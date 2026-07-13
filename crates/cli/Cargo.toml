@@ -1,0 +1,20 @@
+[package]
+name = "zvec-grep-cli"
+description = "Command-line interface for zvec-grep."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "zg"
+path = "src/main.rs"
+
+[dependencies]
+zvec-grep-engine = { path = "../engine" }
+zvec-grep-server = { path = "../server" }
+
+[lints]
+workspace = true
+

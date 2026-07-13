@@ -1,38 +1,17 @@
-# Dependencies
-node_modules/
-
-
-# Build outputs
-dist/
-build/
-coverage/
-
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
+# Rust build output
+/target/
 
 # Environment files
 .env
 .env.*
 !.env.example
 
-
-# Local caches
+# Local caches and indexes
 .cache/
 .zvec-grep/
-.turbo/
-.vite/
 
-
-# Package manager metadata
-.npm/
-.pnpm-store/
-
+# Logs
+*.log
 
 # OS and editor files
 .DS_Store

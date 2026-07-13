@@ -1,0 +1,23 @@
+[package]
+name = "zvec-grep-server"
+description = "Server and client library for zvec-grep."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "zvec_grep_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zg-server"
+path = "src/main.rs"
+
+[dependencies]
+zvec-grep-engine = { path = "../engine" }
+
+[lints]
+workspace = true
+

@@ -1,222 +1,127 @@
-<p align="right">
-  English | <a href="./README_CN.md">中文</a>
-</p>
+# zvec-grep
 
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://zvec.oss-cn-hongkong.aliyuncs.com/logo/github_log_2.svg" />
-    <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/logo/github_logo_1.svg" width="400" alt="zvec logo" />
-  </picture>
-</div>
+`zvec-grep` is a local code and document search engine. It combines full-text
+search with semantic vector search and keeps its index inside the workspace.
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm Release"/></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"/></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D20-blue.svg" alt="Node.js >=20"/>
-  <img src="https://img.shields.io/badge/CLI-zg-2ea44f.svg" alt="zg CLI"/>
-</p>
+This branch is a clean Rust rewrite of the beta TypeScript implementation. It
+does not preserve the old API or index format.
 
-<p align="center">
-  <a href="#quickstart">🚀 <strong>Quickstart</strong></a> |
-  <a href="#features">💫 <strong>Features</strong></a> |
-  <a href="#installation">📦 <strong>Installation</strong></a> |
-  <a href="#models">🧠 <strong>Models</strong></a> |
-  <a href="#library-api">🛠️ <strong>Library API</strong></a>
-</p>
+## Workspace
 
-**zvec-grep** is an agent-friendly hybrid code search tool built on Zvec. It gives repositories a root-local semantic index, combines vector search with full-text search, and keeps CLI output compact enough for AI agents while still offering rich terminal output for humans.
-
-The command is intentionally short:
-
-```bash
-zg "where query auto update happens"
+```text
+crates/
+├── engine/   standalone indexing and search library
+├── server/   server and client library (next layer)
+└── cli/      command-line application (next layer)
 ```
 
-> [!IMPORTANT]
-> **v0.1.4**
->
-> - **Hybrid Code Search**: Query code with natural language, exact terms, or both in one command.
-> - **Explicit Index Lifecycle**: New repositories require `zg --index --embedding <model>`; agents do not silently create indexes.
-> - **Automatic Refresh**: Existing anonymous indexes are checked and incrementally updated before normal queries.
-> - **Token-Efficient Output**: Agent output defaults to `--preview none`; `--human` defaults to full source previews.
-> - **No-Index Lexical Search**: `zg --rg` provides managed ripgrep search without requiring an index.
+The engine has no dependency on the server or CLI. The server depends on the
+engine, and the CLI may use either one.
 
-## <a id="features"></a>💫 Features
+## Documentation
 
-- **Semantic + Lexical Retrieval**: Blend vector search and full-text search for code, docs, tests, scripts, and configuration.
-- **Root-Local Indexes**: Anonymous indexes live under `<repo>/.zvec-grep/`, so repository state stays with the repository.
-- **Agent-Ready Output**: Default output is grouped by file and keeps previews small to save tokens.
-- **Human Output Mode**: Add `--human` for a terminal-friendly summary with full previews by default.
-- **Managed ripgrep Route**: `zg --rg` supports common `rg` flags and works even before a repository is indexed.
-- **Explicit Model Choice**: The first index build requires a model such as `local/embeddinggemma-300m`, `local/qwen3-embedding-0.6b`, or `qwen/text-embedding-v4`.
-- **Schema Reuse**: Re-running `zg --index` on an existing index reuses the stored embedding schema unless you explicitly change it.
-- **Library API**: Use `createZvecGrep()` directly from Node.js tools, agents, or MCP servers.
+- [Design and principles](docs/design.md) describes the durable architecture
+  and the reasoning behind it.
+- [Rust rewrite implementation plan](docs/implementation-plan.md) is the
+  temporary, developer-oriented plan for completing the rewrite.
 
-## <a id="installation"></a>📦 Installation
+## Engine today
 
-Install the CLI from npm:
+The engine is functional as a library and includes:
 
-```bash
-npm install -g @zvec/zvec-grep
-zg --version
+- Git-aware workspace scanning, include/exclude globs, hidden-file policy,
+  dependency/build-directory pruning, and file-size limits.
+- Stable file identities and incremental add/modify/delete detection.
+- Syntax-aware extraction for Rust, TypeScript/TSX, JavaScript, Python, Go,
+  Java, C, and C++, with line-based fallback.
+- Markdown section extraction that understands fenced code blocks.
+- Batched embedding and batched persistent writes with progress and cooperative
+  cancellation.
+- A replaceable embedding interface, a deterministic test/offline embedder,
+  and an optional batched llama.cpp GGUF embedder.
+- Persistent Zvec vector and FTS indexes, plus an in-memory implementation for
+  tests and embedding the engine elsewhere.
+- Lexical, vector, and hybrid RRF search; path, format, time, and symbol
+  filters; adaptive recall; and score/rank evidence.
+- Exhaustive lexical search over live files without creating an index.
+- Per-file indexing/search failures and engine status.
+
+The server and CLI crates intentionally remain minimal while the engine API is
+stabilized.
+
+## Build and test
+
+The repository pins Rust 1.85.
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Or run it without a global install:
+The optional llama.cpp backend builds on common desktop platforms:
 
-```bash
-npx @zvec/zvec-grep --help
+```sh
+cargo check -p zvec-grep-engine --features llama-cpp
 ```
 
-### ✅ Requirements
+On macOS, `--features metal` enables the llama.cpp Metal build.
 
-- Node.js 20 or newer
-- macOS, Linux, or Windows
-- A supported embedding model for indexed search
+## Library example
 
-`zg --rg` works without any embedding model or index.
+```rust,no_run
+use std::sync::Arc;
 
-## <a id="quickstart"></a>⚡ Quickstart
+use zvec_grep_engine::{
+    DeterministicEmbedder, Embedder, Engine, EngineConfig, IndexRequest,
+    SearchRequest, WorkspaceConfig,
+};
 
-Index a repository with an explicit embedding model:
+fn main() -> zvec_grep_engine::Result<()> {
+    let workspace = WorkspaceConfig::new(".");
+    let embedder: Arc<dyn Embedder> = Arc::new(DeterministicEmbedder::new(384)?);
+    let engine = Engine::persistent(EngineConfig::new(workspace), embedder)?;
 
-```bash
-zg --index \
-  --embedding local/embeddinggemma-300m \
-  --include "src/**" \
-  --include "docs/**" \
-  --include "test/**" \
-  --exclude "dist/**,node_modules/**,coverage/**"
-```
-
-Check index state:
-
-```bash
-zg --status
-```
-
-Search with natural language:
-
-```bash
-zg "where query auto update happens"
-```
-
-Combine semantic intent with exact anchors:
-
-```bash
-zg "GPU fallback" --fts "usingCpuFallback" --include "src/**" --limit 5
-```
-
-Use exhaustive lexical search without an index:
-
-```bash
-zg --rg -F "ZVEC_GREP_HOME" src
-```
-
-Switch to human-readable output:
-
-```bash
-zg --human "root local index discovery" --limit 3
-```
-
-## <a id="models"></a>🧠 Models
-
-Local models run through `node-llama-cpp` and keep code search private to your machine:
-
-```bash
-zg --index --embedding local/embeddinggemma-300m
-zg --index --embedding local/qwen3-embedding-0.6b
-```
-
-Remote Qwen embeddings are useful when you prefer a managed embedding service or want to avoid local model setup:
-
-```bash
-zg --index \
-  --embedding qwen/text-embedding-v4 \
-  --api-key "$DASHSCOPE_API_KEY"
-```
-
-For existing indexes, `zg --index` without `--embedding` reuses the stored schema. Use `--rebuild --embedding <model>` only when you intentionally want to rebuild with a different model:
-
-```bash
-zg --index --rebuild --embedding local/qwen3-embedding-0.6b
-```
-
-## 🔎 Query Patterns
-
-Multiple quoted queries are treated as separate search groups:
-
-```bash
-zg "request validation" "error handling" --limit 5
-```
-
-Use path filters early to keep results focused:
-
-```bash
-zg "cache invalidation" \
-  --include "src/**" \
-  --exclude "test/**,tests/**,fixtures/**,dist/**"
-```
-
-Use `--preview` to control indexed source previews:
-
-```bash
-zg "plugin lifecycle" --preview none
-zg "plugin lifecycle" --preview short --limit 5
-zg "plugin lifecycle" --preview full --limit 2
-```
-
-For exact text, symbols, flags, or error codes, use `--fts` or `--rg`:
-
-```bash
-zg "authentication flow" --fts "AuthService" "ForbiddenError"
-zg --rg -i -C 2 -g "*.ts" "needle text" src
-```
-
-## <a id="library-api"></a>🛠️ Library API
-
-```ts
-import { createZvecGrep } from "@zvec/zvec-grep";
-
-const zvecGrep = await createZvecGrep({
-  root: process.cwd(),
-});
-
-const result = await zvecGrep.context({
-  query: "ranking implementation",
-  limit: 5,
-});
-
-for (const item of result.items) {
-  console.log(`${item.file.relativePath}:${item.range.startLine}`);
+    engine.index(IndexRequest::default())?;
+    for item in engine.search(SearchRequest::new("incremental indexing"))?.items {
+        println!("{}: {:?}", item.segment.relative_path.display(), item.segment.location);
+    }
+    Ok(())
 }
-
-await zvecGrep.close();
 ```
 
-For explicit no-index lexical search:
+`DeterministicEmbedder` is useful for tests and a dependency-free fallback. For
+real semantic search, enable `llama-cpp` and construct `LlamaEmbedder` with a
+small embedding GGUF. The original `all-MiniLM-L6-v2` safetensors/ONNX files
+cannot be loaded directly by llama.cpp; use an equivalent GGUF export. Its
+input limit defaults conservatively to 900 characters for the usual 256-token
+MiniLM context and can be configured for a particular model.
 
-```ts
-const result = await zvecGrep.context({
-  query: "ZVEC_GREP_HOME",
-  rg: true,
-});
+An ignored runtime smoke test can validate a local GGUF:
+
+```sh
+ZVEC_GREP_TEST_MODEL=/path/to/all-MiniLM-L6-v2-Q8_0.gguf \
+  cargo test -p zvec-grep-engine --features llama-cpp \
+  llama_minilm_runtime_smoke_test -- --ignored
 ```
 
-## 🤝 Join the Zvec Community
+## Index layout
 
-<div align="center">
+Persistent indexes live at:
 
-| 💬 DingTalk | 📱 WeChat | 🎮 Discord | X (Twitter) |
-| :---: | :---: | :---: | :---: |
-| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="DingTalk QR Code"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v=6" width="150" alt="WeChat QR Code"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](<https://x.com/ZvecAI>) |
-| Scan to join | Scan to join | Click to join | Click to follow |
-
-</div>
-
-## ❤️ Contributing
-
-Issues and pull requests are welcome. Please keep changes focused, add tests for behavior changes, and run:
-
-```bash
-npm test
+```text
+<workspace>/.zvec-grep/index/
+├── manifest.json
+└── segments/       Zvec collection
 ```
+
+The manifest records the embedding model and dimension. Opening an index with
+a different model fails clearly instead of silently mixing incompatible
+vectors. `Engine::persistent_rebuild` explicitly discards that derived index
+when changing models. A workspace lock prevents two processes from opening the
+same persistent collection at once; a long-running server can therefore be the
+single owner used by multiple clients.
+
+## License
+
+Apache-2.0. Direct dependencies use permissive licenses compatible with the
+project policy; `deny.toml` defines the accepted license and source rules.
