@@ -5,23 +5,17 @@ import type {
   FileInfo,
 } from "../types.js";
 
-
 export type StoredEntity = {
   entity: Entity;
   file: FileInfo;
 };
-
 
 export type StoredEntityFragment = {
   fragment: EntityFragment;
   file: FileInfo;
 };
 
-
-export type StorageSearchPath =
-  | "fts"
-  | "vector";
-
+export type StorageSearchPath = "fts" | "vector";
 
 export type StorageSearchFilter = {
   fileIds?: readonly string[];
@@ -30,27 +24,42 @@ export type StorageSearchFilter = {
   symbolTypes?: readonly CodeSymbolType[];
 };
 
-
 export type StorageSearchHit = StoredEntityFragment & {
   path: StorageSearchPath;
   score: number;
 };
 
-
 export interface CollectionStorage {
   getFileById(fileId: string): FileInfo | null;
   getFileByPath(absolutePath: string): FileInfo | null;
   listFiles(): FileInfo[];
-  listEntitiesByFile(fileId: string, options?: { limit?: number; offset?: number; }): StoredEntity[];
-  getEntity(entityId: string, options?: { includeVector?: boolean; }): (StoredEntity & { vector?: number[]; }) | null;
-  upsertFile(file: FileInfo, fragments: readonly EntityFragment[], vectors: readonly number[][]): void;
+  listEntitiesByFile(
+    fileId: string,
+    options?: { limit?: number; offset?: number },
+  ): StoredEntity[];
+  getEntity(
+    entityId: string,
+    options?: { includeVector?: boolean },
+  ): (StoredEntity & { vector?: number[] }) | null;
+  upsertFile(
+    file: FileInfo,
+    fragments: readonly EntityFragment[],
+    vectors: readonly number[][],
+  ): void;
   markFileFailed(file: FileInfo, error: string): void;
   deleteFile(fileId: string): void;
-  searchFts(query: string, limit: number, filter?: StorageSearchFilter): StorageSearchHit[];
-  searchVector(vector: readonly number[], limit: number, filter?: StorageSearchFilter): StorageSearchHit[];
+  searchFts(
+    query: string,
+    limit: number,
+    filter?: StorageSearchFilter,
+  ): StorageSearchHit[];
+  searchVector(
+    vector: readonly number[],
+    limit: number,
+    filter?: StorageSearchFilter,
+  ): StorageSearchHit[];
   optimize(): void;
   close(): void;
 }
-
 
 export { ZvecCollectionStorage } from "./zvec.js";

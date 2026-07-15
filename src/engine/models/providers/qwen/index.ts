@@ -1,4 +1,4 @@
 export {
   Qwen3VlEmbeddingModel,
-  QwenTextEmbeddingV4Model
+  QwenTextEmbeddingV4Model,
 } from "./embedding.js";

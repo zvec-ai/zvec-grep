@@ -11,8 +11,9 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本"/></a>
+  <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="许可证"/></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D20-blue.svg" alt="Node.js >=20"/>
+  <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js >=22"/>
   <img src="https://img.shields.io/badge/CLI-zg-2ea44f.svg" alt="zg CLI"/>
 </p>
 
@@ -95,7 +96,7 @@ Codex MCP 工具调用默认超时为 600 秒，可在安装时通过 `--mcp-too
 
 ### ✅ 运行要求
 
-- Node.js 20 或更新版本
+- Node.js 22 或更新版本
 - macOS、Linux 或 Windows
 - 使用索引检索时需要选择一个支持的 embedding 模型
 
@@ -255,10 +256,10 @@ const result = await zvecGrep.context({
 
 <div align="center">
 
-| 💬 钉钉群 | 📱 微信群 | 🎮 Discord | X (Twitter) |
-| :---: | :---: | :---: | :---: |
-| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="钉钉二维码"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v=6" width="150" alt="微信二维码"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](<https://x.com/ZvecAI>) |
-| 扫码加入 | 扫码加入 | 点击加入 | 点击关注 |
+|                                                💬 钉钉群                                                |                                                 📱 微信群                                                 |                                                                       🎮 Discord                                                                        |                                             X (Twitter)                                              |
+| :-----------------------------------------------------------------------------------------------------: | :-------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------------: |
+| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="钉钉二维码"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v=6" width="150" alt="微信二维码"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](https://x.com/ZvecAI) |
+|                                                扫码加入                                                 |                                                 扫码加入                                                  |                                                                        点击加入                                                                         |                                               点击关注                                               |
 
 </div>
 
@@ -267,5 +268,9 @@ const result = await zvecGrep.context({
 欢迎提交 issue 和 pull request。请保持改动聚焦；如果改变行为，请补充测试，并运行：
 
 ```bash
-npm test
+npm run check
 ```
+
+Pull request 标题需遵循 Conventional Commits。Release Please 会维护发布 PR；
+合并审核通过的发布 PR 后会创建版本 tag 和 GitHub Release，npm production
+环境还需要维护者进行最终审批。

@@ -1,8 +1,6 @@
 export const ENGINE_ERROR_CODE_PREFIX = "ZVEC_GREP.ENGINE";
 
-
 export type EngineErrorCode = `${typeof ENGINE_ERROR_CODE_PREFIX}.${string}`;
-
 
 export type EngineErrorOptions = {
   code: EngineErrorCode;
@@ -10,11 +8,9 @@ export type EngineErrorOptions = {
   cause?: unknown;
 };
 
-
 export class EngineError extends Error {
   readonly code: EngineErrorCode;
   readonly context?: string;
-
 
   constructor(message: string, options: EngineErrorOptions) {
     super(message, { cause: options.cause });
@@ -24,11 +20,9 @@ export class EngineError extends Error {
   }
 }
 
-
 export function isEngineError(error: unknown): error is EngineError {
   return error instanceof EngineError;
 }
-
 
 export {
   collectionDetail,

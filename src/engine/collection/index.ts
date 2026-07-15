@@ -31,10 +31,7 @@ import {
   diagnoseFileSearch,
   searchPlanCollection,
 } from "../pipeline/search/index.js";
-import type {
-  CollectionStorage,
-  StoredEntity,
-} from "../storage/index.js";
+import type { CollectionStorage, StoredEntity } from "../storage/index.js";
 import {
   assertZvecStatus,
   initializeZvec,
@@ -64,15 +61,12 @@ import type {
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { defaultHome, normalizePath } from "../utils/path.js";
 
-
 const COLLECTIONS_ZVEC = "collections.zvec";
 const FILES_ZVEC = "files.zvec";
-
 
 export class Collection {
   private readonly storage: CollectionStorage;
   private readonly embedding: CollectionEmbeddingSchema;
-
 
   constructor(
     readonly info: CollectionInfo,
@@ -95,16 +89,13 @@ export class Collection {
     );
   }
 
-
   get id(): string {
     return this.info.id;
   }
 
-
   get name(): string {
     return this.info.name;
   }
-
 
   index(options: IndexOptions = {}): Promise<IndexResult> {
     if (this.readOnly) {
@@ -125,11 +116,9 @@ export class Collection {
     });
   }
 
-
   status(): Promise<CollectionIndexStatus> {
     return getCollectionIndexStatus(this.info, this.storage.listFiles());
   }
-
 
   searchPlan(plan: SearchPlan): Promise<SearchPlanResult> {
     return searchPlanCollection(plan, {
@@ -138,7 +127,6 @@ export class Collection {
       storage: this.storage,
     });
   }
-
 
   diagnoseFile(absolutePath: string): FileDiagnosis {
     const path = normalizePath(absolutePath);
@@ -163,8 +151,10 @@ export class Collection {
     };
   }
 
-
-  diagnoseEntitySearch(query: string, entityId: string): Promise<EntitySearchDiagnosis> {
+  diagnoseEntitySearch(
+    query: string,
+    entityId: string,
+  ): Promise<EntitySearchDiagnosis> {
     const embeddingModel = this.requireEmbeddingModel("diagnose");
 
     return diagnoseEntitySearch(query, entityId, {
@@ -174,8 +164,10 @@ export class Collection {
     });
   }
 
-
-  diagnoseFileSearch(query: string, absolutePath: string): Promise<EntitySearchDiagnosis | null> {
+  diagnoseFileSearch(
+    query: string,
+    absolutePath: string,
+  ): Promise<EntitySearchDiagnosis | null> {
     const embeddingModel = this.requireEmbeddingModel("diagnose");
 
     return diagnoseFileSearch(query, absolutePath, {
@@ -185,29 +177,24 @@ export class Collection {
     });
   }
 
-
   getFile(absolutePath: string): FileInfo | null {
     return this.storage.getFileByPath(absolutePath);
   }
 
-
   listEntitiesByFile(
     fileId: string,
-    options: { limit?: number; offset?: number; } = {},
+    options: { limit?: number; offset?: number } = {},
   ): StoredEntity[] {
     return this.storage.listEntitiesByFile(fileId, options);
   }
-
 
   getEntity(entityId: string): StoredEntity | null {
     return this.storage.getEntity(entityId);
   }
 
-
   close(): void {
     this.storage.close();
   }
-
 
   private validateIndexVersion(): void {
     if (this.info.indexVersion !== CURRENT_INDEX_VERSION) {
@@ -222,62 +209,89 @@ export class Collection {
     }
   }
 
-
   private validateEmbeddingSchema(current: EmbeddingModel): void {
     this.validateIndexVersion();
 
     const expected = this.embedding;
 
     if (expected.provider !== current.ref.provider) {
-      throw new EngineError("Collection embedding provider does not match current model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_PROVIDER_MISMATCH",
-        context: collectionMismatchDetails(this.name, expected.provider, current.ref.provider),
-      });
+      throw new EngineError(
+        "Collection embedding provider does not match current model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_PROVIDER_MISMATCH",
+          context: collectionMismatchDetails(
+            this.name,
+            expected.provider,
+            current.ref.provider,
+          ),
+        },
+      );
     }
 
     if (expected.model !== current.ref.model) {
-      throw new EngineError("Collection embedding model does not match current model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_MISMATCH",
-        context: collectionMismatchDetails(this.name, expected.model, current.ref.model),
-      });
+      throw new EngineError(
+        "Collection embedding model does not match current model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_MISMATCH",
+          context: collectionMismatchDetails(
+            this.name,
+            expected.model,
+            current.ref.model,
+          ),
+        },
+      );
     }
 
     if (expected.dimension !== current.dimension) {
-      throw new EngineError("Collection embedding dimension does not match current model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_DIMENSION_MISMATCH",
-        context: collectionMismatchDetails(this.name, expected.dimension, current.dimension),
-      });
+      throw new EngineError(
+        "Collection embedding dimension does not match current model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_DIMENSION_MISMATCH",
+          context: collectionMismatchDetails(
+            this.name,
+            expected.dimension,
+            current.dimension,
+          ),
+        },
+      );
     }
 
     if (expected.metric !== current.metric) {
-      throw new EngineError("Collection embedding metric does not match current model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_METRIC_MISMATCH",
-        context: collectionMismatchDetails(this.name, expected.metric, current.metric),
-      });
+      throw new EngineError(
+        "Collection embedding metric does not match current model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_METRIC_MISMATCH",
+          context: collectionMismatchDetails(
+            this.name,
+            expected.metric,
+            current.metric,
+          ),
+        },
+      );
     }
   }
 
-
   private requireEmbeddingModel(operation: string): EmbeddingModel {
     if (!this.embeddingModel) {
-      throw new EngineError("Collection operation requires an embedding model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_REQUIRED",
-        context: collectionOperationDetails(this.name, operation),
-      });
+      throw new EngineError(
+        "Collection operation requires an embedding model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_REQUIRED",
+          context: collectionOperationDetails(this.name, operation),
+        },
+      );
     }
 
     return this.embeddingModel;
   }
 }
 
-
-function collectionOperationDetails(name: string, operation: string): string | undefined {
-  return errorDetails([
-    collectionDetail(name),
-    detail("operation", operation),
-  ]);
+function collectionOperationDetails(
+  name: string,
+  operation: string,
+): string | undefined {
+  return errorDetails([collectionDetail(name), detail("operation", operation)]);
 }
-
 
 function collectionMismatchDetails(
   name: string,
@@ -291,19 +305,19 @@ function collectionMismatchDetails(
   ]);
 }
 
-
 export function isCollectionIndexed(
   info: CollectionInfo | null | undefined,
 ): info is CollectionInfo & {
   embedding: CollectionEmbeddingSchema;
   indexVersion: number;
 } {
-  return info?.embedding !== null
-    && info?.embedding !== undefined
-    && info.indexVersion !== null
-    && info.indexVersion !== undefined;
+  return (
+    info?.embedding !== null &&
+    info?.embedding !== undefined &&
+    info.indexVersion !== null &&
+    info.indexVersion !== undefined
+  );
 }
-
 
 function requireIndexedEmbedding(
   info: CollectionInfo,
@@ -323,11 +337,9 @@ function requireIndexedEmbedding(
   });
 }
 
-
 export class CollectionRegistry {
   private readonly meta: ZvecCollectionsMetaStore;
   private readonly collections = new Map<string, Collection>();
-
 
   constructor(
     readonly home: string = defaultHome(),
@@ -338,31 +350,33 @@ export class CollectionRegistry {
       mkdirSync(home, { recursive: true });
     }
 
-    this.meta = new ZvecCollectionsMetaStore(collectionsMetaPath(home), readOnly);
+    this.meta = new ZvecCollectionsMetaStore(
+      collectionsMetaPath(home),
+      readOnly,
+    );
   }
-
 
   list(): CollectionInfo[] {
     return this.meta.list();
   }
 
-
   get(name: string): CollectionInfo | null {
     return this.meta.getByName(name);
   }
-
 
   has(name: string): boolean {
     return this.get(name) !== null;
   }
 
-
   remove(name: string): boolean {
     if (this.readOnly) {
-      throw new EngineError("Cannot remove a collection from a read-only registry", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: collectionOperationDetails(name, "remove"),
-      });
+      throw new EngineError(
+        "Cannot remove a collection from a read-only registry",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: collectionOperationDetails(name, "remove"),
+        },
+      );
     }
 
     const info = this.get(name);
@@ -388,13 +402,15 @@ export class CollectionRegistry {
     return true;
   }
 
-
   rename(name: string, nextName: string): CollectionInfo | null {
     if (this.readOnly) {
-      throw new EngineError("Cannot rename a collection from a read-only registry", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: collectionOperationDetails(name, "rename"),
-      });
+      throw new EngineError(
+        "Cannot rename a collection from a read-only registry",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: collectionOperationDetails(name, "rename"),
+        },
+      );
     }
 
     const normalizedNextName = nextName.trim();
@@ -434,16 +450,18 @@ export class CollectionRegistry {
     return updated;
   }
 
-
   async status(name: string): Promise<CollectionIndexStatus | null> {
     const info = this.get(name);
-    if (!info || !isCollectionIndexed(info) || info.indexPolicy === "disabled") {
+    if (
+      !info ||
+      !isCollectionIndexed(info) ||
+      info.indexPolicy === "disabled"
+    ) {
       return null;
     }
 
     return this.open(name).status();
   }
-
 
   create(
     name: string,
@@ -451,17 +469,23 @@ export class CollectionRegistry {
     path?: string,
   ): CollectionInfo {
     if (this.readOnly) {
-      throw new EngineError("Cannot create a collection in a read-only registry", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: collectionOperationDetails(name, "create"),
-      });
+      throw new EngineError(
+        "Cannot create a collection in a read-only registry",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: collectionOperationDetails(name, "create"),
+        },
+      );
     }
 
     if (!this.embeddingModel) {
-      throw new EngineError("Creating a collection requires an embedding model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_REQUIRED",
-        context: collectionOperationDetails(name, "create"),
-      });
+      throw new EngineError(
+        "Creating a collection requires an embedding model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_REQUIRED",
+          context: collectionOperationDetails(name, "create"),
+        },
+      );
     }
 
     if (this.has(name)) {
@@ -472,7 +496,9 @@ export class CollectionRegistry {
     }
 
     const id = randomUUID();
-    const collectionPath = normalizePath(path ?? join(this.home, "collections", id));
+    const collectionPath = normalizePath(
+      path ?? join(this.home, "collections", id),
+    );
     const now = Date.now();
     const normalizedRootPaths = validateRootPaths(rootPaths);
     const info: CollectionInfo = {
@@ -493,24 +519,29 @@ export class CollectionRegistry {
     return info;
   }
 
-
   prepareIndex(
     name: string,
     rootPaths: readonly (string | RootPath)[],
     path?: string,
   ): CollectionInfo {
     if (this.readOnly) {
-      throw new EngineError("Cannot prepare a collection in a read-only registry", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: collectionOperationDetails(name, "prepareIndex"),
-      });
+      throw new EngineError(
+        "Cannot prepare a collection in a read-only registry",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: collectionOperationDetails(name, "prepareIndex"),
+        },
+      );
     }
 
     if (!this.embeddingModel) {
-      throw new EngineError("Preparing a collection requires an embedding model", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_REQUIRED",
-        context: collectionOperationDetails(name, "prepareIndex"),
-      });
+      throw new EngineError(
+        "Preparing a collection requires an embedding model",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.EMBEDDING_MODEL_REQUIRED",
+          context: collectionOperationDetails(name, "prepareIndex"),
+        },
+      );
     }
 
     const existing = this.get(name);
@@ -542,17 +573,19 @@ export class CollectionRegistry {
     return updated;
   }
 
-
   disableIndex(
     name: string,
     rootPaths: readonly (string | RootPath)[],
     path?: string,
   ): CollectionInfo {
     if (this.readOnly) {
-      throw new EngineError("Cannot disable a collection index in a read-only registry", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: collectionOperationDetails(name, "disableIndex"),
-      });
+      throw new EngineError(
+        "Cannot disable a collection index in a read-only registry",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: collectionOperationDetails(name, "disableIndex"),
+        },
+      );
     }
 
     const existing = this.get(name);
@@ -580,7 +613,9 @@ export class CollectionRegistry {
       return updated;
     }
 
-    const collectionPath = normalizePath(path ?? join(this.home, "collections", randomUUID()));
+    const collectionPath = normalizePath(
+      path ?? join(this.home, "collections", randomUUID()),
+    );
     const info: CollectionInfo = {
       id: randomUUID(),
       name,
@@ -597,16 +632,18 @@ export class CollectionRegistry {
     return info;
   }
 
-
   updateRootPaths(
     name: string,
     rootPaths: readonly (string | RootPath)[],
   ): CollectionInfo | null {
     if (this.readOnly) {
-      throw new EngineError("Cannot update a collection from a read-only registry", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: collectionOperationDetails(name, "updateRootPaths"),
-      });
+      throw new EngineError(
+        "Cannot update a collection from a read-only registry",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: collectionOperationDetails(name, "updateRootPaths"),
+        },
+      );
     }
 
     const info = this.get(name);
@@ -635,7 +672,6 @@ export class CollectionRegistry {
     return updated;
   }
 
-
   open(name: string): Collection {
     const cached = this.collections.get(name);
     if (cached) {
@@ -655,7 +691,10 @@ export class CollectionRegistry {
         code: "ZVEC_GREP.ENGINE.COLLECTION.INDEX_DISABLED",
         context: errorDetails([
           collectionDetail(name),
-          detail("hint", "Run zg --index to enable and build this index, or use zg --rg for no-index search."),
+          detail(
+            "hint",
+            "Run zg --index to enable and build this index, or use zg --rg for no-index search.",
+          ),
         ]),
       });
     }
@@ -670,11 +709,15 @@ export class CollectionRegistry {
       });
     }
 
-    const collection = new Collection(info, this.embeddingModel, this.readOnly, filesMetaPath(this.home));
+    const collection = new Collection(
+      info,
+      this.embeddingModel,
+      this.readOnly,
+      filesMetaPath(this.home),
+    );
     this.collections.set(name, collection);
     return collection;
   }
-
 
   close(): void {
     for (const collection of this.collections.values()) {
@@ -686,11 +729,9 @@ export class CollectionRegistry {
   }
 }
 
-
 class ZvecCollectionsMetaStore {
   private readonly collection: ZVecCollection | null;
   private needsOptimize = false;
-
 
   constructor(
     private readonly path: string,
@@ -702,24 +743,17 @@ class ZvecCollectionsMetaStore {
     }
 
     if (existsSync(path)) {
-      this.collection = openZvecCollection(
-        path,
-        readOnly,
-        "open",
-        () => ZVecOpen(path, { readOnly }),
+      this.collection = openZvecCollection(path, readOnly, "open", () =>
+        ZVecOpen(path, { readOnly }),
       );
     } else if (readOnly) {
       this.collection = null;
     } else {
-      this.collection = openZvecCollection(
-        path,
-        readOnly,
-        "create",
-        () => ZVecCreateAndOpen(path, createCollectionsSchema()),
+      this.collection = openZvecCollection(path, readOnly, "create", () =>
+        ZVecCreateAndOpen(path, createCollectionsSchema()),
       );
     }
   }
-
 
   list(): CollectionInfo[] {
     if (!this.collection) {
@@ -727,11 +761,11 @@ class ZvecCollectionsMetaStore {
     }
 
     const topk = Math.max(this.collection.stats.docCount, 1);
-    return this.collection.querySync({ topk, includeVector: false })
+    return this.collection
+      .querySync({ topk, includeVector: false })
       .map((doc) => docToCollectionInfo(doc))
       .sort((left, right) => left.name.localeCompare(right.name));
   }
-
 
   getByName(name: string): CollectionInfo | null {
     if (!this.collection) {
@@ -747,25 +781,28 @@ class ZvecCollectionsMetaStore {
     return doc ? docToCollectionInfo(doc) : null;
   }
 
-
   upsert(info: CollectionInfo): void {
     this.assertWritable("upsert");
     const collection = this.requireCollection();
     const deleteStatus = collection.deleteSync(info.id);
-    assertZvecStatusOrNotFound(deleteStatus, "collection metadata replace", info.name);
+    assertZvecStatusOrNotFound(
+      deleteStatus,
+      "collection metadata replace",
+      info.name,
+    );
     const status = collection.upsertSync(collectionInfoToDoc(info));
     assertZvecStatus(status, "collection metadata upsert", info.name);
     this.needsOptimize = true;
   }
 
-
   remove(collectionId: string): void {
     this.assertWritable("remove");
-    const status = this.requireCollection().deleteByFilterSync(`collection_id = ${quoteFilterString(collectionId)}`);
+    const status = this.requireCollection().deleteByFilterSync(
+      `collection_id = ${quoteFilterString(collectionId)}`,
+    );
     assertZvecStatus(status, "collection metadata delete", collectionId);
     this.needsOptimize = true;
   }
-
 
   close(): void {
     if (!this.collection) {
@@ -780,7 +817,6 @@ class ZvecCollectionsMetaStore {
     this.collection.closeSync();
   }
 
-
   private requireCollection(): ZVecCollection {
     if (!this.collection) {
       throw new EngineError("zvec collection metadata storage is unavailable", {
@@ -792,20 +828,21 @@ class ZvecCollectionsMetaStore {
     return this.collection;
   }
 
-
   private assertWritable(operation: string): void {
     if (this.readOnly) {
-      throw new EngineError("Cannot update read-only collection metadata storage", {
-        code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
-        context: `path=${this.path} operation=${operation}`,
-      });
+      throw new EngineError(
+        "Cannot update read-only collection metadata storage",
+        {
+          code: "ZVEC_GREP.ENGINE.COLLECTION.READ_ONLY",
+          context: `path=${this.path} operation=${operation}`,
+        },
+      );
     }
   }
 }
 
-
 function assertZvecStatusOrNotFound(
-  status: { ok: boolean; code: string; message: string; },
+  status: { ok: boolean; code: string; message: string },
   operation: string,
   context: string,
 ): void {
@@ -815,7 +852,6 @@ function assertZvecStatusOrNotFound(
 
   assertZvecStatus(status, operation, context);
 }
-
 
 function createCollectionsSchema(): ZVecCollectionSchema {
   return new ZVecCollectionSchema({
@@ -853,7 +889,6 @@ function createCollectionsSchema(): ZVecCollectionSchema {
   });
 }
 
-
 function collectionInfoToDoc(info: CollectionInfo): ZVecDocInput {
   const fields: Record<string, string | number> = {
     collection_id: info.id,
@@ -885,7 +920,6 @@ function collectionInfoToDoc(info: CollectionInfo): ZVecDocInput {
   };
 }
 
-
 function docToCollectionInfo(doc: ZVecDoc): CollectionInfo {
   const fields = doc.fields;
   const embedding = collectionEmbeddingFromFields(fields);
@@ -894,7 +928,9 @@ function docToCollectionInfo(doc: ZVecDoc): CollectionInfo {
     id: readStringFieldFromFields(fields, "collection_id"),
     name: readStringFieldFromFields(fields, "name"),
     path: normalizePath(readStringFieldFromFields(fields, "path")),
-    rootPaths: parseRootPaths(readStringFieldFromFields(fields, "root_paths_json")),
+    rootPaths: parseRootPaths(
+      readStringFieldFromFields(fields, "root_paths_json"),
+    ),
     indexPolicy: collectionIndexPolicyFromFields(fields),
     embedding,
     indexVersion: readNullableNumberFieldFromFields(fields, "index_version"),
@@ -903,11 +939,18 @@ function docToCollectionInfo(doc: ZVecDoc): CollectionInfo {
   };
 }
 
-
-function collectionEmbeddingFromFields(fields: Record<string, unknown>): CollectionEmbeddingSchema | null {
-  const provider = readNullableStringFieldFromFields(fields, "embedding_provider");
+function collectionEmbeddingFromFields(
+  fields: Record<string, unknown>,
+): CollectionEmbeddingSchema | null {
+  const provider = readNullableStringFieldFromFields(
+    fields,
+    "embedding_provider",
+  );
   const model = readNullableStringFieldFromFields(fields, "embedding_model");
-  const dimension = readNullableNumberFieldFromFields(fields, "embedding_dimension");
+  const dimension = readNullableNumberFieldFromFields(
+    fields,
+    "embedding_dimension",
+  );
   const metric = readNullableStringFieldFromFields(fields, "embedding_metric");
 
   if (!provider || !model || !dimension || !metric) {
@@ -922,12 +965,12 @@ function collectionEmbeddingFromFields(fields: Record<string, unknown>): Collect
   };
 }
 
-
-function collectionIndexPolicyFromFields(fields: Record<string, unknown>): CollectionIndexPolicy | undefined {
+function collectionIndexPolicyFromFields(
+  fields: Record<string, unknown>,
+): CollectionIndexPolicy | undefined {
   const policy = readNullableStringFieldFromFields(fields, "index_policy");
   return policy === "enabled" || policy === "disabled" ? policy : undefined;
 }
-
 
 function parseRootPaths(value: string): RootPath[] {
   try {
@@ -938,21 +981,17 @@ function parseRootPaths(value: string): RootPath[] {
   }
 }
 
-
 function collectionsMetaPath(home: string): string {
   return join(home, COLLECTIONS_ZVEC);
 }
-
 
 function filesMetaPath(home: string): string {
   return join(home, FILES_ZVEC);
 }
 
-
 function homeDirectoryForMetaPath(path: string): string {
   return dirname(path);
 }
-
 
 function indexedStringField(name: string, nullable = false) {
   return {
@@ -963,7 +1002,6 @@ function indexedStringField(name: string, nullable = false) {
   };
 }
 
-
 function stringField(name: string, nullable = false) {
   return {
     name,
@@ -972,13 +1010,13 @@ function stringField(name: string, nullable = false) {
   };
 }
 
-
 export function defaultCollectionName(path: string): string {
   return basename(normalizePath(path));
 }
 
-
-function currentEmbeddingSchema(model: EmbeddingModel): CollectionEmbeddingSchema {
+function currentEmbeddingSchema(
+  model: EmbeddingModel,
+): CollectionEmbeddingSchema {
   return {
     provider: model.ref.provider,
     model: model.ref.model,
@@ -987,7 +1025,9 @@ function currentEmbeddingSchema(model: EmbeddingModel): CollectionEmbeddingSchem
   };
 }
 
-
-function rootPathsEqual(left: readonly RootPath[], right: readonly RootPath[]): boolean {
+function rootPathsEqual(
+  left: readonly RootPath[],
+  right: readonly RootPath[],
+): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }

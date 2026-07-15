@@ -1,14 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
-
 
 export type JsonWriteOptions = {
   directoryMode?: number;
   fileMode?: number;
 };
-
 
 export async function readJsonFile<T>(path: string, fallback: T): Promise<T> {
   try {
@@ -23,7 +35,6 @@ export async function readJsonFile<T>(path: string, fallback: T): Promise<T> {
   }
 }
 
-
 export function readJsonFileSync<T>(path: string, fallback: T): T {
   try {
     const text = readFileSync(path, "utf8");
@@ -36,7 +47,6 @@ export function readJsonFileSync<T>(path: string, fallback: T): T {
     throw error;
   }
 }
-
 
 export async function writeJsonFile(
   path: string,
@@ -66,7 +76,6 @@ export async function writeJsonFile(
     throw error;
   }
 }
-
 
 export function writeJsonFileSync(
   path: string,
@@ -100,7 +109,6 @@ export function writeJsonFileSync(
     throw error;
   }
 }
-
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;

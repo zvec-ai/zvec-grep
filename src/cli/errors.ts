@@ -1,17 +1,14 @@
 import { isEngineError } from "../engine/errors/index.js";
 import type { ColorMode } from "./types.js";
 
-
 export type ErrorPrintOptions = {
   color?: ColorMode;
 };
-
 
 type ErrorTheme = {
   error(value: string): string;
   label(value: string): string;
 };
-
 
 export function printError(
   error: unknown,
@@ -32,10 +29,11 @@ export function printError(
     return;
   }
 
-  console.error(`${theme.error("Error:")} ${error instanceof Error ? error.message : String(error)}`);
+  console.error(
+    `${theme.error("Error:")} ${error instanceof Error ? error.message : String(error)}`,
+  );
   printCause(error, theme);
 }
-
 
 function formatContextLines(context: string): string[] {
   return context
@@ -44,28 +42,29 @@ function formatContextLines(context: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-
 function formatContextLine(line: string): string[] {
   const trimmed = line.trim();
   if (trimmed.length === 0) {
     return [];
   }
 
-  const pairs = parseKeyValuePairs(trimmed)
-    .filter((pair) => !(pair.key === "collection" && pair.value === "__anonymous__"));
+  const pairs = parseKeyValuePairs(trimmed).filter(
+    (pair) => !(pair.key === "collection" && pair.value === "__anonymous__"),
+  );
 
   return pairs.length > 0
     ? pairs.map((pair) => `${pair.key}: ${pair.value}`)
     : [trimmed];
 }
 
-
-function parseKeyValuePairs(line: string): { key: string; value: string; }[] {
-  const matches = [...line.matchAll(/(^|\s)([A-Za-z][A-Za-z0-9_.-]*)=/g)].map((match) => ({
-    key: match[2]!,
-    keyStart: match.index! + match[1]!.length,
-    valueStart: match.index! + match[0]!.length,
-  }));
+function parseKeyValuePairs(line: string): { key: string; value: string }[] {
+  const matches = [...line.matchAll(/(^|\s)([A-Za-z][A-Za-z0-9_.-]*)=/g)].map(
+    (match) => ({
+      key: match[2]!,
+      keyStart: match.index! + match[1]!.length,
+      valueStart: match.index! + match[0]!.length,
+    }),
+  );
 
   if (matches.length === 0) {
     return [];
@@ -82,7 +81,6 @@ function parseKeyValuePairs(line: string): { key: string; value: string; }[] {
   });
 }
 
-
 function printCause(error: unknown, theme: ErrorTheme): void {
   const cause = errorCauseMessage(error);
   if (cause) {
@@ -90,15 +88,15 @@ function printCause(error: unknown, theme: ErrorTheme): void {
   }
 }
 
-
 function errorCauseMessage(error: unknown): string | undefined {
   if (!(error instanceof Error) || error.cause === undefined) {
     return undefined;
   }
 
-  return error.cause instanceof Error ? error.cause.message : String(error.cause);
+  return error.cause instanceof Error
+    ? error.cause.message
+    : String(error.cause);
 }
-
 
 export function colorModeFromArgs(args: readonly string[]): ColorMode {
   for (let index = 0; index < args.length; index++) {
@@ -118,15 +116,13 @@ export function colorModeFromArgs(args: readonly string[]): ColorMode {
   return "auto";
 }
 
-
 function createErrorTheme(mode: ColorMode = "auto"): ErrorTheme {
   const enabled = shouldUseErrorColor(mode);
   return {
-    error: (value) => enabled ? `\x1b[1;31m${value}\x1b[0m` : value,
-    label: (value) => enabled ? `\x1b[2m${value}\x1b[0m` : value,
+    error: (value) => (enabled ? `\x1b[1;31m${value}\x1b[0m` : value),
+    label: (value) => (enabled ? `\x1b[2m${value}\x1b[0m` : value),
   };
 }
-
 
 function shouldUseErrorColor(mode: ColorMode): boolean {
   if (mode === "always") {

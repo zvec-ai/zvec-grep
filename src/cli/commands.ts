@@ -26,7 +26,11 @@ import {
 } from "../engine/config.js";
 import { findNearestAnonymousWorkspace } from "../engine/service/root.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
-import { contextWarningLines, printAgentContextResult, printHumanContextResult } from "./format/context.js";
+import {
+  contextWarningLines,
+  printAgentContextResult,
+  printHumanContextResult,
+} from "./format/context.js";
 import { printDebug } from "./format/debug.js";
 import { createIndexProgressReporter } from "./format/progress.js";
 import {
@@ -38,7 +42,6 @@ import {
   printIndexResult,
 } from "./format/status.js";
 
-
 type AgentInstaller = {
   id: string;
   label: string;
@@ -46,17 +49,14 @@ type AgentInstaller = {
   install: (options: InstallAgentOptions) => Promise<InstallAgentResult>;
 };
 
-
 type InstallAgentOptions = {
   force: boolean;
   mcpToolTimeoutSeconds: number;
 };
 
-
 type InstallAgentResult = {
   files: string[];
 };
-
 
 const AGENT_INSTALLERS: readonly AgentInstaller[] = [
   {
@@ -67,13 +67,11 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
   },
 ];
 
-
 const ZVEC_GREP_CONFIG_START = "# ZVEC_GREP_START";
 const ZVEC_GREP_CONFIG_END = "# ZVEC_GREP_END";
 const ZVEC_GREP_AGENTS_START = "<!-- ZVEC_GREP_START -->";
 const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
-
 
 export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   if (parsed.options.install) {
@@ -109,7 +107,6 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   await runQuery(parsed);
 }
 
-
 async function runInstall(parsed: ParsedArgs): Promise<void> {
   const installers = await resolveInstallers(parsed);
   if (installers.length === 0) {
@@ -117,12 +114,15 @@ async function runInstall(parsed: ParsedArgs): Promise<void> {
     return;
   }
 
-  console.log(`Installing zvec-grep for: ${installers.map((installer) => installer.label).join(", ")}`);
+  console.log(
+    `Installing zvec-grep for: ${installers.map((installer) => installer.label).join(", ")}`,
+  );
   for (const installer of installers) {
     const result = await installer.install({
       force: parsed.options.force === true,
-      mcpToolTimeoutSeconds: parsed.options.installMcpToolTimeoutSeconds
-        ?? DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
+      mcpToolTimeoutSeconds:
+        parsed.options.installMcpToolTimeoutSeconds ??
+        DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
     });
     console.log(`Installed ${installer.label}:`);
     for (const file of result.files) {
@@ -130,14 +130,17 @@ async function runInstall(parsed: ParsedArgs): Promise<void> {
     }
   }
 
-  console.log("Restart the selected agent or start a new session to pick up the integration.");
+  console.log(
+    "Restart the selected agent or start a new session to pick up the integration.",
+  );
   if (installers.some((installer) => installer.id === "codex")) {
     console.log("Codex MCP server: zg serve --mcp");
   }
 }
 
-
-async function installCodexIntegration(options: InstallAgentOptions): Promise<InstallAgentResult> {
+async function installCodexIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
   const codexHome = resolveCodexHome();
   const configPath = resolve(codexHome, "config.toml");
   const agentsPath = resolve(codexHome, "AGENTS.md");
@@ -164,8 +167,9 @@ async function installCodexIntegration(options: InstallAgentOptions): Promise<In
   return { files: [configPath, agentsPath] };
 }
 
-
-async function resolveInstallers(parsed: ParsedArgs): Promise<AgentInstaller[]> {
+async function resolveInstallers(
+  parsed: ParsedArgs,
+): Promise<AgentInstaller[]> {
   const targetTokens = [
     ...(parsed.options.installTargets ?? []),
     ...parsed.positionals,
@@ -175,18 +179,23 @@ async function resolveInstallers(parsed: ParsedArgs): Promise<AgentInstaller[]> 
     return installersFromTokens(targetTokens);
   }
 
-  if (parsed.options.yes === true || !process.stdin.isTTY || !process.stdout.isTTY) {
+  if (
+    parsed.options.yes === true ||
+    !process.stdin.isTTY ||
+    !process.stdout.isTTY
+  ) {
     return installersFromTokens(["auto"]);
   }
 
   return promptInstallers();
 }
 
-
 async function promptInstallers(): Promise<AgentInstaller[]> {
   console.log("Select agents to configure:");
   AGENT_INSTALLERS.forEach((installer, index) => {
-    console.log(`  ${index + 1}. ${installer.label} - ${installer.description}`);
+    console.log(
+      `  ${index + 1}. ${installer.label} - ${installer.description}`,
+    );
   });
   console.log("  all. All supported agents");
   console.log("  none. Cancel");
@@ -198,12 +207,13 @@ async function promptInstallers(): Promise<AgentInstaller[]> {
   try {
     const answer = await readline.question("Agents [codex]: ");
     const normalized = answer.trim();
-    return installersFromTokens(normalized.length > 0 ? splitTargetTokens(normalized) : ["codex"]);
+    return installersFromTokens(
+      normalized.length > 0 ? splitTargetTokens(normalized) : ["codex"],
+    );
   } finally {
     readline.close();
   }
 }
-
 
 function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
   const normalized = tokens.flatMap(splitTargetTokens);
@@ -226,16 +236,20 @@ function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
     }
 
     const numbered = Number.parseInt(lower, 10);
-    if (Number.isInteger(numbered) && numbered >= 1 && numbered <= AGENT_INSTALLERS.length) {
+    if (
+      Number.isInteger(numbered) &&
+      numbered >= 1 &&
+      numbered <= AGENT_INSTALLERS.length
+    ) {
       const installer = AGENT_INSTALLERS[numbered - 1]!;
       selected.set(installer.id, installer);
       continue;
     }
 
-    const installer = AGENT_INSTALLERS.find((candidate) => (
-      candidate.id === lower
-      || candidate.label.toLowerCase() === lower
-    ));
+    const installer = AGENT_INSTALLERS.find(
+      (candidate) =>
+        candidate.id === lower || candidate.label.toLowerCase() === lower,
+    );
     if (!installer) {
       throw new Error(`Unknown install target: ${token}`);
     }
@@ -246,14 +260,12 @@ function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
   return [...selected.values()];
 }
 
-
 function splitTargetTokens(value: string): string[] {
   return value
     .split(/[,\s]+/)
     .map((target) => target.trim())
     .filter((target) => target.length > 0);
 }
-
 
 async function runIndex(parsed: ParsedArgs): Promise<void> {
   const explicitRoot = parsed.positionals.length > 0;
@@ -263,7 +275,9 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
     throw new Error("zg --index accepts at most one root path");
   }
 
-  const zvecGrep = await createZvecGrep(createServiceOptions(parsed.options, rootPath.absolutePath));
+  const zvecGrep = await createZvecGrep(
+    createServiceOptions(parsed.options, rootPath.absolutePath),
+  );
   const progress = createIndexProgressReporter();
   try {
     printIndexPathFilterTip(parsed.options);
@@ -279,8 +293,16 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
     });
     progress.finish();
     const info = await zvecGrep.info({ root: rootPath.absolutePath });
-    printIndexResult("Indexed anonymous workspace", result, parsed.options, info.collection?.rootPaths);
-    persistExplicitGlobalConfig(parsed.options, info.collection?.embedding?.provider);
+    printIndexResult(
+      "Indexed anonymous workspace",
+      result,
+      parsed.options,
+      info.collection?.rootPaths,
+    );
+    persistExplicitGlobalConfig(
+      parsed.options,
+      info.collection?.embedding?.provider,
+    );
   } catch (error) {
     progress.finish();
     throw error;
@@ -288,7 +310,6 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
     await zvecGrep.close();
   }
 }
-
 
 async function runServe(parsed: ParsedArgs): Promise<void> {
   if (parsed.positionals.length > 0) {
@@ -299,14 +320,15 @@ async function runServe(parsed: ParsedArgs): Promise<void> {
   await runMcpServer(createServiceOptions(parsed.options, process.cwd()));
 }
 
-
 async function runDisableIndex(parsed: ParsedArgs): Promise<void> {
   const root = resolveIndexRoot(parsed.positionals[0]);
   if (parsed.positionals.length > 1) {
     throw new Error("zg --disable-index accepts at most one root path");
   }
 
-  const zvecGrep = await createZvecGrep(createServiceOptions(parsed.options, root));
+  const zvecGrep = await createZvecGrep(
+    createServiceOptions(parsed.options, root),
+  );
   try {
     const info = await zvecGrep.disableIndex({ root });
     printAnonymousInfo(info, parsed.options);
@@ -315,14 +337,15 @@ async function runDisableIndex(parsed: ParsedArgs): Promise<void> {
   }
 }
 
-
 async function runStatus(parsed: ParsedArgs): Promise<void> {
   const root = parsed.positionals[0] ?? process.cwd();
   if (parsed.positionals.length > 1) {
     throw new Error("zg --status accepts at most one root path");
   }
 
-  const zvecGrep = await createZvecGrep(createServiceOptions(parsed.options, root));
+  const zvecGrep = await createZvecGrep(
+    createServiceOptions(parsed.options, root),
+  );
   try {
     const info = await zvecGrep.info({ root });
     printAnonymousInfo(info, parsed.options);
@@ -331,15 +354,18 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
   }
 }
 
-
 async function runCollections(parsed: ParsedArgs): Promise<void> {
   const [action = "list", name, root] = parsed.positionals;
-  const zvecGrep = await createZvecGrep(createServiceOptions(parsed.options, undefined));
+  const zvecGrep = await createZvecGrep(
+    createServiceOptions(parsed.options, undefined),
+  );
 
   try {
     if (action === "list") {
       if (parsed.options.resetPaths) {
-        throw new Error("--reset-paths can only be used with --collections index");
+        throw new Error(
+          "--reset-paths can only be used with --collections index",
+        );
       }
 
       printCollectionList(await zvecGrep.collections.list(), parsed.options);
@@ -348,7 +374,9 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
 
     if (action === "info") {
       if (parsed.options.resetPaths) {
-        throw new Error("--reset-paths can only be used with --collections index");
+        throw new Error(
+          "--reset-paths can only be used with --collections index",
+        );
       }
 
       if (!name) {
@@ -387,7 +415,12 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
         });
         progress.finish();
         const info = await zvecGrep.collections.info(name);
-        printIndexResult(`Indexed collection ${name}`, result, parsed.options, info?.rootPaths);
+        printIndexResult(
+          `Indexed collection ${name}`,
+          result,
+          parsed.options,
+          info?.rootPaths,
+        );
         persistExplicitGlobalConfig(parsed.options, info?.embedding?.provider);
       } catch (error) {
         progress.finish();
@@ -398,7 +431,9 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
 
     if (action === "remove") {
       if (parsed.options.resetPaths) {
-        throw new Error("--reset-paths can only be used with --collections index");
+        throw new Error(
+          "--reset-paths can only be used with --collections index",
+        );
       }
 
       if (!name) {
@@ -411,7 +446,9 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
     }
 
     if (parsed.options.resetPaths) {
-      throw new Error("--reset-paths can only be used with --collections index");
+      throw new Error(
+        "--reset-paths can only be used with --collections index",
+      );
     }
 
     throw new Error(`Unknown collections action: ${action}`);
@@ -420,30 +457,33 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
   }
 }
 
-
 async function runQuery(parsed: ParsedArgs): Promise<void> {
-  const rgInput = parsed.options.rg
-    ? normalizeRgInput(parsed)
-    : undefined;
+  const rgInput = parsed.options.rg ? normalizeRgInput(parsed) : undefined;
   const commandOptions = rgInput?.options ?? parsed.options;
   const queries = (rgInput?.queries ?? parsed.positionals)
     .map((query) => query.trim())
     .filter((query) => query.length > 0);
   const routes = parsed.options.routes ?? [];
   if (queries.length === 0 && routes.length === 0) {
-    throw new Error(parsed.options.rg
-      ? "zg --rg requires a pattern. Use --help for examples."
-      : "zg query requires text or --fts/--vector routes. Use --help for examples.");
+    throw new Error(
+      parsed.options.rg
+        ? "zg --rg requires a pattern. Use --help for examples."
+        : "zg query requires text or --fts/--vector routes. Use --help for examples.",
+    );
   }
 
-  const zvecGrep = await createZvecGrep(createServiceOptions(commandOptions, undefined));
+  const zvecGrep = await createZvecGrep(
+    createServiceOptions(commandOptions, undefined),
+  );
   const progress = createIndexProgressReporter();
   try {
-    const result = await zvecGrep.context(contextOptions(commandOptions, queries, (progressEvent) => {
-      if (progressEvent.phase !== "done") {
-        progress.report(progressEvent);
-      }
-    }));
+    const result = await zvecGrep.context(
+      contextOptions(commandOptions, queries, (progressEvent) => {
+        if (progressEvent.phase !== "done") {
+          progress.report(progressEvent);
+        }
+      }),
+    );
     progress.finish();
     if (commandOptions.human) {
       printHumanContextResult(result, commandOptions);
@@ -466,7 +506,6 @@ async function runQuery(parsed: ParsedArgs): Promise<void> {
     await zvecGrep.close();
   }
 }
-
 
 function contextOptions(
   options: CliOptions,
@@ -495,15 +534,19 @@ function contextOptions(
   };
 }
 
-
-function normalizeRgInput(parsed: ParsedArgs): { queries: string[]; options: CliOptions; } {
+function normalizeRgInput(parsed: ParsedArgs): {
+  queries: string[];
+  options: CliOptions;
+} {
   const explicitPatterns = parsed.options.rgOptions?.patterns ?? [];
-  const queries = explicitPatterns.length > 0
-    ? explicitPatterns
-    : parsed.positionals.slice(0, 1);
-  const paths = explicitPatterns.length > 0
-    ? parsed.positionals
-    : parsed.positionals.slice(1);
+  const queries =
+    explicitPatterns.length > 0
+      ? explicitPatterns
+      : parsed.positionals.slice(0, 1);
+  const paths =
+    explicitPatterns.length > 0
+      ? parsed.positionals
+      : parsed.positionals.slice(1);
 
   return {
     queries,
@@ -514,16 +557,16 @@ function normalizeRgInput(parsed: ParsedArgs): { queries: string[]; options: Cli
   };
 }
 
-
 export function createServiceOptions(
   options: CliOptions,
   root: string | undefined,
 ): CreateZvecGrepOptions {
   const embedding = options.embedding ?? process.env.ZVEC_GREP_EMBEDDING;
-  const apiKey = options.apiKey
-    ?? process.env.ZVEC_GREP_API_KEY
-    ?? process.env.DASHSCOPE_API_KEY
-    ?? process.env.QWEN_API_KEY;
+  const apiKey =
+    options.apiKey ??
+    process.env.ZVEC_GREP_API_KEY ??
+    process.env.DASHSCOPE_API_KEY ??
+    process.env.QWEN_API_KEY;
   const endpoint = options.endpoint ?? process.env.ZVEC_GREP_ENDPOINT;
 
   return {
@@ -533,13 +576,18 @@ export function createServiceOptions(
     apiKey,
     endpoint,
     modelCacheDir: options.modelCacheDir ?? process.env.ZVEC_GREP_MODEL_CACHE,
-    llamaGpu: options.llamaGpu ?? parseEnvLlamaGpu(process.env.ZVEC_GREP_LLAMA_GPU),
-    embeddingParallelism: options.embeddingParallelism ?? parseEnvPositiveInteger(process.env.ZVEC_GREP_EMBED_PARALLELISM),
+    llamaGpu:
+      options.llamaGpu ?? parseEnvLlamaGpu(process.env.ZVEC_GREP_LLAMA_GPU),
+    embeddingParallelism:
+      options.embeddingParallelism ??
+      parseEnvPositiveInteger(process.env.ZVEC_GREP_EMBED_PARALLELISM),
   };
 }
 
-
-function persistExplicitGlobalConfig(options: CliOptions, indexedProvider: string | undefined): void {
+function persistExplicitGlobalConfig(
+  options: CliOptions,
+  indexedProvider: string | undefined,
+): void {
   if (!updateGlobalConfigFromExplicitOptions(options, indexedProvider)) {
     return;
   }
@@ -547,26 +595,35 @@ function persistExplicitGlobalConfig(options: CliOptions, indexedProvider: strin
   console.log(`Global config: ${globalConfigPath()}`);
 }
 
-
-function parseEnvLlamaGpu(value: string | undefined): CreateZvecGrepOptions["llamaGpu"] | undefined {
+function parseEnvLlamaGpu(
+  value: string | undefined,
+): CreateZvecGrepOptions["llamaGpu"] | undefined {
   const normalized = value?.trim().toLowerCase() ?? "";
   if (!normalized) {
     return undefined;
   }
 
-  if (normalized === "auto" || normalized === "metal" || normalized === "vulkan" || normalized === "cuda") {
+  if (
+    normalized === "auto" ||
+    normalized === "metal" ||
+    normalized === "vulkan" ||
+    normalized === "cuda"
+  ) {
     return normalized;
   }
 
-  if (["false", "off", "none", "disable", "disabled", "0"].includes(normalized)) {
+  if (
+    ["false", "off", "none", "disable", "disabled", "0"].includes(normalized)
+  ) {
     return false;
   }
 
   return undefined;
 }
 
-
-function parseEnvPositiveInteger(value: string | undefined): number | undefined {
+function parseEnvPositiveInteger(
+  value: string | undefined,
+): number | undefined {
   const normalized = value?.trim() ?? "";
   if (!normalized) {
     return undefined;
@@ -576,11 +633,9 @@ function parseEnvPositiveInteger(value: string | undefined): number | undefined 
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-
 function resolveCodexHome(): string {
   return resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"));
 }
-
 
 async function writeMarkedFile(options: {
   path: string;
@@ -593,27 +648,43 @@ async function writeMarkedFile(options: {
   removeConflict?: (existing: string) => string;
 }): Promise<void> {
   let existing = await readTextFileIfExists(options.path);
-  const next = replaceMarkedBlock(existing, options.startMarker, options.endMarker, options.block);
+  const next = replaceMarkedBlock(
+    existing,
+    options.startMarker,
+    options.endMarker,
+    options.block,
+  );
 
   if (next === null) {
-    existing = removeOrphanedMarkers(existing, options.startMarker, options.endMarker);
+    existing = removeOrphanedMarkers(
+      existing,
+      options.startMarker,
+      options.endMarker,
+    );
   }
 
-  if (
-    next === null
-    && options.hasConflict?.(existing)
-  ) {
+  if (next === null && options.hasConflict?.(existing)) {
     if (!options.force) {
-      throw new Error(options.conflictMessage ?? `Existing unmanaged configuration found in ${options.path}`);
+      throw new Error(
+        options.conflictMessage ??
+          `Existing unmanaged configuration found in ${options.path}`,
+      );
     }
-    existing = options.removeConflict ? options.removeConflict(existing) : existing;
+    existing = options.removeConflict
+      ? options.removeConflict(existing)
+      : existing;
   }
 
-  await writeTextFileAtomic(options.path, next ?? appendMarkedBlock(existing, options.block));
+  await writeTextFileAtomic(
+    options.path,
+    next ?? appendMarkedBlock(existing, options.block),
+  );
 }
 
-
-async function writeTextFileAtomic(path: string, content: string): Promise<void> {
+async function writeTextFileAtomic(
+  path: string,
+  content: string,
+): Promise<void> {
   const targetPath = await resolveAtomicWriteTarget(path);
   await mkdir(dirname(targetPath), { recursive: true });
 
@@ -639,11 +710,15 @@ async function writeTextFileAtomic(path: string, content: string): Promise<void>
   }
 }
 
-
-async function resolveAtomicWriteTarget(path: string, visited = new Set<string>()): Promise<string> {
+async function resolveAtomicWriteTarget(
+  path: string,
+  visited = new Set<string>(),
+): Promise<string> {
   const absolutePath = resolve(path);
   if (visited.has(absolutePath)) {
-    throw new Error(`Cannot atomically write through circular symbolic link: ${path}`);
+    throw new Error(
+      `Cannot atomically write through circular symbolic link: ${path}`,
+    );
   }
 
   try {
@@ -654,7 +729,10 @@ async function resolveAtomicWriteTarget(path: string, visited = new Set<string>(
 
     visited.add(absolutePath);
     const link = await readlink(absolutePath);
-    return resolveAtomicWriteTarget(resolve(dirname(absolutePath), link), visited);
+    return resolveAtomicWriteTarget(
+      resolve(dirname(absolutePath), link),
+      visited,
+    );
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return absolutePath;
@@ -662,7 +740,6 @@ async function resolveAtomicWriteTarget(path: string, visited = new Set<string>(
     throw error;
   }
 }
-
 
 async function fileModeIfExists(path: string): Promise<number | undefined> {
   try {
@@ -675,7 +752,6 @@ async function fileModeIfExists(path: string): Promise<number | undefined> {
   }
 }
 
-
 async function readTextFileIfExists(path: string): Promise<string> {
   try {
     return await readFile(path, "utf8");
@@ -687,11 +763,9 @@ async function readTextFileIfExists(path: string): Promise<string> {
   }
 }
 
-
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
 }
-
 
 function replaceMarkedBlock(
   existing: string,
@@ -701,7 +775,7 @@ function replaceMarkedBlock(
 ): string | null {
   const lines = existing.split(/\r?\n/);
   const markerLines = new Set<number>();
-  const ranges: Array<{ start: number; end: number; }> = [];
+  const ranges: Array<{ start: number; end: number }> = [];
   let pendingStart: number | undefined;
 
   for (const [index, line] of lines.entries()) {
@@ -725,33 +799,40 @@ function replaceMarkedBlock(
     return null;
   }
 
-  const before = retainedMarkedLines(lines, 0, first.start, markerLines, []).join("\n").trimEnd();
+  const before = retainedMarkedLines(lines, 0, first.start, markerLines, [])
+    .join("\n")
+    .trimEnd();
   const after = retainedMarkedLines(
     lines,
     first.end + 1,
     lines.length,
     markerLines,
     ranges.slice(1),
-  ).join("\n").trim();
-  return [before, block.trim(), after.trim()]
-    .filter((part) => part.length > 0)
-    .join("\n\n") + "\n";
+  )
+    .join("\n")
+    .trim();
+  return (
+    [before, block.trim(), after.trim()]
+      .filter((part) => part.length > 0)
+      .join("\n\n") + "\n"
+  );
 }
-
 
 function retainedMarkedLines(
   lines: readonly string[],
   start: number,
   end: number,
   markerLines: ReadonlySet<number>,
-  removedRanges: readonly { start: number; end: number; }[],
+  removedRanges: readonly { start: number; end: number }[],
 ): string[] {
   const retained: string[] = [];
   for (let index = start; index < end; index += 1) {
     if (markerLines.has(index)) {
       continue;
     }
-    if (removedRanges.some((range) => index >= range.start && index <= range.end)) {
+    if (
+      removedRanges.some((range) => index >= range.start && index <= range.end)
+    ) {
       continue;
     }
     retained.push(lines[index]!);
@@ -759,28 +840,27 @@ function retainedMarkedLines(
   return retained;
 }
 
-
 function removeOrphanedMarkers(
   existing: string,
   startMarker: string,
   endMarker: string,
 ): string {
-  return existing
-    .split(/\r?\n/)
-    .filter((line) => {
-      const trimmed = line.trim();
-      return trimmed !== startMarker && trimmed !== endMarker;
-    })
-    .join("\n")
-    .trimEnd() + "\n";
+  return (
+    existing
+      .split(/\r?\n/)
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed !== startMarker && trimmed !== endMarker;
+      })
+      .join("\n")
+      .trimEnd() + "\n"
+  );
 }
-
 
 function appendMarkedBlock(existing: string, block: string): string {
   const prefix = existing.trimEnd();
   return `${prefix.length > 0 ? `${prefix}\n\n` : ""}${block.trim()}\n`;
 }
-
 
 function hasCodexMcpServerConfig(existing: string): boolean {
   return existing.split(/\r?\n/).some((line) => {
@@ -788,7 +868,6 @@ function hasCodexMcpServerConfig(existing: string): boolean {
     return tableName !== undefined && isCodexMcpServerTableName(tableName);
   });
 }
-
 
 function removeCodexMcpServerConfig(existing: string): string {
   const lines = existing.split(/\r?\n/);
@@ -809,16 +888,15 @@ function removeCodexMcpServerConfig(existing: string): string {
   return kept.join("\n").trimEnd() + "\n";
 }
 
-
 function tomlTableName(line: string): string | undefined {
   return line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/)?.[1]?.trim();
 }
 
-
 function isCodexMcpServerTableName(tableName: string): boolean {
-  return /^(?:mcp_servers|"mcp_servers"|'mcp_servers')\s*\.\s*(?:zvec_grep|"zvec_grep"|'zvec_grep')(?:\s*\.|$)/.test(tableName);
+  return /^(?:mcp_servers|"mcp_servers"|'mcp_servers')\s*\.\s*(?:zvec_grep|"zvec_grep"|'zvec_grep')(?:\s*\.|$)/.test(
+    tableName,
+  );
 }
-
 
 function codexConfigBlock(mcpToolTimeoutSeconds: number): string {
   return `${ZVEC_GREP_CONFIG_START}
@@ -845,7 +923,6 @@ default_tools_approval_mode = "auto"
 ${ZVEC_GREP_CONFIG_END}`;
 }
 
-
 function codexAgentsBlock(): string {
   return `${ZVEC_GREP_AGENTS_START}
 ## zvec-grep
@@ -860,7 +937,6 @@ Prefer focused include/exclude filters, and exclude dependencies, generated outp
 ${ZVEC_GREP_AGENTS_END}`;
 }
 
-
 function resolveIndexRoot(root: string | undefined): string {
   if (root !== undefined) {
     return root;
@@ -868,7 +944,6 @@ function resolveIndexRoot(root: string | undefined): string {
 
   return findNearestAnonymousWorkspace(process.cwd())?.root ?? process.cwd();
 }
-
 
 function indexRootPath(path: string, options: CliOptions): RootPath {
   return {

@@ -1,6 +1,4 @@
-export {
-  createZvecGrep,
-} from "./engine/service/index.js";
+export { createZvecGrep } from "./engine/service/index.js";
 export type {
   CreateZvecGrepOptions,
   ZvecGrep,
@@ -38,10 +36,7 @@ export {
   getEmbeddingModelCatalogEntryByRef,
   listEmbeddingModels,
 } from "./engine/models/index.js";
-export {
-  isImageContent,
-  isTextContent,
-} from "./engine/types.js";
+export { isImageContent, isTextContent } from "./engine/types.js";
 export type {
   CodeEntityMetadata,
   CodeEntityModifier,

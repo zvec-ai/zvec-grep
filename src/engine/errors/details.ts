@@ -1,17 +1,13 @@
 type ErrorDetailValue = string | number | boolean | null | undefined;
 
-
 export type ErrorDetailEntry =
-  | string
-  | readonly [string, ErrorDetailValue]
-  | null
-  | undefined;
-
+  string | readonly [string, ErrorDetailValue] | null | undefined;
 
 const ANONYMOUS_COLLECTION_NAME = "__anonymous__";
 
-
-export function errorDetails(entries: readonly ErrorDetailEntry[]): string | undefined {
+export function errorDetails(
+  entries: readonly ErrorDetailEntry[],
+): string | undefined {
   const lines = entries
     .map(formatDetailEntry)
     .filter((line): line is string => line !== null && line.length > 0);
@@ -19,16 +15,13 @@ export function errorDetails(entries: readonly ErrorDetailEntry[]): string | und
   return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
-
 export function detail(key: string, value: ErrorDetailValue): ErrorDetailEntry {
   return value === null || value === undefined ? null : [key, value];
 }
 
-
 export function collectionDetail(name: string): ErrorDetailEntry {
   return name === ANONYMOUS_COLLECTION_NAME ? null : detail("collection", name);
 }
-
 
 function formatDetailEntry(entry: ErrorDetailEntry): string | null {
   if (entry === null || entry === undefined) {

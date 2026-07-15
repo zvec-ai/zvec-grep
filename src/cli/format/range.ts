@@ -1,6 +1,5 @@
 import type { Range } from "../../engine/types.js";
 
-
 export function rangeLabel(range: Range): string {
   if (range.kind === "text") {
     return range.startLine === range.endLine
@@ -26,7 +25,6 @@ export function rangeLabel(range: Range): string {
 
   return "file";
 }
-
 
 export function rangeStartLine(range: Range): number {
   return range.kind === "text" ? range.startLine : 0;

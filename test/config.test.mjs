@@ -9,7 +9,6 @@ import {
   updateGlobalConfigFromExplicitOptions,
 } from "../dist/engine/config.js";
 
-
 test("global config is created securely and merged incrementally", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-config-"));
   const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
@@ -19,27 +18,33 @@ test("global config is created securely and merged incrementally", async (t) => 
 
   assert.deepEqual(readGlobalConfig(configPath), { version: 1 });
 
-  updateGlobalConfig({
-    defaults: {
-      embedding: "qwen/text-embedding-v4",
-      llamaGpu: false,
-    },
-    providers: {
-      qwen: {
-        apiKey: "first-key",
+  updateGlobalConfig(
+    {
+      defaults: {
+        embedding: "qwen/text-embedding-v4",
+        llamaGpu: false,
+      },
+      providers: {
+        qwen: {
+          apiKey: "first-key",
+        },
       },
     },
-  }, configPath);
-  updateGlobalConfig({
-    defaults: {
-      embeddingParallelism: 3,
-    },
-    providers: {
-      qwen: {
-        endpoint: "https://example.test/embeddings",
+    configPath,
+  );
+  updateGlobalConfig(
+    {
+      defaults: {
+        embeddingParallelism: 3,
+      },
+      providers: {
+        qwen: {
+          endpoint: "https://example.test/embeddings",
+        },
       },
     },
-  }, configPath);
+    configPath,
+  );
 
   assert.deepEqual(readGlobalConfig(configPath), {
     version: 1,
@@ -66,19 +71,27 @@ test("global config is created securely and merged incrementally", async (t) => 
   }
 });
 
-
 test("explicit index options become provider-aware global config", async (t) => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-config-explicit-"));
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-config-explicit-"),
+  );
   const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  assert.equal(updateGlobalConfigFromExplicitOptions({
-    embedding: "qwen/text-embedding-v4",
-    apiKey: "explicit-key",
-    endpoint: "https://example.test/embeddings",
-  }, undefined, configPath), true);
+  assert.equal(
+    updateGlobalConfigFromExplicitOptions(
+      {
+        embedding: "qwen/text-embedding-v4",
+        apiKey: "explicit-key",
+        endpoint: "https://example.test/embeddings",
+      },
+      undefined,
+      configPath,
+    ),
+    true,
+  );
   assert.deepEqual(readGlobalConfig(configPath), {
     version: 1,
     defaults: {
@@ -91,25 +104,32 @@ test("explicit index options become provider-aware global config", async (t) => 
       },
     },
   });
-  assert.equal(updateGlobalConfigFromExplicitOptions({}, "qwen", configPath), false);
+  assert.equal(
+    updateGlobalConfigFromExplicitOptions({}, "qwen", configPath),
+    false,
+  );
 });
 
-
 test("global config rejects malformed fields without echoing secrets", async (t) => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-config-invalid-"));
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-config-invalid-"),
+  );
   const configPath = join(temporaryDirectory, "config.json");
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  await writeFile(configPath, JSON.stringify({
-    version: 1,
-    providers: {
-      qwen: {
-        apiKey: 12345,
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: {
+        qwen: {
+          apiKey: 12345,
+        },
       },
-    },
-  }));
+    }),
+  );
 
   assert.throws(
     () => readGlobalConfig(configPath),

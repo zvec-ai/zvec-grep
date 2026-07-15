@@ -2,9 +2,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import Parser from "web-tree-sitter";
 
-
 const require = createRequire(import.meta.url);
-
 
 const LANGUAGE_WASM_MAP: Record<string, string> = {
   c: "c",
@@ -19,10 +17,8 @@ const LANGUAGE_WASM_MAP: Record<string, string> = {
   typescript: "typescript",
 };
 
-
 let parserReady = false;
 const grammarCache = new Map<string, Parser.Language>();
-
 
 export async function ensureParser(): Promise<void> {
   if (!parserReady) {
@@ -31,8 +27,9 @@ export async function ensureParser(): Promise<void> {
   }
 }
 
-
-export async function loadGrammar(format: string): Promise<Parser.Language | null> {
+export async function loadGrammar(
+  format: string,
+): Promise<Parser.Language | null> {
   const cached = grammarCache.get(format);
   if (cached) {
     return cached;
@@ -46,7 +43,11 @@ export async function loadGrammar(format: string): Promise<Parser.Language | nul
   await ensureParser();
 
   try {
-    const wasmsDir = join(require.resolve("tree-sitter-wasms/package.json"), "..", "out");
+    const wasmsDir = join(
+      require.resolve("tree-sitter-wasms/package.json"),
+      "..",
+      "out",
+    );
     const wasmPath = join(wasmsDir, `tree-sitter-${wasmName}.wasm`);
     const grammar = await Parser.Language.load(wasmPath);
     grammarCache.set(format, grammar);
@@ -56,7 +57,6 @@ export async function loadGrammar(format: string): Promise<Parser.Language | nul
     return null;
   }
 }
-
 
 export function hasGrammar(format: string): boolean {
   return format in LANGUAGE_WASM_MAP;

@@ -6,7 +6,6 @@ import {
   extractPrecedingDoc,
 } from "../families/metadata.js";
 
-
 export const GO_ADAPTER: LanguageAdapter = {
   format: "go",
   entityTypes: new Set([
@@ -16,9 +15,7 @@ export const GO_ADAPTER: LanguageAdapter = {
     "type_alias",
     "type_spec",
   ]),
-  scopeTypes: new Set([
-    "type_spec",
-  ]),
+  scopeTypes: new Set(["type_spec"]),
   extractName(node) {
     return node.childForFieldName("name")?.text;
   },
@@ -78,7 +75,6 @@ export const GO_ADAPTER: LanguageAdapter = {
     return modifiers;
   },
 };
-
 
 function extractGoReceiverType(node: TSNode): string | undefined {
   const receiver = node.childForFieldName("receiver");

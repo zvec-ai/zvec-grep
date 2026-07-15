@@ -1,17 +1,14 @@
 import { performance } from "node:perf_hooks";
 import type { TimingEntry } from "../types.js";
 
-
 type MutableTimingEntry = {
   name: string;
   durationMs: number;
   count: number;
 };
 
-
 export class TimingCollector {
   private readonly entriesByName = new Map<string, MutableTimingEntry>();
-
 
   async time<T>(name: string, task: () => Promise<T>): Promise<T> {
     const start = performance.now();
@@ -22,7 +19,6 @@ export class TimingCollector {
     }
   }
 
-
   timeSync<T>(name: string, task: () => T): T {
     const start = performance.now();
     try {
@@ -31,7 +27,6 @@ export class TimingCollector {
       this.add(name, performance.now() - start);
     }
   }
-
 
   add(name: string, durationMs: number, count = 1): void {
     const normalizedName = name.trim();
@@ -53,13 +48,11 @@ export class TimingCollector {
     });
   }
 
-
   addEntries(entries: readonly TimingEntry[] | undefined, prefix = ""): void {
     for (const entry of entries ?? []) {
       this.add(`${prefix}${entry.name}`, entry.durationMs, entry.count ?? 1);
     }
   }
-
 
   entries(): TimingEntry[] {
     return [...this.entriesByName.values()].map((entry) => ({
@@ -70,17 +63,14 @@ export class TimingCollector {
   }
 }
 
-
 export class ConcurrentTiming {
   private active = 0;
   private startedAt = 0;
-
 
   constructor(
     private readonly collector: TimingCollector,
     private readonly name: string,
   ) {}
-
 
   async time<T>(task: () => Promise<T>): Promise<T> {
     this.start();
@@ -91,7 +81,6 @@ export class ConcurrentTiming {
     }
   }
 
-
   private start(): void {
     if (this.active === 0) {
       this.startedAt = performance.now();
@@ -99,7 +88,6 @@ export class ConcurrentTiming {
 
     this.active++;
   }
-
 
   private stop(): void {
     if (this.active <= 0) {

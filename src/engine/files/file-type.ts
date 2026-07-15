@@ -1,10 +1,5 @@
 import { basename, extname } from "node:path";
-import type {
-  FileFormat,
-  FileKind,
-  ImageFormat,
-} from "../types.js";
-
+import type { FileFormat, FileKind, ImageFormat } from "../types.js";
 
 const CODE_FORMATS: Record<string, string> = {
   ".c": "c",
@@ -41,7 +36,6 @@ const CODE_FORMATS: Record<string, string> = {
   ".svelte": "svelte",
 };
 
-
 const DATA_FORMATS: Record<string, string> = {
   ".csv": "csv",
   ".json": "json",
@@ -50,7 +44,6 @@ const DATA_FORMATS: Record<string, string> = {
   ".yaml": "yaml",
   ".yml": "yaml",
 };
-
 
 const TEXT_FORMATS: Record<string, string> = {
   ".md": "markdown",
@@ -62,7 +55,6 @@ const TEXT_FORMATS: Record<string, string> = {
   ".xml": "xml",
 };
 
-
 const IMAGE_FORMATS: Record<string, ImageFormat> = {
   ".gif": "gif",
   ".jpeg": "jpeg",
@@ -70,7 +62,6 @@ const IMAGE_FORMATS: Record<string, ImageFormat> = {
   ".png": "png",
   ".webp": "webp",
 };
-
 
 const BINARY_EXTENSIONS = new Set([
   ".zip",
@@ -106,8 +97,9 @@ const BINARY_EXTENSIONS = new Set([
   ".sqlite",
 ]);
 
-
-export function detectFileType(path: string): { kind: FileKind; format: FileFormat; } | null {
+export function detectFileType(
+  path: string,
+): { kind: FileKind; format: FileFormat } | null {
   const name = basename(path);
 
   if (name === "Dockerfile") {

@@ -6,9 +6,7 @@ export {
   listEmbeddingModels,
 } from "./catalog.js";
 
-
 export { EmbeddingModel } from "./embeddings.js";
-
 
 export {
   LlamaCppEmbeddingModel,
@@ -17,20 +15,17 @@ export {
   setLlamaCppRuntimeForTesting,
 } from "./providers/index.js";
 
-
 export type {
   RankingCandidate,
   RankingModel,
-  RankingScore
+  RankingScore,
 } from "./ranking.js";
-
 
 export {
   createEmbeddingModel,
   createEmbeddingModelFromCatalog,
   createEmbeddingModelFromReference,
 } from "./factory.js";
-
 
 export type {
   EmbeddingCatalogEntry,

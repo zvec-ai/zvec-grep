@@ -7,7 +7,6 @@ import {
   extractPrecedingDoc,
 } from "./metadata.js";
 
-
 const C_FAMILY_FUNCTION_TYPES = new Set([
   "declaration",
   "field_declaration",
@@ -15,12 +14,10 @@ const C_FAMILY_FUNCTION_TYPES = new Set([
   "macro_type_specifier",
 ]);
 
-
 const C_FAMILY_FUNCTION_DECLARATION_TYPES = new Set([
   "declaration",
   "field_declaration",
 ]);
-
 
 export function createCFamilyAdapter(
   format: string,
@@ -69,8 +66,10 @@ export function createCFamilyAdapter(
   };
 }
 
-
-function cFamilyScopeBreadcrumb(node: TSNode, breadcrumb: readonly string[]): readonly string[] {
+function cFamilyScopeBreadcrumb(
+  node: TSNode,
+  breadcrumb: readonly string[],
+): readonly string[] {
   if (!C_FAMILY_FUNCTION_TYPES.has(node.type)) {
     return breadcrumb;
   }
@@ -82,13 +81,13 @@ function cFamilyScopeBreadcrumb(node: TSNode, breadcrumb: readonly string[]): re
     return breadcrumb;
   }
 
-  const parts = breadcrumb.length > 0 && breadcrumb[breadcrumb.length - 1] === qualifier[0]
-    ? qualifier.slice(1)
-    : qualifier;
+  const parts =
+    breadcrumb.length > 0 && breadcrumb[breadcrumb.length - 1] === qualifier[0]
+      ? qualifier.slice(1)
+      : qualifier;
 
   return [...breadcrumb, ...parts];
 }
-
 
 function classifyCFamilyNode(node: TSNode): CodeSymbolType | undefined {
   if (node.type === "type_definition") {
@@ -99,17 +98,20 @@ function classifyCFamilyNode(node: TSNode): CodeSymbolType | undefined {
     return "alias";
   }
 
-  if (node.type === "field_declaration" && findDescendantByType(node, "function_declarator")) {
+  if (
+    node.type === "field_declaration" &&
+    findDescendantByType(node, "function_declarator")
+  ) {
     return "function";
   }
 
   return undefined;
 }
 
-
 function extractRawCFunctionName(node: TSNode): string | undefined {
-  const declarator = node.childForFieldName("declarator")
-    ?? findDescendantByType(node, "function_declarator");
+  const declarator =
+    node.childForFieldName("declarator") ??
+    findDescendantByType(node, "function_declarator");
   const name = declarator ? findIdentifierLeaf(declarator)?.text : undefined;
 
   return isSimpleCIdentifier(name)
@@ -117,31 +119,39 @@ function extractRawCFunctionName(node: TSNode): string | undefined {
     : extractCFunctionName(declarator?.text ?? node.text);
 }
 
-
 function qualifierParts(name: string): string[] {
   const parts = name.split("::").filter((part) => part.length > 0);
 
   return parts.length > 1 ? parts.slice(0, -1) : [];
 }
 
-
 function lastQualifiedPart(name: string): string {
-  return name.split("::").filter((part) => part.length > 0).at(-1) ?? name;
+  return (
+    name
+      .split("::")
+      .filter((part) => part.length > 0)
+      .at(-1) ?? name
+  );
 }
-
 
 function typedefWrapsClassLikeBody(node: TSNode): boolean {
-  return ["struct_specifier", "union_specifier", "enum_specifier"].some((type) => {
-    const child = findDescendantByType(node, type);
-    return child?.childForFieldName("body") !== null && child?.childForFieldName("body") !== undefined;
-  });
+  return ["struct_specifier", "union_specifier", "enum_specifier"].some(
+    (type) => {
+      const child = findDescendantByType(node, type);
+      return (
+        child?.childForFieldName("body") !== null &&
+        child?.childForFieldName("body") !== undefined
+      );
+    },
+  );
 }
-
 
 function isSimpleCIdentifier(value: string | undefined): value is string {
-  return value !== undefined && /^~?[A-Za-z_][A-Za-z0-9_]*(?:::[~A-Za-z_][A-Za-z0-9_]*)*$/.test(value);
+  return (
+    value !== undefined &&
+    /^~?[A-Za-z_][A-Za-z0-9_]*(?:::[~A-Za-z_][A-Za-z0-9_]*)*$/.test(value)
+  );
 }
-
 
 function extractCFunctionName(text: string): string | undefined {
   const matches = [...text.matchAll(/([~A-Za-z_][~A-Za-z0-9_:]*)\s*\(/g)];
@@ -149,7 +159,6 @@ function extractCFunctionName(text: string): string | undefined {
 
   return last?.[1];
 }
-
 
 function findDescendantByType(node: TSNode, type: string): TSNode | null {
   if (node.type === type) {

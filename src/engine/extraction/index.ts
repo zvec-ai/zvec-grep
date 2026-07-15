@@ -9,23 +9,17 @@ import { makeEntityId } from "./ids.js";
 import { CodeExtractor } from "./code/extractor.js";
 import { MarkdownExtractor } from "./markdown/extractor.js";
 
-
-export type SourceKind =
-  | "text"
-  | "image";
-
+export type SourceKind = "text" | "image";
 
 type SourceBase = {
   kind: SourceKind;
   file: FileInfo;
 };
 
-
 export type TextSource = SourceBase & {
   kind: "text";
   text: string;
 };
-
 
 export type ImageSource = SourceBase & {
   kind: "image";
@@ -33,66 +27,62 @@ export type ImageSource = SourceBase & {
   format: ImageFormat;
 };
 
-
-export type Source =
-  | TextSource
-  | ImageSource;
-
+export type Source = TextSource | ImageSource;
 
 export interface Extractor {
   supports(source: Source): boolean;
   extract(source: Source): Promise<EntityFragment[]>;
 }
 
-
 export type TextExtractorOptions = {
   maxChunkChars?: number;
   chunkOverlapChars?: number;
 };
 
-
 const DEFAULT_TEXT_CHUNK_CHARS = 3600;
 
-
 const DEFAULT_TEXT_CHUNK_OVERLAP_CHARS = 540;
-
 
 export class TextExtractor implements Extractor {
   private readonly maxChunkChars: number;
   private readonly chunkOverlapChars: number;
 
-
   constructor(options: TextExtractorOptions = {}) {
     const maxChunkChars = options.maxChunkChars ?? DEFAULT_TEXT_CHUNK_CHARS;
-    const chunkOverlapChars = options.chunkOverlapChars ?? DEFAULT_TEXT_CHUNK_OVERLAP_CHARS;
+    const chunkOverlapChars =
+      options.chunkOverlapChars ?? DEFAULT_TEXT_CHUNK_OVERLAP_CHARS;
 
     if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
-      throw new EngineError("Text extractor requires a positive integer chunk size", {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.TEXT_INVALID_CHUNK_SIZE",
-        context: `maxChunkChars=${maxChunkChars}`,
-      });
+      throw new EngineError(
+        "Text extractor requires a positive integer chunk size",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.TEXT_INVALID_CHUNK_SIZE",
+          context: `maxChunkChars=${maxChunkChars}`,
+        },
+      );
     }
 
     if (
-      !Number.isInteger(chunkOverlapChars)
-      || chunkOverlapChars < 0
-      || chunkOverlapChars >= maxChunkChars
+      !Number.isInteger(chunkOverlapChars) ||
+      chunkOverlapChars < 0 ||
+      chunkOverlapChars >= maxChunkChars
     ) {
-      throw new EngineError("Text extractor requires overlap to be smaller than chunk size", {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.TEXT_INVALID_CHUNK_OVERLAP",
-        context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
-      });
+      throw new EngineError(
+        "Text extractor requires overlap to be smaller than chunk size",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.TEXT_INVALID_CHUNK_OVERLAP",
+          context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
+        },
+      );
     }
 
     this.maxChunkChars = maxChunkChars;
     this.chunkOverlapChars = chunkOverlapChars;
   }
 
-
   supports(source: Source): boolean {
     return source.kind === "text";
   }
-
 
   async extract(source: Source): Promise<EntityFragment[]> {
     if (source.kind !== "text") {
@@ -104,7 +94,11 @@ export class TextExtractor implements Extractor {
 
     validateSourceFile(source);
 
-    const chunks = chunkText(source.text, this.maxChunkChars, this.chunkOverlapChars);
+    const chunks = chunkText(
+      source.text,
+      this.maxChunkChars,
+      this.chunkOverlapChars,
+    );
 
     return chunks.map((chunk, index): EntityFragment => ({
       id: makeEntityId(source.file.id, index),
@@ -118,12 +112,10 @@ export class TextExtractor implements Extractor {
   }
 }
 
-
 export class ImageExtractor implements Extractor {
   supports(source: Source): boolean {
     return source.kind === "image";
   }
-
 
   async extract(source: Source): Promise<EntityFragment[]> {
     if (source.kind !== "image") {
@@ -159,7 +151,6 @@ export class ImageExtractor implements Extractor {
   }
 }
 
-
 const DEFAULT_EXTRACTORS: readonly Extractor[] = [
   new CodeExtractor(),
   new MarkdownExtractor(),
@@ -167,21 +158,21 @@ const DEFAULT_EXTRACTORS: readonly Extractor[] = [
   new ImageExtractor(),
 ];
 
-
 export class ExtractorRegistry {
   private readonly extractors: readonly Extractor[];
 
-
   constructor(extractors: readonly Extractor[] = DEFAULT_EXTRACTORS) {
     if (extractors.length === 0) {
-      throw new EngineError("Extractor registry requires at least one extractor", {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_REGISTRY",
-      });
+      throw new EngineError(
+        "Extractor registry requires at least one extractor",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_REGISTRY",
+        },
+      );
     }
 
     this.extractors = extractors;
   }
-
 
   resolve(source: Source): Extractor {
     for (const extractor of this.extractors) {
@@ -196,11 +187,9 @@ export class ExtractorRegistry {
     });
   }
 
-
   extract(source: Source): Promise<EntityFragment[]> {
     return this.extractFirst(source);
   }
-
 
   private async extractFirst(source: Source): Promise<EntityFragment[]> {
     let matched = false;
@@ -230,19 +219,20 @@ export class ExtractorRegistry {
   }
 }
 
-
 export function extractFragments(source: Source): Promise<EntityFragment[]> {
   return new ExtractorRegistry().extract(source);
 }
-
 
 type TextChunk = {
   text: string;
   range: TextRange;
 };
 
-
-function chunkText(text: string, maxChars: number, overlapChars: number): TextChunk[] {
+function chunkText(
+  text: string,
+  maxChars: number,
+  overlapChars: number,
+): TextChunk[] {
   if (text.trim().length === 0) {
     return [];
   }
@@ -261,9 +251,10 @@ function chunkText(text: string, maxChars: number, overlapChars: number): TextCh
 
       while (offset < line.length) {
         const remaining = line.length - offset;
-        const sliceLength = remaining <= maxChars
-          ? remaining
-          : findLineCut(line.slice(offset), maxChars);
+        const sliceLength =
+          remaining <= maxChars
+            ? remaining
+            : findLineCut(line.slice(offset), maxChars);
         const slice = line.slice(offset, offset + sliceLength);
 
         if (slice.trim().length > 0) {
@@ -322,12 +313,16 @@ function chunkText(text: string, maxChars: number, overlapChars: number): TextCh
       break;
     }
 
-    startIndex = computeNextStartLine(lines, startIndex, endIndex, overlapChars);
+    startIndex = computeNextStartLine(
+      lines,
+      startIndex,
+      endIndex,
+      overlapChars,
+    );
   }
 
   return chunks;
 }
-
 
 function computeLineOffsets(lines: readonly string[]): number[] {
   const offsets: number[] = [];
@@ -340,7 +335,6 @@ function computeLineOffsets(lines: readonly string[]): number[] {
 
   return offsets;
 }
-
 
 function computeNextStartLine(
   lines: readonly string[],
@@ -355,7 +349,11 @@ function computeNextStartLine(
   let overlapLines = 0;
   let overlapCount = 0;
 
-  for (let index = endIndex - 1; index >= startIndex && overlapCount < overlapChars; index--) {
+  for (
+    let index = endIndex - 1;
+    index >= startIndex && overlapCount < overlapChars;
+    index--
+  ) {
     overlapCount += lines[index].length + 1;
     overlapLines++;
   }
@@ -364,7 +362,6 @@ function computeNextStartLine(
 
   return nextStart > startIndex ? nextStart : endIndex;
 }
-
 
 function findLineCut(line: string, maxChars: number): number {
   if (line.length <= maxChars) {
@@ -398,7 +395,6 @@ function findLineCut(line: string, maxChars: number): number {
   return bestPosition > 0 ? bestPosition : maxChars;
 }
 
-
 function validateSourceFile(source: Source): void {
   if (source.file.id.trim().length === 0) {
     throw new EngineError("Extractor source requires a non-empty file id", {
@@ -408,16 +404,22 @@ function validateSourceFile(source: Source): void {
   }
 
   if (source.file.absolutePath.trim().length === 0) {
-    throw new EngineError("Extractor source requires a non-empty absolute file path", {
-      code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_ABSOLUTE_FILE_PATH",
-      context: `fileId=${source.file.id} sourceKind=${source.kind}`,
-    });
+    throw new EngineError(
+      "Extractor source requires a non-empty absolute file path",
+      {
+        code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_ABSOLUTE_FILE_PATH",
+        context: `fileId=${source.file.id} sourceKind=${source.kind}`,
+      },
+    );
   }
 
   if (source.file.relativePath.trim().length === 0) {
-    throw new EngineError("Extractor source requires a non-empty relative file path", {
-      code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_RELATIVE_FILE_PATH",
-      context: `fileId=${source.file.id} sourceKind=${source.kind}`,
-    });
+    throw new EngineError(
+      "Extractor source requires a non-empty relative file path",
+      {
+        code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_RELATIVE_FILE_PATH",
+        context: `fileId=${source.file.id} sourceKind=${source.kind}`,
+      },
+    );
   }
 }

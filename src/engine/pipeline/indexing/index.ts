@@ -6,7 +6,10 @@ import {
   errorDetails,
   isEngineError,
 } from "../../errors/index.js";
-import type { EmbeddingModel, EmbeddingVector } from "../../models/embeddings.js";
+import type {
+  EmbeddingModel,
+  EmbeddingVector,
+} from "../../models/embeddings.js";
 import type { CollectionStorage } from "../../storage/index.js";
 import type {
   CollectionIndexStatus,
@@ -25,7 +28,6 @@ import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import { ExtractorRegistry, type Source } from "../../extraction/index.js";
 import { scanRootPaths } from "./scanner/index.js";
 
-
 export type IndexContext = {
   collection: CollectionInfo;
   storage: CollectionStorage;
@@ -33,7 +35,6 @@ export type IndexContext = {
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
 };
-
 
 type DiffResult = {
   added: FileInfo[];
@@ -43,18 +44,15 @@ type DiffResult = {
   unchanged: FileInfo[];
 };
 
-
 type PreparedFile = {
   file: FileInfo;
   fragments: EntityFragment[];
 };
 
-
 type FailedPreparedFile = {
   file: FileInfo;
   failedReason: string;
 };
-
 
 type IndexStats = {
   filesIndexed: number;
@@ -64,20 +62,17 @@ type IndexStats = {
   entitiesCreated: number;
 };
 
-
 type IndexPassResult = {
   filesScanned: number;
   diff: DiffResult;
   stats: IndexStats;
 };
 
-
 type IndexProgressReporter = (
   stats: IndexStats,
   detail?: string,
   embedding?: IndexEmbeddingProgress,
 ) => void;
-
 
 const DEFAULT_EMBEDDING_CONCURRENCY = 4;
 const DEFAULT_EMBEDDING_MIN_CONCURRENCY = 4;
@@ -91,15 +86,16 @@ const EMBEDDING_RATE_LIMIT_RETRY_MAX_DELAY_MS = 30000;
 const EMBEDDING_RETRY_JITTER_MS = 500;
 const EMBEDDING_SUCCESS_STREAK_MIN = 4;
 
-
 type EmbeddingScheduler = {
   readonly taskConcurrency: number;
-  run<T>(task: () => Promise<T>, onError?: (error: unknown) => void): Promise<T>;
+  run<T>(
+    task: () => Promise<T>,
+    onError?: (error: unknown) => void,
+  ): Promise<T>;
   recordSuccess(): void;
   recordRetryableFailure(retry: EmbeddingRetryDecision): void;
   snapshot(): IndexEmbeddingProgress;
 };
-
 
 type EmbeddingRetryClassification = {
   retryable: boolean;
@@ -107,12 +103,10 @@ type EmbeddingRetryClassification = {
   retryAfterMs?: number;
 };
 
-
 type EmbeddingRetryDecision = {
   rateLimited: boolean;
   delayMs: number;
 };
-
 
 type EmbeddingConcurrencyPolicy = {
   initial: number;
@@ -120,7 +114,6 @@ type EmbeddingConcurrencyPolicy = {
   max: number;
   adaptive: boolean;
 };
-
 
 export async function indexCollection(ctx: IndexContext): Promise<IndexResult> {
   try {
@@ -133,7 +126,6 @@ export async function indexCollection(ctx: IndexContext): Promise<IndexResult> {
   }
 }
 
-
 export async function getCollectionIndexStatus(
   collection: CollectionInfo,
   storedFiles: readonly FileInfo[],
@@ -141,11 +133,21 @@ export async function getCollectionIndexStatus(
   try {
     const scan = await scanRootPaths(collection.id, collection.rootPaths);
     const diff = await computeDiffFromFiles(scan.files, storedFiles);
-    const pendingFiles = storedFiles.filter((file) => file.indexStatus?.indexedTime === null);
-    const failedFiles = pendingFiles.filter((file) => file.indexStatus?.error !== undefined);
-    const indexedFiles = storedFiles.filter((file) => file.indexStatus?.indexedTime !== undefined
-      && file.indexStatus.indexedTime !== null);
-    const entitiesIndexed = indexedFiles.reduce((count, file) => count + (file.indexStatus?.entityCount ?? 0), 0);
+    const pendingFiles = storedFiles.filter(
+      (file) => file.indexStatus?.indexedTime === null,
+    );
+    const failedFiles = pendingFiles.filter(
+      (file) => file.indexStatus?.error !== undefined,
+    );
+    const indexedFiles = storedFiles.filter(
+      (file) =>
+        file.indexStatus?.indexedTime !== undefined &&
+        file.indexStatus.indexedTime !== null,
+    );
+    const entitiesIndexed = indexedFiles.reduce(
+      (count, file) => count + (file.indexStatus?.entityCount ?? 0),
+      0,
+    );
 
     return {
       collectionId: collection.id,
@@ -174,13 +176,19 @@ export async function getCollectionIndexStatus(
   }
 }
 
-
-async function indexCollectionUnchecked(ctx: IndexContext): Promise<IndexResult> {
+async function indexCollectionUnchecked(
+  ctx: IndexContext,
+): Promise<IndexResult> {
   const start = Date.now();
   const report = ctx.onProgress ?? (() => undefined);
   const timings = new TimingCollector();
 
-  const firstPass = await runIndexPass(ctx, report, "Scanning files...", timings);
+  const firstPass = await runIndexPass(
+    ctx,
+    report,
+    "Scanning files...",
+    timings,
+  );
   const passes = [firstPass];
   if (firstPass.stats.filesFailed > 0) {
     const failed = firstPass.stats.filesFailed;
@@ -188,7 +196,9 @@ async function indexCollectionUnchecked(ctx: IndexContext): Promise<IndexResult>
       phase: "scanning",
       detail: `Retrying ${failed} failed ${failed === 1 ? "file" : "files"}...`,
     });
-    passes.push(await runIndexPass(ctx, report, "Scanning retry candidates...", timings));
+    passes.push(
+      await runIndexPass(ctx, report, "Scanning retry candidates...", timings),
+    );
   }
 
   const finalPass = passes[passes.length - 1];
@@ -207,8 +217,14 @@ async function indexCollectionUnchecked(ctx: IndexContext): Promise<IndexResult>
           collectionDetail(ctx.collection.name),
           detail("filesFailed", result.filesFailed),
           detail("filesScanned", result.filesScanned),
-          detail("failedFiles", summarizeFailedFiles(finalPass.stats.failedFiles)),
-          detail("failedReasons", summarizeFailedFiles(finalPass.stats.failedFileReasons)),
+          detail(
+            "failedFiles",
+            summarizeFailedFiles(finalPass.stats.failedFiles),
+          ),
+          detail(
+            "failedReasons",
+            summarizeFailedFiles(finalPass.stats.failedFileReasons),
+          ),
           detail(
             "hint",
             passes.length > 1
@@ -224,7 +240,6 @@ async function indexCollectionUnchecked(ctx: IndexContext): Promise<IndexResult>
   return result;
 }
 
-
 async function runIndexPass(
   ctx: IndexContext,
   report: (progress: IndexProgress) => void,
@@ -233,8 +248,11 @@ async function runIndexPass(
 ): Promise<IndexPassResult> {
   report({ phase: "scanning", detail: scanningDetail });
   const scan = await timings.time("index_scan", () =>
-    scanRootPaths(ctx.collection.id, ctx.collection.rootPaths));
-  const diff = await timings.time("index_diff", () => computeDiff(scan.files, ctx.storage));
+    scanRootPaths(ctx.collection.id, ctx.collection.rootPaths),
+  );
+  const diff = await timings.time("index_diff", () =>
+    computeDiff(scan.files, ctx.storage),
+  );
   const pending = [...diff.added, ...diff.modified, ...diff.pending];
 
   report({
@@ -248,15 +266,23 @@ async function runIndexPass(
       try {
         ctx.storage.deleteFile(file.id);
       } catch (error) {
-        throw toEngineError(error, "Indexing failed to delete stale file records", {
-          code: "ZVEC_GREP.ENGINE.INDEXING.DELETE_FILE_FAILED",
-          context: fileContext(file),
-        });
+        throw toEngineError(
+          error,
+          "Indexing failed to delete stale file records",
+          {
+            code: "ZVEC_GREP.ENGINE.INDEXING.DELETE_FILE_FAILED",
+            context: fileContext(file),
+          },
+        );
       }
     }
   });
 
-  const reportIndexing: IndexProgressReporter = (currentStats, detail, embedding) => {
+  const reportIndexing: IndexProgressReporter = (
+    currentStats,
+    detail,
+    embedding,
+  ) => {
     report({
       phase: "indexing",
       filesTotal: pending.length,
@@ -267,7 +293,13 @@ async function runIndexPass(
     });
   };
 
-  reportIndexing({ filesIndexed: 0, filesFailed: 0, failedFiles: [], failedFileReasons: [], entitiesCreated: 0 });
+  reportIndexing({
+    filesIndexed: 0,
+    filesFailed: 0,
+    failedFiles: [],
+    failedFileReasons: [],
+    entitiesCreated: 0,
+  });
 
   const stats = await indexFiles(pending, ctx, reportIndexing, timings);
 
@@ -278,7 +310,6 @@ async function runIndexPass(
   };
 }
 
-
 function reportIndexFinalizing(
   ctx: IndexContext,
   report: (progress: IndexProgress) => void,
@@ -286,13 +317,15 @@ function reportIndexFinalizing(
 ): void {
   report({
     phase: "indexing",
-    filesTotal: pass.diff.added.length + pass.diff.modified.length + pass.diff.pending.length,
+    filesTotal:
+      pass.diff.added.length +
+      pass.diff.modified.length +
+      pass.diff.pending.length,
     filesIndexed: pass.stats.filesIndexed + pass.stats.filesFailed,
     filesFailed: pass.stats.filesFailed,
     detail: "finalizing index",
   });
 }
-
 
 function buildIndexResult(
   ctx: IndexContext,
@@ -308,22 +341,28 @@ function buildIndexResult(
     collectionId: ctx.collection.id,
     collectionName: ctx.collection.name,
     filesScanned: finalPass.filesScanned,
-    filesAdded: firstPass.diff.added.length
-      + retryPasses.reduce((count, pass) => count + pass.diff.added.length, 0),
-    filesModified: firstPass.diff.modified.length
-      + retryPasses.reduce((count, pass) => count + pass.diff.modified.length, 0),
-    filesPending: firstPass.diff.pending.length
-      + retryPasses.reduce((count, pass) => count + pass.diff.pending.length, 0),
-    filesDeleted: firstPass.diff.deleted.length
-      + retryPasses.reduce((count, pass) => count + pass.diff.deleted.length, 0),
+    filesAdded:
+      firstPass.diff.added.length +
+      retryPasses.reduce((count, pass) => count + pass.diff.added.length, 0),
+    filesModified:
+      firstPass.diff.modified.length +
+      retryPasses.reduce((count, pass) => count + pass.diff.modified.length, 0),
+    filesPending:
+      firstPass.diff.pending.length +
+      retryPasses.reduce((count, pass) => count + pass.diff.pending.length, 0),
+    filesDeleted:
+      firstPass.diff.deleted.length +
+      retryPasses.reduce((count, pass) => count + pass.diff.deleted.length, 0),
     filesUnchanged: firstPass.diff.unchanged.length,
     filesFailed: finalPass.stats.filesFailed,
-    entitiesCreated: passes.reduce((count, pass) => count + pass.stats.entitiesCreated, 0),
+    entitiesCreated: passes.reduce(
+      (count, pass) => count + pass.stats.entitiesCreated,
+      0,
+    ),
     durationMs,
     timings: timings.entries(),
   };
 }
-
 
 function optimizeStorage(ctx: IndexContext): void {
   try {
@@ -336,14 +375,12 @@ function optimizeStorage(ctx: IndexContext): void {
   }
 }
 
-
 async function computeDiff(
   scannedFiles: readonly FileInfo[],
   storage: CollectionStorage,
 ): Promise<DiffResult> {
   return computeDiffFromFiles(scannedFiles, storage.listFiles());
 }
-
 
 async function computeDiffFromFiles(
   scannedFiles: readonly FileInfo[],
@@ -371,9 +408,9 @@ async function computeDiffFromFiles(
     }
 
     if (
-      existing.sizeBytes === file.sizeBytes
-      && existing.lastModifiedTime === file.lastModifiedTime
-      && existing.contentHash
+      existing.sizeBytes === file.sizeBytes &&
+      existing.lastModifiedTime === file.lastModifiedTime &&
+      existing.contentHash
     ) {
       unchanged.push(existing);
       continue;
@@ -381,8 +418,8 @@ async function computeDiffFromFiles(
 
     const hashed = await withContentHash(file);
     if (
-      existing.sizeBytes === hashed.sizeBytes
-      && existing.contentHash === hashed.contentHash
+      existing.sizeBytes === hashed.sizeBytes &&
+      existing.contentHash === hashed.contentHash
     ) {
       unchanged.push(existing);
       continue;
@@ -391,11 +428,12 @@ async function computeDiffFromFiles(
     modified.push(hashed);
   }
 
-  const deleted = [...existingById.values()].filter((file) => !seen.has(file.id));
+  const deleted = [...existingById.values()].filter(
+    (file) => !seen.has(file.id),
+  );
 
   return { added, modified, pending, deleted, unchanged };
 }
-
 
 async function indexFiles(
   files: readonly FileInfo[],
@@ -412,10 +450,16 @@ async function indexFiles(
   };
   const batchFiles: PreparedFile[] = [];
   let batchFragmentCount = 0;
-  const embeddingScheduler = createEmbeddingScheduler(ctx.embeddingConcurrency, ctx.embeddingModel);
+  const embeddingScheduler = createEmbeddingScheduler(
+    ctx.embeddingConcurrency,
+    ctx.embeddingModel,
+  );
   const embeddingTiming = new ConcurrentTiming(timings, "index_embedding");
   const runningEmbeddings = new Set<Promise<void>>();
-  const reportEmbeddingProgress = (currentStats: IndexStats, detail: string): void => {
+  const reportEmbeddingProgress = (
+    currentStats: IndexStats,
+    detail: string,
+  ): void => {
     onProgress(currentStats, detail, embeddingScheduler.snapshot());
   };
 
@@ -428,14 +472,24 @@ async function indexFiles(
     batchFragmentCount = 0;
 
     await scheduleEmbeddingTask(() =>
-      embedAndCommitBatch(filesToEmbed, ctx, stats, onProgress, embeddingScheduler, timings, embeddingTiming));
+      embedAndCommitBatch(
+        filesToEmbed,
+        ctx,
+        stats,
+        onProgress,
+        embeddingScheduler,
+        timings,
+        embeddingTiming,
+      ),
+    );
   };
 
-  const scheduleEmbeddingTask = async (task: () => Promise<void>): Promise<void> => {
-    const promise = task()
-      .finally(() => {
-        runningEmbeddings.delete(promise);
-      });
+  const scheduleEmbeddingTask = async (
+    task: () => Promise<void>,
+  ): Promise<void> => {
+    const promise = task().finally(() => {
+      runningEmbeddings.delete(promise);
+    });
 
     runningEmbeddings.add(promise);
 
@@ -446,7 +500,9 @@ async function indexFiles(
 
   for (const file of files) {
     onProgress(stats, `reading ${file.relativePath}`);
-    const prepared = await timings.time("index_prepare", () => prepareFile(file, ctx));
+    const prepared = await timings.time("index_prepare", () =>
+      prepareFile(file, ctx),
+    );
 
     if ("failedReason" in prepared) {
       recordFileFailed(stats, file, prepared.failedReason);
@@ -464,14 +520,23 @@ async function indexFiles(
       await flushBatch();
       await scheduleEmbeddingTask(async () => {
         reportEmbeddingProgress(stats, `embedding ${file.relativePath}`);
-        await embedAndCommitFile(prepared, ctx, stats, onProgress, embeddingScheduler, timings, embeddingTiming);
+        await embedAndCommitFile(
+          prepared,
+          ctx,
+          stats,
+          onProgress,
+          embeddingScheduler,
+          timings,
+          embeddingTiming,
+        );
       });
       continue;
     }
 
     if (
-      batchFragmentCount > 0
-      && batchFragmentCount + prepared.fragments.length > ctx.embeddingModel.limits.maxBatchSize
+      batchFragmentCount > 0 &&
+      batchFragmentCount + prepared.fragments.length >
+        ctx.embeddingModel.limits.maxBatchSize
     ) {
       await flushBatch();
     }
@@ -490,8 +555,10 @@ async function indexFiles(
   return stats;
 }
 
-
-async function prepareFile(file: FileInfo, ctx: IndexContext): Promise<PreparedFile | FailedPreparedFile> {
+async function prepareFile(
+  file: FileInfo,
+  ctx: IndexContext,
+): Promise<PreparedFile | FailedPreparedFile> {
   try {
     const source = await readSource(file);
     const extracted = await new ExtractorRegistry().extract(source);
@@ -508,7 +575,6 @@ async function prepareFile(file: FileInfo, ctx: IndexContext): Promise<PreparedF
   }
 }
 
-
 async function embedAndCommitBatch(
   files: readonly PreparedFile[],
   ctx: IndexContext,
@@ -522,15 +588,22 @@ async function embedAndCommitBatch(
 
   try {
     const contents = fragments.map(vectorContentForFragment);
-    onProgress(stats, `embedding ${describePreparedFiles(files)}`, embeddingScheduler.snapshot());
+    onProgress(
+      stats,
+      `embedding ${describePreparedFiles(files)}`,
+      embeddingScheduler.snapshot(),
+    );
     const vectors = await embeddingTiming.time(() =>
-      embedContentsWithRetry(contents, ctx.embeddingModel, embeddingScheduler));
+      embedContentsWithRetry(contents, ctx.embeddingModel, embeddingScheduler),
+    );
     let offset = 0;
 
     for (const file of files) {
       const fileVectors = vectors.slice(offset, offset + file.fragments.length);
       offset += file.fragments.length;
-      const committed = timings.timeSync("index_commit", () => commitFile(file, fileVectors, ctx, stats));
+      const committed = timings.timeSync("index_commit", () =>
+        commitFile(file, fileVectors, ctx, stats),
+      );
       onProgress(stats, finishedFileDetail(committed, file.file.relativePath));
     }
   } catch (error) {
@@ -544,12 +617,23 @@ async function embedAndCommitBatch(
     }
 
     for (const file of files) {
-      onProgress(stats, `embedding ${file.file.relativePath}`, embeddingScheduler.snapshot());
-      await embedAndCommitFile(file, ctx, stats, onProgress, embeddingScheduler, timings, embeddingTiming);
+      onProgress(
+        stats,
+        `embedding ${file.file.relativePath}`,
+        embeddingScheduler.snapshot(),
+      );
+      await embedAndCommitFile(
+        file,
+        ctx,
+        stats,
+        onProgress,
+        embeddingScheduler,
+        timings,
+        embeddingTiming,
+      );
     }
   }
 }
-
 
 async function embedAndCommitFile(
   file: PreparedFile,
@@ -562,8 +646,11 @@ async function embedAndCommitFile(
 ): Promise<void> {
   try {
     const vectors = await embeddingTiming.time(() =>
-      embedFragments(file.fragments, ctx.embeddingModel, embeddingScheduler));
-    const committed = timings.timeSync("index_commit", () => commitFile(file, vectors, ctx, stats));
+      embedFragments(file.fragments, ctx.embeddingModel, embeddingScheduler),
+    );
+    const committed = timings.timeSync("index_commit", () =>
+      commitFile(file, vectors, ctx, stats),
+    );
     onProgress(stats, finishedFileDetail(committed, file.file.relativePath));
   } catch (error) {
     const reason = markFileFailed(ctx, file.file, error, "embed");
@@ -571,7 +658,6 @@ async function embedAndCommitFile(
     onProgress(stats, finishedFileDetail(false, file.file.relativePath));
   }
 }
-
 
 function commitFile(
   file: PreparedFile,
@@ -591,15 +677,17 @@ function commitFile(
   }
 }
 
-
-function recordFileFailed(stats: IndexStats, file: FileInfo, reason: string | undefined): void {
+function recordFileFailed(
+  stats: IndexStats,
+  file: FileInfo,
+  reason: string | undefined,
+): void {
   stats.filesFailed++;
   stats.failedFiles.push(file.relativePath);
   if (reason) {
     stats.failedFileReasons.push(`${file.relativePath}: ${reason}`);
   }
 }
-
 
 function summarizeFailedFiles(files: readonly string[]): string {
   const shown = files.slice(0, 5);
@@ -608,7 +696,6 @@ function summarizeFailedFiles(files: readonly string[]): string {
     ? `${shown.join(", ")} and ${remaining} more`
     : shown.join(", ");
 }
-
 
 function describePreparedFiles(files: readonly PreparedFile[]): string {
   if (files.length === 0) {
@@ -622,14 +709,9 @@ function describePreparedFiles(files: readonly PreparedFile[]): string {
   return `${files.length} files, starting with ${files[0].file.relativePath}`;
 }
 
-
-function finishedFileDetail(
-  succeeded: boolean,
-  relativePath: string,
-): string {
+function finishedFileDetail(succeeded: boolean, relativePath: string): string {
   return succeeded ? `indexed ${relativePath}` : `failed ${relativePath}`;
 }
-
 
 async function readSource(file: FileInfo): Promise<Source> {
   let bytes: Buffer;
@@ -659,22 +741,32 @@ async function readSource(file: FileInfo): Promise<Source> {
   };
 }
 
-
 async function embedFragments(
   fragments: readonly EntityFragment[],
   model: EmbeddingModel,
   embeddingScheduler: EmbeddingScheduler,
 ): Promise<EmbeddingVector[]> {
-  const batches: { start: number; fragments: EntityFragment[]; }[] = [];
+  const batches: { start: number; fragments: EntityFragment[] }[] = [];
 
-  for (let start = 0; start < fragments.length; start += model.limits.maxBatchSize) {
+  for (
+    let start = 0;
+    start < fragments.length;
+    start += model.limits.maxBatchSize
+  ) {
     const batch = fragments.slice(start, start + model.limits.maxBatchSize);
     batches.push({ start, fragments: batch });
   }
 
   const vectors: EmbeddingVector[] = new Array(fragments.length);
   const results = await Promise.allSettled(
-    batches.map((batch) => embedFragmentBatch(batch.fragments, model, batch.start, embeddingScheduler)),
+    batches.map((batch) =>
+      embedFragmentBatch(
+        batch.fragments,
+        model,
+        batch.start,
+        embeddingScheduler,
+      ),
+    ),
   );
   let firstError: unknown;
 
@@ -697,7 +789,6 @@ async function embedFragments(
   return vectors;
 }
 
-
 async function embedFragmentBatch(
   fragments: readonly EntityFragment[],
   model: EmbeddingModel,
@@ -713,10 +804,14 @@ async function embedFragmentBatch(
       throw error;
     }
 
-    return await embedFragmentBatchOneByOne(fragments, model, startIndex, embeddingScheduler);
+    return await embedFragmentBatchOneByOne(
+      fragments,
+      model,
+      startIndex,
+      embeddingScheduler,
+    );
   }
 }
-
 
 async function embedFragmentBatchOneByOne(
   fragments: readonly EntityFragment[],
@@ -728,20 +823,26 @@ async function embedFragmentBatchOneByOne(
 
   for (const [index, fragment] of fragments.entries()) {
     try {
-      const [vector] = await embedContentsWithRetry([vectorContentForFragment(fragment)], model, embeddingScheduler);
+      const [vector] = await embedContentsWithRetry(
+        [vectorContentForFragment(fragment)],
+        model,
+        embeddingScheduler,
+      );
       vectors.push(vector);
     } catch (error) {
-      throw new EngineError("Embedding entity fragment failed after one-by-one fallback", {
-        code: "ZVEC_GREP.ENGINE.INDEXING.EMBEDDING_FRAGMENT_FAILED",
-        context: `model=${model.ref.model} fragmentId=${fragment.id} fragmentIndex=${startIndex + index}`,
-        cause: error,
-      });
+      throw new EngineError(
+        "Embedding entity fragment failed after one-by-one fallback",
+        {
+          code: "ZVEC_GREP.ENGINE.INDEXING.EMBEDDING_FRAGMENT_FAILED",
+          context: `model=${model.ref.model} fragmentId=${fragment.id} fragmentIndex=${startIndex + index}`,
+          cause: error,
+        },
+      );
     }
   }
 
   return vectors;
 }
-
 
 function vectorContentForFragment(fragment: EntityFragment): Content {
   if (fragment.content.kind !== "text") {
@@ -759,7 +860,6 @@ function vectorContentForFragment(fragment: EntityFragment): Content {
   };
 }
 
-
 function vectorMetadataText(metadata: EntityMetadata | undefined): string {
   if (!metadata) {
     return "";
@@ -772,25 +872,27 @@ function vectorMetadataText(metadata: EntityMetadata | undefined): string {
         : `symbol: ${metadata.symbolType}`,
       metadata.scope ? `scope: ${metadata.scope}` : null,
       metadata.signature ? `signature: ${oneLine(metadata.signature)}` : null,
-      metadata.modifiers.length > 0 ? `modifiers: ${metadata.modifiers.join(" ")}` : null,
+      metadata.modifiers.length > 0
+        ? `modifiers: ${metadata.modifiers.join(" ")}`
+        : null,
       metadata.doc ? `doc: ${oneLine(metadata.doc)}` : null,
     ]);
   }
 
   return compactMetadataLines([
     metadata.heading ? `heading: ${metadata.heading}` : null,
-    typeof metadata.level === "number" ? `heading_level: ${metadata.level}` : null,
+    typeof metadata.level === "number"
+      ? `heading_level: ${metadata.level}`
+      : null,
     metadata.scope ? `scope: ${metadata.scope}` : null,
   ]);
 }
-
 
 function compactMetadataLines(lines: readonly (string | null)[]): string {
   return lines
     .filter((line): line is string => line !== null && line.trim().length > 0)
     .join("\n");
 }
-
 
 async function embedContentsWithRetry(
   contents: readonly Content[],
@@ -835,23 +937,23 @@ async function embedContentsWithRetry(
   }
 }
 
-
 function createEmbeddingScheduler(
   requestedConcurrency: number | undefined,
   model: EmbeddingModel,
 ): EmbeddingScheduler {
-  return new AdaptiveEmbeddingScheduler(resolveEmbeddingConcurrencyPolicy(requestedConcurrency, model));
+  return new AdaptiveEmbeddingScheduler(
+    resolveEmbeddingConcurrencyPolicy(requestedConcurrency, model),
+  );
 }
-
 
 function resolveEmbeddingConcurrencyPolicy(
   requestedConcurrency: number | undefined,
   model: EmbeddingModel,
 ): EmbeddingConcurrencyPolicy {
   if (
-    requestedConcurrency !== undefined
-    && Number.isInteger(requestedConcurrency)
-    && requestedConcurrency > 0
+    requestedConcurrency !== undefined &&
+    Number.isInteger(requestedConcurrency) &&
+    requestedConcurrency > 0
   ) {
     return {
       initial: requestedConcurrency,
@@ -861,9 +963,11 @@ function resolveEmbeddingConcurrencyPolicy(
     };
   }
 
-  const initial = model.recommendedIndexConcurrency ?? DEFAULT_EMBEDDING_CONCURRENCY;
-  const max = model.maxIndexConcurrency
-    ?? (initial <= 1 ? initial : DEFAULT_EMBEDDING_MAX_CONCURRENCY);
+  const initial =
+    model.recommendedIndexConcurrency ?? DEFAULT_EMBEDDING_CONCURRENCY;
+  const max =
+    model.maxIndexConcurrency ??
+    (initial <= 1 ? initial : DEFAULT_EMBEDDING_MAX_CONCURRENCY);
   const min = Math.min(initial, DEFAULT_EMBEDDING_MIN_CONCURRENCY);
 
   return {
@@ -874,7 +978,6 @@ function resolveEmbeddingConcurrencyPolicy(
   };
 }
 
-
 class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
   private active = 0;
   private cooldownUntil = 0;
@@ -883,18 +986,18 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
   private successStreak = 0;
   private readonly queue: (() => void)[] = [];
 
-
   constructor(private readonly policy: EmbeddingConcurrencyPolicy) {
     this.currentConcurrency = policy.initial;
   }
-
 
   get taskConcurrency(): number {
     return this.policy.max;
   }
 
-
-  async run<T>(task: () => Promise<T>, onError?: (error: unknown) => void): Promise<T> {
+  async run<T>(
+    task: () => Promise<T>,
+    onError?: (error: unknown) => void,
+  ): Promise<T> {
     await this.waitForCooldown();
     await this.acquire();
 
@@ -909,14 +1012,16 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
     }
   }
 
-
   recordSuccess(): void {
     if (!this.policy.adaptive || this.currentConcurrency >= this.policy.max) {
       return;
     }
 
     this.successStreak++;
-    if (this.successStreak < Math.max(EMBEDDING_SUCCESS_STREAK_MIN, this.currentConcurrency * 2)) {
+    if (
+      this.successStreak <
+      Math.max(EMBEDDING_SUCCESS_STREAK_MIN, this.currentConcurrency * 2)
+    ) {
       return;
     }
 
@@ -925,11 +1030,13 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
     this.drainQueue();
   }
 
-
   recordRetryableFailure(retry: EmbeddingRetryDecision): void {
     this.retryableFailures++;
     if (retry.rateLimited && retry.delayMs > 0) {
-      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + retry.delayMs);
+      this.cooldownUntil = Math.max(
+        this.cooldownUntil,
+        Date.now() + retry.delayMs,
+      );
     }
 
     if (!this.policy.adaptive) {
@@ -943,7 +1050,6 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
     this.successStreak = 0;
   }
 
-
   snapshot(): IndexEmbeddingProgress {
     return {
       concurrency: this.currentConcurrency,
@@ -952,14 +1058,12 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
     };
   }
 
-
   private async waitForCooldown(): Promise<void> {
     const remaining = this.cooldownUntil - Date.now();
     if (remaining > 0) {
       await delay(remaining);
     }
   }
-
 
   private async acquire(): Promise<void> {
     if (this.active < this.currentConcurrency) {
@@ -972,12 +1076,10 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
     });
   }
 
-
   private release(): void {
     this.active--;
     this.drainQueue();
   }
-
 
   private drainQueue(): void {
     while (this.active < this.currentConcurrency) {
@@ -992,25 +1094,27 @@ class AdaptiveEmbeddingScheduler implements EmbeddingScheduler {
   }
 }
 
-
 function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
-
 
 function isRetryableEmbeddingError(error: unknown): boolean {
   return classifyEmbeddingRetry(error).retryable;
 }
 
-
 function classifyEmbeddingRetry(error: unknown): EmbeddingRetryClassification {
   const message = errorToMessage(error);
-  const context = isEngineError(error) && error.context ? ` ${error.context}` : "";
+  const context =
+    isEngineError(error) && error.context ? ` ${error.context}` : "";
   const text = `${message}${context}`;
   const status = httpStatusFromText(text);
-  const rateLimited = status === 429
-    || /rate limit|quota exceeded|too many requests|request rate increased too quickly/i.test(text);
-  const serverError = typeof status === "number" && status >= 500 && status <= 599;
+  const rateLimited =
+    status === 429 ||
+    /rate limit|quota exceeded|too many requests|request rate increased too quickly/i.test(
+      text,
+    );
+  const serverError =
+    typeof status === "number" && status >= 500 && status <= 599;
 
   return {
     retryable: rateLimited || serverError,
@@ -1019,7 +1123,6 @@ function classifyEmbeddingRetry(error: unknown): EmbeddingRetryClassification {
   };
 }
 
-
 function nonRetryableEmbeddingError(): EmbeddingRetryClassification {
   return {
     retryable: false,
@@ -1027,15 +1130,16 @@ function nonRetryableEmbeddingError(): EmbeddingRetryClassification {
   };
 }
 
-
 function maxRetryAttempts(retry: EmbeddingRetryClassification): number {
   return retry.rateLimited
     ? EMBEDDING_RATE_LIMIT_MAX_RETRIES
     : EMBEDDING_TRANSIENT_MAX_RETRIES;
 }
 
-
-function retryDelayMs(attempt: number, retry: EmbeddingRetryClassification): number {
+function retryDelayMs(
+  attempt: number,
+  retry: EmbeddingRetryClassification,
+): number {
   if (typeof retry.retryAfterMs === "number") {
     return retry.retryAfterMs;
   }
@@ -1052,7 +1156,6 @@ function retryDelayMs(attempt: number, retry: EmbeddingRetryClassification): num
   return Math.min(exponential + jitter, max);
 }
 
-
 function httpStatusFromText(text: string): number | undefined {
   const match = /\bstatus=(\d{3})\b/i.exec(text);
   if (!match) {
@@ -1061,7 +1164,6 @@ function httpStatusFromText(text: string): number | undefined {
 
   return Number(match[1]);
 }
-
 
 function retryAfterMsFromText(text: string): number | undefined {
   const milliseconds = /\bretryAfterMs=(\d+)\b/i.exec(text);
@@ -1077,11 +1179,9 @@ function retryAfterMsFromText(text: string): number | undefined {
   return undefined;
 }
 
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 
 function countPublicEntities(fragments: readonly EntityFragment[]): number {
   let count = 0;
@@ -1094,7 +1194,6 @@ function countPublicEntities(fragments: readonly EntityFragment[]): number {
 
   return count;
 }
-
 
 async function withContentHash(file: FileInfo): Promise<FileInfo> {
   let bytes: Buffer;
@@ -1113,7 +1212,6 @@ async function withContentHash(file: FileInfo): Promise<FileInfo> {
     contentHash: sha256Bytes(bytes),
   };
 }
-
 
 function markFileFailed(
   ctx: IndexContext,
@@ -1134,16 +1232,14 @@ function markFileFailed(
   }
 }
 
-
 function fileFailureReason(stage: string, error: unknown): string {
   return oneLine(`${stage}: ${errorToMessage(error)}`);
 }
 
-
 function toEngineError(
   error: unknown,
   message: string,
-  options: { code: EngineError["code"]; context: string; },
+  options: { code: EngineError["code"]; context: string },
 ): EngineError {
   if (isEngineError(error)) {
     return error;
@@ -1155,19 +1251,18 @@ function toEngineError(
   });
 }
 
-
 function collectionContext(collection: CollectionInfo): string {
-  return errorDetails([
-    detail("collection_id", collection.id),
-    collectionDetail(collection.name),
-  ]) ?? "";
+  return (
+    errorDetails([
+      detail("collection_id", collection.id),
+      collectionDetail(collection.name),
+    ]) ?? ""
+  );
 }
-
 
 function fileContext(file: FileInfo): string {
   return `fileId=${file.id} path=${file.relativePath}`;
 }
-
 
 function errorToMessage(error: unknown): string {
   if (isEngineError(error) && error.context) {

@@ -12,21 +12,17 @@ export function normalizePathPattern(pattern: string): string {
   return normalized;
 }
 
-
 export function normalizePathForMatch(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/+/g, "/");
 }
-
 
 export function isAbsolutePathPattern(pattern: string): boolean {
   return pattern.startsWith("/") || /^[A-Za-z]:\//.test(pattern);
 }
 
-
 export function hasPathGlob(pattern: string): boolean {
   return pattern.includes("*") || pattern.includes("?");
 }
-
 
 export function pathPatternMatches(pattern: string, path: string): boolean {
   const normalizedPattern = normalizePathPattern(pattern);
@@ -44,22 +40,33 @@ export function pathPatternMatches(pattern: string, path: string): boolean {
     ? normalizedPattern
     : `${normalizedPattern}/`;
 
-  return normalizedPath === normalizedPattern || normalizedPath.startsWith(prefix);
+  return (
+    normalizedPath === normalizedPattern || normalizedPath.startsWith(prefix)
+  );
 }
 
-
-export function pathPatternMightMatchDescendant(pattern: string, directoryPath: string): boolean {
+export function pathPatternMightMatchDescendant(
+  pattern: string,
+  directoryPath: string,
+): boolean {
   const normalizedPattern = normalizePathPattern(pattern);
-  const normalizedDirectory = normalizePathForMatch(directoryPath).replace(/\/+$/, "");
+  const normalizedDirectory = normalizePathForMatch(directoryPath).replace(
+    /\/+$/,
+    "",
+  );
   if (normalizedDirectory.length === 0) {
     return true;
   }
 
-  return pathPatternMatches(pattern, normalizedDirectory)
-    || pathPatternMatches(pattern, `${normalizedDirectory}/__zvec_grep_descendant__`)
-    || patternPrefixMightMatchDescendant(normalizedPattern, normalizedDirectory);
+  return (
+    pathPatternMatches(pattern, normalizedDirectory) ||
+    pathPatternMatches(
+      pattern,
+      `${normalizedDirectory}/__zvec_grep_descendant__`,
+    ) ||
+    patternPrefixMightMatchDescendant(normalizedPattern, normalizedDirectory)
+  );
 }
-
 
 function globPatternMatches(pattern: string, path: string): boolean {
   if (pattern.endsWith("/**")) {
@@ -71,7 +78,6 @@ function globPatternMatches(pattern: string, path: string): boolean {
 
   return globToRegExp(pattern).test(path);
 }
-
 
 function globToRegExp(pattern: string): RegExp {
   let expression = pattern.includes("/") ? "^" : "^(?:.*/)?";
@@ -99,8 +105,10 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`${expression}$`);
 }
 
-
-function patternPrefixMightMatchDescendant(pattern: string, directoryPath: string): boolean {
+function patternPrefixMightMatchDescendant(
+  pattern: string,
+  directoryPath: string,
+): boolean {
   const directoryPrefix = `${directoryPath}/`;
   const variants = pattern.startsWith("**/")
     ? [pattern, pattern.slice(3)]
@@ -116,8 +124,9 @@ function patternPrefixMightMatchDescendant(pattern: string, directoryPath: strin
 
     const literalPrefix = literalPrefixBeforeFirstGlob(variant);
     if (
-      literalPrefix.length > 0
-      && (literalPrefix.startsWith(directoryPrefix) || directoryPrefix.startsWith(literalPrefix))
+      literalPrefix.length > 0 &&
+      (literalPrefix.startsWith(directoryPrefix) ||
+        directoryPrefix.startsWith(literalPrefix))
     ) {
       return true;
     }
@@ -126,17 +135,16 @@ function patternPrefixMightMatchDescendant(pattern: string, directoryPath: strin
   return false;
 }
 
-
 function literalPrefixBeforeFirstGlob(pattern: string): string {
-  const indexes = [pattern.indexOf("*"), pattern.indexOf("?")]
-    .filter((index) => index >= 0);
+  const indexes = [pattern.indexOf("*"), pattern.indexOf("?")].filter(
+    (index) => index >= 0,
+  );
   if (indexes.length === 0) {
     return pattern;
   }
 
   return pattern.slice(0, Math.min(...indexes));
 }
-
 
 function escapeRegExp(value: string): string {
   return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");

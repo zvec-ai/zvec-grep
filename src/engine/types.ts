@@ -7,13 +7,7 @@ export type TextContent = {
   text: string;
 };
 
-
-export type ImageFormat =
-  | "png"
-  | "jpeg"
-  | "webp"
-  | "gif";
-
+export type ImageFormat = "png" | "jpeg" | "webp" | "gif";
 
 export type ImageContent = {
   kind: "image";
@@ -21,38 +15,25 @@ export type ImageContent = {
   format: ImageFormat;
 };
 
-
-export type Content =
-  | TextContent
-  | ImageContent;
-
+export type Content = TextContent | ImageContent;
 
 export type ContentKind = Content["kind"];
-
 
 export function isTextContent(content: Content): content is TextContent {
   return content.kind === "text";
 }
 
-
 export function isImageContent(content: Content): content is ImageContent {
   return content.kind === "image";
 }
-
 
 // -----------------------------------------------------------------------------
 // File types
 // -----------------------------------------------------------------------------
 
-export type FileKind =
-  | "text"
-  | "code"
-  | "data"
-  | "image";
-
+export type FileKind = "text" | "code" | "data" | "image";
 
 export type FileFormat = string;
-
 
 export type FileIndexStatus = {
   indexedTime: number | null;
@@ -61,14 +42,12 @@ export type FileIndexStatus = {
   error?: string;
 };
 
-
 export type RootPath = {
   absolutePath: string;
   recursive: boolean;
   include?: readonly string[];
   exclude?: readonly string[];
 };
-
 
 export type FileInfo = {
   id: string;
@@ -84,7 +63,6 @@ export type FileInfo = {
   indexStatus?: FileIndexStatus;
 };
 
-
 // -----------------------------------------------------------------------------
 // Entity and fragment types
 // -----------------------------------------------------------------------------
@@ -92,7 +70,6 @@ export type FileInfo = {
 export type FileRange = {
   kind: "file";
 };
-
 
 export type TextRange = {
   kind: "text";
@@ -102,19 +79,16 @@ export type TextRange = {
   endOffset: number;
 };
 
-
 export type ByteRange = {
   kind: "byte";
   startOffset: number;
   endOffset: number;
 };
 
-
 export type PageRange = {
   kind: "page";
   page: number;
 };
-
 
 export type PageTextRange = {
   kind: "page_text";
@@ -122,7 +96,6 @@ export type PageTextRange = {
   startOffset: number;
   endOffset: number;
 };
-
 
 export type PageRegionRange = {
   kind: "page_region";
@@ -133,7 +106,6 @@ export type PageRegionRange = {
   height: number;
 };
 
-
 export type Range =
   | FileRange
   | TextRange
@@ -142,15 +114,8 @@ export type Range =
   | PageTextRange
   | PageRegionRange;
 
-
 export type CodeSymbolType =
-  | "module"
-  | "class"
-  | "interface"
-  | "function"
-  | "value"
-  | "alias";
-
+  "module" | "class" | "interface" | "function" | "value" | "alias";
 
 export type CodeEntityModifier =
   | "exported"
@@ -160,7 +125,6 @@ export type CodeEntityModifier =
   | "private"
   | "protected"
   | "internal";
-
 
 export type CodeEntityMetadata = {
   kind: "code";
@@ -173,7 +137,6 @@ export type CodeEntityMetadata = {
   modifiers: readonly CodeEntityModifier[];
 };
 
-
 export type MarkdownEntityMetadata = {
   kind: "markdown";
   heading: string | null;
@@ -181,11 +144,7 @@ export type MarkdownEntityMetadata = {
   scope: string | null;
 };
 
-
-export type EntityMetadata =
-  | CodeEntityMetadata
-  | MarkdownEntityMetadata;
-
+export type EntityMetadata = CodeEntityMetadata | MarkdownEntityMetadata;
 
 export type Entity = {
   id: string;
@@ -194,7 +153,6 @@ export type Entity = {
   content: Content;
   metadata?: EntityMetadata;
 };
-
 
 export type EntityFragment = {
   id: string;
@@ -205,13 +163,11 @@ export type EntityFragment = {
   metadata?: EntityMetadata;
 };
 
-
 // -----------------------------------------------------------------------------
 // Collection types
 // -----------------------------------------------------------------------------
 
 export const CURRENT_INDEX_VERSION = 1;
-
 
 export type CollectionEmbeddingSchema = {
   provider: string;
@@ -220,11 +176,7 @@ export type CollectionEmbeddingSchema = {
   metric: string;
 };
 
-
-export type CollectionIndexPolicy =
-  | "enabled"
-  | "disabled";
-
+export type CollectionIndexPolicy = "enabled" | "disabled";
 
 export type CollectionInfo = {
   id: string;
@@ -238,23 +190,17 @@ export type CollectionInfo = {
   updatedTime: number;
 };
 
-
 // -----------------------------------------------------------------------------
 // Indexing types
 // -----------------------------------------------------------------------------
 
-export type IndexProgressPhase =
-  | "scanning"
-  | "indexing"
-  | "done";
-
+export type IndexProgressPhase = "scanning" | "indexing" | "done";
 
 export type IndexEmbeddingProgress = {
   concurrency?: number;
   maxConcurrency?: number;
   retryableFailures?: number;
 };
-
 
 export type IndexProgress = {
   phase: IndexProgressPhase;
@@ -265,7 +211,6 @@ export type IndexProgress = {
   embedding?: IndexEmbeddingProgress;
 };
 
-
 export type IndexOptions = {
   name?: string;
   rebuild?: boolean;
@@ -273,13 +218,11 @@ export type IndexOptions = {
   onProgress?: (progress: IndexProgress) => void;
 };
 
-
 export type TimingEntry = {
   name: string;
   durationMs: number;
   count?: number;
 };
-
 
 export type IndexResult = {
   collectionId: string;
@@ -295,7 +238,6 @@ export type IndexResult = {
   durationMs: number;
   timings?: readonly TimingEntry[];
 };
-
 
 export type CollectionIndexStatus = {
   collectionId: string;
@@ -317,16 +259,11 @@ export type CollectionIndexStatus = {
   deletedFiles: FileInfo[];
 };
 
-
 // -----------------------------------------------------------------------------
 // Search types
 // -----------------------------------------------------------------------------
 
-export type SearchMatchedBy =
-  | "fts"
-  | "vector"
-  | "fts+vector";
-
+export type SearchMatchedBy = "fts" | "vector" | "fts+vector";
 
 export type SearchRecallTrace = {
   path: "fts" | "vector";
@@ -339,19 +276,16 @@ export type SearchRecallTrace = {
   reason?: string;
 };
 
-
 export type SearchStageTrace = {
   rank: number;
   score: number;
   forced?: boolean;
 };
 
-
 export type SearchFinalTrace = {
   returnedByLimit: boolean;
   cutoffRank: number;
 };
-
 
 export type SearchHitTrace = {
   recall: SearchRecallTrace[];
@@ -359,7 +293,6 @@ export type SearchHitTrace = {
   ranking?: SearchStageTrace;
   final: SearchFinalTrace;
 };
-
 
 export type SearchHitEvidence = {
   range: Range;
@@ -374,7 +307,6 @@ export type SearchHitEvidence = {
   forced?: boolean;
 };
 
-
 export type SearchHit = {
   entity: Entity;
   file: FileInfo;
@@ -385,24 +317,18 @@ export type SearchHit = {
   trace?: SearchHitTrace;
 };
 
-
-export type SearchPlanRouteMode =
-  | "fts"
-  | "vector";
-
+export type SearchPlanRouteMode = "fts" | "vector";
 
 export type SearchPlanRoute = {
   mode: SearchPlanRouteMode;
   query: string;
 };
 
-
 export type ResolvedSearchPlanRoute = {
   id: string;
   mode: SearchPlanRouteMode;
   query: string;
 };
-
 
 export type SearchPlan = {
   routes: readonly SearchPlanRoute[];
@@ -417,11 +343,9 @@ export type SearchPlan = {
   modifiedBefore?: number;
 };
 
-
 export type ResolvedSearchPlan = Omit<SearchPlan, "routes"> & {
   routes: readonly ResolvedSearchPlanRoute[];
 };
-
 
 export type SearchPlanResult = {
   collectionId: string;
@@ -431,7 +355,6 @@ export type SearchPlanResult = {
   trackedHit?: SearchHit;
   timings?: readonly TimingEntry[];
 };
-
 
 // -----------------------------------------------------------------------------
 // Diagnostics
@@ -447,7 +370,6 @@ export type FileDiagnosis = {
   entityCount: number;
   reason?: string;
 };
-
 
 export type EntitySearchDiagnosis = {
   query: string;

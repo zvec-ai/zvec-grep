@@ -6,12 +6,9 @@ import { colorModeFromArgs, printError } from "./errors.js";
 import { printHelp } from "./help.js";
 import { readPackageVersion } from "./version.js";
 
-
 const PACKAGE_VERSION = readPackageVersion();
 
-
 void main();
-
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);

@@ -3,11 +3,7 @@ import { relative } from "node:path";
 import { CodeExtractor } from "../extraction/code/extractor.js";
 import type { Extractor } from "../extraction/index.js";
 import { MarkdownExtractor } from "../extraction/markdown/extractor.js";
-import type {
-  EntityFragment,
-  FileInfo,
-  Range,
-} from "../types.js";
+import type { EntityFragment, FileInfo, Range } from "../types.js";
 import type {
   ZvecGrepStructureEnrichmentDiagnostics,
   ZvecGrepContextContainer,
@@ -17,19 +13,15 @@ import { detectFileType } from "../files/file-type.js";
 import { normalizePath, toDisplayPath } from "../utils/path.js";
 import { sha256Text } from "../utils/hash.js";
 
-
 export const RG_STRUCTURE_ENRICH_FILE_LIMIT = 100;
-
 
 type StructureEnrichmentResult = {
   items: ZvecGrepContextItem[];
   diagnostics: ZvecGrepStructureEnrichmentDiagnostics;
 };
 
-
 const STRUCTURE_ENRICH_COLLECTION_ID = "__rg_structure__";
 const STRUCTURE_ENRICH_MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024;
-
 
 export async function enrichLexicalItemsWithStructure(
   root: string,
@@ -46,7 +38,11 @@ export async function enrichLexicalItemsWithStructure(
   let parsedFiles = 0;
 
   for (const absolutePath of selectedFiles) {
-    const fragments = await parseStructuralFragments(root, absolutePath, extractors);
+    const fragments = await parseStructuralFragments(
+      root,
+      absolutePath,
+      extractors,
+    );
     fragmentsByFile.set(absolutePath, fragments);
     if (fragments !== null) {
       parsedFiles++;
@@ -60,7 +56,9 @@ export async function enrichLexicalItemsWithStructure(
       return item;
     }
 
-    const fragments = fragmentsByFile.get(normalizePath(item.file.absolutePath));
+    const fragments = fragmentsByFile.get(
+      normalizePath(item.file.absolutePath),
+    );
     if (!fragments || fragments.length === 0) {
       return item;
     }
@@ -106,8 +104,9 @@ export async function enrichLexicalItemsWithStructure(
   };
 }
 
-
-function uniqueLexicalFilePaths(items: readonly ZvecGrepContextItem[]): string[] {
+function uniqueLexicalFilePaths(
+  items: readonly ZvecGrepContextItem[],
+): string[] {
   const seen = new Set<string>();
   const paths: string[] = [];
 
@@ -126,7 +125,6 @@ function uniqueLexicalFilePaths(items: readonly ZvecGrepContextItem[]): string[]
   return paths;
 }
 
-
 async function parseStructuralFragments(
   root: string,
   absolutePath: string,
@@ -144,17 +142,26 @@ async function parseStructuralFragments(
       file,
       text,
     } as const;
-    const extractor = extractors.find((candidate) => candidate.supports(source));
+    const extractor = extractors.find((candidate) =>
+      candidate.supports(source),
+    );
     return extractor ? await extractor.extract(source) : null;
   } catch {
     return null;
   }
 }
 
-
-async function fileInfoForStructure(root: string, absolutePath: string): Promise<FileInfo | null> {
+async function fileInfoForStructure(
+  root: string,
+  absolutePath: string,
+): Promise<FileInfo | null> {
   const info = await stat(absolutePath).catch(() => null);
-  if (!info || !info.isFile() || info.size <= 0 || info.size > STRUCTURE_ENRICH_MAX_FILE_SIZE_BYTES) {
+  if (
+    !info ||
+    !info.isFile() ||
+    info.size <= 0 ||
+    info.size > STRUCTURE_ENRICH_MAX_FILE_SIZE_BYTES
+  ) {
     return null;
   }
 
@@ -176,24 +183,24 @@ async function fileInfoForStructure(root: string, absolutePath: string): Promise
   };
 }
 
-
 function isStructurallyEnrichableFile(
   file: Pick<FileInfo, "kind" | "format">,
 ): boolean {
-  return file.kind === "code"
-    || (file.kind === "text" && file.format === "markdown");
+  return (
+    file.kind === "code" || (file.kind === "text" && file.format === "markdown")
+  );
 }
 
-
-function lexicalMatchRange(item: ZvecGrepContextItem): Extract<Range, { kind: "text"; }> | null {
+function lexicalMatchRange(
+  item: ZvecGrepContextItem,
+): Extract<Range, { kind: "text" }> | null {
   const range = item.excerptRange ?? item.range;
   return range.kind === "text" ? range : null;
 }
 
-
 function smallestContainingFragment(
   fragments: readonly EntityFragment[],
-  matchRange: Extract<Range, { kind: "text"; }>,
+  matchRange: Extract<Range, { kind: "text" }>,
 ): EntityFragment | null {
   let best: EntityFragment | null = null;
 
@@ -210,28 +217,38 @@ function smallestContainingFragment(
   return best;
 }
 
-
 function textRangeContains(
   outer: Range,
-  inner: Extract<Range, { kind: "text"; }>,
+  inner: Extract<Range, { kind: "text" }>,
 ): boolean {
-  return outer.kind === "text"
-    && outer.startLine <= inner.startLine
-    && outer.endLine >= inner.endLine;
+  return (
+    outer.kind === "text" &&
+    outer.startLine <= inner.startLine &&
+    outer.endLine >= inner.endLine
+  );
 }
 
-
-function compareFragmentContainer(left: EntityFragment, right: EntityFragment): number {
+function compareFragmentContainer(
+  left: EntityFragment,
+  right: EntityFragment,
+): number {
   const leftRange = left.range;
   const rightRange = right.range;
-  const leftLines = leftRange.kind === "text" ? leftRange.endLine - leftRange.startLine : Number.MAX_SAFE_INTEGER;
-  const rightLines = rightRange.kind === "text" ? rightRange.endLine - rightRange.startLine : Number.MAX_SAFE_INTEGER;
+  const leftLines =
+    leftRange.kind === "text"
+      ? leftRange.endLine - leftRange.startLine
+      : Number.MAX_SAFE_INTEGER;
+  const rightLines =
+    rightRange.kind === "text"
+      ? rightRange.endLine - rightRange.startLine
+      : Number.MAX_SAFE_INTEGER;
 
-  return leftLines - rightLines
-    || fragmentSpecificityScore(right) - fragmentSpecificityScore(left)
-    || left.id.localeCompare(right.id);
+  return (
+    leftLines - rightLines ||
+    fragmentSpecificityScore(right) - fragmentSpecificityScore(left) ||
+    left.id.localeCompare(right.id)
+  );
 }
-
 
 function fragmentSpecificityScore(fragment: EntityFragment): number {
   const metadata = fragment.metadata;
@@ -246,7 +263,8 @@ function fragmentSpecificityScore(fragment: EntityFragment): number {
   return metadata.heading ? 1 : 0;
 }
 
-
 function makeStructureFileId(absolutePath: string): string {
-  return sha256Text(`${STRUCTURE_ENRICH_COLLECTION_ID}\0${normalizePath(absolutePath)}`);
+  return sha256Text(
+    `${STRUCTURE_ENRICH_COLLECTION_ID}\0${normalizePath(absolutePath)}`,
+  );
 }

@@ -1,15 +1,12 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-
 export const ZVEC_GREP_DIR = ".zvec-grep";
 export const ANONYMOUS_COLLECTION_NAME = "__anonymous__";
 export const ANONYMOUS_COLLECTION_DIR = "index";
 
-
 const COLLECTIONS_ZVEC = "collections.zvec";
 const ENTITIES_ZVEC = "index.zvec";
-
 
 export type AnonymousIndexLocation = {
   root: string;
@@ -18,21 +15,17 @@ export type AnonymousIndexLocation = {
   collectionPath: string;
 };
 
-
 export function resolveZvecGrepRoot(root: string | undefined): string {
   return resolve(root ?? process.cwd());
 }
-
 
 export function anonymousHome(root: string): string {
   return join(resolve(root), ZVEC_GREP_DIR);
 }
 
-
 export function anonymousCollectionPath(root: string): string {
   return join(anonymousHome(root), ANONYMOUS_COLLECTION_DIR);
 }
-
 
 export function anonymousIndexLocation(root: string): AnonymousIndexLocation {
   const resolvedRoot = resolve(root);
@@ -45,16 +38,17 @@ export function anonymousIndexLocation(root: string): AnonymousIndexLocation {
   };
 }
 
-
-export function findNearestAnonymousIndex(start: string): AnonymousIndexLocation | null {
+export function findNearestAnonymousIndex(
+  start: string,
+): AnonymousIndexLocation | null {
   return findNearestAnonymousLocation(start, hasAnonymousIndex);
 }
 
-
-export function findNearestAnonymousWorkspace(start: string): AnonymousIndexLocation | null {
+export function findNearestAnonymousWorkspace(
+  start: string,
+): AnonymousIndexLocation | null {
   return findNearestAnonymousLocation(start, hasAnonymousMetadata);
 }
-
 
 function findNearestAnonymousLocation(
   start: string,
@@ -77,13 +71,15 @@ function findNearestAnonymousLocation(
   }
 }
 
-
-export function hasAnonymousMetadata(location: AnonymousIndexLocation): boolean {
+export function hasAnonymousMetadata(
+  location: AnonymousIndexLocation,
+): boolean {
   return existsSync(join(location.home, COLLECTIONS_ZVEC));
 }
 
-
 export function hasAnonymousIndex(location: AnonymousIndexLocation): boolean {
-  return existsSync(join(location.home, COLLECTIONS_ZVEC))
-    && existsSync(join(location.collectionPath, ENTITIES_ZVEC));
+  return (
+    existsSync(join(location.home, COLLECTIONS_ZVEC)) &&
+    existsSync(join(location.collectionPath, ENTITIES_ZVEC))
+  );
 }

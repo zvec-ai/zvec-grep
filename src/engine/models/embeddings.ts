@@ -2,26 +2,19 @@ import { EngineError } from "../errors/index.js";
 import type { Content, ContentKind } from "../types.js";
 import type { ModelRef, VectorMetric } from "./types.js";
 
-
 export type EmbeddingVector = number[];
 
-
-export type EmbeddingPurpose =
-  | "document"
-  | "query";
-
+export type EmbeddingPurpose = "document" | "query";
 
 export type EmbeddingOptions = {
   purpose?: EmbeddingPurpose;
 };
-
 
 export type EmbeddingLimits = {
   maxBatchSize: number;
   maxInputTokens?: number;
   maxImageBytes?: number;
 };
-
 
 export abstract class EmbeddingModel {
   abstract readonly ref: ModelRef;
@@ -45,22 +38,19 @@ export abstract class EmbeddingModel {
     return vectors;
   }
 
-
   async dispose(): Promise<void> {
     // Most embedding providers do not hold local resources.
   }
-
 
   protected abstract doEmbed(
     contents: readonly Content[],
     options: Required<EmbeddingOptions>,
   ): Promise<EmbeddingVector[]>;
 
-
   private validateContents(contents: readonly Content[]): void {
     if (contents.length === 0) {
       throw new EngineError("Embedding requires at least one content item", {
-        code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_EMPTY_INPUT"
+        code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_EMPTY_INPUT",
       });
     }
 
@@ -95,15 +85,18 @@ export abstract class EmbeddingModel {
         }
 
         if (content.format.trim().length === 0) {
-          throw new EngineError("Embedding image content must include a format", {
-            code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_MISSING_IMAGE_FORMAT",
-            context: `model=${this.ref.model} index=${index}`,
-          });
+          throw new EngineError(
+            "Embedding image content must include a format",
+            {
+              code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_MISSING_IMAGE_FORMAT",
+              context: `model=${this.ref.model} index=${index}`,
+            },
+          );
         }
 
         if (
-          this.limits.maxImageBytes !== undefined
-          && content.data.byteLength > this.limits.maxImageBytes
+          this.limits.maxImageBytes !== undefined &&
+          content.data.byteLength > this.limits.maxImageBytes
         ) {
           throw new EngineError("Embedding image content exceeds model limit", {
             code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_IMAGE_TOO_LARGE",
@@ -114,8 +107,10 @@ export abstract class EmbeddingModel {
     }
   }
 
-
-  private validateVectors(contents: readonly Content[], vectors: EmbeddingVector[]): void {
+  private validateVectors(
+    contents: readonly Content[],
+    vectors: EmbeddingVector[],
+  ): void {
     if (!Array.isArray(vectors)) {
       throw new EngineError("Embedding model returned a non-array response", {
         code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_INVALID_RESPONSE",
@@ -124,10 +119,13 @@ export abstract class EmbeddingModel {
     }
 
     if (vectors.length !== contents.length) {
-      throw new EngineError("Embedding model returned the wrong number of vectors", {
-        code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_VECTOR_COUNT_MISMATCH",
-        context: `model=${this.ref.model} contentCount=${contents.length} vectorCount=${vectors.length}`,
-      });
+      throw new EngineError(
+        "Embedding model returned the wrong number of vectors",
+        {
+          code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_VECTOR_COUNT_MISMATCH",
+          context: `model=${this.ref.model} contentCount=${contents.length} vectorCount=${vectors.length}`,
+        },
+      );
     }
 
     for (const [vectorIndex, vector] of vectors.entries()) {
@@ -139,18 +137,24 @@ export abstract class EmbeddingModel {
       }
 
       if (vector.length !== this.dimension) {
-        throw new EngineError("Embedding model returned a vector with the wrong dimension", {
-          code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_DIMENSION_MISMATCH",
-          context: `model=${this.ref.model} vectorIndex=${vectorIndex} expectedDimension=${this.dimension} actualDimension=${vector.length}`,
-        });
+        throw new EngineError(
+          "Embedding model returned a vector with the wrong dimension",
+          {
+            code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_DIMENSION_MISMATCH",
+            context: `model=${this.ref.model} vectorIndex=${vectorIndex} expectedDimension=${this.dimension} actualDimension=${vector.length}`,
+          },
+        );
       }
 
       for (const [valueIndex, value] of vector.entries()) {
         if (!Number.isFinite(value)) {
-          throw new EngineError("Embedding model returned a non-finite vector value", {
-            code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_NON_FINITE_VECTOR_VALUE",
-            context: `model=${this.ref.model} vectorIndex=${vectorIndex} valueIndex=${valueIndex}`,
-          });
+          throw new EngineError(
+            "Embedding model returned a non-finite vector value",
+            {
+              code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_NON_FINITE_VECTOR_VALUE",
+              context: `model=${this.ref.model} vectorIndex=${vectorIndex} valueIndex=${valueIndex}`,
+            },
+          );
         }
       }
     }

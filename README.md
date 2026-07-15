@@ -11,8 +11,9 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm Release"/></a>
+  <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"/></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D20-blue.svg" alt="Node.js >=20"/>
+  <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js >=22"/>
   <img src="https://img.shields.io/badge/CLI-zg-2ea44f.svg" alt="zg CLI"/>
 </p>
 
@@ -95,7 +96,7 @@ Codex MCP tool calls default to a 600-second timeout. Override it during install
 
 ### ✅ Requirements
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - macOS, Linux, or Windows
 - A supported embedding model for indexed search
 
@@ -255,10 +256,10 @@ const result = await zvecGrep.context({
 
 <div align="center">
 
-| 💬 DingTalk | 📱 WeChat | 🎮 Discord | X (Twitter) |
-| :---: | :---: | :---: | :---: |
-| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="DingTalk QR Code"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v=6" width="150" alt="WeChat QR Code"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](<https://x.com/ZvecAI>) |
-| Scan to join | Scan to join | Click to join | Click to follow |
+|                                                  💬 DingTalk                                                  |                                                   📱 WeChat                                                   |                                                                       🎮 Discord                                                                        |                                             X (Twitter)                                              |
+| :-----------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------------: |
+| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="DingTalk QR Code"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v=6" width="150" alt="WeChat QR Code"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](https://x.com/ZvecAI) |
+|                                                 Scan to join                                                  |                                                 Scan to join                                                  |                                                                      Click to join                                                                      |                                           Click to follow                                            |
 
 </div>
 
@@ -267,5 +268,10 @@ const result = await zvecGrep.context({
 Issues and pull requests are welcome. Please keep changes focused, add tests for behavior changes, and run:
 
 ```bash
-npm test
+npm run check
 ```
+
+Pull request titles use Conventional Commits syntax. Releases are prepared by
+Release Please; merging an approved release pull request creates the version tag
+and GitHub Release, after which the npm production environment requires a final
+maintainer approval.

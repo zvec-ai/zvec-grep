@@ -7,9 +7,10 @@ import { updateGlobalConfig } from "../dist/engine/config.js";
 import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
 
-
 test("recovered embedding model cache is bounded and defers disposal until active queries finish", async () => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-model-cache-"));
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-model-cache-"),
+  );
   const root = join(temporaryDirectory, "repo");
   const originalHome = process.env.HOME;
   const originalFetch = globalThis.fetch;
@@ -39,7 +40,10 @@ test("recovered embedding model cache is bounded and defers disposal until activ
 
   try {
     await mkdir(join(root, "src"), { recursive: true });
-    await writeFile(join(root, "src", "example.ts"), "export const answer = 42;\n");
+    await writeFile(
+      join(root, "src", "example.ts"),
+      "export const answer = 42;\n",
+    );
     configureQwen("https://initial.test/embeddings");
 
     service = await createZvecGrep({
@@ -91,7 +95,6 @@ test("recovered embedding model cache is bounded and defers disposal until activ
   }
 });
 
-
 function configureQwen(endpoint) {
   updateGlobalConfig({
     providers: {
@@ -103,17 +106,19 @@ function configureQwen(endpoint) {
   });
 }
 
-
 function embeddingResponse(init) {
   const body = JSON.parse(String(init?.body));
   const contents = Array.isArray(body.input) ? body.input : [];
-  return new Response(JSON.stringify({
-    data: contents.map((_, index) => ({
-      index,
-      embedding: new Array(1024).fill(0.01),
-    })),
-  }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({
+      data: contents.map((_, index) => ({
+        index,
+        embedding: new Array(1024).fill(0.01),
+      })),
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
 }

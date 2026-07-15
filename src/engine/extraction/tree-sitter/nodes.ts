@@ -1,8 +1,6 @@
 import type Parser from "web-tree-sitter";
 
-
 export type TSNode = Parser.SyntaxNode;
-
 
 export function findIdentifierLeaf(node: TSNode): TSNode | null {
   const wrappers = new Set([
@@ -21,7 +19,10 @@ export function findIdentifierLeaf(node: TSNode): TSNode | null {
       return current;
     }
 
-    if (current.type === "destructor_name" || current.type === "operator_name") {
+    if (
+      current.type === "destructor_name" ||
+      current.type === "operator_name"
+    ) {
       return current;
     }
 

@@ -36,13 +36,11 @@ import {
   pathPatternMatches,
 } from "../../utils/glob.js";
 
-
 type SearchContext = {
   collection: CollectionInfo;
   storage: CollectionStorage;
   embeddingModel?: EmbeddingModel;
 };
-
 
 type Candidate = {
   id: string;
@@ -56,7 +54,6 @@ type Candidate = {
   forced: boolean;
 };
 
-
 type InternalSearchEvidence = {
   fragment: EntityFragment;
   path: "fts" | "vector";
@@ -67,9 +64,7 @@ type InternalSearchEvidence = {
   forced?: boolean;
 };
 
-
 type PathFilterMatcher = (file: FileInfo) => boolean;
-
 
 const DEFAULT_LIMIT = 7;
 const RRF_K = 60;
@@ -79,12 +74,10 @@ const RECALL_GROWTH_FACTOR = 2;
 const RECALL_TARGET_FACTOR = 5;
 const RECALL_MIN_TARGET_CANDIDATES = 50;
 
-
 type RecallRoute = ResolvedSearchPlanRoute & {
   filter?: StorageSearchFilter;
   vectorRouteId?: string;
 };
-
 
 export async function searchPlanCollection(
   plan: SearchPlan,
@@ -93,40 +86,54 @@ export async function searchPlanCollection(
   const timings = new TimingCollector();
 
   const result = await timings.time("search_total", async () => {
-    const normalized = timings.timeSync("search_plan", () => validateSearchPlan(plan));
+    const normalized = timings.timeSync("search_plan", () =>
+      validateSearchPlan(plan),
+    );
     const limit = normalized.limit ?? DEFAULT_LIMIT;
-    const trace = normalized.trace === true || normalized.trackEntityId !== undefined;
-    const filter = timings.timeSync("search_filter", () => searchPlanToStorageFilter(normalized, ctx.storage));
+    const trace =
+      normalized.trace === true || normalized.trackEntityId !== undefined;
+    const filter = timings.timeSync("search_filter", () =>
+      searchPlanToStorageFilter(normalized, ctx.storage),
+    );
     const hasSearchableFiles = !filterMatchesNoFiles(filter);
     const candidates = new Map<string, Candidate>();
-    const vectorByRoute = hasSearchableFiles && planUsesVector(normalized)
-      ? await timings.time("query_embedding", () =>
-        embedVectorRoutes(normalized.routes, requireEmbeddingModel(ctx, "searchPlan")))
-      : new Map<string, number[]>();
+    const vectorByRoute =
+      hasSearchableFiles && planUsesVector(normalized)
+        ? await timings.time("query_embedding", () =>
+            embedVectorRoutes(
+              normalized.routes,
+              requireEmbeddingModel(ctx, "searchPlan"),
+            ),
+          )
+        : new Map<string, number[]>();
     let recallDepth = RECALL_INITIAL_DEPTH;
 
     if (hasSearchableFiles) {
-      recallDepth = timings.timeSync("recall", () => collectAdaptiveRecall({
-        routes: normalized.routes,
-        filter,
-        preferSymbol: normalized.preferSymbol === true,
-        vectorByRoute,
-        limit,
-        storage: ctx.storage,
-        candidates,
-      }));
+      recallDepth = timings.timeSync("recall", () =>
+        collectAdaptiveRecall({
+          routes: normalized.routes,
+          filter,
+          preferSymbol: normalized.preferSymbol === true,
+          vectorByRoute,
+          limit,
+          storage: ctx.storage,
+          candidates,
+        }),
+      );
     }
 
     if (normalized.trackEntityId) {
-      timings.timeSync("force_track", () => forceTrackEntity({
-        entityId: normalized.trackEntityId!,
-        routes: normalized.routes,
-        vectorByRoute,
-        recallDepth,
-        filter,
-        storage: ctx.storage,
-        candidates,
-      }));
+      timings.timeSync("force_track", () =>
+        forceTrackEntity({
+          entityId: normalized.trackEntityId!,
+          routes: normalized.routes,
+          vectorByRoute,
+          recallDepth,
+          filter,
+          storage: ctx.storage,
+          candidates,
+        }),
+      );
     }
 
     const fused = timings.timeSync("fusion", () => fuseCandidates(candidates));
@@ -139,9 +146,9 @@ export async function searchPlanCollection(
       visible.push(tracked);
     }
 
-    const hits = timings.timeSync("materialize", () => visible.map((candidate) =>
-      candidateToHit(candidate, limit, trace),
-    ));
+    const hits = timings.timeSync("materialize", () =>
+      visible.map((candidate) => candidateToHit(candidate, limit, trace)),
+    );
     const trackedHit = normalized.trackEntityId
       ? hits.find((hit) => hit.entity.id === normalized.trackEntityId)
       : undefined;
@@ -161,7 +168,6 @@ export async function searchPlanCollection(
   };
 }
 
-
 export async function diagnoseEntitySearch(
   query: string,
   entityId: string,
@@ -173,14 +179,17 @@ export async function diagnoseEntitySearch(
     throw new Error(`Entity not found: ${entityId}`);
   }
 
-  const search = await searchPlanCollection({
-    routes: [
-      { mode: "fts", query },
-      { mode: "vector", query },
-    ],
-    trace: true,
-    trackEntityId: entityId,
-  }, ctx);
+  const search = await searchPlanCollection(
+    {
+      routes: [
+        { mode: "fts", query },
+        { mode: "vector", query },
+      ],
+      trace: true,
+      trackEntityId: entityId,
+    },
+    ctx,
+  );
 
   return {
     query,
@@ -190,7 +199,6 @@ export async function diagnoseEntitySearch(
     search,
   };
 }
-
 
 export async function diagnoseFileSearch(
   query: string,
@@ -209,7 +217,6 @@ export async function diagnoseFileSearch(
 
   return diagnoseEntitySearch(query, entityId, ctx);
 }
-
 
 function validateSearchPlan(plan: SearchPlan): ResolvedSearchPlan {
   if (!Array.isArray(plan.routes) || plan.routes.length === 0) {
@@ -248,18 +255,27 @@ function validateSearchPlan(plan: SearchPlan): ResolvedSearchPlan {
     };
   });
 
-  const modifiedAfter = normalizeModifiedTime(plan.modifiedAfter, "modifiedAfter");
-  const modifiedBefore = normalizeModifiedTime(plan.modifiedBefore, "modifiedBefore");
+  const modifiedAfter = normalizeModifiedTime(
+    plan.modifiedAfter,
+    "modifiedAfter",
+  );
+  const modifiedBefore = normalizeModifiedTime(
+    plan.modifiedBefore,
+    "modifiedBefore",
+  );
 
   if (
-    modifiedAfter !== undefined
-    && modifiedBefore !== undefined
-    && modifiedAfter > modifiedBefore
+    modifiedAfter !== undefined &&
+    modifiedBefore !== undefined &&
+    modifiedAfter > modifiedBefore
   ) {
-    throw new EngineError("Search plan modified-after filter must not be later than modified-before", {
-      code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_MODIFIED_TIME_RANGE",
-      context: `modifiedAfter=${modifiedAfter} modifiedBefore=${modifiedBefore}`,
-    });
+    throw new EngineError(
+      "Search plan modified-after filter must not be later than modified-before",
+      {
+        code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_MODIFIED_TIME_RANGE",
+        context: `modifiedAfter=${modifiedAfter} modifiedBefore=${modifiedBefore}`,
+      },
+    );
   }
 
   return {
@@ -271,7 +287,6 @@ function validateSearchPlan(plan: SearchPlan): ResolvedSearchPlan {
     modifiedBefore,
   };
 }
-
 
 function makeDefaultRouteId(
   mode: ResolvedSearchPlanRoute["mode"],
@@ -292,13 +307,14 @@ function makeDefaultRouteId(
   }
 }
 
-
 function planUsesVector(plan: SearchPlan): boolean {
   return plan.routes.some((route) => route.mode === "vector");
 }
 
-
-function requireEmbeddingModel(ctx: SearchContext, operation: string): EmbeddingModel {
+function requireEmbeddingModel(
+  ctx: SearchContext,
+  operation: string,
+): EmbeddingModel {
   if (!ctx.embeddingModel) {
     throw new EngineError("Search operation requires an embedding model", {
       code: "ZVEC_GREP.ENGINE.SEARCH.EMBEDDING_MODEL_REQUIRED",
@@ -311,7 +327,6 @@ function requireEmbeddingModel(ctx: SearchContext, operation: string): Embedding
 
   return ctx.embeddingModel;
 }
-
 
 function normalizePathFilters(
   value: readonly string[] | undefined,
@@ -347,22 +362,26 @@ function normalizePathFilters(
   return patterns.length > 0 ? patterns : undefined;
 }
 
-
-function normalizeModifiedTime(value: number | undefined, field: "modifiedAfter" | "modifiedBefore"): number | undefined {
+function normalizeModifiedTime(
+  value: number | undefined,
+  field: "modifiedAfter" | "modifiedBefore",
+): number | undefined {
   if (value === undefined) {
     return undefined;
   }
 
   if (!Number.isFinite(value) || value < 0) {
-    throw new EngineError("Search plan modified time filters must be non-negative epoch milliseconds", {
-      code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_MODIFIED_TIME_FILTER",
-      context: `field=${field} value=${String(value)}`,
-    });
+    throw new EngineError(
+      "Search plan modified time filters must be non-negative epoch milliseconds",
+      {
+        code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_MODIFIED_TIME_FILTER",
+        context: `field=${field} value=${String(value)}`,
+      },
+    );
   }
 
   return value;
 }
-
 
 async function embedVectorRoutes(
   routes: readonly ResolvedSearchPlanRoute[],
@@ -371,7 +390,11 @@ async function embedVectorRoutes(
   const vectorRoutes = routes.filter((route) => route.mode === "vector");
   const vectorsByRoute = new Map<string, number[]>();
 
-  for (let start = 0; start < vectorRoutes.length; start += model.limits.maxBatchSize) {
+  for (
+    let start = 0;
+    start < vectorRoutes.length;
+    start += model.limits.maxBatchSize
+  ) {
     const batch = vectorRoutes.slice(start, start + model.limits.maxBatchSize);
     const vectors = await model.embed(
       batch.map((route) => ({
@@ -389,13 +412,12 @@ async function embedVectorRoutes(
   return vectorsByRoute;
 }
 
-
 function addRecallHits(
   candidates: Map<string, Candidate>,
   hits: readonly StorageSearchHit[],
   route: ResolvedSearchPlanRoute,
   storage: CollectionStorage,
-  options: { startIndex?: number; } = {},
+  options: { startIndex?: number } = {},
 ): void {
   const startIndex = Math.max(0, options.startIndex ?? 0);
 
@@ -446,7 +468,6 @@ function addRecallHits(
   }
 }
 
-
 function collectAdaptiveRecall(input: {
   routes: readonly ResolvedSearchPlanRoute[];
   filter?: StorageSearchFilter;
@@ -456,7 +477,11 @@ function collectAdaptiveRecall(input: {
   storage: CollectionStorage;
   candidates: Map<string, Candidate>;
 }): number {
-  const routes = buildRecallRoutes(input.routes, input.filter, input.preferSymbol);
+  const routes = buildRecallRoutes(
+    input.routes,
+    input.filter,
+    input.preferSymbol,
+  );
   const targetCandidates = recallTargetCandidateCount(input.limit);
   let previousDepth = 0;
   let depth = RECALL_INITIAL_DEPTH;
@@ -472,9 +497,9 @@ function collectAdaptiveRecall(input: {
     });
 
     if (
-      input.candidates.size >= targetCandidates
-      || !saturated
-      || depth >= RECALL_MAX_DEPTH
+      input.candidates.size >= targetCandidates ||
+      !saturated ||
+      depth >= RECALL_MAX_DEPTH
     ) {
       return depth;
     }
@@ -483,7 +508,6 @@ function collectAdaptiveRecall(input: {
     depth = Math.min(depth * RECALL_GROWTH_FACTOR, RECALL_MAX_DEPTH);
   }
 }
-
 
 function buildRecallRoutes(
   routes: readonly ResolvedSearchPlanRoute[],
@@ -527,7 +551,6 @@ function buildRecallRoutes(
   return output;
 }
 
-
 function collectRecallPass(input: {
   routes: readonly RecallRoute[];
   vectorByRoute: ReadonlyMap<string, readonly number[]>;
@@ -549,7 +572,6 @@ function collectRecallPass(input: {
   return saturated;
 }
 
-
 function recallRouteHits(
   route: RecallRoute,
   input: {
@@ -568,16 +590,14 @@ function recallRouteHits(
     : [];
 }
 
-
 function recallTargetCandidateCount(limit: number): number {
   return Math.max(limit * RECALL_TARGET_FACTOR, RECALL_MIN_TARGET_CANDIDATES);
 }
 
-
 function resolveHitEntity(
   hit: StorageSearchHit,
   storage: CollectionStorage,
-): { entity: Entity; file: FileInfo; } | null {
+): { entity: Entity; file: FileInfo } | null {
   if (!hit.fragment.group || hit.fragment.group === hit.fragment.id) {
     return {
       entity: fragmentToEntity(hit.fragment),
@@ -587,7 +607,6 @@ function resolveHitEntity(
 
   return storage.getEntity(hit.fragment.group);
 }
-
 
 function fragmentToEntity(fragment: EntityFragment): Entity {
   return {
@@ -599,18 +618,16 @@ function fragmentToEntity(fragment: EntityFragment): Entity {
   };
 }
 
-
 function publicEntityId(fragment: EntityFragment): string {
   return fragment.group ?? fragment.id;
 }
-
 
 function addOrUpdateRecall(
   candidate: Candidate,
   recall: SearchRecallTrace,
 ): void {
-  const existing = candidate.recall.find((item) =>
-    item.path === recall.path && item.routeId === recall.routeId,
+  const existing = candidate.recall.find(
+    (item) => item.path === recall.path && item.routeId === recall.routeId,
   );
 
   if (!existing) {
@@ -623,9 +640,9 @@ function addOrUpdateRecall(
   }
 
   if (
-    !existing.found
-    || existing.rank === undefined
-    || (recall.rank !== undefined && recall.rank < existing.rank)
+    !existing.found ||
+    existing.rank === undefined ||
+    (recall.rank !== undefined && recall.rank < existing.rank)
   ) {
     Object.assign(existing, recall, {
       forced: existing.forced || recall.forced || undefined,
@@ -637,7 +654,6 @@ function addOrUpdateRecall(
     existing.forced = true;
   }
 }
-
 
 function extractSymbolNames(query: string): string[] {
   const keywords = new Set([
@@ -673,7 +689,6 @@ function extractSymbolNames(query: string): string[] {
   return [...names];
 }
 
-
 function symbolNameFromToken(token: string): string | null {
   const parts = token.split("::").filter((part) => part.length > 0);
   const name = parts[parts.length - 1] ?? token;
@@ -693,7 +708,6 @@ function symbolNameFromToken(token: string): string | null {
 
   return name;
 }
-
 
 function forceTrackEntity(input: {
   entityId: string;
@@ -739,21 +753,28 @@ function forceTrackEntity(input: {
     }
 
     if (route.mode === "fts") {
-      forceTrackFtsRoute(candidate, {
-        ...input,
-        targetFileId: tracked.file.id,
-      }, route);
+      forceTrackFtsRoute(
+        candidate,
+        {
+          ...input,
+          targetFileId: tracked.file.id,
+        },
+        route,
+      );
     } else {
-      forceTrackVectorRoute(candidate, {
-        ...input,
-        targetFileId: tracked.file.id,
-      }, route);
+      forceTrackVectorRoute(
+        candidate,
+        {
+          ...input,
+          targetFileId: tracked.file.id,
+        },
+        route,
+      );
     }
   }
 
   input.candidates.set(input.entityId, candidate);
 }
-
 
 function filterExcludesFile(
   filter: StorageSearchFilter | undefined,
@@ -761,7 +782,6 @@ function filterExcludesFile(
 ): boolean {
   return filter?.fileIds !== undefined && !filter.fileIds.includes(fileId);
 }
-
 
 function forceTrackNoMatchingFilesRoute(
   candidate: Candidate,
@@ -777,7 +797,6 @@ function forceTrackNoMatchingFilesRoute(
   });
 }
 
-
 function forceTrackPathExcludedRoute(
   candidate: Candidate,
   route: ResolvedSearchPlanRoute,
@@ -791,7 +810,6 @@ function forceTrackPathExcludedRoute(
     reason: "Target entity file was excluded by the path filters",
   });
 }
-
 
 function forceTrackFtsRoute(
   candidate: Candidate,
@@ -838,7 +856,6 @@ function forceTrackFtsRoute(
     reason: "Target entity did not match the FTS query",
   });
 }
-
 
 function forceTrackVectorRoute(
   candidate: Candidate,
@@ -901,7 +918,6 @@ function forceTrackVectorRoute(
   });
 }
 
-
 function searchTrackedEntityFts(
   input: {
     entityId: string;
@@ -921,12 +937,14 @@ function searchTrackedEntityFts(
     return groupHit;
   }
 
-  return input.storage.searchFts(route.query, input.recallDepth, restrictFilterToFile(
-    input.filter,
-    input.targetFileId,
-  )).find((hit) => publicEntityId(hit.fragment) === input.entityId);
+  return input.storage
+    .searchFts(
+      route.query,
+      input.recallDepth,
+      restrictFilterToFile(input.filter, input.targetFileId),
+    )
+    .find((hit) => publicEntityId(hit.fragment) === input.entityId);
 }
-
 
 function searchTrackedEntityVector(
   input: {
@@ -947,12 +965,14 @@ function searchTrackedEntityVector(
     return groupHit;
   }
 
-  return input.storage.searchVector(vector, input.recallDepth, restrictFilterToFile(
-    input.filter,
-    input.targetFileId,
-  )).find((hit) => publicEntityId(hit.fragment) === input.entityId);
+  return input.storage
+    .searchVector(
+      vector,
+      input.recallDepth,
+      restrictFilterToFile(input.filter, input.targetFileId),
+    )
+    .find((hit) => publicEntityId(hit.fragment) === input.entityId);
 }
-
 
 function restrictFilterToFile(
   filter: StorageSearchFilter | undefined,
@@ -964,20 +984,17 @@ function restrictFilterToFile(
   };
 }
 
-
 function searchPlanToStorageFilter(
   plan: SearchPlan,
   storage: CollectionStorage,
 ): StorageSearchFilter | undefined {
   const fileIds = resolveFilteredFileIds(plan, storage.listFiles());
-  const symbolTypes = plan.symbolTypes && plan.symbolTypes.length > 0
-    ? plan.symbolTypes
-    : undefined;
+  const symbolTypes =
+    plan.symbolTypes && plan.symbolTypes.length > 0
+      ? plan.symbolTypes
+      : undefined;
 
-  if (
-    fileIds === undefined
-    && symbolTypes === undefined
-  ) {
+  if (fileIds === undefined && symbolTypes === undefined) {
     return undefined;
   }
 
@@ -987,11 +1004,11 @@ function searchPlanToStorageFilter(
   };
 }
 
-
-function filterMatchesNoFiles(filter: StorageSearchFilter | undefined): boolean {
+function filterMatchesNoFiles(
+  filter: StorageSearchFilter | undefined,
+): boolean {
   return filter?.fileIds !== undefined && filter.fileIds.length === 0;
 }
-
 
 function resolveFilteredFileIds(
   plan: SearchPlan,
@@ -999,16 +1016,22 @@ function resolveFilteredFileIds(
 ): string[] | undefined {
   const includeMatchers = (plan.includePaths ?? []).map(compilePathFilter);
   const excludeMatchers = (plan.excludePaths ?? []).map(compilePathFilter);
-  const hasModifiedFilter = plan.modifiedAfter !== undefined || plan.modifiedBefore !== undefined;
+  const hasModifiedFilter =
+    plan.modifiedAfter !== undefined || plan.modifiedBefore !== undefined;
 
-  if (includeMatchers.length === 0 && excludeMatchers.length === 0 && !hasModifiedFilter) {
+  if (
+    includeMatchers.length === 0 &&
+    excludeMatchers.length === 0 &&
+    !hasModifiedFilter
+  ) {
     return undefined;
   }
 
   return files
     .filter((file) => {
-      const included = includeMatchers.length === 0
-        || includeMatchers.some((matcher) => matcher(file));
+      const included =
+        includeMatchers.length === 0 ||
+        includeMatchers.some((matcher) => matcher(file));
       const excluded = excludeMatchers.some((matcher) => matcher(file));
 
       return included && !excluded && matchesModifiedTimeFilter(file, plan);
@@ -1016,25 +1039,32 @@ function resolveFilteredFileIds(
     .map((file) => file.id);
 }
 
-
 function matchesModifiedTimeFilter(file: FileInfo, plan: SearchPlan): boolean {
-  if (plan.modifiedAfter !== undefined && file.lastModifiedTime < plan.modifiedAfter) {
+  if (
+    plan.modifiedAfter !== undefined &&
+    file.lastModifiedTime < plan.modifiedAfter
+  ) {
     return false;
   }
 
-  if (plan.modifiedBefore !== undefined && file.lastModifiedTime > plan.modifiedBefore) {
+  if (
+    plan.modifiedBefore !== undefined &&
+    file.lastModifiedTime > plan.modifiedBefore
+  ) {
     return false;
   }
 
   return true;
 }
 
-
 function compilePathFilter(pattern: string): PathFilterMatcher {
-  const pathTarget = isAbsolutePathPattern(pattern) ? "absolutePath" : "relativePath";
+  const pathTarget = isAbsolutePathPattern(pattern)
+    ? "absolutePath"
+    : "relativePath";
 
   if (hasPathGlob(pattern)) {
-    return (file) => pathPatternMatches(pattern, normalizePathForMatch(file[pathTarget]));
+    return (file) =>
+      pathPatternMatches(pattern, normalizePathForMatch(file[pathTarget]));
   }
 
   return (file) => {
@@ -1044,11 +1074,9 @@ function compilePathFilter(pattern: string): PathFilterMatcher {
   };
 }
 
-
 function normalizePathFilterPattern(pattern: string): string {
   return normalizePathPattern(pattern);
 }
-
 
 function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
   for (const candidate of candidates.values()) {
@@ -1077,8 +1105,11 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
   return fused;
 }
 
-
-function candidateToHit(candidate: Candidate, limit: number, trace: boolean): SearchHit {
+function candidateToHit(
+  candidate: Candidate,
+  limit: number,
+  trace: boolean,
+): SearchHit {
   return {
     entity: candidate.entity,
     file: candidate.file,
@@ -1090,8 +1121,9 @@ function candidateToHit(candidate: Candidate, limit: number, trace: boolean): Se
   };
 }
 
-
-function evidenceToSearchHitEvidence(evidence: InternalSearchEvidence): SearchHitEvidence {
+function evidenceToSearchHitEvidence(
+  evidence: InternalSearchEvidence,
+): SearchHitEvidence {
   return {
     range: evidence.fragment.range,
     content: evidence.fragment.content,
@@ -1106,8 +1138,9 @@ function evidenceToSearchHitEvidence(evidence: InternalSearchEvidence): SearchHi
   };
 }
 
-
-function sortEvidence(evidence: readonly InternalSearchEvidence[]): InternalSearchEvidence[] {
+function sortEvidence(
+  evidence: readonly InternalSearchEvidence[],
+): InternalSearchEvidence[] {
   return [...evidence].sort((left, right) => {
     const leftRank = left.rank ?? Number.POSITIVE_INFINITY;
     const rightRank = right.rank ?? Number.POSITIVE_INFINITY;
@@ -1123,7 +1156,6 @@ function sortEvidence(evidence: readonly InternalSearchEvidence[]): InternalSear
     return left.fragment.id.localeCompare(right.fragment.id);
   });
 }
-
 
 function candidateToTrace(candidate: Candidate, limit: number): SearchHitTrace {
   const final: SearchFinalTrace = {
@@ -1142,32 +1174,41 @@ function candidateToTrace(candidate: Candidate, limit: number): SearchHitTrace {
   };
 }
 
-
 async function chooseBestEntityInFile(
   query: string,
   file: FileInfo,
   ctx: SearchContext,
 ): Promise<string | null> {
   const candidates = new Map<string, Candidate>();
-  addRecallHits(candidates, ctx.storage.searchFts(query, 10, {
-    fileIds: [file.id],
-  }), {
-    id: "fts",
-    mode: "fts",
-    query,
-  }, ctx.storage);
+  addRecallHits(
+    candidates,
+    ctx.storage.searchFts(query, 10, {
+      fileIds: [file.id],
+    }),
+    {
+      id: "fts",
+      mode: "fts",
+      query,
+    },
+    ctx.storage,
+  );
 
   const [queryVector] = await requireEmbeddingModel(ctx, "diagnose").embed(
     [{ kind: "text", text: query }],
     { purpose: "query" },
   );
-  addRecallHits(candidates, ctx.storage.searchVector(queryVector, 10, {
-    fileIds: [file.id],
-  }), {
-    id: "vector",
-    mode: "vector",
-    query,
-  }, ctx.storage);
+  addRecallHits(
+    candidates,
+    ctx.storage.searchVector(queryVector, 10, {
+      fileIds: [file.id],
+    }),
+    {
+      id: "vector",
+      mode: "vector",
+      query,
+    },
+    ctx.storage,
+  );
 
   const [best] = fuseCandidates(candidates);
   if (best) {
@@ -1178,7 +1219,6 @@ async function chooseBestEntityInFile(
 
   return first?.entity.id ?? null;
 }
-
 
 function deriveMatchedBy(sources: Set<"fts" | "vector">): SearchMatchedBy {
   if (sources.has("fts") && sources.has("vector")) {

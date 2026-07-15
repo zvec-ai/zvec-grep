@@ -1,6 +1,5 @@
 import type { CliOptions } from "../types.js";
 
-
 export function shouldUseColor(options: CliOptions): boolean {
   const mode = options.color ?? "auto";
   if (mode === "always") {
@@ -14,8 +13,10 @@ export function shouldUseColor(options: CliOptions): boolean {
   return process.env.NO_COLOR === undefined && process.stdout.isTTY === true;
 }
 
-
-export function createHighlighter(query: string, enabled: boolean): (value: string) => string {
+export function createHighlighter(
+  query: string,
+  enabled: boolean,
+): (value: string) => string {
   if (!enabled) {
     return (value) => value;
   }
@@ -27,7 +28,6 @@ export function createHighlighter(query: string, enabled: boolean): (value: stri
 
   return (value) => highlightTermsInText(value, terms);
 }
-
 
 function highlightTerms(query: string): string[] {
   const ignored = new Set([
@@ -65,7 +65,9 @@ function highlightTerms(query: string): string[] {
     terms.add(trimmed);
   }
 
-  for (const match of trimmed.matchAll(/[A-Za-z_~][A-Za-z0-9_~]*|[0-9]+(?:\.[0-9]+)?/g)) {
+  for (const match of trimmed.matchAll(
+    /[A-Za-z_~][A-Za-z0-9_~]*|[0-9]+(?:\.[0-9]+)?/g,
+  )) {
     const term = match[0];
     if (term.length >= 2 && !ignored.has(term.toLowerCase())) {
       terms.add(term);
@@ -75,9 +77,8 @@ function highlightTerms(query: string): string[] {
   return [...terms].sort((left, right) => right.length - left.length);
 }
 
-
 function highlightTermsInText(value: string, terms: readonly string[]): string {
-  const ranges: Array<{ start: number; end: number; }> = [];
+  const ranges: Array<{ start: number; end: number }> = [];
   const lower = value.toLowerCase();
 
   for (const term of terms) {
@@ -112,12 +113,13 @@ function highlightTermsInText(value: string, terms: readonly string[]): string {
   return highlighted + value.slice(cursor);
 }
 
-
-function mergeRanges(ranges: Array<{ start: number; end: number; }>): Array<{ start: number; end: number; }> {
+function mergeRanges(
+  ranges: Array<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
   const sorted = ranges
     .filter((range) => range.end > range.start)
     .sort((left, right) => left.start - right.start || right.end - left.end);
-  const merged: Array<{ start: number; end: number; }> = [];
+  const merged: Array<{ start: number; end: number }> = [];
 
   for (const range of sorted) {
     const previous = merged.at(-1);

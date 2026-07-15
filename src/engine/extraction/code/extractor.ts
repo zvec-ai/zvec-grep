@@ -14,61 +14,60 @@ import { withParser } from "../tree-sitter/parser.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
 
-
 export type CodeExtractorOptions = {
   maxChunkChars?: number;
   chunkOverlapChars?: number;
 };
 
-
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
-
 
 export class CodeExtractor implements Extractor {
   private readonly maxChunkChars: number;
   private readonly chunkOverlapChars: number;
 
-
   constructor(options: CodeExtractorOptions = {}) {
     const maxChunkChars = options.maxChunkChars ?? DEFAULT_CODE_CHUNK_CHARS;
-    const chunkOverlapChars = options.chunkOverlapChars ?? DEFAULT_CODE_CHUNK_OVERLAP_CHARS;
+    const chunkOverlapChars =
+      options.chunkOverlapChars ?? DEFAULT_CODE_CHUNK_OVERLAP_CHARS;
 
     if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
-      throw new EngineError("Code extractor requires a positive integer chunk size", {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_SIZE",
-        context: `maxChunkChars=${maxChunkChars}`,
-      });
+      throw new EngineError(
+        "Code extractor requires a positive integer chunk size",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_SIZE",
+          context: `maxChunkChars=${maxChunkChars}`,
+        },
+      );
     }
 
     if (
-      !Number.isInteger(chunkOverlapChars)
-      || chunkOverlapChars < 0
-      || chunkOverlapChars >= maxChunkChars
+      !Number.isInteger(chunkOverlapChars) ||
+      chunkOverlapChars < 0 ||
+      chunkOverlapChars >= maxChunkChars
     ) {
-      throw new EngineError("Code extractor requires overlap to be smaller than chunk size", {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_OVERLAP",
-        context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
-      });
+      throw new EngineError(
+        "Code extractor requires overlap to be smaller than chunk size",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_OVERLAP",
+          context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
+        },
+      );
     }
 
     this.maxChunkChars = maxChunkChars;
     this.chunkOverlapChars = chunkOverlapChars;
   }
 
-
   supports(source: Source): boolean {
-    return source.kind === "text"
-      && source.file.kind === "code"
-      && (
-        isScriptBlockFormat(source.file.format)
-        || (
-          hasGrammar(source.file.format)
-          && resolveAdapter(source.file.format) !== null
-        )
-      );
+    return (
+      source.kind === "text" &&
+      source.file.kind === "code" &&
+      (isScriptBlockFormat(source.file.format) ||
+        (hasGrammar(source.file.format) &&
+          resolveAdapter(source.file.format) !== null))
+    );
   }
-
 
   async extract(source: Source): Promise<EntityFragment[]> {
     if (!this.supports(source) || source.kind !== "text") {
@@ -84,43 +83,46 @@ export class CodeExtractor implements Extractor {
       return [];
     }
 
-    const extracted = await withParser(source.text, source.file.format, (tree) => {
-      const collected: CodeEntity[] = [];
-      walkCodeNode(tree.rootNode, adapter, [], collected);
+    const extracted = await withParser(
+      source.text,
+      source.file.format,
+      (tree) => {
+        const collected: CodeEntity[] = [];
+        walkCodeNode(tree.rootNode, adapter, [], collected);
 
-      const output: EntityFragment[] = [];
-      let entityIdIndex = 0;
-      const appendEntity = (entity: CodeEntity): void => {
-        const fragments = codeEntityToSearchFragments(
-          source,
-          adapter,
-          entity,
-          this.maxChunkChars,
-          this.chunkOverlapChars,
-        );
-        const majorId = fragments[0]?.group === ""
-          ? makeEntityId(source.file.id, entityIdIndex)
-          : null;
+        const output: EntityFragment[] = [];
+        let entityIdIndex = 0;
+        const appendEntity = (entity: CodeEntity): void => {
+          const fragments = codeEntityToSearchFragments(
+            source,
+            adapter,
+            entity,
+            this.maxChunkChars,
+            this.chunkOverlapChars,
+          );
+          const majorId =
+            fragments[0]?.group === ""
+              ? makeEntityId(source.file.id, entityIdIndex)
+              : null;
 
-        for (const item of fragments) {
-          const id = makeEntityId(source.file.id, entityIdIndex);
-          output.push({
-            id,
-            ...item,
-            group: item.group === ""
-              ? id
-              : majorId ?? item.group,
-          });
-          entityIdIndex++;
+          for (const item of fragments) {
+            const id = makeEntityId(source.file.id, entityIdIndex);
+            output.push({
+              id,
+              ...item,
+              group: item.group === "" ? id : (majorId ?? item.group),
+            });
+            entityIdIndex++;
+          }
+        };
+
+        for (const entity of collected) {
+          appendEntity(entity);
         }
-      };
 
-      for (const entity of collected) {
-        appendEntity(entity);
-      }
-
-      return output;
-    });
+        return output;
+      },
+    );
 
     if (!extracted || extracted.length === 0) {
       return [];
@@ -129,8 +131,9 @@ export class CodeExtractor implements Extractor {
     return extracted;
   }
 
-
-  private async extractScriptBlocks(source: TextSource): Promise<EntityFragment[]> {
+  private async extractScriptBlocks(
+    source: TextSource,
+  ): Promise<EntityFragment[]> {
     const fragments: EntityFragment[] = [];
 
     for (const block of findScriptBlocks(source.text)) {
@@ -144,19 +147,20 @@ export class CodeExtractor implements Extractor {
         text: block.text,
       });
 
-      fragments.push(...remapScriptBlockFragments(
-        source.file.id,
-        blockFragments,
-        fragments.length,
-        block.startLine,
-        block.startOffset,
-      ));
+      fragments.push(
+        ...remapScriptBlockFragments(
+          source.file.id,
+          blockFragments,
+          fragments.length,
+          block.startLine,
+          block.startOffset,
+        ),
+      );
     }
 
     return fragments;
   }
 }
-
 
 type CodeEntity = {
   node: TSNode;
@@ -168,15 +172,12 @@ type CodeEntity = {
   modifiers: readonly CodeEntityModifier[];
 };
 
-
 type CodeWindow = {
   text: string;
   range: TextRange;
 };
 
-
 type CodeFragmentOutput = Omit<EntityFragment, "id">;
-
 
 type ScriptBlock = {
   text: string;
@@ -185,7 +186,6 @@ type ScriptBlock = {
   startOffset: number;
 };
 
-
 function walkCodeNode(
   node: TSNode,
   adapter: LanguageAdapter,
@@ -193,20 +193,25 @@ function walkCodeNode(
   out: CodeEntity[],
 ): void {
   for (const child of node.children) {
-    const isScope = adapter.scopeTypes.has(child.type)
-      && adapter.shouldEnterScope?.(child) !== false;
-    const isEntity = adapter.entityTypes.has(child.type)
-      && adapter.shouldIndexEntity?.(child) !== false;
+    const isScope =
+      adapter.scopeTypes.has(child.type) &&
+      adapter.shouldEnterScope?.(child) !== false;
+    const isEntity =
+      adapter.entityTypes.has(child.type) &&
+      adapter.shouldIndexEntity?.(child) !== false;
 
     if (isEntity) {
-      const entities = adapter.resolveEntities?.(child)
-        ?? [adapter.resolveEntity ? adapter.resolveEntity(child) : child];
+      const entities = adapter.resolveEntities?.(child) ?? [
+        adapter.resolveEntity ? adapter.resolveEntity(child) : child,
+      ];
 
       for (const entity of entities) {
         const name = adapter.extractName(entity);
-        const entityBreadcrumb = adapter.scopeBreadcrumb?.(entity, breadcrumb) ?? breadcrumb;
-        const symbolType = adapter.classifyNode?.(entity, entityBreadcrumb)
-          ?? classifyCodeNode(entity, entityBreadcrumb);
+        const entityBreadcrumb =
+          adapter.scopeBreadcrumb?.(entity, breadcrumb) ?? breadcrumb;
+        const symbolType =
+          adapter.classifyNode?.(entity, entityBreadcrumb) ??
+          classifyCodeNode(entity, entityBreadcrumb);
 
         out.push({
           node: entity,
@@ -223,7 +228,12 @@ function walkCodeNode(
     if (isScope) {
       const name = adapter.extractName(child);
       const scopeNode = adapter.enterScopeNode?.(child) ?? child;
-      walkCodeNode(scopeNode, adapter, name ? [...breadcrumb, name] : breadcrumb, out);
+      walkCodeNode(
+        scopeNode,
+        adapter,
+        name ? [...breadcrumb, name] : breadcrumb,
+        out,
+      );
       continue;
     }
 
@@ -233,7 +243,6 @@ function walkCodeNode(
   }
 }
 
-
 function codeEntityToSearchFragments(
   source: TextSource,
   adapter: LanguageAdapter,
@@ -242,7 +251,9 @@ function codeEntityToSearchFragments(
   overlapChars: number,
 ): CodeFragmentOutput[] {
   if (entity.node.text.length <= maxChars) {
-    return [codeEntityWindowToFragment(source, entity, nodeToWindow(entity.node))];
+    return [
+      codeEntityWindowToFragment(source, entity, nodeToWindow(entity.node)),
+    ];
   }
 
   const metadata = codeEntityMetadata(entity);
@@ -265,7 +276,6 @@ function codeEntityToSearchFragments(
   ];
 }
 
-
 function codeEntityWindowToFragment(
   source: TextSource,
   entity: CodeEntity,
@@ -282,7 +292,6 @@ function codeEntityWindowToFragment(
   };
 }
 
-
 function nodeToWindow(node: TSNode): CodeWindow {
   return {
     text: node.text,
@@ -296,7 +305,6 @@ function nodeToWindow(node: TSNode): CodeWindow {
   };
 }
 
-
 function* splitLargeNode(
   node: TSNode,
   maxChars: number,
@@ -306,7 +314,13 @@ function* splitLargeNode(
   const statements = body.namedChildren;
 
   if (statements.length <= 1) {
-    yield* splitTextByLines(node.text, maxChars, node.startPosition.row + 1, node.startIndex, overlapChars);
+    yield* splitTextByLines(
+      node.text,
+      maxChars,
+      node.startPosition.row + 1,
+      node.startIndex,
+      overlapChars,
+    );
     return;
   }
 
@@ -321,22 +335,46 @@ function* splitLargeNode(
 
     if (statementChars > maxChars) {
       if (index > groupStart) {
-        yield sliceStatements(source, baseStart, statements, groupStart, index - 1);
+        yield sliceStatements(
+          source,
+          baseStart,
+          statements,
+          groupStart,
+          index - 1,
+        );
       }
-      yield* splitTextByLines(statement.text, maxChars, statement.startPosition.row + 1, statement.startIndex, overlapChars);
+      yield* splitTextByLines(
+        statement.text,
+        maxChars,
+        statement.startPosition.row + 1,
+        statement.startIndex,
+        overlapChars,
+      );
       groupStart = index + 1;
       groupChars = 0;
       continue;
     }
 
     if (groupChars + statementChars > maxChars && index > groupStart) {
-      yield sliceStatements(source, baseStart, statements, groupStart, index - 1);
-      const overlapStart = computeOverlapStart(statements, groupStart, index - 1, overlapChars);
+      yield sliceStatements(
+        source,
+        baseStart,
+        statements,
+        groupStart,
+        index - 1,
+      );
+      const overlapStart = computeOverlapStart(
+        statements,
+        groupStart,
+        index - 1,
+        overlapChars,
+      );
       let candidateStart = overlapStart < index ? overlapStart : index;
       let candidateChars = statementChars;
 
       for (let previous = index - 1; previous >= candidateStart; previous--) {
-        const addedChars = statements[previous].endIndex - statements[previous].startIndex + 1;
+        const addedChars =
+          statements[previous].endIndex - statements[previous].startIndex + 1;
         if (candidateChars + addedChars > maxChars) {
           candidateStart = previous + 1;
           break;
@@ -353,10 +391,15 @@ function* splitLargeNode(
   }
 
   if (groupStart < statements.length) {
-    yield sliceStatements(source, baseStart, statements, groupStart, statements.length - 1);
+    yield sliceStatements(
+      source,
+      baseStart,
+      statements,
+      groupStart,
+      statements.length - 1,
+    );
   }
 }
-
 
 function sliceStatements(
   source: string,
@@ -379,7 +422,6 @@ function sliceStatements(
     },
   };
 }
-
 
 function* splitTextByLines(
   text: string,
@@ -421,7 +463,12 @@ function* splitTextByLines(
       break;
     }
 
-    const overlapLines = computeLineOverlap(lines, lineIndex, endIndex, overlapChars);
+    const overlapLines = computeLineOverlap(
+      lines,
+      lineIndex,
+      endIndex,
+      overlapChars,
+    );
     const nextIndex = endIndex - overlapLines;
     offset += lines.slice(lineIndex, nextIndex).join("\n").length;
     if (nextIndex > lineIndex) {
@@ -430,7 +477,6 @@ function* splitTextByLines(
     lineIndex = nextIndex;
   }
 }
-
 
 function computeOverlapStart(
   statements: readonly TSNode[],
@@ -452,7 +498,6 @@ function computeOverlapStart(
 
   return index + 1;
 }
-
 
 function computeLineOverlap(
   lines: readonly string[],
@@ -478,18 +523,15 @@ function computeLineOverlap(
   return Math.min(count, Math.floor((endIndex - startIndex) / 2));
 }
 
-
 const STRUCTURAL_SYMBOL_TYPES = new Set<CodeSymbolType>([
   "class",
   "interface",
   "module",
 ]);
 
-
 const OUTLINE_MAX_MEMBERS = 32;
 const OUTLINE_MAX_CALLS = 24;
 const OUTLINE_MAX_LINE_CHARS = 180;
-
 
 type OutlineMember = {
   symbolType: CodeSymbolType;
@@ -497,15 +539,23 @@ type OutlineMember = {
   signature?: string;
 };
 
-
-function codeEntityOutline(entity: CodeEntity, adapter: LanguageAdapter): string {
+function codeEntityOutline(
+  entity: CodeEntity,
+  adapter: LanguageAdapter,
+): string {
   const header = extractCodeHeader(entity.node.text);
-  const lines = [header.length > 0 ? header : entity.name ?? entity.symbolType];
+  const lines = [
+    header.length > 0 ? header : (entity.name ?? entity.symbolType),
+  ];
 
   if (STRUCTURAL_SYMBOL_TYPES.has(entity.symbolType)) {
     const members = collectStructureOutlineMembers(entity, adapter);
     if (members.length > 0) {
-      lines.push("", "members:", ...members.map((member) => `- ${formatOutlineMember(member)}`));
+      lines.push(
+        "",
+        "members:",
+        ...members.map((member) => `- ${formatOutlineMember(member)}`),
+      );
     }
   } else if (entity.symbolType === "function") {
     const calls = collectFunctionCallNames(entity.node);
@@ -516,7 +566,6 @@ function codeEntityOutline(entity: CodeEntity, adapter: LanguageAdapter): string
 
   return lines.join("\n").trim();
 }
-
 
 function extractCodeHeader(text: string): string {
   const maxChars = 1200;
@@ -537,7 +586,6 @@ function extractCodeHeader(text: string): string {
     : header;
 }
 
-
 function collectStructureOutlineMembers(
   entity: CodeEntity,
   adapter: LanguageAdapter,
@@ -552,17 +600,22 @@ function collectStructureOutlineMembers(
 
     if (!sameNode(node, entity.node) && adapter.entityTypes.has(node.type)) {
       if (adapter.shouldIndexEntity?.(node) !== false) {
-        const resolved = adapter.resolveEntities?.(node)
-          ?? [adapter.resolveEntity ? adapter.resolveEntity(node) : node];
+        const resolved = adapter.resolveEntities?.(node) ?? [
+          adapter.resolveEntity ? adapter.resolveEntity(node) : node,
+        ];
 
         for (const resolvedNode of resolved) {
-          if (members.length >= OUTLINE_MAX_MEMBERS || sameNode(resolvedNode, entity.node)) {
+          if (
+            members.length >= OUTLINE_MAX_MEMBERS ||
+            sameNode(resolvedNode, entity.node)
+          ) {
             break;
           }
 
           const name = adapter.extractName(resolvedNode);
-          const symbolType = adapter.classifyNode?.(resolvedNode, entity.breadcrumb)
-            ?? classifyCodeNode(resolvedNode, entity.breadcrumb);
+          const symbolType =
+            adapter.classifyNode?.(resolvedNode, entity.breadcrumb) ??
+            classifyCodeNode(resolvedNode, entity.breadcrumb);
           const signature = adapter.extractSignature?.(resolvedNode);
           const key = `${symbolType}:${name ?? ""}:${signature ?? ""}:${resolvedNode.startIndex}`;
 
@@ -585,10 +638,11 @@ function collectStructureOutlineMembers(
   return members;
 }
 
-
 function formatOutlineMember(member: OutlineMember): string {
   const name = member.name ?? "";
-  const signature = member.signature ? truncateOutlineLine(oneLine(member.signature)) : "";
+  const signature = member.signature
+    ? truncateOutlineLine(oneLine(member.signature))
+    : "";
 
   if (signature.length > 0) {
     return name.length > 0 && !signature.includes(name)
@@ -598,7 +652,6 @@ function formatOutlineMember(member: OutlineMember): string {
 
   return name.length > 0 ? `${member.symbolType} ${name}` : member.symbolType;
 }
-
 
 function collectFunctionCallNames(node: TSNode): string[] {
   const calls: string[] = [];
@@ -626,23 +679,24 @@ function collectFunctionCallNames(node: TSNode): string[] {
   return calls;
 }
 
-
 function isCallNode(node: TSNode): boolean {
-  return node.type === "call"
-    || node.type === "call_expression"
-    || node.type === "function_call_expression"
-    || node.type === "method_invocation"
-    || node.type === "object_creation_expression"
-    || node.type === "new_expression";
+  return (
+    node.type === "call" ||
+    node.type === "call_expression" ||
+    node.type === "function_call_expression" ||
+    node.type === "method_invocation" ||
+    node.type === "object_creation_expression" ||
+    node.type === "new_expression"
+  );
 }
 
-
 function extractCallName(node: TSNode): string | undefined {
-  const target = node.childForFieldName("function")
-    ?? node.childForFieldName("name")
-    ?? node.childForFieldName("constructor")
-    ?? node.childForFieldName("type")
-    ?? node.namedChildren[0];
+  const target =
+    node.childForFieldName("function") ??
+    node.childForFieldName("name") ??
+    node.childForFieldName("constructor") ??
+    node.childForFieldName("type") ??
+    node.namedChildren[0];
 
   if (!target) {
     return undefined;
@@ -651,7 +705,6 @@ function extractCallName(node: TSNode): string | undefined {
   return normalizeCallName(target.text);
 }
 
-
 function normalizeCallName(value: string): string | undefined {
   const cleaned = value
     .replace(/\s+/g, " ")
@@ -659,10 +712,10 @@ function normalizeCallName(value: string): string | undefined {
     .trim();
 
   if (
-    cleaned.length === 0
-    || cleaned.length > OUTLINE_MAX_LINE_CHARS
-    || /[\n\r]/.test(cleaned)
-    || !/[A-Za-z_$][A-Za-z0-9_$]*/.test(cleaned)
+    cleaned.length === 0 ||
+    cleaned.length > OUTLINE_MAX_LINE_CHARS ||
+    /[\n\r]/.test(cleaned) ||
+    !/[A-Za-z_$][A-Za-z0-9_$]*/.test(cleaned)
   ) {
     return undefined;
   }
@@ -670,25 +723,23 @@ function normalizeCallName(value: string): string | undefined {
   return cleaned;
 }
 
-
 function sameNode(left: TSNode, right: TSNode): boolean {
-  return left.startIndex === right.startIndex
-    && left.endIndex === right.endIndex
-    && left.type === right.type;
+  return (
+    left.startIndex === right.startIndex &&
+    left.endIndex === right.endIndex &&
+    left.type === right.type
+  );
 }
-
 
 function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
-
 
 function truncateOutlineLine(value: string): string {
   return value.length > OUTLINE_MAX_LINE_CHARS
     ? `${value.slice(0, OUTLINE_MAX_LINE_CHARS - 3).trimEnd()}...`
     : value;
 }
-
 
 function codeEntityMetadata(entity: CodeEntity): CodeEntityMetadata {
   return {
@@ -703,7 +754,6 @@ function codeEntityMetadata(entity: CodeEntity): CodeEntityMetadata {
   };
 }
 
-
 function classifyCodeNode(
   node: TSNode,
   breadcrumb: readonly string[],
@@ -711,20 +761,20 @@ function classifyCodeNode(
   const nodeType = node.type;
 
   if (nodeType === "decorated_definition") {
-    const inner = node.namedChildren.find((child) =>
-      child.type === "function_definition" || child.type === "class_definition",
+    const inner = node.namedChildren.find(
+      (child) =>
+        child.type === "function_definition" ||
+        child.type === "class_definition",
     );
 
     return inner ? classifyCodeNode(inner, breadcrumb) : "value";
   }
 
   if (
-    (
-      nodeType === "field_definition"
-      || nodeType === "public_field_definition"
-      || nodeType === "variable_declarator"
-    )
-    && hasJavascriptTypescriptFunctionValue(node)
+    (nodeType === "field_definition" ||
+      nodeType === "public_field_definition" ||
+      nodeType === "variable_declarator") &&
+    hasJavascriptTypescriptFunctionValue(node)
   ) {
     return "function";
   }
@@ -734,12 +784,10 @@ function classifyCodeNode(
   }
 
   if (
-    breadcrumb.length > 0
-    && (
-      nodeType.includes("function")
-      || nodeType === "declaration"
-      || nodeType === "function_item"
-    )
+    breadcrumb.length > 0 &&
+    (nodeType.includes("function") ||
+      nodeType === "declaration" ||
+      nodeType === "function_item")
   ) {
     return "function";
   }
@@ -753,37 +801,37 @@ function classifyCodeNode(
   }
 
   if (
-    nodeType.includes("class")
-    || nodeType.includes("struct")
-    || nodeType.includes("impl")
-    || nodeType.includes("enum")
-    || nodeType.includes("union")
-    || nodeType.includes("record")
+    nodeType.includes("class") ||
+    nodeType.includes("struct") ||
+    nodeType.includes("impl") ||
+    nodeType.includes("enum") ||
+    nodeType.includes("union") ||
+    nodeType.includes("record")
   ) {
     return "class";
   }
 
   if (
-    nodeType.includes("interface")
-    || nodeType.includes("protocol")
-    || nodeType.includes("trait")
+    nodeType.includes("interface") ||
+    nodeType.includes("protocol") ||
+    nodeType.includes("trait")
   ) {
     return "interface";
   }
 
   if (
-    nodeType.includes("module")
-    || nodeType.includes("namespace")
-    || nodeType === "mod_item"
+    nodeType.includes("module") ||
+    nodeType.includes("namespace") ||
+    nodeType === "mod_item"
   ) {
     return "module";
   }
 
   if (
-    nodeType.includes("alias")
-    || nodeType.includes("typedef")
-    || nodeType === "type_definition"
-    || nodeType === "type_item"
+    nodeType.includes("alias") ||
+    nodeType.includes("typedef") ||
+    nodeType === "type_definition" ||
+    nodeType === "type_item"
   ) {
     return "alias";
   }
@@ -791,18 +839,17 @@ function classifyCodeNode(
   return "value";
 }
 
-
 function truncateInline(value: string, maxChars: number): string {
   const compact = value.replace(/\s+/g, " ").trim();
 
-  return compact.length > maxChars ? `${compact.slice(0, maxChars).trimEnd()}...` : compact;
+  return compact.length > maxChars
+    ? `${compact.slice(0, maxChars).trimEnd()}...`
+    : compact;
 }
-
 
 function isScriptBlockFormat(format: string): boolean {
   return format === "vue" || format === "svelte";
 }
-
 
 function findScriptBlocks(text: string): ScriptBlock[] {
   const blocks: ScriptBlock[] = [];
@@ -831,9 +878,10 @@ function findScriptBlocks(text: string): ScriptBlock[] {
   return blocks;
 }
 
-
 function scriptBlockFormat(attrs: string): ScriptBlock["format"] {
-  const lang = attrs.match(/\blang\s*=\s*["']?([A-Za-z0-9_-]+)/i)?.[1]?.toLowerCase();
+  const lang = attrs
+    .match(/\blang\s*=\s*["']?([A-Za-z0-9_-]+)/i)?.[1]
+    ?.toLowerCase();
 
   if (lang === "ts" || lang === "typescript") {
     return "typescript";
@@ -848,7 +896,6 @@ function scriptBlockFormat(attrs: string): ScriptBlock["format"] {
   return "javascript";
 }
 
-
 function lineAtOffset(text: string, offset: number): number {
   let line = 1;
 
@@ -860,7 +907,6 @@ function lineAtOffset(text: string, offset: number): number {
 
   return line;
 }
-
 
 function remapScriptBlockFragments(
   fileId: string,
@@ -878,12 +924,13 @@ function remapScriptBlockFragments(
   return fragments.map((fragment) => ({
     ...fragment,
     id: idMap.get(fragment.id) ?? fragment.id,
-    group: fragment.group ? idMap.get(fragment.group) ?? fragment.group : undefined,
+    group: fragment.group
+      ? (idMap.get(fragment.group) ?? fragment.group)
+      : undefined,
     fileId,
     range: remapScriptBlockRange(fragment.range, startLine, startOffset),
   }));
 }
-
 
 function remapScriptBlockRange(
   range: EntityFragment["range"],

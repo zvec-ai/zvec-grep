@@ -6,7 +6,6 @@ export type ModelProviderOptions = {
   embeddingParallelism?: number;
 };
 
-
 export type ModelCatalog = Record<
   string,
   {
@@ -15,31 +14,16 @@ export type ModelCatalog = Record<
   }
 >;
 
-
 export type ModelRef = {
   provider: string;
   model: string;
 };
 
+export type VectorMetric = "cosine" | "dot" | "euclidean";
 
-export type VectorMetric =
-  | "cosine"
-  | "dot"
-  | "euclidean";
+export type LlamaGpuMode = "auto" | "metal" | "vulkan" | "cuda" | false;
 
-
-export type LlamaGpuMode =
-  | "auto"
-  | "metal"
-  | "vulkan"
-  | "cuda"
-  | false;
-
-
-export type LocalEmbeddingFormat =
-  | "embeddinggemma"
-  | "qwen3";
-
+export type LocalEmbeddingFormat = "embeddinggemma" | "qwen3";
 
 export type LlamaCppEmbeddingCatalogEntry = {
   id: string;
@@ -53,6 +37,4 @@ export type LlamaCppEmbeddingCatalogEntry = {
   maxBatchSize: number;
 };
 
-
-export type EmbeddingCatalogEntry =
-  | LlamaCppEmbeddingCatalogEntry;
+export type EmbeddingCatalogEntry = LlamaCppEmbeddingCatalogEntry;

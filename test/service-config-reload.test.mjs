@@ -6,9 +6,10 @@ import test from "node:test";
 import { updateGlobalConfig } from "../dist/engine/config.js";
 import { createZvecGrep } from "../dist/index.js";
 
-
 test("explicit embedding reference reloads provider config before refresh and query", async () => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-config-reload-"));
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-config-reload-"),
+  );
   const root = join(temporaryDirectory, "repo");
   const originalHome = process.env.HOME;
   const originalFetch = globalThis.fetch;
@@ -23,20 +24,26 @@ test("explicit embedding reference reloads provider config before refresh and qu
       url: String(input),
       authorization: init?.headers?.Authorization,
     });
-    return new Response(JSON.stringify({
-      data: contents.map((_, index) => ({
-        index,
-        embedding: new Array(1024).fill(0.01),
-      })),
-    }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({
+        data: contents.map((_, index) => ({
+          index,
+          embedding: new Array(1024).fill(0.01),
+        })),
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   };
 
   try {
     await mkdir(join(root, "src"), { recursive: true });
-    await writeFile(join(root, "src", "example.ts"), "export const answer = 42;\n");
+    await writeFile(
+      join(root, "src", "example.ts"),
+      "export const answer = 42;\n",
+    );
     updateGlobalConfig({
       providers: {
         qwen: {
@@ -52,8 +59,14 @@ test("explicit embedding reference reloads provider config before refresh and qu
     });
     await service.index();
     assert.ok(requests.length > 0);
-    assert.ok(requests.every((request) => request.url === "https://endpoint-a.test/embeddings"));
-    assert.ok(requests.every((request) => request.authorization === "Bearer key-a"));
+    assert.ok(
+      requests.every(
+        (request) => request.url === "https://endpoint-a.test/embeddings",
+      ),
+    );
+    assert.ok(
+      requests.every((request) => request.authorization === "Bearer key-a"),
+    );
 
     requests.length = 0;
     updateGlobalConfig({
@@ -64,7 +77,10 @@ test("explicit embedding reference reloads provider config before refresh and qu
         },
       },
     });
-    await writeFile(join(root, "src", "example.ts"), "export const answer = 43;\n");
+    await writeFile(
+      join(root, "src", "example.ts"),
+      "export const answer = 43;\n",
+    );
 
     await service.context({
       root,
@@ -72,8 +88,14 @@ test("explicit embedding reference reloads provider config before refresh and qu
       limit: 1,
     });
     assert.ok(requests.length > 0);
-    assert.ok(requests.every((request) => request.url === "https://endpoint-b.test/embeddings"));
-    assert.ok(requests.every((request) => request.authorization === "Bearer key-b"));
+    assert.ok(
+      requests.every(
+        (request) => request.url === "https://endpoint-b.test/embeddings",
+      ),
+    );
+    assert.ok(
+      requests.every((request) => request.authorization === "Bearer key-b"),
+    );
   } finally {
     await service?.close();
     globalThis.fetch = originalFetch;

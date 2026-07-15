@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/zvec-ai/zvec-grep.git"
+    "url": "git+https://github.com/zvec-ai/zvec-grep.git"
   },
   "bugs": {
     "url": "https://github.com/zvec-ai/zvec-grep/issues"
@@ -16,7 +16,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "exports": {
     ".": {
@@ -36,12 +36,29 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run test:package",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "prepack": "npm run build",
+    "test:coverage": "npm run build && c8 --all --include=dist/**/*.js --check-coverage --lines=80 --statements=80 --functions=80 --branches=80 npm run test:all",
+    "test:all": "node --test --test-concurrency=1 test/*.test.mjs test/unit/*.test.mjs test/integration/*.test.mjs test/e2e/*.test.mjs",
+    "test:e2e": "npm run build && node --test --test-concurrency=1 test/e2e/*.test.mjs",
+    "test:integration": "npm run build && node --test --test-concurrency=1 test/*.test.mjs test/integration/*.test.mjs",
+    "test:package": "npm run build && node --test --test-concurrency=1 test/package/*.test.mjs",
+    "test:unit": "npm run build && node --test test/unit/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "workflow:check": "node scripts/check-workflows.mjs",
+    "test": "npm run build && npm run test:all"
   },
   "devDependencies": {
-    "@types/node": "^25.9.4",
-    "typescript": "^5.9.3"
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
+    "c8": "^11.0.0",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.5",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.64.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

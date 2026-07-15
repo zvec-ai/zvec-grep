@@ -1,24 +1,21 @@
 import type { IndexProgress } from "../../index.js";
 
-
 export type IndexProgressReporter = {
   report(progress: IndexProgress): void;
   finish(): void;
 };
 
-
 export type IndexProgressReporterOptions = {
   nonTtyIntervalMs?: number;
 };
 
-
 const NON_TTY_PROGRESS_INTERVAL_MS = 15_000;
-
 
 export function createIndexProgressReporter(
   options: IndexProgressReporterOptions = {},
 ): IndexProgressReporter {
-  const nonTtyIntervalMs = options.nonTtyIntervalMs ?? NON_TTY_PROGRESS_INTERVAL_MS;
+  const nonTtyIntervalMs =
+    options.nonTtyIntervalMs ?? NON_TTY_PROGRESS_INTERVAL_MS;
   let lastLineLength = 0;
   let finished = false;
   let currentNonTtyLine = "";
@@ -35,7 +32,11 @@ export function createIndexProgressReporter(
     startHeartbeat();
 
     const now = Date.now();
-    if (force || lastNonTtyWriteTime === 0 || now - lastNonTtyWriteTime >= nonTtyIntervalMs) {
+    if (
+      force ||
+      lastNonTtyWriteTime === 0 ||
+      now - lastNonTtyWriteTime >= nonTtyIntervalMs
+    ) {
       writeNonTtyProgressLine(line);
       lastNonTtyWriteTime = now;
     }
@@ -72,12 +73,15 @@ export function createIndexProgressReporter(
       if (progress.phase === "indexing") {
         const indexed = progress.filesIndexed ?? 0;
         const total = progress.filesTotal ?? 0;
-        const detail = progress.detail ? ` ${truncate(progress.detail, 100)}` : "";
+        const detail = progress.detail
+          ? ` ${truncate(progress.detail, 100)}`
+          : "";
         const failed = formatFailedProgress(progress);
         const embedding = formatEmbeddingProgress(progress);
-        const line = total > 0
-          ? `Indexing files: ${indexed}/${total}${detail}${failed}${embedding}`
-          : `Indexing files...${detail}${failed}${embedding}`;
+        const line =
+          total > 0
+            ? `Indexing files: ${indexed}/${total}${detail}${failed}${embedding}`
+            : `Indexing files...${detail}${failed}${embedding}`;
 
         writeLine(line);
         return;
@@ -106,26 +110,23 @@ export function createIndexProgressReporter(
   };
 }
 
-
 function writeTtyProgressLine(line: string, previousLength: number): number {
-  const padding = previousLength > line.length
-    ? " ".repeat(previousLength - line.length)
-    : "";
+  const padding =
+    previousLength > line.length
+      ? " ".repeat(previousLength - line.length)
+      : "";
   process.stderr.write(`\r${line}${padding}`);
   return line.length;
 }
-
 
 function writeNonTtyProgressLine(line: string): void {
   process.stderr.write(`${line}\n`);
 }
 
-
 function formatFailedProgress(progress: IndexProgress): string {
   const failed = progress.filesFailed ?? 0;
   return failed > 0 ? ` [failed=${failed}]` : "";
 }
-
 
 function formatEmbeddingProgress(progress: IndexProgress): string {
   const embedding = progress.embedding;
@@ -138,13 +139,15 @@ function formatEmbeddingProgress(progress: IndexProgress): string {
     parts.push(`concurrency=${embedding.concurrency}`);
   }
 
-  if (typeof embedding.retryableFailures === "number" && embedding.retryableFailures > 0) {
+  if (
+    typeof embedding.retryableFailures === "number" &&
+    embedding.retryableFailures > 0
+  ) {
     parts.push(`retries=${embedding.retryableFailures}`);
   }
 
   return parts.length > 0 ? ` [embed ${parts.join(" ")}]` : "";
 }
-
 
 function truncate(value: string, maxLength: number): string {
   if (value.length <= maxLength) {

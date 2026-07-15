@@ -5,7 +5,6 @@ import {
   extractPrecedingDoc,
 } from "../families/metadata.js";
 
-
 export const RUST_ADAPTER: LanguageAdapter = {
   format: "rust",
   entityTypes: new Set([
@@ -18,11 +17,7 @@ export const RUST_ADAPTER: LanguageAdapter = {
     "type_item",
     "union_item",
   ]),
-  scopeTypes: new Set([
-    "impl_item",
-    "mod_item",
-    "trait_item",
-  ]),
+  scopeTypes: new Set(["impl_item", "mod_item", "trait_item"]),
   extractName(node) {
     if (node.type === "impl_item") {
       return node.childForFieldName("type")?.text;

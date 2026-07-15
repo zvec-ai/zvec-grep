@@ -1,7 +1,6 @@
 import Parser from "web-tree-sitter";
 import { ensureParser, loadGrammar } from "./grammar.js";
 
-
 export async function withParser<T>(
   source: string,
   format: string,

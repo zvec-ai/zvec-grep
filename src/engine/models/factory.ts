@@ -11,7 +11,6 @@ import {
 } from "./providers/index.js";
 import type { ModelProviderOptions, ModelRef } from "./types.js";
 
-
 export function createEmbeddingModel(
   ref: ModelRef,
   options: ModelProviderOptions,
@@ -19,10 +18,13 @@ export function createEmbeddingModel(
   if (ref.provider === "local") {
     const entry = getEmbeddingModelCatalogEntryByRef(ref);
     if (!entry || entry.provider !== "local") {
-      throw new EngineError("Local embedding model is not in the zvec-grep catalog", {
-        code: "ZVEC_GREP.ENGINE.MODELS.LOCAL_MODEL_NOT_IN_CATALOG",
-        context: `provider=${ref.provider} model=${ref.model}`,
-      });
+      throw new EngineError(
+        "Local embedding model is not in the zvec-grep catalog",
+        {
+          code: "ZVEC_GREP.ENGINE.MODELS.LOCAL_MODEL_NOT_IN_CATALOG",
+          context: `provider=${ref.provider} model=${ref.model}`,
+        },
+      );
     }
 
     return new LlamaCppEmbeddingModel(entry, options);
@@ -42,7 +44,6 @@ export function createEmbeddingModel(
   });
 }
 
-
 export function createEmbeddingModelFromCatalog(
   id: string,
   options: ModelProviderOptions,
@@ -55,12 +56,14 @@ export function createEmbeddingModelFromCatalog(
     });
   }
 
-  return createEmbeddingModel({
-    provider: entry.provider,
-    model: entry.model,
-  }, options);
+  return createEmbeddingModel(
+    {
+      provider: entry.provider,
+      model: entry.model,
+    },
+    options,
+  );
 }
-
 
 export function createEmbeddingModelFromReference(
   reference: string,
@@ -68,10 +71,13 @@ export function createEmbeddingModelFromReference(
 ): EmbeddingModel {
   const catalogEntry = getEmbeddingModelCatalogEntry(reference);
   if (catalogEntry) {
-    return createEmbeddingModel({
-      provider: catalogEntry.provider,
-      model: catalogEntry.model,
-    }, options);
+    return createEmbeddingModel(
+      {
+        provider: catalogEntry.provider,
+        model: catalogEntry.model,
+      },
+      options,
+    );
   }
 
   const ref = parseModelReference(reference);
@@ -84,7 +90,6 @@ export function createEmbeddingModelFromReference(
 
   return createEmbeddingModel(ref, options);
 }
-
 
 function parseModelReference(reference: string): ModelRef | undefined {
   const separator = reference.indexOf("/");

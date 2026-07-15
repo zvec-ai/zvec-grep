@@ -1,24 +1,24 @@
-import type { EntityFragment, MarkdownEntityMetadata, TextRange } from "../../types.js";
+import type {
+  EntityFragment,
+  MarkdownEntityMetadata,
+  TextRange,
+} from "../../types.js";
 import { makeEntityId } from "../ids.js";
 import type { Extractor, Source, TextSource } from "../index.js";
-
 
 export type MarkdownExtractorOptions = {
   maxChunkChars?: number;
   chunkOverlapChars?: number;
 };
 
-
 const DEFAULT_MARKDOWN_CHUNK_CHARS = 3600;
 const DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS = 540;
-
 
 type Heading = {
   level: number;
   text: string;
   lineIndex: number;
 };
-
 
 type Section = {
   heading: Heading | null;
@@ -27,28 +27,24 @@ type Section = {
   breadcrumb: readonly string[];
 };
 
-
 type MarkdownWindow = {
   text: string;
   range: TextRange;
 };
 
-
 export class MarkdownExtractor implements Extractor {
   private readonly maxChunkChars: number;
   private readonly chunkOverlapChars: number;
 
-
   constructor(options: MarkdownExtractorOptions = {}) {
     this.maxChunkChars = options.maxChunkChars ?? DEFAULT_MARKDOWN_CHUNK_CHARS;
-    this.chunkOverlapChars = options.chunkOverlapChars ?? DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS;
+    this.chunkOverlapChars =
+      options.chunkOverlapChars ?? DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS;
   }
-
 
   supports(source: Source): boolean {
     return source.kind === "text" && source.file.format === "markdown";
   }
-
 
   async extract(source: Source): Promise<EntityFragment[]> {
     if (!this.supports(source) || source.kind !== "text") {
@@ -83,7 +79,12 @@ export class MarkdownExtractor implements Extractor {
           id,
           group: id,
           fileId: source.file.id,
-          range: linesToWindow(lines, lineOffsets, section.startIndex, section.endIndex).range,
+          range: linesToWindow(
+            lines,
+            lineOffsets,
+            section.startIndex,
+            section.endIndex,
+          ).range,
           content: {
             kind: "text",
             text: markdownOutline(metadata),
@@ -92,13 +93,15 @@ export class MarkdownExtractor implements Extractor {
         });
 
         for (const window of windows) {
-          fragments.push(markdownWindowToFragment(
-            source,
-            metadata,
-            window,
-            fragments.length,
-            id,
-          ));
+          fragments.push(
+            markdownWindowToFragment(
+              source,
+              metadata,
+              window,
+              fragments.length,
+              id,
+            ),
+          );
         }
 
         continue;
@@ -122,7 +125,6 @@ export class MarkdownExtractor implements Extractor {
   }
 }
 
-
 function markdownWindowToFragment(
   source: TextSource,
   metadata: MarkdownEntityMetadata,
@@ -143,11 +145,9 @@ function markdownWindowToFragment(
   };
 }
 
-
 function markdownOutline(metadata: MarkdownEntityMetadata): string {
   return metadata.heading ?? "markdown section";
 }
-
 
 function scanHeadings(lines: readonly string[]): Heading[] {
   const headings: Heading[] = [];
@@ -198,13 +198,18 @@ function scanHeadings(lines: readonly string[]): Heading[] {
   return headings;
 }
 
-
-function buildSections(headings: readonly Heading[], lines: readonly string[]): Section[] {
+function buildSections(
+  headings: readonly Heading[],
+  lines: readonly string[],
+): Section[] {
   const stack: Heading[] = [];
   const sections: Section[] = [];
   const firstHeading = headings[0];
 
-  if (firstHeading.lineIndex > 0 && lines.slice(0, firstHeading.lineIndex).join("\n").trim().length > 0) {
+  if (
+    firstHeading.lineIndex > 0 &&
+    lines.slice(0, firstHeading.lineIndex).join("\n").trim().length > 0
+  ) {
     sections.push({
       heading: null,
       startIndex: 0,
@@ -223,9 +228,10 @@ function buildSections(headings: readonly Heading[], lines: readonly string[]): 
     sections.push({
       heading,
       startIndex: heading.lineIndex,
-      endIndex: index + 1 < headings.length
-        ? headings[index + 1].lineIndex - 1
-        : lines.length - 1,
+      endIndex:
+        index + 1 < headings.length
+          ? headings[index + 1].lineIndex - 1
+          : lines.length - 1,
       breadcrumb: stack.map((item) => item.text),
     });
     stack.push(heading);
@@ -233,7 +239,6 @@ function buildSections(headings: readonly Heading[], lines: readonly string[]): 
 
   return sections;
 }
-
 
 function splitMarkdownSection(input: {
   lines: readonly string[];
@@ -248,12 +253,14 @@ function splitMarkdownSection(input: {
 
   while (startIndex <= input.section.endIndex) {
     if (input.lines[startIndex].length + 1 > input.maxChars) {
-      windows.push(...splitLongLine(
-        input.lines[startIndex],
-        startIndex,
-        input.lineOffsets[startIndex],
-        input.maxChars,
-      ));
+      windows.push(
+        ...splitLongLine(
+          input.lines[startIndex],
+          startIndex,
+          input.lineOffsets[startIndex],
+          input.maxChars,
+        ),
+      );
       startIndex++;
       continue;
     }
@@ -271,10 +278,17 @@ function splitMarkdownSection(input: {
     }
 
     if (endIndex <= input.section.endIndex && endIndex - startIndex > 1) {
-      endIndex = chooseMarkdownBreak(input.lines, input.fenceLines, startIndex, endIndex);
+      endIndex = chooseMarkdownBreak(
+        input.lines,
+        input.fenceLines,
+        startIndex,
+        endIndex,
+      );
     }
 
-    windows.push(linesToWindow(input.lines, input.lineOffsets, startIndex, endIndex - 1));
+    windows.push(
+      linesToWindow(input.lines, input.lineOffsets, startIndex, endIndex - 1),
+    );
 
     if (endIndex > input.section.endIndex) {
       break;
@@ -293,14 +307,14 @@ function splitMarkdownSection(input: {
   return windows.filter((window) => window.text.trim().length > 0);
 }
 
-
 function chooseMarkdownBreak(
   lines: readonly string[],
   fenceLines: readonly boolean[],
   startIndex: number,
   endIndex: number,
 ): number {
-  const minBreak = startIndex + Math.max(1, Math.floor((endIndex - startIndex) * 0.7));
+  const minBreak =
+    startIndex + Math.max(1, Math.floor((endIndex - startIndex) * 0.7));
   let bestBreak = endIndex;
   let bestScore = markdownBreakScore(lines, fenceLines, endIndex);
 
@@ -314,7 +328,6 @@ function chooseMarkdownBreak(
 
   return bestBreak;
 }
-
 
 function markdownBreakScore(
   lines: readonly string[],
@@ -351,7 +364,6 @@ function markdownBreakScore(
   return 10;
 }
 
-
 function splitLongLine(
   line: string,
   lineIndex: number,
@@ -363,9 +375,10 @@ function splitLongLine(
 
   while (offset < line.length) {
     const remaining = line.length - offset;
-    const sliceLength = remaining <= maxChars
-      ? remaining
-      : findLineCut(line.slice(offset), maxChars);
+    const sliceLength =
+      remaining <= maxChars
+        ? remaining
+        : findLineCut(line.slice(offset), maxChars);
     const text = line.slice(offset, offset + sliceLength);
 
     windows.push({
@@ -383,7 +396,6 @@ function splitLongLine(
 
   return windows;
 }
-
 
 function linesToWindow(
   lines: readonly string[],
@@ -403,7 +415,6 @@ function linesToWindow(
   };
 }
 
-
 function computeLineOffsets(lines: readonly string[]): number[] {
   const offsets: number[] = [];
   let offset = 0;
@@ -415,7 +426,6 @@ function computeLineOffsets(lines: readonly string[]): number[] {
 
   return offsets;
 }
-
 
 function computeFenceLines(lines: readonly string[]): boolean[] {
   const inFence = new Array<boolean>(lines.length).fill(false);
@@ -442,7 +452,6 @@ function computeFenceLines(lines: readonly string[]): boolean[] {
   return inFence;
 }
 
-
 function computeMarkdownOverlapLines(
   lines: readonly string[],
   startIndex: number,
@@ -466,7 +475,6 @@ function computeMarkdownOverlapLines(
 
   return Math.min(count, Math.floor((endIndex - startIndex) / 2));
 }
-
 
 function findLineCut(line: string, maxChars: number): number {
   const minPosition = Math.floor(maxChars * 0.7);
@@ -495,7 +503,6 @@ function findLineCut(line: string, maxChars: number): number {
 
   return bestPosition > 0 ? bestPosition : maxChars;
 }
-
 
 function markdownMetadata(section: Section): MarkdownEntityMetadata {
   return {

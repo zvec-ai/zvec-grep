@@ -1,47 +1,26 @@
-import type {
-  EmbeddingCatalogEntry,
-  ModelCatalog,
-  ModelRef,
-} from "./types.js";
-
+import type { EmbeddingCatalogEntry, ModelCatalog, ModelRef } from "./types.js";
 
 export const MODEL_CATALOG = {
   openai: {
-    embedding: [
-      "text-embedding-3-small",
-      "text-embedding-3-large",
-    ],
+    embedding: ["text-embedding-3-small", "text-embedding-3-large"],
     ranking: [],
   },
 
   qwen: {
-    embedding: [
-      "text-embedding-v4",
-      "qwen3-vl-embedding",
-    ],
-    ranking: [
-      "gte-rerank-v2",
-    ],
+    embedding: ["text-embedding-v4", "qwen3-vl-embedding"],
+    ranking: ["gte-rerank-v2"],
   },
 
   jina: {
-    embedding: [
-      "jina-embeddings-v3",
-    ],
-    ranking: [
-      "jina-reranker-v2-base-multilingual",
-    ],
+    embedding: ["jina-embeddings-v3"],
+    ranking: ["jina-reranker-v2-base-multilingual"],
   },
 
   local: {
-    embedding: [
-      "embeddinggemma-300m",
-      "qwen3-embedding-0.6b",
-    ],
+    embedding: ["embeddinggemma-300m", "qwen3-embedding-0.6b"],
     ranking: [],
   },
 } as const satisfies ModelCatalog;
-
 
 export const EMBEDDING_MODEL_CATALOG = {
   "local/embeddinggemma-300m": {
@@ -69,14 +48,11 @@ export const EMBEDDING_MODEL_CATALOG = {
   },
 } as const satisfies Record<string, EmbeddingCatalogEntry>;
 
-
 export type EmbeddingModelCatalogId = keyof typeof EMBEDDING_MODEL_CATALOG;
-
 
 export function listEmbeddingModels(): EmbeddingCatalogEntry[] {
   return Object.values(EMBEDDING_MODEL_CATALOG);
 }
-
 
 export function getEmbeddingModelCatalogEntry(
   id: string,
@@ -84,12 +60,10 @@ export function getEmbeddingModelCatalogEntry(
   return EMBEDDING_MODEL_CATALOG[id as EmbeddingModelCatalogId];
 }
 
-
 export function getEmbeddingModelCatalogEntryByRef(
   ref: ModelRef,
 ): EmbeddingCatalogEntry | undefined {
-  return listEmbeddingModels().find((entry) =>
-    entry.provider === ref.provider
-    && entry.model === ref.model
+  return listEmbeddingModels().find(
+    (entry) => entry.provider === ref.provider && entry.model === ref.model,
   );
 }

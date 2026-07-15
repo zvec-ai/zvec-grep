@@ -10,7 +10,6 @@ import {
   shouldIndexJavascriptTypescriptEntity,
 } from "../families/js-ts.js";
 
-
 export const TYPESCRIPT_ADAPTER: LanguageAdapter = {
   format: "typescript",
   entityTypes: new Set([

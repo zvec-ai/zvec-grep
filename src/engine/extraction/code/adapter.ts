@@ -9,7 +9,6 @@ import { PYTHON_ADAPTER } from "./languages/python.js";
 import { RUST_ADAPTER } from "./languages/rust.js";
 import { TYPESCRIPT_ADAPTER } from "./languages/typescript.js";
 
-
 export type LanguageAdapter = {
   format: string;
   entityTypes: ReadonlySet<string>;
@@ -20,13 +19,18 @@ export type LanguageAdapter = {
   resolveEntities?(node: TSNode): readonly TSNode[];
   enterScopeNode?(node: TSNode): TSNode;
   resolveEntity?(node: TSNode): TSNode;
-  scopeBreadcrumb?(node: TSNode, breadcrumb: readonly string[]): readonly string[];
-  classifyNode?(node: TSNode, breadcrumb: readonly string[]): CodeSymbolType | undefined;
+  scopeBreadcrumb?(
+    node: TSNode,
+    breadcrumb: readonly string[],
+  ): readonly string[];
+  classifyNode?(
+    node: TSNode,
+    breadcrumb: readonly string[],
+  ): CodeSymbolType | undefined;
   extractSignature?(node: TSNode): string | undefined;
   extractDoc?(node: TSNode): string | undefined;
   extractModifiers?(node: TSNode): readonly CodeEntityModifier[];
 };
-
 
 const ADAPTERS: Record<string, LanguageAdapter> = {
   c: C_ADAPTER,
@@ -40,7 +44,6 @@ const ADAPTERS: Record<string, LanguageAdapter> = {
   tsx: TYPESCRIPT_ADAPTER,
   typescript: TYPESCRIPT_ADAPTER,
 };
-
 
 export function resolveAdapter(format: string): LanguageAdapter | null {
   return ADAPTERS[format] ?? null;

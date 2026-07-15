@@ -6,9 +6,10 @@ import {
   extractPrecedingDoc,
 } from "./metadata.js";
 
-
-export type NameFieldAdapterOptions = Pick<LanguageAdapter, "shouldIndexEntity">;
-
+export type NameFieldAdapterOptions = Pick<
+  LanguageAdapter,
+  "shouldIndexEntity"
+>;
 
 export function createNameFieldAdapter(
   format: string,
@@ -22,8 +23,10 @@ export function createNameFieldAdapter(
     scopeTypes: new Set(scopeTypes),
     ...options,
     extractName(node) {
-      return node.childForFieldName("name")?.text
-        ?? findNamedIdentifierChild(node)?.text;
+      return (
+        node.childForFieldName("name")?.text ??
+        findNamedIdentifierChild(node)?.text
+      );
     },
     extractSignature: extractGenericSignature,
     extractDoc: extractPrecedingDoc,
@@ -31,11 +34,11 @@ export function createNameFieldAdapter(
   };
 }
 
-
 function findNamedIdentifierChild(node: TSNode): TSNode | undefined {
-  return node.namedChildren.find((child) =>
-    child.type === "identifier"
-    || child.type === "property_identifier"
-    || child.type === "type_identifier",
+  return node.namedChildren.find(
+    (child) =>
+      child.type === "identifier" ||
+      child.type === "property_identifier" ||
+      child.type === "type_identifier",
   );
 }

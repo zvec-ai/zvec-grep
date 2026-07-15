@@ -9,13 +9,11 @@ import type { CliOptions, PreviewMode } from "../types.js";
 import { createHighlighter, shouldUseColor } from "./highlight.js";
 import { rangeLabel, rangeStartLine } from "./range.js";
 
-
 type ContextItemGroup = {
   file: ZvecGrepContextFile;
   firstRank: number;
   items: ZvecGrepContextItem[];
 };
-
 
 const SHORT_SOURCE_MAX_LINES = 10;
 const SHORT_SOURCE_CONTEXT_BEFORE = 2;
@@ -23,8 +21,10 @@ const SHORT_OUTLINE_MAX_LINES = 7;
 const AGENT_PREVIEW_MAX_LINE_LENGTH = 160;
 const HUMAN_PREVIEW_MAX_LINE_LENGTH = 120;
 
-
-export function printAgentContextResult(result: ZvecGrepContextResult, options: CliOptions): void {
+export function printAgentContextResult(
+  result: ZvecGrepContextResult,
+  options: CliOptions,
+): void {
   const highlighter = plainText;
   const groups = groupContextItems(result.items);
   const preview = previewMode(result, options);
@@ -51,7 +51,10 @@ export function printAgentContextResult(result: ZvecGrepContextResult, options: 
       const sourceLines = sourceLinesForPreview(item, preview, highlighter, {
         maxLineLength: AGENT_PREVIEW_MAX_LINE_LENGTH,
       });
-      for (const line of agentMetadataLines(item, [...outlineLines, ...sourceLines])) {
+      for (const line of agentMetadataLines(item, [
+        ...outlineLines,
+        ...sourceLines,
+      ])) {
         console.log(line);
       }
       for (const line of outlineLines) {
@@ -78,13 +81,14 @@ export function printAgentContextResult(result: ZvecGrepContextResult, options: 
   }
 }
 
-
 function plainText(value: string): string {
   return value;
 }
 
-
-export function printHumanContextResult(result: ZvecGrepContextResult, options: CliOptions): void {
+export function printHumanContextResult(
+  result: ZvecGrepContextResult,
+  options: CliOptions,
+): void {
   const highlighter = createHighlighter(result.query, shouldUseColor(options));
   const theme = createHumanTheme(options);
   const groups = groupContextItems(result.items);
@@ -101,7 +105,11 @@ export function printHumanContextResult(result: ZvecGrepContextResult, options: 
   printHumanField(theme, "Hits", String(result.items.length));
 
   if (groups.length === 0) {
-    printHumanField(theme, "Reason", emptyContextLabel(result).replace(/\.$/, ""));
+    printHumanField(
+      theme,
+      "Reason",
+      emptyContextLabel(result).replace(/\.$/, ""),
+    );
     const missingPaths = result.diagnostics.fallback?.missingPaths ?? [];
     if (missingPaths.length > 0) {
       printHumanField(theme, "Missing", missingPaths.join(", "));
@@ -115,14 +123,23 @@ export function printHumanContextResult(result: ZvecGrepContextResult, options: 
     printHumanField(theme, "Hits", String(group.items.length));
 
     for (const item of group.items.sort(compareContextItems)) {
-      const score = typeof item.score === "number" ? ` score=${formatScore(item.score)}` : "";
+      const score =
+        typeof item.score === "number"
+          ? ` score=${formatScore(item.score)}`
+          : "";
       const matched = matchedRangeLine(item);
 
       console.log("");
-      console.log(`  ${theme.accent(`#${item.rank}`)} ${entitySummary(item)} matchedBy=${theme.accent(item.matchedBy)}${score}`);
-      console.log(`  ${theme.label("Range")}: ${rangeLabel(item.range)}  ${theme.label("Status")}: ${theme.status(item.status)}`);
+      console.log(
+        `  ${theme.accent(`#${item.rank}`)} ${entitySummary(item)} matchedBy=${theme.accent(item.matchedBy)}${score}`,
+      );
+      console.log(
+        `  ${theme.label("Range")}: ${rangeLabel(item.range)}  ${theme.label("Status")}: ${theme.status(item.status)}`,
+      );
       if (matched && preview !== "none") {
-        console.log(`  ${theme.label("Matched")}: ${theme.accent(rangeLabel(item.excerptRange ?? item.range))}`);
+        console.log(
+          `  ${theme.label("Matched")}: ${theme.accent(rangeLabel(item.excerptRange ?? item.range))}`,
+        );
       }
       for (const line of humanMetadataLines(item.metadata)) {
         console.log(`  ${line}`);
@@ -153,10 +170,12 @@ export function printHumanContextResult(result: ZvecGrepContextResult, options: 
   }
 }
 
-
 export function contextWarningLines(result: ZvecGrepContextResult): string[] {
   const missingPaths = result.diagnostics.fallback?.missingPaths ?? [];
-  if (missingPaths.length === 0 || result.diagnostics.emptyReason === "no_searchable_files") {
+  if (
+    missingPaths.length === 0 ||
+    result.diagnostics.emptyReason === "no_searchable_files"
+  ) {
     return [];
   }
 
@@ -165,15 +184,16 @@ export function contextWarningLines(result: ZvecGrepContextResult): string[] {
   ];
 }
 
-
-function previewMode(result: ZvecGrepContextResult, options: CliOptions): PreviewMode {
+function previewMode(
+  result: ZvecGrepContextResult,
+  options: CliOptions,
+): PreviewMode {
   if (result.source === "rg") {
     return "full";
   }
 
   return options.preview ?? (options.human ? "full" : "none");
 }
-
 
 function emptyContextLabel(result: ZvecGrepContextResult): string {
   switch (result.diagnostics.emptyReason ?? "no_matches") {
@@ -188,7 +208,6 @@ function emptyContextLabel(result: ZvecGrepContextResult): string {
   }
 }
 
-
 function emptyContextDetailLines(result: ZvecGrepContextResult): string[] {
   const lines: string[] = [];
   const missingPaths = result.diagnostics.fallback?.missingPaths ?? [];
@@ -199,8 +218,9 @@ function emptyContextDetailLines(result: ZvecGrepContextResult): string[] {
   return lines;
 }
 
-
-function groupContextItems(items: readonly ZvecGrepContextItem[]): ContextItemGroup[] {
+function groupContextItems(
+  items: readonly ZvecGrepContextItem[],
+): ContextItemGroup[] {
   const groups = new Map<string, ContextItemGroup>();
 
   for (const item of items) {
@@ -219,19 +239,23 @@ function groupContextItems(items: readonly ZvecGrepContextItem[]): ContextItemGr
     });
   }
 
-  return [...groups.values()].sort((left, right) => (
-    left.firstRank - right.firstRank
-    || left.file.relativePath.localeCompare(right.file.relativePath)
-  ));
+  return [...groups.values()].sort(
+    (left, right) =>
+      left.firstRank - right.firstRank ||
+      left.file.relativePath.localeCompare(right.file.relativePath),
+  );
 }
 
-
-function compareContextItems(left: ZvecGrepContextItem, right: ZvecGrepContextItem): number {
-  return left.rank - right.rank
-    || rangeStartLine(left.range) - rangeStartLine(right.range)
-    || rangeLabel(left.range).localeCompare(rangeLabel(right.range));
+function compareContextItems(
+  left: ZvecGrepContextItem,
+  right: ZvecGrepContextItem,
+): number {
+  return (
+    left.rank - right.rank ||
+    rangeStartLine(left.range) - rangeStartLine(right.range) ||
+    rangeLabel(left.range).localeCompare(rangeLabel(right.range))
+  );
 }
-
 
 function agentMetadataLines(
   item: ZvecGrepContextItem,
@@ -243,17 +267,19 @@ function agentMetadataLines(
     lines.push("status: possibly_stale");
   }
 
-  lines.push(...agentMetadataFields(item.metadata, visiblePreviewLines, {
-    forceSymbol: item.kind === "lexical_match" && item.container !== undefined,
-  }));
+  lines.push(
+    ...agentMetadataFields(item.metadata, visiblePreviewLines, {
+      forceSymbol:
+        item.kind === "lexical_match" && item.container !== undefined,
+    }),
+  );
   return lines;
 }
-
 
 function agentMetadataFields(
   metadata: EntityMetadata | undefined,
   visiblePreviewLines: readonly string[],
-  options: { forceSymbol?: boolean; } = {},
+  options: { forceSymbol?: boolean } = {},
 ): string[] {
   if (!metadata) {
     return [];
@@ -262,11 +288,14 @@ function agentMetadataFields(
   if (metadata.kind === "code") {
     const lines: string[] = [];
     if (
-      metadata.symbolName
-      && (options.forceSymbol || !previewLinesContain(visiblePreviewLines, metadata.symbolName))
+      metadata.symbolName &&
+      (options.forceSymbol ||
+        !previewLinesContain(visiblePreviewLines, metadata.symbolName))
     ) {
       const scope = metadata.scope ? ` scope: ${metadata.scope}` : "";
-      lines.push(`symbol: ${metadata.symbolType} ${metadata.symbolName}${scope}`);
+      lines.push(
+        `symbol: ${metadata.symbolType} ${metadata.symbolName}${scope}`,
+      );
     }
 
     return lines;
@@ -285,26 +314,26 @@ function agentMetadataFields(
   return lines;
 }
 
-
 function previewLinesContain(lines: readonly string[], value: string): boolean {
   return lines.some((line) => line.includes(value));
 }
 
-
-function agentOutlineLines(item: ZvecGrepContextItem, preview: PreviewMode): string[] {
+function agentOutlineLines(
+  item: ZvecGrepContextItem,
+  preview: PreviewMode,
+): string[] {
   const lines = outlineLinesForPreview(item, preview);
   if (lines.length === 0) {
     return [];
   }
 
-  return [
-    "outline:",
-    ...lines,
-  ];
+  return ["outline:", ...lines];
 }
 
-
-function outlineLinesForPreview(item: ZvecGrepContextItem, preview: PreviewMode): string[] {
+function outlineLinesForPreview(
+  item: ZvecGrepContextItem,
+  preview: PreviewMode,
+): string[] {
   if (preview === "none") {
     return [];
   }
@@ -320,7 +349,6 @@ function outlineLinesForPreview(item: ZvecGrepContextItem, preview: PreviewMode)
     : lines;
 }
 
-
 function outlineContent(item: ZvecGrepContextItem): string | undefined {
   if (item.contentRole === "outline") {
     return item.content;
@@ -329,24 +357,24 @@ function outlineContent(item: ZvecGrepContextItem): string | undefined {
   return item.outline;
 }
 
-
 function itemHasSourceContent(item: ZvecGrepContextItem): boolean {
   return item.contentRole !== "outline" && item.content.length > 0;
 }
-
 
 function matchedRangeLine(item: ZvecGrepContextItem): string | undefined {
   if (item.kind === "lexical_match") {
     return undefined;
   }
 
-  if (!item.excerptRange || rangeLabel(item.excerptRange) === rangeLabel(item.range)) {
+  if (
+    !item.excerptRange ||
+    rangeLabel(item.excerptRange) === rangeLabel(item.range)
+  ) {
     return undefined;
   }
 
   return `matched: ${rangeLabel(item.excerptRange)}`;
 }
-
 
 function humanMetadataLines(metadata: EntityMetadata | undefined): string[] {
   if (!metadata) {
@@ -362,7 +390,9 @@ function humanMetadataLines(metadata: EntityMetadata | undefined): string[] {
       lines.push(`Scope: ${metadata.scope}`);
     }
     if (metadata.signature) {
-      lines.push(`Signature: ${truncate(oneLine(metadata.signature), HUMAN_PREVIEW_MAX_LINE_LENGTH)}`);
+      lines.push(
+        `Signature: ${truncate(oneLine(metadata.signature), HUMAN_PREVIEW_MAX_LINE_LENGTH)}`,
+      );
     }
     if (metadata.modifiers.length > 0) {
       lines.push(`Modifiers: ${metadata.modifiers.join(", ")}`);
@@ -383,27 +413,30 @@ function humanMetadataLines(metadata: EntityMetadata | undefined): string[] {
   return lines;
 }
 
-
 function numberedSourceLines(
   item: ZvecGrepContextItem,
   highlighter: (value: string) => string,
 ): string[] {
   return sourceLineEntries(item).map((entry) =>
-    formatSourceLine(entry, highlighter, undefined, sourceLineMarker(item, entry)));
+    formatSourceLine(
+      entry,
+      highlighter,
+      undefined,
+      sourceLineMarker(item, entry),
+    ),
+  );
 }
-
 
 type SourceLineEntry = {
   lineNumber: number | null;
   text: string;
 };
 
-
 function sourceLinesForPreview(
   item: ZvecGrepContextItem,
   preview: PreviewMode,
   highlighter: (value: string) => string,
-  options: { maxLineLength: number; },
+  options: { maxLineLength: number },
 ): string[] {
   if (!itemHasSourceContent(item)) {
     return [];
@@ -421,20 +454,31 @@ function sourceLinesForPreview(
   if (preview === "none") {
     const entry = entries[sourceAnchorIndex(item, entries)];
     return entry
-      ? [formatSourceLine(entry, highlighter, options.maxLineLength, sourceLineMarker(item, entry))]
+      ? [
+          formatSourceLine(
+            entry,
+            highlighter,
+            options.maxLineLength,
+            sourceLineMarker(item, entry),
+          ),
+        ]
       : [];
   }
 
   const lines = sourceWindowEntries(item, entries, SHORT_SOURCE_MAX_LINES);
-  return lines.map((line) => typeof line === "string"
-    ? line
-    : formatSourceLine(line, highlighter, options.maxLineLength, sourceLineMarker(item, line)));
+  return lines.map((line) =>
+    typeof line === "string"
+      ? line
+      : formatSourceLine(
+          line,
+          highlighter,
+          options.maxLineLength,
+          sourceLineMarker(item, line),
+        ),
+  );
 }
 
-
-function sourceLineEntries(
-  item: ZvecGrepContextItem,
-): SourceLineEntry[] {
+function sourceLineEntries(item: ZvecGrepContextItem): SourceLineEntry[] {
   const lines = splitContentLines(item.content);
   const range = contentRangeForItem(item, lines.length);
   const startLine = range.kind === "text" ? range.startLine : null;
@@ -445,8 +489,10 @@ function sourceLineEntries(
   }));
 }
 
-
-function contentRangeForItem(item: ZvecGrepContextItem, lineCount: number): Range {
+function contentRangeForItem(
+  item: ZvecGrepContextItem,
+  lineCount: number,
+): Range {
   if (item.kind === "lexical_match" || !item.excerptRange) {
     return item.range;
   }
@@ -462,7 +508,6 @@ function contentRangeForItem(item: ZvecGrepContextItem, lineCount: number): Rang
     : item.range;
 }
 
-
 function sourceWindowEntries(
   item: ZvecGrepContextItem,
   entries: readonly SourceLineEntry[],
@@ -473,9 +518,10 @@ function sourceWindowEntries(
   }
 
   const anchorIndex = sourceAnchorIndex(item, entries);
-  const excerptLineCount = item.excerptRange?.kind === "text"
-    ? textRangeLineCount(item.excerptRange)
-    : 1;
+  const excerptLineCount =
+    item.excerptRange?.kind === "text"
+      ? textRangeLineCount(item.excerptRange)
+      : 1;
   const before = excerptLineCount >= maxLines ? 0 : SHORT_SOURCE_CONTEXT_BEFORE;
   let start = Math.max(0, anchorIndex - before);
   if (start + maxLines > entries.length) {
@@ -490,7 +536,6 @@ function sourceWindowEntries(
   ];
 }
 
-
 function sourceAnchorIndex(
   item: ZvecGrepContextItem,
   entries: readonly SourceLineEntry[],
@@ -500,11 +545,12 @@ function sourceAnchorIndex(
   }
 
   const excerptRange = item.excerptRange;
-  const index = entries.findIndex((entry) =>
-    entry.lineNumber !== null && entry.lineNumber >= excerptRange.startLine);
+  const index = entries.findIndex(
+    (entry) =>
+      entry.lineNumber !== null && entry.lineNumber >= excerptRange.startLine,
+  );
   return index >= 0 ? index : 0;
 }
-
 
 function formatSourceLine(
   entry: SourceLineEntry,
@@ -513,19 +559,18 @@ function formatSourceLine(
   marker?: ":" | "-",
 ): string {
   const prefix = entry.lineNumber === null ? "" : String(entry.lineNumber);
-  const text = maxLineLength === undefined
-    ? entry.text
-    : truncate(entry.text, maxLineLength);
+  const text =
+    maxLineLength === undefined
+      ? entry.text
+      : truncate(entry.text, maxLineLength);
   return marker
     ? `${prefix}${marker}\t${highlighter(text)}`
     : `${prefix}\t${highlighter(text)}`;
 }
 
-
 function headerRange(item: ZvecGrepContextItem): Range {
   return item.container?.range ?? item.range;
 }
-
 
 function sourceLineMarker(
   item: ZvecGrepContextItem,
@@ -540,11 +585,11 @@ function sourceLineMarker(
     return ":";
   }
 
-  return entry.lineNumber >= matchRange.startLine && entry.lineNumber <= matchRange.endLine
+  return entry.lineNumber >= matchRange.startLine &&
+    entry.lineNumber <= matchRange.endLine
     ? ":"
     : "-";
 }
-
 
 function clipLines(lines: readonly string[], maxLines: number): string[] {
   return lines.length > maxLines
@@ -552,11 +597,9 @@ function clipLines(lines: readonly string[], maxLines: number): string[] {
     : [...lines];
 }
 
-
-function textRangeLineCount(range: Extract<Range, { kind: "text"; }>): number {
+function textRangeLineCount(range: Extract<Range, { kind: "text" }>): number {
   return range.endLine - range.startLine + 1;
 }
-
 
 function traceDetailLine(item: ZvecGrepContextItem): string | null {
   const trace = item.trace;
@@ -579,8 +622,9 @@ function traceDetailLine(item: ZvecGrepContextItem): string | null {
   return parts.length > 0 ? parts.join("; ") : null;
 }
 
-
-function traceRecallSummaries(trace: NonNullable<ZvecGrepContextItem["trace"]>["recall"]): string[] {
+function traceRecallSummaries(
+  trace: NonNullable<ZvecGrepContextItem["trace"]>["recall"],
+): string[] {
   const byQuery = new Map<string, typeof trace>();
 
   for (const recall of trace) {
@@ -604,17 +648,14 @@ function traceRecallSummaries(trace: NonNullable<ZvecGrepContextItem["trace"]>["
   });
 }
 
-
 function traceRouteLabel(routeId: string | undefined, path: string): string {
   return routeId && routeId !== path ? `${routeId}/${path}` : path;
 }
-
 
 function splitContentLines(content: string): string[] {
   const lines = content.split(/\r?\n/);
   return lines.length > 0 ? lines : [""];
 }
-
 
 function entitySummary(item: ZvecGrepContextItem): string {
   const metadata = item.metadata;
@@ -631,7 +672,6 @@ function entitySummary(item: ZvecGrepContextItem): string {
   return metadata.heading ? `heading ${metadata.heading}` : "markdown";
 }
 
-
 function contextLabel(result: ZvecGrepContextResult): string {
   if (result.collection) {
     return result.collection.anonymous
@@ -642,28 +682,22 @@ function contextLabel(result: ZvecGrepContextResult): string {
   return `${result.root} ${result.source}`;
 }
 
-
 function routeLabel(result: ZvecGrepContextResult): string | undefined {
   const routes = result.diagnostics.index?.routes;
   if (!routes || routes.length === 0) {
     return undefined;
   }
 
-  return routes
-    .map((route) => `${route.mode}:${route.query}`)
-    .join(", ");
+  return routes.map((route) => `${route.mode}:${route.query}`).join(", ");
 }
-
 
 function formatScore(score: number): string {
   return Number.isInteger(score) ? String(score) : score.toFixed(4);
 }
 
-
 function oneLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
-
 
 function truncate(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
@@ -673,7 +707,6 @@ function truncate(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(0, maxLength - 1))}...`;
 }
 
-
 type HumanTheme = {
   label(value: string): string;
   accent(value: string): string;
@@ -681,11 +714,13 @@ type HumanTheme = {
   status(value: string): string;
 };
 
-
-function printHumanField(theme: HumanTheme, label: string, value: string): void {
+function printHumanField(
+  theme: HumanTheme,
+  label: string,
+  value: string,
+): void {
   console.log(`${theme.label(label)}: ${value}`);
 }
-
 
 function createHumanTheme(options: CliOptions): HumanTheme {
   if (!shouldUseColor(options)) {
@@ -705,19 +740,21 @@ function createHumanTheme(options: CliOptions): HumanTheme {
   };
 }
 
-
 function colorHumanStatus(value: string): string {
   if (value === "fresh" || value === "lexical_exhaustive") {
     return `\x1b[32m${value}\x1b[0m`;
   }
 
-  if (value === "possibly_stale" || value === "lexical_truncated" || value === "ranked_sample") {
+  if (
+    value === "possibly_stale" ||
+    value === "lexical_truncated" ||
+    value === "ranked_sample"
+  ) {
     return `\x1b[33m${value}\x1b[0m`;
   }
 
   return `\x1b[1m${value}\x1b[0m`;
 }
-
 
 function identity(value: string): string {
   return value;

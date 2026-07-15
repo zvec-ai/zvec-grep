@@ -10,7 +10,6 @@ import {
   shouldIndexJavascriptTypescriptEntity,
 } from "../families/js-ts.js";
 
-
 export const JAVASCRIPT_ADAPTER: LanguageAdapter = {
   format: "javascript",
   entityTypes: new Set([
@@ -22,9 +21,7 @@ export const JAVASCRIPT_ADAPTER: LanguageAdapter = {
     "pair",
     "variable_declarator",
   ]),
-  scopeTypes: new Set([
-    "class_declaration",
-  ]),
+  scopeTypes: new Set(["class_declaration"]),
   extractName: extractJavascriptTypescriptName,
   shouldIndexEntity: shouldIndexJavascriptTypescriptEntity,
   resolveEntities: resolveJavascriptTypescriptEntities,

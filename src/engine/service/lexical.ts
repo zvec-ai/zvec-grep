@@ -7,7 +7,6 @@ import type {
   ZvecGrepLexicalFallbackDiagnostics,
 } from "./types.js";
 
-
 type LexicalFallbackOptions = {
   root: string;
   query: string;
@@ -19,12 +18,10 @@ type LexicalFallbackOptions = {
   rgOptions?: ZvecGrepSearchOptions;
 };
 
-
 type LexicalFallbackResult = {
   items: ZvecGrepContextItem[];
   diagnostics: ZvecGrepLexicalFallbackDiagnostics;
 };
-
 
 type RgSearchOptions = {
   root: string;
@@ -38,31 +35,26 @@ type RgSearchOptions = {
   rgOptions?: ZvecGrepSearchOptions;
 };
 
-
 type CommandResult = {
   items: ZvecGrepContextItem[];
   truncated: boolean;
   args: string[];
 };
 
-
 type RipgrepRunOptions = RgSearchOptions & {
   fixedStringsDefault: boolean;
   includeDefaultIgnores: boolean;
 };
-
 
 type CheckedSearchPaths = {
   paths?: readonly string[];
   missingPaths: readonly string[];
 };
 
-
 type RipgrepBackend = {
   backend: "bundled-rg" | "rg";
   command: string;
 };
-
 
 const DEFAULT_IGNORED_DIRECTORIES = [
   "node_modules",
@@ -100,21 +92,14 @@ const DEFAULT_IGNORED_DIRECTORIES = [
   "logs",
 ] as const;
 
-
-const HARD_IGNORED_HIDDEN_DIRECTORIES = [
-  ".git",
-  ".zvec-grep",
-] as const;
-
+const HARD_IGNORED_HIDDEN_DIRECTORIES = [".git", ".zvec-grep"] as const;
 
 const DIAGNOSTIC_IGNORED_DIRECTORIES = [
   ...DEFAULT_IGNORED_DIRECTORIES,
   ...HARD_IGNORED_HIDDEN_DIRECTORIES,
 ] as const;
 
-
 let bundledRipgrepPath: string | null | undefined;
-
 
 export async function runLexicalFallback(
   options: LexicalFallbackOptions,
@@ -122,13 +107,16 @@ export async function runLexicalFallback(
   let commandMissing: unknown;
   for (const backend of await ripgrepBackends()) {
     try {
-      const result = await runRipgrep({
-        ...options,
-        patterns: [options.query],
-        paths: [options.root],
-        fixedStringsDefault: true,
-        includeDefaultIgnores: true,
-      }, backend.command);
+      const result = await runRipgrep(
+        {
+          ...options,
+          patterns: [options.query],
+          paths: [options.root],
+          fixedStringsDefault: true,
+          includeDefaultIgnores: true,
+        },
+        backend.command,
+      );
 
       return {
         items: result.items,
@@ -153,7 +141,6 @@ export async function runLexicalFallback(
     ? commandMissing
     : new Error("ripgrep command not found");
 }
-
 
 export async function runRgSearch(
   options: RgSearchOptions,
@@ -186,12 +173,15 @@ export async function runRgSearch(
   let commandMissing: unknown;
   for (const backend of backends) {
     try {
-      const result = await runRipgrep({
-        ...options,
-        paths: paths.paths,
-        fixedStringsDefault: false,
-        includeDefaultIgnores: false,
-      }, backend.command);
+      const result = await runRipgrep(
+        {
+          ...options,
+          paths: paths.paths,
+          fixedStringsDefault: false,
+          includeDefaultIgnores: false,
+        },
+        backend.command,
+      );
 
       return {
         items: result.items,
@@ -200,7 +190,8 @@ export async function runRgSearch(
           command: backend.command,
           args: result.args,
           ignoredDirectories: HARD_IGNORED_HIDDEN_DIRECTORIES,
-          missingPaths: paths.missingPaths.length > 0 ? paths.missingPaths : undefined,
+          missingPaths:
+            paths.missingPaths.length > 0 ? paths.missingPaths : undefined,
           searchedPaths: paths.paths,
           limit: options.limit,
           truncated: result.truncated,
@@ -218,7 +209,6 @@ export async function runRgSearch(
     ? commandMissing
     : new Error("ripgrep command not found");
 }
-
 
 async function ripgrepBackends(): Promise<RipgrepBackend[]> {
   const bundled = await resolveBundledRipgrepPath();
@@ -239,7 +229,6 @@ async function ripgrepBackends(): Promise<RipgrepBackend[]> {
   return backends;
 }
 
-
 async function resolveBundledRipgrepPath(): Promise<string | undefined> {
   if (bundledRipgrepPath !== undefined) {
     return bundledRipgrepPath ?? undefined;
@@ -254,7 +243,6 @@ async function resolveBundledRipgrepPath(): Promise<string | undefined> {
 
   return bundledRipgrepPath ?? undefined;
 }
-
 
 function runRipgrep(
   options: RipgrepRunOptions,
@@ -274,7 +262,6 @@ function runRipgrep(
   });
 }
 
-
 function buildRipgrepArgs(options: RipgrepRunOptions): string[] {
   return [
     "--json",
@@ -287,9 +274,9 @@ function buildRipgrepArgs(options: RipgrepRunOptions): string[] {
     ...hiddenSearchArgs(options.includePaths, options.rgOptions),
     ...(options.includeDefaultIgnores
       ? DEFAULT_IGNORED_DIRECTORIES.flatMap((directory) => [
-        "--glob",
-        `!**/${directory}/**`,
-      ])
+          "--glob",
+          `!**/${directory}/**`,
+        ])
       : []),
     ...pathFilterArgs(options.includePaths, false),
     ...pathFilterArgs(options.excludePaths, true),
@@ -297,10 +284,11 @@ function buildRipgrepArgs(options: RipgrepRunOptions): string[] {
     ...(options.rgOptions?.extraArgs ?? []),
     ...patternArgs(options.patterns),
     "--",
-    ...(options.paths && options.paths.length > 0 ? options.paths : [options.root]),
+    ...(options.paths && options.paths.length > 0
+      ? options.paths
+      : [options.root]),
   ];
 }
-
 
 function ripgrepSearchArgs(
   options: ZvecGrepSearchOptions | undefined,
@@ -319,14 +307,14 @@ function ripgrepSearchArgs(
   return args;
 }
 
-
 function hiddenSearchArgs(
   includePaths: readonly string[] | undefined,
   options: ZvecGrepSearchOptions | undefined,
 ): string[] {
-  return options?.hidden || includesHiddenPath(includePaths) ? ["--hidden"] : [];
+  return options?.hidden || includesHiddenPath(includePaths)
+    ? ["--hidden"]
+    : [];
 }
-
 
 function hardIgnoredHiddenDirectoryArgs(): string[] {
   return HARD_IGNORED_HIDDEN_DIRECTORIES.flatMap((directory) => [
@@ -335,8 +323,10 @@ function hardIgnoredHiddenDirectoryArgs(): string[] {
   ]);
 }
 
-
-function pathFilterArgs(patterns: readonly string[] | undefined, negated: boolean): string[] {
+function pathFilterArgs(
+  patterns: readonly string[] | undefined,
+  negated: boolean,
+): string[] {
   if (!patterns || patterns.length === 0) {
     return [];
   }
@@ -345,9 +335,9 @@ function pathFilterArgs(patterns: readonly string[] | undefined, negated: boolea
     expandRipgrepPathGlob(pattern).flatMap((expandedPattern) => [
       "--glob",
       negated ? `!${expandedPattern}` : expandedPattern,
-    ]));
+    ]),
+  );
 }
-
 
 function expandRipgrepPathGlob(pattern: string): string[] {
   const normalized = pattern.startsWith("./") ? pattern.slice(2) : pattern;
@@ -355,17 +345,12 @@ function expandRipgrepPathGlob(pattern: string): string[] {
     return [normalized];
   }
 
-  return [
-    normalized,
-    `**/${normalized}`,
-  ];
+  return [normalized, `**/${normalized}`];
 }
-
 
 function patternArgs(patterns: readonly string[]): string[] {
   return patterns.flatMap((pattern) => ["--regexp", pattern]);
 }
-
 
 function includesHiddenPath(patterns: readonly string[] | undefined): boolean {
   if (!patterns || patterns.length === 0) {
@@ -373,18 +358,18 @@ function includesHiddenPath(patterns: readonly string[] | undefined): boolean {
   }
 
   return patterns.some((pattern) =>
-    pattern
-      .split(/[\\/]+/)
-      .some((segment) => isHiddenPatternSegment(segment)));
+    pattern.split(/[\\/]+/).some((segment) => isHiddenPatternSegment(segment)),
+  );
 }
-
 
 function isHiddenPatternSegment(segment: string): boolean {
   return segment.startsWith(".") && segment !== "." && segment !== "..";
 }
 
-
-function checkSearchPaths(root: string, paths: readonly string[] | undefined): CheckedSearchPaths {
+function checkSearchPaths(
+  root: string,
+  paths: readonly string[] | undefined,
+): CheckedSearchPaths {
   if (!paths || paths.length === 0) {
     return {
       paths,
@@ -408,11 +393,9 @@ function checkSearchPaths(root: string, paths: readonly string[] | undefined): C
   };
 }
 
-
 function resolveSearchPath(root: string, path: string): string {
   return isAbsolute(path) ? path : resolve(root, path);
 }
-
 
 function runCommand(options: {
   command: string;
@@ -454,7 +437,10 @@ function runCommand(options: {
         const item = parsedItem
           ? expandContextItem(parsedItem, options.rgOptions, contextCache)
           : null;
-        if (item && matchesModifiedTime(item.file.absolutePath, options, mtimeCache)) {
+        if (
+          item &&
+          matchesModifiedTime(item.file.absolutePath, options, mtimeCache)
+        ) {
           items.push(item);
         }
 
@@ -477,15 +463,18 @@ function runCommand(options: {
 
     child.on("close", (code) => {
       if (
-        !killedAfterLimit
-        && stdoutBuffer.length > 0
-        && (!hasLimit || items.length < options.limit!)
+        !killedAfterLimit &&
+        stdoutBuffer.length > 0 &&
+        (!hasLimit || items.length < options.limit!)
       ) {
         const parsedItem = options.parseLine(stdoutBuffer, items.length + 1);
         const item = parsedItem
           ? expandContextItem(parsedItem, options.rgOptions, contextCache)
           : null;
-        if (item && matchesModifiedTime(item.file.absolutePath, options, mtimeCache)) {
+        if (
+          item &&
+          matchesModifiedTime(item.file.absolutePath, options, mtimeCache)
+        ) {
           items.push(item);
         }
       }
@@ -499,11 +488,14 @@ function runCommand(options: {
         return;
       }
 
-      reject(new Error(`${options.command} failed with exit code ${code}: ${stderr.trim()}`));
+      reject(
+        new Error(
+          `${options.command} failed with exit code ${code}: ${stderr.trim()}`,
+        ),
+      );
     });
   });
 }
-
 
 function expandContextItem(
   item: ZvecGrepContextItem,
@@ -543,7 +535,6 @@ function expandContextItem(
   };
 }
 
-
 function readTextLines(
   path: string,
   cache: Map<string, string[] | null>,
@@ -566,7 +557,6 @@ function readTextLines(
   return lines;
 }
 
-
 function matchesModifiedTime(
   path: string,
   options: {
@@ -575,7 +565,10 @@ function matchesModifiedTime(
   },
   cache: Map<string, boolean>,
 ): boolean {
-  if (options.modifiedAfter === undefined && options.modifiedBefore === undefined) {
+  if (
+    options.modifiedAfter === undefined &&
+    options.modifiedBefore === undefined
+  ) {
     return true;
   }
 
@@ -589,8 +582,11 @@ function matchesModifiedTime(
     const info = statSync(path, { throwIfNoEntry: false });
     if (info?.isFile()) {
       const modifiedTime = info.mtimeMs;
-      matched = (options.modifiedAfter === undefined || modifiedTime >= options.modifiedAfter)
-        && (options.modifiedBefore === undefined || modifiedTime <= options.modifiedBefore);
+      matched =
+        (options.modifiedAfter === undefined ||
+          modifiedTime >= options.modifiedAfter) &&
+        (options.modifiedBefore === undefined ||
+          modifiedTime <= options.modifiedBefore);
     }
   } catch {
     matched = false;
@@ -599,7 +595,6 @@ function matchesModifiedTime(
   cache.set(path, matched);
   return matched;
 }
-
 
 function parseRipgrepJsonLine(
   line: string,
@@ -636,11 +631,16 @@ function parseRipgrepJsonLine(
 
   const path = normalizeResultPath(root, data.path.text);
   const lineText = trimTrailingNewline(data.lines.text);
-  const firstSubmatch = Array.isArray(data.submatches) && isRecord(data.submatches[0])
-    ? data.submatches[0]
-    : undefined;
-  const startOffset = typeof firstSubmatch?.start === "number" ? firstSubmatch.start : 0;
-  const endOffset = typeof firstSubmatch?.end === "number" ? firstSubmatch.end : lineText.length;
+  const firstSubmatch =
+    Array.isArray(data.submatches) && isRecord(data.submatches[0])
+      ? data.submatches[0]
+      : undefined;
+  const startOffset =
+    typeof firstSubmatch?.start === "number" ? firstSubmatch.start : 0;
+  const endOffset =
+    typeof firstSubmatch?.end === "number"
+      ? firstSubmatch.end
+      : lineText.length;
 
   return {
     kind: "lexical_match",
@@ -659,7 +659,6 @@ function parseRipgrepJsonLine(
   };
 }
 
-
 function normalizeResultPath(root: string, path: string) {
   const absolutePath = isAbsolute(path) ? resolve(path) : resolve(root, path);
 
@@ -670,16 +669,13 @@ function normalizeResultPath(root: string, path: string) {
   };
 }
 
-
 function trimTrailingNewline(value: string): string {
   return value.endsWith("\n") ? value.slice(0, -1) : value;
 }
 
-
 function isCommandMissing(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT";
 }
-
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
