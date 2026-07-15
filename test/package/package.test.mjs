@@ -17,6 +17,14 @@ function runNpm(args, options) {
   return execFileAsync("npm", args, options);
 }
 
+function runExecutable(file, args, options) {
+  return execFileAsync(file, args, {
+    ...options,
+    shell: process.platform === "win32",
+    windowsHide: true,
+  });
+}
+
 test("npm package contains and exposes the supported public surface", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
@@ -98,15 +106,17 @@ test("npm package contains and exposes the supported public surface", async (t) 
     );
     assert.equal(installedCli.mode & 0o111, 0o111);
   }
-  const version = await execFileAsync(cli, ["--version"], {
+  const version = await runExecutable(cli, ["--version"], {
     cwd: consumerDirectory,
   });
   assert.equal(version.stdout.trim(), packageJson.version);
-  const help = await execFileAsync(cli, ["--help"], { cwd: consumerDirectory });
+  const help = await runExecutable(cli, ["--help"], {
+    cwd: consumerDirectory,
+  });
   assert.match(help.stdout, /Usage:/);
 
   await writeFile(join(consumerDirectory, "fixture.txt"), "PackageNeedle\n");
-  const rg = await execFileAsync(cli, ["--rg", "PackageNeedle", "."], {
+  const rg = await runExecutable(cli, ["--rg", "PackageNeedle", "."], {
     cwd: consumerDirectory,
   });
   assert.match(rg.stdout, /fixture\.txt/);
