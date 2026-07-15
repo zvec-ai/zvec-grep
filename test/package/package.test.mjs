@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 
 const execFileAsync = promisify(execFile);
+
+function runNpm(args, options) {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath) {
+    return execFileAsync(process.execPath, [npmExecPath, ...args], options);
+  }
+
+  return execFileAsync("npm", args, options);
+}
 
 test("npm package contains and exposes the supported public surface", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
@@ -23,8 +32,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
   await mkdir(packDirectory, { recursive: true });
   await mkdir(consumerDirectory, { recursive: true });
 
-  const packed = await execFileAsync(
-    "npm",
+  const packed = await runNpm(
     ["pack", "--json", "--pack-destination", packDirectory],
     { cwd: resolve("."), env: npmEnvironment, timeout: 120_000 },
   );
@@ -41,7 +49,6 @@ test("npm package contains and exposes the supported public surface", async (t) 
   ]) {
     assert.ok(paths.has(required), `package is missing ${required}`);
   }
-  assert.equal(paths.get("dist/cli/index.js").mode & 0o111, 0o111);
   assert.equal(
     [...paths].some(
       ([path]) => path.startsWith("src/") || path.startsWith("test/"),
@@ -54,8 +61,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
     join(consumerDirectory, "package.json"),
     JSON.stringify({ private: true, type: "module" }),
   );
-  await execFileAsync(
-    "npm",
+  await runNpm(
     ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
     { cwd: consumerDirectory, env: npmEnvironment, timeout: 180_000 },
   );
@@ -78,6 +84,20 @@ test("npm package contains and exposes the supported public surface", async (t) 
     ".bin",
     process.platform === "win32" ? "zg.cmd" : "zg",
   );
+  if (process.platform !== "win32") {
+    const installedCli = await stat(
+      join(
+        consumerDirectory,
+        "node_modules",
+        "@zvec",
+        "zvec-grep",
+        "dist",
+        "cli",
+        "index.js",
+      ),
+    );
+    assert.equal(installedCli.mode & 0o111, 0o111);
+  }
   const version = await execFileAsync(cli, ["--version"], {
     cwd: consumerDirectory,
   });

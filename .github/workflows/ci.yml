@@ -158,6 +158,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci --install-strategy=linked
+      - run: npm ci --install-strategy=nested
       - run: npm run build
       - run: npm run test:unit

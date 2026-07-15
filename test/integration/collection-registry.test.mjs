@@ -11,6 +11,12 @@ import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
 
 test("collection registry covers lifecycle, caching, rename, roots, disable, read-only, and schema errors", async (t) => {
+  let registry;
+  let readOnly;
+  t.after(() => {
+    readOnly?.close();
+    registry?.close();
+  });
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-collection-registry-",
@@ -36,8 +42,7 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   withoutModel.close();
 
   const embedding = new FakeEmbeddingModel();
-  const registry = new CollectionRegistry(home, embedding);
-  t.after(() => registry.close());
+  registry = new CollectionRegistry(home, embedding);
   const created = registry.create("docs", [root]);
   assert.equal(isCollectionIndexed(created), true);
   assert.equal(registry.has("docs"), true);
@@ -143,8 +148,8 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   }
 
   registry.close();
-  const readOnly = new CollectionRegistry(home, embedding, true);
-  t.after(() => readOnly.close());
+  registry = undefined;
+  readOnly = new CollectionRegistry(home, embedding, true);
   assert.ok(readOnly.list().length > 0);
   for (const operation of [
     () => readOnly.create("readonly", [root]),

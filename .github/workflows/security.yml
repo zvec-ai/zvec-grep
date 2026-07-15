@@ -11,7 +11,9 @@ permissions: {}
 
 jobs:
   dependency-review:
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.repository.visibility == 'public' || vars.ENABLE_GHAS == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -25,6 +27,9 @@ jobs:
           fail-on-severity: high
 
   codeql:
+    if: >-
+      github.event.repository.visibility == 'public' ||
+      vars.ENABLE_GHAS == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
