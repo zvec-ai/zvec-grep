@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { createTemporaryDirectory, runCli } from "../helpers/fixtures.mjs";
-import { deterministicVector } from "../helpers/fake-embedding.mjs";
+import { createFakeEmbeddingServer } from "../helpers/fake-embedding.mjs";
 
 test("CLI completes index, search, automatic refresh, status, and rg workflows", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
@@ -19,31 +18,7 @@ test("CLI completes index, search, automatic refresh, status, and rg workflows",
     "export const FirstWorkflowSymbol = 41;\n",
   );
 
-  const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    const inputs = Array.isArray(body.input) ? body.input : [];
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(
-      JSON.stringify({
-        data: inputs.map((input, index) => ({
-          index,
-          embedding: deterministicVector(input, 1024),
-        })),
-      }),
-    );
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(
-    () =>
-      new Promise((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      ),
-  );
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const endpoint = `http://127.0.0.1:${address.port}/embeddings`;
+  const endpoint = await createFakeEmbeddingServer(t);
   const env = { HOME: home, NO_COLOR: "1" };
 
   const indexed = await runCli(
@@ -72,12 +47,16 @@ test("CLI completes index, search, automatic refresh, status, and rg workflows",
     join(root, "src", "example.ts"),
     "export const RefreshedWorkflowSymbol = 42;\n",
   );
-  const refreshed = await runCli(["RefreshedWorkflowSymbol", "--limit", "5"], {
-    cwd: root,
-    env,
-    timeout: 120_000,
-  });
-  assert.match(refreshed.stdout, /RefreshedWorkflowSymbol|example\.ts/);
+  const refreshed = await runCli(
+    ["--fts", "RefreshedWorkflowSymbol", "--limit", "5"],
+    {
+      cwd: root,
+      env,
+      timeout: 120_000,
+    },
+  );
+  assert.match(refreshed.stdout, /RefreshedWorkflowSymbol/);
+  assert.doesNotMatch(refreshed.stdout, /FirstWorkflowSymbol/);
 
   const status = await runCli(["--status", root], { cwd: root, env });
   assert.match(status.stdout, /enabled|indexed/i);

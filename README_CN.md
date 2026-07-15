@@ -271,6 +271,4 @@ const result = await zvecGrep.context({
 npm run check
 ```
 
-Pull request 标题需遵循 Conventional Commits。Release Please 会维护发布 PR；
-合并审核通过的发布 PR 后会创建版本 tag 和 GitHub Release，npm production
-环境还需要维护者进行最终审批。
+Pull request 标题需遵循 Conventional Commits。

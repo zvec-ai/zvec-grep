@@ -4,6 +4,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { createFakeEmbeddingServer } from "../helpers/fake-embedding.mjs";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -69,10 +70,11 @@ test("npm package contains and exposes the supported public surface", async (t) 
     join(consumerDirectory, "package.json"),
     JSON.stringify({ private: true, type: "module" }),
   );
-  await runNpm(
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
-    { cwd: consumerDirectory, env: npmEnvironment, timeout: 180_000 },
-  );
+  await runNpm(["install", "--no-audit", "--no-fund", tarball], {
+    cwd: consumerDirectory,
+    env: npmEnvironment,
+    timeout: 180_000,
+  });
 
   const packageJson = JSON.parse(
     await readFile(
@@ -115,11 +117,43 @@ test("npm package contains and exposes the supported public surface", async (t) 
   });
   assert.match(help.stdout, /Usage:/);
 
-  await writeFile(join(consumerDirectory, "fixture.txt"), "PackageNeedle\n");
-  const rg = await runExecutable(cli, ["--rg", "PackageNeedle", "."], {
+  await writeFile(
+    join(consumerDirectory, "fixture.ts"),
+    "export const PackageIndexedNeedle = 42;\n",
+  );
+  const rg = await runExecutable(cli, ["--rg", "PackageIndexedNeedle", "."], {
     cwd: consumerDirectory,
   });
-  assert.match(rg.stdout, /fixture\.txt/);
+  assert.match(rg.stdout, /fixture\.ts/);
+
+  const endpoint = await createFakeEmbeddingServer(t);
+  const packageHome = join(temporaryDirectory, "package-home");
+  const cliEnvironment = {
+    ...process.env,
+    HOME: packageHome,
+    NO_COLOR: "1",
+    ZVEC_GREP_HOME: packageHome,
+  };
+  await runExecutable(
+    cli,
+    [
+      "--index",
+      "--embedding",
+      "qwen/text-embedding-v4",
+      "--api-key",
+      "test-key",
+      "--endpoint",
+      endpoint,
+      ".",
+    ],
+    { cwd: consumerDirectory, env: cliEnvironment, timeout: 120_000 },
+  );
+  const indexed = await runExecutable(
+    cli,
+    ["--fts", "PackageIndexedNeedle", "--limit", "5"],
+    { cwd: consumerDirectory, env: cliEnvironment, timeout: 120_000 },
+  );
+  assert.match(indexed.stdout, /PackageIndexedNeedle/);
 
   const imported = await execFileAsync(
     process.execPath,

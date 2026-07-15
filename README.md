@@ -271,7 +271,4 @@ Issues and pull requests are welcome. Please keep changes focused, add tests for
 npm run check
 ```
 
-Pull request titles use Conventional Commits syntax. Releases are prepared by
-Release Please; merging an approved release pull request creates the version tag
-and GitHub Release, after which the npm production environment requires a final
-maintainer approval.
+Pull request titles use Conventional Commits syntax.
