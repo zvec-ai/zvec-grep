@@ -65,10 +65,10 @@
     "@vscode/ripgrep": "^1.18.0",
     "@zvec/zvec": "^0.5.0",
     "tree-sitter-wasms": "^0.1.13",
-    "web-tree-sitter": "^0.20.8",
+    "web-tree-sitter": "^0.26.11",
     "zod": "^3.25.76"
   },
   "optionalDependencies": {
-    "node-llama-cpp": "3.18.1"
+    "node-llama-cpp": "3.19.0"
   }
 }
