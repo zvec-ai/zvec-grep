@@ -9,6 +9,7 @@ import type {
   LegacySearchInput,
   StringListInput,
   TimeInput,
+  ZvecGrepRgInput,
   ZvecGrepSearchInput,
 } from "./schemas.js";
 
@@ -77,7 +78,7 @@ export function contextOptionsFromSearchInput(
 }
 
 export function contextOptionsFromRgInput(
-  input: LegacyRgInput,
+  input: LegacyRgInput | ZvecGrepRgInput,
 ): ZvecGrepContextOptions {
   const queries = [
     ...normalizeQueryList(input.pattern),

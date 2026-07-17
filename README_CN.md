@@ -51,7 +51,7 @@ zg query "where query auto update happens"
 - **托管 ripgrep 通道**：`zg query --rg` 支持常见 `rg` 参数，未建索引仓库也能使用。
 - **显式模型选择**：第一次建索引必须指定模型，例如 `local/embeddinggemma-300m`、`local/qwen3-embedding-0.6b` 或 `qwen/qwen3.7-text-embedding`。
 - **Schema 复用**：已有索引再次运行 `zg index` 会复用保存的 embedding schema，除非你显式切换模型。
-- **共享 MCP Server**：运行 `zg server on`，通过 loopback Streamable HTTP 暴露索引检索、建索引、索引状态和服务状态四个工具，并可按需启用 Bearer 鉴权。
+- **共享 MCP Server**：运行 `zg server on`，通过 loopback Streamable HTTP 暴露索引检索、托管 ripgrep、建索引、索引状态和服务状态工具，并可按需启用 Bearer 鉴权。
 - **库 API**：Node.js 工具、agent 或 MCP server 可以直接使用 `createZvecGrep()`。
 
 ## <a id="installation"></a>📦 安装
@@ -155,7 +155,7 @@ zg query --rg -F "ZVEC_GREP_HOME" src
 zg query --human "root local index discovery" --limit 3
 ```
 
-MCP 客户端可使用四个工具：`zvec_grep_search`、`zvec_grep_index`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。installer 会为 Codex、Claude Code、OpenCode 和 Cursor 写入用户级 MCP 配置，不会安装 skill 或 agent guidance。`cc` 和 `claude-code` 仍可作为正式 target `claude` 的兼容别名。
+MCP 客户端可使用五个工具：`zvec_grep_search`、`zvec_grep_rg`、`zvec_grep_index`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。installer 会为 Codex、Claude Code、OpenCode 和 Cursor 写入用户级 MCP 配置，不会安装 skill 或 agent guidance。`cc` 和 `claude-code` 仍可作为正式 target `claude` 的兼容别名。
 
 ## <a id="models"></a>🧠 模型
 

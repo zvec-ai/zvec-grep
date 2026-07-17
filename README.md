@@ -1,29 +1,4 @@
-<p align="right">
-  English | <a href="./README_CN.md">中文</a>
-</p>
-
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://zvec.oss-cn-hongkong.aliyuncs.com/logo/github_log_2.svg" />
-    <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/logo/github_logo_1.svg" width="400" alt="zvec logo" />
-  </picture>
-</div>
-
-<p align="center">
-  <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm Release"/></a>
-  <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"/></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js >=22"/>
-  <img src="https://img.shields.io/badge/CLI-zg-2ea44f.svg" alt="zg CLI"/>
-</p>
-
-<p align="center">
-  <a href="#quickstart">🚀 <strong>Quickstart</strong></a> |
-  <a href="#features">💫 <strong>Features</strong></a> |
-  <a href="#installation">📦 <strong>Installation</strong></a> |
-  <a href="#models">🧠 <strong>Models</strong></a> |
-  <a href="#library-api">🛠️ <strong>Library API</strong></a>
-</p>
+![WIP](https://img.shields.io/badge/status-WIP-orange)
 
 **zvec-grep** is an agent-friendly hybrid code search tool built on Zvec. It gives repositories a root-local semantic index, combines vector search with full-text search, and keeps CLI output compact enough for AI agents while still offering rich terminal output for humans.
 
@@ -51,7 +26,7 @@ zg query "where query auto update happens"
 - **Managed ripgrep Route**: `zg query --rg` supports common `rg` flags and works even before a repository is indexed.
 - **Explicit Model Choice**: The first index build requires a model such as `local/embeddinggemma-300m`, `local/qwen3-embedding-0.6b`, or `qwen/qwen3.7-text-embedding`.
 - **Schema Reuse**: Re-running `zg index` on an existing index reuses the stored embedding schema unless you explicitly change it.
-- **Shared MCP Server**: Run `zg server on` to expose the four indexed search, indexing, index-status, and server-status tools over loopback Streamable HTTP.
+- **Shared MCP Server**: Run `zg server on` to expose indexed search, managed ripgrep, indexing, index-status, and server-status tools over loopback Streamable HTTP.
 - **Library API**: Use `createZvecGrep()` directly from Node.js tools, agents, or MCP servers.
 
 ## <a id="installation"></a>📦 Installation
@@ -154,7 +129,7 @@ Switch to human-readable output:
 zg query --human "root local index discovery" --limit 3
 ```
 
-Use the four MCP tools `zvec_grep_search`, `zvec_grep_index`, `zvec_grep_index_status`, and `zvec_grep_server_status`. MCP inputs use JSON-friendly fields such as `globs: ["src/**"]`. The installer writes user-level MCP configuration for Codex, Claude Code, OpenCode, and Cursor; it does not install skills or agent guidance. `cc` and `claude-code` remain accepted aliases for the canonical `claude` target.
+Use the five MCP tools `zvec_grep_search`, `zvec_grep_rg`, `zvec_grep_index`, `zvec_grep_index_status`, and `zvec_grep_server_status`. MCP inputs use JSON-friendly fields such as `globs: ["src/**"]`. The installer writes user-level MCP configuration for Codex, Claude Code, OpenCode, and Cursor; it does not install skills or agent guidance. `cc` and `claude-code` remain accepted aliases for the canonical `claude` target.
 
 ## <a id="models"></a>🧠 Models
 

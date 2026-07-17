@@ -9,12 +9,15 @@ import {
   zvecGrepIndexOutputSchema,
   zvecGrepIndexStatusInputSchema,
   zvecGrepIndexStatusOutputSchema,
+  zvecGrepRgInputSchema,
+  zvecGrepRgOutputSchema,
   zvecGrepSearchInputSchema,
   zvecGrepSearchOutputSchema,
   zvecGrepServerStatusInputSchema,
   zvecGrepServerStatusOutputSchema,
   type ZvecGrepIndexInput,
   type ZvecGrepIndexStatusInput,
+  type ZvecGrepRgInput,
   type ZvecGrepSearchIndexing,
 } from "./schemas.js";
 import {
@@ -31,6 +34,8 @@ export type ZvecGrepIndexResult = {
   jobId: string;
   state: IndexJobState;
   reused: boolean;
+  action?: "index" | "drop";
+  dropped?: boolean;
 };
 
 export type ZvecGrepSearchResult = {
@@ -117,14 +122,36 @@ export type ZvecGrepServerStatusResult = {
   };
 };
 
+export type ZvecGrepRgResult = {
+  root: string;
+  result: ZvecGrepContextResult;
+};
+
 export interface ZvecGrepDaemonBackend {
   index(input: ZvecGrepIndexInput): Promise<ZvecGrepIndexResult>;
   search(input: NormalizedSearchInput): Promise<ZvecGrepSearchResult>;
   indexStatus(
     input: ZvecGrepIndexStatusInput,
   ): Promise<ZvecGrepIndexStatusResult>;
+  rg(input: ZvecGrepRgInput): Promise<ZvecGrepRgResult>;
   serverStatus(): Promise<ZvecGrepServerStatusResult>;
 }
+
+export const ZVEC_GREP_MCP_INSTRUCTIONS = [
+  "Use zvec-grep before raw grep or rg for repository investigation.",
+  "Every repository operation requires an absolute root path visible to the daemon.",
+  "Use the zvec_grep_* tools directly for repository search, status, indexing, deletion, and exhaustive lexical search.",
+  "Call zvec_grep_search first. Use its freshness and indexing fields without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
+  "Use possibly_stale search results immediately when they are sufficient; do not call status merely because a background update is active.",
+  "Use zvec_grep_rg for exhaustive local ripgrep when an index is missing and literal or regex search can answer the task, or when the user explicitly requests rg mode.",
+  "Do not switch to zvec_grep_rg merely because semantic search or embedding is unavailable unless exhaustive lexical search fits the task.",
+  "Apply focused globs, path filters, and file type filters early; exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.",
+  "Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.",
+  "For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.",
+  "zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.",
+  "Use zvec_grep_index with drop: true only when index deletion is explicitly requested.",
+  "Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.",
+].join(" ");
 
 export function createZvecGrepMcpServer(
   backend: ZvecGrepDaemonBackend,
@@ -133,12 +160,7 @@ export function createZvecGrepMcpServer(
   const server = new McpServer(
     { name: "zvec-grep", version },
     {
-      instructions: [
-        "Use zvec-grep for indexed repository search.",
-        "Every repository operation requires an absolute root path visible to the daemon.",
-        "Call zvec_grep_search first. Use its freshness and indexing fields without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
-        "Call zvec_grep_index only when indexing is requested. Its wait parameter defaults to false; poll zvec_grep_index_status for background progress and set wait: true only when completion is required before continuing.",
-      ].join(" "),
+      instructions: ZVEC_GREP_MCP_INSTRUCTIONS,
     },
   );
   registerZvecGrepTools(server, backend);
@@ -152,14 +174,14 @@ export function registerZvecGrepTools(
   server.registerTool(
     "zvec_grep_index",
     {
-      title: "Ensure zvec-grep index",
+      title: "Ensure or drop zvec-grep index",
       description:
-        "Activate an absolute repository root and create or incrementally update its index.",
+        "Activate an absolute repository root to create, incrementally update, rebuild, or explicitly drop its index. Do not call this tool to create, rebuild, or drop an index unless the user requested persistent indexing or index deletion.",
       inputSchema: zvecGrepIndexInputSchema.shape,
       outputSchema: zvecGrepIndexOutputSchema.shape,
       annotations: {
         readOnlyHint: false,
-        destructiveHint: false,
+        destructiveHint: true,
         idempotentHint: true,
         openWorldHint: true,
       },
@@ -171,9 +193,20 @@ export function registerZvecGrepTools(
         job_id: result.jobId,
         state: result.state,
         reused: result.reused,
+        action: result.action,
+        dropped: result.dropped,
       };
       return toolResult(
-        `root: ${result.root}\njob_id: ${result.jobId}\nstate: ${result.state}\nreused: ${result.reused}`,
+        [
+          `root: ${result.root}`,
+          `job_id: ${result.jobId}`,
+          `state: ${result.state}`,
+          `reused: ${result.reused}`,
+          ...(result.action ? [`action: ${result.action}`] : []),
+          ...(result.dropped !== undefined
+            ? [`dropped: ${result.dropped}`]
+            : []),
+        ].join("\n"),
         structuredContent,
       );
     },
@@ -184,7 +217,7 @@ export function registerZvecGrepTools(
     {
       title: "Search with zvec-grep",
       description:
-        "Search an existing repository index and report freshness plus a compact indexing snapshot when results may be stale.",
+        "Search an existing repository index first for repository investigation. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
       inputSchema: zvecGrepSearchInputSchema.shape,
       outputSchema: zvecGrepSearchOutputSchema.shape,
       annotations: {
@@ -220,11 +253,39 @@ export function registerZvecGrepTools(
   );
 
   server.registerTool(
+    "zvec_grep_rg",
+    {
+      title: "Search with managed ripgrep",
+      description:
+        "Run exhaustive managed ripgrep locally without requiring an index. Use it for literal or regex search, an unindexed repository that can be answered lexically, or an explicit rg-mode request; do not switch to rg merely because semantic search is unavailable.",
+      inputSchema: zvecGrepRgInputSchema.shape,
+      outputSchema: zvecGrepRgOutputSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const response = await backend.rg(input);
+      const structuredContent = {
+        root: response.root,
+        result: simplifyContextResult(response.result, input.maxContentChars),
+      };
+      return toolResult(
+        contextText(response.result, input.maxContentChars),
+        structuredContent,
+      );
+    },
+  );
+
+  server.registerTool(
     "zvec_grep_index_status",
     {
       title: "Inspect zvec-grep index status",
       description:
-        "Read persisted index status and, when active, the daemon runtime and job status for an absolute root.",
+        "Read persisted index status and, when active, daemon runtime and job status for an absolute root. Use only after a missing-index response, indexing failure or cancellation, explicit progress monitoring, or daemon diagnostics.",
       inputSchema: zvecGrepIndexStatusInputSchema.shape,
       outputSchema: zvecGrepIndexStatusOutputSchema.shape,
       annotations: {

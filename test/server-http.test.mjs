@@ -162,6 +162,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
     "zvec_grep_index",
     "zvec_grep_index_status",
+    "zvec_grep_rg",
     "zvec_grep_search",
     "zvec_grep_server_status",
   ]);
@@ -257,12 +258,25 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   assert.equal(missing.isError, true);
   assert.match(missing.content[0].text, /INDEX_MISSING/);
+  assert.match(missing.content[0].text, /zvec_grep_rg/);
+  assert.match(missing.content[0].text, /persistent indexing is authorized/);
   await assert.rejects(access(join(unindexedRoot, ".zvec-grep")));
 
   await writeFile(
     join(unindexedRoot, "new.ts"),
     "export const newlyIndexed = true;\n",
   );
+  const rgSearch = await clients[0].callTool({
+    name: "zvec_grep_rg",
+    arguments: { root: unindexedRoot, pattern: "newlyIndexed" },
+  });
+  assert.equal(rgSearch.isError, undefined);
+  assert.equal(rgSearch.structuredContent.result.source, "rg");
+  assert.equal(
+    rgSearch.structuredContent.result.items[0].file.relativePath,
+    "new.ts",
+  );
+
   blockEmbedding = true;
   const indexed = await clients[0].callTool({
     name: "zvec_grep_index",
@@ -354,6 +368,19 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     "new.ts",
   );
   assert.equal(modelLoads, 1);
+
+  const dropped = await clients[0].callTool({
+    name: "zvec_grep_index",
+    arguments: { root: unindexedRoot, drop: true },
+  });
+  assert.equal(dropped.isError, undefined);
+  assert.equal(dropped.structuredContent.action, "drop");
+  assert.equal(dropped.structuredContent.dropped, true);
+  const droppedStatus = await clients[0].callTool({
+    name: "zvec_grep_index_status",
+    arguments: { root: unindexedRoot },
+  });
+  assert.equal(droppedStatus.structuredContent.indexed, false);
 });
 
 test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (t) => {

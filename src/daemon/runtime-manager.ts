@@ -84,7 +84,7 @@ export class RuntimeManager {
     if (!info.indexed || !info.collection?.embedding) {
       throw new DaemonError(
         "INDEX_MISSING",
-        `No built zvec-grep index exists for ${info.root}. Call zvec_grep_index first.`,
+        `Indexed search requires a built zvec-grep index for ${info.root}. Use zvec_grep_rg for exhaustive literal or regex search, or call zvec_grep_index only when persistent indexing is authorized.`,
       );
     }
     const canonicalRoot = await realpath(info.root);
@@ -142,6 +142,27 @@ export class RuntimeManager {
 
   getByCanonicalRoot(canonicalRoot: string): RootRuntime | undefined {
     return this.runtimes.get(canonicalRoot);
+  }
+
+  async evict(canonicalRoot: string): Promise<void> {
+    const runtime = this.runtimes.get(canonicalRoot);
+    if (!runtime) {
+      return;
+    }
+    const timer = this.idleTimers.get(canonicalRoot);
+    if (timer) clearTimeout(timer);
+    this.idleTimers.delete(canonicalRoot);
+    this.runtimes.delete(canonicalRoot);
+    for (const [alias, target] of this.aliases) {
+      if (alias === canonicalRoot || target === canonicalRoot) {
+        this.aliases.delete(alias);
+      }
+    }
+    try {
+      await this.options.onRuntimeEvicted?.(canonicalRoot);
+    } finally {
+      await runtime.close();
+    }
   }
 
   snapshot(): RuntimeManagerSnapshot {
@@ -257,12 +278,7 @@ export class RuntimeManager {
       this.touchRuntime(canonicalRoot);
       return;
     }
-    this.runtimes.delete(canonicalRoot);
-    try {
-      await this.options.onRuntimeEvicted?.(canonicalRoot);
-    } finally {
-      await runtime.close();
-    }
+    await this.evict(canonicalRoot);
   }
 }
 

@@ -141,17 +141,27 @@ const searchFields = {
 
 export const zvecGrepIndexInputSchema = z.object({
   root: absoluteRootSchema,
+  drop: z
+    .boolean()
+    .optional()
+    .describe(
+      "Permanently remove the workspace index. Use only when index deletion is explicitly requested, and do not combine with indexing options.",
+    ),
   embedding: z
     .string()
     .trim()
     .min(1)
     .max(256)
     .optional()
-    .describe("Embedding model reference for a new index."),
+    .describe(
+      "Embedding model reference for a new index. Use a user-selected embedding, or omit only when a server default model is known; never guess a model.",
+    ),
   rebuild: z
     .boolean()
     .optional()
-    .describe("Explicitly rebuild the existing index."),
+    .describe(
+      "Explicitly rebuild the existing index. Use only when rebuild was requested or required by an incompatible schema or index version.",
+    ),
   resetPaths: z
     .boolean()
     .optional()
@@ -196,7 +206,7 @@ export const zvecGrepIndexInputSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Wait for the submitted index job to finish. Defaults to false: submit in the background and poll zvec_grep_index_status.",
+      "Wait for the submitted index job to finish. Defaults to false: submit in the background and poll zvec_grep_index_status only when completion, progress monitoring, or diagnostics are required.",
     ),
 });
 
@@ -222,6 +232,70 @@ export const zvecGrepIndexStatusInputSchema = z.object({
 });
 
 export const zvecGrepServerStatusInputSchema = z.object({});
+
+export const zvecGrepRgInputSchema = z.object({
+  pattern: z
+    .string()
+    .optional()
+    .describe(
+      "Regex or literal pattern to search for. Use zvec_grep_rg for exhaustive lexical search, unindexed repositories that can be answered lexically, or explicit rg-mode requests.",
+    ),
+  patterns: legacyStringListInputSchema.describe(
+    "Multiple regex or literal patterns to search for.",
+  ),
+  root: absoluteRootSchema,
+  paths: legacyStringListInputSchema.describe(
+    "Optional paths to search within the root.",
+  ),
+  fixedStrings: z
+    .boolean()
+    .optional()
+    .describe("Treat pattern as a literal string."),
+  ignoreCase: z.boolean().optional().describe("Search case-insensitively."),
+  wordRegexp: z.boolean().optional().describe("Only match whole words."),
+  context: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(20)
+    .optional()
+    .describe("Context lines before and after each match."),
+  beforeContext: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(20)
+    .optional()
+    .describe("Context lines before each match."),
+  afterContext: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(20)
+    .optional()
+    .describe("Context lines after each match."),
+  hidden: z
+    .boolean()
+    .optional()
+    .describe("Search hidden files and directories."),
+  glob: legacyStringListInputSchema.describe(
+    "ripgrep glob filters, for example '*.ts' or '!dist/**'. Accepts an array or comma-separated string.",
+  ),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .max(200)
+    .optional()
+    .describe("Maximum returned matches."),
+  maxContentChars: z
+    .number()
+    .int()
+    .positive()
+    .max(MCP_MAX_CONTENT_CHARS)
+    .default(1_200)
+    .describe("Maximum source characters to include per hit."),
+});
 
 const jobStateSchema = z.enum([
   "queued",
@@ -294,6 +368,8 @@ const searchResultSchema = z.object({
   source: z.enum(["index", "rg", "lexical_fallback"]),
   coverage: z.enum([
     "ranked_sample",
+    "rg_exhaustive",
+    "rg_truncated",
     "lexical_exhaustive",
     "lexical_truncated",
   ]),
@@ -316,6 +392,7 @@ const searchResultSchema = z.object({
       .optional(),
     index: z.unknown().optional(),
     fallback: z.unknown().optional(),
+    rg: z.unknown().optional(),
     structure: z.unknown().optional(),
     timings: z
       .array(
@@ -335,6 +412,8 @@ export const zvecGrepIndexOutputSchema = z.object({
   job_id: z.string(),
   state: jobStateSchema,
   reused: z.boolean(),
+  action: z.enum(["index", "drop"]).optional(),
+  dropped: z.boolean().optional(),
 });
 
 export const zvecGrepSearchIndexingSchema = z
@@ -463,6 +542,11 @@ export const zvecGrepServerStatusOutputSchema = z.object({
   }),
 });
 
+export const zvecGrepRgOutputSchema = z.object({
+  root: z.string(),
+  result: searchResultSchema,
+});
+
 export const legacySearchInputSchema = z.object({
   query: z
     .string()
@@ -495,10 +579,10 @@ export const legacySearchInputSchema = z.object({
     .optional()
     .describe("Maximum returned items per query/group."),
   include: legacyStringListInputSchema.describe(
-    "Glob filters for paths to include. Accepts an array or CLI-style comma-separated string.",
+    "Glob filters for paths to include. Accepts an array or comma-separated string.",
   ),
   exclude: legacyStringListInputSchema.describe(
-    "Glob filters for paths to exclude. Accepts an array or CLI-style comma-separated string.",
+    "Glob filters for paths to exclude. Accepts an array or comma-separated string.",
   ),
   preferSymbol: z
     .boolean()
@@ -518,7 +602,7 @@ export const legacySearchInputSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Refresh an existing stale anonymous index before query. Defaults to CLI behavior: true.",
+      "Refresh an existing stale anonymous index before query. Defaults to true.",
     ),
   embeddingConcurrency: z
     .number()
@@ -587,7 +671,7 @@ export const legacyRgInputSchema = z.object({
     .optional()
     .describe("Search hidden files and directories."),
   glob: legacyStringListInputSchema.describe(
-    "ripgrep glob filters, for example '*.ts' or '!dist/**'. Accepts an array or CLI-style comma-separated string.",
+    "ripgrep glob filters, for example '*.ts' or '!dist/**'. Accepts an array or comma-separated string.",
   ),
   limit: z
     .number()
@@ -610,6 +694,7 @@ export type ZvecGrepSearchInput = z.infer<typeof zvecGrepSearchInputSchema>;
 export type ZvecGrepIndexStatusInput = z.infer<
   typeof zvecGrepIndexStatusInputSchema
 >;
+export type ZvecGrepRgInput = z.infer<typeof zvecGrepRgInputSchema>;
 export type LegacySearchInput = z.infer<typeof legacySearchInputSchema>;
 export type LegacyRgInput = z.infer<typeof legacyRgInputSchema>;
 export type StringListInput = z.infer<typeof stringListInputSchema>;

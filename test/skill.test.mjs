@@ -37,9 +37,10 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
   assert.match(skill, /server default is known; never guess a model/);
   assert.match(skill, /zvec_grep_index_status/);
   assert.match(skill, /Call `zvec_grep_search` first/);
+  assert.match(skill, /Call `zvec_grep_rg` for exhaustive local ripgrep/);
+  assert.match(skill, /Its `drop` parameter deletes the workspace index/);
   assert.match(skill, /`freshness` and `indexing`/);
   assert.doesNotMatch(skill, /Call `zvec_grep_index_status` once at the start/);
-  assert.doesNotMatch(skill, /zvec_grep_rg/);
   assert.match(skill, /references\/cli-fallback\.md/);
   assert.doesNotMatch(skill, /Use zvec-grep through the `zg` command/);
   assert.match(metadata, /Repository search, indexing, and daemon diagnostics/);
@@ -47,7 +48,6 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
     metadata,
     /Use \$zvec-grep to investigate this repository before raw grep or rg/,
   );
-  assert.doesNotMatch(metadata, /zvec_grep_rg/);
   assert.match(fallback, /Leave `--mode` unset/);
   assert.match(fallback, /zg status\r?\n/);
   assert.doesNotMatch(fallback, /zg status --mode (?:server|direct)/);

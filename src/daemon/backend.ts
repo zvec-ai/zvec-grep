@@ -10,6 +10,7 @@ import type {
   IndexProgress,
 } from "../engine/types.js";
 import {
+  contextOptionsFromRgInput,
   normalizePlainStringList,
   type NormalizedSearchInput,
 } from "../mcp/input-normalization.js";
@@ -17,12 +18,14 @@ import type {
   ZvecGrepDaemonBackend,
   ZvecGrepIndexResult,
   ZvecGrepIndexStatusResult,
+  ZvecGrepRgResult,
   ZvecGrepSearchResult,
   ZvecGrepServerStatusResult,
 } from "../mcp/tools.js";
 import type {
   ZvecGrepIndexInput,
   ZvecGrepIndexStatusInput,
+  ZvecGrepRgInput,
 } from "../mcp/schemas.js";
 import { DaemonError } from "./errors.js";
 import {
@@ -97,6 +100,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   }
 
   async index(input: ZvecGrepIndexInput): Promise<ZvecGrepIndexResult> {
+    if (input.drop === true) {
+      return await this.dropIndex(input);
+    }
     const runtime = await this.runtimeManager.activateForIndex(input.root);
     this.ensureWatcher(runtime);
     const activeJob = this.scheduler.getByRoot(runtime.canonicalRoot);
@@ -157,6 +163,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       jobId: job.id,
       state: job.state,
       reused: submitted.reused,
+      action: "index",
     };
   }
 
@@ -340,6 +347,34 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     };
   }
 
+  async rg(input: ZvecGrepRgInput): Promise<ZvecGrepRgResult> {
+    const startedAt = Date.now();
+    const canonicalRoot = await resolveRequestedRoot(input.root, false);
+    const service = await (this.options.createService ?? createZvecGrep)({
+      ...this.options.serviceOptions,
+      root: canonicalRoot,
+      daemonInstanceToken: this.runtimeManager.instanceToken,
+    });
+    try {
+      const result = await service.context({
+        ...contextOptionsFromRgInput({ ...input, root: canonicalRoot }),
+        root: canonicalRoot,
+        autoUpdate: false,
+      });
+      this.options.logger?.event("rg.completed", {
+        root_id: rootIdentity(canonicalRoot),
+        duration_ms: Date.now() - startedAt,
+        result_count: result.items.length,
+      });
+      return {
+        root: canonicalRoot,
+        result,
+      };
+    } finally {
+      await service.close();
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closePromise) {
       return this.closePromise;
@@ -451,6 +486,38 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       reconciled,
       reconciliationEpoch: proofReconciliationEpoch,
     };
+  }
+
+  private async dropIndex(
+    input: ZvecGrepIndexInput,
+  ): Promise<ZvecGrepIndexResult> {
+    assertDropOnlyInput(input);
+    const canonicalRoot = await resolveRequestedRoot(input.root, true);
+    await this.scheduler.waitForRootIdle(canonicalRoot);
+    await this.runtimeManager.evict(canonicalRoot);
+    this.statusCache.delete(canonicalRoot);
+    const service = await (this.options.createService ?? createZvecGrep)({
+      ...this.options.serviceOptions,
+      root: canonicalRoot,
+      daemonInstanceToken: this.runtimeManager.instanceToken,
+    });
+    try {
+      const dropped = await service.dropIndex({ root: canonicalRoot });
+      this.options.logger?.event("index.dropped", {
+        root_id: rootIdentity(canonicalRoot),
+        dropped,
+      });
+      return {
+        root: canonicalRoot,
+        jobId: "drop",
+        state: "succeeded",
+        reused: false,
+        action: "drop",
+        dropped,
+      };
+    } finally {
+      await service.close();
+    }
   }
 
   private async submitIndex(
@@ -691,6 +758,35 @@ function indexStatusIsFresh(info: ZvecGrepInfoResult): boolean {
     status.filesPending === 0 &&
     status.filesFailed === 0
   );
+}
+
+function assertDropOnlyInput(input: ZvecGrepIndexInput): void {
+  const conflicts: Array<[boolean, string]> = [
+    [input.embedding !== undefined, "embedding"],
+    [input.rebuild !== undefined, "rebuild"],
+    [input.resetPaths !== undefined, "resetPaths"],
+    [input.globs !== undefined, "globs"],
+    [input.insensitiveGlobs !== undefined, "insensitiveGlobs"],
+    [input.fileTypes !== undefined, "fileTypes"],
+    [input.excludedFileTypes !== undefined, "excludedFileTypes"],
+    [input.hidden !== undefined, "hidden"],
+    [input.noIgnore !== undefined, "noIgnore"],
+    [input.ignoreFiles !== undefined, "ignoreFiles"],
+    [input.maxDepth !== undefined, "maxDepth"],
+    [input.maxFileSizeBytes !== undefined, "maxFileSizeBytes"],
+    [input.follow !== undefined, "follow"],
+    [input.embeddingConcurrency !== undefined, "embeddingConcurrency"],
+    [input.wait !== undefined, "wait"],
+  ];
+  const names = conflicts
+    .filter(([conflictsWithDrop]) => conflictsWithDrop)
+    .map(([, name]) => name);
+  if (names.length > 0) {
+    throw new DaemonError(
+      "INVALID_ARGUMENT",
+      `zvec_grep_index drop cannot be combined with ${names.join(", ")}.`,
+    );
+  }
 }
 
 function resolveCatalogEmbeddingSchema(

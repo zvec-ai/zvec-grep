@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createZvecGrepMcpServer } from "../dist/mcp/tools.js";
+import {
+  createZvecGrepMcpServer,
+  ZVEC_GREP_MCP_INSTRUCTIONS,
+} from "../dist/mcp/tools.js";
 
 const root = resolve("test/fixtures/repository");
 
@@ -11,9 +14,11 @@ function createBackend() {
   return {
     index: async (input) => ({
       root: input.root,
-      jobId: "job-1",
-      state: "queued",
+      jobId: input.drop ? "drop" : "job-1",
+      state: input.drop ? "succeeded" : "queued",
       reused: false,
+      action: input.drop ? "drop" : "index",
+      dropped: input.drop ? true : undefined,
     }),
     search: async (input) => ({
       root: input.root,
@@ -80,6 +85,36 @@ function createBackend() {
       runningJobs: 1,
       models: { loaded: 1, activeLeases: 1 },
     }),
+    rg: async (input) => ({
+      root: input.root,
+      result: {
+        query: input.pattern ?? input.patterns?.[0] ?? "",
+        root: input.root,
+        source: "rg",
+        coverage: "rg_exhaustive",
+        diagnostics: {},
+        items: [
+          {
+            kind: "lexical_match",
+            rank: 1,
+            file: {
+              absolutePath: `${input.root}/src/index.ts`,
+              relativePath: "src/index.ts",
+            },
+            range: {
+              kind: "text",
+              startLine: 1,
+              endLine: 1,
+              startOffset: 0,
+              endOffset: 8,
+            },
+            content: "needle",
+            status: "fresh",
+            matchedBy: "lexical",
+          },
+        ],
+      },
+    }),
   };
 }
 
@@ -95,7 +130,7 @@ async function connect(backend = createBackend()) {
   return { client, server };
 }
 
-test("server contract exposes exactly the four final tools with stable annotations", async (t) => {
+test("server contract exposes final tools with stable annotations", async (t) => {
   const { client, server } = await connect();
   t.after(async () => {
     await client.close();
@@ -111,20 +146,43 @@ test("server contract exposes exactly the four final tools with stable annotatio
     [
       "zvec_grep_index",
       "zvec_grep_index_status",
+      "zvec_grep_rg",
       "zvec_grep_search",
       "zvec_grep_server_status",
     ],
   );
+  const toolContracts = JSON.stringify(
+    tools.map((tool) => ({
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      outputSchema: tool.outputSchema,
+    })),
+  );
+  assert.doesNotMatch(toolContracts, /\bCLI\b/i);
+  assert.doesNotMatch(toolContracts, /`?zg(?:\s|`)/i);
+  assert.doesNotMatch(ZVEC_GREP_MCP_INSTRUCTIONS, /\bCLI\b/i);
+  assert.doesNotMatch(ZVEC_GREP_MCP_INSTRUCTIONS, /`?zg(?:\s|`)/i);
 
   const annotations = Object.fromEntries(
     tools.map((tool) => [tool.name, tool.annotations]),
   );
   assert.equal(annotations.zvec_grep_index.readOnlyHint, false);
+  assert.equal(annotations.zvec_grep_index.destructiveHint, true);
+  assert.equal(annotations.zvec_grep_rg.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_search.readOnlyHint, false);
   assert.equal(annotations.zvec_grep_index_status.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_server_status.readOnlyHint, true);
+  const index = tools.find((tool) => tool.name === "zvec_grep_index");
+  assert.match(index.title, /Ensure or drop/);
+  assert.match(index.description, /Do not call this tool/);
+  assert.match(index.description, /index deletion/);
   const search = tools.find((tool) => tool.name === "zvec_grep_search");
-  assert.match(search.description, /compact indexing snapshot/);
+  assert.match(search.description, /Search an existing repository index first/);
+  assert.match(search.description, /missing indexes/);
+  const rg = tools.find((tool) => tool.name === "zvec_grep_rg");
+  assert.match(rg.description, /explicit rg-mode request/);
+  assert.match(rg.description, /do not switch to rg merely/);
   assert.match(
     search.outputSchema.properties.indexing.description,
     /possibly stale results/,
@@ -157,6 +215,12 @@ test("index contract documents background submission as the default", async (t) 
     index.inputSchema.properties.wait.description,
     /zvec_grep_index_status/,
   );
+  assert.match(index.inputSchema.properties.drop.description, /index deletion/);
+  assert.match(
+    index.inputSchema.properties.embedding.description,
+    /never guess/,
+  );
+  assert.match(index.inputSchema.properties.rebuild.description, /requested/);
 });
 
 test("root tools require an absolute root", async (t) => {
@@ -186,6 +250,36 @@ test("root tools require an absolute root", async (t) => {
   });
   assert.equal(searchRelative.isError, true);
   assert.match(searchRelative.content[0].text, /absolute path/i);
+
+  const rgRelative = await client.callTool({
+    name: "zvec_grep_rg",
+    arguments: { root: "relative/path", pattern: "query" },
+  });
+  assert.equal(rgRelative.isError, true);
+  assert.match(rgRelative.content[0].text, /absolute path/i);
+});
+
+test("index supports drop mode", async (t) => {
+  let received;
+  const backend = createBackend();
+  backend.index = async (input) => {
+    received = input;
+    return createBackend().index(input);
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const dropped = await client.callTool({
+    name: "zvec_grep_index",
+    arguments: { root, drop: true },
+  });
+
+  assert.equal(received.drop, true);
+  assert.equal(dropped.structuredContent.action, "drop");
+  assert.equal(dropped.structuredContent.dropped, true);
 });
 
 test("search normalizes query, path and time inputs before calling the backend", async (t) => {
@@ -268,6 +362,41 @@ test("search can return the current index without scheduling an update", async (
   assert.equal(received.autoUpdate, false);
 });
 
+test("rg normalizes managed ripgrep input before calling the backend", async (t) => {
+  let received;
+  const backend = createBackend();
+  backend.rg = async (input) => {
+    received = input;
+    return createBackend().rg(input);
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const result = await client.callTool({
+    name: "zvec_grep_rg",
+    arguments: {
+      root,
+      pattern: "needle",
+      fixedStrings: true,
+      ignoreCase: true,
+      glob: ["src/**", "!dist/**"],
+      context: 2,
+      maxContentChars: 20,
+    },
+  });
+
+  assert.equal(received.pattern, "needle");
+  assert.equal(received.fixedStrings, true);
+  assert.equal(received.ignoreCase, true);
+  assert.deepEqual(received.glob, ["src/**", "!dist/**"]);
+  assert.equal(received.context, 2);
+  assert.equal(result.structuredContent.result.source, "rg");
+  assert.equal(result.structuredContent.result.coverage, "rg_exhaustive");
+});
+
 test("input upper bounds are enforced", async (t) => {
   const { client, server } = await connect();
   t.after(async () => {
@@ -331,6 +460,7 @@ test("all tools return output-schema-compatible structured content", async (t) =
   const calls = [
     ["zvec_grep_index", { root }],
     ["zvec_grep_search", { root, query: "query", maxContentChars: 20 }],
+    ["zvec_grep_rg", { root, pattern: "needle", maxContentChars: 20 }],
     ["zvec_grep_index_status", { root }],
     ["zvec_grep_server_status", {}],
   ];

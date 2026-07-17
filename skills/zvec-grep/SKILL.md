@@ -26,11 +26,12 @@ Pass the repository's daemon-visible absolute path as `root` on every repository
 1. Call `zvec_grep_search` first for repository investigation. Search defaults to `freshness: "eventual"`; use `freshness: "wait_for_fresh"` only when the result must include all pending changes. Use hybrid `queries` for concepts, `fts` for exact lexical anchors, and `vector` for semantic-only intent.
 2. Read the search response's `freshness` and `indexing` fields. Use `possibly_stale` results immediately when they are sufficient; do not call status merely because a background update is active.
 3. Call `zvec_grep_index_status` only when search reports a missing index, indexing failed or was cancelled, or explicit progress monitoring and diagnostics are required.
-4. Apply focused path and file-type filters early. Exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.
-5. Call `zvec_grep_index` only when the user requests persistent indexing. Never silently create or rebuild an index. For a new index, use a user-selected embedding, or omit it only when a server default is known; never guess a model. Its `wait` parameter defaults to false: submit the job in the background. Poll `zvec_grep_index_status` only when completion, progress monitoring, or diagnostics are required; set `wait: true` only when completion is required before continuing.
-6. Call `zvec_grep_server_status` only for daemon diagnostics, not before ordinary searches.
+4. Call `zvec_grep_rg` for exhaustive local ripgrep when an index is missing and the task can be answered with literal or regex search, or when the user explicitly requests rg mode.
+5. Apply focused path and file-type filters early. Exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.
+6. Call `zvec_grep_index` only when the user requests persistent indexing or index deletion. Never silently create, rebuild, or drop an index. For a new index, use a user-selected embedding, or omit it only when a server default is known; never guess a model. Its `wait` parameter defaults to false: submit the job in the background. Poll `zvec_grep_index_status` only when completion, progress monitoring, or diagnostics are required; set `wait: true` only when completion is required before continuing. Its `drop` parameter deletes the workspace index and must be requested by the user.
+7. Call `zvec_grep_server_status` only for daemon diagnostics, not before ordinary searches.
 
-If the index is missing, explain that indexed search requires an index and ask before creating one. For exhaustive literal or regex search without an index, use the explicit no-index CLI fallback.
+If the index is missing, explain that indexed search requires an index and ask before creating one. For exhaustive literal or regex search without an index, use `zvec_grep_rg` when present; otherwise use the explicit no-index CLI fallback.
 
 Use multiple queries when comparing related concepts.
 
