@@ -87,13 +87,16 @@ zg server on
 zg server status
 ```
 
-安装 Codex MCP 集成：
+为 Codex、Claude Code、OpenCode 或 Cursor 安装 MCP 集成：
 
 ```bash
 zg install --target codex --yes
+zg install --target claude --yes
+zg install --target opencode --yes
+zg install --target cursor --yes
 ```
 
-Codex MCP 工具调用默认超时为 600 秒，可在安装时通过 `--mcp-tool-timeout <秒数>` 覆盖。
+Codex MCP 工具调用和 OpenCode MCP 初始化默认超时为 600 秒，可在安装时通过 `--mcp-tool-timeout <秒数>` 覆盖。
 本地 server 默认不启用 token，并且只监听 loopback。需要 Bearer 鉴权时，可使用 `zg server on --token-file <path>` 启动（或设置 `ZVEC_GREP_SERVER_TOKEN`），再通过 `zg install --mcp-token-env ZVEC_GREP_SERVER_TOKEN` 让 MCP 客户端发送相同 token。安装后的 MCP URL 为 `http://127.0.0.1:7999/mcp`。使用 `zg server off` 停止 daemon。
 
 CLI 的索引检索和建索引命令支持 `--mode direct`、`--mode server` 和 `--mode auto`。默认模式为 `auto`：只在 daemon ready 时使用 server，否则在提交请求前回退 Direct。
@@ -152,7 +155,7 @@ zg query --rg -F "ZVEC_GREP_HOME" src
 zg query --human "root local index discovery" --limit 3
 ```
 
-MCP 客户端可使用四个工具：`zvec_grep_search`、`zvec_grep_index`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。Codex installer 会向 `${CODEX_HOME:-$HOME/.codex}/config.toml` 和 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` 写入由 zvec-grep 管理的配置块。
+MCP 客户端可使用四个工具：`zvec_grep_search`、`zvec_grep_index`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。installer 会为 Codex、Claude Code、OpenCode 和 Cursor 写入用户级 MCP 配置，不会安装 skill 或 agent guidance。`cc` 和 `claude-code` 仍可作为正式 target `claude` 的兼容别名。
 
 ## <a id="models"></a>🧠 模型
 

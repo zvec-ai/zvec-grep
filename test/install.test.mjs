@@ -26,7 +26,6 @@ test("Codex installer removes orphaned managed markers", async (t) => {
   );
   const codexHome = join(temporaryDirectory, ".codex");
   const configPath = join(codexHome, "config.toml");
-  const agentsPath = join(codexHome, "AGENTS.md");
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
@@ -51,15 +50,10 @@ test("Codex installer removes orphaned managed markers", async (t) => {
   );
 
   const installed = await readFile(configPath, "utf8");
-  const agents = await readFile(agentsPath, "utf8");
   assert.match(installed, /\[mcp_servers\.other\]/);
   assert.match(installed, /^url = "http:\/\/127\.0\.0\.1:7999\/mcp"$/m);
   assert.doesNotMatch(installed, /^bearer_token_env_var\s*=/m);
   assert.doesNotMatch(installed, /^command\s*=\s*"zg"$/m);
-  assert.match(agents, /zvec_grep_index/);
-  assert.match(agents, /zg server on/);
-  assert.match(agents, /`wait` defaults to false/i);
-  assert.match(agents, /zvec_grep_index_status/);
   assert.match(installed, /^tool_timeout_sec = 600$/m);
   assert.equal(countOccurrences(installed, "# ZVEC_GREP_START"), 1);
   assert.equal(countOccurrences(installed, "# ZVEC_GREP_END"), 1);
@@ -295,9 +289,7 @@ test(
     const codexHome = join(temporaryDirectory, ".codex");
     const dotfiles = join(temporaryDirectory, "dotfiles");
     const configTarget = join(dotfiles, "config.toml");
-    const agentsTarget = join(dotfiles, "AGENTS.md");
     const configPath = join(codexHome, "config.toml");
-    const agentsPath = join(codexHome, "AGENTS.md");
     t.after(async () => {
       await rm(temporaryDirectory, { recursive: true, force: true });
     });
@@ -305,23 +297,17 @@ test(
     await mkdir(codexHome, { recursive: true });
     await mkdir(dotfiles, { recursive: true });
     await writeFile(configTarget, '[mcp_servers.other]\ncommand = "other"\n');
-    await writeFile(agentsTarget, "# Existing instructions\n");
     await chmod(configTarget, 0o640);
-    await chmod(agentsTarget, 0o600);
     await symlink(configTarget, configPath);
-    await symlink(agentsTarget, agentsPath);
 
     await installCodex(codexHome);
 
     assert.equal((await lstat(configPath)).isSymbolicLink(), true);
-    assert.equal((await lstat(agentsPath)).isSymbolicLink(), true);
     assert.equal((await stat(configTarget)).mode & 0o777, 0o640);
-    assert.equal((await stat(agentsTarget)).mode & 0o777, 0o600);
     assert.match(
       await readFile(configTarget, "utf8"),
       /\[mcp_servers\.zvec_grep\]/,
     );
-    assert.match(await readFile(agentsTarget, "utf8"), /## zvec-grep/);
   },
 );
 
@@ -330,12 +316,12 @@ test("Codex installer removes temporary files when an atomic replacement fails",
     join(tmpdir(), "zvec-grep-install-failure-"),
   );
   const codexHome = join(temporaryDirectory, ".codex");
-  const agentsPath = join(codexHome, "AGENTS.md");
+  const configPath = join(codexHome, "config.toml");
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  await mkdir(agentsPath, { recursive: true });
+  await mkdir(configPath, { recursive: true });
 
   await assert.rejects(installCodex(codexHome));
 
@@ -362,6 +348,179 @@ test("Codex installer accepts a custom MCP tool timeout", async (t) => {
   assert.match(installed, /^tool_timeout_sec = 900$/m);
 });
 
+test("Codex installer removes legacy managed guidance", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-legacy-guidance-"),
+  );
+  const codexHome = join(temporaryDirectory, ".codex");
+  const agentsPath = join(codexHome, "AGENTS.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(codexHome, { recursive: true });
+  await writeFile(
+    agentsPath,
+    [
+      "# Existing instructions",
+      "",
+      "<!-- ZVEC_GREP_START -->",
+      "## zvec-grep",
+      "legacy guidance",
+      "<!-- ZVEC_GREP_END -->",
+      "",
+    ].join("\n"),
+  );
+
+  await installCodex(codexHome);
+
+  const agents = await readFile(agentsPath, "utf8");
+  assert.match(agents, /# Existing instructions/);
+  assert.doesNotMatch(agents, /ZVEC_GREP|legacy guidance/);
+});
+
+test("Claude Code installer manages a user-scoped HTTP MCP server", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-claude-"),
+  );
+  const claudeConfigDirectory = join(temporaryDirectory, ".claude");
+  const configPath = join(claudeConfigDirectory, ".claude.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget(
+    "claude",
+    {
+      CLAUDE_CONFIG_DIR: claudeConfigDirectory,
+    },
+    ["--mcp-token-env", "ZVEC_GREP_SERVER_TOKEN"],
+  );
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    headers: {
+      Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
+    },
+  });
+
+  await uninstallTarget("claude", {
+    CLAUDE_CONFIG_DIR: claudeConfigDirectory,
+  });
+  const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.mcpServers, undefined);
+});
+
+test("Claude Code installer accepts cc and claude-code compatibility aliases", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-claude-aliases-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  for (const alias of ["cc", "claude-code"]) {
+    const claudeConfigDirectory = join(temporaryDirectory, alias);
+    await installTarget(alias, { CLAUDE_CONFIG_DIR: claudeConfigDirectory });
+    const config = JSON.parse(
+      await readFile(join(claudeConfigDirectory, ".claude.json"), "utf8"),
+    );
+    assert.equal(config.mcpServers.zvec_grep.url, "http://127.0.0.1:7999/mcp");
+  }
+});
+
+test("Cursor installer manages a global Streamable HTTP MCP server", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-cursor-"),
+  );
+  const cursorConfigDirectory = join(temporaryDirectory, ".cursor");
+  const configPath = join(cursorConfigDirectory, "mcp.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("cursor", { CURSOR_CONFIG_DIR: cursorConfigDirectory }, [
+    "--mcp-token-env",
+    "ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    url: "http://127.0.0.1:7999/mcp",
+    headers: {
+      Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
+    },
+  });
+
+  await uninstallTarget("cursor", {
+    CURSOR_CONFIG_DIR: cursorConfigDirectory,
+  });
+  const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.mcpServers, undefined);
+});
+
+test("OpenCode installer preserves config and manages a remote MCP server", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-opencode-"),
+  );
+  const configPath = join(temporaryDirectory, "opencode.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ model: "custom/model", mcp: { other: { type: "remote", url: "https://example.com/mcp" } } }, null, 2)}\n`,
+  );
+  await installTarget("opencode", { OPENCODE_CONFIG: configPath }, [
+    "--mcp-tool-timeout=900",
+    "--mcp-token-env=ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(config.model, "custom/model");
+  assert.equal(config.mcp.other.url, "https://example.com/mcp");
+  assert.deepEqual(config.mcp.zvec_grep, {
+    type: "remote",
+    url: "http://127.0.0.1:7999/mcp",
+    enabled: true,
+    timeout: 900000,
+    oauth: false,
+    headers: {
+      Authorization: "Bearer {env:ZVEC_GREP_SERVER_TOKEN}",
+    },
+  });
+
+  await uninstallTarget("opencode", { OPENCODE_CONFIG: configPath });
+  const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.mcp.zvec_grep, undefined);
+  assert.equal(uninstalled.mcp.other.url, "https://example.com/mcp");
+});
+
+test("JSON installers require force before replacing an unmanaged server", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-json-conflict-"),
+  );
+  const configPath = join(temporaryDirectory, "opencode.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+  await writeFile(
+    configPath,
+    '{"mcp":{"zvec_grep":{"type":"remote","url":"https://example.com/mcp"}}}\n',
+  );
+
+  await assert.rejects(
+    installTarget("opencode", { OPENCODE_CONFIG: configPath }),
+    /--force/,
+  );
+  await installTarget("opencode", { OPENCODE_CONFIG: configPath }, ["--force"]);
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(config.mcp.zvec_grep.url, "http://127.0.0.1:7999/mcp");
+});
+
 async function installCodex(codexHome, extraArgs = []) {
   await execFileAsync(
     process.execPath,
@@ -385,6 +544,22 @@ async function uninstallCodex(codexHome, extraArgs = []) {
         CODEX_HOME: codexHome,
       },
     },
+  );
+}
+
+async function installTarget(target, env, extraArgs = []) {
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "install", "--target", target, "--yes", ...extraArgs],
+    { env: { ...process.env, ...env } },
+  );
+}
+
+async function uninstallTarget(target, env, extraArgs = []) {
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "uninstall", "--target", target, "--yes", ...extraArgs],
+    { env: { ...process.env, ...env } },
   );
 }
 

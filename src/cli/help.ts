@@ -148,7 +148,7 @@ The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.`;
     case "install":
       return `Usage:
-  zg install [--target codex|all|auto] [--yes] [--force]
+  zg install [--target codex|claude|opencode|cursor|all|auto] [--yes] [--force]
 
 Options:
   --target <agent>                  Agent integration to install
@@ -157,12 +157,12 @@ Options:
   --yes                             Use default choices without prompting
   --force                           Replace conflicting unmanaged configuration
 
-This installs agent guidance and MCP configuration. It does not install the npm package.`;
+This installs MCP configuration only. It does not install the npm package or agent skills.`;
     case "uninstall":
       return `Usage:
-  zg uninstall [--target codex|all|auto] [--yes]
+  zg uninstall [--target codex|claude|opencode|cursor|all|auto] [--yes]
 
-Removes zvec-grep-managed agent guidance and MCP configuration.`;
+Removes zvec-grep-managed MCP configuration and legacy Codex guidance.`;
     case "help":
       return `Usage:
   zg help [command]

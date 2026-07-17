@@ -77,9 +77,30 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
   {
     id: "codex",
     label: "Codex",
-    description: "configure zvec-grep MCP and Codex guidance",
+    description: "configure the zvec-grep MCP server",
     install: installCodexIntegration,
     uninstall: uninstallCodexIntegration,
+  },
+  {
+    id: "claude",
+    label: "Claude Code",
+    description: "configure the zvec-grep MCP server",
+    install: installClaudeCodeIntegration,
+    uninstall: uninstallClaudeCodeIntegration,
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    description: "configure the zvec-grep MCP server",
+    install: installOpenCodeIntegration,
+    uninstall: uninstallOpenCodeIntegration,
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    description: "configure the zvec-grep MCP server",
+    install: installCursorIntegration,
+    uninstall: uninstallCursorIntegration,
   },
 ];
 
@@ -192,9 +213,7 @@ async function runInstall(parsed: ParsedArgs): Promise<void> {
   console.log(
     "Restart the selected agent or start a new session to pick up the integration.",
   );
-  if (installers.some((installer) => installer.id === "codex")) {
-    console.log("zvec-grep MCP endpoint: http://127.0.0.1:7999/mcp");
-  }
+  console.log(`zvec-grep MCP endpoint: ${resolveServerUrl()}`);
 }
 
 async function runUninstall(parsed: ParsedArgs): Promise<void> {
@@ -238,15 +257,14 @@ async function installCodexIntegration(
     removeConflict: removeCodexMcpServerConfig,
   });
 
-  await writeMarkedFile({
+  // Remove guidance written by older releases. Integrations are MCP-only now.
+  await removeMarkedFile({
     path: agentsPath,
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
-    block: codexAgentsBlock(),
-    force: true,
   });
 
-  return { files: [configPath, agentsPath] };
+  return { files: [configPath] };
 }
 
 async function uninstallCodexIntegration(): Promise<InstallAgentResult> {
@@ -266,6 +284,98 @@ async function uninstallCodexIntegration(): Promise<InstallAgentResult> {
   });
 
   return { files: [configPath, agentsPath] };
+}
+
+async function installClaudeCodeIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const configPath = resolveClaudeCodeConfigPath();
+  await installJsonMcpServer({
+    path: configPath,
+    containerKey: "mcpServers",
+    server: {
+      type: "http",
+      url: resolveServerUrl(),
+      ...(options.mcpTokenEnv
+        ? {
+            headers: {
+              Authorization: `Bearer \${${options.mcpTokenEnv}}`,
+            },
+          }
+        : {}),
+    },
+    force: options.force,
+    label: "Claude Code",
+  });
+  return { files: [configPath] };
+}
+
+async function uninstallClaudeCodeIntegration(): Promise<InstallAgentResult> {
+  const configPath = resolveClaudeCodeConfigPath();
+  await uninstallJsonMcpServer(configPath, "mcpServers");
+  return { files: [configPath] };
+}
+
+async function installOpenCodeIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const configPath = resolveOpenCodeConfigPath();
+  await installJsonMcpServer({
+    path: configPath,
+    containerKey: "mcp",
+    server: {
+      type: "remote",
+      url: resolveServerUrl(),
+      enabled: true,
+      timeout: options.mcpToolTimeoutSeconds * 1_000,
+      oauth: false,
+      ...(options.mcpTokenEnv
+        ? {
+            headers: {
+              Authorization: `Bearer {env:${options.mcpTokenEnv}}`,
+            },
+          }
+        : {}),
+    },
+    force: options.force,
+    label: "OpenCode",
+  });
+  return { files: [configPath] };
+}
+
+async function uninstallOpenCodeIntegration(): Promise<InstallAgentResult> {
+  const configPath = resolveOpenCodeConfigPath();
+  await uninstallJsonMcpServer(configPath, "mcp");
+  return { files: [configPath] };
+}
+
+async function installCursorIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const configPath = resolveCursorConfigPath();
+  await installJsonMcpServer({
+    path: configPath,
+    containerKey: "mcpServers",
+    server: {
+      url: resolveServerUrl(),
+      ...(options.mcpTokenEnv
+        ? {
+            headers: {
+              Authorization: `Bearer \${${options.mcpTokenEnv}}`,
+            },
+          }
+        : {}),
+    },
+    force: options.force,
+    label: "Cursor",
+  });
+  return { files: [configPath] };
+}
+
+async function uninstallCursorIntegration(): Promise<InstallAgentResult> {
+  const configPath = resolveCursorConfigPath();
+  await uninstallJsonMcpServer(configPath, "mcpServers");
+  return { files: [configPath] };
 }
 
 async function resolveInstallers(
@@ -329,7 +439,8 @@ function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
 
   const selected = new Map<string, AgentInstaller>();
   for (const token of normalized) {
-    const lower = token.toLowerCase();
+    const input = token.toLowerCase();
+    const lower = input === "cc" || input === "claude-code" ? "claude" : input;
     if (lower === "none") {
       return [];
     }
@@ -1095,6 +1206,112 @@ function resolveCodexHome(): string {
   return resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"));
 }
 
+function resolveClaudeCodeConfigPath(): string {
+  return process.env.CLAUDE_CONFIG_DIR
+    ? resolve(process.env.CLAUDE_CONFIG_DIR, ".claude.json")
+    : resolve(homedir(), ".claude.json");
+}
+
+function resolveOpenCodeConfigPath(): string {
+  return resolve(
+    process.env.OPENCODE_CONFIG ??
+      resolve(homedir(), ".config", "opencode", "opencode.json"),
+  );
+}
+
+function resolveCursorConfigPath(): string {
+  return resolve(
+    process.env.CURSOR_CONFIG_DIR ?? resolve(homedir(), ".cursor"),
+    "mcp.json",
+  );
+}
+
+async function installJsonMcpServer(options: {
+  path: string;
+  containerKey: "mcp" | "mcpServers";
+  server: Record<string, unknown>;
+  force: boolean;
+  label: string;
+}): Promise<void> {
+  const config = await readJsonObject(options.path);
+  const existingContainer = config[options.containerKey];
+  if (existingContainer !== undefined && !isJsonObject(existingContainer)) {
+    throw new Error(
+      `Expected ${options.containerKey} in ${options.path} to be a JSON object`,
+    );
+  }
+
+  const container = { ...(existingContainer ?? {}) } as Record<string, unknown>;
+  const existingServer = container.zvec_grep;
+  if (
+    existingServer !== undefined &&
+    !isManagedJsonMcpServer(existingServer) &&
+    !options.force
+  ) {
+    throw new Error(
+      `Existing unmanaged zvec_grep MCP server found in ${options.path}. Re-run with --force to replace it for ${options.label}.`,
+    );
+  }
+
+  container.zvec_grep = options.server;
+  config[options.containerKey] = container;
+  await writeTextFileAtomic(
+    options.path,
+    `${JSON.stringify(config, null, 2)}\n`,
+  );
+}
+
+async function uninstallJsonMcpServer(
+  path: string,
+  containerKey: "mcp" | "mcpServers",
+): Promise<void> {
+  const existing = await readTextFileIfExists(path);
+  if (!existing) return;
+
+  const config = parseJsonObject(existing, path);
+  const container = config[containerKey];
+  if (!isJsonObject(container)) return;
+  if (!isManagedJsonMcpServer(container.zvec_grep)) return;
+
+  const nextContainer = { ...container };
+  delete nextContainer.zvec_grep;
+  if (Object.keys(nextContainer).length === 0) {
+    delete config[containerKey];
+  } else {
+    config[containerKey] = nextContainer;
+  }
+  await writeTextFileAtomic(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown>> {
+  const existing = await readTextFileIfExists(path);
+  return existing ? parseJsonObject(existing, path) : {};
+}
+
+function parseJsonObject(value: string, path: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(
+      `Cannot update ${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`,
+      { cause: error },
+    );
+  }
+  if (!isJsonObject(parsed)) {
+    throw new Error(`Cannot update ${path}: expected a JSON object`);
+  }
+  return parsed;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isManagedJsonMcpServer(value: unknown): boolean {
+  return isJsonObject(value) && value.url === resolveServerUrl();
+}
+
 async function writeMarkedFile(options: {
   path: string;
   startMarker: string;
@@ -1391,20 +1608,6 @@ ${
 }tool_timeout_sec = ${mcpToolTimeoutSeconds}
 default_tools_approval_mode = "auto"
 ${ZVEC_GREP_CONFIG_END}`;
-}
-
-function codexAgentsBlock(): string {
-  return `${ZVEC_GREP_AGENTS_START}
-## zvec-grep
-
-Use zvec-grep before grep, rg, or broad file reads when you need to understand or locate code.
-
-- **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search, \`zvec_grep_index\` to ensure an index, and the two status tools to inspect index or server state.
-- **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. For \`zvec_grep_index\`, \`wait\` defaults to false: submit it in the background and poll \`zvec_grep_index_status\`; set \`wait: true\` only when completion is required before continuing.
-- **Shell fallback**: If the MCP server is unavailable, use \`zg status\`, \`zg query "<query>"\`, and \`zg query --rg "<pattern>"\`.
-
-Prefer focused -g/--glob and -t/--type filters, and exclude dependencies, generated output, caches, build artifacts, and logs unless the task is about those files.
-${ZVEC_GREP_AGENTS_END}`;
 }
 
 function resolveIndexRoot(root: string | undefined): string {
