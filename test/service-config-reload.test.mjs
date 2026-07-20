@@ -5,6 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { updateGlobalConfig } from "../dist/engine/config.js";
 import { createZvecGrep } from "../dist/index.js";
+import {
+  createRemoteEmbeddingOperationPermit,
+  createRemoteEmbeddingTarget,
+  withRemoteEmbeddingOperationPermit,
+} from "../dist/authorization/index.js";
 
 test("explicit embedding reference reloads provider config before refresh and query", async () => {
   const temporaryDirectory = await mkdtemp(
@@ -57,7 +62,9 @@ test("explicit embedding reference reloads provider config before refresh and qu
       root,
       embedding: "qwen/text-embedding-v4",
     });
-    await service.index();
+    await withPermit(root, "https://endpoint-a.test/embeddings", () =>
+      service.index(),
+    );
     assert.ok(requests.length > 0);
     assert.ok(
       requests.every(
@@ -82,11 +89,13 @@ test("explicit embedding reference reloads provider config before refresh and qu
       "export const answer = 43;\n",
     );
 
-    await service.context({
-      root,
-      query: "where is the answer defined",
-      limit: 1,
-    });
+    await withPermit(root, "https://endpoint-b.test/embeddings", () =>
+      service.context({
+        root,
+        query: "where is the answer defined",
+        limit: 1,
+      }),
+    );
     assert.ok(requests.length > 0);
     assert.ok(
       requests.every(
@@ -107,3 +116,16 @@ test("explicit embedding reference reloads provider config before refresh and qu
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+async function withPermit(root, endpoint, operation) {
+  const target = await createRemoteEmbeddingTarget({
+    roots: [root],
+    provider: "qwen",
+    model: "text-embedding-v4",
+    endpoint,
+  });
+  return await withRemoteEmbeddingOperationPermit(
+    createRemoteEmbeddingOperationPermit(target, "once"),
+    operation,
+  );
+}

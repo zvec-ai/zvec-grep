@@ -61,6 +61,8 @@ test("Codex installer removes orphaned managed markers", async (t) => {
   assert.match(agents, /`wait` defaults to false/i);
   assert.match(agents, /zvec_grep_index_status/);
   assert.match(installed, /^tool_timeout_sec = 600$/m);
+  assert.match(installed, /^default_tools_approval_mode = "approve"$/m);
+  assert.doesNotMatch(installed, /^default_tools_approval_mode = "auto"$/m);
   assert.equal(countOccurrences(installed, "# ZVEC_GREP_START"), 1);
   assert.equal(countOccurrences(installed, "# ZVEC_GREP_END"), 1);
   assert.equal(countOccurrences(installed, "[mcp_servers.zvec_grep]"), 1);

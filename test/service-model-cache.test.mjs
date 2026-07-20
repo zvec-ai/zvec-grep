@@ -6,6 +6,11 @@ import test from "node:test";
 import { updateGlobalConfig } from "../dist/engine/config.js";
 import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
+import {
+  createRemoteEmbeddingOperationPermit,
+  createRemoteEmbeddingTarget,
+  withRemoteEmbeddingOperationPermit,
+} from "../dist/authorization/index.js";
 
 test("recovered embedding model cache is bounded and defers disposal until active queries finish", async () => {
   const temporaryDirectory = await mkdtemp(
@@ -50,25 +55,31 @@ test("recovered embedding model cache is bounded and defers disposal until activ
       root,
       embedding: "qwen/text-embedding-v4",
     });
-    await service.index();
+    await withPermit(root, "https://initial.test/embeddings", () =>
+      service.index(),
+    );
 
     configureQwen("https://blocked.test/embeddings");
-    blockedContext = service.context({
-      root,
-      query: "where is the answer defined",
-      limit: 1,
-      autoUpdate: false,
-    });
-    await blockedRequestStarted;
-
-    for (const name of ["third", "fourth", "fifth", "sixth"]) {
-      configureQwen(`https://${name}.test/embeddings`);
-      await service.context({
+    blockedContext = withPermit(root, "https://blocked.test/embeddings", () =>
+      service.context({
         root,
         query: "where is the answer defined",
         limit: 1,
         autoUpdate: false,
-      });
+      }),
+    );
+    await blockedRequestStarted;
+
+    for (const name of ["third", "fourth", "fifth", "sixth"]) {
+      configureQwen(`https://${name}.test/embeddings`);
+      await withPermit(root, `https://${name}.test/embeddings`, () =>
+        service.context({
+          root,
+          query: "where is the answer defined",
+          limit: 1,
+          autoUpdate: false,
+        }),
+      );
     }
 
     assert.equal(disposedModels.length, 0);
@@ -104,6 +115,19 @@ function configureQwen(endpoint) {
       },
     },
   });
+}
+
+async function withPermit(root, endpoint, operation) {
+  const target = await createRemoteEmbeddingTarget({
+    roots: [root],
+    provider: "qwen",
+    model: "text-embedding-v4",
+    endpoint,
+  });
+  return await withRemoteEmbeddingOperationPermit(
+    createRemoteEmbeddingOperationPermit(target, "once"),
+    operation,
+  );
 }
 
 function embeddingResponse(init) {

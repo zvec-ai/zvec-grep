@@ -7,6 +7,10 @@ export type PreviewMode = "none" | "short" | "full";
 
 export type CliOptions = {
   configAction?: "model-set";
+  authAction?: "grant" | "status" | "revoke";
+  authorizationCapability?: "embedding";
+  authorizationScope?: "workspace";
+  allowRemote?: "once" | "workspace";
   serverAction?: "on" | "off" | "status" | "run";
   listen?: string;
   serverTokenFile?: string;
@@ -68,6 +72,7 @@ export type CliCommand =
   | "install"
   | "uninstall"
   | "config"
+  | "auth"
   | "server"
   | "help"
   | "version";

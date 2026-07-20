@@ -42,7 +42,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
   await mkdir(consumerDirectory, { recursive: true });
 
   const packed = await runNpm(
-    ["pack", "--json", "--pack-destination", packDirectory],
+    ["pack", "--json", "--ignore-scripts", "--pack-destination", packDirectory],
     { cwd: resolve("."), env: npmEnvironment, timeout: 120_000 },
   );
   const [metadata] = JSON.parse(packed.stdout);
@@ -146,6 +146,8 @@ test("npm package contains and exposes the supported public surface", async (t) 
       "test-key",
       "--endpoint",
       endpoint,
+      "--allow-remote",
+      "workspace",
       "-g",
       "*.ts",
       "-t",

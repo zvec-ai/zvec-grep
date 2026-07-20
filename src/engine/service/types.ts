@@ -29,6 +29,7 @@ export type CreateZvecGrepOptions = {
   llamaGpu?: "auto" | "metal" | "vulkan" | "cuda" | false;
   embeddingParallelism?: number;
   defaultEmbedding?: boolean;
+  authorizationSigningKeyPath?: string;
 };
 
 export type ZvecGrepIndexOptions = {

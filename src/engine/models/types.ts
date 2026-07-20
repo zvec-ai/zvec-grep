@@ -4,6 +4,18 @@ export type ModelProviderOptions = {
   modelCacheDir?: string;
   llamaGpu?: LlamaGpuMode;
   embeddingParallelism?: number;
+  authorizeRemoteEmbedding?: (
+    request: ModelRemoteEmbeddingRequest,
+  ) => void | Promise<void>;
+};
+
+export type ModelRemoteEmbeddingRequest = {
+  provider: string;
+  model: string;
+  endpoint: string;
+  purpose: "document" | "query";
+  contentKinds: readonly ("text" | "image")[];
+  contentCount: number;
 };
 
 export type ModelCatalog = Record<

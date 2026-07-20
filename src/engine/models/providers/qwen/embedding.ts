@@ -7,7 +7,7 @@ import {
   type EmbeddingOptions,
   type EmbeddingVector,
 } from "../../embeddings.js";
-import type { ModelProviderOptions } from "../../types.js";
+import type { ModelProviderOptions, ModelRef } from "../../types.js";
 
 // -----------------------------------------------------------------------------
 // Text embedding models (OpenAI-compatible API)
@@ -53,6 +53,7 @@ abstract class QwenTextEmbeddingModel extends EmbeddingModel {
   private readonly endpoint: string;
   private readonly displayName: string;
   private readonly errorCodePrefix: string;
+  private readonly authorizeRemoteEmbedding?: ModelProviderOptions["authorizeRemoteEmbedding"];
 
   constructor(spec: QwenTextEmbeddingSpec, options: ModelProviderOptions) {
     super();
@@ -75,9 +76,7 @@ abstract class QwenTextEmbeddingModel extends EmbeddingModel {
       });
     }
 
-    const endpoint = normalizeEndpoint(
-      options.endpoint ?? DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
-    );
+    const endpoint = resolveRemoteEmbeddingEndpoint(this.ref, options.endpoint);
 
     if (endpoint.length === 0) {
       throw new EngineError(`${this.displayName} model requires an endpoint`, {
@@ -88,15 +87,25 @@ abstract class QwenTextEmbeddingModel extends EmbeddingModel {
 
     this.apiKey = options.apiKey;
     this.endpoint = endpoint;
+    this.authorizeRemoteEmbedding = options.authorizeRemoteEmbedding;
   }
 
   protected async doEmbed(
     contents: readonly Content[],
-    _options: Required<EmbeddingOptions>,
+    options: Required<EmbeddingOptions>,
   ): Promise<EmbeddingVector[]> {
     const texts = (contents as readonly TextContent[]).map(
       (content) => content.text,
     );
+
+    await this.authorizeRemoteEmbedding?.({
+      provider: this.ref.provider,
+      model: this.ref.model,
+      endpoint: this.endpoint,
+      purpose: options.purpose,
+      contentKinds: contents.map((content) => content.kind),
+      contentCount: contents.length,
+    });
 
     let response: Response;
 
@@ -246,6 +255,7 @@ export class Qwen3VlEmbeddingModel extends EmbeddingModel {
 
   private readonly apiKey: string;
   private readonly endpoint: string;
+  private readonly authorizeRemoteEmbedding?: ModelProviderOptions["authorizeRemoteEmbedding"];
 
   constructor(options: ModelProviderOptions) {
     super();
@@ -257,9 +267,7 @@ export class Qwen3VlEmbeddingModel extends EmbeddingModel {
       });
     }
 
-    const endpoint = normalizeEndpoint(
-      options.endpoint ?? DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT,
-    );
+    const endpoint = resolveRemoteEmbeddingEndpoint(this.ref, options.endpoint);
 
     if (endpoint.length === 0) {
       throw new EngineError("Qwen3 VL embedding model requires an endpoint", {
@@ -270,13 +278,23 @@ export class Qwen3VlEmbeddingModel extends EmbeddingModel {
 
     this.apiKey = options.apiKey;
     this.endpoint = endpoint;
+    this.authorizeRemoteEmbedding = options.authorizeRemoteEmbedding;
   }
 
   protected async doEmbed(
     contents: readonly Content[],
-    _options: Required<EmbeddingOptions>,
+    options: Required<EmbeddingOptions>,
   ): Promise<EmbeddingVector[]> {
     validateQwen3VlContents(this.ref.model, contents);
+
+    await this.authorizeRemoteEmbedding?.({
+      provider: this.ref.provider,
+      model: this.ref.model,
+      endpoint: this.endpoint,
+      purpose: options.purpose,
+      contentKinds: contents.map((content) => content.kind),
+      contentCount: contents.length,
+    });
 
     const requestContents = contents.map((content) => {
       if (content.kind === "text") {
@@ -403,6 +421,27 @@ const BASE64_CHARS =
 
 function normalizeEndpoint(endpoint: string): string {
   return endpoint.trim();
+}
+
+export function resolveRemoteEmbeddingEndpoint(
+  ref: ModelRef,
+  endpoint?: string,
+): string {
+  if (endpoint !== undefined) return normalizeEndpoint(endpoint);
+  if (
+    ref.provider === "qwen" &&
+    (ref.model === "text-embedding-v4" ||
+      ref.model === "qwen3.7-text-embedding")
+  ) {
+    return DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT;
+  }
+  if (ref.provider === "qwen" && ref.model === "qwen3-vl-embedding") {
+    return DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT;
+  }
+  throw new EngineError("Remote embedding endpoint is not implemented", {
+    code: "ZVEC_GREP.ENGINE.MODELS.REMOTE_ENDPOINT_NOT_IMPLEMENTED",
+    context: `provider=${ref.provider} model=${ref.model}`,
+  });
 }
 
 function providerErrorContext(

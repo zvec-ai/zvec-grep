@@ -1,4 +1,5 @@
 import { createZvecGrep } from "../engine/service/index.js";
+import { anonymousHome } from "../engine/service/root.js";
 import type {
   CreateZvecGrepOptions,
   ZvecGrepInfoResult,
@@ -14,16 +15,28 @@ import {
   type NormalizedSearchInput,
 } from "../mcp/input-normalization.js";
 import type {
+  RemoteEmbeddingDemoAuthorization,
+  RemoteEmbeddingDemoAuthorizationRequest,
   ZvecGrepDaemonBackend,
   ZvecGrepIndexResult,
   ZvecGrepIndexStatusResult,
   ZvecGrepSearchResult,
   ZvecGrepServerStatusResult,
+  ZvecGrepRemoteEmbeddingDemoResult,
 } from "../mcp/tools.js";
 import type {
   ZvecGrepIndexInput,
   ZvecGrepIndexStatusInput,
+  ZvecGrepRemoteEmbeddingDemoInput,
 } from "../mcp/schemas.js";
+import {
+  inspectRemoteEmbeddingDemoFile,
+  readRemoteEmbeddingDemoFile,
+  readRemoteEmbeddingDemoGrant,
+  REMOTE_EMBEDDING_DEMO_SCHEMA,
+  remoteEmbeddingDemoAuthorizationPath,
+  writeRemoteEmbeddingDemoGrant,
+} from "../demo/remote-embedding-authorization.js";
 import { DaemonError } from "./errors.js";
 import {
   JobScheduler,
@@ -46,6 +59,17 @@ import {
 import type { RootRuntime } from "./root-runtime.js";
 import { WatchManager, type WatchManagerOptions } from "./watch-manager.js";
 import { rootIdentity, type DaemonLogger } from "./logger.js";
+import {
+  RemoteEmbeddingAuthorizationManager,
+  RemoteEmbeddingAuthorizationStore,
+  createRemoteEmbeddingTarget,
+  planRemoteIndexAuthorization,
+  planRemoteSearchAuthorization,
+  withRemoteEmbeddingOperationPermit,
+  type RemoteEmbeddingAuthorizationPlan,
+  type RemoteEmbeddingAuthorizationScope,
+  type RemoteEmbeddingOperationPermit,
+} from "../authorization/index.js";
 
 const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
 
@@ -60,6 +84,7 @@ export type DaemonBackendOptions = {
   createService?: typeof createZvecGrep;
   watchManagerFactory?: (options: WatchManagerOptions) => WatchManager;
   logger?: DaemonLogger;
+  authorizationStore?: RemoteEmbeddingAuthorizationStore;
 };
 
 type DaemonIndexInput = ZvecGrepIndexInput & {
@@ -74,10 +99,17 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private readonly statusCache = new Map<string, ZvecGrepInfoResult>();
   private readonly watchers = new Map<string, WatchManager>();
   private readonly indexCoordinators = new Map<string, IndexCoordinator>();
+  private readonly authorizationManager: RemoteEmbeddingAuthorizationManager;
   private shuttingDown = false;
   private closePromise?: Promise<void>;
 
   constructor(private readonly options: DaemonBackendOptions) {
+    this.authorizationManager = new RemoteEmbeddingAuthorizationManager(
+      options.authorizationStore ??
+        new RemoteEmbeddingAuthorizationStore({
+          signingKeyPath: options.serviceOptions?.authorizationSigningKeyPath,
+        }),
+    );
     this.modelPool = new EmbeddingModelPool({
       ...options.modelPoolOptions,
       serviceOptions: options.serviceOptions,
@@ -96,7 +128,86 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     });
   }
 
-  async index(input: ZvecGrepIndexInput): Promise<ZvecGrepIndexResult> {
+  async planIndexAuthorization(
+    input: ZvecGrepIndexInput,
+  ): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
+    const requestedRoot = await resolveRequestedRoot(input.root, false);
+    if (input.rebuild !== true && this.scheduler.hasActiveRoot(requestedRoot)) {
+      return undefined;
+    }
+    const info = await inspectRoot(input.root, this.options.serviceOptions);
+    let schema: CollectionEmbeddingSchema;
+    try {
+      schema = this.indexSchema(info, input);
+    } catch (error) {
+      if (error instanceof DaemonError && error.code === "MODEL_LOAD_FAILED") {
+        return undefined;
+      }
+      throw error;
+    }
+    const existing = info.collection?.embedding;
+    if (
+      existing &&
+      input.embedding &&
+      input.rebuild !== true &&
+      (existing.provider !== schema.provider || existing.model !== schema.model)
+    ) {
+      throw new DaemonError(
+        "EMBEDDING_MODEL_MISMATCH",
+        `Existing model ${existing.provider}/${existing.model} does not match requested model ${schema.provider}/${schema.model}; use rebuild to change models.`,
+      );
+    }
+    return await planRemoteIndexAuthorization({
+      info,
+      schema,
+      rebuild: input.rebuild,
+      serviceOptions: this.options.serviceOptions,
+      store: this.authorizationManager.store,
+    });
+  }
+
+  async planSearchAuthorization(
+    input: NormalizedSearchInput,
+  ): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
+    const requestedRoot = await resolveRequestedRoot(input.root, false);
+    const activeRuntime = this.runtimeManager.getByCanonicalRoot(requestedRoot);
+    if (
+      activeRuntime?.embeddingProvider() &&
+      activeRuntime.embeddingProvider() !== "qwen"
+    ) {
+      return undefined;
+    }
+    const info = await inspectRoot(input.root, this.options.serviceOptions);
+    const canonicalRoot = await resolveRequestedRoot(info.root, false);
+    return await planRemoteSearchAuthorization({
+      info,
+      search: input,
+      runtimeNeedsReconciliation:
+        this.runtimeManager
+          .getByCanonicalRoot(canonicalRoot)
+          ?.needsReconciliation() ?? false,
+      serviceOptions: this.options.serviceOptions,
+      store: this.authorizationManager.store,
+    });
+  }
+
+  async existingRemoteEmbeddingPermit(
+    plan: RemoteEmbeddingAuthorizationPlan,
+  ): Promise<RemoteEmbeddingOperationPermit | undefined> {
+    return await this.authorizationManager.existingWorkspacePermit(plan);
+  }
+
+  async grantRemoteEmbedding(
+    plan: RemoteEmbeddingAuthorizationPlan,
+    scope: RemoteEmbeddingAuthorizationScope,
+  ): Promise<RemoteEmbeddingOperationPermit> {
+    return await this.authorizationManager.grant(plan, scope);
+  }
+
+  async index(
+    input: ZvecGrepIndexInput,
+    options: { authorization?: RemoteEmbeddingOperationPermit } = {},
+  ): Promise<ZvecGrepIndexResult> {
     const runtime = await this.runtimeManager.activateForIndex(input.root);
     this.ensureWatcher(runtime);
     const activeJob = this.scheduler.getByRoot(runtime.canonicalRoot);
@@ -120,7 +231,12 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         followupIfRunning: input.rebuild === true || followsNarrowJob,
         run: (report) =>
           runtime.withWrite(async () => {
-            const proof = await this.runIndex(runtime, input, report);
+            const proof = await this.runIndex(
+              runtime,
+              input,
+              report,
+              options.authorization,
+            );
             if (proof.reconciled) {
               runtime.markReconciled(targetRevision, proof.reconciliationEpoch);
             } else {
@@ -160,7 +276,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     };
   }
 
-  async search(input: NormalizedSearchInput): Promise<ZvecGrepSearchResult> {
+  async search(
+    input: NormalizedSearchInput,
+    options: { authorization?: RemoteEmbeddingOperationPermit } = {},
+  ): Promise<ZvecGrepSearchResult> {
     const startedAt = Date.now();
     const runtime = await this.runtimeManager.activate(input.root);
     this.ensureWatcher(runtime);
@@ -184,35 +303,39 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     );
     let updateJob: IndexJobSnapshot | undefined;
     const executeSearch = () =>
-      runtime.search({
-        queries: input.queries,
-        routes: input.routes,
-        fuse: input.fuse,
-        limit: input.limit,
-        trace: input.trace,
-        preferSymbol: input.preferSymbol,
-        symbolTypes: input.symbolTypes,
-        includePaths: input.includePaths,
-        excludePaths: input.excludePaths,
-        globs: normalizePlainStringList(input.globs),
-        insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
-        fileTypes: normalizePlainStringList(input.fileTypes),
-        excludedFileTypes: normalizePlainStringList(input.excludedFileTypes),
-        hidden: input.hidden,
-        noIgnore: input.noIgnore,
-        ignoreFiles: input.ignoreFiles,
-        maxDepth: input.maxDepth,
-        maxFileSizeBytes: input.maxFileSizeBytes,
-        follow: input.follow,
-        embeddingConcurrency: input.embeddingConcurrency,
-        modifiedAfter: input.modifiedAfter,
-        modifiedBefore: input.modifiedBefore,
-        autoUpdate: false,
-      });
+      withRemoteEmbeddingOperationPermit(options.authorization, () =>
+        runtime.search({
+          queries: input.queries,
+          routes: input.routes,
+          fuse: input.fuse,
+          limit: input.limit,
+          trace: input.trace,
+          preferSymbol: input.preferSymbol,
+          symbolTypes: input.symbolTypes,
+          includePaths: input.includePaths,
+          excludePaths: input.excludePaths,
+          globs: normalizePlainStringList(input.globs),
+          insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
+          fileTypes: normalizePlainStringList(input.fileTypes),
+          excludedFileTypes: normalizePlainStringList(input.excludedFileTypes),
+          hidden: input.hidden,
+          noIgnore: input.noIgnore,
+          ignoreFiles: input.ignoreFiles,
+          maxDepth: input.maxDepth,
+          maxFileSizeBytes: input.maxFileSizeBytes,
+          follow: input.follow,
+          embeddingConcurrency: input.embeddingConcurrency,
+          modifiedAfter: input.modifiedAfter,
+          modifiedBefore: input.modifiedBefore,
+          autoUpdate: false,
+        }),
+      );
     let result;
     if (input.freshness === "wait_for_fresh") {
       while (true) {
-        updateJob = (await this.waitForFresh(runtime)) ?? updateJob;
+        updateJob =
+          (await this.waitForFresh(runtime, options.authorization)) ??
+          updateJob;
         const beforeSearch = runtime.snapshot();
         result = await executeSearch();
         const afterSearch = runtime.snapshot();
@@ -249,6 +372,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           { root: runtime.canonicalRoot },
           "background_reconcile",
           false,
+          options.authorization,
         );
       }
     }
@@ -340,6 +464,115 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     };
   }
 
+  async remoteEmbeddingDemo(
+    input: ZvecGrepRemoteEmbeddingDemoInput,
+    options: { authorization?: RemoteEmbeddingDemoAuthorizationRequest } = {},
+  ): Promise<ZvecGrepRemoteEmbeddingDemoResult> {
+    const authorizationRequest = options.authorization;
+    const canonicalRoot = await resolveRequestedRoot(
+      input.root,
+      authorizationRequest?.scope === "workspace",
+    );
+    const fileMetadata = await inspectRemoteEmbeddingDemoFile(
+      canonicalRoot,
+      input.filePath,
+    );
+    let grant = await readRemoteEmbeddingDemoGrant(canonicalRoot);
+    if (!grant && !authorizationRequest) {
+      return {
+        state: "authorization_required",
+        root: canonicalRoot,
+        provider: REMOTE_EMBEDDING_DEMO_SCHEMA.provider,
+        model: REMOTE_EMBEDDING_DEMO_SCHEMA.model,
+        grantPath: remoteEmbeddingDemoAuthorizationPath(canonicalRoot),
+        filePath: fileMetadata.relativePath,
+        fileBytes: fileMetadata.bytes,
+      };
+    }
+
+    let authorization: RemoteEmbeddingDemoAuthorization;
+    let scope: "once" | "session" | "workspace";
+    let grantPath: string | undefined;
+    if (grant) {
+      authorization = "existing_workspace";
+      scope = "workspace";
+      grantPath = remoteEmbeddingDemoAuthorizationPath(canonicalRoot);
+    } else if (authorizationRequest?.scope === "workspace") {
+      grant = await writeRemoteEmbeddingDemoGrant(canonicalRoot);
+      authorization = "granted_workspace";
+      scope = "workspace";
+      grantPath = remoteEmbeddingDemoAuthorizationPath(canonicalRoot);
+    } else if (authorizationRequest?.scope === "session") {
+      authorization = authorizationRequest.existing
+        ? "existing_session"
+        : "granted_session";
+      scope = "session";
+    } else {
+      authorization = "granted_once";
+      scope = "once";
+    }
+
+    const file = await readRemoteEmbeddingDemoFile(
+      canonicalRoot,
+      input.filePath,
+    );
+
+    const target = await createRemoteEmbeddingTarget({
+      roots: [canonicalRoot],
+      provider: REMOTE_EMBEDDING_DEMO_SCHEMA.provider,
+      model: REMOTE_EMBEDDING_DEMO_SCHEMA.model,
+      serviceOptions: this.options.serviceOptions,
+    });
+    const formalPlan: RemoteEmbeddingAuthorizationPlan = {
+      operation: "query_and_index",
+      target,
+      disclosure: { queryText: true, workspaceContent: "selected" },
+      reason: "query",
+      grantPath: this.authorizationManager.store.grantPath(target),
+    };
+    const permit = await this.authorizationManager.grant(formalPlan, scope);
+
+    const lease = await this.modelPool.acquire({
+      schema: REMOTE_EMBEDDING_DEMO_SCHEMA,
+      root: canonicalRoot,
+      registryHome: anonymousHome(canonicalRoot),
+    });
+    try {
+      const [queryVector, fileVector] =
+        await withRemoteEmbeddingOperationPermit(permit, async () => {
+          const [query] = await lease.model.embed(
+            [{ kind: "text", text: input.text }],
+            { purpose: "query" },
+          );
+          const [document] = await lease.model.embed(
+            [{ kind: "text", text: file.text }],
+            { purpose: "document" },
+          );
+          return [query, document];
+        });
+      if (!queryVector || !fileVector) {
+        throw new Error(
+          "Remote Embedding demo returned an incomplete vector result.",
+        );
+      }
+      return {
+        state: "completed",
+        root: canonicalRoot,
+        authorization,
+        scope,
+        provider: grant?.provider ?? REMOTE_EMBEDDING_DEMO_SCHEMA.provider,
+        model: grant?.model ?? REMOTE_EMBEDDING_DEMO_SCHEMA.model,
+        grantPath,
+        filePath: file.relativePath,
+        fileBytes: file.bytes,
+        queryVectorDimensions: queryVector.length,
+        fileVectorDimensions: fileVector.length,
+      };
+    } finally {
+      lease.release();
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closePromise) {
       return this.closePromise;
@@ -365,6 +598,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     runtime: RootRuntime,
     input: DaemonIndexInput,
     report: (progress: IndexProgress) => void,
+    authorization?: RemoteEmbeddingOperationPermit,
   ): Promise<IndexReconciliationProof> {
     const startedAt = Date.now();
     const includeStatus = !input.changedPaths;
@@ -375,6 +609,11 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     );
     if (includeStatus) this.statusCache.set(runtime.canonicalRoot, before);
     const schema = this.indexSchema(before, input);
+    runtime.updateModelRequest({
+      schema,
+      root: runtime.canonicalRoot,
+      registryHome: before.home,
+    });
     const lease = await this.modelPool.acquire({
       schema,
       root: runtime.canonicalRoot,
@@ -389,25 +628,27 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         embeddingModelOwnership: "borrowed",
         daemonInstanceToken: this.runtimeManager.instanceToken,
       });
-      await service.index({
-        root: runtime.canonicalRoot,
-        rebuild: input.rebuild,
-        resetPaths: input.resetPaths,
-        globs: normalizePlainStringList(input.globs),
-        insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
-        fileTypes: normalizePlainStringList(input.fileTypes),
-        excludedFileTypes: normalizePlainStringList(input.excludedFileTypes),
-        hidden: input.hidden,
-        noIgnore: input.noIgnore,
-        ignoreFiles: normalizePlainStringList(input.ignoreFiles),
-        maxDepth: input.maxDepth,
-        maxFileSizeBytes: input.maxFileSizeBytes,
-        follow: input.follow,
-        embeddingConcurrency: input.embeddingConcurrency,
-        changedPaths: input.changedPaths,
-        onProgress: report,
-        onWriterContext: (context) => runtime.setWriterContext(context),
-      });
+      await withRemoteEmbeddingOperationPermit(authorization, () =>
+        service!.index({
+          root: runtime.canonicalRoot,
+          rebuild: input.rebuild,
+          resetPaths: input.resetPaths,
+          globs: normalizePlainStringList(input.globs),
+          insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
+          fileTypes: normalizePlainStringList(input.fileTypes),
+          excludedFileTypes: normalizePlainStringList(input.excludedFileTypes),
+          hidden: input.hidden,
+          noIgnore: input.noIgnore,
+          ignoreFiles: normalizePlainStringList(input.ignoreFiles),
+          maxDepth: input.maxDepth,
+          maxFileSizeBytes: input.maxFileSizeBytes,
+          follow: input.follow,
+          embeddingConcurrency: input.embeddingConcurrency,
+          changedPaths: input.changedPaths,
+          onProgress: report,
+          onWriterContext: (context) => runtime.setWriterContext(context),
+        }),
+      );
     } finally {
       try {
         await service?.close();
@@ -458,6 +699,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     input: DaemonIndexInput,
     reason: "background_reconcile" | "fresh_query",
     wait: boolean,
+    authorization?: RemoteEmbeddingOperationPermit,
   ): Promise<IndexJobSnapshot> {
     const createsWork =
       !this.scheduler.hasActiveRoot(runtime.canonicalRoot) ||
@@ -476,7 +718,12 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         followupIfRunning: followsNarrowWatch,
         run: (report) =>
           runtime.withWrite(async () => {
-            const proof = await this.runIndex(runtime, input, report);
+            const proof = await this.runIndex(
+              runtime,
+              input,
+              report,
+              authorization,
+            );
             if (proof.reconciled) {
               runtime.markReconciled(targetRevision, proof.reconciliationEpoch);
             } else {
@@ -518,6 +765,14 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         if (!changes.forceFullReconcile && changedPaths.length === 0) {
           return;
         }
+        const automaticAuthorization =
+          await this.automaticIndexAuthorization(runtime);
+        if (!automaticAuthorization.allowed) {
+          throw new DaemonError(
+            "REMOTE_EMBEDDING_AUTH_REQUIRED",
+            "A Workspace Remote Embedding grant is required for file-watcher index updates.",
+          );
+        }
         return await this.runIndex(
           runtime,
           {
@@ -525,6 +780,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             changedPaths: changes.forceFullReconcile ? undefined : changedPaths,
           },
           report,
+          automaticAuthorization.authorization,
         );
       },
     });
@@ -533,7 +789,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       ((options) => new WatchManager(options))
     )({
       root: runtime.canonicalRoot,
-      onChanges: (changes, reason) => {
+      onChanges: async (changes, reason) => {
         const pathCount =
           changes.touchedFiles.length +
           changes.rescanDirectories.length +
@@ -544,6 +800,17 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             root_id: rootIdentity(runtime.canonicalRoot),
             reason,
             active_job: this.scheduler.hasActiveRoot(runtime.canonicalRoot),
+          });
+          return;
+        }
+        const automaticAuthorization =
+          await this.automaticIndexAuthorization(runtime);
+        if (!automaticAuthorization.allowed) {
+          runtime.markDirty();
+          runtime.requireFullReconciliation();
+          this.options.logger?.event("watcher.authorization_required", {
+            root_id: rootIdentity(runtime.canonicalRoot),
+            reason,
           });
           return;
         }
@@ -584,8 +851,34 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
   }
 
+  private async automaticIndexAuthorization(runtime: RootRuntime): Promise<{
+    allowed: boolean;
+    authorization?: RemoteEmbeddingOperationPermit;
+  }> {
+    const knownProvider = runtime.embeddingProvider();
+    if (knownProvider && knownProvider !== "qwen") return { allowed: true };
+    const root = runtime.canonicalRoot;
+    const info = await inspectRoot(root, this.options.serviceOptions);
+    const schema = info.collection?.embedding;
+    if (!schema || schema.provider === "local") return { allowed: true };
+    const plan = await planRemoteIndexAuthorization({
+      info,
+      schema,
+      needsUpdate: true,
+      serviceOptions: this.options.serviceOptions,
+      store: this.authorizationManager.store,
+    });
+    if (!plan) return { allowed: true };
+    const authorization =
+      await this.authorizationManager.existingWorkspacePermit(plan);
+    return authorization
+      ? { allowed: true, authorization }
+      : { allowed: false };
+  }
+
   private async waitForFresh(
     runtime: RootRuntime,
+    authorization?: RemoteEmbeddingOperationPermit,
   ): Promise<IndexJobSnapshot | undefined> {
     let updateJob: IndexJobSnapshot | undefined;
     while (true) {
@@ -620,6 +913,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         { root: runtime.canonicalRoot },
         "fresh_query",
         true,
+        authorization,
       );
       if (updateJob.state !== "succeeded") {
         throw new DaemonError(

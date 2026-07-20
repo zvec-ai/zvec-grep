@@ -158,6 +158,29 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
   assert.equal(parseArgs(["index", "--drop", "--yes"]).options.drop, true);
   assert.equal(parseArgs(["status"]).command, "status");
   assert.equal(parseArgs(["collections"]).command, "collections");
+  assert.deepEqual(
+    parseArgs([
+      "auth",
+      "grant",
+      "/tmp/workspace",
+      "--capability",
+      "embedding",
+      "--scope=workspace",
+    ]),
+    {
+      command: "auth",
+      options: {
+        authAction: "grant",
+        authorizationCapability: "embedding",
+        authorizationScope: "workspace",
+      },
+      positionals: ["/tmp/workspace"],
+    },
+  );
+  assert.equal(
+    parseArgs(["query", "--allow-remote=once", "query"]).options.allowRemote,
+    "once",
+  );
 
   const query = parseArgs([
     "query",
@@ -344,6 +367,8 @@ test("CLI shape validation rejects every incompatible command family", () => {
     [["index", "--drop", "-g", "src/**"], /cannot be combined/],
     [["uninstall", "--force"], /only be used with zg install/],
     [["status", "--target", "codex"], /only be used with zg install/],
+    [["auth", "grant", "--scope", "session"], /only workspace scope/],
+    [["status", "--allow-remote", "once"], /query or index commands/],
   ];
   for (const [args, message] of invalid) {
     assert.throws(() => parseArgs(args), message, args.join(" "));

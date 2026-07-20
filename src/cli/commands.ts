@@ -15,6 +15,7 @@ import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   createZvecGrep,
+  getEmbeddingModelCatalogEntry,
   getEmbeddingModelCatalogEntryByRef,
   type CreateZvecGrepOptions,
   type IndexProgress,
@@ -22,6 +23,8 @@ import {
   type ZvecGrepContextResult,
   type ZvecGrepContextOptions,
   type ZvecGrepContextRoute,
+  type ZvecGrep,
+  type ZvecGrepInfoResult,
 } from "../index.js";
 import {
   globalConfigPath,
@@ -54,6 +57,18 @@ import {
   printIndexResult,
   printServerIndexInfo,
 } from "./format/status.js";
+import {
+  RemoteEmbeddingAuthorizationManager,
+  RemoteEmbeddingAuthorizationStore,
+  createRemoteEmbeddingTarget,
+  planRemoteIndexAuthorization,
+  planRemoteSearchAuthorization,
+  withRemoteEmbeddingOperationPermit,
+  type RemoteEmbeddingAuthorizationPlan,
+  type RemoteEmbeddingOperationPermit,
+} from "../authorization/index.js";
+import type { CollectionEmbeddingSchema } from "../engine/types.js";
+import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
 
 type AgentInstaller = {
   id: string;
@@ -88,6 +103,7 @@ const ZVEC_GREP_CONFIG_END = "# ZVEC_GREP_END";
 const ZVEC_GREP_AGENTS_START = "<!-- ZVEC_GREP_START -->";
 const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
+const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
 
 export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   switch (parsed.command) {
@@ -111,6 +127,9 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
       return;
     case "config":
       runConfig(parsed);
+      return;
+    case "auth":
+      await runAuth(parsed);
       return;
     case "server":
       await runServer(parsed);
@@ -218,6 +237,88 @@ async function runUninstall(parsed: ParsedArgs): Promise<void> {
   console.log(
     "Restart the selected agent or start a new session to apply the change.",
   );
+}
+
+async function runAuth(parsed: ParsedArgs): Promise<void> {
+  const requestedRoot = resolve(parsed.positionals[0] ?? process.cwd());
+  const root =
+    findNearestAnonymousWorkspace(requestedRoot)?.root ?? requestedRoot;
+  const store = authorizationStore(parsed.options);
+  if (parsed.options.authAction === "status") {
+    const status = await store.status(root);
+    console.log("Remote Embedding authorization");
+    console.log(`Workspace: ${root}`);
+    console.log(`Store: ${status.path}`);
+    if (status.grants.length === 0) {
+      console.log("Status: not granted");
+      return;
+    }
+    for (const grant of status.grants) {
+      console.log("");
+      console.log(`Provider: ${grant.provider}`);
+      console.log(`Model: ${grant.model}`);
+      console.log(`Endpoint: ${grant.endpoint}`);
+      console.log(`Scope: ${grant.scope}`);
+      console.log(`Status: ${grant.valid ? "granted" : "invalid"}`);
+    }
+    return;
+  }
+  if (parsed.options.authAction === "revoke") {
+    const revoked = await store.revokeAll(root);
+    console.log(
+      revoked > 0
+        ? `Revoked ${revoked} Remote Embedding Workspace grant(s).`
+        : "No Remote Embedding Workspace grants found.",
+    );
+    return;
+  }
+  if (parsed.options.authAction !== "grant") {
+    throw new Error("zg auth requires grant, status, or revoke");
+  }
+
+  const serviceOptions = createServiceOptions(parsed.options, root);
+  const service = await createZvecGrep(serviceOptions);
+  try {
+    const info = await service.info({ root });
+    const schema = resolveAuthorizationSchema(
+      parsed.options.embedding ?? process.env.ZVEC_GREP_EMBEDDING,
+      info.collection?.embedding,
+    );
+    if (!schema) {
+      throw new Error(
+        "No embedding model is available. Pass --embedding <remote/model> or build an index first.",
+      );
+    }
+    if (schema.provider === "local") {
+      throw new Error("Local embedding models do not require authorization.");
+    }
+    const target = await createRemoteEmbeddingTarget({
+      roots: info.collection?.rootPaths.map((item) => item.absolutePath) ?? [
+        root,
+      ],
+      provider: schema.provider,
+      model: schema.model,
+      serviceOptions,
+    });
+    const manager = new RemoteEmbeddingAuthorizationManager(store);
+    const plan: RemoteEmbeddingAuthorizationPlan = {
+      operation: "query_and_index",
+      target,
+      disclosure: { queryText: true, workspaceContent: "full" },
+      reason: "index_create",
+      grantPath: store.grantPath(target),
+    };
+    await manager.grant(plan, "workspace");
+    console.log("Granted Remote Embedding authorization.");
+    console.log(`Workspace: ${target.workspaceRoots.join(", ")}`);
+    console.log(`Provider: ${target.provider}`);
+    console.log(`Model: ${target.model}`);
+    console.log(`Endpoint: ${target.endpoint}`);
+    console.log(`Scope: workspace`);
+    console.log(`Store: ${plan.grantPath}`);
+  } finally {
+    await service.close();
+  }
 }
 
 async function installCodexIntegration(
@@ -427,30 +528,72 @@ async function runDirectIndex(
   rootPath: RootPath,
   explicitRoot: boolean,
 ): Promise<void> {
-  const zvecGrep = await createZvecGrep(
+  let zvecGrep = await createZvecGrep(
     createServiceOptions(parsed.options, rootPath.absolutePath),
   );
   const progress = createIndexProgressReporter();
+  let usedLocalFallback = false;
   try {
+    const infoBefore = await zvecGrep.info({ root: rootPath.absolutePath });
+    const schema = resolveAuthorizationSchema(
+      parsed.options.embedding ?? process.env.ZVEC_GREP_EMBEDDING,
+      infoBefore.collection?.embedding,
+    );
+    assertEmbeddingModelCompatible(
+      infoBefore.collection?.embedding,
+      schema,
+      parsed.options.rebuild === true,
+    );
+    const plan = schema
+      ? await planRemoteIndexAuthorization({
+          info: infoBefore,
+          schema,
+          rebuild: parsed.options.rebuild,
+          serviceOptions: createServiceOptions(
+            parsed.options,
+            rootPath.absolutePath,
+          ),
+          store: authorizationStore(parsed.options),
+        })
+      : undefined;
+    const authorizationResolution = plan
+      ? await authorizeCliPlan(
+          plan,
+          parsed.options,
+          plan.reason === "index_create" ? "local_index" : undefined,
+        )
+      : {};
+    if (authorizationResolution.alternative === "local_index") {
+      await zvecGrep.close();
+      zvecGrep = await createZvecGrep({
+        ...createServiceOptions(parsed.options, rootPath.absolutePath),
+        embedding: DEFAULT_LOCAL_EMBEDDING,
+      });
+      usedLocalFallback = true;
+    }
     printIndexPathFilterTip(parsed.options);
-    const result = await zvecGrep.index({
-      root: rootPath.absolutePath,
-      rootPaths: explicitRoot ? [rootPath] : undefined,
-      rebuild: parsed.options.rebuild,
-      resetPaths: parsed.options.resetPaths,
-      globs: parsed.options.globs,
-      insensitiveGlobs: parsed.options.insensitiveGlobs,
-      fileTypes: parsed.options.fileTypes,
-      excludedFileTypes: parsed.options.excludedFileTypes,
-      hidden: parsed.options.hidden,
-      noIgnore: parsed.options.noIgnore,
-      ignoreFiles: parsed.options.ignoreFiles,
-      maxDepth: parsed.options.maxDepth,
-      maxFileSizeBytes: parsed.options.maxFileSizeBytes,
-      follow: parsed.options.follow,
-      embeddingConcurrency: parsed.options.embeddingConcurrency,
-      onProgress: progress.report,
-    });
+    const result = await withRemoteEmbeddingOperationPermit(
+      authorizationResolution.authorization,
+      () =>
+        zvecGrep.index({
+          root: rootPath.absolutePath,
+          rootPaths: explicitRoot ? [rootPath] : undefined,
+          rebuild: parsed.options.rebuild,
+          resetPaths: parsed.options.resetPaths,
+          globs: parsed.options.globs,
+          insensitiveGlobs: parsed.options.insensitiveGlobs,
+          fileTypes: parsed.options.fileTypes,
+          excludedFileTypes: parsed.options.excludedFileTypes,
+          hidden: parsed.options.hidden,
+          noIgnore: parsed.options.noIgnore,
+          ignoreFiles: parsed.options.ignoreFiles,
+          maxDepth: parsed.options.maxDepth,
+          maxFileSizeBytes: parsed.options.maxFileSizeBytes,
+          follow: parsed.options.follow,
+          embeddingConcurrency: parsed.options.embeddingConcurrency,
+          onProgress: progress.report,
+        }),
+    );
     progress.finish();
     const info = await zvecGrep.info({ root: rootPath.absolutePath });
     printIndexResult(
@@ -459,10 +602,12 @@ async function runDirectIndex(
       parsed.options,
       info.collection?.rootPaths,
     );
-    persistExplicitGlobalConfig(
-      parsed.options,
-      embeddingReference(info.collection?.embedding),
-    );
+    if (!usedLocalFallback) {
+      persistExplicitGlobalConfig(
+        parsed.options,
+        embeddingReference(info.collection?.embedding),
+      );
+    }
   } catch (error) {
     progress.finish();
     throw error;
@@ -654,22 +799,67 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
       const rootPaths = explicitRoot ? rootPath : undefined;
       const progress = createIndexProgressReporter();
       try {
-        const result = await zvecGrep.collections.index(name, rootPaths, {
-          rebuild: parsed.options.rebuild,
-          resetPaths: parsed.options.resetPaths,
-          globs: parsed.options.globs,
-          insensitiveGlobs: parsed.options.insensitiveGlobs,
-          fileTypes: parsed.options.fileTypes,
-          excludedFileTypes: parsed.options.excludedFileTypes,
-          hidden: parsed.options.hidden,
-          noIgnore: parsed.options.noIgnore,
-          ignoreFiles: parsed.options.ignoreFiles,
-          maxDepth: parsed.options.maxDepth,
-          maxFileSizeBytes: parsed.options.maxFileSizeBytes,
-          follow: parsed.options.follow,
-          embeddingConcurrency: parsed.options.embeddingConcurrency,
-          onProgress: progress.report,
-        });
+        const [existing, status] = await Promise.all([
+          zvecGrep.collections.info(name),
+          zvecGrep.collections.status(name),
+        ]);
+        const schema = resolveAuthorizationSchema(
+          parsed.options.embedding ?? process.env.ZVEC_GREP_EMBEDDING,
+          existing?.embedding,
+        );
+        assertEmbeddingModelCompatible(
+          existing?.embedding,
+          schema,
+          parsed.options.rebuild === true,
+        );
+        const authorizationCollection = existing
+          ? {
+              ...existing,
+              rootPaths: explicitRoot ? [rootPath] : existing.rootPaths,
+            }
+          : undefined;
+        const infoBefore: ZvecGrepInfoResult = {
+          root: rootPath.absolutePath,
+          indexed: Boolean(existing?.embedding),
+          indexPolicy: existing?.indexPolicy ?? "undecided",
+          home: parsed.options.home ?? "",
+          indexPath: existing?.path ?? "",
+          source: existing?.embedding ? "index" : "unindexed",
+          collection: authorizationCollection,
+          status,
+        };
+        const plan = schema
+          ? await planRemoteIndexAuthorization({
+              info: infoBefore,
+              schema,
+              rebuild: parsed.options.rebuild,
+              serviceOptions: createServiceOptions(parsed.options, undefined),
+              store: authorizationStore(parsed.options),
+            })
+          : undefined;
+        const authorization = plan
+          ? (await authorizeCliPlan(plan, parsed.options)).authorization
+          : undefined;
+        const result = await withRemoteEmbeddingOperationPermit(
+          authorization,
+          () =>
+            zvecGrep.collections.index(name, rootPaths, {
+              rebuild: parsed.options.rebuild,
+              resetPaths: parsed.options.resetPaths,
+              globs: parsed.options.globs,
+              insensitiveGlobs: parsed.options.insensitiveGlobs,
+              fileTypes: parsed.options.fileTypes,
+              excludedFileTypes: parsed.options.excludedFileTypes,
+              hidden: parsed.options.hidden,
+              noIgnore: parsed.options.noIgnore,
+              ignoreFiles: parsed.options.ignoreFiles,
+              maxDepth: parsed.options.maxDepth,
+              maxFileSizeBytes: parsed.options.maxFileSizeBytes,
+              follow: parsed.options.follow,
+              embeddingConcurrency: parsed.options.embeddingConcurrency,
+              onProgress: progress.report,
+            }),
+        );
         progress.finish();
         const info = await zvecGrep.collections.info(name);
         printIndexResult(
@@ -819,12 +1009,36 @@ async function runDirectQuery(
   );
   const progress = createIndexProgressReporter();
   try {
-    const result = await zvecGrep.context(
-      contextOptions(commandOptions, queries, (progressEvent) => {
-        if (progressEvent.phase !== "done") {
-          progress.report(progressEvent);
-        }
-      }),
+    const contextRequest = contextOptions(
+      commandOptions,
+      queries,
+      (progressEvent) => {
+        if (progressEvent.phase !== "done") progress.report(progressEvent);
+      },
+    );
+    const info = await directQueryInfo(zvecGrep, commandOptions);
+    const plan = commandOptions.rg
+      ? undefined
+      : await planRemoteSearchAuthorization({
+          info,
+          search: normalizedDirectSearchInput(
+            commandOptions,
+            queries,
+            info.root,
+          ),
+          serviceOptions: createServiceOptions(commandOptions, info.root),
+          store: authorizationStore(commandOptions),
+        });
+    const authorizationResolution = plan
+      ? await authorizeCliPlan(plan, commandOptions, "local_search")
+      : {};
+    const effectiveContextRequest =
+      authorizationResolution.alternative === "local_search"
+        ? ftsFallbackContextRequest(contextRequest)
+        : contextRequest;
+    const result = await withRemoteEmbeddingOperationPermit(
+      authorizationResolution.authorization,
+      () => zvecGrep.context(effectiveContextRequest),
     );
     progress.finish();
     if (commandOptions.human) {
@@ -909,7 +1123,202 @@ function daemonClient(options: CliOptions): DaemonClient {
     serverUrl: resolveServerUrl(),
     home: options.home,
     tokenFile: options.serverTokenFile,
+    allowRemote: options.allowRemote,
   });
+}
+
+function authorizationStore(
+  options: CliOptions,
+): RemoteEmbeddingAuthorizationStore {
+  return new RemoteEmbeddingAuthorizationStore({
+    signingKeyPath: createServiceOptions(options, undefined)
+      .authorizationSigningKeyPath,
+  });
+}
+
+async function authorizeCliPlan(
+  plan: RemoteEmbeddingAuthorizationPlan,
+  options: CliOptions,
+  alternative?: "local_search" | "local_index",
+): Promise<{
+  authorization?: RemoteEmbeddingOperationPermit;
+  alternative?: "local_search" | "local_index";
+}> {
+  const manager = new RemoteEmbeddingAuthorizationManager(
+    authorizationStore(options),
+  );
+  const existing = await manager.existingWorkspacePermit(plan);
+  if (existing) return { authorization: existing };
+  if (options.allowRemote) {
+    return {
+      authorization: await manager.grant(plan, options.allowRemote),
+    };
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      [
+        "Remote Embedding authorization is required.",
+        "Re-run with --allow-remote once, or grant Workspace authorization:",
+        "  zg auth grant --capability embedding --scope workspace",
+      ].join("\n"),
+    );
+  }
+
+  console.error("Remote Embedding requires authorization.\n");
+  console.error(`Workspace: ${plan.target.workspaceRoots.join(", ")}`);
+  console.error(`Provider: ${plan.target.provider}`);
+  console.error(`Model: ${plan.target.model}`);
+  console.error(`Endpoint: ${plan.target.endpoint}\n`);
+  console.error("Data sent by this operation:");
+  if (plan.disclosure.queryText) {
+    console.error("  - Query text");
+  }
+  if (plan.disclosure.workspaceContent !== "none") {
+    console.error(
+      plan.disclosure.workspaceContent === "changed"
+        ? "  - Changed workspace content"
+        : "  - Selected workspace content",
+    );
+  }
+  console.error("API charges may apply.\n");
+  console.error("1. Allow once");
+  console.error("2. Allow for this workspace");
+  if (alternative === "local_search") console.error("3. Use FTS only");
+  if (alternative === "local_index") {
+    console.error("3. Use a local embedding model");
+  }
+  const cancelChoice = alternative ? 4 : 3;
+  console.error(`${cancelChoice}. Cancel`);
+  const readline = createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  try {
+    const answer = (
+      await readline.question(`Choose [1-${cancelChoice}]: `)
+    ).trim();
+    if (answer === "1") {
+      return { authorization: await manager.grant(plan, "once") };
+    }
+    if (answer === "2") {
+      return { authorization: await manager.grant(plan, "workspace") };
+    }
+    if (answer === "3" && alternative) {
+      return { alternative };
+    }
+    throw new Error(
+      "Remote Embedding authorization was declined. No remote data was sent.",
+    );
+  } finally {
+    readline.close();
+  }
+}
+
+function ftsFallbackContextRequest(
+  request: ZvecGrepContextOptions,
+): ZvecGrepContextOptions {
+  const queries = [
+    ...(request.queries ?? []),
+    ...(request.query ? [request.query] : []),
+    ...(request.routes ?? []).map((route) => route.query),
+  ];
+  return {
+    ...request,
+    query: undefined,
+    queries: undefined,
+    routes: queries.map((query) => ({ mode: "fts", query })),
+    autoUpdate: false,
+  };
+}
+
+function resolveAuthorizationSchema(
+  reference: string | undefined,
+  existing: CollectionEmbeddingSchema | null | undefined,
+): CollectionEmbeddingSchema | undefined {
+  if (!reference) return existing ?? undefined;
+  const separator = reference.indexOf("/");
+  if (separator <= 0 || separator === reference.length - 1) {
+    throw new Error(`Invalid embedding reference: ${reference}`);
+  }
+  const provider = reference.slice(0, separator);
+  const model = reference.slice(separator + 1);
+  const catalog = getEmbeddingModelCatalogEntry(reference);
+  return {
+    provider,
+    model,
+    dimension:
+      catalog?.dimension ??
+      (existing?.provider === provider && existing.model === model
+        ? existing.dimension
+        : 1),
+    metric:
+      catalog?.metric ??
+      (existing?.provider === provider && existing.model === model
+        ? existing.metric
+        : "cosine"),
+  };
+}
+
+function assertEmbeddingModelCompatible(
+  existing: CollectionEmbeddingSchema | null | undefined,
+  requested: CollectionEmbeddingSchema | undefined,
+  rebuild: boolean,
+): void {
+  if (!existing || !requested || rebuild) return;
+  if (
+    existing.provider === requested.provider &&
+    existing.model === requested.model
+  ) {
+    return;
+  }
+  throw new Error(
+    [
+      "Embedding model does not match the existing index.",
+      `Existing model: ${existing.provider}/${existing.model}`,
+      `Requested model: ${requested.provider}/${requested.model}`,
+      "Re-run with --rebuild to change the embedding model.",
+    ].join("\n"),
+  );
+}
+
+async function directQueryInfo(
+  service: ZvecGrep,
+  options: CliOptions,
+): Promise<ZvecGrepInfoResult> {
+  if (!options.collection) {
+    return await service.info({ root: process.cwd() });
+  }
+  const [collection, status] = await Promise.all([
+    service.collections.info(options.collection),
+    service.collections.status(options.collection),
+  ]);
+  if (!collection)
+    throw new Error(`Collection not found: ${options.collection}`);
+  return {
+    root: collection.rootPaths[0]?.absolutePath ?? process.cwd(),
+    indexed: collection.embedding !== null,
+    indexPolicy: collection.indexPolicy ?? "undecided",
+    home: options.home ?? "",
+    indexPath: collection.path,
+    source: collection.embedding ? "index" : "unindexed",
+    collection,
+    status,
+  };
+}
+
+function normalizedDirectSearchInput(
+  options: CliOptions,
+  queries: readonly string[],
+  root: string,
+): NormalizedSearchInput {
+  return {
+    root,
+    queries: !options.rg && queries.length > 0 ? [...queries] : undefined,
+    routes: [...(options.routes ?? [])],
+    freshness: options.fresh ? "wait_for_fresh" : "eventual",
+    autoUpdate: !options.noAutoUpdate,
+    maxContentChars: 1_200,
+  };
 }
 
 async function daemonIsReady(home?: string): Promise<boolean> {
@@ -1033,6 +1442,7 @@ export function createServiceOptions(
     embeddingParallelism:
       options.embeddingParallelism ??
       parseEnvPositiveInteger(process.env.ZVEC_GREP_EMBED_PARALLELISM),
+    authorizationSigningKeyPath: process.env.ZVEC_GREP_AUTHORIZATION_KEY_FILE,
   };
 }
 
@@ -1389,7 +1799,7 @@ ${
 `
     : ""
 }tool_timeout_sec = ${mcpToolTimeoutSeconds}
-default_tools_approval_mode = "auto"
+default_tools_approval_mode = "approve"
 ${ZVEC_GREP_CONFIG_END}`;
 }
 

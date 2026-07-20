@@ -67,6 +67,10 @@ export class RootRuntime {
     this.modelRequest = request;
   }
 
+  embeddingProvider(): string | undefined {
+    return this.modelRequest?.schema.provider;
+  }
+
   async search(
     options: ZvecGrepContextOptions,
   ): Promise<ZvecGrepContextResult> {

@@ -109,6 +109,11 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.configAction = "model-set";
       startIndex = 3;
     }
+  } else if (commandInput.command === "auth") {
+    if (args[1] === "grant" || args[1] === "status" || args[1] === "revoke") {
+      options.authAction = args[1];
+      startIndex = 2;
+    }
   } else if (commandInput.command === "server") {
     if (
       args[1] === "on" ||
@@ -189,6 +194,28 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--yes") {
       options.yes = true;
+    } else if (isLongOptionWithValue(arg, "--allow-remote")) {
+      options.allowRemote = parseAllowRemote(valueFromLongOption(arg));
+    } else if (arg === "--allow-remote") {
+      options.allowRemote = parseAllowRemote(
+        readOptionValue(args, ++index, arg),
+      );
+    } else if (isLongOptionWithValue(arg, "--capability")) {
+      options.authorizationCapability = parseAuthorizationCapability(
+        valueFromLongOption(arg),
+      );
+    } else if (arg === "--capability") {
+      options.authorizationCapability = parseAuthorizationCapability(
+        readOptionValue(args, ++index, arg),
+      );
+    } else if (isLongOptionWithValue(arg, "--scope")) {
+      options.authorizationScope = parseAuthorizationScope(
+        valueFromLongOption(arg),
+      );
+    } else if (arg === "--scope") {
+      options.authorizationScope = parseAuthorizationScope(
+        readOptionValue(args, ++index, arg),
+      );
     } else if (arg === "--rg") {
       options.rg = true;
     } else if (arg === "--debug") {
@@ -571,6 +598,7 @@ function parseCommand(args: readonly string[]): {
     first === "install" ||
     first === "uninstall" ||
     first === "config" ||
+    first === "auth" ||
     first === "server"
   ) {
     return { command: first };
@@ -590,6 +618,35 @@ function validateCliShape(
   options: CliOptions,
   positionals: readonly string[],
 ): void {
+  if (command === "auth") {
+    if (!options.authAction) {
+      throw new Error("zg auth requires grant, status, or revoke");
+    }
+    if (positionals.length > 1) {
+      throw new Error(`zg auth ${options.authAction} accepts at most one root`);
+    }
+    if (
+      options.authAction !== "grant" &&
+      (options.authorizationCapability || options.authorizationScope)
+    ) {
+      throw new Error(
+        `--capability and --scope can only be used with zg auth grant`,
+      );
+    }
+  } else if (options.authorizationCapability || options.authorizationScope) {
+    throw new Error("--capability and --scope can only be used with zg auth");
+  }
+
+  if (
+    options.allowRemote &&
+    command !== "query" &&
+    command !== "index" &&
+    command !== "collections"
+  ) {
+    throw new Error(
+      "--allow-remote can only be used with query or index commands",
+    );
+  }
   const queryOnly = firstEnabledOption([
     [options.rg, "--rg"],
     [options.hybridQueries?.length, "--hybrid"],
@@ -879,6 +936,21 @@ function parseClientMode(value: string): "direct" | "server" | "auto" {
   if (value === "direct" || value === "server" || value === "auto")
     return value;
   throw new Error("--mode must be direct, server, or auto");
+}
+
+function parseAllowRemote(value: string): "once" | "workspace" {
+  if (value === "once" || value === "workspace") return value;
+  throw new Error("--allow-remote must be once or workspace");
+}
+
+function parseAuthorizationCapability(value: string): "embedding" {
+  if (value === "embedding") return value;
+  throw new Error("--capability currently supports only embedding");
+}
+
+function parseAuthorizationScope(value: string): "workspace" {
+  if (value === "workspace") return value;
+  throw new Error("zg auth supports only workspace scope");
 }
 
 function readOptionValue(

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createZvecGrepMcpServer } from "../dist/mcp/tools.js";
 
 const root = resolve("test/fixtures/repository");
@@ -95,7 +96,7 @@ async function connect(backend = createBackend()) {
   return { client, server };
 }
 
-test("server contract exposes exactly the four final tools with stable annotations", async (t) => {
+test("server contract exposes the public tools with stable annotations", async (t) => {
   const { client, server } = await connect();
   t.after(async () => {
     await client.close();
@@ -111,6 +112,7 @@ test("server contract exposes exactly the four final tools with stable annotatio
     [
       "zvec_grep_index",
       "zvec_grep_index_status",
+      "zvec_grep_remote_embedding_demo",
       "zvec_grep_search",
       "zvec_grep_server_status",
     ],
@@ -120,6 +122,15 @@ test("server contract exposes exactly the four final tools with stable annotatio
     tools.map((tool) => [tool.name, tool.annotations]),
   );
   assert.equal(annotations.zvec_grep_index.readOnlyHint, false);
+  assert.equal(annotations.zvec_grep_remote_embedding_demo.readOnlyHint, false);
+  assert.equal(
+    annotations.zvec_grep_remote_embedding_demo.idempotentHint,
+    false,
+  );
+  assert.equal(
+    annotations.zvec_grep_remote_embedding_demo.openWorldHint,
+    false,
+  );
   assert.equal(annotations.zvec_grep_search.readOnlyHint, false);
   assert.equal(annotations.zvec_grep_index_status.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_server_status.readOnlyHint, true);
@@ -157,6 +168,80 @@ test("index contract documents background submission as the default", async (t) 
     index.inputSchema.properties.wait.description,
     /zvec_grep_index_status/,
   );
+});
+
+test("search elicits merged Remote Embedding authorization and reuses session scope", async (t) => {
+  const backend = createBackend();
+  let elicitations = 0;
+  let granted = 0;
+  let receivedPermit;
+  const target = {
+    workspaceRoots: [root],
+    workspaceFingerprint: "workspace-fingerprint",
+    provider: "qwen",
+    model: "text-embedding-v4",
+    endpoint: "https://qwen.test/embeddings",
+    targetFingerprint: "target-fingerprint",
+  };
+  backend.planSearchAuthorization = async () => ({
+    operation: "query_and_index",
+    target,
+    disclosure: { queryText: true, workspaceContent: "changed" },
+    reason: "query",
+    grantPath: `${root}/.zvec-grep/authorization.json`,
+  });
+  backend.existingRemoteEmbeddingPermit = async () => undefined;
+  backend.grantRemoteEmbedding = async (_plan, scope) => {
+    granted += 1;
+    return {
+      capability: "remote_embedding",
+      scope,
+      target,
+      issuedAt: Date.now(),
+      operationId: `operation-${granted}`,
+    };
+  };
+  const originalSearch = backend.search;
+  backend.search = async (input, options) => {
+    receivedPermit = options.authorization;
+    return await originalSearch(input);
+  };
+
+  const server = createZvecGrepMcpServer(backend, "1.0.0");
+  const client = new Client(
+    { name: "mcp-auth-test", version: "1.0.0" },
+    { capabilities: { elicitation: { form: {} } } },
+  );
+  client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    elicitations += 1;
+    assert.match(request.params.message, /Query \+ Index/);
+    assert.match(request.params.message, /Changed workspace content/);
+    return {
+      action: "accept",
+      content: { decision: "allow_session" },
+    };
+  });
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  for (let index = 0; index < 2; index++) {
+    const result = await client.callTool({
+      name: "zvec_grep_search",
+      arguments: { root, query: "authorization flow" },
+    });
+    assert.equal(result.isError, undefined);
+  }
+  assert.equal(elicitations, 1);
+  assert.equal(granted, 2);
+  assert.equal(receivedPermit.scope, "session");
 });
 
 test("root tools require an absolute root", async (t) => {

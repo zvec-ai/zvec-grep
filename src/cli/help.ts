@@ -23,6 +23,7 @@ Commands:
   status         Show workspace and index status
   collections    Manage named collections
   config         Configure per-model local embedding runtime settings
+  auth           Manage Workspace Remote Embedding authorization
   server         Start, stop, inspect, or run the shared MCP server
   install        Install agent integrations
   uninstall      Remove agent integrations
@@ -35,6 +36,7 @@ Examples:
   zg query --rg -F "AuthService" src
   zg index --embedding local/embeddinggemma-300m
   zg status
+  zg auth status
   zg server on
   zg config model set local/embeddinggemma-300m --llama-gpu metal
   zg install
@@ -137,6 +139,22 @@ rebuild, and embedding-concurrency options as zg index.`;
 
 Stores runtime GPU and parallelism settings for one local embedding model in
 ~/.zvec-grep/config.json. These settings do not change index compatibility.`;
+    case "auth":
+      return `Usage:
+  zg auth grant [root] --capability embedding --scope workspace [--embedding <model>]
+  zg auth status [root]
+  zg auth revoke [root]
+
+Manage the signed Remote Embedding grant stored in the Workspace under
+.zvec-grep/authorization.json. Workspace grants are shared by zg CLI and zg MCP.
+
+Scopes used during operations:
+  once                              Current CLI command only
+  session                           Current Agent/MCP session only
+  workspace                         Persisted in this Workspace
+
+Use --allow-remote once|workspace on zg query or zg index for non-interactive
+execution. API credentials configure a provider but do not grant permission.`;
     case "server":
       return `Usage:
   zg server on [--listen 127.0.0.1:7999] [--token-file <path>]

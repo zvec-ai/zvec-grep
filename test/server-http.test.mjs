@@ -3,6 +3,7 @@ import {
   access,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -13,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DaemonBackend } from "../dist/daemon/backend.js";
 import { DaemonHttpServer } from "../dist/daemon/http-server.js";
 import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
@@ -70,6 +72,9 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   const backend = new DaemonBackend({
     version: "1.0.0",
+    serviceOptions: {
+      authorizationSigningKeyPath: join(temporaryDirectory, "auth.key"),
+    },
     modelPoolOptions: {
       createModel: () => {
         modelLoads += 1;
@@ -162,6 +167,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
     "zvec_grep_index",
     "zvec_grep_index_status",
+    "zvec_grep_remote_embedding_demo",
     "zvec_grep_search",
     "zvec_grep_server_status",
   ]);
@@ -356,6 +362,291 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.equal(modelLoads, 1);
 });
 
+test("Remote Embedding demo elicits once and reuses its Workspace grant", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auth-demo-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  const demoFileText = "Local workspace content for remote embedding.\n";
+  await writeFile(join(root, "README.md"), demoFileText);
+  await writeFile(
+    join(temporaryDirectory, "outside.txt"),
+    "This file must never be uploaded by the demo.\n",
+  );
+  let embeddingCalls = 0;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    serviceOptions: {
+      authorizationSigningKeyPath: join(temporaryDirectory, "auth.key"),
+    },
+    modelPoolOptions: {
+      createModel: () =>
+        new TestEmbeddingModel(async () => {
+          embeddingCalls += 1;
+        }),
+    },
+  });
+  const server = new DaemonHttpServer({
+    host: "127.0.0.1",
+    port: 0,
+    token,
+    version: "1.0.0",
+    backend,
+  });
+  const address = await server.start();
+  const mcpUrl = new URL(`http://127.0.0.1:${address.port}/mcp`);
+  let elicitations = 0;
+  const client = await connectClient(
+    mcpUrl,
+    "remote-embedding-auth-demo",
+    async (request) => {
+      elicitations += 1;
+      assert.equal(request.params.mode, "form");
+      assert.match(request.params.message, /Query \+ Index/);
+      assert.match(request.params.message, /README\.md/);
+      assert.match(request.params.message, /Workspace file content/);
+      return {
+        action: "accept",
+        content: { decision: "allow_workspace" },
+      };
+    },
+  );
+  t.after(async () => {
+    await client.close();
+    await server.close();
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const first = await client.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root,
+      text: "first authorized remote query",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(first.isError, undefined);
+  assert.equal(first.structuredContent.authorization, "granted_workspace");
+  assert.equal(first.structuredContent.query_vector_dimensions, 8);
+  assert.equal(first.structuredContent.file_vector_dimensions, 8);
+  assert.equal(first.structuredContent.file_path, "README.md");
+  assert.equal(
+    first.structuredContent.file_bytes,
+    Buffer.byteLength(demoFileText),
+  );
+  const grant = JSON.parse(
+    await readFile(first.structuredContent.grant_path, "utf8"),
+  );
+  assert.equal(grant.version, 2);
+  assert.equal(grant.scope, "workspace");
+  assert.equal(grant.capability, "remote_embedding");
+
+  const second = await client.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root,
+      text: "second authorized remote query",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(second.isError, undefined);
+  assert.equal(second.structuredContent.authorization, "existing_workspace");
+  assert.equal(elicitations, 1);
+  assert.equal(embeddingCalls, 4);
+
+  let crossSessionElicitations = 0;
+  const secondClient = await connectClient(
+    mcpUrl,
+    "remote-embedding-auth-demo-second-session",
+    async () => {
+      crossSessionElicitations += 1;
+      return { action: "accept", content: { decision: "cancel" } };
+    },
+  );
+  t.after(async () => secondClient.close());
+  const crossSession = await secondClient.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root,
+      text: "workspace grant survives a new MCP session",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(crossSession.isError, undefined);
+  assert.equal(
+    crossSession.structuredContent.authorization,
+    "existing_workspace",
+  );
+  assert.equal(crossSessionElicitations, 0);
+  assert.equal(embeddingCalls, 6);
+
+  const escaped = await client.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root,
+      text: "must not run",
+      filePath: "../outside.txt",
+    },
+  });
+  assert.equal(escaped.isError, true);
+  assert.match(escaped.content[0].text, /inside the Workspace/);
+  assert.equal(embeddingCalls, 6);
+});
+
+test("Remote Embedding demo keeps once and session authorization inside zg", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auth-scope-demo-"),
+  );
+  const onceRoot = join(temporaryDirectory, "once");
+  const sessionRoot = join(temporaryDirectory, "session");
+  const cancelRoot = join(temporaryDirectory, "cancel");
+  await Promise.all(
+    [onceRoot, sessionRoot, cancelRoot].map((root) =>
+      mkdir(root, { recursive: true }),
+    ),
+  );
+  await writeFile(join(onceRoot, "README.md"), "Allow once demo.\n");
+  await writeFile(join(sessionRoot, "README.md"), "Session grant demo.\n");
+  await writeFile(join(cancelRoot, "README.md"), Buffer.from([0, 1, 2, 3]));
+
+  let embeddingCalls = 0;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    serviceOptions: {
+      authorizationSigningKeyPath: join(temporaryDirectory, "auth.key"),
+    },
+    modelPoolOptions: {
+      createModel: () =>
+        new TestEmbeddingModel(async () => {
+          embeddingCalls += 1;
+        }),
+    },
+  });
+  const server = new DaemonHttpServer({
+    host: "127.0.0.1",
+    port: 0,
+    token,
+    version: "1.0.0",
+    backend,
+  });
+  const address = await server.start();
+  const mcpUrl = new URL(`http://127.0.0.1:${address.port}/mcp`);
+  const elicitationCounts = { once: 0, session: 0, cancel: 0 };
+  const onElicitation = async (request) => {
+    assert.equal(request.params.mode, "form");
+    assert.match(request.params.message, /file body has not been read/i);
+    if (request.params.message.includes(onceRoot)) {
+      elicitationCounts.once += 1;
+      return { action: "accept", content: { decision: "allow_once" } };
+    }
+    if (request.params.message.includes(sessionRoot)) {
+      elicitationCounts.session += 1;
+      return { action: "accept", content: { decision: "allow_session" } };
+    }
+    assert.ok(request.params.message.includes(cancelRoot));
+    elicitationCounts.cancel += 1;
+    return { action: "accept", content: { decision: "cancel" } };
+  };
+  const clients = [];
+  const firstClient = await connectClient(
+    mcpUrl,
+    "remote-embedding-scope-demo-first-session",
+    onElicitation,
+  );
+  clients.push(firstClient);
+  t.after(async () => {
+    await Promise.all(clients.map((client) => client.close()));
+    await server.close();
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  for (const text of ["first once call", "second once call"]) {
+    const once = await firstClient.callTool({
+      name: "zvec_grep_remote_embedding_demo",
+      arguments: { root: onceRoot, text, filePath: "README.md" },
+    });
+    assert.equal(once.isError, undefined);
+    assert.equal(once.structuredContent.authorization, "granted_once");
+    assert.equal(once.structuredContent.scope, "once");
+    assert.equal(once.structuredContent.grant_path, undefined);
+  }
+  assert.equal(elicitationCounts.once, 2);
+
+  const firstSession = await firstClient.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root: sessionRoot,
+      text: "first session call",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(firstSession.structuredContent.authorization, "granted_session");
+  assert.equal(firstSession.structuredContent.scope, "session");
+  assert.equal(firstSession.structuredContent.grant_path, undefined);
+
+  const reusedSession = await firstClient.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root: sessionRoot,
+      text: "second session call",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(
+    reusedSession.structuredContent.authorization,
+    "existing_session",
+  );
+  assert.equal(elicitationCounts.session, 1);
+
+  const cancelled = await firstClient.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root: cancelRoot,
+      text: "cancel before reading the binary file",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(cancelled.isError, undefined);
+  assert.equal(cancelled.structuredContent.authorization, "declined");
+  assert.equal(elicitationCounts.cancel, 1);
+
+  const secondClient = await connectClient(
+    mcpUrl,
+    "remote-embedding-scope-demo-second-session",
+    onElicitation,
+  );
+  clients.push(secondClient);
+  const newSession = await secondClient.callTool({
+    name: "zvec_grep_remote_embedding_demo",
+    arguments: {
+      root: sessionRoot,
+      text: "new MCP session",
+      filePath: "README.md",
+    },
+  });
+  assert.equal(newSession.structuredContent.authorization, "granted_session");
+  assert.equal(elicitationCounts.session, 2);
+  assert.equal(embeddingCalls, 10);
+
+  await assert.rejects(
+    access(
+      join(onceRoot, ".zvec-grep", "remote-embedding-authorization.demo.json"),
+    ),
+  );
+  await assert.rejects(
+    access(
+      join(
+        sessionRoot,
+        ".zvec-grep",
+        "remote-embedding-authorization.demo.json",
+      ),
+    ),
+  );
+});
+
 test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-qwen-http-"),
@@ -392,7 +683,11 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
 
   const backend = new DaemonBackend({
     version: "1.0.0",
-    serviceOptions: { apiKey: "qwen-test-key", endpoint },
+    serviceOptions: {
+      apiKey: "qwen-test-key",
+      endpoint,
+      authorizationSigningKeyPath: join(temporaryDirectory, "auth.key"),
+    },
   });
   const server = new DaemonHttpServer({
     host: "127.0.0.1",
@@ -405,6 +700,10 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   const client = await connectClient(
     new URL(`http://127.0.0.1:${address.port}/mcp`),
     "qwen-client",
+    async () => ({
+      action: "accept",
+      content: { decision: "allow_workspace" },
+    }),
   );
   t.after(async () => {
     await client.close();
@@ -464,8 +763,14 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   await assert.rejects(access(join(unsupportedRoot, ".zvec-grep", "index")));
 });
 
-async function connectClient(url, name) {
-  const client = new Client({ name, version: "1.0.0" });
+async function connectClient(url, name, onElicitation) {
+  const client = new Client(
+    { name, version: "1.0.0" },
+    onElicitation ? { capabilities: { elicitation: { form: {} } } } : undefined,
+  );
+  if (onElicitation) {
+    client.setRequestHandler(ElicitRequestSchema, onElicitation);
+  }
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: {
       headers: { Authorization: `Bearer ${token}` },

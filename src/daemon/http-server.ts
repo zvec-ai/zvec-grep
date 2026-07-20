@@ -7,7 +7,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ZvecGrepDaemonBackend } from "../mcp/tools.js";
-import { handleMcpPost } from "../mcp/http-transport.js";
+import { McpHttpSessionManager } from "../mcp/http-transport.js";
 import { isLoopbackHost, type ServerListenAddress } from "./config.js";
 import { requestId, type DaemonLogger } from "./logger.js";
 
@@ -23,11 +23,16 @@ export type DaemonHttpServerOptions = ServerListenAddress & {
 
 export class DaemonHttpServer {
   private server?: Server;
+  private readonly mcpSessions: McpHttpSessionManager;
 
   constructor(private readonly options: DaemonHttpServerOptions) {
     if (!isLoopbackHost(options.host)) {
       throw new Error("Daemon HTTP server requires a loopback host.");
     }
+    this.mcpSessions = new McpHttpSessionManager(
+      options.backend,
+      options.version,
+    );
   }
 
   async start(): Promise<AddressInfo> {
@@ -92,6 +97,7 @@ export class DaemonHttpServer {
     if (!server) {
       return;
     }
+    await this.mcpSessions.close();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
@@ -150,6 +156,10 @@ export class DaemonHttpServer {
       writeJson(response, 401, { error: "unauthorized" });
       return;
     }
+    if (request.method === "GET" || request.method === "DELETE") {
+      await this.mcpSessions.handleSessionRequest(request, response);
+      return;
+    }
     if (request.method !== "POST") {
       writeJson(response, 405, {
         jsonrpc: "2.0",
@@ -179,13 +189,7 @@ export class DaemonHttpServer {
       client_id: request.headers["x-client-id"] as string | undefined,
       tool: toolName(body),
     });
-    await handleMcpPost(
-      request,
-      response,
-      this.options.backend,
-      this.options.version,
-      body,
-    );
+    await this.mcpSessions.handlePost(request, response, body);
   }
 }
 
