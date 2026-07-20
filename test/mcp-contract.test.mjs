@@ -119,7 +119,6 @@ test("server contract exposes the public tools with stable annotations", async (
       "zvec_grep_index",
       "zvec_grep_index_drop",
       "zvec_grep_index_status",
-      "zvec_grep_remote_embedding_demo",
       "zvec_grep_search",
       "zvec_grep_server_status",
     ],
@@ -132,15 +131,6 @@ test("server contract exposes the public tools with stable annotations", async (
   assert.equal(annotations.zvec_grep_index_drop.readOnlyHint, false);
   assert.equal(annotations.zvec_grep_index_drop.destructiveHint, true);
   assert.equal(annotations.zvec_grep_index_drop.idempotentHint, true);
-  assert.equal(annotations.zvec_grep_remote_embedding_demo.readOnlyHint, false);
-  assert.equal(
-    annotations.zvec_grep_remote_embedding_demo.idempotentHint,
-    false,
-  );
-  assert.equal(
-    annotations.zvec_grep_remote_embedding_demo.openWorldHint,
-    false,
-  );
   assert.equal(annotations.zvec_grep_search.readOnlyHint, false);
   assert.equal(annotations.zvec_grep_index_status.readOnlyHint, true);
   assert.equal(annotations.zvec_grep_server_status.readOnlyHint, true);

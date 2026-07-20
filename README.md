@@ -80,20 +80,31 @@ npm install -g .
 zg version
 ```
 
-Start the local background server:
+Configure the detected Claude Code and Codex integrations:
 
 ```bash
-zg server on
-zg server status
+zg install
 ```
 
-Install the Codex MCP integration:
+The interactive setup lets you select either agent, writes its MCP and guidance
+configuration, pre-approves only the local `zvec_grep` MCP tools, and starts the
+loopback server. For non-interactive setup, select targets explicitly:
 
 ```bash
-zg install --target codex --yes
+zg install --target claude,codex --yes
 ```
 
-Codex MCP tool calls default to a 600-second timeout. Override it during installation with `--mcp-tool-timeout <seconds>`. The local server has no token by default and only listens on loopback. To require Bearer authentication, start it with `zg server on --token-file <path>` (or set `ZVEC_GREP_SERVER_TOKEN`), then install with `zg install --mcp-token-env ZVEC_GREP_SERVER_TOKEN` so the MCP client sends the same token. The installed MCP URL is `http://127.0.0.1:7999/mcp`. Stop the daemon with `zg server off`.
+MCP trust and Remote Embedding authorization are separate: installation allows
+the agents to call the local zg tools without another agent-level prompt, but zg
+still asks before query text or workspace content is sent to a remote Embedding
+provider. Codex MCP tool calls default to a 600-second timeout; override it with
+`--mcp-tool-timeout <seconds>`. The local server has no token by default and only
+listens on loopback. To require Bearer authentication from the first start, set
+`ZVEC_GREP_SERVER_TOKEN` before running install and pass
+`--mcp-token-env ZVEC_GREP_SERVER_TOKEN` so the MCP clients send the same token.
+If the server is already running without a token, stop it before restarting with
+the token configured. The installed MCP URL is `http://127.0.0.1:7999/mcp`.
+Stop the daemon with `zg server off`.
 
 CLI indexed queries and index commands can use `--mode direct`, `--mode server`, or `--mode auto`. The default is `auto`: it uses the daemon only when it is ready and otherwise falls back before submitting a request.
 Daemon logs are written as JSON lines to `~/.zvec-grep/daemon/logs/server.log`; credentials and complete query text are not recorded.
@@ -151,7 +162,7 @@ Switch to human-readable output:
 zg query --human "root local index discovery" --limit 3
 ```
 
-Use the four MCP tools `zvec_grep_search`, `zvec_grep_index`, `zvec_grep_index_status`, and `zvec_grep_server_status`. MCP inputs use JSON-friendly fields such as `globs: ["src/**"]`. The Codex installer writes managed zvec-grep blocks to `${CODEX_HOME:-$HOME/.codex}/config.toml` and `${CODEX_HOME:-$HOME/.codex}/AGENTS.md`.
+Use the four MCP tools `zvec_grep_search`, `zvec_grep_index`, `zvec_grep_index_status`, and `zvec_grep_server_status`. MCP inputs use JSON-friendly fields such as `globs: ["src/**"]`. The installer writes managed zvec-grep blocks to `${CODEX_HOME:-$HOME/.codex}/config.toml` and `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` for Codex. For Claude Code it updates `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` (or the corresponding `CLAUDE_CONFIG_DIR` paths).
 
 ## <a id="models"></a>🧠 Models
 

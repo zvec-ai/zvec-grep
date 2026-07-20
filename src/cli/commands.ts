@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { constants as fileSystemConstants } from "node:fs";
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -11,7 +13,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   createZvecGrep,
@@ -76,7 +78,7 @@ import { indexProgressFromMessage } from "../index-progress.js";
 type AgentInstaller = {
   id: string;
   label: string;
-  description: string;
+  executable: string;
   install: (options: InstallAgentOptions) => Promise<InstallAgentResult>;
   uninstall: () => Promise<InstallAgentResult>;
 };
@@ -93,9 +95,16 @@ type InstallAgentResult = {
 
 const AGENT_INSTALLERS: readonly AgentInstaller[] = [
   {
+    id: "claude",
+    label: "Claude Code",
+    executable: "claude",
+    install: installClaudeIntegration,
+    uninstall: uninstallClaudeIntegration,
+  },
+  {
     id: "codex",
     label: "Codex",
-    description: "configure zvec-grep MCP and Codex guidance",
+    executable: "codex",
     install: installCodexIntegration,
     uninstall: uninstallCodexIntegration,
   },
@@ -105,6 +114,7 @@ const ZVEC_GREP_CONFIG_START = "# ZVEC_GREP_START";
 const ZVEC_GREP_CONFIG_END = "# ZVEC_GREP_END";
 const ZVEC_GREP_AGENTS_START = "<!-- ZVEC_GREP_START -->";
 const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
+const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
 
@@ -188,57 +198,66 @@ function runConfig(parsed: ParsedArgs): void {
 }
 
 async function runInstall(parsed: ParsedArgs): Promise<void> {
+  printInstallHeader();
   const installers = await resolveInstallers(parsed, "install");
   if (installers.length === 0) {
-    console.log("No agents selected.");
+    console.log("\nNo agent integrations selected.");
     return;
   }
 
-  console.log(
-    `Installing zvec-grep for: ${installers.map((installer) => installer.label).join(", ")}`,
-  );
+  console.log("\nInstalling integrations\n");
   for (const installer of installers) {
-    const result = await installer.install({
+    await installer.install({
       force: parsed.options.force === true,
       mcpToolTimeoutSeconds:
         parsed.options.installMcpToolTimeoutSeconds ??
         DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
       mcpTokenEnv: parsed.options.installMcpTokenEnv,
     });
-    console.log(`Installed ${installer.label}:`);
-    for (const file of result.files) {
-      console.log(`  ${file}`);
-    }
+    console.log(`  ${installSuccessMark()} ${installer.label}`);
+    console.log("    MCP       configured");
+    console.log("    Trust     approved");
+    console.log("    Guidance  updated");
+    console.log("");
   }
 
-  console.log(
-    "Restart the selected agent or start a new session to pick up the integration.",
-  );
-  if (installers.some((installer) => installer.id === "codex")) {
-    console.log("zvec-grep MCP endpoint: http://127.0.0.1:7999/mcp");
+  const server = await ensureInstalledServer();
+  if (server.ready) {
+    console.log(`  ${installSuccessMark()} Server`);
+    console.log(`    ready at ${server.serverUrl ?? resolveServerUrl()}`);
+  } else {
+    console.log(`  ${installMutedMark()} Server`);
+    console.log("    not started; run `zg server on`");
   }
+
+  console.log("\nzvec-grep is ready\n");
+  console.log(
+    `  Agents       ${installers.map((installer) => installer.label).join(", ")}`,
+  );
+  console.log("  MCP trust    Approved for local zvec-grep tools");
+  console.log("  Remote data  Authorization requested on first remote use");
+  console.log(
+    "\nRestart the selected agents or start a new session to load the integration.",
+  );
 }
 
 async function runUninstall(parsed: ParsedArgs): Promise<void> {
+  printInstallHeader();
   const installers = await resolveInstallers(parsed, "uninstall");
   if (installers.length === 0) {
-    console.log("No agents selected.");
+    console.log("\nNo agent integrations selected.");
     return;
   }
 
-  console.log(
-    `Removing zvec-grep from: ${installers.map((installer) => installer.label).join(", ")}`,
-  );
+  console.log("\nRemoving integrations\n");
   for (const installer of installers) {
-    const result = await installer.uninstall();
-    console.log(`Removed ${installer.label} integration:`);
-    for (const file of result.files) {
-      console.log(`  ${file}`);
-    }
+    await installer.uninstall();
+    console.log(`  ${installSuccessMark()} ${installer.label}`);
+    console.log("    integration removed");
   }
 
   console.log(
-    "Restart the selected agent or start a new session to apply the change.",
+    "\nRestart the selected agents or start a new session to apply the change.",
   );
 }
 
@@ -346,11 +365,53 @@ async function installCodexIntegration(
     path: agentsPath,
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
-    block: codexAgentsBlock(),
+    block: agentGuidanceBlock(),
     force: true,
   });
 
   return { files: [configPath, agentsPath] };
+}
+
+async function installClaudeIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const configDirectory = resolveClaudeConfigDirectory();
+  const mcpConfigPath = resolveClaudeMcpConfigPath();
+  const settingsPath = resolve(configDirectory, "settings.json");
+  const guidancePath = resolve(configDirectory, "CLAUDE.md");
+
+  await updateClaudeMcpConfig({
+    path: mcpConfigPath,
+    force: options.force,
+    tokenEnv: options.mcpTokenEnv,
+  });
+  await updateClaudePermissionSettings(settingsPath, true);
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: agentGuidanceBlock(),
+    force: true,
+  });
+
+  return { files: [mcpConfigPath, settingsPath, guidancePath] };
+}
+
+async function uninstallClaudeIntegration(): Promise<InstallAgentResult> {
+  const configDirectory = resolveClaudeConfigDirectory();
+  const mcpConfigPath = resolveClaudeMcpConfigPath();
+  const settingsPath = resolve(configDirectory, "settings.json");
+  const guidancePath = resolve(configDirectory, "CLAUDE.md");
+
+  await removeClaudeMcpConfig(mcpConfigPath);
+  await updateClaudePermissionSettings(settingsPath, false);
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+
+  return { files: [mcpConfigPath, settingsPath, guidancePath] };
 }
 
 async function uninstallCodexIntegration(): Promise<InstallAgentResult> {
@@ -376,13 +437,14 @@ async function resolveInstallers(
   parsed: ParsedArgs,
   action: "install" | "uninstall",
 ): Promise<AgentInstaller[]> {
+  const detected = await detectAgentInstallers();
   const targetTokens = [
     ...(parsed.options.installTargets ?? []),
     ...parsed.positionals,
   ];
 
   if (targetTokens.length > 0) {
-    return installersFromTokens(targetTokens);
+    return installersFromTokens(targetTokens, detected);
   }
 
   if (
@@ -390,45 +452,32 @@ async function resolveInstallers(
     !process.stdin.isTTY ||
     !process.stdout.isTTY
   ) {
-    return installersFromTokens(["auto"]);
+    return installersFromTokens(["auto"], detected);
   }
 
-  return promptInstallers(action);
+  return promptInstallers(action, detected);
 }
 
 async function promptInstallers(
   action: "install" | "uninstall",
+  detected: ReadonlySet<string>,
 ): Promise<AgentInstaller[]> {
   console.log(
-    `Select agents whose zvec-grep integration should be ${action === "install" ? "installed" : "removed"}:`,
+    action === "install"
+      ? "\nChoose agent integrations\n"
+      : "\nChoose integrations to remove\n",
   );
-  AGENT_INSTALLERS.forEach((installer, index) => {
-    console.log(
-      `  ${index + 1}. ${installer.label} - ${installer.description}`,
-    );
-  });
-  console.log("  all. All supported agents");
-  console.log("  none. Cancel");
-
-  const readline = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  try {
-    const answer = await readline.question("Agents [codex]: ");
-    const normalized = answer.trim();
-    return installersFromTokens(
-      normalized.length > 0 ? splitTargetTokens(normalized) : ["codex"],
-    );
-  } finally {
-    readline.close();
-  }
+  const selected = await promptInstallerSelection(detected);
+  return AGENT_INSTALLERS.filter((installer) => selected.has(installer.id));
 }
 
-function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
+function installersFromTokens(
+  tokens: readonly string[],
+  detected: ReadonlySet<string> = new Set(),
+): AgentInstaller[] {
   const normalized = tokens.flatMap(splitTargetTokens);
   if (normalized.length === 0) {
-    return installersFromTokens(["auto"]);
+    return installersFromTokens(["auto"], detected);
   }
 
   const selected = new Map<string, AgentInstaller>();
@@ -438,7 +487,16 @@ function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
       return [];
     }
 
-    if (lower === "auto" || lower === "all") {
+    if (lower === "auto") {
+      for (const installer of AGENT_INSTALLERS) {
+        if (detected.has(installer.id)) {
+          selected.set(installer.id, installer);
+        }
+      }
+      continue;
+    }
+
+    if (lower === "all") {
       for (const installer of AGENT_INSTALLERS) {
         selected.set(installer.id, installer);
       }
@@ -468,6 +526,200 @@ function installersFromTokens(tokens: readonly string[]): AgentInstaller[] {
   }
 
   return [...selected.values()];
+}
+
+async function detectAgentInstallers(): Promise<Set<string>> {
+  const detected = new Set<string>();
+  const checks = await Promise.all(
+    AGENT_INSTALLERS.map(async (installer) => ({
+      installer,
+      available: await executableIsAvailable(installer.executable),
+    })),
+  );
+  for (const check of checks) {
+    if (check.available) {
+      detected.add(check.installer.id);
+    }
+  }
+  return detected;
+}
+
+async function executableIsAvailable(executable: string): Promise<boolean> {
+  const path = process.env.PATH ?? "";
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+      : [""];
+  for (const pathEntry of path.split(delimiter)) {
+    const directory = pathEntry || process.cwd();
+    for (const extension of extensions) {
+      try {
+        await access(
+          resolve(directory, `${executable}${extension.toLowerCase()}`),
+          fileSystemConstants.X_OK,
+        );
+        return true;
+      } catch {
+        // Continue searching PATH.
+      }
+    }
+  }
+  return false;
+}
+
+async function promptInstallerSelection(
+  detected: ReadonlySet<string>,
+): Promise<Set<string>> {
+  if (typeof process.stdin.setRawMode !== "function") {
+    return promptInstallerLineSelection(detected);
+  }
+
+  const selected = new Set(detected);
+  let activeIndex = Math.max(
+    0,
+    AGENT_INSTALLERS.findIndex((installer) => detected.has(installer.id)),
+  );
+  let renderedLineCount = 0;
+
+  const render = (): void => {
+    const labelWidth = Math.max(
+      ...AGENT_INSTALLERS.map((installer) => installer.label.length),
+    );
+    const lines = [
+      ...AGENT_INSTALLERS.map((installer, index) => {
+        const active = index === activeIndex ? installAccent("›") : " ";
+        const checked = selected.has(installer.id)
+          ? installSuccess("[●]")
+          : "[ ]";
+        const label = installer.label.padEnd(labelWidth);
+        const status = detected.has(installer.id)
+          ? installSuccess("detected")
+          : installDim("not found");
+        return `  ${active} ${checked} ${label}  ${status}`;
+      }),
+      "",
+      installDim("  Use ↑↓ to move · Space to select · Enter to continue"),
+    ];
+
+    if (renderedLineCount > 0) {
+      process.stdout.write(`\u001b[${renderedLineCount}A`);
+    }
+    for (const line of lines) {
+      process.stdout.write(`\u001b[2K${line}\n`);
+    }
+    renderedLineCount = lines.length;
+  };
+
+  render();
+  return new Promise<Set<string>>((resolveSelection) => {
+    const wasRaw = process.stdin.isRaw === true;
+    const finish = (result: Set<string>): void => {
+      process.stdin.removeListener("data", onData);
+      process.stdin.setRawMode(wasRaw);
+      if (!wasRaw) process.stdin.pause();
+      process.stdout.write("\n");
+      resolveSelection(result);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      const key = chunk.toString();
+      if (key === "\u0003" || key === "\u001b") {
+        finish(new Set());
+        return;
+      }
+      if (key === "\u001b[A") {
+        activeIndex =
+          (activeIndex - 1 + AGENT_INSTALLERS.length) % AGENT_INSTALLERS.length;
+        render();
+        return;
+      }
+      if (key === "\u001b[B") {
+        activeIndex = (activeIndex + 1) % AGENT_INSTALLERS.length;
+        render();
+        return;
+      }
+      if (key === " ") {
+        const id = AGENT_INSTALLERS[activeIndex]!.id;
+        if (selected.has(id)) selected.delete(id);
+        else selected.add(id);
+        render();
+        return;
+      }
+      if (key.includes("\r") || key.includes("\n")) {
+        finish(selected);
+      }
+    };
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+  });
+}
+
+async function promptInstallerLineSelection(
+  detected: ReadonlySet<string>,
+): Promise<Set<string>> {
+  AGENT_INSTALLERS.forEach((installer, index) => {
+    console.log(
+      `  ${index + 1}. ${installer.label} (${detected.has(installer.id) ? "detected" : "not found"})`,
+    );
+  });
+  const defaults = [...detected].join(",") || "none";
+  const readline = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await readline.question(`Agents [${defaults}]: `);
+    const value = answer.trim() || defaults;
+    return new Set(
+      installersFromTokens(splitTargetTokens(value), detected).map(
+        (installer) => installer.id,
+      ),
+    );
+  } finally {
+    readline.close();
+  }
+}
+
+function printInstallHeader(): void {
+  console.log(installAccent("zvec-grep setup"));
+  console.log(installDim("─".repeat(40)));
+}
+
+function installSuccessMark(): string {
+  return installSuccess("✓");
+}
+
+function installMutedMark(): string {
+  return installDim("○");
+}
+
+function installSuccess(value: string): string {
+  return installStyle("32", value);
+}
+
+function installAccent(value: string): string {
+  return installStyle("36", value);
+}
+
+function installDim(value: string): string {
+  return installStyle("2", value);
+}
+
+function installStyle(code: string, value: string): string {
+  return process.stdout.isTTY && process.env.NO_COLOR === undefined
+    ? `\u001b[${code}m${value}\u001b[0m`
+    : value;
+}
+
+async function ensureInstalledServer(): Promise<
+  Awaited<ReturnType<typeof serverStatus>>
+> {
+  if (process.env.ZVEC_GREP_INSTALL_SKIP_SERVER === "1") {
+    return { running: false, ready: false };
+  }
+  const { startServer } = await import("../daemon/server-controller.js");
+  return startServer({ cliPath: process.argv[1]! });
 }
 
 function splitTargetTokens(value: string): string[] {
@@ -1543,6 +1795,155 @@ function resolveCodexHome(): string {
   return resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"));
 }
 
+function resolveClaudeConfigDirectory(): string {
+  return resolve(
+    process.env.CLAUDE_CONFIG_DIR ?? resolve(homedir(), ".claude"),
+  );
+}
+
+function resolveClaudeMcpConfigPath(): string {
+  return process.env.CLAUDE_CONFIG_DIR
+    ? resolve(process.env.CLAUDE_CONFIG_DIR, ".claude.json")
+    : resolve(homedir(), ".claude.json");
+}
+
+type JsonObject = Record<string, unknown>;
+
+async function updateClaudeMcpConfig(options: {
+  path: string;
+  force: boolean;
+  tokenEnv?: string;
+}): Promise<void> {
+  const root = await readJsonObject(options.path);
+  const currentServers = root.mcpServers;
+  if (
+    currentServers !== undefined &&
+    !isJsonObject(currentServers) &&
+    !options.force
+  ) {
+    throw new Error(
+      `Invalid mcpServers configuration in ${options.path}. Re-run with --force to replace it.`,
+    );
+  }
+  const mcpServers = isJsonObject(currentServers) ? currentServers : {};
+  const current = mcpServers.zvec_grep;
+  if (
+    current !== undefined &&
+    (!isJsonObject(current) || current.url !== resolveServerUrl()) &&
+    !options.force
+  ) {
+    throw new Error(
+      `Existing Claude Code MCP server "zvec_grep" found in ${options.path}. Re-run with --force to replace it.`,
+    );
+  }
+
+  const existingServer = isJsonObject(current) ? current : {};
+  const existingHeaders = isJsonObject(existingServer.headers)
+    ? existingServer.headers
+    : {};
+  mcpServers.zvec_grep = {
+    ...existingServer,
+    type: "http",
+    url: resolveServerUrl(),
+    ...(options.tokenEnv
+      ? {
+          headers: {
+            ...existingHeaders,
+            Authorization: `Bearer \${${options.tokenEnv}}`,
+          },
+        }
+      : {}),
+  };
+  root.mcpServers = mcpServers;
+  await writeJsonObject(options.path, root);
+}
+
+async function removeClaudeMcpConfig(path: string): Promise<void> {
+  const source = await readTextFileIfExists(path);
+  if (!source.trim()) return;
+  const root = parseJsonObject(path, source);
+  if (!isJsonObject(root.mcpServers)) return;
+  const current = root.mcpServers.zvec_grep;
+  if (!isJsonObject(current) || current.url !== resolveServerUrl()) return;
+
+  delete root.mcpServers.zvec_grep;
+  if (Object.keys(root.mcpServers).length === 0) {
+    delete root.mcpServers;
+  }
+  await writeJsonObject(path, root);
+}
+
+async function updateClaudePermissionSettings(
+  path: string,
+  grant: boolean,
+): Promise<void> {
+  const source = await readTextFileIfExists(path);
+  if (!source.trim() && !grant) return;
+  const root = source.trim() ? parseJsonObject(path, source) : {};
+  const currentPermissions = root.permissions;
+  if (currentPermissions !== undefined && !isJsonObject(currentPermissions)) {
+    throw new Error(`Invalid permissions configuration in ${path}.`);
+  }
+  const permissions = isJsonObject(currentPermissions)
+    ? currentPermissions
+    : {};
+  const currentAllow = permissions.allow;
+  if (currentAllow !== undefined && !Array.isArray(currentAllow)) {
+    throw new Error(`Invalid permissions.allow configuration in ${path}.`);
+  }
+  if (
+    Array.isArray(currentAllow) &&
+    currentAllow.some((item) => typeof item !== "string")
+  ) {
+    throw new Error(`Invalid permissions.allow rule in ${path}.`);
+  }
+  const allow = Array.isArray(currentAllow)
+    ? (currentAllow.slice() as string[])
+    : [];
+
+  if (grant) {
+    if (!allow.includes(CLAUDE_MCP_PERMISSION)) {
+      allow.push(CLAUDE_MCP_PERMISSION);
+    }
+    permissions.allow = allow;
+    root.permissions = permissions;
+  } else {
+    const retained = allow.filter((item) => item !== CLAUDE_MCP_PERMISSION);
+    if (retained.length > 0) permissions.allow = retained;
+    else delete permissions.allow;
+    if (Object.keys(permissions).length > 0) root.permissions = permissions;
+    else delete root.permissions;
+  }
+
+  await writeJsonObject(path, root);
+}
+
+async function readJsonObject(path: string): Promise<JsonObject> {
+  const source = await readTextFileIfExists(path);
+  return source.trim() ? parseJsonObject(path, source) : {};
+}
+
+function parseJsonObject(path: string, source: string): JsonObject {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    throw new Error(`Invalid JSON in ${path}.`, { cause: error });
+  }
+  if (!isJsonObject(parsed)) {
+    throw new Error(`Expected a JSON object in ${path}.`);
+  }
+  return parsed;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function writeJsonObject(path: string, value: JsonObject): Promise<void> {
+  await writeTextFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
 async function writeMarkedFile(options: {
   path: string;
   startMarker: string;
@@ -1841,7 +2242,7 @@ default_tools_approval_mode = "approve"
 ${ZVEC_GREP_CONFIG_END}`;
 }
 
-function codexAgentsBlock(): string {
+function agentGuidanceBlock(): string {
   return `${ZVEC_GREP_AGENTS_START}
 ## zvec-grep
 
@@ -1849,6 +2250,7 @@ Use zvec-grep before grep, rg, or broad file reads when you need to understand o
 
 - **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search, \`zvec_grep_index\` to ensure an index, and the two status tools to inspect index or server state.
 - **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. For \`zvec_grep_index\`, \`wait\` defaults to false: submit it in the background and poll \`zvec_grep_index_status\`; set \`wait: true\` only when completion is required before continuing.
+- **Remote data authorization**: MCP tool trust does not authorize Remote Embedding. zvec-grep requests its own once, session, or workspace authorization before sending query text or workspace content to a remote provider.
 - **Shell fallback**: If the MCP server is unavailable, use \`zg status\`, \`zg query "<query>"\`, and \`zg query --rg "<pattern>"\`.
 
 Prefer focused -g/--glob and -t/--type filters, and exclude dependencies, generated output, caches, build artifacts, and logs unless the task is about those files.

@@ -227,27 +227,6 @@ export const zvecGrepIndexDropInputSchema = z.object({
 
 export const zvecGrepServerStatusInputSchema = z.object({});
 
-export const zvecGrepRemoteEmbeddingDemoInputSchema = z.object({
-  root: absoluteRootSchema,
-  text: z
-    .string()
-    .trim()
-    .min(1)
-    .max(1_000)
-    .default("zvec-grep remote embedding authorization demo")
-    .describe("Non-sensitive text to send for one remote query embedding."),
-  filePath: z
-    .string()
-    .trim()
-    .min(1)
-    .max(MCP_MAX_PATH_CHARS)
-    .refine((path) => !isAbsolute(path), "filePath must be relative.")
-    .default("README.md")
-    .describe(
-      "Workspace-relative UTF-8 text file to send for one remote document embedding.",
-    ),
-});
-
 const jobStateSchema = z.enum([
   "queued",
   "running",
@@ -493,27 +472,6 @@ export const zvecGrepServerStatusOutputSchema = z.object({
   }),
 });
 
-export const zvecGrepRemoteEmbeddingDemoOutputSchema = z.object({
-  root: z.string(),
-  state: z.enum(["completed", "declined"]),
-  authorization: z.enum([
-    "granted_once",
-    "granted_session",
-    "existing_session",
-    "existing_workspace",
-    "granted_workspace",
-    "declined",
-  ]),
-  scope: z.enum(["once", "session", "workspace"]).optional(),
-  provider: z.string(),
-  model: z.string(),
-  grant_path: z.string().optional(),
-  file_path: z.string(),
-  file_bytes: z.number().int().nonnegative(),
-  query_vector_dimensions: z.number().int().positive().optional(),
-  file_vector_dimensions: z.number().int().positive().optional(),
-});
-
 export const legacySearchInputSchema = z.object({
   query: z
     .string()
@@ -663,9 +621,6 @@ export type ZvecGrepIndexDropInput = z.infer<
 export type ZvecGrepSearchInput = z.infer<typeof zvecGrepSearchInputSchema>;
 export type ZvecGrepIndexStatusInput = z.infer<
   typeof zvecGrepIndexStatusInputSchema
->;
-export type ZvecGrepRemoteEmbeddingDemoInput = z.infer<
-  typeof zvecGrepRemoteEmbeddingDemoInputSchema
 >;
 export type LegacySearchInput = z.infer<typeof legacySearchInputSchema>;
 export type LegacyRgInput = z.infer<typeof legacyRgInputSchema>;

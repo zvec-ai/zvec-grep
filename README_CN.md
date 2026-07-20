@@ -80,21 +80,27 @@ npm install -g .
 zg version
 ```
 
-启动本机后台 server：
+为检测到的 Claude Code 和 Codex 配置集成：
 
 ```bash
-zg server on
-zg server status
+zg install
 ```
 
-安装 Codex MCP 集成：
+交互式安装支持选择 Agent，写入 MCP 与指导配置，只预批准本机
+`zvec_grep` MCP 工具，并启动 loopback server。非交互安装可显式指定：
 
 ```bash
-zg install --target codex --yes
+zg install --target claude,codex --yes
 ```
 
-Codex MCP 工具调用默认超时为 600 秒，可在安装时通过 `--mcp-tool-timeout <秒数>` 覆盖。
-本地 server 默认不启用 token，并且只监听 loopback。需要 Bearer 鉴权时，可使用 `zg server on --token-file <path>` 启动（或设置 `ZVEC_GREP_SERVER_TOKEN`），再通过 `zg install --mcp-token-env ZVEC_GREP_SERVER_TOKEN` 让 MCP 客户端发送相同 token。安装后的 MCP URL 为 `http://127.0.0.1:7999/mcp`。使用 `zg server off` 停止 daemon。
+MCP 信任与 Remote Embedding 授权相互独立：安装后 Agent 调用本机 zg 工具不再重复确认，
+但向远程 Embedding Provider 发送查询文本或工作区内容前，zg 仍会单独请求授权。
+Codex MCP 工具调用默认超时为 600 秒，可通过 `--mcp-tool-timeout <秒数>` 覆盖。
+本地 server 默认不启用 token，并且只监听 loopback。如需从首次启动开始启用 Bearer 鉴权，
+请在运行 install 前设置 `ZVEC_GREP_SERVER_TOKEN`，并传入
+`--mcp-token-env ZVEC_GREP_SERVER_TOKEN`，让 MCP 客户端发送相同 token。
+如果 server 已在无 token 状态下运行，应先停止再以 token 配置重启。
+安装后的 MCP URL 为 `http://127.0.0.1:7999/mcp`。使用 `zg server off` 停止 daemon。
 
 CLI 的索引检索和建索引命令支持 `--mode direct`、`--mode server` 和 `--mode auto`。默认模式为 `auto`：只在 daemon ready 时使用 server，否则在提交请求前回退 Direct。
 Daemon 以 JSON Lines 写日志到 `~/.zvec-grep/daemon/logs/server.log`，不会记录凭证或完整查询文本。
@@ -152,7 +158,7 @@ zg query --rg -F "ZVEC_GREP_HOME" src
 zg query --human "root local index discovery" --limit 3
 ```
 
-MCP 客户端可使用四个工具：`zvec_grep_search`、`zvec_grep_index`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。Codex installer 会向 `${CODEX_HOME:-$HOME/.codex}/config.toml` 和 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` 写入由 zvec-grep 管理的配置块。
+MCP 客户端可使用四个工具：`zvec_grep_search`、`zvec_grep_index`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。对 Codex，installer 会向 `${CODEX_HOME:-$HOME/.codex}/config.toml` 和 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` 写入由 zvec-grep 管理的配置块；对 Claude Code，则更新 `~/.claude.json`、`~/.claude/settings.json` 和 `~/.claude/CLAUDE.md`（或 `CLAUDE_CONFIG_DIR` 下的对应文件）。
 
 ## <a id="models"></a>🧠 模型
 

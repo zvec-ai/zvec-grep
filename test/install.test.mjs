@@ -46,6 +46,7 @@ test("Codex installer removes orphaned managed markers", async (t) => {
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
+        ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
       },
     },
   );
@@ -88,7 +89,13 @@ test("Codex installer writes an explicit MCP token environment variable", async 
       "ZVEC_GREP_SERVER_TOKEN",
       "--yes",
     ],
-    { env: { ...process.env, CODEX_HOME: codexHome } },
+    {
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+      },
+    },
   );
 
   const installed = await readFile(join(codexHome, "config.toml"), "utf8");
@@ -194,6 +201,7 @@ test("Codex installer ignores an orphaned end marker before a complete block", a
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
+        ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
       },
     },
   );
@@ -364,6 +372,203 @@ test("Codex installer accepts a custom MCP tool timeout", async (t) => {
   assert.match(installed, /^tool_timeout_sec = 900$/m);
 });
 
+test("Claude Code installer configures MCP trust and guidance", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-claude-"),
+  );
+  const claudeConfigDirectory = join(temporaryDirectory, ".claude");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(claudeConfigDirectory, { recursive: true });
+  await writeFile(
+    join(claudeConfigDirectory, ".claude.json"),
+    `${JSON.stringify({ mcpServers: { zvec_grep: { type: "http", url: "http://127.0.0.1:7999/mcp", alwaysLoad: true } } }, null, 2)}\n`,
+  );
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [cliPath, "install", "--target", "claude", "--yes"],
+    {
+      env: {
+        ...process.env,
+        HOME: temporaryDirectory,
+        CLAUDE_CONFIG_DIR: claudeConfigDirectory,
+        ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+      },
+    },
+  );
+
+  const mcpConfig = JSON.parse(
+    await readFile(join(claudeConfigDirectory, ".claude.json"), "utf8"),
+  );
+  const settings = JSON.parse(
+    await readFile(join(claudeConfigDirectory, "settings.json"), "utf8"),
+  );
+  const guidance = await readFile(
+    join(claudeConfigDirectory, "CLAUDE.md"),
+    "utf8",
+  );
+
+  assert.deepEqual(mcpConfig.mcpServers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    alwaysLoad: true,
+  });
+  assert.ok(settings.permissions.allow.includes("mcp__zvec_grep__*"));
+  assert.match(guidance, /Remote data authorization/);
+  assert.match(stdout, /zvec-grep setup/);
+  assert.match(stdout, /Installing integrations/);
+  assert.match(stdout, /Claude Code/);
+  assert.match(stdout, /MCP trust\s+Approved/);
+  assert.match(stdout, /Remote data\s+Authorization requested/);
+});
+
+test("Claude Code installer preserves user configuration on install and uninstall", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-claude-preserve-"),
+  );
+  const claudeConfigDirectory = join(temporaryDirectory, ".claude");
+  const mcpConfigPath = join(claudeConfigDirectory, ".claude.json");
+  const settingsPath = join(claudeConfigDirectory, "settings.json");
+  const guidancePath = join(claudeConfigDirectory, "CLAUDE.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(claudeConfigDirectory, { recursive: true });
+  await writeFile(
+    mcpConfigPath,
+    `${JSON.stringify({ mcpServers: { other: { type: "http", url: "https://example.test/mcp" } }, theme: "dark" }, null, 2)}\n`,
+  );
+  await writeFile(
+    settingsPath,
+    `${JSON.stringify({ permissions: { allow: ["Bash(git status)"], deny: ["Bash(rm *)"] } }, null, 2)}\n`,
+  );
+  await writeFile(guidancePath, "# Existing Claude guidance\n");
+
+  const environment = {
+    ...process.env,
+    HOME: temporaryDirectory,
+    CLAUDE_CONFIG_DIR: claudeConfigDirectory,
+    ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+  };
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "install", "--target", "claude", "--yes"],
+    { env: environment },
+  );
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "uninstall", "--target", "claude", "--yes"],
+    { env: environment },
+  );
+
+  const mcpConfig = JSON.parse(await readFile(mcpConfigPath, "utf8"));
+  const settings = JSON.parse(await readFile(settingsPath, "utf8"));
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.deepEqual(mcpConfig, {
+    mcpServers: {
+      other: { type: "http", url: "https://example.test/mcp" },
+    },
+    theme: "dark",
+  });
+  assert.deepEqual(settings, {
+    permissions: {
+      allow: ["Bash(git status)"],
+      deny: ["Bash(rm *)"],
+    },
+  });
+  assert.match(guidance, /# Existing Claude guidance/);
+  assert.doesNotMatch(guidance, /ZVEC_GREP|## zvec-grep/);
+});
+
+test("Claude Code installer writes MCP token environment expansion", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-claude-token-"),
+  );
+  const claudeConfigDirectory = join(temporaryDirectory, ".claude");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await execFileAsync(
+    process.execPath,
+    [
+      cliPath,
+      "install",
+      "--target",
+      "claude",
+      "--mcp-token-env",
+      "ZVEC_GREP_SERVER_TOKEN",
+      "--yes",
+    ],
+    {
+      env: {
+        ...process.env,
+        HOME: temporaryDirectory,
+        CLAUDE_CONFIG_DIR: claudeConfigDirectory,
+        ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+      },
+    },
+  );
+
+  const mcpConfig = JSON.parse(
+    await readFile(join(claudeConfigDirectory, ".claude.json"), "utf8"),
+  );
+  assert.equal(
+    mcpConfig.mcpServers.zvec_grep.headers.Authorization,
+    "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
+  );
+});
+
+test(
+  "auto target installs only detected agents",
+  {
+    skip:
+      process.platform === "win32" ? "PATH executable semantics differ" : false,
+  },
+  async (t) => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), "zvec-grep-install-auto-"),
+    );
+    const binaryDirectory = join(temporaryDirectory, "bin");
+    const claudeConfigDirectory = join(temporaryDirectory, ".claude");
+    const codexHome = join(temporaryDirectory, ".codex");
+    t.after(async () => {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    });
+
+    await mkdir(binaryDirectory, { recursive: true });
+    const claudeExecutable = join(binaryDirectory, "claude");
+    await writeFile(claudeExecutable, "#!/bin/sh\n");
+    await chmod(claudeExecutable, 0o755);
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [cliPath, "install", "--yes"],
+      {
+        env: {
+          ...process.env,
+          PATH: binaryDirectory,
+          HOME: temporaryDirectory,
+          CLAUDE_CONFIG_DIR: claudeConfigDirectory,
+          CODEX_HOME: codexHome,
+          ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+        },
+      },
+    );
+
+    assert.match(stdout, /Claude Code/);
+    assert.doesNotMatch(stdout, /Codex/);
+    await stat(join(claudeConfigDirectory, ".claude.json"));
+    await assert.rejects(stat(join(codexHome, "config.toml")), {
+      code: "ENOENT",
+    });
+  },
+);
+
 async function installCodex(codexHome, extraArgs = []) {
   await execFileAsync(
     process.execPath,
@@ -372,6 +577,7 @@ async function installCodex(codexHome, extraArgs = []) {
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
+        ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
       },
     },
   );

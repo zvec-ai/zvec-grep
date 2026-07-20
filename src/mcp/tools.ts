@@ -22,14 +22,11 @@ import {
   zvecGrepIndexStatusOutputSchema,
   zvecGrepSearchInputSchema,
   zvecGrepSearchOutputSchema,
-  zvecGrepRemoteEmbeddingDemoInputSchema,
-  zvecGrepRemoteEmbeddingDemoOutputSchema,
   zvecGrepServerStatusInputSchema,
   zvecGrepServerStatusOutputSchema,
   type ZvecGrepIndexInput,
   type ZvecGrepIndexDropInput,
   type ZvecGrepIndexStatusInput,
-  type ZvecGrepRemoteEmbeddingDemoInput,
   type ZvecGrepSearchIndexing,
 } from "./schemas.js";
 import {
@@ -149,45 +146,6 @@ export type ZvecGrepServerStatusResult = {
   };
 };
 
-export type RemoteEmbeddingDemoAuthorizationScope =
-  "once" | "session" | "workspace";
-
-export type RemoteEmbeddingDemoAuthorization =
-  | "granted_once"
-  | "granted_session"
-  | "existing_session"
-  | "granted_workspace"
-  | "existing_workspace";
-
-export type RemoteEmbeddingDemoAuthorizationRequest = {
-  scope: RemoteEmbeddingDemoAuthorizationScope;
-  existing?: boolean;
-};
-
-export type ZvecGrepRemoteEmbeddingDemoResult =
-  | {
-      state: "authorization_required";
-      root: string;
-      provider: string;
-      model: string;
-      grantPath: string;
-      filePath: string;
-      fileBytes: number;
-    }
-  | {
-      state: "completed";
-      root: string;
-      authorization: RemoteEmbeddingDemoAuthorization;
-      scope: RemoteEmbeddingDemoAuthorizationScope;
-      provider: string;
-      model: string;
-      grantPath?: string;
-      filePath: string;
-      fileBytes: number;
-      queryVectorDimensions: number;
-      fileVectorDimensions: number;
-    };
-
 export interface ZvecGrepDaemonBackend {
   index(
     input: ZvecGrepIndexInput,
@@ -218,10 +176,6 @@ export interface ZvecGrepDaemonBackend {
     input: ZvecGrepIndexStatusInput,
   ): Promise<ZvecGrepIndexStatusResult>;
   serverStatus(): Promise<ZvecGrepServerStatusResult>;
-  remoteEmbeddingDemo(
-    input: ZvecGrepRemoteEmbeddingDemoInput,
-    options?: { authorization?: RemoteEmbeddingDemoAuthorizationRequest },
-  ): Promise<ZvecGrepRemoteEmbeddingDemoResult>;
 }
 
 export type ZvecGrepMcpServerOptions = {
@@ -243,7 +197,6 @@ export function createZvecGrepMcpServer(
         "Call zvec_grep_search first. Use its freshness and indexing fields without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
         "Call zvec_grep_index only when indexing is requested. Its wait parameter defaults to false; poll zvec_grep_index_status for background progress and set wait: true only when completion is required before continuing.",
         "Call zvec_grep_index_drop only when the user explicitly asks to delete a Workspace index.",
-        "Call zvec_grep_remote_embedding_demo only when the user asks to experience the Remote Embedding authorization demo.",
       ].join(" "),
     },
   );
@@ -432,150 +385,6 @@ export function registerZvecGrepTools(
       const structuredContent = formatIndexStatus(result);
       return toolResult(
         JSON.stringify(structuredContent, null, 2),
-        structuredContent,
-      );
-    },
-  );
-
-  server.registerTool(
-    "zvec_grep_remote_embedding_demo",
-    {
-      title: "Experience Remote Embedding authorization",
-      description:
-        "Demo-only tool that keeps Remote Embedding authorization inside zg. It offers once, MCP-session, or Workspace scope before performing real Qwen embeddings for query text and one explicitly selected local text file.",
-      inputSchema: zvecGrepRemoteEmbeddingDemoInputSchema.shape,
-      outputSchema: zvecGrepRemoteEmbeddingDemoOutputSchema.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
-    },
-    async (input, extra) => {
-      let result = await backend.remoteEmbeddingDemo(input);
-      if (result.state === "authorization_required") {
-        const sessionGrantKey = JSON.stringify([
-          result.root,
-          result.provider,
-          result.model,
-        ]);
-        if (remoteEmbeddingSessionGrants.has(sessionGrantKey)) {
-          result = await backend.remoteEmbeddingDemo(input, {
-            authorization: { scope: "session", existing: true },
-          });
-        } else {
-          const elicitation = await elicitRemoteEmbeddingAuthorization(
-            server,
-            extra,
-            options,
-            {
-              mode: "form",
-              message: formatRemoteEmbeddingAuthorizationPrompt({
-                workspaceRoots: [result.root],
-                provider: result.provider,
-                model: result.model,
-                data: [
-                  "query text",
-                  `selected workspace file (${result.fileBytes} bytes)`,
-                ],
-                note: "The file is read only after approval.",
-              }),
-              requestedSchema: {
-                type: "object",
-                properties: {
-                  decision: {
-                    type: "string",
-                    title: "Remote Embedding permission",
-                    description: REMOTE_EMBEDDING_SCOPE_DESCRIPTION,
-                    oneOf: [
-                      { const: "allow_once", title: "Allow once" },
-                      {
-                        const: "allow_session",
-                        title: "Allow for this session",
-                      },
-                      {
-                        const: "allow_workspace",
-                        title: "Allow for this workspace",
-                      },
-                      { const: "cancel", title: "Cancel" },
-                    ],
-                    default: "cancel",
-                  },
-                },
-                required: ["decision"],
-              },
-            },
-          );
-          const decision =
-            elicitation.action === "accept"
-              ? elicitation.content?.decision
-              : undefined;
-          if (
-            decision !== "allow_once" &&
-            decision !== "allow_session" &&
-            decision !== "allow_workspace"
-          ) {
-            const structuredContent = {
-              root: result.root,
-              state: "declined" as const,
-              authorization: "declined" as const,
-              provider: result.provider,
-              model: result.model,
-              grant_path: result.grantPath,
-              file_path: result.filePath,
-              file_bytes: result.fileBytes,
-            };
-            return toolResult(
-              "Remote Embedding demo cancelled. No query or file content was sent, and no authorization was saved.",
-              structuredContent,
-            );
-          }
-
-          const scope =
-            decision === "allow_workspace"
-              ? "workspace"
-              : decision === "allow_session"
-                ? "session"
-                : "once";
-          if (scope === "session") {
-            remoteEmbeddingSessionGrants.add(sessionGrantKey);
-          }
-          result = await backend.remoteEmbeddingDemo(input, {
-            authorization: { scope },
-          });
-        }
-      }
-
-      if (result.state !== "completed") {
-        throw new Error("Remote Embedding demo authorization was not saved.");
-      }
-      const structuredContent = {
-        root: result.root,
-        state: result.state,
-        authorization: result.authorization,
-        scope: result.scope,
-        provider: result.provider,
-        model: result.model,
-        grant_path: result.grantPath,
-        file_path: result.filePath,
-        file_bytes: result.fileBytes,
-        query_vector_dimensions: result.queryVectorDimensions,
-        file_vector_dimensions: result.fileVectorDimensions,
-      };
-      return toolResult(
-        [
-          "Remote Embedding demo completed.",
-          `authorization: ${result.authorization}`,
-          `scope: ${result.scope}`,
-          `provider: ${result.provider}`,
-          `model: ${result.model}`,
-          `file_path: ${result.filePath}`,
-          `file_bytes: ${result.fileBytes}`,
-          `query_vector_dimensions: ${result.queryVectorDimensions}`,
-          `file_vector_dimensions: ${result.fileVectorDimensions}`,
-          ...(result.grantPath ? [`grant_path: ${result.grantPath}`] : []),
-        ].join("\n"),
         structuredContent,
       );
     },

@@ -166,19 +166,22 @@ The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.`;
     case "install":
       return `Usage:
-  zg install [--target codex|all|auto] [--yes] [--force]
+  zg install [--target claude|codex|all|auto] [--yes] [--force]
 
 Options:
-  --target <agent>                  Agent integration to install
-  --mcp-tool-timeout <seconds>      MCP tool timeout written to configuration
+  --target <agent>                  claude, codex, auto, or all; repeatable
+  --mcp-tool-timeout <seconds>      Codex MCP tool timeout (default: 600)
   --mcp-token-env <name>            Bearer token environment variable
-  --yes                             Use default choices without prompting
+  --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
 
-This installs agent guidance and MCP configuration. It does not install the npm package.`;
+Interactive setup detects Claude Code and Codex, configures and pre-approves
+the local zvec-grep MCP tools, updates agent guidance, and starts the local
+server. Remote Embedding data authorization remains separate and is requested
+by zvec-grep on first remote use. This does not install the npm package.`;
     case "uninstall":
       return `Usage:
-  zg uninstall [--target codex|all|auto] [--yes]
+  zg uninstall [--target claude|codex|all|auto] [--yes]
 
 Removes zvec-grep-managed agent guidance and MCP configuration.`;
     case "help":

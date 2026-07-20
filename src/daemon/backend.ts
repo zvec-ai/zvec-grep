@@ -1,5 +1,4 @@
 import { createZvecGrep } from "../engine/service/index.js";
-import { anonymousHome } from "../engine/service/root.js";
 import type {
   CreateZvecGrepOptions,
   ZvecGrepInfoResult,
@@ -15,30 +14,18 @@ import {
   type NormalizedSearchInput,
 } from "../mcp/input-normalization.js";
 import type {
-  RemoteEmbeddingDemoAuthorization,
-  RemoteEmbeddingDemoAuthorizationRequest,
   ZvecGrepDaemonBackend,
   ZvecGrepIndexDropResult,
   ZvecGrepIndexResult,
   ZvecGrepIndexStatusResult,
   ZvecGrepSearchResult,
   ZvecGrepServerStatusResult,
-  ZvecGrepRemoteEmbeddingDemoResult,
 } from "../mcp/tools.js";
 import type {
   ZvecGrepIndexInput,
   ZvecGrepIndexDropInput,
   ZvecGrepIndexStatusInput,
-  ZvecGrepRemoteEmbeddingDemoInput,
 } from "../mcp/schemas.js";
-import {
-  inspectRemoteEmbeddingDemoFile,
-  readRemoteEmbeddingDemoFile,
-  readRemoteEmbeddingDemoGrant,
-  REMOTE_EMBEDDING_DEMO_SCHEMA,
-  remoteEmbeddingDemoAuthorizationPath,
-  writeRemoteEmbeddingDemoGrant,
-} from "../demo/remote-embedding-authorization.js";
 import { DaemonError } from "./errors.js";
 import {
   JobScheduler,
@@ -64,7 +51,6 @@ import { rootIdentity, type DaemonLogger } from "./logger.js";
 import {
   RemoteEmbeddingAuthorizationManager,
   RemoteEmbeddingAuthorizationStore,
-  createRemoteEmbeddingTarget,
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,
   withRemoteEmbeddingOperationPermit,
@@ -512,115 +498,6 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       runningJobs: jobs.running,
       models,
     };
-  }
-
-  async remoteEmbeddingDemo(
-    input: ZvecGrepRemoteEmbeddingDemoInput,
-    options: { authorization?: RemoteEmbeddingDemoAuthorizationRequest } = {},
-  ): Promise<ZvecGrepRemoteEmbeddingDemoResult> {
-    const authorizationRequest = options.authorization;
-    const canonicalRoot = await resolveRequestedRoot(
-      input.root,
-      authorizationRequest?.scope === "workspace",
-    );
-    const fileMetadata = await inspectRemoteEmbeddingDemoFile(
-      canonicalRoot,
-      input.filePath,
-    );
-    let grant = await readRemoteEmbeddingDemoGrant(canonicalRoot);
-    if (!grant && !authorizationRequest) {
-      return {
-        state: "authorization_required",
-        root: canonicalRoot,
-        provider: REMOTE_EMBEDDING_DEMO_SCHEMA.provider,
-        model: REMOTE_EMBEDDING_DEMO_SCHEMA.model,
-        grantPath: remoteEmbeddingDemoAuthorizationPath(canonicalRoot),
-        filePath: fileMetadata.relativePath,
-        fileBytes: fileMetadata.bytes,
-      };
-    }
-
-    let authorization: RemoteEmbeddingDemoAuthorization;
-    let scope: "once" | "session" | "workspace";
-    let grantPath: string | undefined;
-    if (grant) {
-      authorization = "existing_workspace";
-      scope = "workspace";
-      grantPath = remoteEmbeddingDemoAuthorizationPath(canonicalRoot);
-    } else if (authorizationRequest?.scope === "workspace") {
-      grant = await writeRemoteEmbeddingDemoGrant(canonicalRoot);
-      authorization = "granted_workspace";
-      scope = "workspace";
-      grantPath = remoteEmbeddingDemoAuthorizationPath(canonicalRoot);
-    } else if (authorizationRequest?.scope === "session") {
-      authorization = authorizationRequest.existing
-        ? "existing_session"
-        : "granted_session";
-      scope = "session";
-    } else {
-      authorization = "granted_once";
-      scope = "once";
-    }
-
-    const file = await readRemoteEmbeddingDemoFile(
-      canonicalRoot,
-      input.filePath,
-    );
-
-    const target = await createRemoteEmbeddingTarget({
-      roots: [canonicalRoot],
-      provider: REMOTE_EMBEDDING_DEMO_SCHEMA.provider,
-      model: REMOTE_EMBEDDING_DEMO_SCHEMA.model,
-      serviceOptions: this.options.serviceOptions,
-    });
-    const formalPlan: RemoteEmbeddingAuthorizationPlan = {
-      operation: "query_and_index",
-      target,
-      disclosure: { queryText: true, workspaceContent: "selected" },
-      reason: "query",
-      grantPath: this.authorizationManager.store.grantPath(target),
-    };
-    const permit = await this.authorizationManager.grant(formalPlan, scope);
-
-    const lease = await this.modelPool.acquire({
-      schema: REMOTE_EMBEDDING_DEMO_SCHEMA,
-      root: canonicalRoot,
-      registryHome: anonymousHome(canonicalRoot),
-    });
-    try {
-      const [queryVector, fileVector] =
-        await withRemoteEmbeddingOperationPermit(permit, async () => {
-          const [query] = await lease.model.embed(
-            [{ kind: "text", text: input.text }],
-            { purpose: "query" },
-          );
-          const [document] = await lease.model.embed(
-            [{ kind: "text", text: file.text }],
-            { purpose: "document" },
-          );
-          return [query, document];
-        });
-      if (!queryVector || !fileVector) {
-        throw new Error(
-          "Remote Embedding demo returned an incomplete vector result.",
-        );
-      }
-      return {
-        state: "completed",
-        root: canonicalRoot,
-        authorization,
-        scope,
-        provider: grant?.provider ?? REMOTE_EMBEDDING_DEMO_SCHEMA.provider,
-        model: grant?.model ?? REMOTE_EMBEDDING_DEMO_SCHEMA.model,
-        grantPath,
-        filePath: file.relativePath,
-        fileBytes: file.bytes,
-        queryVectorDimensions: queryVector.length,
-        fileVectorDimensions: fileVector.length,
-      };
-    } finally {
-      lease.release();
-    }
   }
 
   async close(): Promise<void> {
