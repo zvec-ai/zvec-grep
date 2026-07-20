@@ -80,6 +80,46 @@ test("scheduler retries retryable failures without blocking another root", async
   await scheduler.close();
 });
 
+test("scheduler wait observes current and future index progress", async () => {
+  const scheduler = new JobScheduler({ concurrency: 1 });
+  let continueIndexing;
+  const scanObserved = new Promise((resolve) => {
+    continueIndexing = resolve;
+  });
+  const submitted = scheduler.submit({
+    canonicalRoot: "/repo-progress",
+    reason: "manual",
+    run: async (report) => {
+      report({ phase: "scanning", detail: "Scanning workspace..." });
+      await scanObserved;
+      report({
+        phase: "indexing",
+        filesIndexed: 2,
+        filesTotal: 5,
+        detail: "embedding src/example.ts",
+      });
+    },
+  });
+  await waitFor(
+    () => scheduler.get(submitted.job.id)?.progress?.phase === "scanning",
+  );
+
+  const observed = [];
+  const completed = scheduler.wait(submitted.job.id, (progress) => {
+    observed.push(progress);
+  });
+  continueIndexing();
+
+  assert.equal((await completed).state, "succeeded");
+  assert.deepEqual(
+    observed.map((progress) => progress.phase),
+    ["scanning", "indexing"],
+  );
+  assert.equal(observed[1].filesIndexed, 2);
+  assert.equal(observed[1].filesTotal, 5);
+  await scheduler.close();
+});
+
 test("scheduler keeps one follow-up for changes submitted while a root is running", async () => {
   const scheduler = new JobScheduler({ concurrency: 1 });
   let releaseFirst;

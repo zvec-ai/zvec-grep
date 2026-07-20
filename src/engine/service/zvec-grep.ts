@@ -1099,7 +1099,7 @@ class ZvecGrepService implements ZvecGrep {
           ),
           detail(
             "examples",
-            "local/embeddinggemma-300m, qwen/qwen3.7-text-embedding",
+            "local/embeddinggemma-300m, qwen/text-embedding-v4",
           ),
         ]),
       });

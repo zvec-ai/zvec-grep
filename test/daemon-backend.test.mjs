@@ -50,6 +50,55 @@ test("index releases its model lease when service creation fails", async () => {
   }
 });
 
+test("drop index closes the active runtime and removes the persisted index", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-drop-backend-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new TestEmbeddingModel(),
+  });
+  await service.index();
+  await service.close();
+
+  let watcherCloses = 0;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
+    createService: (options) =>
+      createZvecGrep({
+        ...options,
+        embeddingModel: new TestEmbeddingModel(),
+      }),
+    watchManagerFactory: () => ({
+      start() {},
+      flushPending: async () => {},
+      close: async () => {
+        watcherCloses += 1;
+      },
+    }),
+  });
+  try {
+    await backend.search(searchInput(root, "answer", "wait_for_fresh"));
+    assert.equal((await backend.serverStatus()).activeRuntimes, 1);
+
+    const result = await backend.dropIndex({ root });
+    assert.deepEqual(result, { root: await realpath(root), removed: true });
+    assert.equal(watcherCloses, 1);
+    assert.equal((await backend.serverStatus()).activeRuntimes, 0);
+    assert.equal((await backend.indexStatus({ root })).indexed, false);
+
+    const repeated = await backend.dropIndex({ root });
+    assert.deepEqual(repeated, { root: await realpath(root), removed: false });
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("wait_for_fresh reports a failed reconciliation instead of returning stale results", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-freshness-"),

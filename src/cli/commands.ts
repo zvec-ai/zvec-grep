@@ -61,14 +61,17 @@ import {
   RemoteEmbeddingAuthorizationManager,
   RemoteEmbeddingAuthorizationStore,
   createRemoteEmbeddingTarget,
+  formatRemoteEmbeddingAuthorizationPrompt,
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,
+  remoteEmbeddingDisclosureData,
   withRemoteEmbeddingOperationPermit,
   type RemoteEmbeddingAuthorizationPlan,
   type RemoteEmbeddingOperationPermit,
 } from "../authorization/index.js";
 import type { CollectionEmbeddingSchema } from "../engine/types.js";
 import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
+import { indexProgressFromMessage } from "../index-progress.js";
 
 type AgentInstaller = {
   id: string;
@@ -492,30 +495,44 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
     mode,
     serverAvailable: () => daemonIsReady(parsed.options.home),
     server: async () => {
-      const result = await daemonClient(parsed.options).callTool(
-        "zvec_grep_index",
-        {
-          root: rootPath.absolutePath,
-          embedding: parsed.options.embedding,
-          rebuild: parsed.options.rebuild,
-          resetPaths: parsed.options.resetPaths,
-          globs: parsed.options.globs,
-          insensitiveGlobs: parsed.options.insensitiveGlobs,
-          fileTypes: parsed.options.fileTypes,
-          excludedFileTypes: parsed.options.excludedFileTypes,
-          hidden: parsed.options.hidden,
-          noIgnore: parsed.options.noIgnore,
-          ignoreFiles: parsed.options.ignoreFiles,
-          maxDepth: parsed.options.maxDepth,
-          maxFileSizeBytes: parsed.options.maxFileSizeBytes,
-          follow: parsed.options.follow,
-          embeddingConcurrency: parsed.options.embeddingConcurrency,
-          wait: true,
-        },
-      );
-      console.log(
-        `Indexed anonymous workspace: ${String(result.state ?? "submitted")}`,
-      );
+      const progress = createIndexProgressReporter({
+        color: parsed.options.color,
+      });
+      let result: Record<string, unknown>;
+      try {
+        result = await daemonClient(parsed.options).callTool(
+          "zvec_grep_index",
+          {
+            root: rootPath.absolutePath,
+            embedding: parsed.options.embedding,
+            rebuild: parsed.options.rebuild,
+            resetPaths: parsed.options.resetPaths,
+            globs: parsed.options.globs,
+            insensitiveGlobs: parsed.options.insensitiveGlobs,
+            fileTypes: parsed.options.fileTypes,
+            excludedFileTypes: parsed.options.excludedFileTypes,
+            hidden: parsed.options.hidden,
+            noIgnore: parsed.options.noIgnore,
+            ignoreFiles: parsed.options.ignoreFiles,
+            maxDepth: parsed.options.maxDepth,
+            maxFileSizeBytes: parsed.options.maxFileSizeBytes,
+            follow: parsed.options.follow,
+            embeddingConcurrency: parsed.options.embeddingConcurrency,
+            wait: true,
+          },
+          {
+            onProgress: (event) => {
+              const update = indexProgressFromMessage(event.message);
+              if (update) {
+                progress.report(update.progress);
+              }
+            },
+          },
+        );
+      } finally {
+        progress.finish();
+      }
+      console.log(`Workspace index: ${String(result.state ?? "submitted")}`);
       console.log(`Root: ${String(result.root ?? rootPath.absolutePath)}`);
       console.log(`Job: ${String(result.job_id ?? "unknown")}`);
       if (result.state === "failed") {
@@ -556,7 +573,7 @@ async function runDirectIndex(
   let zvecGrep = await createZvecGrep(
     createServiceOptions(parsed.options, rootPath.absolutePath),
   );
-  const progress = createIndexProgressReporter();
+  const progress = createIndexProgressReporter({ color: parsed.options.color });
   let usedLocalFallback = false;
   try {
     const infoBefore = await zvecGrep.info({ root: rootPath.absolutePath });
@@ -622,7 +639,7 @@ async function runDirectIndex(
     progress.finish();
     const info = await zvecGrep.info({ root: rootPath.absolutePath });
     printIndexResult(
-      "Indexed anonymous workspace",
+      "Workspace index",
       result,
       parsed.options,
       info.collection?.rootPaths,
@@ -642,23 +659,37 @@ async function runDirectIndex(
 }
 
 async function runDropIndex(parsed: ParsedArgs, root: string): Promise<void> {
-  await assertDirectOnlyOperation(parsed.options, "zg index --drop");
   if (!(await confirmIndexDrop(root, parsed.options.yes === true))) {
     console.log("Index drop cancelled.");
     return;
   }
 
-  const zvecGrep = await createZvecGrep(
-    createServiceOptions(parsed.options, root),
-  );
-  try {
-    const removed = await zvecGrep.dropIndex({ root });
+  const printResult = (removed: boolean): void => {
     console.log(
       removed ? `Dropped index for ${root}` : `No index found for ${root}`,
     );
-  } finally {
-    await zvecGrep.close();
-  }
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      const result = await daemonClient(parsed.options).callTool(
+        "zvec_grep_index_drop",
+        { root },
+      );
+      printResult(result.removed === true);
+    },
+    direct: async () => {
+      const zvecGrep = await createZvecGrep(
+        createServiceOptions(parsed.options, root),
+      );
+      try {
+        printResult(await zvecGrep.dropIndex({ root }));
+      } finally {
+        await zvecGrep.close();
+      }
+    },
+  });
 }
 
 async function confirmIndexDrop(
@@ -822,7 +853,9 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
       const explicitRoot = root !== undefined;
       const rootPath = indexRootPath(root ?? process.cwd(), parsed.options);
       const rootPaths = explicitRoot ? rootPath : undefined;
-      const progress = createIndexProgressReporter();
+      const progress = createIndexProgressReporter({
+        color: parsed.options.color,
+      });
       try {
         const [existing, status] = await Promise.all([
           zvecGrep.collections.info(name),
@@ -1032,7 +1065,9 @@ async function runDirectQuery(
   const zvecGrep = await createZvecGrep(
     createServiceOptions(commandOptions, undefined),
   );
-  const progress = createIndexProgressReporter();
+  const progress = createIndexProgressReporter({
+    color: commandOptions.color,
+  });
   try {
     const contextRequest = contextOptions(
       commandOptions,
@@ -1189,23 +1224,16 @@ async function authorizeCliPlan(
     );
   }
 
-  console.error("Remote Embedding requires authorization.\n");
-  console.error(`Workspace: ${plan.target.workspaceRoots.join(", ")}`);
-  console.error(`Provider: ${plan.target.provider}`);
-  console.error(`Model: ${plan.target.model}`);
-  console.error(`Endpoint: ${plan.target.endpoint}\n`);
-  console.error("Data sent by this operation:");
-  if (plan.disclosure.queryText) {
-    console.error("  - Query text");
-  }
-  if (plan.disclosure.workspaceContent !== "none") {
-    console.error(
-      plan.disclosure.workspaceContent === "changed"
-        ? "  - Changed workspace content"
-        : "  - Selected workspace content",
-    );
-  }
-  console.error("API charges may apply.\n");
+  console.error(
+    formatRemoteEmbeddingAuthorizationPrompt({
+      workspaceRoots: plan.target.workspaceRoots,
+      provider: plan.target.provider,
+      model: plan.target.model,
+      endpoint: plan.target.endpoint,
+      data: remoteEmbeddingDisclosureData(plan.disclosure),
+    }),
+  );
+  console.error("");
   console.error("1. Allow once");
   console.error("2. Allow for this workspace");
   if (alternative === "local_search") console.error("3. Use FTS only");
@@ -1362,21 +1390,6 @@ function printServerControlStatus(
 
 function assertDirectOnlyMode(options: CliOptions, command: string): void {
   if (resolveClientMode(options.mode) === "server") {
-    throw new Error(
-      `${command} is Direct-only; use --mode direct after stopping the daemon`,
-    );
-  }
-}
-
-async function assertDirectOnlyOperation(
-  options: CliOptions,
-  command: string,
-): Promise<void> {
-  const mode = resolveClientMode(options.mode);
-  if (
-    mode === "server" ||
-    (mode === "auto" && (await daemonIsReady(options.home)))
-  ) {
     throw new Error(
       `${command} is Direct-only; use --mode direct after stopping the daemon`,
     );

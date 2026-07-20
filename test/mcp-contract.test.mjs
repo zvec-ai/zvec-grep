@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createZvecGrepMcpServer } from "../dist/mcp/tools.js";
 import { withProgressHeartbeat } from "../dist/mcp/progress-heartbeat.js";
+import { indexProgressFromMessage } from "../dist/index-progress.js";
 
 const root = resolve("test/fixtures/repository");
 
@@ -16,6 +17,10 @@ function createBackend() {
       jobId: "job-1",
       state: "queued",
       reused: false,
+    }),
+    dropIndex: async (input) => ({
+      root: input.root,
+      removed: true,
     }),
     search: async (input) => ({
       root: input.root,
@@ -112,6 +117,7 @@ test("server contract exposes the public tools with stable annotations", async (
     tools.map((tool) => tool.name),
     [
       "zvec_grep_index",
+      "zvec_grep_index_drop",
       "zvec_grep_index_status",
       "zvec_grep_remote_embedding_demo",
       "zvec_grep_search",
@@ -123,6 +129,9 @@ test("server contract exposes the public tools with stable annotations", async (
     tools.map((tool) => [tool.name, tool.annotations]),
   );
   assert.equal(annotations.zvec_grep_index.readOnlyHint, false);
+  assert.equal(annotations.zvec_grep_index_drop.readOnlyHint, false);
+  assert.equal(annotations.zvec_grep_index_drop.destructiveHint, true);
+  assert.equal(annotations.zvec_grep_index_drop.idempotentHint, true);
   assert.equal(annotations.zvec_grep_remote_embedding_demo.readOnlyHint, false);
   assert.equal(
     annotations.zvec_grep_remote_embedding_demo.idempotentHint,
@@ -172,6 +181,22 @@ test("index contract documents background submission as the default", async (t) 
   assert.ok(index.outputSchema.properties.error);
 });
 
+test("index drop returns the daemon deletion result", async (t) => {
+  const { client, server } = await connect();
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const result = await client.callTool({
+    name: "zvec_grep_index_drop",
+    arguments: { root },
+  });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent, { root, removed: true });
+  assert.match(result.content[0].text, /Dropped Workspace index/);
+});
+
 test("index result includes an immediately available failure reason", async (t) => {
   const backend = createBackend();
   backend.index = async (input) => ({
@@ -204,6 +229,66 @@ test("index result includes an immediately available failure reason", async (t) 
     result.content[0].text,
     /Embedding schema could not be resolved/,
   );
+});
+
+test("index streams daemon progress through MCP", async (t) => {
+  const backend = createBackend();
+  backend.index = async (input, options) => {
+    options.onProgress({
+      phase: "scanning",
+      detail: "Scanning workspace...",
+    });
+    options.onProgress({
+      phase: "indexing",
+      filesIndexed: 2,
+      filesTotal: 5,
+      detail: "embedding src/example.ts",
+    });
+    options.onProgress({ phase: "done", detail: "Indexing complete" });
+    return {
+      root: input.root,
+      jobId: "job-progress",
+      state: "succeeded",
+      reused: false,
+    };
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const progressLines = [];
+  const progressUpdates = [];
+  const result = await client.callTool(
+    {
+      name: "zvec_grep_index",
+      arguments: { root, embedding: "test/deterministic", wait: true },
+    },
+    undefined,
+    {
+      onprogress: (progress) => {
+        const update = indexProgressFromMessage(progress.message);
+        if (update) {
+          progressLines.push(update.line);
+          progressUpdates.push(update.progress);
+        }
+      },
+    },
+  );
+
+  assert.equal(result.structuredContent.state, "succeeded");
+  assert.deepEqual(progressLines, [
+    "Scanning workspace...",
+    "Indexing files: 2/5 embedding src/example.ts",
+    "Indexing complete",
+  ]);
+  assert.deepEqual(progressUpdates[1], {
+    phase: "indexing",
+    filesIndexed: 2,
+    filesTotal: 5,
+    detail: "embedding src/example.ts",
+  });
 });
 
 test("search elicits merged Remote Embedding authorization and reuses session scope", async (t) => {
@@ -250,8 +335,26 @@ test("search elicits merged Remote Embedding authorization and reuses session sc
   );
   client.setRequestHandler(ElicitRequestSchema, async (request) => {
     elicitations += 1;
-    assert.match(request.params.message, /Query \+ Index/);
-    assert.match(request.params.message, /Changed workspace content/);
+    assert.equal(
+      request.params.message,
+      [
+        "Remote Embedding authorization",
+        "",
+        "Send query text and changed workspace files?",
+        "",
+        "  From  repository",
+        "  To    qwen/text-embedding-v4",
+        "        qwen.test",
+        "",
+        "API charges may apply.",
+      ].join("\n"),
+    );
+    assert.equal(request.params.message.includes("\n"), true);
+    assert.equal(request.params.message.includes(root), false);
+    assert.equal(
+      request.params.requestedSchema.properties.decision.description,
+      "Choose how long zvec-grep may reuse this permission.",
+    );
     return {
       action: "accept",
       content: { decision: "allow_session" },
@@ -383,6 +486,13 @@ test("root tools require an absolute root", async (t) => {
   });
   assert.equal(statusRelative.isError, true);
   assert.match(statusRelative.content[0].text, /absolute path/i);
+
+  const dropRelative = await client.callTool({
+    name: "zvec_grep_index_drop",
+    arguments: { root: "relative/path" },
+  });
+  assert.equal(dropRelative.isError, true);
+  assert.match(dropRelative.content[0].text, /absolute path/i);
 
   const searchRelative = await client.callTool({
     name: "zvec_grep_search",
@@ -534,6 +644,7 @@ test("all tools return output-schema-compatible structured content", async (t) =
 
   const calls = [
     ["zvec_grep_index", { root }],
+    ["zvec_grep_index_drop", { root }],
     ["zvec_grep_search", { root, query: "query", maxContentChars: 20 }],
     ["zvec_grep_index_status", { root }],
     ["zvec_grep_server_status", {}],

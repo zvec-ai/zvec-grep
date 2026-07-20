@@ -49,7 +49,7 @@ zg query "where query auto update happens"
 - **Agent-Ready Output**: Default output is grouped by file and keeps previews small to save tokens.
 - **Human Output Mode**: Add `--human` for a terminal-friendly summary with full previews by default.
 - **Managed ripgrep Route**: `zg query --rg` supports common `rg` flags and works even before a repository is indexed.
-- **Explicit Model Choice**: The first index build requires a model such as `local/embeddinggemma-300m`, `local/qwen3-embedding-0.6b`, or `qwen/qwen3.7-text-embedding`.
+- **Explicit Model Choice**: The first index build requires a model such as `local/embeddinggemma-300m`, `local/qwen3-embedding-0.6b`, or `qwen/text-embedding-v4`.
 - **Schema Reuse**: Re-running `zg index` on an existing index reuses the stored embedding schema unless you explicitly change it.
 - **Shared MCP Server**: Run `zg server on` to expose the four indexed search, indexing, index-status, and server-status tools over loopback Streamable HTTP.
 - **Library API**: Use `createZvecGrep()` directly from Node.js tools, agents, or MCP servers.
@@ -168,7 +168,7 @@ Remote Qwen embeddings are useful when you prefer a managed embedding service or
 
 ```bash
 zg index \
-  --embedding qwen/qwen3.7-text-embedding \
+  --embedding qwen/text-embedding-v4 \
   --api-key "$DASHSCOPE_API_KEY"
 ```
 
@@ -178,7 +178,7 @@ After a successful index, explicitly passed global model and provider options ar
 {
   "version": 1,
   "defaults": {
-    "embedding": "qwen/qwen3.7-text-embedding"
+    "embedding": "qwen/text-embedding-v4"
   },
   "providers": {
     "qwen": {

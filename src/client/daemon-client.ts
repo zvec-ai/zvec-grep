@@ -1,6 +1,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ElicitRequestSchema,
+  type Progress,
+} from "@modelcontextprotocol/sdk/types.js";
 import { createInterface } from "node:readline/promises";
 import { resolveClientToken } from "../daemon/config.js";
 import {
@@ -21,6 +24,9 @@ export class DaemonClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    callOptions: {
+      onProgress?: (progress: Progress) => void;
+    } = {},
   ): Promise<Record<string, unknown>> {
     const abortController = new AbortController();
     let cancelledByCtrlC = false;
@@ -132,7 +138,7 @@ export class DaemonClient {
         {
           signal: abortController.signal,
           timeout: LONG_RUNNING_MCP_TIMEOUT_MS,
-          onprogress: () => undefined,
+          onprogress: callOptions.onProgress ?? (() => undefined),
           resetTimeoutOnProgress: true,
         },
       );

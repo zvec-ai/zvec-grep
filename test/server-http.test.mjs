@@ -166,6 +166,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   const listed = await clients[0].listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
     "zvec_grep_index",
+    "zvec_grep_index_drop",
     "zvec_grep_index_status",
     "zvec_grep_remote_embedding_demo",
     "zvec_grep_search",
@@ -403,9 +404,14 @@ test("Remote Embedding demo elicits once and reuses its Workspace grant", async 
     async (request) => {
       elicitations += 1;
       assert.equal(request.params.mode, "form");
-      assert.match(request.params.message, /Query \+ Index/);
-      assert.match(request.params.message, /README\.md/);
-      assert.match(request.params.message, /Workspace file content/);
+      assert.match(
+        request.params.message,
+        /Send query text and selected workspace file/,
+      );
+      assert.match(request.params.message, /From\s+repo/);
+      assert.match(request.params.message, /read only after approval/i);
+      assert.equal(request.params.message.includes("\n"), true);
+      assert.ok(request.params.message.length < 240);
       return {
         action: "accept",
         content: { decision: "allow_workspace" },
@@ -536,16 +542,16 @@ test("Remote Embedding demo keeps once and session authorization inside zg", asy
   const elicitationCounts = { once: 0, session: 0, cancel: 0 };
   const onElicitation = async (request) => {
     assert.equal(request.params.mode, "form");
-    assert.match(request.params.message, /file body has not been read/i);
-    if (request.params.message.includes(onceRoot)) {
+    assert.match(request.params.message, /read only after approval/i);
+    if (/From\s+once/.test(request.params.message)) {
       elicitationCounts.once += 1;
       return { action: "accept", content: { decision: "allow_once" } };
     }
-    if (request.params.message.includes(sessionRoot)) {
+    if (/From\s+session/.test(request.params.message)) {
       elicitationCounts.session += 1;
       return { action: "accept", content: { decision: "allow_session" } };
     }
-    assert.ok(request.params.message.includes(cancelRoot));
+    assert.match(request.params.message, /From\s+cancel/);
     elicitationCounts.cancel += 1;
     return { action: "accept", content: { decision: "cancel" } };
   };

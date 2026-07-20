@@ -44,6 +44,7 @@ type ScheduledJob = IndexJobSnapshot & {
   run: SubmitIndexJob["run"];
   completion: Promise<IndexJobSnapshot>;
   resolveCompletion: (snapshot: IndexJobSnapshot) => void;
+  progressListeners: Set<(progress: IndexProgress) => void>;
   retryTimer?: ReturnType<typeof setTimeout>;
   followup?: ScheduledJob;
 };
@@ -116,12 +117,30 @@ export class JobScheduler {
     return job ? snapshot(job) : undefined;
   }
 
-  async wait(jobId: string): Promise<IndexJobSnapshot> {
+  async wait(
+    jobId: string,
+    onProgress?: (progress: IndexProgress) => void,
+  ): Promise<IndexJobSnapshot> {
     const job = this.jobs.get(jobId);
     if (!job) {
       throw new Error(`Unknown job: ${jobId}`);
     }
-    return job.completion;
+    if (!onProgress) {
+      return job.completion;
+    }
+    job.progressListeners.add(onProgress);
+    if (job.progress) {
+      try {
+        onProgress({ ...job.progress });
+      } catch {
+        // Progress observers must never change the indexing outcome.
+      }
+    }
+    try {
+      return await job.completion;
+    } finally {
+      job.progressListeners.delete(onProgress);
+    }
   }
 
   async waitForRootIdle(canonicalRoot: string): Promise<void> {
@@ -195,6 +214,13 @@ export class JobScheduler {
     try {
       await job.run((progress) => {
         job.progress = { ...progress };
+        for (const listener of job.progressListeners) {
+          try {
+            listener({ ...progress });
+          } catch {
+            // Progress observers must never change the indexing outcome.
+          }
+        }
       });
       this.finish(job, "succeeded");
     } catch (error) {
@@ -280,6 +306,7 @@ export class JobScheduler {
       run: input.run,
       completion,
       resolveCompletion,
+      progressListeners: new Set(),
     };
     this.jobs.set(job.id, job);
     return job;

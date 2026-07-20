@@ -549,7 +549,13 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
     process.stderr,
     "isTTY",
   );
+  const columnsDescriptor = Object.getOwnPropertyDescriptor(
+    process.stderr,
+    "columns",
+  );
+  const originalTerm = process.env.TERM;
   const writes = [];
+  let ttyStart;
   process.stderr.write = (value) => {
     writes.push(String(value));
     return true;
@@ -574,19 +580,27 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
     nonTty.report({ phase: "indexing", embedding: {} });
     nonTty.report({ phase: "done" });
     nonTty.report({ phase: "done", detail: "Custom completion" });
+    nonTty.reportLine("Server index progress");
     nonTty.finish();
     nonTty.finish();
 
+    ttyStart = writes.length;
+    process.env.TERM = "xterm-256color";
     Object.defineProperty(process.stderr, "isTTY", {
       configurable: true,
       value: true,
     });
-    const tty = createIndexProgressReporter();
+    Object.defineProperty(process.stderr, "columns", {
+      configurable: true,
+      value: 100,
+    });
+    const tty = createIndexProgressReporter({ color: "always" });
     tty.report({
       phase: "indexing",
       filesIndexed: 1,
       filesTotal: 10,
       detail: "a long progress detail",
+      embedding: { concurrency: 3 },
     });
     tty.report({ phase: "done", detail: "done" });
     tty.finish();
@@ -597,12 +611,31 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
     } else {
       delete process.stderr.isTTY;
     }
+    if (columnsDescriptor) {
+      Object.defineProperty(process.stderr, "columns", columnsDescriptor);
+    } else {
+      delete process.stderr.columns;
+    }
+    if (originalTerm === undefined) {
+      delete process.env.TERM;
+    } else {
+      process.env.TERM = originalTerm;
+    }
   }
 
   const text = writes.join("");
+  const ttyText = writes.slice(ttyStart).join("");
   assert.match(text, /Scanning workspace/);
   assert.match(text, /failed=1/);
   assert.match(text, /concurrency=3 retries=2/);
   assert.match(text, /Indexing complete/);
-  assert.match(text, /\rdone\s+\n/);
+  assert.match(text, /Server index progress/);
+  assert.match(ttyText, /\x1b\[\?25l/);
+  assert.match(ttyText, /\r\x1b\[2K/);
+  assert.match(ttyText, /\x1b\[38;2;\d+;\d+;\d+m█/);
+  assert.match(ttyText, /░/);
+  assert.match(ttyText, /10%\s+1\/10\s+3 workers/);
+  assert.match(ttyText, /100%\s+10\/10\s+3 workers/);
+  assert.doesNotMatch(ttyText, /a long progress detail/);
+  assert.match(ttyText, /\n\x1b\[\?25h$/);
 });

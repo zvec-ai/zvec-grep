@@ -221,6 +221,10 @@ export const zvecGrepIndexStatusInputSchema = z.object({
   root: absoluteRootSchema,
 });
 
+export const zvecGrepIndexDropInputSchema = z.object({
+  root: absoluteRootSchema,
+});
+
 export const zvecGrepServerStatusInputSchema = z.object({});
 
 export const zvecGrepRemoteEmbeddingDemoInputSchema = z.object({
@@ -361,6 +365,11 @@ export const zvecGrepIndexOutputSchema = z.object({
   state: jobStateSchema,
   reused: z.boolean(),
   error: jobErrorSchema.optional(),
+});
+
+export const zvecGrepIndexDropOutputSchema = z.object({
+  root: z.string(),
+  removed: z.boolean(),
 });
 
 export const zvecGrepSearchIndexingSchema = z
@@ -648,6 +657,9 @@ export const legacyRgInputSchema = z.object({
 });
 
 export type ZvecGrepIndexInput = z.infer<typeof zvecGrepIndexInputSchema>;
+export type ZvecGrepIndexDropInput = z.infer<
+  typeof zvecGrepIndexDropInputSchema
+>;
 export type ZvecGrepSearchInput = z.infer<typeof zvecGrepSearchInputSchema>;
 export type ZvecGrepIndexStatusInput = z.infer<
   typeof zvecGrepIndexStatusInputSchema

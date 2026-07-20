@@ -27,7 +27,7 @@ export async function withProgressHeartbeat<T>(
   }
 
   const intervalMs = options.intervalMs ?? REMOTE_AUTHORIZATION_HEARTBEAT_MS;
-  let progress = 0;
+  let progress = Date.now();
   let inFlight: Promise<void> | undefined;
 
   const sendHeartbeat = async (): Promise<void> => {

@@ -49,7 +49,7 @@ zg query "where query auto update happens"
 - **Agent 友好输出**：默认按文件分组，并尽量减少源码 preview，降低上下文成本。
 - **人类阅读模式**：加 `--human` 后更适合终端阅读，并默认展示完整 preview。
 - **托管 ripgrep 通道**：`zg query --rg` 支持常见 `rg` 参数，未建索引仓库也能使用。
-- **显式模型选择**：第一次建索引必须指定模型，例如 `local/embeddinggemma-300m`、`local/qwen3-embedding-0.6b` 或 `qwen/qwen3.7-text-embedding`。
+- **显式模型选择**：第一次建索引必须指定模型，例如 `local/embeddinggemma-300m`、`local/qwen3-embedding-0.6b` 或 `qwen/text-embedding-v4`。
 - **Schema 复用**：已有索引再次运行 `zg index` 会复用保存的 embedding schema，除非你显式切换模型。
 - **共享 MCP Server**：运行 `zg server on`，通过 loopback Streamable HTTP 暴露索引检索、建索引、索引状态和服务状态四个工具，并可按需启用 Bearer 鉴权。
 - **库 API**：Node.js 工具、agent 或 MCP server 可以直接使用 `createZvecGrep()`。
@@ -169,7 +169,7 @@ zg index --embedding local/qwen3-embedding-0.6b
 
 ```bash
 zg index \
-  --embedding qwen/qwen3.7-text-embedding \
+  --embedding qwen/text-embedding-v4 \
   --api-key "$DASHSCOPE_API_KEY"
 ```
 
@@ -179,7 +179,7 @@ zg index \
 {
   "version": 1,
   "defaults": {
-    "embedding": "qwen/qwen3.7-text-embedding"
+    "embedding": "qwen/text-embedding-v4"
   },
   "providers": {
     "qwen": {

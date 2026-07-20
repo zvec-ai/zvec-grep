@@ -91,7 +91,7 @@ Options that replace rg's output format are rejected.`;
   zg index [root] --drop [--yes]
 
 Options:
-  --embedding <model>               Model such as local/embeddinggemma-300m or qwen/qwen3.7-text-embedding
+  --embedding <model>               Model such as local/embeddinggemma-300m or qwen/text-embedding-v4
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
   --yes                             Confirm --drop without prompting

@@ -148,6 +148,30 @@ export class RuntimeManager {
     return { activeRuntimes: this.runtimes.size };
   }
 
+  async evict(canonicalRoot: string): Promise<boolean> {
+    const creating = this.creating.get(canonicalRoot);
+    if (creating) {
+      await creating;
+    }
+    const timer = this.idleTimers.get(canonicalRoot);
+    if (timer) clearTimeout(timer);
+    this.idleTimers.delete(canonicalRoot);
+    const runtime = this.runtimes.get(canonicalRoot);
+    this.runtimes.delete(canonicalRoot);
+    for (const [alias, target] of this.aliases) {
+      if (alias === canonicalRoot || target === canonicalRoot) {
+        this.aliases.delete(alias);
+      }
+    }
+    if (!runtime) return false;
+    try {
+      await this.options.onRuntimeEvicted?.(canonicalRoot);
+    } finally {
+      await runtime.close();
+    }
+    return true;
+  }
+
   async close(): Promise<void> {
     if (this.closed) {
       return;

@@ -6,6 +6,11 @@ export {
 } from "./operation.js";
 export { RemoteEmbeddingAuthorizationStore } from "./store.js";
 export {
+  formatRemoteEmbeddingAuthorizationPrompt,
+  remoteEmbeddingDisclosureData,
+  type RemoteEmbeddingAuthorizationPromptInput,
+} from "./prompt.js";
+export {
   indexStatusIsFresh,
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,

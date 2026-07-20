@@ -18,6 +18,7 @@ import type {
   RemoteEmbeddingDemoAuthorization,
   RemoteEmbeddingDemoAuthorizationRequest,
   ZvecGrepDaemonBackend,
+  ZvecGrepIndexDropResult,
   ZvecGrepIndexResult,
   ZvecGrepIndexStatusResult,
   ZvecGrepSearchResult,
@@ -26,6 +27,7 @@ import type {
 } from "../mcp/tools.js";
 import type {
   ZvecGrepIndexInput,
+  ZvecGrepIndexDropInput,
   ZvecGrepIndexStatusInput,
   ZvecGrepRemoteEmbeddingDemoInput,
 } from "../mcp/schemas.js";
@@ -99,6 +101,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private readonly statusCache = new Map<string, ZvecGrepInfoResult>();
   private readonly watchers = new Map<string, WatchManager>();
   private readonly indexCoordinators = new Map<string, IndexCoordinator>();
+  private readonly droppingRoots = new Set<string>();
   private readonly authorizationManager: RemoteEmbeddingAuthorizationManager;
   private shuttingDown = false;
   private closePromise?: Promise<void>;
@@ -206,9 +209,14 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
 
   async index(
     input: ZvecGrepIndexInput,
-    options: { authorization?: RemoteEmbeddingOperationPermit } = {},
+    options: {
+      authorization?: RemoteEmbeddingOperationPermit;
+      onProgress?: (progress: IndexProgress) => void;
+    } = {},
   ): Promise<ZvecGrepIndexResult> {
-    const runtime = await this.runtimeManager.activateForIndex(input.root);
+    const requestedRoot = await resolveRequestedRoot(input.root, true);
+    this.assertRootNotDropping(requestedRoot);
+    const runtime = await this.runtimeManager.activateForIndex(requestedRoot);
     this.ensureWatcher(runtime);
     const activeJob = this.scheduler.getByRoot(runtime.canonicalRoot);
     const followsNarrowJob =
@@ -255,7 +263,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       });
     }
     const job = input.wait
-      ? await this.scheduler.wait(submitted.job.id)
+      ? await this.scheduler.wait(submitted.job.id, options.onProgress)
       : submitted.job;
     if (input.wait) {
       await this.settleKnownChanges(runtime);
@@ -277,12 +285,53 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     };
   }
 
+  async dropIndex(
+    input: ZvecGrepIndexDropInput,
+  ): Promise<ZvecGrepIndexDropResult> {
+    const canonicalRoot = await resolveRequestedRoot(input.root, true);
+    if (this.droppingRoots.has(canonicalRoot)) {
+      throw new DaemonError(
+        "INDEX_DROP_IN_PROGRESS",
+        "The Workspace index is already being dropped.",
+      );
+    }
+    this.droppingRoots.add(canonicalRoot);
+    try {
+      await this.closeWatcher(canonicalRoot);
+      await this.scheduler.waitForRootIdle(canonicalRoot);
+      const runtime = this.runtimeManager.getByCanonicalRoot(canonicalRoot);
+      const drop = async (): Promise<boolean> => {
+        const service = await (this.options.createService ?? createZvecGrep)({
+          ...this.options.serviceOptions,
+          root: canonicalRoot,
+          daemonInstanceToken: this.runtimeManager.instanceToken,
+        });
+        try {
+          return await service.dropIndex({ root: canonicalRoot });
+        } finally {
+          await service.close();
+        }
+      };
+      const removed = runtime ? await runtime.withWrite(drop) : await drop();
+      return { root: canonicalRoot, removed };
+    } finally {
+      this.statusCache.delete(canonicalRoot);
+      try {
+        await this.runtimeManager.evict(canonicalRoot);
+      } finally {
+        this.droppingRoots.delete(canonicalRoot);
+      }
+    }
+  }
+
   async search(
     input: NormalizedSearchInput,
     options: { authorization?: RemoteEmbeddingOperationPermit } = {},
   ): Promise<ZvecGrepSearchResult> {
     const startedAt = Date.now();
-    const runtime = await this.runtimeManager.activate(input.root);
+    const requestedRoot = await resolveRequestedRoot(input.root, false);
+    this.assertRootNotDropping(requestedRoot);
+    const runtime = await this.runtimeManager.activate(requestedRoot);
     this.ensureWatcher(runtime);
     await runtime.probeInitialFreshness(
       async () => {
@@ -948,6 +997,16 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     this.watchers.delete(canonicalRoot);
     this.indexCoordinators.delete(canonicalRoot);
     await watcher?.close();
+  }
+
+  private assertRootNotDropping(canonicalRoot: string): void {
+    if (this.droppingRoots.has(canonicalRoot)) {
+      throw new DaemonError(
+        "INDEX_DROP_IN_PROGRESS",
+        "The Workspace index is being dropped.",
+        true,
+      );
+    }
   }
 
   private indexSchema(
