@@ -181,6 +181,10 @@ export function printServerIndexInfo(
         files_indexed?: number;
         files_failed?: number;
       };
+      error?: {
+        code: string;
+        message: string;
+      };
     };
   },
   options: CliOptions,
@@ -261,6 +265,10 @@ export function printServerIndexInfo(
         ? String(progress.files_indexed)
         : `${progress.files_indexed}/${progress.files_total}`,
     );
+  }
+  if (info.runtime?.error) {
+    printField(theme, "error-code", info.runtime.error.code);
+    printField(theme, "error", info.runtime.error.message);
   }
   if (info.persistent.suggestion) {
     printField(theme, "suggestion", theme.accent(info.persistent.suggestion));

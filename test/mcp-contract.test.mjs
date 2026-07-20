@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createZvecGrepMcpServer } from "../dist/mcp/tools.js";
+import { withProgressHeartbeat } from "../dist/mcp/progress-heartbeat.js";
 
 const root = resolve("test/fixtures/repository");
 
@@ -168,6 +169,41 @@ test("index contract documents background submission as the default", async (t) 
     index.inputSchema.properties.wait.description,
     /zvec_grep_index_status/,
   );
+  assert.ok(index.outputSchema.properties.error);
+});
+
+test("index result includes an immediately available failure reason", async (t) => {
+  const backend = createBackend();
+  backend.index = async (input) => ({
+    root: input.root,
+    jobId: "job-failed",
+    state: "failed",
+    reused: false,
+    error: {
+      code: "MODEL_LOAD_FAILED",
+      message: "Embedding schema could not be resolved.",
+    },
+  });
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const result = await client.callTool({
+    name: "zvec_grep_index",
+    arguments: { root, embedding: "qwen/unsupported", wait: true },
+  });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent.error, {
+    code: "MODEL_LOAD_FAILED",
+    message: "Embedding schema could not be resolved.",
+  });
+  assert.match(result.content[0].text, /error_code: MODEL_LOAD_FAILED/);
+  assert.match(
+    result.content[0].text,
+    /Embedding schema could not be resolved/,
+  );
 });
 
 test("search elicits merged Remote Embedding authorization and reuses session scope", async (t) => {
@@ -242,6 +278,89 @@ test("search elicits merged Remote Embedding authorization and reuses session sc
   assert.equal(elicitations, 1);
   assert.equal(granted, 2);
   assert.equal(receivedPermit.scope, "session");
+});
+
+test("Remote Embedding authorization stays alive while waiting for user input", async (t) => {
+  const backend = createBackend();
+  const target = {
+    workspaceRoots: [root],
+    workspaceFingerprint: "workspace-fingerprint",
+    provider: "qwen",
+    model: "text-embedding-v4",
+    endpoint: "https://qwen.test/embeddings",
+    targetFingerprint: "target-fingerprint",
+  };
+  backend.planSearchAuthorization = async () => ({
+    operation: "query",
+    target,
+    disclosure: { queryText: true, workspaceContent: "none" },
+    reason: "query",
+    grantPath: `${root}/.zvec-grep/authorization.json`,
+  });
+  backend.existingRemoteEmbeddingPermit = async () => undefined;
+  backend.grantRemoteEmbedding = async (_plan, scope) => ({
+    capability: "remote_embedding",
+    scope,
+    target,
+    issuedAt: Date.now(),
+    operationId: "long-wait-operation",
+  });
+
+  const server = createZvecGrepMcpServer(backend, "1.0.0", {
+    authorizationHeartbeatMs: 5,
+    authorizationRequestTimeoutMs: 20,
+  });
+  const client = new Client(
+    { name: "mcp-long-auth-test", version: "1.0.0" },
+    { capabilities: { elicitation: { form: {} } } },
+  );
+  client.setRequestHandler(
+    ElicitRequestSchema,
+    async (_request, extra) =>
+      await withProgressHeartbeat(
+        extra,
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          return {
+            action: "accept",
+            content: { decision: "allow_once" },
+          };
+        },
+        {
+          intervalMs: 5,
+          message: "Waiting for simulated user input.",
+        },
+      ),
+  );
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  let progressNotifications = 0;
+  const result = await client.callTool(
+    {
+      name: "zvec_grep_search",
+      arguments: { root, query: "authorization flow" },
+    },
+    undefined,
+    {
+      timeout: 20,
+      onprogress: () => {
+        progressNotifications += 1;
+      },
+      resetTimeoutOnProgress: true,
+    },
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.ok(progressNotifications >= 2);
 });
 
 test("root tools require an absolute root", async (t) => {

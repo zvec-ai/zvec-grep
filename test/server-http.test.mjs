@@ -751,6 +751,12 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   });
   assert.equal(unsupported.isError, undefined);
   assert.equal(unsupported.structuredContent.state, "failed");
+  assert.deepEqual(unsupported.structuredContent.error, {
+    code: "MODEL_LOAD_FAILED",
+    message:
+      "[MODEL_LOAD_FAILED] Server MVP cannot resolve embedding schema for qwen/unsupported-embedding.",
+  });
+  assert.match(unsupported.content[0].text, /qwen\/unsupported-embedding/);
   const unsupportedStatus = await client.callTool({
     name: "zvec_grep_index_status",
     arguments: { root: unsupportedRoot },

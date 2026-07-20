@@ -518,9 +518,34 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
       );
       console.log(`Root: ${String(result.root ?? rootPath.absolutePath)}`);
       console.log(`Job: ${String(result.job_id ?? "unknown")}`);
+      if (result.state === "failed") {
+        throw new Error(serverIndexFailureMessage(result));
+      }
     },
     direct: () => runDirectIndex(parsed, rootPath, explicitRoot),
   });
+}
+
+function serverIndexFailureMessage(result: Record<string, unknown>): string {
+  const error = result.error;
+  if (error && typeof error === "object") {
+    const code = (error as Record<string, unknown>).code;
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === "string" && message.length > 0) {
+      if (
+        typeof code !== "string" ||
+        code.length === 0 ||
+        message.includes(`[${code}]`)
+      ) {
+        return message;
+      }
+      return `[${code}] ${message}`;
+    }
+    if (typeof code === "string" && code.length > 0) {
+      return `[${code}] Index job failed.`;
+    }
+  }
+  return `Index job ${String(result.job_id ?? "unknown")} failed. Run zg status --mode server for details.`;
 }
 
 async function runDirectIndex(

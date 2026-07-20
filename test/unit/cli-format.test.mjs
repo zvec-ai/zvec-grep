@@ -431,12 +431,37 @@ test("status formatters cover collections, anonymous states, failures, filters, 
       },
       { color: "never" },
     );
+    printServerIndexInfo(
+      {
+        root: "/failed-repo",
+        indexed: false,
+        index_policy: "undecided",
+        source: "unindexed",
+        persistent: {
+          home: "/failed-repo/.zvec-grep",
+          index_path: "/failed-repo/.zvec-grep/index",
+        },
+        runtime: {
+          job_state: "failed",
+          error: {
+            code: "MODEL_LOAD_FAILED",
+            message: "Embedding schema could not be resolved.",
+          },
+        },
+      },
+      { color: "never" },
+    );
   });
   assert.match(output.logs.join("\n"), /failed_reasons/);
   assert.match(output.logs.join("\n"), /1m 5s/);
   assert.match(output.logs.join("\n"), /ignore-file=\.rgignore/);
   assert.match(output.logs.join("\n"), /Default indexing skips/);
   assert.match(output.logs.join("\n"), /progress\s+3\/4/);
+  assert.match(output.logs.join("\n"), /error-code\s+MODEL_LOAD_FAILED/);
+  assert.match(
+    output.logs.join("\n"),
+    /error\s+Embedding schema could not be resolved/,
+  );
 
   for (const stateInfo of [
     {

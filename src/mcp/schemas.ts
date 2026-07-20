@@ -251,6 +251,10 @@ const jobStateSchema = z.enum([
   "failed",
   "cancelled",
 ]);
+const jobErrorSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
 const rangeSchema = z.union([
   z.object({ kind: z.literal("file") }),
   z.object({
@@ -356,6 +360,7 @@ export const zvecGrepIndexOutputSchema = z.object({
   job_id: z.string(),
   state: jobStateSchema,
   reused: z.boolean(),
+  error: jobErrorSchema.optional(),
 });
 
 export const zvecGrepSearchIndexingSchema = z
@@ -461,12 +466,7 @@ export const zvecGrepIndexStatusOutputSchema = z.object({
           detail: z.string().optional(),
         })
         .optional(),
-      error: z
-        .object({
-          code: z.string(),
-          message: z.string(),
-        })
-        .optional(),
+      error: jobErrorSchema.optional(),
     })
     .optional(),
 });

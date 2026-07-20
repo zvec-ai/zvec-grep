@@ -273,6 +273,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       jobId: job.id,
       state: job.state,
       reused: submitted.reused,
+      error: job.error,
     };
   }
 

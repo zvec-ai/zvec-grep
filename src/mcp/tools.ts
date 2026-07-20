@@ -1,4 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type {
+  ServerNotification,
+  ServerRequest,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { ZvecGrepContextResult } from "../index.js";
 import {
   normalizeSearchInput,
@@ -30,6 +35,11 @@ import type {
   RemoteEmbeddingAuthorizationScope,
   RemoteEmbeddingOperationPermit,
 } from "../authorization/types.js";
+import {
+  LONG_RUNNING_MCP_TIMEOUT_MS,
+  REMOTE_AUTHORIZATION_HEARTBEAT_MS,
+  withProgressHeartbeat,
+} from "./progress-heartbeat.js";
 
 export type IndexJobState =
   "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -39,6 +49,7 @@ export type ZvecGrepIndexResult = {
   jobId: string;
   state: IndexJobState;
   reused: boolean;
+  error?: { code: string; message: string };
 };
 
 export type ZvecGrepSearchResult = {
@@ -196,9 +207,15 @@ export interface ZvecGrepDaemonBackend {
   ): Promise<ZvecGrepRemoteEmbeddingDemoResult>;
 }
 
+export type ZvecGrepMcpServerOptions = {
+  authorizationHeartbeatMs?: number;
+  authorizationRequestTimeoutMs?: number;
+};
+
 export function createZvecGrepMcpServer(
   backend: ZvecGrepDaemonBackend,
   version: string,
+  options: ZvecGrepMcpServerOptions = {},
 ): McpServer {
   const server = new McpServer(
     { name: "zvec-grep", version },
@@ -212,13 +229,14 @@ export function createZvecGrepMcpServer(
       ].join(" "),
     },
   );
-  registerZvecGrepTools(server, backend);
+  registerZvecGrepTools(server, backend, options);
   return server;
 }
 
 export function registerZvecGrepTools(
   server: McpServer,
   backend: ZvecGrepDaemonBackend,
+  options: ZvecGrepMcpServerOptions = {},
 ): void {
   const remoteEmbeddingSessionGrants = new Set<string>();
   server.registerTool(
@@ -236,7 +254,7 @@ export function registerZvecGrepTools(
         openWorldHint: false,
       },
     },
-    async (input) => {
+    async (input, extra) => {
       const plan = await backend.planIndexAuthorization?.(input);
       const resolution = plan
         ? await resolveRemoteEmbeddingAuthorization(
@@ -245,6 +263,8 @@ export function registerZvecGrepTools(
             plan,
             remoteEmbeddingSessionGrants,
             plan.reason === "index_create" ? "local_index" : undefined,
+            extra,
+            options,
           )
         : {};
       const effectiveInput =
@@ -259,9 +279,21 @@ export function registerZvecGrepTools(
         job_id: result.jobId,
         state: result.state,
         reused: result.reused,
+        error: result.error,
       };
       return toolResult(
-        `root: ${result.root}\njob_id: ${result.jobId}\nstate: ${result.state}\nreused: ${result.reused}`,
+        [
+          `root: ${result.root}`,
+          `job_id: ${result.jobId}`,
+          `state: ${result.state}`,
+          `reused: ${result.reused}`,
+          ...(result.error
+            ? [
+                `error_code: ${result.error.code}`,
+                `error_message: ${result.error.message}`,
+              ]
+            : []),
+        ].join("\n"),
         structuredContent,
       );
     },
@@ -282,7 +314,7 @@ export function registerZvecGrepTools(
         openWorldHint: false,
       },
     },
-    async (input) => {
+    async (input, extra) => {
       const normalized = normalizeSearchInput(input);
       const plan = await backend.planSearchAuthorization?.(normalized);
       const resolution = plan
@@ -292,6 +324,8 @@ export function registerZvecGrepTools(
             plan,
             remoteEmbeddingSessionGrants,
             "local_search",
+            extra,
+            options,
           )
         : {};
       const effectiveSearch =
@@ -363,7 +397,7 @@ export function registerZvecGrepTools(
         openWorldHint: false,
       },
     },
-    async (input) => {
+    async (input, extra) => {
       let result = await backend.remoteEmbeddingDemo(input);
       if (result.state === "authorization_required") {
         const sessionGrantKey = JSON.stringify([
@@ -376,48 +410,53 @@ export function registerZvecGrepTools(
             authorization: { scope: "session", existing: true },
           });
         } else {
-          const elicitation = await server.server.elicitInput({
-            mode: "form",
-            message: [
-              "zvec-grep Remote Embedding demo requires authorization.",
-              "",
-              `Workspace: ${result.root}`,
-              "Provider: Qwen",
-              `Model: ${result.model}`,
-              "",
-              "Remote Embedding permission covers Query + Index data for the selected scope.",
-              "Data sent by this demo call:",
-              "- Query text for remote query embedding.",
-              `- Workspace file content: ${result.filePath} (${result.fileBytes} bytes) for remote document embedding.`,
-              "The file body has not been read by the demo yet.",
-              "API charges may apply.",
-            ].join("\n"),
-            requestedSchema: {
-              type: "object",
-              properties: {
-                decision: {
-                  type: "string",
-                  title: "Remote Embedding authorization",
-                  description:
-                    "Choose how long zg may reuse this Remote Embedding permission.",
-                  oneOf: [
-                    { const: "allow_once", title: "Allow once" },
-                    {
-                      const: "allow_session",
-                      title: "Allow for this session",
-                    },
-                    {
-                      const: "allow_workspace",
-                      title: "Allow for this workspace",
-                    },
-                    { const: "cancel", title: "Cancel" },
-                  ],
-                  default: "cancel",
+          const elicitation = await elicitRemoteEmbeddingAuthorization(
+            server,
+            extra,
+            options,
+            {
+              mode: "form",
+              message: [
+                "zvec-grep Remote Embedding demo requires authorization.",
+                "",
+                `Workspace: ${result.root}`,
+                "Provider: Qwen",
+                `Model: ${result.model}`,
+                "",
+                "Remote Embedding permission covers Query + Index data for the selected scope.",
+                "Data sent by this demo call:",
+                "- Query text for remote query embedding.",
+                `- Workspace file content: ${result.filePath} (${result.fileBytes} bytes) for remote document embedding.`,
+                "The file body has not been read by the demo yet.",
+                "API charges may apply.",
+              ].join("\n"),
+              requestedSchema: {
+                type: "object",
+                properties: {
+                  decision: {
+                    type: "string",
+                    title: "Remote Embedding authorization",
+                    description:
+                      "Choose how long zg may reuse this Remote Embedding permission.",
+                    oneOf: [
+                      { const: "allow_once", title: "Allow once" },
+                      {
+                        const: "allow_session",
+                        title: "Allow for this session",
+                      },
+                      {
+                        const: "allow_workspace",
+                        title: "Allow for this workspace",
+                      },
+                      { const: "cancel", title: "Cancel" },
+                    ],
+                    default: "cancel",
+                  },
                 },
+                required: ["decision"],
               },
-              required: ["decision"],
             },
-          });
+          );
           const decision =
             elicitation.action === "accept"
               ? elicitation.content?.decision
@@ -534,7 +573,9 @@ async function resolveRemoteEmbeddingAuthorization(
   backend: ZvecGrepDaemonBackend,
   plan: RemoteEmbeddingAuthorizationPlan,
   sessionGrants: Set<string>,
-  alternative?: "local_search" | "local_index",
+  alternative: "local_search" | "local_index" | undefined,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  options: ZvecGrepMcpServerOptions = {},
 ): Promise<{
   authorization?: RemoteEmbeddingOperationPermit;
   alternative?: "local_search" | "local_index";
@@ -562,59 +603,64 @@ async function resolveRemoteEmbeddingAuthorization(
         ]
       : []),
   ];
-  const elicitation = await server.server.elicitInput({
-    mode: "form",
-    message: [
-      "zvec-grep Remote Embedding requires authorization.",
-      "",
-      `Workspace: ${plan.target.workspaceRoots.join(", ")}`,
-      `Provider: ${plan.target.provider}`,
-      `Model: ${plan.target.model}`,
-      `Endpoint: ${plan.target.endpoint}`,
-      "",
-      "Remote Embedding permission covers Query + Index for the selected scope.",
-      "Data sent by this operation:",
-      ...disclosure,
-      "API charges may apply.",
-    ].join("\n"),
-    requestedSchema: {
-      type: "object",
-      properties: {
-        decision: {
-          type: "string",
-          title: "Remote Embedding authorization",
-          description:
-            "Choose how long zg may reuse this Remote Embedding permission.",
-          oneOf: [
-            { const: "allow_once", title: "Allow once" },
-            { const: "allow_session", title: "Allow for this session" },
-            {
-              const: "allow_workspace",
-              title: "Allow for this workspace",
-            },
-            ...(alternative === "local_search"
-              ? [
-                  {
-                    const: "use_local_search",
-                    title: "Use FTS only",
-                  },
-                ]
-              : alternative === "local_index"
+  const elicitation = await elicitRemoteEmbeddingAuthorization(
+    server,
+    extra,
+    options,
+    {
+      mode: "form",
+      message: [
+        "zvec-grep Remote Embedding requires authorization.",
+        "",
+        `Workspace: ${plan.target.workspaceRoots.join(", ")}`,
+        `Provider: ${plan.target.provider}`,
+        `Model: ${plan.target.model}`,
+        `Endpoint: ${plan.target.endpoint}`,
+        "",
+        "Remote Embedding permission covers Query + Index for the selected scope.",
+        "Data sent by this operation:",
+        ...disclosure,
+        "API charges may apply.",
+      ].join("\n"),
+      requestedSchema: {
+        type: "object",
+        properties: {
+          decision: {
+            type: "string",
+            title: "Remote Embedding authorization",
+            description:
+              "Choose how long zg may reuse this Remote Embedding permission.",
+            oneOf: [
+              { const: "allow_once", title: "Allow once" },
+              { const: "allow_session", title: "Allow for this session" },
+              {
+                const: "allow_workspace",
+                title: "Allow for this workspace",
+              },
+              ...(alternative === "local_search"
                 ? [
                     {
-                      const: "use_local_index",
-                      title: "Use a local embedding model",
+                      const: "use_local_search",
+                      title: "Use FTS only",
                     },
                   ]
-                : []),
-            { const: "cancel", title: "Cancel" },
-          ],
-          default: "cancel",
+                : alternative === "local_index"
+                  ? [
+                      {
+                        const: "use_local_index",
+                        title: "Use a local embedding model",
+                      },
+                    ]
+                  : []),
+              { const: "cancel", title: "Cancel" },
+            ],
+            default: "cancel",
+          },
         },
+        required: ["decision"],
       },
-      required: ["decision"],
     },
-  });
+  );
   const decision =
     elicitation.action === "accept" ? elicitation.content?.decision : undefined;
   if (decision === "use_local_search") {
@@ -644,6 +690,30 @@ async function resolveRemoteEmbeddingAuthorization(
   return {
     authorization: await backend.grantRemoteEmbedding(plan, scope),
   };
+}
+
+async function elicitRemoteEmbeddingAuthorization(
+  server: McpServer,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  options: ZvecGrepMcpServerOptions,
+  request: Parameters<McpServer["server"]["elicitInput"]>[0],
+): ReturnType<McpServer["server"]["elicitInput"]> {
+  return await withProgressHeartbeat(
+    extra,
+    async () =>
+      await server.server.elicitInput(request, {
+        signal: extra.signal,
+        timeout:
+          options.authorizationRequestTimeoutMs ?? LONG_RUNNING_MCP_TIMEOUT_MS,
+        onprogress: () => undefined,
+        resetTimeoutOnProgress: true,
+      }),
+    {
+      intervalMs:
+        options.authorizationHeartbeatMs ?? REMOTE_AUTHORIZATION_HEARTBEAT_MS,
+      message: "Waiting for Remote Embedding authorization.",
+    },
+  );
 }
 
 function ftsFallbackSearch(

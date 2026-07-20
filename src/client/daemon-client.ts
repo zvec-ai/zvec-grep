@@ -3,6 +3,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createInterface } from "node:readline/promises";
 import { resolveClientToken } from "../daemon/config.js";
+import {
+  LONG_RUNNING_MCP_TIMEOUT_MS,
+  withProgressHeartbeat,
+} from "../mcp/progress-heartbeat.js";
 
 export class DaemonClient {
   constructor(
@@ -18,15 +22,21 @@ export class DaemonClient {
     name: string,
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    const abortController = new AbortController();
+    let cancelledByCtrlC = false;
+    const onInterrupt = (): void => {
+      abortController.abort(new Error("Operation cancelled by user."));
+    };
     const token = await resolveClientToken({
       home: this.options.home,
       tokenFile: this.options.tokenFile,
     });
+    process.once("SIGINT", onInterrupt);
     const client = new Client(
       { name: "zvec-grep-cli", version: "1.0.0" },
       { capabilities: { elicitation: { form: {} } } },
     );
-    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
       if (this.options.allowRemote) {
         return {
           action: "accept" as const,
@@ -65,22 +75,37 @@ export class DaemonClient {
         output: process.stderr,
       });
       try {
-        const answer = (
-          await readline.question(`Choose [1-${cancelChoice}]: `)
-        ).trim();
-        if (answer === "1") {
+        let answer: string;
+        try {
+          answer = await withProgressHeartbeat(
+            extra,
+            async () =>
+              await readline.question(`Choose [1-${cancelChoice}]: `, {
+                signal: AbortSignal.any([abortController.signal, extra.signal]),
+              }),
+            { message: "Waiting for Remote Embedding authorization input." },
+          );
+        } catch (error) {
+          if (isCtrlCError(error)) {
+            cancelledByCtrlC = true;
+            return { action: "cancel" as const };
+          }
+          throw error;
+        }
+        const decision = answer.trim();
+        if (decision === "1") {
           return {
             action: "accept" as const,
             content: { decision: "allow_once" },
           };
         }
-        if (answer === "2") {
+        if (decision === "2") {
           return {
             action: "accept" as const,
             content: { decision: "allow_workspace" },
           };
         }
-        if (answer === "3" && localDecision) {
+        if (decision === "3" && localDecision) {
           return {
             action: "accept" as const,
             content: { decision: localDecision.value },
@@ -101,7 +126,19 @@ export class DaemonClient {
     );
     try {
       await client.connect(transport);
-      const result = await client.callTool({ name, arguments: args });
+      const result = await client.callTool(
+        { name, arguments: args },
+        undefined,
+        {
+          signal: abortController.signal,
+          timeout: LONG_RUNNING_MCP_TIMEOUT_MS,
+          onprogress: () => undefined,
+          resetTimeoutOnProgress: true,
+        },
+      );
+      if (cancelledByCtrlC) {
+        throw new Error("Operation cancelled by user.");
+      }
       if (result.isError) {
         const text = Array.isArray(result.content)
           ? result.content.find((item) => item.type === "text")?.text
@@ -109,8 +146,18 @@ export class DaemonClient {
         throw new Error(text ?? `${name} failed`);
       }
       return (result.structuredContent ?? {}) as Record<string, unknown>;
+    } catch (error) {
+      if (abortController.signal.aborted || isCtrlCError(error)) {
+        throw new Error("Operation cancelled by user.", { cause: error });
+      }
+      throw error;
     } finally {
+      process.off("SIGINT", onInterrupt);
       await client.close().catch(() => undefined);
     }
   }
+}
+
+function isCtrlCError(error: unknown): boolean {
+  return error instanceof Error && /aborted with Ctrl\+C/i.test(error.message);
 }
