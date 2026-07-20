@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { isAbsolute, relative, sep } from "node:path";
 import type {
   CollectionIndexStatus,
   CollectionInfo,
@@ -6,8 +8,10 @@ import type {
 } from "../../index.js";
 import type { CliOptions } from "../types.js";
 import { shouldUseColor } from "./highlight.js";
+import { formatGreenProgressBar } from "./progress.js";
 
 type StatusTheme = {
+  color: boolean;
   label(value: string): string;
   path(value: string): string;
   success(value: string): string;
@@ -15,6 +19,102 @@ type StatusTheme = {
   danger(value: string): string;
   accent(value: string): string;
   muted(value: string): string;
+};
+
+type WorkspaceIndexState =
+  | "ready"
+  | "indexing"
+  | "stale"
+  | "failed"
+  | "cancelled"
+  | "disabled"
+  | "unindexed"
+  | "undecided";
+
+type WorkspaceRootPath = CollectionInfo["rootPaths"][number];
+
+type WorkspaceStatusView = {
+  root: string;
+  indexPath: string;
+  policy: "enabled" | "disabled" | "undecided";
+  state: WorkspaceIndexState;
+  embedding?: CollectionInfo["embedding"];
+  roots?: readonly WorkspaceRootPath[];
+  files?: {
+    indexed: number;
+    total: number;
+    entities: number;
+    pending: number;
+    failed: number;
+  };
+  changes?: {
+    added: number;
+    modified: number;
+    deleted: number;
+  };
+  suggestion?: string;
+  error?: {
+    code: string;
+    message: string;
+  };
+  failedReasons?: string;
+};
+
+type ServerRootPath = {
+  absolute_path: string;
+  recursive: boolean;
+  include?: string[];
+  exclude?: string[];
+  globs?: string[];
+  insensitive_globs?: string[];
+  file_types?: string[];
+  excluded_file_types?: string[];
+  hidden?: boolean;
+  no_ignore?: boolean;
+  ignore_files?: string[];
+  max_depth?: number;
+  max_file_size_bytes?: number;
+  follow?: boolean;
+};
+
+type ServerIndexInfo = {
+  root: string;
+  indexed: boolean;
+  index_policy: "enabled" | "disabled" | "undecided";
+  source: "index" | "unindexed";
+  persistent: {
+    home: string;
+    index_path: string;
+    collection?: {
+      root_paths: ServerRootPath[];
+      embedding?: {
+        provider: string;
+        model: string;
+        dimension: number;
+        metric: string;
+      } | null;
+    };
+    files?: {
+      stored: number;
+      indexed: number;
+      pending: number;
+      failed: number;
+      entities: number;
+    };
+    suggestion?: string;
+  };
+  runtime?: {
+    job_state?: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+    progress?: {
+      files_total?: number;
+      files_indexed?: number;
+      files_failed?: number;
+    };
+    error?: {
+      code: string;
+      message: string;
+    };
+  };
 };
 
 export function printCollectionList(
@@ -76,219 +176,319 @@ export function printAnonymousInfo(
   options: CliOptions,
 ): void {
   const theme = createStatusTheme(options);
-
-  printField(theme, "root", theme.path(info.root));
-  printField(theme, "policy", info.indexPolicy);
-  printField(
-    theme,
-    "indexed",
-    info.indexed ? theme.success("yes") : theme.warning("no"),
-  );
-  printField(theme, "state", formatAnonymousState(theme, info));
-  printField(
-    theme,
-    "source",
-    info.source === "index"
-      ? theme.success(info.source)
-      : theme.warning(info.source),
-  );
-  printField(theme, "home", theme.path(info.home));
-  printField(theme, "index", theme.path(info.indexPath));
-
-  if (info.collection?.embedding) {
-    printField(
-      theme,
-      "embedding",
-      `${info.collection.embedding.provider}/${info.collection.embedding.model}`,
-    );
-    printField(theme, "dimension", String(info.collection.embedding.dimension));
-    printField(theme, "metric", info.collection.embedding.metric);
-  } else if (info.collection) {
-    printField(theme, "embedding", theme.warning("none"));
-  }
-
-  if (info.collection) {
-    printField(
-      theme,
-      "roots",
-      theme.path(info.collection.rootPaths.map(formatRootPath).join(", ")),
-    );
-  }
-
-  if (info.status) {
-    printIndexStatus(theme, info.status);
-  }
-
+  const status = info.status ?? undefined;
   const suggestion =
-    info.status && statusNeedsRefresh(info.status)
-      ? "zg index"
-      : info.suggestion;
-  if (suggestion) {
-    printField(theme, "suggestion", theme.accent(suggestion));
-  }
+    status && statusNeedsRefresh(status) ? "zg index" : info.suggestion;
 
-  if (info.status) {
-    printFailedFilesNote(theme, info.status, "zg index");
-  }
+  printWorkspaceIndexStatus(theme, {
+    root: info.root,
+    indexPath: info.indexPath,
+    policy: info.indexPolicy,
+    state: anonymousState(info),
+    embedding: info.collection?.embedding,
+    roots: info.collection?.rootPaths,
+    files: status
+      ? {
+          indexed: status.filesIndexed,
+          total: status.filesScanned,
+          entities: status.entitiesIndexed ?? 0,
+          pending: status.filesPending,
+          failed: status.filesFailed,
+        }
+      : undefined,
+    changes: status
+      ? {
+          added: status.filesAdded,
+          modified: status.filesModified,
+          deleted: status.filesDeleted,
+        }
+      : undefined,
+    suggestion,
+    failedReasons: status
+      ? summarizeFailedFileReasons(status.failedFiles, "zg index")
+      : undefined,
+  });
 }
 
 export function printServerIndexInfo(
-  info: {
-    root: string;
-    indexed: boolean;
-    index_policy: "enabled" | "disabled" | "undecided";
-    source: "index" | "unindexed";
-    persistent: {
-      home: string;
-      index_path: string;
-      collection?: {
-        root_paths: Array<{
-          absolute_path: string;
-          recursive: boolean;
-          include?: string[];
-          exclude?: string[];
-          globs?: string[];
-          insensitive_globs?: string[];
-          file_types?: string[];
-          excluded_file_types?: string[];
-          hidden?: boolean;
-          no_ignore?: boolean;
-          ignore_files?: string[];
-          max_depth?: number;
-          max_file_size_bytes?: number;
-          follow?: boolean;
-        }>;
-        embedding?: {
-          provider: string;
-          model: string;
-          dimension: number;
-          metric: string;
-        } | null;
-      };
-      files?: {
-        stored: number;
-        indexed: number;
-        pending: number;
-        failed: number;
-        entities: number;
-      };
-      suggestion?: string;
-    };
-    runtime?: {
-      job_state?: "queued" | "running" | "succeeded" | "failed" | "cancelled";
-      progress?: {
-        files_total?: number;
-        files_indexed?: number;
-        files_failed?: number;
-      };
-      error?: {
-        code: string;
-        message: string;
-      };
-    };
-  },
+  info: ServerIndexInfo,
   options: CliOptions,
 ): void {
   const theme = createStatusTheme(options);
-  const jobState = info.runtime?.job_state;
-  const stale = jobState === "queued" || jobState === "running";
-  const failed = jobState === "failed" || jobState === "cancelled";
-  const state = failed
-    ? theme.danger("failed")
-    : stale
-      ? theme.warning("stale")
-      : info.indexed
-        ? theme.success("ready")
-        : theme.warning("unindexed");
-
-  printField(theme, "root", theme.path(info.root));
-  printField(theme, "policy", info.index_policy);
-  printField(
-    theme,
-    "indexed",
-    info.indexed ? theme.success("yes") : theme.warning("no"),
-  );
-  printField(theme, "state", state);
-  printField(theme, "source", info.source);
-  printField(theme, "home", theme.path(info.persistent.home));
-  printField(theme, "index", theme.path(info.persistent.index_path));
-
+  const state = serverIndexState(info);
   const embedding = info.persistent.collection?.embedding;
-  if (embedding) {
-    printField(theme, "embedding", `${embedding.provider}/${embedding.model}`);
-    printField(theme, "dimension", String(embedding.dimension));
-    printField(theme, "metric", embedding.metric);
+  const roots = info.persistent.collection?.root_paths.map(mapServerRootPath);
+  const files = info.persistent.files;
+  const progress = info.runtime?.progress;
+
+  printWorkspaceIndexStatus(theme, {
+    root: info.root,
+    indexPath: info.persistent.index_path,
+    policy: info.index_policy,
+    state,
+    embedding,
+    roots,
+    files: files
+      ? {
+          indexed: progress?.files_indexed ?? files.indexed,
+          total: progress?.files_total ?? files.stored,
+          entities: files.entities,
+          pending: files.pending,
+          failed: progress?.files_failed ?? files.failed,
+        }
+      : undefined,
+    suggestion: info.persistent.suggestion,
+    error: info.runtime?.error,
+  });
+}
+
+function printWorkspaceIndexStatus(
+  theme: StatusTheme,
+  view: WorkspaceStatusView,
+): void {
+  console.log(formatWorkspaceStatusHeading(theme, view.state));
+  console.log(`  ${theme.path(formatDisplayPath(view.root))}`);
+
+  const sections: string[][] = [];
+  if (view.files) {
+    const { indexed, total, entities, pending, failed } = view.files;
+    const percent =
+      total === 0
+        ? 0
+        : Math.min(100, Math.round((Math.max(indexed, 0) / total) * 100));
+    const bar = formatGreenProgressBar(indexed, total, 20, theme.color);
+    const summary = [
+      ...formatStatusField(
+        theme,
+        "Coverage",
+        `${bar} ${String(percent).padStart(3)}%  ${formatCount(indexed)} / ${formatCount(total)} files`,
+      ),
+      ...formatStatusField(theme, "Entities", formatCount(entities)),
+      ...formatStatusField(
+        theme,
+        "Queue",
+        `${statusCount(theme, pending, "pending", "warning")} ${theme.muted("·")} ${statusCount(theme, failed, "failed", "danger")}`,
+      ),
+    ];
+
+    if (view.changes && changedTotal(view.changes) > 0) {
+      summary.push(
+        ...formatStatusField(
+          theme,
+          "Changes",
+          `${theme.warning(`${formatCount(view.changes.added)} added`)} ${theme.muted("·")} ${theme.warning(`${formatCount(view.changes.modified)} modified`)} ${theme.muted("·")} ${theme.warning(`${formatCount(view.changes.deleted)} deleted`)}`,
+        ),
+      );
+    }
+    sections.push(summary);
   }
-  const rootPaths = info.persistent.collection?.root_paths;
-  if (rootPaths?.length) {
-    printField(
-      theme,
-      "roots",
-      theme.path(
-        rootPaths
-          .map((root) =>
-            formatRootPath({
-              absolutePath: root.absolute_path,
-              recursive: root.recursive,
-              include: root.include,
-              exclude: root.exclude,
-              globs: root.globs,
-              insensitiveGlobs: root.insensitive_globs,
-              fileTypes: root.file_types,
-              excludedFileTypes: root.excluded_file_types,
-              hidden: root.hidden,
-              noIgnore: root.no_ignore,
-              ignoreFiles: root.ignore_files,
-              maxDepth: root.max_depth,
-              maxFileSizeBytes: root.max_file_size_bytes,
-              follow: root.follow,
-            }),
-          )
-          .join(", "),
+
+  if (view.embedding !== undefined) {
+    sections.push(
+      formatStatusField(
+        theme,
+        "Embedding",
+        view.embedding
+          ? [
+              `${view.embedding.provider}/${view.embedding.model}`,
+              `${formatCount(view.embedding.dimension)} dimensions ${theme.muted("·")} ${view.embedding.metric}`,
+            ]
+          : theme.warning("Not configured"),
       ),
     );
   }
-  const files = info.persistent.files;
-  if (files) {
-    printField(theme, "files", `${files.indexed}/${files.stored} indexed`);
-    printField(theme, "entities", String(files.entities));
-    printField(theme, "pending", String(files.pending));
-    printField(theme, "failed", String(files.failed));
-  }
-  if (jobState) printField(theme, "job", jobState);
-  const progress = info.runtime?.progress;
-  if (progress?.files_indexed !== undefined) {
-    printField(
-      theme,
-      "progress",
-      progress.files_total === undefined
-        ? String(progress.files_indexed)
-        : `${progress.files_indexed}/${progress.files_total}`,
+
+  const storage = formatStatusField(
+    theme,
+    "Storage",
+    theme.path(formatStoragePath(view.indexPath, view.root)),
+  );
+  if (view.roots && shouldShowRoots(view.root, view.roots)) {
+    storage.push(
+      ...formatStatusField(
+        theme,
+        "Roots",
+        view.roots.map((root) => theme.path(formatDisplayRootPath(root))),
+      ),
     );
   }
-  if (info.runtime?.error) {
-    printField(theme, "error-code", info.runtime.error.code);
-    printField(theme, "error", info.runtime.error.message);
+  if (view.policy !== "enabled") {
+    storage.push(
+      ...formatStatusField(
+        theme,
+        "Policy",
+        view.policy === "disabled"
+          ? theme.warning(view.policy)
+          : theme.muted(view.policy),
+      ),
+    );
   }
-  if (info.persistent.suggestion) {
-    printField(theme, "suggestion", theme.accent(info.persistent.suggestion));
+  sections.push(storage);
+
+  const diagnostics: string[] = [];
+  if (view.error) {
+    diagnostics.push(
+      ...formatStatusField(theme, "Error", [
+        theme.danger(view.error.code),
+        theme.danger(view.error.message),
+      ]),
+    );
+  }
+  if (view.failedReasons) {
+    diagnostics.push(
+      ...formatStatusField(theme, "Problem", theme.danger(view.failedReasons)),
+    );
+  }
+  if (view.suggestion) {
+    diagnostics.push(
+      ...formatStatusField(theme, "Next", theme.accent(view.suggestion)),
+    );
+  }
+  if (diagnostics.length > 0) {
+    sections.push(diagnostics);
+  }
+
+  for (const section of sections) {
+    if (section.length === 0) continue;
+    console.log("");
+    for (const line of section) console.log(line);
   }
 }
 
-function formatAnonymousState(
+function formatWorkspaceStatusHeading(
   theme: StatusTheme,
-  info: ZvecGrepInfoResult,
+  state: WorkspaceIndexState,
 ): string {
-  const state = anonymousState(info);
-  if (state === "ready") {
-    return theme.success(state);
+  switch (state) {
+    case "ready":
+      return theme.success("✓ Workspace index is ready");
+    case "indexing":
+      return theme.warning("◐ Workspace index is updating");
+    case "stale":
+      return theme.warning("! Workspace index needs an update");
+    case "failed":
+      return theme.danger("✗ Workspace index failed");
+    case "cancelled":
+      return theme.warning("! Workspace index update was cancelled");
+    case "disabled":
+      return theme.warning("○ Workspace indexing is disabled");
+    case "unindexed":
+      return theme.warning("○ Workspace index is not created");
+    case "undecided":
+      return theme.warning("? Workspace index is not configured");
   }
+}
 
-  if (state === "failed") {
-    return theme.danger(state);
+function formatStatusField(
+  theme: StatusTheme,
+  label: string,
+  value: string | readonly string[],
+): string[] {
+  const values = typeof value === "string" ? [value] : value;
+  const labelWidth = 12;
+  const continuation = `  ${" ".repeat(labelWidth)}`;
+  return values.map((line, index) =>
+    index === 0
+      ? `  ${theme.label(label.padEnd(labelWidth))}${line}`
+      : `${continuation}${line}`,
+  );
+}
+
+function statusCount(
+  theme: StatusTheme,
+  count: number,
+  label: string,
+  tone: "warning" | "danger",
+): string {
+  const value = `${formatCount(count)} ${label}`;
+  return count > 0 ? theme[tone](value) : theme.muted(value);
+}
+
+function changedTotal(
+  changes: NonNullable<WorkspaceStatusView["changes"]>,
+): number {
+  return changes.added + changes.modified + changes.deleted;
+}
+
+function serverIndexState(info: ServerIndexInfo): WorkspaceIndexState {
+  if (info.index_policy === "disabled") return "disabled";
+  if (info.runtime?.job_state === "failed" || info.runtime?.error) {
+    return "failed";
   }
+  if (info.runtime?.job_state === "cancelled") return "cancelled";
+  if (
+    info.runtime?.job_state === "queued" ||
+    info.runtime?.job_state === "running"
+  ) {
+    return "indexing";
+  }
+  if ((info.persistent.files?.failed ?? 0) > 0) return "failed";
+  if ((info.persistent.files?.pending ?? 0) > 0) return "stale";
+  if (info.indexed) return "ready";
+  return info.index_policy === "undecided" ? "undecided" : "unindexed";
+}
 
-  return theme.warning(state);
+function mapServerRootPath(root: ServerRootPath): WorkspaceRootPath {
+  return {
+    absolutePath: root.absolute_path,
+    recursive: root.recursive,
+    include: root.include,
+    exclude: root.exclude,
+    globs: root.globs,
+    insensitiveGlobs: root.insensitive_globs,
+    fileTypes: root.file_types,
+    excludedFileTypes: root.excluded_file_types,
+    hidden: root.hidden,
+    noIgnore: root.no_ignore,
+    ignoreFiles: root.ignore_files,
+    maxDepth: root.max_depth,
+    maxFileSizeBytes: root.max_file_size_bytes,
+    follow: root.follow,
+  };
+}
+
+function shouldShowRoots(
+  workspaceRoot: string,
+  roots: readonly WorkspaceRootPath[],
+): boolean {
+  return (
+    roots.length > 1 ||
+    roots.some(
+      (root) =>
+        root.absolutePath !== workspaceRoot ||
+        formatRootPath(root) !== root.absolutePath,
+    )
+  );
+}
+
+function formatDisplayRootPath(root: WorkspaceRootPath): string {
+  const formatted = formatRootPath(root);
+  return `${formatDisplayPath(root.absolutePath)}${formatted.slice(root.absolutePath.length)}`;
+}
+
+function formatStoragePath(indexPath: string, workspaceRoot: string): string {
+  const localPath = relative(workspaceRoot, indexPath);
+  if (
+    localPath.length > 0 &&
+    !isAbsolute(localPath) &&
+    localPath !== ".." &&
+    !localPath.startsWith(`..${sep}`)
+  ) {
+    return localPath;
+  }
+  return formatDisplayPath(indexPath);
+}
+
+function formatDisplayPath(path: string): string {
+  const home = homedir();
+  if (path === home) return "~";
+  return path.startsWith(`${home}${sep}`)
+    ? `~${path.slice(home.length)}`
+    : path;
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString("en-US");
 }
 
 function anonymousState(
@@ -530,8 +730,10 @@ function failedCount(theme: StatusTheme, count: number): string {
 }
 
 function createStatusTheme(options: CliOptions): StatusTheme {
-  if (!shouldUseColor(options)) {
+  const color = shouldUseColor(options);
+  if (!color) {
     return {
+      color,
       label: identity,
       path: identity,
       success: identity,
@@ -543,6 +745,7 @@ function createStatusTheme(options: CliOptions): StatusTheme {
   }
 
   return {
+    color,
     label: (value) => `\x1b[2m${value}\x1b[0m`,
     path: (value) => `\x1b[36m${value}\x1b[0m`,
     success: (value) => `\x1b[32m${value}\x1b[0m`,

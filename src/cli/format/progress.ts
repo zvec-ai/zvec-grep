@@ -238,6 +238,23 @@ function gradientBar(
   return `${bar}${ANSI_RESET}${ANSI_DIM}${glyphs.barEmpty.repeat(width - boundedFilled)}${ANSI_RESET}`;
 }
 
+export function formatGreenProgressBar(
+  completed: number,
+  total: number,
+  width: number,
+  color: boolean,
+): string {
+  const boundedTotal = Math.max(total, 0);
+  const boundedWidth = Math.max(Math.floor(width), 0);
+  const ratio =
+    boundedTotal === 0
+      ? 0
+      : Math.min(Math.max(completed, 0), boundedTotal) / boundedTotal;
+  const filled = Math.round(boundedWidth * ratio);
+  const glyphs = supportsUnicode() ? UNICODE_GLYPHS : ASCII_GLYPHS;
+  return gradientBar(filled, boundedWidth, glyphs, color);
+}
+
 function formatTtyMetadata(progress: IndexProgress): string {
   const parts: string[] = [];
   const failed = progress.filesFailed ?? 0;

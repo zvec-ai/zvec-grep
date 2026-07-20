@@ -68,7 +68,7 @@ test("server-mode index reports Workspace progress", async (t) => {
     cwd: root,
     env,
   });
-  assert.match(status.stdout, /indexed\s+no/i);
+  assert.match(status.stdout, /Workspace index is not configured/i);
 });
 
 test("CLI completes index, search, automatic refresh, status, and rg workflows", async (t) => {
@@ -139,7 +139,8 @@ test("CLI completes index, search, automatic refresh, status, and rg workflows",
   assert.doesNotMatch(refreshed.stdout, /FirstWorkflowSymbol/);
 
   const status = await runCli(["status", root], { cwd: root, env });
-  assert.match(status.stdout, /enabled|indexed/i);
+  assert.match(status.stdout, /Workspace index is ready/i);
+  assert.match(status.stdout, /Coverage\s+.*100%\s+1 \/ 1 files/i);
   assert.match(status.stdout, /glob=src\/\*\*/);
   assert.match(status.stdout, /type=ts/);
 
@@ -211,7 +212,7 @@ test("CLI completes index, search, automatic refresh, status, and rg workflows",
   });
   assert.match(dropped.stdout, /Dropped index/);
   const droppedStatus = await runCli(["status", root], { cwd: root, env });
-  assert.match(droppedStatus.stdout, /indexed\s+no/i);
+  assert.match(droppedStatus.stdout, /Workspace index is not configured/i);
 });
 
 test("CLI exposes stable help, version, and failure behavior", async () => {

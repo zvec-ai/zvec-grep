@@ -456,11 +456,14 @@ test("status formatters cover collections, anonymous states, failures, filters, 
   assert.match(output.logs.join("\n"), /1m 5s/);
   assert.match(output.logs.join("\n"), /ignore-file=\.rgignore/);
   assert.match(output.logs.join("\n"), /Default indexing skips/);
-  assert.match(output.logs.join("\n"), /progress\s+3\/4/);
-  assert.match(output.logs.join("\n"), /error-code\s+MODEL_LOAD_FAILED/);
   assert.match(
     output.logs.join("\n"),
-    /error\s+Embedding schema could not be resolved/,
+    /◐ Workspace index is updating[\s\S]*Coverage\s+█{15}░{5}\s+75%\s+3 \/ 4 files/,
+  );
+  assert.match(output.logs.join("\n"), /Error\s+MODEL_LOAD_FAILED/);
+  assert.match(
+    output.logs.join("\n"),
+    /Embedding schema could not be resolved/,
   );
 
   for (const stateInfo of [
@@ -515,7 +518,96 @@ test("status formatters cover collections, anonymous states, failures, filters, 
     const rendered = await captureConsole(() =>
       printAnonymousInfo(anonymous, { color: "never" }),
     );
-    assert.match(rendered.logs.join("\n"), /state/);
+    assert.match(rendered.logs.join("\n"), /Workspace index/);
+  }
+});
+
+test("workspace status uses a status-first grouped layout", async () => {
+  const originalTerm = process.env.TERM;
+  process.env.TERM = "xterm-256color";
+  try {
+    const output = await captureConsole(() =>
+      printAnonymousInfo(
+        {
+          root: "/repo",
+          indexed: true,
+          indexPolicy: "enabled",
+          source: "index",
+          home: "/repo/.zvec-grep",
+          indexPath: "/repo/.zvec-grep/index",
+          collection: collection({
+            rootPaths: [{ absolutePath: "/repo", recursive: true }],
+          }),
+          status: status({
+            filesScanned: 1132,
+            filesStored: 1132,
+            filesIndexed: 1132,
+            entitiesIndexed: 22037,
+            filesPending: 0,
+            filesFailed: 0,
+            filesAdded: 0,
+            filesModified: 0,
+            filesDeleted: 0,
+          }),
+        },
+        { color: "never" },
+      ),
+    );
+
+    assert.deepEqual(output.logs, [
+      "✓ Workspace index is ready",
+      "  /repo",
+      "",
+      "  Coverage    ████████████████████ 100%  1,132 / 1,132 files",
+      "  Entities    22,037",
+      "  Queue       0 pending · 0 failed",
+      "",
+      "  Embedding   qwen/text-embedding-v4",
+      "              16 dimensions · cosine",
+      "",
+      "  Storage     .zvec-grep/index",
+    ]);
+
+    const colored = await captureConsole(() =>
+      printServerIndexInfo(
+        {
+          root: "/repo",
+          indexed: true,
+          index_policy: "enabled",
+          source: "index",
+          persistent: {
+            home: "/repo/.zvec-grep",
+            index_path: "/repo/.zvec-grep/index",
+            collection: {
+              root_paths: [{ absolute_path: "/repo", recursive: true }],
+              embedding: {
+                provider: "qwen",
+                model: "text-embedding-v4",
+                dimension: 1024,
+                metric: "cosine",
+              },
+            },
+            files: {
+              stored: 2,
+              indexed: 1,
+              pending: 1,
+              failed: 1,
+              entities: 3,
+            },
+          },
+        },
+        { color: "always" },
+      ),
+    );
+    const text = colored.logs.join("\n");
+    assert.match(text, /\x1b\[31m✗ Workspace index failed/);
+    assert.match(text, /\x1b\[38;2;22;163;74m█/);
+    assert.match(text, /\x1b\[33m1 pending/);
+    assert.match(text, /\x1b\[31m1 failed/);
+    assert.doesNotMatch(text, /policy|indexed\s+yes|source\s+index|home/);
+  } finally {
+    if (originalTerm === undefined) delete process.env.TERM;
+    else process.env.TERM = originalTerm;
   }
 });
 

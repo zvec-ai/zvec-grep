@@ -16,9 +16,23 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { installerSelectionLines } from "../dist/cli/commands.js";
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve("dist/cli/index.js");
+
+test("interactive installer marker follows the active agent", () => {
+  const detected = new Set(["claude", "codex"]);
+  const claude = installerSelectionLines(0, detected);
+  const codex = installerSelectionLines(1, detected);
+
+  assert.match(claude[0], /● Claude Code\s+detected/);
+  assert.match(claude[1], /○ Codex\s+detected/);
+  assert.match(codex[0], /○ Claude Code\s+detected/);
+  assert.match(codex[1], /● Codex\s+detected/);
+  assert.match(codex.at(-1), /Use ↑↓ to move · Enter to select/);
+  assert.doesNotMatch(codex.join("\n"), /Space|\[●\]/);
+});
 
 test("Codex installer removes orphaned managed markers", async (t) => {
   const temporaryDirectory = await mkdtemp(
@@ -421,6 +435,7 @@ test("Claude Code installer configures MCP trust and guidance", async (t) => {
   assert.match(stdout, /zvec-grep setup/);
   assert.match(stdout, /Installing integrations/);
   assert.match(stdout, /Claude Code/);
+  assert.doesNotMatch(stdout, /Guidance/);
   assert.match(stdout, /MCP trust\s+Approved/);
   assert.match(stdout, /Remote data\s+Authorization requested/);
 });

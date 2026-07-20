@@ -217,7 +217,6 @@ async function runInstall(parsed: ParsedArgs): Promise<void> {
     console.log(`  ${installSuccessMark()} ${installer.label}`);
     console.log("    MCP       configured");
     console.log("    Trust     approved");
-    console.log("    Guidance  updated");
     console.log("");
   }
 
@@ -574,7 +573,6 @@ async function promptInstallerSelection(
     return promptInstallerLineSelection(detected);
   }
 
-  const selected = new Set(detected);
   let activeIndex = Math.max(
     0,
     AGENT_INSTALLERS.findIndex((installer) => detected.has(installer.id)),
@@ -582,24 +580,7 @@ async function promptInstallerSelection(
   let renderedLineCount = 0;
 
   const render = (): void => {
-    const labelWidth = Math.max(
-      ...AGENT_INSTALLERS.map((installer) => installer.label.length),
-    );
-    const lines = [
-      ...AGENT_INSTALLERS.map((installer, index) => {
-        const active = index === activeIndex ? installAccent("›") : " ";
-        const checked = selected.has(installer.id)
-          ? installSuccess("[●]")
-          : "[ ]";
-        const label = installer.label.padEnd(labelWidth);
-        const status = detected.has(installer.id)
-          ? installSuccess("detected")
-          : installDim("not found");
-        return `  ${active} ${checked} ${label}  ${status}`;
-      }),
-      "",
-      installDim("  Use ↑↓ to move · Space to select · Enter to continue"),
-    ];
+    const lines = installerSelectionLines(activeIndex, detected);
 
     if (renderedLineCount > 0) {
       process.stdout.write(`\u001b[${renderedLineCount}A`);
@@ -637,15 +618,8 @@ async function promptInstallerSelection(
         render();
         return;
       }
-      if (key === " ") {
-        const id = AGENT_INSTALLERS[activeIndex]!.id;
-        if (selected.has(id)) selected.delete(id);
-        else selected.add(id);
-        render();
-        return;
-      }
       if (key.includes("\r") || key.includes("\n")) {
-        finish(selected);
+        finish(new Set([AGENT_INSTALLERS[activeIndex]!.id]));
       }
     };
 
@@ -653,6 +627,28 @@ async function promptInstallerSelection(
     process.stdin.resume();
     process.stdin.on("data", onData);
   });
+}
+
+export function installerSelectionLines(
+  activeIndex: number,
+  detected: ReadonlySet<string>,
+): string[] {
+  const labelWidth = Math.max(
+    ...AGENT_INSTALLERS.map((installer) => installer.label.length),
+  );
+  return [
+    ...AGENT_INSTALLERS.map((installer, index) => {
+      const marker =
+        index === activeIndex ? installSuccess("●") : installDim("○");
+      const label = installer.label.padEnd(labelWidth);
+      const status = detected.has(installer.id)
+        ? installDim("detected")
+        : installDim("not found");
+      return `  ${marker} ${label}  ${status}`;
+    }),
+    "",
+    installDim("  Use ↑↓ to move · Enter to select"),
+  ];
 }
 
 async function promptInstallerLineSelection(
