@@ -53,7 +53,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.20.1",
-    "c8": "^11.0.0",
+    "c8": "^12.0.0",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
     "prettier": "^3.9.5",
