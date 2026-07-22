@@ -27,6 +27,10 @@ _NVM_INIT = 'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi;'
 class ZvecGrepMixin:
     """Provision zvec-grep before an installed Harbor agent starts."""
 
+    # Extra flags appended to the global npm install. Subclasses override this;
+    # the default keeps the published CLI/skill profile unchanged.
+    _extra_npm_install_flags: str = ""
+
     def __init__(
         self,
         *args: Any,
@@ -146,11 +150,16 @@ class ZvecGrepMixin:
     ) -> tuple[str, bool]:
         package = shlex.quote(self._zvec_grep_package)
         binding_package = shlex.quote(self._zvec_binding_package)
+        extra_flags = (
+            f" {self._extra_npm_install_flags}"
+            if self._extra_npm_install_flags
+            else ""
+        )
         expected_version = self._package_version(self._zvec_grep_package)
         if expected_version is None:
             install_command = (
                 f"npm install -g {package} {binding_package} "
-                "--omit=optional --no-audit --no-fund; reused=0"
+                f"--omit=optional --no-audit --no-fund{extra_flags}; reused=0"
             )
         else:
             expected = shlex.quote(expected_version)
@@ -160,7 +169,7 @@ class ZvecGrepMixin:
                 f"npm list -g --depth=0 {binding_package} >/dev/null 2>&1; "
                 "then reused=1; else "
                 f"npm install -g {package} {binding_package} "
-                "--omit=optional --no-audit --no-fund; reused=0; fi"
+                f"--omit=optional --no-audit --no-fund{extra_flags}; reused=0; fi"
             )
         install_result = await self.exec_as_agent(
             environment,
@@ -184,14 +193,19 @@ class ZvecGrepMixin:
 
         await self._upload_embedding_config(environment)
 
-        link_commands = [
-            f"ln -sf {shlex.quote(zg_path)} /usr/local/bin/zg",
-        ]
+        # Only symlink when the binary is not already on the default PATH.
+        # When node's global prefix is /usr/local (e.g. Claude Code), npm places
+        # zg at /usr/local/bin/zg directly; linking it onto itself would create a
+        # circular symlink and break the command.
+        link_commands = []
+        if zg_path != "/usr/local/bin/zg":
+            link_commands.append(f"ln -sf {shlex.quote(zg_path)} /usr/local/bin/zg")
         if node_path != "/usr/local/bin/node":
             link_commands.append(
                 f"ln -sf {shlex.quote(node_path)} /usr/local/bin/node"
             )
-        await self.exec_as_root(environment, command=" && ".join(link_commands))
+        if link_commands:
+            await self.exec_as_root(environment, command=" && ".join(link_commands))
         version_result = await self.exec_as_agent(
             environment, command="zg version -v"
         )

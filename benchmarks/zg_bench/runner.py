@@ -22,6 +22,7 @@ from .settings import (
     QWEN_CODE_VERSION,
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
+    ZVEC_GREP_CLAUDE_PACKAGE,
     ZVEC_GREP_EMBEDDING,
     ZVEC_GREP_PACKAGE,
 )
@@ -35,16 +36,21 @@ ZVEC_QWEN_CODE_IMPORT_PATH = (
     "zg_bench.agents.zvec_qwen_code:ZvecQwenCode"
 )
 ZVEC_OPENCODE_IMPORT_PATH = "zg_bench.agents.zvec_opencode:ZvecOpenCode"
+ZVEC_CLAUDE_CODE_IMPORT_PATH = (
+    "zg_bench.agents.zvec_claude_code:ZvecClaudeCode"
+)
 SETUP_CACHE_DIR = BENCHMARKS_DIR / ".cache" / "agent-setup"
 _SETUP_CACHE_TARGET = "/root/.nvm"
 _CODEX_AGENT = "codex"
 _QWEN_CODE_AGENT = "qwen-coder"
 _OPENCODE_AGENT = "opencode"
+_CLAUDE_CODE_AGENT = "claude-code"
 _CACHEABLE_AGENTS = (_CODEX_AGENT, _QWEN_CODE_AGENT, _OPENCODE_AGENT)
 _ZVEC_AGENT_IMPORT_PATHS = {
     _CODEX_AGENT: ZVEC_CODEX_IMPORT_PATH,
     _QWEN_CODE_AGENT: ZVEC_QWEN_CODE_IMPORT_PATH,
     _OPENCODE_AGENT: ZVEC_OPENCODE_IMPORT_PATH,
+    _CLAUDE_CODE_AGENT: ZVEC_CLAUDE_CODE_IMPORT_PATH,
 }
 _QWEN_CODE_API_KEY_ENV_VARS = (
     "DASHSCOPE_API_KEY",
@@ -335,17 +341,27 @@ def build_harbor_command(
                 "the zvec-grep profile currently supports --agent "
                 f"{supported}"
             )
-        if not ZVEC_GREP_SKILL_DIR.is_dir():
-            raise ValueError(f"zvec-grep skill not found: {ZVEC_GREP_SKILL_DIR}")
         harbor_agent = _ZVEC_AGENT_IMPORT_PATHS[agent]
+        zvec_package = (
+            ZVEC_GREP_CLAUDE_PACKAGE
+            if agent == _CLAUDE_CODE_AGENT
+            else ZVEC_GREP_PACKAGE
+        )
         agent_kwargs.extend(
             [
-                f"zvec_grep_package={ZVEC_GREP_PACKAGE}",
+                f"zvec_grep_package={zvec_package}",
                 f"zvec_binding_package={ZVEC_GREP_BINDING_PACKAGE}",
                 f"embedding_model={ZVEC_GREP_EMBEDDING}",
             ]
         )
-        skills.append(str(ZVEC_GREP_SKILL_DIR.resolve()))
+        # Claude Code receives guidance through `zg install` (its managed MCP
+        # guidance block), so it does not use the injected query skill.
+        if agent != _CLAUDE_CODE_AGENT:
+            if not ZVEC_GREP_SKILL_DIR.is_dir():
+                raise ValueError(
+                    f"zvec-grep skill not found: {ZVEC_GREP_SKILL_DIR}"
+                )
+            skills.append(str(ZVEC_GREP_SKILL_DIR.resolve()))
 
     command = [
         harbor_executable,

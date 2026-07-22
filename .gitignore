@@ -45,3 +45,9 @@ Thumbs.db
 .idea/
 .vscode/
 .opencode/
+
+# Claude Code local config
+.claude/
+
+# Large exported benchmark dataset (regenerate/download separately)
+benchmarks/dataset-export/

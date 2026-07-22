@@ -12,6 +12,12 @@ OPENCODE_ALIYUN_GLM_BASE_URL = (
     "https://dashscope.alibaba-inc.com/compatible-mode/v1"
 )
 ZVEC_GREP_PACKAGE = "@zvec/zvec-grep@0.1.5"
+# Claude Code integrates through `zg install`, which needs the newer build that
+# ships the MCP install target. Other agents stay on the published CLI package.
+ZVEC_GREP_CLAUDE_PACKAGE = (
+    "https://zvec-bj.oss-cn-beijing.aliyuncs.com/zg/"
+    "zvec-zvec-grep-0.1.6-alpha.2.tgz"
+)
 ZVEC_GREP_BINDING_PACKAGE = "@zvec/bindings-linux-x64@0.5.0"
 ZVEC_GREP_EMBEDDING = "qwen/text-embedding-v4"
 ZVEC_GREP_API_KEY_ENV_VARS = (
