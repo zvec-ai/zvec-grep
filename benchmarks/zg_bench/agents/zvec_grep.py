@@ -429,7 +429,10 @@ class ZvecGrepMixin:
     @staticmethod
     def _index_is_ready(status_output: str) -> bool:
         for line in status_output.splitlines():
-            fields = line.split()
+            normalized = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+            if normalized == "✓ Workspace index is ready":
+                return True
+            fields = normalized.split()
             if len(fields) >= 2 and fields[0] == "state":
                 return fields[1] == "ready"
         return False

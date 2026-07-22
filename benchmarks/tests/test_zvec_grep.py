@@ -53,6 +53,21 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             "zg index --embedding qwen/text-embedding-v4 --allow-remote once",
         )
 
+    async def test_recognizes_current_and_legacy_ready_status(self) -> None:
+        self.assertTrue(
+            ZvecGrepMixin._index_is_ready(
+                "\x1b[32m✓ Workspace index is ready\x1b[0m\n  /workspace"
+            )
+        )
+        self.assertTrue(ZvecGrepMixin._index_is_ready("state ready\n"))
+
+    async def test_does_not_treat_stale_index_as_ready(self) -> None:
+        self.assertFalse(
+            ZvecGrepMixin._index_is_ready(
+                "! Workspace index needs an update\n  /workspace"
+            )
+        )
+
     async def test_bootstraps_node_before_installing_zvec_grep(self) -> None:
         harness = _InstallHarness()
 
