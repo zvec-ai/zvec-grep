@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
 
 from ..settings import (
@@ -192,10 +193,18 @@ class ZvecGrepMixin:
         package = shlex.quote(self._zvec_grep_package)
         binding_package = shlex.quote(self._zvec_binding_package)
         expected_version = self._package_version(self._zvec_grep_package)
+        node_install_command = nvm_node_install_snippet()
+        ensure_node_command = (
+            f"{_NVM_INIT} "
+            "if ! command -v node >/dev/null 2>&1 || "
+            "! command -v npm >/dev/null 2>&1; then "
+            f"{node_install_command}; "
+            "fi"
+        )
         if expected_version is None:
             install_command = (
                 f"npm install -g {package} {binding_package} "
-                "--omit=optional --no-audit --no-fund; reused=0"
+                "--omit=optional --no-audit --no-fund && reused=0"
             )
         else:
             expected = shlex.quote(expected_version)
@@ -205,12 +214,13 @@ class ZvecGrepMixin:
                 f"npm list -g --depth=0 {binding_package} >/dev/null 2>&1; "
                 "then reused=1; else "
                 f"npm install -g {package} {binding_package} "
-                "--omit=optional --no-audit --no-fund; reused=0; fi"
+                "--omit=optional --no-audit --no-fund && reused=0; fi"
             )
         install_result = await self.exec_as_agent(
             environment,
             command=(
-                f"{_NVM_INIT} "
+                "set -e; "
+                f"{ensure_node_command}; "
                 f"{install_command}; "
                 "printf '\\nZG_INSTALL_REUSED=%s\\nZG_NODE_PATH=%s\\n"
                 "ZG_BIN_PATH=%s\\n' \"$reused\" \"$(command -v node)\" "
