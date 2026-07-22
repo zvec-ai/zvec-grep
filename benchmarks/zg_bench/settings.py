@@ -2,15 +2,17 @@ from __future__ import annotations
 
 CODEX_VERSION = "0.144.4"
 QWEN_CODE_VERSION = "0.19.10"
-OPENCODE_VERSION = "1.18.3"
+OPENCODE_VERSION = "1.18.4"
 QWEN_CODE_DASHSCOPE_MODEL = "qwen3.7-max"
 QWEN_CODE_DASHSCOPE_BASE_URL = (
     "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
 OPENCODE_ALIYUN_GLM_MODEL = "aliyun-glm-5.2"
+OPENCODE_ALIYUN_GLM_MODEL_ID = "glm-5.2"
 OPENCODE_ALIYUN_GLM_BASE_URL = (
-    "https://dashscope.alibaba-inc.com/compatible-mode/v1"
+    "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
+OPENCODE_OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible"
 ZVEC_GREP_PACKAGE = "@zvec/zvec-grep@0.1.5"
 ZVEC_GREP_BINDING_PACKAGE = "@zvec/bindings-linux-x64@0.5.0"
 ZVEC_GREP_EMBEDDING = "qwen/text-embedding-v4"

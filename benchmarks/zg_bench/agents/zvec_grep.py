@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 import shlex
 import tempfile
 import time
@@ -252,7 +253,12 @@ class ZvecGrepMixin:
             environment,
             command='printf "%s\\n" "$HOME"',
         )
-        home = posixpath.normpath((home_result.stdout or "").strip())
+        home_lines = [
+            re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+            for line in (home_result.stdout or "").splitlines()
+            if re.sub(r"\x1b\[[0-9;]*m", "", line).strip().startswith("/")
+        ]
+        home = posixpath.normpath(home_lines[-1] if home_lines else "")
         if not home.startswith("/") or home == "/":
             raise RuntimeError(f"agent home directory is not absolute: {home!r}")
 
@@ -335,7 +341,12 @@ class ZvecGrepMixin:
         if result.return_code != 0:
             raise RuntimeError("could not resolve the task working directory")
 
-        workdir = posixpath.normpath((result.stdout or "").strip())
+        workdir_lines = [
+            re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+            for line in (result.stdout or "").splitlines()
+            if re.sub(r"\x1b\[[0-9;]*m", "", line).strip().startswith("/")
+        ]
+        workdir = posixpath.normpath(workdir_lines[-1] if workdir_lines else "")
         if not workdir or not workdir.startswith("/"):
             raise RuntimeError(f"task working directory is not absolute: {workdir!r}")
         if workdir == "/":

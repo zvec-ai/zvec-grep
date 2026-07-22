@@ -16,6 +16,8 @@ from .settings import (
     CODEX_VERSION,
     OPENCODE_ALIYUN_GLM_BASE_URL,
     OPENCODE_ALIYUN_GLM_MODEL,
+    OPENCODE_ALIYUN_GLM_MODEL_ID,
+    OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
     OPENCODE_VERSION,
     QWEN_CODE_DASHSCOPE_BASE_URL,
     QWEN_CODE_DASHSCOPE_MODEL,
@@ -35,6 +37,12 @@ ZVEC_QWEN_CODE_IMPORT_PATH = (
     "zg_bench.agents.zvec_qwen_code:ZvecQwenCode"
 )
 ZVEC_OPENCODE_IMPORT_PATH = "zg_bench.agents.zvec_opencode:ZvecOpenCode"
+OPENCODE_ACP_IMPORT_PATH = "zg_bench.agents.opencode_acp:OpenCodeACP"
+OPENCODE_ACP_REGISTRY_ENTRY_PATH = (
+    Path(__file__).resolve().parent
+    / "agents"
+    / f"opencode-{OPENCODE_VERSION}.json"
+)
 SETUP_CACHE_DIR = BENCHMARKS_DIR / ".cache" / "agent-setup"
 _SETUP_CACHE_TARGET = "/root/.nvm"
 _CODEX_AGENT = "codex"
@@ -150,6 +158,7 @@ def _is_opencode_aliyun_glm_model(agent: str, model: str) -> bool:
     return agent == _OPENCODE_AGENT and model in {
         OPENCODE_ALIYUN_GLM_MODEL,
         f"openai/{OPENCODE_ALIYUN_GLM_MODEL}",
+        f"dashscope/{OPENCODE_ALIYUN_GLM_MODEL}",
     }
 
 
@@ -283,6 +292,15 @@ def prepare_setup_cache(agent: str, profile: Profile) -> None:
         encoding="utf-8",
     )
 
+    inspected = subprocess.run(
+        ["docker", "volume", "inspect", volume_name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode == 0:
+        return
+
     completed = subprocess.run(
         ["docker", "volume", "create", volume_name],
         check=False,
@@ -324,9 +342,36 @@ def build_harbor_command(
             harbor_model = QWEN_CODE_DASHSCOPE_MODEL
             agent_kwargs.append(f"base_url={QWEN_CODE_DASHSCOPE_BASE_URL}")
     elif agent == _OPENCODE_AGENT:
-        agent_kwargs.append(f"version={OPENCODE_VERSION}")
         if _is_opencode_aliyun_glm_model(agent, model):
-            harbor_model = f"openai/{OPENCODE_ALIYUN_GLM_MODEL}"
+            harbor_agent = OPENCODE_ACP_IMPORT_PATH
+            harbor_model = f"dashscope/{OPENCODE_ALIYUN_GLM_MODEL_ID}"
+            agent_kwargs.append(
+                "registry_entry_path="
+                + str(OPENCODE_ACP_REGISTRY_ENTRY_PATH.resolve())
+            )
+            opencode_config = {
+                "provider": {
+                    "dashscope": {
+                        "npm": OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
+                        "name": "DashScope OpenAI Compatible",
+                        "models": {
+                            OPENCODE_ALIYUN_GLM_MODEL_ID: {
+                                "options": {"enable_thinking": False}
+                            }
+                        },
+                        "options": {
+                            "apiKey": "{env:OPENAI_API_KEY}",
+                            "baseURL": OPENCODE_ALIYUN_GLM_BASE_URL,
+                        },
+                    }
+                }
+            }
+            agent_kwargs.append(
+                "opencode_config="
+                + json.dumps(opencode_config, separators=(",", ":"))
+            )
+        else:
+            agent_kwargs.append(f"version={OPENCODE_VERSION}")
 
     if profile == "zvec-grep":
         if agent not in _ZVEC_AGENT_IMPORT_PATHS:
@@ -388,6 +433,10 @@ def build_harbor_command(
 
     for agent_kwarg in agent_kwargs:
         command.extend(["--agent-kwarg", agent_kwarg])
+    if _is_opencode_aliyun_glm_model(agent, model):
+        command.extend(
+            ["--agent-env", "OPENAI_API_KEY=${OPENAI_API_KEY}"]
+        )
     for skill in skills:
         command.extend(["--skill", skill])
 

@@ -3,4 +3,4 @@ dataset: swe-bench/swe-bench-verified@2
 tiers:
   smoke:
     tasks:
-      - swe-bench/sympy__sympy-15976
+        - swe-bench/pallets__flask-5014

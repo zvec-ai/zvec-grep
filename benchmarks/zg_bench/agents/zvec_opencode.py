@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from harbor.agents.installed.opencode import OpenCode
-
+from .opencode_acp import OpenCodeACP
 from .zvec_grep import ZvecGrepMixin
 
 
-class ZvecOpenCode(ZvecGrepMixin, OpenCode):
+class ZvecOpenCode(ZvecGrepMixin, OpenCodeACP):
     """OpenCode benchmark agent with the zvec-grep MCP server provisioned."""

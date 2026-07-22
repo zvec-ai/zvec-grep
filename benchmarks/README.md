@@ -118,9 +118,16 @@ export DASHSCOPE_API_KEY="your-api-key"
 ```
 
 Use `--agent opencode --model aliyun-glm-5.2` in the test commands below. The
-runner pins the OpenCode version, maps the model to OpenCode's OpenAI-compatible
-provider, and configures the Aliyun endpoint. The credential is passed through
-the environment and is not included in the generated Harbor command.
+runner pins the OpenCode version, maps the alias to DashScope's `glm-5.2` model,
+configures the public Beijing endpoint, and selects OpenCode's Chat
+Completions-compatible AI SDK package. OpenCode runs through its official ACP
+server so Harbor owns the session lifecycle through a structured protocol. Its
+ACP release manifest and SHA-256 checksum are pinned with the benchmark instead
+of being resolved from the mutable registry at run time. The credential is
+passed through Harbor's host-environment template and is neither included in the
+generated command nor persisted in benchmark output. This GLM configuration
+disables model thinking so a single long response cannot consume the task's
+50-minute agent timeout.
 
 ### zvec-grep authentication
 
