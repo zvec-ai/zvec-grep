@@ -22,6 +22,6 @@ ZVEC_GREP_API_KEY_ENV_VARS = (
 
 # Agent installation can approach Harbor's default six-minute setup timeout on
 # a fresh container. The zvec-grep profile also installs the tool and builds an
-# index before agent execution, so both profiles receive the same larger setup
-# budget.
+# index and, for supported agents, configures the MCP server before execution,
+# so both profiles receive the same larger setup budget.
 AGENT_SETUP_TIMEOUT_MULTIPLIER = "5"

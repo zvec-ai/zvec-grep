@@ -33,6 +33,7 @@ class ZvecGrepMixin:
         zvec_grep_package: str = ZVEC_GREP_PACKAGE,
         zvec_binding_package: str = ZVEC_GREP_BINDING_PACKAGE,
         embedding_model: str = ZVEC_GREP_EMBEDDING,
+        mcp_target: str | None = None,
         extra_env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -42,6 +43,8 @@ class ZvecGrepMixin:
             raise ValueError("zvec_binding_package must not be empty")
         if not embedding_model.strip():
             raise ValueError("embedding_model must not be empty")
+        if mcp_target is not None and not mcp_target.strip():
+            raise ValueError("mcp_target must not be empty")
 
         resolved_extra_env = dict(extra_env or {})
         api_key_source = self._resolve_api_key_source(resolved_extra_env)
@@ -68,6 +71,7 @@ class ZvecGrepMixin:
         self._zvec_grep_package = zvec_grep_package
         self._zvec_binding_package = zvec_binding_package
         self._embedding_model = embedding_model
+        self._mcp_target = mcp_target
         self._api_key_source = api_key_source
         self._embedding_api_key = api_key
 
@@ -84,6 +88,8 @@ class ZvecGrepMixin:
             "embedding_model": self._embedding_model,
             "api_key_source": self._api_key_source,
         }
+        if self._mcp_target is not None:
+            metadata["mcp_target"] = self._mcp_target
 
         try:
             install_started = time.monotonic()
@@ -130,6 +136,9 @@ class ZvecGrepMixin:
                     "zvec-grep index setup completed but zg status did not "
                     "report state ready"
                 )
+
+            if self._mcp_target is not None:
+                await self._setup_mcp(environment, workdir, metadata)
             metadata["status"] = "ready"
         except BaseException as error:
             metadata["status"] = "failed"
@@ -140,6 +149,41 @@ class ZvecGrepMixin:
             metadata["finished_at"] = datetime.now(UTC).isoformat()
             metadata["total_duration_seconds"] = round(time.monotonic() - started, 3)
             self._write_setup_metadata(metadata)
+
+    async def _setup_mcp(
+        self,
+        environment: BaseEnvironment,
+        workdir: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        assert self._mcp_target is not None
+        mcp_started = time.monotonic()
+        mcp_result = await self.exec_as_agent(
+            environment,
+            command=(
+                "zg install --target " f"{shlex.quote(self._mcp_target)} --yes"
+            ),
+            cwd=workdir,
+        )
+        metadata["mcp_setup_duration_seconds"] = round(
+            time.monotonic() - mcp_started, 3
+        )
+        metadata["mcp_setup_stdout"] = self._bounded_output(mcp_result.stdout)
+        metadata["mcp_setup_stderr"] = self._bounded_output(mcp_result.stderr)
+
+        server_status = await self.exec_as_agent(
+            environment,
+            command="zg server status",
+            cwd=workdir,
+        )
+        metadata["mcp_server_status"] = self._bounded_output(server_status.stdout)
+        metadata["mcp_server_status_stderr"] = self._bounded_output(
+            server_status.stderr
+        )
+        if not self._mcp_server_is_ready(metadata["mcp_server_status"]):
+            raise RuntimeError(
+                "zvec-grep MCP setup completed but the server did not report ready"
+            )
 
     async def _install_zvec_grep(
         self, environment: BaseEnvironment
@@ -342,6 +386,12 @@ class ZvecGrepMixin:
             if len(fields) >= 2 and fields[0] == "state":
                 return fields[1] == "ready"
         return False
+
+    @staticmethod
+    def _mcp_server_is_ready(status_output: str) -> bool:
+        return any(
+            line.strip() == "Server: ready" for line in status_output.splitlines()
+        )
 
     @staticmethod
     def _bounded_output(output: str | None) -> str:

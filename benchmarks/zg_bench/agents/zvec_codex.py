@@ -6,4 +6,4 @@ from .zvec_grep import ZvecGrepMixin
 
 
 class ZvecCodex(ZvecGrepMixin, Codex):
-    """Harbor agent with zvec-grep provisioned before execution."""
+    """Codex benchmark agent with the zvec-grep MCP server provisioned."""

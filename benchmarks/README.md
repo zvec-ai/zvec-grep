@@ -8,8 +8,8 @@ the same. The only difference is the tool profile:
 
 - **Baseline:** the agent's standard tools, including shell utilities such as
   `rg` and `find` when available.
-- **zvec-grep:** the same tools, plus a prepared `zvec-grep` index and a
-  query-only skill.
+- **zvec-grep:** the same agent with a prepared `zvec-grep` index. Codex and
+  OpenCode access it through MCP; Qwen Code retains its query-only skill.
 
 ## Benchmark suites
 
@@ -133,8 +133,10 @@ export DASHSCOPE_API_KEY="your-api-key"
 
 The adapter uploads the embedding credential to a protected zvec-grep config
 file in the isolated agent environment and does not add its value to the
-generated Harbor command. If the same credential also authenticates the agent's
-model, that agent's normal authentication path still applies.
+generated Harbor command. For Codex and OpenCode, it configures the agent's MCP
+integration and starts the zvec-grep server inside the task container. If the
+same credential also authenticates the agent's model, that agent's normal
+authentication path still applies.
 
 ## Test run instructions
 
@@ -143,17 +145,16 @@ container. Harbor writes trajectories and evaluator output to `runs/`.
 
 The first run may take several minutes while Docker downloads and builds the
 task image and prepares the agent environment. This is expected. Later runs of
-the same task reuse both the large task image and, for Codex, Qwen Code, and
-OpenCode, a Docker volume containing the installed agent runtime. Setup caches
-are isolated by agent and profile, so baseline containers never receive
-zvec-grep. They contain neither credentials nor the repository index. The
-zvec-grep profile also skips the unused local embedding runtime when Qwen
-embeddings are selected.
+the same task reuse both the large task image and a Docker volume containing the
+installed agent runtime. Setup caches are isolated by agent and profile, so
+baseline containers never receive zvec-grep. They contain neither credentials,
+the repository index, nor the MCP configuration. The zvec-grep profile also
+skips the unused local embedding runtime when Qwen embeddings are selected.
 
 Each command runs both profiles by default. Use `--profile baseline` or
-`--profile zvec-grep` to run one profile. The zvec-grep profile currently
-supports Codex, Qwen Code, and OpenCode and builds its index before agent
-execution.
+`--profile zvec-grep` to run one profile. The zvec-grep profile supports Codex,
+Qwen Code, and OpenCode and builds its index before agent execution. Codex and
+OpenCode use MCP; Qwen Code keeps the benchmark skill integration.
 
 ### Run the smoke test
 

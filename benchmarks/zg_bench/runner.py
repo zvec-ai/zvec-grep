@@ -335,8 +335,6 @@ def build_harbor_command(
                 "the zvec-grep profile currently supports --agent "
                 f"{supported}"
             )
-        if not ZVEC_GREP_SKILL_DIR.is_dir():
-            raise ValueError(f"zvec-grep skill not found: {ZVEC_GREP_SKILL_DIR}")
         harbor_agent = _ZVEC_AGENT_IMPORT_PATHS[agent]
         agent_kwargs.extend(
             [
@@ -345,7 +343,14 @@ def build_harbor_command(
                 f"embedding_model={ZVEC_GREP_EMBEDDING}",
             ]
         )
-        skills.append(str(ZVEC_GREP_SKILL_DIR.resolve()))
+        if agent in {_CODEX_AGENT, _OPENCODE_AGENT}:
+            agent_kwargs.append(f"mcp_target={agent}")
+        else:
+            if not ZVEC_GREP_SKILL_DIR.is_dir():
+                raise ValueError(
+                    f"zvec-grep skill not found: {ZVEC_GREP_SKILL_DIR}"
+                )
+            skills.append(str(ZVEC_GREP_SKILL_DIR.resolve()))
 
     command = [
         harbor_executable,

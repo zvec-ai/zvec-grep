@@ -6,4 +6,4 @@ from .zvec_grep import ZvecGrepMixin
 
 
 class ZvecOpenCode(ZvecGrepMixin, OpenCode):
-    """Benchmark agent with zvec-grep provisioned before execution."""
+    """OpenCode benchmark agent with the zvec-grep MCP server provisioned."""
