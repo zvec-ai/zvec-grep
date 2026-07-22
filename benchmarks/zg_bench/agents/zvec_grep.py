@@ -36,6 +36,7 @@ class ZvecGrepMixin:
         zvec_binding_package: str = ZVEC_GREP_BINDING_PACKAGE,
         embedding_model: str = ZVEC_GREP_EMBEDDING,
         mcp_target: str | None = None,
+        zvec_grep_package_sha256: str | None = None,
         extra_env: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -47,6 +48,10 @@ class ZvecGrepMixin:
             raise ValueError("embedding_model must not be empty")
         if mcp_target is not None and not mcp_target.strip():
             raise ValueError("mcp_target must not be empty")
+        if zvec_grep_package_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", zvec_grep_package_sha256
+        ):
+            raise ValueError("zvec_grep_package_sha256 must be a SHA-256 digest")
 
         resolved_extra_env = dict(extra_env or {})
         api_key_source = self._resolve_api_key_source(resolved_extra_env)
@@ -74,6 +79,7 @@ class ZvecGrepMixin:
         self._zvec_binding_package = zvec_binding_package
         self._embedding_model = embedding_model
         self._mcp_target = mcp_target
+        self._zvec_grep_package_sha256 = zvec_grep_package_sha256
         self._api_key_source = api_key_source
         self._embedding_api_key = api_key
 
@@ -90,6 +96,8 @@ class ZvecGrepMixin:
             "embedding_model": self._embedding_model,
             "api_key_source": self._api_key_source,
         }
+        if self._zvec_grep_package_sha256 is not None:
+            metadata["package_sha256"] = self._zvec_grep_package_sha256
         if self._mcp_target is not None:
             metadata["mcp_target"] = self._mcp_target
 
@@ -201,7 +209,20 @@ class ZvecGrepMixin:
             f"{node_install_command}; "
             "fi"
         )
-        if expected_version is None:
+        if self._zvec_grep_package_sha256 is not None:
+            expected_digest = shlex.quote(self._zvec_grep_package_sha256)
+            install_command = (
+                'package_marker="$HOME/.nvm/.zg-bench-zvec-grep-sha256"; '
+                "if command -v zg >/dev/null 2>&1 && "
+                f'[ "$(cat "$package_marker" 2>/dev/null)" = {expected_digest} ] && '
+                f"npm list -g --depth=0 {binding_package} >/dev/null 2>&1; "
+                "then reused=1; else "
+                f"npm install -g {package} {binding_package} "
+                "--omit=optional --no-audit --no-fund && "
+                f"printf '%s\\n' {expected_digest} > \"$package_marker\" && "
+                "reused=0; fi"
+            )
+        elif expected_version is None:
             install_command = (
                 f"npm install -g {package} {binding_package} "
                 "--omit=optional --no-audit --no-fund && reused=0"

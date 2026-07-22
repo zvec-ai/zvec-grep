@@ -66,6 +66,13 @@ uv sync
 uv run zg-bench doctor
 ```
 
+Using a local zvec-grep checkout additionally requires
+[Node.js and npm](https://nodejs.org/) and its installed dependencies:
+
+```sh
+npm --prefix .. ci
+```
+
 ### Codex authentication
 
 When using `--agent codex`, choose one authentication method.
@@ -151,12 +158,18 @@ Add `--dry-run` to inspect the generated Harbor command without starting a
 container. Harbor writes trajectories and evaluator output to `runs/`.
 
 The first run may take several minutes while Docker downloads and builds the
-task image and prepares the agent environment. This is expected. Later runs of
-the same task reuse both the large task image and a Docker volume containing the
-installed agent runtime. Setup caches are isolated by agent and profile, so
-baseline containers never receive zvec-grep. They contain neither credentials,
-the repository index, nor the MCP configuration. The zvec-grep profile also
-skips the unused local embedding runtime when Qwen embeddings are selected.
+task image and prepares the agent environment. This is expected. By default,
+the zvec-grep profile installs the pinned npm package. Pass
+`--zvec-grep-package <version-or-npm-spec>` to select another published package,
+or `--zvec-grep-package <directory-or-tgz>` to test local code. Local directories
+are packaged with `npm pack`, and only the resulting tarball is mounted into the
+task container. Its SHA-256 is recorded in setup metadata and included in the
+setup-cache identity. Later runs of the same package reuse both the large task
+image and a Docker volume containing the installed agent runtime. Setup caches
+are isolated by agent and profile, so baseline containers never receive
+zvec-grep. They contain neither credentials, the repository index, nor the MCP
+configuration. The zvec-grep profile also skips the unused local embedding
+runtime when Qwen embeddings are selected.
 
 Each command runs both profiles by default. Use `--profile baseline` or
 `--profile zvec-grep` to run one profile. The zvec-grep profile supports Codex,
@@ -170,6 +183,22 @@ OpenCode use MCP; Qwen Code keeps the benchmark skill integration.
 ```sh
 uv run zg-bench run swebench-verified \
   --agent <agent> --model <provider/model>
+```
+
+Use a published version or npm spec:
+
+```sh
+uv run zg-bench run swebench-verified \
+  --agent <agent> --model <provider/model> \
+  --profile zvec-grep --zvec-grep-package 0.1.5
+```
+
+Use the current repository checkout when running from `benchmarks/`:
+
+```sh
+uv run zg-bench run swebench-verified \
+  --agent <agent> --model <provider/model> \
+  --profile zvec-grep --zvec-grep-package ..
 ```
 
 #### Terminal-Bench 2.1

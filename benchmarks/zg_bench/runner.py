@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +47,9 @@ OPENCODE_ACP_REGISTRY_ENTRY_PATH = (
     / f"opencode-{OPENCODE_VERSION}.json"
 )
 SETUP_CACHE_DIR = BENCHMARKS_DIR / ".cache" / "agent-setup"
+LOCAL_PACKAGE_DIR = SETUP_CACHE_DIR / "local-package"
+LOCAL_NPM_CACHE_DIR = SETUP_CACHE_DIR / "npm-cache"
+LOCAL_ZVEC_GREP_PACKAGE_TARGET = "/tmp/zg-bench-zvec-grep.tgz"
 _SETUP_CACHE_TARGET = "/root/.nvm"
 _CODEX_AGENT = "codex"
 _QWEN_CODE_AGENT = "qwen-coder"
@@ -79,6 +85,20 @@ class SmokeSuite:
     name: str
     dataset: str
     task: str
+
+
+@dataclass(frozen=True)
+class PreparedSetupCache:
+    compose_path: Path
+    zvec_grep_package: str | None = None
+    zvec_grep_package_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class PreparedZvecGrepPackage:
+    install_spec: str
+    bind_source: Path | None = None
+    sha256: str | None = None
 
 
 def available_suites() -> list[str]:
@@ -252,10 +272,21 @@ def uses_setup_cache(agent: str) -> bool:
     return agent in _CACHEABLE_AGENTS
 
 
-def setup_cache_volume_name(agent: str, profile: Profile) -> str:
+def setup_cache_volume_name(
+    agent: str,
+    profile: Profile,
+    *,
+    zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+    zvec_grep_package_sha256: str | None = None,
+) -> str:
     identity = f"{agent}-{_agent_version(agent)}-{profile}-linux-x64"
     if profile == "zvec-grep":
-        identity += f"-{ZVEC_GREP_PACKAGE}-{ZVEC_GREP_BINDING_PACKAGE}"
+        package_identity = (
+            f"local-{zvec_grep_package_sha256[:16]}"
+            if zvec_grep_package_sha256 is not None
+            else zvec_grep_package
+        )
+        identity += f"-{package_identity}-{ZVEC_GREP_BINDING_PACKAGE}"
     return f"zg-bench-{_cache_slug(identity)}"
 
 
@@ -263,21 +294,137 @@ def setup_cache_compose_path(agent: str, profile: Profile) -> Path:
     return SETUP_CACHE_DIR / f"{_cache_slug(agent)}-{profile}.compose.json"
 
 
-def prepare_setup_cache(agent: str, profile: Profile) -> None:
+def _cache_local_package(package: Path) -> tuple[Path, str]:
+    with package.open("rb") as package_file:
+        digest = hashlib.file_digest(package_file, "sha256").hexdigest()
+    cached_package = LOCAL_PACKAGE_DIR / f"zvec-grep-{digest[:16]}.tgz"
+    if not cached_package.exists():
+        shutil.copy2(package, cached_package)
+    return cached_package.resolve(), digest
+
+
+def prepare_local_zvec_grep_package(source_root: Path) -> tuple[Path, str]:
+    """Pack a local zvec-grep checkout for installation in task containers."""
+    source_root = source_root.expanduser().resolve()
+    if not (source_root / "package.json").is_file():
+        raise RuntimeError(f"local zvec-grep package has no package.json: {source_root}")
+    if shutil.which("npm") is None:
+        raise RuntimeError("npm is required to pack the local zvec-grep checkout")
+    if not (source_root / "node_modules" / ".bin" / "tsc").is_file():
+        raise RuntimeError(
+            "local zvec-grep dependencies are missing; run 'npm ci' from "
+            f"{source_root}"
+        )
+    LOCAL_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_NPM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="npm-pack-", dir=LOCAL_PACKAGE_DIR
+    ) as temp_dir:
+        completed = subprocess.run(
+            ["npm", "pack", "--pack-destination", temp_dir],
+            cwd=source_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "npm_config_cache": str(LOCAL_NPM_CACHE_DIR)},
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "unknown error").strip()
+            raise RuntimeError(f"could not pack the local zvec-grep checkout: {detail}")
+
+        packages = list(Path(temp_dir).glob("*.tgz"))
+        if len(packages) != 1:
+            raise RuntimeError(
+                "npm pack did not produce exactly one zvec-grep package: "
+                f"found {len(packages)}"
+            )
+        return _cache_local_package(packages[0])
+
+
+def _looks_like_package_path(value: str) -> bool:
+    return value.startswith((".", "/", "~")) or value.endswith(".tgz")
+
+
+def normalize_zvec_grep_package(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("zvec-grep package must not be empty")
+    if re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", value):
+        return f"@zvec/zvec-grep@{value.removeprefix('v')}"
+    return value
+
+
+def zvec_grep_package_install_spec(value: str) -> str:
+    """Return the package spec visible inside a task container."""
+    candidate = Path(value).expanduser()
+    if candidate.exists() or _looks_like_package_path(value):
+        return LOCAL_ZVEC_GREP_PACKAGE_TARGET
+    return normalize_zvec_grep_package(value)
+
+
+def prepare_zvec_grep_package(value: str) -> PreparedZvecGrepPackage:
+    normalized = normalize_zvec_grep_package(value)
+    candidate = Path(normalized).expanduser()
+    if candidate.exists():
+        if candidate.is_dir():
+            package, digest = prepare_local_zvec_grep_package(candidate)
+        elif candidate.is_file() and candidate.suffix == ".tgz":
+            LOCAL_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+            package, digest = _cache_local_package(candidate.resolve())
+        else:
+            raise ValueError(
+                "local zvec-grep package must be a directory or .tgz file: "
+                f"{candidate}"
+            )
+        return PreparedZvecGrepPackage(
+            install_spec=LOCAL_ZVEC_GREP_PACKAGE_TARGET,
+            bind_source=package,
+            sha256=digest,
+        )
+    if _looks_like_package_path(normalized):
+        raise ValueError(f"local zvec-grep package does not exist: {candidate}")
+    return PreparedZvecGrepPackage(install_spec=normalized)
+
+
+def prepare_setup_cache(
+    agent: str,
+    profile: Profile,
+    *,
+    zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+) -> PreparedSetupCache:
     """Create the profile-isolated Docker volume and its Compose overlay."""
-    volume_name = setup_cache_volume_name(agent, profile)
+    prepared_package = PreparedZvecGrepPackage(install_spec=zvec_grep_package)
+    if profile == "zvec-grep":
+        prepared_package = prepare_zvec_grep_package(zvec_grep_package)
+
+    volume_name = setup_cache_volume_name(
+        agent,
+        profile,
+        zvec_grep_package=prepared_package.install_spec,
+        zvec_grep_package_sha256=prepared_package.sha256,
+    )
     SETUP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    service_volumes: list[dict[str, Any]] = [
+        {
+            "type": "volume",
+            "source": "agent-setup-cache",
+            "target": _SETUP_CACHE_TARGET,
+        }
+    ]
+    if prepared_package.bind_source is not None:
+        service_volumes.append(
+            {
+                "type": "bind",
+                "source": str(prepared_package.bind_source),
+                "target": LOCAL_ZVEC_GREP_PACKAGE_TARGET,
+                "read_only": True,
+            }
+        )
     overlay = {
         "services": {
             "main": {
                 "platform": "linux/amd64",
-                "volumes": [
-                    {
-                        "type": "volume",
-                        "source": "agent-setup-cache",
-                        "target": _SETUP_CACHE_TARGET,
-                    }
-                ]
+                "volumes": service_volumes,
             }
         },
         "volumes": {
@@ -287,7 +434,8 @@ def prepare_setup_cache(agent: str, profile: Profile) -> None:
             }
         },
     }
-    setup_cache_compose_path(agent, profile).write_text(
+    compose_path = setup_cache_compose_path(agent, profile)
+    compose_path.write_text(
         json.dumps(overlay, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
@@ -298,18 +446,24 @@ def prepare_setup_cache(agent: str, profile: Profile) -> None:
         capture_output=True,
         text=True,
     )
-    if inspected.returncode == 0:
-        return
+    if inspected.returncode != 0:
+        completed = subprocess.run(
+            ["docker", "volume", "create", volume_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "unknown error").strip()
+            raise RuntimeError(f"could not prepare agent setup cache: {detail}")
 
-    completed = subprocess.run(
-        ["docker", "volume", "create", volume_name],
-        check=False,
-        capture_output=True,
-        text=True,
+    return PreparedSetupCache(
+        compose_path=compose_path,
+        zvec_grep_package=(
+            prepared_package.install_spec if profile == "zvec-grep" else None
+        ),
+        zvec_grep_package_sha256=prepared_package.sha256,
     )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "unknown error").strip()
-        raise RuntimeError(f"could not prepare agent setup cache: {detail}")
 
 
 def build_harbor_command(
@@ -321,6 +475,8 @@ def build_harbor_command(
     jobs_dir: Path = DEFAULT_RUNS_DIR,
     job_name: str,
     harbor_executable: str = "harbor",
+    zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+    zvec_grep_package_sha256: str | None = None,
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
@@ -383,11 +539,15 @@ def build_harbor_command(
         harbor_agent = _ZVEC_AGENT_IMPORT_PATHS[agent]
         agent_kwargs.extend(
             [
-                f"zvec_grep_package={ZVEC_GREP_PACKAGE}",
+                f"zvec_grep_package={zvec_grep_package}",
                 f"zvec_binding_package={ZVEC_GREP_BINDING_PACKAGE}",
                 f"embedding_model={ZVEC_GREP_EMBEDDING}",
             ]
         )
+        if zvec_grep_package_sha256 is not None:
+            agent_kwargs.append(
+                f"zvec_grep_package_sha256={zvec_grep_package_sha256}"
+            )
         if agent in {_CODEX_AGENT, _OPENCODE_AGENT}:
             agent_kwargs.append(f"mcp_target={agent}")
         else:

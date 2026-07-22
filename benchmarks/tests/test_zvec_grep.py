@@ -18,6 +18,7 @@ class _InstallHarness(ZvecGrepMixin):
     def __init__(self, package: str = "@zvec/zvec-grep@0.1.5") -> None:
         self._zvec_grep_package = package
         self._zvec_binding_package = "@zvec/bindings-linux-x64@0.5.0"
+        self._zvec_grep_package_sha256: str | None = None
         self.agent_commands: list[str] = []
         self.root_commands: list[str] = []
 
@@ -72,6 +73,17 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("npm install -g", install_command)
         self.assertIn("--no-fund && reused=0", install_command)
         self.assertNotIn("--no-fund; reused=0", install_command)
+
+    async def test_local_package_reuses_only_matching_package_hash(self) -> None:
+        harness = _InstallHarness(package="/tmp/zg-bench-zvec-grep.tgz")
+        harness._zvec_grep_package_sha256 = "a" * 64
+
+        await harness._install_zvec_grep(object())
+
+        install_command = harness.agent_commands[0]
+        self.assertIn(".zg-bench-zvec-grep-sha256", install_command)
+        self.assertIn("a" * 64, install_command)
+        self.assertIn("npm install -g /tmp/zg-bench-zvec-grep.tgz", install_command)
 
 
 if __name__ == "__main__":

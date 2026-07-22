@@ -20,7 +20,9 @@ from .runner import (
     selected_profiles,
     uses_setup_cache,
     validate_profile_credentials,
+    zvec_grep_package_install_spec,
 )
+from .settings import ZVEC_GREP_PACKAGE
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the job name; profile names are appended when running all",
     )
     run.add_argument(
+        "--zvec-grep-package",
+        default=ZVEC_GREP_PACKAGE,
+        help=(
+            "zvec-grep npm spec, version, local directory, or .tgz "
+            f"(default: {ZVEC_GREP_PACKAGE})"
+        ),
+    )
+    run.add_argument(
         "--dry-run",
         action="store_true",
         help="print the Harbor command without running it",
@@ -71,7 +81,20 @@ def main(argv: list[str] | None = None) -> int:
         suite = load_suite(args.suite)
         profiles = selected_profiles(args.profile)
         run_id = new_run_id()
-        commands = [
+        run_specs = [
+            (
+                profile,
+                profile_job_name(
+                    suite,
+                    profile,
+                    run_id=run_id,
+                    override=args.job_name,
+                    paired=len(profiles) > 1,
+                ),
+            )
+            for profile in profiles
+        ]
+        dry_run_commands = [
             (
                 profile,
                 build_harbor_command(
@@ -80,16 +103,13 @@ def main(argv: list[str] | None = None) -> int:
                     agent=args.agent,
                     model=args.model,
                     jobs_dir=args.jobs_dir,
-                    job_name=profile_job_name(
-                        suite,
-                        profile,
-                        run_id=run_id,
-                        override=args.job_name,
-                        paired=len(profiles) > 1,
+                    job_name=job_name,
+                    zvec_grep_package=zvec_grep_package_install_spec(
+                        args.zvec_grep_package
                     ),
                 ),
             )
-            for profile in profiles
+            for profile, job_name in run_specs
         ]
         if not args.dry_run:
             validate_profile_credentials(
@@ -105,16 +125,40 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Profile: {args.profile}")
     print(f"Task:    {suite.task}")
     if args.dry_run:
-        for profile, command in commands:
+        for profile, command in dry_run_commands:
             print(f"{profile}: {shlex.join(command)}")
         return 0
 
     return_code = 0
     try:
-        for profile, command in commands:
+        for profile, job_name in run_specs:
             print(f"Starting profile: {profile}", flush=True)
+            prepared_cache = None
             if uses_setup_cache(args.agent):
-                prepare_setup_cache(args.agent, profile)
+                prepared_cache = prepare_setup_cache(
+                    args.agent,
+                    profile,
+                    zvec_grep_package=args.zvec_grep_package,
+                )
+            command = build_harbor_command(
+                suite,
+                profile=profile,
+                agent=args.agent,
+                model=args.model,
+                jobs_dir=args.jobs_dir,
+                job_name=job_name,
+                zvec_grep_package=(
+                    prepared_cache.zvec_grep_package
+                    if prepared_cache is not None
+                    and prepared_cache.zvec_grep_package is not None
+                    else zvec_grep_package_install_spec(args.zvec_grep_package)
+                ),
+                zvec_grep_package_sha256=(
+                    prepared_cache.zvec_grep_package_sha256
+                    if prepared_cache is not None
+                    else None
+                ),
+            )
             profile_return_code = execute(
                 command,
                 jobs_dir=args.jobs_dir,
