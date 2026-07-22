@@ -121,9 +121,7 @@ class ZvecGrepMixin:
             index_started = time.monotonic()
             index_result = await self.exec_as_agent(
                 environment,
-                command=(
-                    "zg index --embedding " f"{shlex.quote(self._embedding_model)}"
-                ),
+                command=self._index_command(self._embedding_model),
                 cwd=workdir,
             )
             metadata["index_duration_seconds"] = round(
@@ -366,6 +364,13 @@ class ZvecGrepMixin:
         if not separator or not name or not version:
             return None
         return version
+
+    @staticmethod
+    def _index_command(embedding_model: str) -> str:
+        return (
+            "zg index --embedding "
+            f"{shlex.quote(embedding_model)} --allow-remote once"
+        )
 
     async def _resolve_workdir(self, environment: BaseEnvironment) -> str:
         result = await environment.exec(command="pwd")

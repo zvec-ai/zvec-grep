@@ -47,6 +47,12 @@ class _InstallHarness(ZvecGrepMixin):
 
 
 class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
+    async def test_index_authorizes_remote_embedding_once(self) -> None:
+        self.assertEqual(
+            ZvecGrepMixin._index_command("qwen/text-embedding-v4"),
+            "zg index --embedding qwen/text-embedding-v4 --allow-remote once",
+        )
+
     async def test_bootstraps_node_before_installing_zvec_grep(self) -> None:
         harness = _InstallHarness()
 
