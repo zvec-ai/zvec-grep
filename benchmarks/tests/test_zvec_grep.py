@@ -68,6 +68,23 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_local_and_new_packages_use_machine_ready_checks(self) -> None:
+        self.assertTrue(
+            ZvecGrepMixin._supports_machine_ready_check(
+                "0.1.5", package_sha256="a" * 64
+            )
+        )
+        self.assertTrue(
+            ZvecGrepMixin._supports_machine_ready_check(
+                "0.1.6", package_sha256=None
+            )
+        )
+        self.assertFalse(
+            ZvecGrepMixin._supports_machine_ready_check(
+                "0.1.5", package_sha256=None
+            )
+        )
+
     async def test_bootstraps_node_before_installing_zvec_grep(self) -> None:
         harness = _InstallHarness()
 

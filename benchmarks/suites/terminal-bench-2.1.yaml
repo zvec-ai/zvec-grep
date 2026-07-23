@@ -4,3 +4,5 @@ tiers:
   smoke:
     tasks:
       - terminal-bench/regex-log
+  full:
+    all: true

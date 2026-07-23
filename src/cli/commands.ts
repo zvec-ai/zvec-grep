@@ -1048,7 +1048,11 @@ async function runServer(parsed: ParsedArgs): Promise<void> {
     return;
   }
   if (parsed.options.serverAction === "status") {
-    printServerControlStatus(await serverStatus(parsed.options.home));
+    const status = await serverStatus(parsed.options.home);
+    printServerControlStatus(status);
+    if (parsed.options.checkReady && !status.ready) {
+      throw new Error("zvec-grep server is not ready");
+    }
     return;
   }
 
@@ -1069,7 +1073,7 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
   }
 
   const mode = resolveClientMode(parsed.options.mode);
-  await routeByMode({
+  const state = await routeByMode({
     mode,
     serverAvailable: () => daemonIsReady(parsed.options.home),
     server: async () => {
@@ -1077,7 +1081,7 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
         "zvec_grep_index_status",
         { root: resolve(root) },
       );
-      printServerIndexInfo(
+      return printServerIndexInfo(
         result as Parameters<typeof printServerIndexInfo>[0],
         parsed.options,
       );
@@ -1087,12 +1091,18 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
         createServiceOptions(parsed.options, root),
       );
       try {
-        printAnonymousInfo(await zvecGrep.info({ root }), parsed.options);
+        return printAnonymousInfo(
+          await zvecGrep.info({ root }),
+          parsed.options,
+        );
       } finally {
         await zvecGrep.close();
       }
     },
   });
+  if (parsed.options.checkReady && state !== "ready") {
+    throw new Error(`Workspace index is not ready (state: ${state})`);
+  }
 }
 
 async function runCollections(parsed: ParsedArgs): Promise<void> {

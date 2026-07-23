@@ -225,6 +225,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.trace = true;
     } else if (arg === "--human") {
       options.human = true;
+    } else if (arg === "--check-ready") {
+      options.checkReady = true;
     } else if (isLongOptionWithValue(arg, "--preview")) {
       options.preview = parsePreviewMode(valueFromLongOption(arg));
     } else if (arg === "--preview") {
@@ -799,6 +801,15 @@ function validateCliShape(
     command !== "status"
   ) {
     throw new Error("--mode can only be used with query, index, or status");
+  }
+  if (
+    options.checkReady &&
+    command !== "status" &&
+    !(command === "server" && options.serverAction === "status")
+  ) {
+    throw new Error(
+      "--check-ready can only be used with zg status or zg server status",
+    );
   }
   if (options.listen !== undefined && command !== "server") {
     throw new Error("--listen can only be used with zg server on or run");

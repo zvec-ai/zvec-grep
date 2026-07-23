@@ -26,7 +26,7 @@ type StatusTheme = {
   muted(value: string): string;
 };
 
-type WorkspaceIndexState =
+export type WorkspaceIndexState =
   | "ready"
   | "indexing"
   | "stale"
@@ -262,18 +262,19 @@ export function printCollectionInfo(
 export function printAnonymousInfo(
   info: ZvecGrepInfoResult,
   options: CliOptions,
-): void {
+): WorkspaceIndexState {
   const theme = createStatusTheme(options);
   const status = info.status ?? undefined;
   const completion = indexCompletionFromStatus(status);
   const suggestion =
     status && statusNeedsRefresh(status) ? "zg index" : info.suggestion;
 
+  const state = anonymousState(info);
   printWorkspaceIndexStatus(theme, {
     root: info.root,
     indexPath: info.indexPath,
     policy: info.indexPolicy,
-    state: anonymousState(info),
+    state,
     embedding: info.collection?.embedding,
     roots: info.collection?.rootPaths,
     files: status
@@ -297,12 +298,13 @@ export function printAnonymousInfo(
       ? summarizeFailedFileReasons(status.failedFiles, "zg index")
       : undefined,
   });
+  return state;
 }
 
 export function printServerIndexInfo(
   info: ServerIndexInfo,
   options: CliOptions,
-): void {
+): WorkspaceIndexState {
   const theme = createStatusTheme(options);
   const state = serverIndexState(info);
   const embedding = info.persistent.collection?.embedding;
@@ -339,6 +341,7 @@ export function printServerIndexInfo(
     suggestion: info.persistent.suggestion,
     error: info.runtime?.error,
   });
+  return state;
 }
 
 function printWorkspaceIndexStatus(

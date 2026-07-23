@@ -156,6 +156,7 @@ test("server on, status and off are idempotent", async (t) => {
     cliPath,
     "server",
     "status",
+    "--check-ready",
     ...args,
   ]);
   assert.match(status.stdout, new RegExp(`127\\.0\\.0\\.1:${port}`));

@@ -30,6 +30,7 @@ export type CliOptions = {
   debug?: boolean;
   trace?: boolean;
   human?: boolean;
+  checkReady?: boolean;
   preview?: PreviewMode;
   color?: ColorMode;
   home?: string;

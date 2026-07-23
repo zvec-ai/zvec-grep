@@ -160,6 +160,15 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
   );
   assert.equal(parseArgs(["index", "--drop", "--yes"]).options.drop, true);
   assert.equal(parseArgs(["status"]).command, "status");
+  assert.equal(parseArgs(["status", "--check-ready"]).options.checkReady, true);
+  assert.equal(
+    parseArgs(["server", "status", "--check-ready"]).options.checkReady,
+    true,
+  );
+  assert.throws(
+    () => parseArgs(["query", "--check-ready", "query"]),
+    /zg status or zg server status/,
+  );
   assert.equal(parseArgs(["collections"]).command, "collections");
   assert.deepEqual(
     parseArgs([

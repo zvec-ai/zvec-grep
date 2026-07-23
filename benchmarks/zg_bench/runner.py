@@ -17,9 +17,11 @@ import yaml
 from .settings import (
     AGENT_SETUP_TIMEOUT_MULTIPLIER,
     CODEX_VERSION,
-    OPENCODE_ALIYUN_GLM_BASE_URL,
     OPENCODE_ALIYUN_GLM_MODEL,
     OPENCODE_ALIYUN_GLM_MODEL_ID,
+    OPENCODE_ALIYUN_QWEN_MODEL,
+    OPENCODE_ALIYUN_QWEN_MODEL_ID,
+    OPENCODE_DASHSCOPE_BASE_URL,
     OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
     OPENCODE_VERSION,
     QWEN_CODE_DASHSCOPE_BASE_URL,
@@ -72,8 +74,10 @@ _OPENCODE_ALIYUN_API_KEY_ENV_VARS = (
 
 Profile = Literal["baseline", "zvec-grep"]
 ProfileSelection = Literal["baseline", "zvec-grep", "all"]
+Tier = Literal["smoke", "ci", "full"]
 PROFILES: tuple[Profile, ...] = ("baseline", "zvec-grep")
 PROFILE_SELECTIONS: tuple[ProfileSelection, ...] = (*PROFILES, "all")
+TIERS: tuple[Tier, ...] = ("smoke", "ci", "full")
 
 
 class SuiteConfigError(ValueError):
@@ -81,10 +85,60 @@ class SuiteConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class SmokeSuite:
+class BenchmarkSuite:
     name: str
     dataset: str
-    task: str
+    tier: Tier
+    tasks: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
+class AgentModelSupport:
+    """An agent/model pair intentionally supported by this benchmark."""
+
+    agent: str
+    model: str
+    aliases: tuple[str, ...] = ()
+    configuration: str = "configured"
+
+    def matches(self, agent: str, model: str) -> bool:
+        return self.agent == agent and model in (self.model, *self.aliases)
+
+
+_CODEX_MODEL_SUPPORT = AgentModelSupport(
+    _CODEX_AGENT,
+    "*",
+    configuration="native passthrough",
+)
+_QWEN_CODE_MODEL_SUPPORT = AgentModelSupport(
+    _QWEN_CODE_AGENT,
+    QWEN_CODE_DASHSCOPE_MODEL,
+    aliases=(
+        f"dashscope/{QWEN_CODE_DASHSCOPE_MODEL}",
+        "qwen-3.7-max",
+        "dashscope/qwen-3.7-max",
+    ),
+)
+_OPENCODE_GLM_MODEL_SUPPORT = AgentModelSupport(
+    _OPENCODE_AGENT,
+    OPENCODE_ALIYUN_GLM_MODEL,
+    aliases=(
+        f"openai/{OPENCODE_ALIYUN_GLM_MODEL}",
+        f"dashscope/{OPENCODE_ALIYUN_GLM_MODEL}",
+    ),
+)
+_OPENCODE_QWEN_MODEL_SUPPORT = AgentModelSupport(
+    _OPENCODE_AGENT,
+    OPENCODE_ALIYUN_QWEN_MODEL,
+    aliases=(f"dashscope/{OPENCODE_ALIYUN_QWEN_MODEL}",),
+)
+AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
+    # Codex owns its model catalog and receives the selected model unchanged.
+    _CODEX_MODEL_SUPPORT,
+    _QWEN_CODE_MODEL_SUPPORT,
+    _OPENCODE_GLM_MODEL_SUPPORT,
+    _OPENCODE_QWEN_MODEL_SUPPORT,
+)
 
 
 @dataclass(frozen=True)
@@ -117,7 +171,12 @@ def _require_nonempty_string(value: Any, label: str) -> str:
     return value
 
 
-def load_suite(name_or_path: str | Path) -> SmokeSuite:
+def load_suite(
+    name_or_path: str | Path,
+    *,
+    tier: Tier = "smoke",
+    task_overrides: Sequence[str] | None = None,
+) -> BenchmarkSuite:
     candidate = Path(name_or_path)
     if candidate.suffix in {".yaml", ".yml"}:
         path = candidate
@@ -141,16 +200,50 @@ def load_suite(name_or_path: str | Path) -> SmokeSuite:
         raise SuiteConfigError("dataset must use a pinned Harbor revision")
 
     tiers = _require_mapping(root.get("tiers"), "tiers")
-    smoke = _require_mapping(tiers.get("smoke"), "tiers.smoke")
-    tasks = smoke.get("tasks")
-    if not isinstance(tasks, list) or len(tasks) != 1:
+    if tier not in TIERS:
+        raise SuiteConfigError(f"unsupported tier: {tier}")
+    if tier not in tiers:
+        available = ", ".join(name for name in TIERS if name in tiers) or "none"
+        raise SuiteConfigError(
+            f"tier {tier!r} is not configured for {name!r}; available: {available}"
+        )
+    selected = _require_mapping(tiers.get(tier), f"tiers.{tier}")
+    run_all = selected.get("all", False)
+    raw_tasks = selected.get("tasks")
+    if not isinstance(run_all, bool):
+        raise SuiteConfigError(f"tiers.{tier}.all must be a boolean")
+    if run_all and raw_tasks is not None:
+        raise SuiteConfigError(
+            f"tiers.{tier} cannot define both all: true and tasks"
+        )
+    if run_all:
+        tasks: tuple[str, ...] | None = None
+    else:
+        if not isinstance(raw_tasks, list) or not raw_tasks:
+            raise SuiteConfigError(
+                f"tiers.{tier} must contain tasks or set all: true"
+            )
+        tasks = tuple(
+            _require_nonempty_string(task, f"tiers.{tier}.tasks[{index}]")
+            for index, task in enumerate(raw_tasks)
+        )
+        if len(set(tasks)) != len(tasks):
+            raise SuiteConfigError(f"tiers.{tier}.tasks must not contain duplicates")
+    if tier == "smoke" and tasks is not None and len(tasks) != 1:
         raise SuiteConfigError("the smoke tier must contain exactly one task")
-    task = _require_nonempty_string(tasks[0], "tiers.smoke.tasks[0]")
+
+    if task_overrides:
+        tasks = tuple(
+            _require_nonempty_string(task, f"task override {index}")
+            for index, task in enumerate(task_overrides)
+        )
+        if len(set(tasks)) != len(tasks):
+            raise SuiteConfigError("task overrides must not contain duplicates")
 
     if path.parent == SUITES_DIR and name != path.stem:
         raise SuiteConfigError(f"suite name {name!r} must match filename {path.stem!r}")
 
-    return SmokeSuite(name=name, dataset=dataset, task=task)
+    return BenchmarkSuite(name=name, dataset=dataset, tier=tier, tasks=tasks)
 
 
 def new_run_id() -> str:
@@ -165,21 +258,57 @@ def selected_profiles(selection: ProfileSelection) -> tuple[Profile, ...]:
     return (selection,)
 
 
+def available_agent_models() -> tuple[AgentModelSupport, ...]:
+    return AGENT_MODEL_SUPPORT
+
+
+def resolve_agent_model(agent: str, model: str) -> AgentModelSupport:
+    agent = agent.strip()
+    model = model.strip()
+    if not agent:
+        raise ValueError("agent must not be empty")
+    if not model:
+        raise ValueError("model must not be empty")
+    agent_support = tuple(
+        support for support in AGENT_MODEL_SUPPORT if support.agent == agent
+    )
+    if not agent_support:
+        supported = ", ".join(
+            dict.fromkeys(support.agent for support in AGENT_MODEL_SUPPORT)
+        )
+        raise ValueError(
+            f"unsupported agent {agent!r}; supported agents: {supported}"
+        )
+
+    for support in agent_support:
+        if support.model == "*" or support.matches(agent, model):
+            return support
+
+    supported = ", ".join(support.model for support in agent_support)
+    raise ValueError(
+        f"unsupported model {model!r} for agent {agent!r}; "
+        f"supported models: {supported}"
+    )
+
+
 def _is_qwen_code_dashscope_model(agent: str, model: str) -> bool:
-    return agent == _QWEN_CODE_AGENT and model in {
-        QWEN_CODE_DASHSCOPE_MODEL,
-        f"dashscope/{QWEN_CODE_DASHSCOPE_MODEL}",
-        "qwen-3.7-max",
-        "dashscope/qwen-3.7-max",
-    }
+    return _QWEN_CODE_MODEL_SUPPORT.matches(agent, model)
 
 
 def _is_opencode_aliyun_glm_model(agent: str, model: str) -> bool:
-    return agent == _OPENCODE_AGENT and model in {
-        OPENCODE_ALIYUN_GLM_MODEL,
-        f"openai/{OPENCODE_ALIYUN_GLM_MODEL}",
-        f"dashscope/{OPENCODE_ALIYUN_GLM_MODEL}",
-    }
+    return _OPENCODE_GLM_MODEL_SUPPORT.matches(agent, model)
+
+
+def _is_opencode_aliyun_qwen_model(agent: str, model: str) -> bool:
+    return _OPENCODE_QWEN_MODEL_SUPPORT.matches(agent, model)
+
+
+def _opencode_dashscope_model_id(agent: str, model: str) -> str | None:
+    if _is_opencode_aliyun_glm_model(agent, model):
+        return OPENCODE_ALIYUN_GLM_MODEL_ID
+    if _is_opencode_aliyun_qwen_model(agent, model):
+        return OPENCODE_ALIYUN_QWEN_MODEL_ID
+    return None
 
 
 def _first_nonempty_env(names: Sequence[str]) -> tuple[str, str] | None:
@@ -193,6 +322,7 @@ def _first_nonempty_env(names: Sequence[str]) -> tuple[str, str] | None:
 def validate_profile_credentials(
     profiles: Sequence[Profile], *, agent: str, model: str
 ) -> None:
+    resolve_agent_model(agent, model)
     if _is_qwen_code_dashscope_model(agent, model):
         if _first_nonempty_env(_QWEN_CODE_API_KEY_ENV_VARS) is None:
             accepted = ", ".join(_QWEN_CODE_API_KEY_ENV_VARS)
@@ -201,11 +331,11 @@ def validate_profile_credentials(
                 f"export one of: {accepted}"
             )
 
-    if _is_opencode_aliyun_glm_model(agent, model):
+    if _opencode_dashscope_model_id(agent, model) is not None:
         if _first_nonempty_env(_OPENCODE_ALIYUN_API_KEY_ENV_VARS) is None:
             accepted = ", ".join(_OPENCODE_ALIYUN_API_KEY_ENV_VARS)
             raise ValueError(
-                f"{OPENCODE_ALIYUN_GLM_MODEL} requires a DashScope API key; "
+                f"{model} requires a DashScope API key; "
                 f"export one of: {accepted}"
             )
 
@@ -220,29 +350,80 @@ def validate_profile_credentials(
     )
 
 
+def validate_zvec_grep_package_compatibility(
+    profiles: Sequence[Profile], *, agent: str, zvec_grep_package: str
+) -> None:
+    if "zvec-grep" not in profiles:
+        return
+
+    normalized = normalize_zvec_grep_package(zvec_grep_package)
+    candidate = Path(normalized).expanduser()
+    if candidate.exists():
+        if candidate.is_dir() or (candidate.is_file() and candidate.suffix == ".tgz"):
+            return
+        raise ValueError(
+            "local zvec-grep package must be a directory or .tgz file: "
+            f"{candidate}"
+        )
+    if _looks_like_package_path(normalized):
+        raise ValueError(f"local zvec-grep package does not exist: {candidate}")
+    if agent != _OPENCODE_AGENT:
+        return
+
+    match = re.fullmatch(
+        r"@zvec/zvec-grep@v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?",
+        normalized,
+    )
+    if match is None:
+        return
+    version = tuple(int(part) for part in match.groups())
+    if version <= (0, 1, 5):
+        raise ValueError(
+            f"{normalized} does not support 'zg install --target opencode'; "
+            "use a newer published package or pass --zvec-grep-package .. "
+            "from the benchmarks directory"
+        )
+
+
+def validate_job_destinations(
+    jobs_dir: Path, run_specs: Sequence[tuple[Profile, str]]
+) -> None:
+    names = [job_name for _, job_name in run_specs]
+    if len(set(names)) != len(names):
+        raise ValueError("profile job names must be unique")
+    collisions = [jobs_dir / job_name for job_name in names if (jobs_dir / job_name).exists()]
+    if collisions:
+        paths = ", ".join(str(path.resolve()) for path in collisions)
+        raise ValueError(
+            f"job output already exists: {paths}; choose a new --job-name or "
+            "omit it to use a timestamped name"
+        )
+
+
 def execution_environment(*, agent: str, model: str) -> dict[str, str]:
     """Return Harbor's environment without placing credentials in its command."""
+    resolve_agent_model(agent, model)
     environment = os.environ.copy()
     if _is_qwen_code_dashscope_model(agent, model):
         credential = _first_nonempty_env(_QWEN_CODE_API_KEY_ENV_VARS)
         if credential is not None:
             _, api_key = credential
             environment["OPENAI_API_KEY"] = api_key
-    if _is_opencode_aliyun_glm_model(agent, model):
+    if _opencode_dashscope_model_id(agent, model) is not None:
         credential = _first_nonempty_env(_OPENCODE_ALIYUN_API_KEY_ENV_VARS)
         if credential is not None:
             _, api_key = credential
             environment["OPENAI_API_KEY"] = api_key
-        environment["OPENAI_BASE_URL"] = OPENCODE_ALIYUN_GLM_BASE_URL
+        environment["OPENAI_BASE_URL"] = OPENCODE_DASHSCOPE_BASE_URL
     return environment
 
 
-def default_job_name(suite: SmokeSuite, profile: Profile, *, run_id: str) -> str:
-    return f"{run_id}-{suite.name}-smoke-{profile}"
+def default_job_name(suite: BenchmarkSuite, profile: Profile, *, run_id: str) -> str:
+    return f"{run_id}-{suite.name}-{suite.tier}-{profile}"
 
 
 def profile_job_name(
-    suite: SmokeSuite,
+    suite: BenchmarkSuite,
     profile: Profile,
     *,
     run_id: str,
@@ -467,7 +648,7 @@ def prepare_setup_cache(
 
 
 def build_harbor_command(
-    suite: SmokeSuite,
+    suite: BenchmarkSuite,
     *,
     profile: Profile,
     agent: str,
@@ -480,10 +661,7 @@ def build_harbor_command(
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
-    if not agent.strip():
-        raise ValueError("agent must not be empty")
-    if not model.strip():
-        raise ValueError("model must not be empty")
+    resolve_agent_model(agent, model)
 
     harbor_agent = agent
     harbor_model = model
@@ -498,9 +676,10 @@ def build_harbor_command(
             harbor_model = QWEN_CODE_DASHSCOPE_MODEL
             agent_kwargs.append(f"base_url={QWEN_CODE_DASHSCOPE_BASE_URL}")
     elif agent == _OPENCODE_AGENT:
-        if _is_opencode_aliyun_glm_model(agent, model):
+        opencode_model_id = _opencode_dashscope_model_id(agent, model)
+        if opencode_model_id is not None:
             harbor_agent = OPENCODE_ACP_IMPORT_PATH
-            harbor_model = f"dashscope/{OPENCODE_ALIYUN_GLM_MODEL_ID}"
+            harbor_model = f"dashscope/{opencode_model_id}"
             agent_kwargs.append(
                 "registry_entry_path="
                 + str(OPENCODE_ACP_REGISTRY_ENTRY_PATH.resolve())
@@ -511,13 +690,13 @@ def build_harbor_command(
                         "npm": OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
                         "name": "DashScope OpenAI Compatible",
                         "models": {
-                            OPENCODE_ALIYUN_GLM_MODEL_ID: {
+                            opencode_model_id: {
                                 "options": {"enable_thinking": False}
                             }
                         },
                         "options": {
                             "apiKey": "{env:OPENAI_API_KEY}",
-                            "baseURL": OPENCODE_ALIYUN_GLM_BASE_URL,
+                            "baseURL": OPENCODE_DASHSCOPE_BASE_URL,
                         },
                     }
                 }
@@ -562,8 +741,6 @@ def build_harbor_command(
         "run",
         "--dataset",
         suite.dataset,
-        "--include-task-name",
-        suite.task,
         "--agent",
         harbor_agent,
         "--model",
@@ -582,6 +759,10 @@ def build_harbor_command(
         job_name,
     ]
 
+    if suite.tasks is not None:
+        for task in suite.tasks:
+            command.extend(["--include-task-name", task])
+
     if uses_setup_cache(agent):
         command.extend(
             [
@@ -593,7 +774,7 @@ def build_harbor_command(
 
     for agent_kwarg in agent_kwargs:
         command.extend(["--agent-kwarg", agent_kwarg])
-    if _is_opencode_aliyun_glm_model(agent, model):
+    if _opencode_dashscope_model_id(agent, model) is not None:
         command.extend(
             ["--agent-env", "OPENAI_API_KEY=${OPENAI_API_KEY}"]
         )

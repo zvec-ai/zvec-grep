@@ -103,10 +103,11 @@ class LocalPackageTests(unittest.TestCase):
 
     def test_harbor_command_installs_mounted_package_and_records_hash(self) -> None:
         digest = "c" * 64
-        suite = runner.SmokeSuite(
+        suite = runner.BenchmarkSuite(
             name="swebench-verified",
             dataset="swe-bench/swe-bench-verified@2",
-            task="swe-bench/pallets__flask-5014",
+            tier="smoke",
+            tasks=("swe-bench/pallets__flask-5014",),
         )
 
         command = runner.build_harbor_command(
@@ -123,6 +124,184 @@ class LocalPackageTests(unittest.TestCase):
             f"zvec_grep_package={runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET}", command
         )
         self.assertIn(f"zvec_grep_package_sha256={digest}", command)
+
+
+class RunValidationTests(unittest.TestCase):
+    def test_qwen_code_model_is_supported(self) -> None:
+        support = runner.resolve_agent_model("qwen-coder", "qwen3.7-max")
+
+        self.assertEqual(support.agent, "qwen-coder")
+        self.assertEqual(support.model, "qwen3.7-max")
+
+    def test_qwen_code_rejects_unconfigured_model(self) -> None:
+        with self.assertRaisesRegex(ValueError, "supported models: qwen3.7-max"):
+            runner.resolve_agent_model("qwen-coder", "qwen3.8")
+
+    def test_qwen_code_uses_harbor_agent_name(self) -> None:
+        suite = runner.load_suite("swebench-verified", tier="smoke")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="qwen-coder",
+            model="qwen3.7-max",
+            job_name="qwen-code-test",
+        )
+
+        agent_index = command.index("--agent")
+        model_index = command.index("--model")
+        self.assertEqual(command[agent_index + 1], "qwen-coder")
+        self.assertEqual(command[model_index + 1], "qwen3.7-max")
+        self.assertIn(
+            f"base_url={runner.QWEN_CODE_DASHSCOPE_BASE_URL}", command
+        )
+
+    def test_qwen_code_zvec_profile_uses_custom_adapter(self) -> None:
+        suite = runner.load_suite("swebench-verified", tier="smoke")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="zvec-grep",
+            agent="qwen-coder",
+            model="qwen3.7-max",
+            job_name="qwen-code-zvec-test",
+        )
+
+        agent_index = command.index("--agent")
+        self.assertEqual(
+            command[agent_index + 1], runner.ZVEC_QWEN_CODE_IMPORT_PATH
+        )
+        self.assertIn("--skill", command)
+
+    def test_qwen_code_dashscope_key_is_forwarded_as_openai_key(self) -> None:
+        with patch.dict(
+            runner.os.environ,
+            {"DASHSCOPE_API_KEY": "qwen-secret"},
+            clear=True,
+        ):
+            environment = runner.execution_environment(
+                agent="qwen-coder",
+                model="qwen3.7-max",
+            )
+
+        self.assertEqual(environment["OPENAI_API_KEY"], "qwen-secret")
+
+    def test_opencode_qwen_uses_dashscope_provider(self) -> None:
+        suite = runner.load_suite("swebench-verified", tier="smoke")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="qwen3.7-max",
+            job_name="opencode-qwen-test",
+        )
+
+        agent_index = command.index("--agent")
+        model_index = command.index("--model")
+        self.assertEqual(command[agent_index + 1], runner.OPENCODE_ACP_IMPORT_PATH)
+        self.assertEqual(command[model_index + 1], "dashscope/qwen3.7-max")
+
+        config_argument = next(
+            value for value in command if value.startswith("opencode_config=")
+        )
+        config = json.loads(config_argument.removeprefix("opencode_config="))
+        qwen = config["provider"]["dashscope"]["models"]["qwen3.7-max"]
+        self.assertEqual(qwen["options"]["enable_thinking"], False)
+        self.assertIn("OPENAI_API_KEY=${OPENAI_API_KEY}", command)
+
+        with patch.dict(
+            runner.os.environ,
+            {"DASHSCOPE_API_KEY": "opencode-qwen-secret"},
+            clear=True,
+        ):
+            environment = runner.execution_environment(
+                agent="opencode",
+                model="qwen3.7-max",
+            )
+        self.assertEqual(
+            environment["OPENAI_API_KEY"], "opencode-qwen-secret"
+        )
+        self.assertEqual(
+            environment["OPENAI_BASE_URL"], runner.OPENCODE_DASHSCOPE_BASE_URL
+        )
+
+    def test_opencode_rejects_published_package_without_installer(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not support"):
+            runner.validate_zvec_grep_package_compatibility(
+                ("zvec-grep",),
+                agent="opencode",
+                zvec_grep_package="0.1.5",
+            )
+
+    def test_opencode_accepts_local_package_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runner.validate_zvec_grep_package_compatibility(
+                ("zvec-grep",),
+                agent="opencode",
+                zvec_grep_package=temp_dir,
+            )
+
+    def test_missing_local_package_is_rejected_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "missing"
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                runner.validate_zvec_grep_package_compatibility(
+                    ("zvec-grep",),
+                    agent="opencode",
+                    zvec_grep_package=str(missing),
+                )
+
+    def test_existing_job_directory_is_rejected_before_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir)
+            (jobs_dir / "existing").mkdir()
+            with self.assertRaisesRegex(ValueError, "job output already exists"):
+                runner.validate_job_destinations(
+                    jobs_dir, (("baseline", "existing"),)
+                )
+
+
+class SuiteTierTests(unittest.TestCase):
+    def test_full_tier_runs_all_dataset_tasks(self) -> None:
+        suite = runner.load_suite("swebench-verified", tier="full")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="aliyun-glm-5.2",
+            job_name="full-test",
+        )
+
+        self.assertIsNone(suite.tasks)
+        self.assertNotIn("--include-task-name", command)
+
+    def test_task_overrides_are_forwarded_as_repeatable_filters(self) -> None:
+        suite = runner.load_suite(
+            "swebench-verified",
+            tier="smoke",
+            task_overrides=("org/task-one", "org/task-two"),
+        )
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="aliyun-glm-5.2",
+            job_name="tasks-test",
+        )
+
+        filters = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == "--include-task-name"
+        ]
+        self.assertEqual(filters, ["org/task-one", "org/task-two"])
+
+    def test_unconfigured_ci_tier_has_actionable_error(self) -> None:
+        with self.assertRaisesRegex(runner.SuiteConfigError, "available: smoke, full"):
+            runner.load_suite("swebench-verified", tier="ci")
 
 
 if __name__ == "__main__":

@@ -108,6 +108,13 @@ class ZvecGrepMixin:
             )
             metadata["zvec_grep_version"] = zvec_grep_version
             metadata["install_reused_cache"] = reused_install
+            supports_ready_check = self._supports_machine_ready_check(
+                zvec_grep_version,
+                package_sha256=self._zvec_grep_package_sha256,
+            )
+            metadata["ready_check"] = (
+                "machine" if supports_ready_check else "legacy-text"
+            )
             metadata["install_duration_seconds"] = round(
                 time.monotonic() - install_started, 3
             )
@@ -132,21 +139,32 @@ class ZvecGrepMixin:
 
             status_result = await self.exec_as_agent(
                 environment,
-                command="zg status",
+                command=(
+                    "zg status --check-ready"
+                    if supports_ready_check
+                    else "zg status"
+                ),
                 cwd=workdir,
             )
             metadata["index_status"] = self._bounded_output(status_result.stdout)
             metadata["index_status_stderr"] = self._bounded_output(
                 status_result.stderr
             )
-            if not self._index_is_ready(metadata["index_status"]):
+            if not supports_ready_check and not self._index_is_ready(
+                metadata["index_status"]
+            ):
                 raise RuntimeError(
                     "zvec-grep index setup completed but zg status did not "
                     "report state ready"
                 )
 
             if self._mcp_target is not None:
-                await self._setup_mcp(environment, workdir, metadata)
+                await self._setup_mcp(
+                    environment,
+                    workdir,
+                    metadata,
+                    supports_ready_check=supports_ready_check,
+                )
             metadata["status"] = "ready"
         except BaseException as error:
             metadata["status"] = "failed"
@@ -163,6 +181,8 @@ class ZvecGrepMixin:
         environment: BaseEnvironment,
         workdir: str,
         metadata: dict[str, Any],
+        *,
+        supports_ready_check: bool,
     ) -> None:
         assert self._mcp_target is not None
         mcp_started = time.monotonic()
@@ -181,14 +201,20 @@ class ZvecGrepMixin:
 
         server_status = await self.exec_as_agent(
             environment,
-            command="zg server status",
+            command=(
+                "zg server status --check-ready"
+                if supports_ready_check
+                else "zg server status"
+            ),
             cwd=workdir,
         )
         metadata["mcp_server_status"] = self._bounded_output(server_status.stdout)
         metadata["mcp_server_status_stderr"] = self._bounded_output(
             server_status.stderr
         )
-        if not self._mcp_server_is_ready(metadata["mcp_server_status"]):
+        if not supports_ready_check and not self._mcp_server_is_ready(
+            metadata["mcp_server_status"]
+        ):
             raise RuntimeError(
                 "zvec-grep MCP setup completed but the server did not report ready"
             )
@@ -364,6 +390,17 @@ class ZvecGrepMixin:
         if not separator or not name or not version:
             return None
         return version
+
+    @staticmethod
+    def _supports_machine_ready_check(
+        version: str, *, package_sha256: str | None
+    ) -> bool:
+        if package_sha256 is not None:
+            return True
+        match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", version)
+        if match is None:
+            return False
+        return tuple(int(part) for part in match.groups()) >= (0, 1, 6)
 
     @staticmethod
     def _index_command(embedding_model: str) -> str:

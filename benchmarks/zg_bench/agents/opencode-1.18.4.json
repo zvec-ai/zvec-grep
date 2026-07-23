@@ -5,18 +5,14 @@
   "description": "The open source coding agent",
   "repository": "https://github.com/anomalyco/opencode",
   "website": "https://opencode.ai",
-  "authors": [
-    "Anomaly"
-  ],
+  "authors": ["Anomaly"],
   "license": "MIT",
   "distribution": {
     "binary": {
       "linux-x86_64": {
         "archive": "https://github.com/anomalyco/opencode/releases/download/v1.18.4/opencode-linux-x64.tar.gz",
         "cmd": "./opencode",
-        "args": [
-          "acp"
-        ],
+        "args": ["acp"],
         "checksum": "bab463c3fb3224d388bb7cfad63f38703df9cf0be2cfd2ce8cb49d886b53a174"
       }
     }

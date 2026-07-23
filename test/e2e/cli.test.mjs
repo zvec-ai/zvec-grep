@@ -142,6 +142,14 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.doesNotMatch(stale.stdout, /RefreshedWorkflowSymbol/);
   assert.match(stale.stderr, /status: possibly_stale/);
   assert.match(stale.stderr, /indexing: idle \(0\/1\)/);
+  await assert.rejects(
+    runCli(["status", "--check-ready", root], { cwd: root, env }),
+    (error) => {
+      assert.match(error.stdout, /Workspace index needs an update/i);
+      assert.match(error.stderr, /state: stale/i);
+      return true;
+    },
+  );
 
   const background = await runCli(
     [
@@ -184,6 +192,11 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(status.stdout, /Coverage\s+.*100%\s+1 \/ 1 files/i);
   assert.match(status.stdout, /glob=src\/\*\*/);
   assert.match(status.stdout, /type=ts/);
+  const checkedStatus = await runCli(["status", "--check-ready", root], {
+    cwd: root,
+    env,
+  });
+  assert.match(checkedStatus.stdout, /Workspace index is ready/i);
 
   await writeFile(
     join(root, "outside.ts"),

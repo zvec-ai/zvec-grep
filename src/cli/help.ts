@@ -121,10 +121,13 @@ New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
 Existing indexes reuse their stored embedding schema.`;
     case "status":
       return `Usage:
-  zg status [root] [--mode <direct|server|auto>]
+  zg status [root] [--mode <direct|server|auto>] [--check-ready]
 
 Shows the nearest workspace root, index policy, index state, embedding schema,
-stored paths, refresh status, and suggested next action.`;
+stored paths, refresh status, and suggested next action.
+
+--check-ready preserves the normal output and exits non-zero unless the
+Workspace index is ready.`;
     case "collections":
       return `Usage:
   zg collections
@@ -159,11 +162,12 @@ execution. API credentials configure a provider but do not grant permission.`;
       return `Usage:
   zg server on [--listen 127.0.0.1:7999] [--token-file <path>]
   zg server off [--token-file <path>]
-  zg server status
+  zg server status [--check-ready]
   zg server run [--listen 127.0.0.1:7999] [--token-file <path>]
 
 The server listens on loopback. Authentication is disabled by default; pass a
-token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.`;
+token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
+--check-ready exits non-zero unless the server is ready.`;
     case "install":
       return `Usage:
   zg install [--target codex|claude|opencode|cursor|all|auto] [--yes] [--force]
