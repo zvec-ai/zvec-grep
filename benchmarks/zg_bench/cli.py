@@ -5,7 +5,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .diagnostics import format_job_diagnostics, latest_job
+from .diagnostics import format_job_diagnostics, job_has_exceptions, latest_job
 from .doctor import collect_checks, print_report, run_doctor
 from .runner import (
     DEFAULT_RUNS_DIR,
@@ -323,11 +323,15 @@ def main(argv: list[str] | None = None) -> int:
                     model=args.model,
                 ),
             )
-            if profile_return_code != 0 and return_code == 0:
-                return_code = profile_return_code
-            if profile_return_code != 0:
+            job_dir = args.jobs_dir / job_name
+            profile_failed = (
+                profile_return_code != 0 or job_has_exceptions(job_dir)
+            )
+            if profile_failed and return_code == 0:
+                return_code = profile_return_code or 1
+            if profile_failed:
                 print(
-                    format_job_diagnostics(args.jobs_dir / job_name),
+                    format_job_diagnostics(job_dir),
                     file=sys.stderr,
                     flush=True,
                 )

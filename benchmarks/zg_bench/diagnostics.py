@@ -14,6 +14,15 @@ def latest_job(jobs_dir: Path) -> Path | None:
     return max(jobs, key=lambda path: path.stat().st_mtime)
 
 
+def job_has_exceptions(job_dir: Path) -> bool:
+    if _exception_stats(_read_json(job_dir / "result.json")):
+        return True
+    return any(
+        _exception_info(_read_json(path))
+        for path in job_dir.glob("*/result.json")
+    )
+
+
 def format_job_diagnostics(job_dir: Path, *, max_trials: int = 3) -> str:
     job_dir = job_dir.resolve()
     lines = [f"Failure details: {job_dir}"]
@@ -33,10 +42,16 @@ def format_job_diagnostics(job_dir: Path, *, max_trials: int = 3) -> str:
         {path.parent for path in job_dir.glob("*/exception.txt")},
         key=lambda path: path.name,
     )
+    trial_result_files = sorted(job_dir.glob("*/result.json"))
+    exception_by_trial = {
+        path.parent: exception
+        for path in trial_result_files
+        if (exception := _exception_info(_read_json(path)))
+    }
     setup_files = sorted(job_dir.glob("*/agent/zvec-grep-setup.json"))
     setup_by_trial = {path.parents[1]: path for path in setup_files}
 
-    if not trial_dirs and not setup_files:
+    if not trial_dirs and not setup_files and not exception_by_trial:
         job_log = job_dir / "job.log"
         if job_log.is_file():
             lines.append("  Recent job log:")
@@ -46,7 +61,8 @@ def format_job_diagnostics(job_dir: Path, *, max_trials: int = 3) -> str:
         return "\n".join(lines)
 
     all_trials = sorted(
-        set(trial_dirs) | set(setup_by_trial), key=lambda path: path.name
+        set(trial_dirs) | set(setup_by_trial) | set(exception_by_trial),
+        key=lambda path: path.name,
     )
     for trial_dir in all_trials[:max_trials]:
         lines.append(f"  Trial: {trial_dir.name}")
@@ -64,8 +80,17 @@ def format_job_diagnostics(job_dir: Path, *, max_trials: int = 3) -> str:
                 if isinstance(error, str) and error.strip():
                     lines.extend(_indented_tail(error, 8, indent="      "))
 
-        exception_path = trial_dir / "exception.txt"
-        if exception_path.is_file():
+        exception = exception_by_trial.get(trial_dir)
+        if exception is not None:
+            exception_type = exception.get("exception_type", "unknown")
+            lines.append(f"    Exception: {exception_type}")
+            message = exception.get("exception_message")
+            if isinstance(message, str) and message.strip():
+                lines.extend(_indented_tail(message, 14, indent="      "))
+        else:
+            exception_path = trial_dir / "exception.txt"
+            if not exception_path.is_file():
+                continue
             lines.append("    Exception tail:")
             lines.extend(
                 _indented_tail(
@@ -108,6 +133,11 @@ def _exception_stats(result: dict[str, Any]) -> dict[str, int]:
             if isinstance(name, str) and isinstance(trials, list):
                 counts[name] = counts.get(name, 0) + len(trials)
     return counts
+
+
+def _exception_info(result: dict[str, Any]) -> dict[str, Any]:
+    exception = result.get("exception_info")
+    return exception if isinstance(exception, dict) and exception else {}
 
 
 def _indented_tail(

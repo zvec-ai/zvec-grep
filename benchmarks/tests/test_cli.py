@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from zg_bench.cli import build_parser, main
 
@@ -102,6 +106,74 @@ class CliTests(unittest.TestCase):
                     "--dry-run",
                 ]
             )
+
+    def test_trial_exception_is_printed_when_harbor_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jobs_dir = Path(temp_dir)
+
+            def fake_execute(*args: object, **kwargs: object) -> int:
+                job_dir = jobs_dir / "failed-job"
+                trial_dir = job_dir / "trial-one"
+                trial_dir.mkdir(parents=True)
+                (job_dir / "result.json").write_text(
+                    json.dumps(
+                        {
+                            "stats": {
+                                "evals": {
+                                    "eval": {
+                                        "exception_stats": {
+                                            "NonZeroAgentExitCodeError": ["trial-one"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (trial_dir / "result.json").write_text(
+                    json.dumps(
+                        {
+                            "exception_info": {
+                                "exception_type": "NonZeroAgentExitCodeError",
+                                "exception_message": "qwen exited with status 1",
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+
+            stderr = io.StringIO()
+            stdout = io.StringIO()
+            with (
+                patch("zg_bench.cli.collect_checks", return_value=[]),
+                patch("zg_bench.cli.print_report", return_value=0),
+                patch("zg_bench.cli.prepare_setup_cache", return_value=None),
+                patch("zg_bench.cli.execute", side_effect=fake_execute),
+                contextlib.redirect_stderr(stderr),
+                contextlib.redirect_stdout(stdout),
+            ):
+                return_code = main(
+                    [
+                        "run",
+                        "swebench-verified",
+                        "--agent",
+                        "opencode",
+                        "--model",
+                        "qwen3.7-max",
+                        "--profile",
+                        "baseline",
+                        "--jobs-dir",
+                        str(jobs_dir),
+                        "--job-name",
+                        "failed-job",
+                    ]
+                )
+
+            self.assertEqual(return_code, 1)
+            self.assertIn("Exception: NonZeroAgentExitCodeError", stderr.getvalue())
+            self.assertIn("qwen exited with status 1", stderr.getvalue())
 
 
 if __name__ == "__main__":

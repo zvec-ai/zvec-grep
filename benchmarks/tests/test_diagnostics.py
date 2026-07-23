@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from zg_bench.diagnostics import format_job_diagnostics, latest_job
+from zg_bench.diagnostics import (
+    format_job_diagnostics,
+    job_has_exceptions,
+    latest_job,
+)
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -64,6 +68,45 @@ class DiagnosticsTests(unittest.TestCase):
             os.utime(second, (2, 2))
 
             self.assertEqual(latest_job(jobs_dir), second)
+
+    def test_reads_exception_from_trial_result_without_exception_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir) / "job"
+            trial_dir = job_dir / "trial-one"
+            trial_dir.mkdir(parents=True)
+            (job_dir / "result.json").write_text(
+                json.dumps(
+                    {
+                        "stats": {
+                            "evals": {
+                                "eval": {
+                                    "exception_stats": {
+                                        "NonZeroAgentExitCodeError": ["trial-one"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (trial_dir / "result.json").write_text(
+                json.dumps(
+                    {
+                        "exception_info": {
+                            "exception_type": "NonZeroAgentExitCodeError",
+                            "exception_message": "qwen exited with status 1",
+                            "exception_traceback": "traceback",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(job_has_exceptions(job_dir))
+            report = format_job_diagnostics(job_dir)
+            self.assertIn("Exception: NonZeroAgentExitCodeError", report)
+            self.assertIn("qwen exited with status 1", report)
 
 
 if __name__ == "__main__":

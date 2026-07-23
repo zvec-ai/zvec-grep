@@ -330,8 +330,9 @@ and platform fixed across compared profiles.
 
 ### Diagnose a failed run
 
-When Harbor exits unsuccessfully, `zg-bench` now prints the exception tail and
-zvec-grep setup error automatically. The same report can be requested later:
+When a trial records an exception, even if Harbor itself exits successfully,
+`zg-bench` prints the structured exception and zvec-grep setup error
+automatically and exits non-zero. The same report can be requested later:
 
 ```sh
 uv run zg-bench diagnose --latest
