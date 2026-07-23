@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import { printError } from "../../dist/cli/errors.js";
 import {
@@ -19,6 +20,21 @@ import {
   printServerIndexInfo,
 } from "../../dist/cli/format/status.js";
 import { EngineError } from "../../dist/engine/errors/index.js";
+
+function progressBarGlyphs() {
+  return process.platform !== "win32" && process.env.TERM !== "linux"
+    ? { filled: "█", empty: "░" }
+    : { filled: "#", empty: "-" };
+}
+
+function progressBar(filled, empty = 0) {
+  const glyphs = progressBarGlyphs();
+  return `${glyphs.filled.repeat(filled)}${glyphs.empty.repeat(empty)}`;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 async function captureConsole(callback) {
   const logs = [];
@@ -465,7 +481,9 @@ test("status formatters cover collections, anonymous states, failures, filters, 
   assert.match(output.logs.join("\n"), /Default indexing skips/);
   assert.match(
     output.logs.join("\n"),
-    /◐ Workspace index is updating[\s\S]*Coverage\s+█{15}░{5}\s+75%\s+3 \/ 4 files/,
+    new RegExp(
+      `◐ Workspace index is updating[\\s\\S]*Coverage\\s+${progressBar(15, 5)}\\s+75%\\s+3 / 4 files`,
+    ),
   );
   assert.match(output.logs.join("\n"), /Error\s+MODEL_LOAD_FAILED/);
   assert.match(
@@ -566,14 +584,14 @@ test("workspace status uses a status-first grouped layout", async () => {
       "✓ Workspace index is ready",
       "  /repo",
       "",
-      "  Coverage    ████████████████████ 100%  1,132 / 1,132 files",
+      `  Coverage    ${progressBar(20)} 100%  1,132 / 1,132 files`,
       "  Entities    22,037",
       "  Queue       0 pending · 0 failed",
       "",
       "  Embedding   qwen/text-embedding-v4",
       "              16 dimensions · cosine",
       "",
-      "  Storage     .zvec-grep/index",
+      `  Storage     ${path.join(".zvec-grep", "index")}`,
     ]);
 
     const colored = await captureConsole(() =>
@@ -613,7 +631,12 @@ test("workspace status uses a status-first grouped layout", async () => {
     );
     const text = colored.logs.join("\n");
     assert.match(text, /\x1b\[31m✗ Workspace index failed/);
-    assert.match(text, /\x1b\[38;2;22;163;74m█/);
+    assert.match(
+      text,
+      new RegExp(
+        `\\x1b\\[38;2;22;163;74m${escapeRegExp(progressBarGlyphs().filled)}`,
+      ),
+    );
     assert.match(text, /\x1b\[33m1 pending/);
     assert.match(text, /\x1b\[31m1 failed/);
     assert.doesNotMatch(text, /policy|indexed\s+yes|source\s+index|home/);
@@ -664,7 +687,7 @@ test("server workspace status reports changed files as stale", async () => {
   assert.match(output.logs.join("\n"), /Workspace index needs an update/);
   assert.match(
     output.logs.join("\n"),
-    /Coverage\s+█{10}░{10}\s+50%\s+3 \/ 6 files/,
+    new RegExp(`Coverage\\s+${progressBar(10, 10)}\\s+50%\\s+3 / 6 files`),
   );
   assert.match(
     output.logs.join("\n"),
@@ -704,7 +727,7 @@ test("direct workspace status excludes changed files from coverage", async () =>
   assert.match(output.logs.join("\n"), /Workspace index needs an update/);
   assert.match(
     output.logs.join("\n"),
-    /Coverage\s+█{20}\s+99%\s+172 \/ 173 files/,
+    new RegExp(`Coverage\\s+${progressBar(20)}\\s+99%\\s+172 / 173 files`),
   );
   assert.doesNotMatch(output.logs.join("\n"), /100%\s+173 \/ 173 files/);
 });
@@ -750,7 +773,10 @@ test("server updating coverage uses the full configured scope", async () => {
   );
 
   const text = output.logs.join("\n");
-  assert.match(text, /Coverage\s+█{20}\s+98%\s+976 \/ 1,000 files/);
+  assert.match(
+    text,
+    new RegExp(`Coverage\\s+${progressBar(20)}\\s+98%\\s+976 / 1,000 files`),
+  );
   assert.doesNotMatch(text, /89 \/ 113 files/);
 });
 
@@ -790,7 +816,7 @@ test("Remote Embedding authorization status uses grouped colors and compact path
     "  Endpoint    dashscope.aliyuncs.com",
     "",
     "Storage",
-    "  Grant       .zvec-grep/authorization.json",
+    `  Grant       ${path.join(".zvec-grep", "authorization.json")}`,
   ]);
 
   const colored = await captureConsole(() =>
@@ -802,7 +828,12 @@ test("Remote Embedding authorization status uses grouped colors and compact path
   assert.match(coloredText, /\x1b\[32m✓ Remote Embedding is authorized/);
   assert.match(coloredText, /\x1b\[32mWorkspace/);
   assert.match(coloredText, /\x1b\[36m\/repo/);
-  assert.match(coloredText, /\x1b\[36m\.zvec-grep\/authorization\.json/);
+  assert.match(
+    coloredText,
+    new RegExp(
+      `\\x1b\\[36m${escapeRegExp(path.join(".zvec-grep", "authorization.json"))}`,
+    ),
+  );
 
   const missing = await captureConsole(() =>
     printRemoteEmbeddingAuthorizationStatus(
@@ -857,6 +888,7 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
   const originalTerm = process.env.TERM;
   const writes = [];
   let ttyStart;
+  let ttyProgressGlyphs;
   process.stderr.write = (value) => {
     writes.push(String(value));
     return true;
@@ -887,6 +919,7 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
 
     ttyStart = writes.length;
     process.env.TERM = "xterm-256color";
+    ttyProgressGlyphs = progressBarGlyphs();
     Object.defineProperty(process.stderr, "isTTY", {
       configurable: true,
       value: true,
@@ -933,8 +966,13 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
   assert.match(text, /Server index progress/);
   assert.match(ttyText, /\x1b\[\?25l/);
   assert.match(ttyText, /\r\x1b\[2K/);
-  assert.match(ttyText, /\x1b\[38;2;\d+;\d+;\d+m█/);
-  assert.match(ttyText, /░/);
+  assert.match(
+    ttyText,
+    new RegExp(
+      `\\x1b\\[38;2;\\d+;\\d+;\\d+m${escapeRegExp(ttyProgressGlyphs.filled)}`,
+    ),
+  );
+  assert.match(ttyText, new RegExp(escapeRegExp(ttyProgressGlyphs.empty)));
   assert.match(ttyText, /10%\s+1\/10\s+3 workers/);
   assert.match(ttyText, /100%\s+10\/10\s+3 workers/);
   assert.doesNotMatch(ttyText, /a long progress detail/);

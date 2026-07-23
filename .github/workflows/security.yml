@@ -11,9 +11,11 @@ permissions: {}
 
 jobs:
   dependency-review:
+    # Dependency review requires Dependency Graph. Keep it opt-in so
+    # repositories without that setting do not fail every pull request.
     if: >-
       github.event_name == 'pull_request' &&
-      (github.event.repository.visibility == 'public' || vars.ENABLE_GHAS == 'true')
+      vars.ENABLE_DEPENDENCY_REVIEW == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

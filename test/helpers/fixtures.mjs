@@ -8,10 +8,25 @@ const execFileAsync = promisify(execFile);
 
 export const cliPath = resolve("dist/cli/index.js");
 
-export async function createTemporaryDirectory(t, prefix = "zvec-grep-test-") {
+export async function createTemporaryDirectory(
+  t,
+  prefix = "zvec-grep-test-",
+  options = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), prefix));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  if (options.cleanup !== false) {
+    t.after(() => removeTemporaryDirectory(directory));
+  }
   return directory;
+}
+
+export async function removeTemporaryDirectory(directory) {
+  await rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
 }
 
 export async function runCli(args, options = {}) {

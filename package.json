@@ -46,7 +46,7 @@
     "test:e2e": "npm run build && node --test --test-concurrency=1 test/e2e/*.test.mjs",
     "test:integration": "npm run build && node --test --test-concurrency=1 test/*.test.mjs test/integration/*.test.mjs",
     "test:package": "npm run build && node --test --test-concurrency=1 test/package/*.test.mjs",
-    "test:unit": "npm run build && node --test test/unit/*.test.mjs",
+    "test:unit": "npm run build && node --test --test-concurrency=1 test/unit/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "workflow:check": "node scripts/check-workflows.mjs",
     "test": "npm run build && npm run test:all"

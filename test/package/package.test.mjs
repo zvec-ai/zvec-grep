@@ -71,11 +71,14 @@ test("npm package contains and exposes the supported public surface", async (t) 
     join(consumerDirectory, "package.json"),
     JSON.stringify({ private: true, type: "module" }),
   );
-  await runNpm(["install", "--no-audit", "--no-fund", tarball], {
-    cwd: consumerDirectory,
-    env: npmEnvironment,
-    timeout: 180_000,
-  });
+  await runNpm(
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+    {
+      cwd: consumerDirectory,
+      env: npmEnvironment,
+      timeout: 180_000,
+    },
+  );
 
   const packageJson = JSON.parse(
     await readFile(
