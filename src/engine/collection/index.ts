@@ -68,6 +68,7 @@ const FILES_ZVEC = "files.zvec";
 export class Collection {
   private readonly storage: CollectionStorage;
   private readonly embedding: CollectionEmbeddingSchema;
+  private closed = false;
 
   constructor(
     readonly info: CollectionInfo,
@@ -198,7 +199,12 @@ export class Collection {
   }
 
   close(): void {
+    if (this.closed) {
+      return;
+    }
+
     this.storage.close();
+    this.closed = true;
   }
 
   private validateIndexVersion(): void {
@@ -345,6 +351,7 @@ function requireIndexedEmbedding(
 export class CollectionRegistry {
   private readonly meta: ZvecCollectionsMetaStore;
   private readonly collections = new Map<string, Collection>();
+  private closed = false;
 
   constructor(
     readonly home: string = defaultHome(),
@@ -725,12 +732,17 @@ export class CollectionRegistry {
   }
 
   close(): void {
+    if (this.closed) {
+      return;
+    }
+
     for (const collection of this.collections.values()) {
       collection.close();
     }
 
     this.collections.clear();
     this.meta.close();
+    this.closed = true;
   }
 }
 

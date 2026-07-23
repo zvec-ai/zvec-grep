@@ -148,6 +148,7 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   }
 
   registry.close();
+  assert.doesNotThrow(() => registry.close());
   registry = undefined;
   readOnly = new CollectionRegistry(home, embedding, true);
   assert.ok(readOnly.list().length > 0);
@@ -164,4 +165,8 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   const readOnlyCollection = readOnly.open("renamed");
   assert.throws(() => readOnlyCollection.index(), /read-only/);
   readOnlyCollection.close();
+  assert.doesNotThrow(() => readOnlyCollection.close());
+  readOnly.close();
+  assert.doesNotThrow(() => readOnly.close());
+  readOnly = undefined;
 });
