@@ -20,6 +20,7 @@ from .runner import (
     load_suite,
     new_run_id,
     prepare_setup_cache,
+    prepare_suite_uv_archive,
     profile_job_name,
     resolve_agent_model,
     selected_profiles,
@@ -145,6 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "zvec-grep npm spec, version, local directory, or .tgz "
             f"(default: {ZVEC_GREP_PACKAGE})"
+        ),
+    )
+    run.add_argument(
+        "--uv-archive",
+        type=Path,
+        help=(
+            "pre-downloaded uv 0.7.13 x86_64 release tar.gz; selected task "
+            "Dockerfiles use it instead of downloading uv during image builds"
         ),
     )
     run.add_argument(
@@ -287,6 +296,14 @@ def main(argv: list[str] | None = None) -> int:
 
     return_code = 0
     try:
+        prepared_uv_tasks = None
+        if args.uv_archive is not None:
+            prepared_uv_tasks = prepare_suite_uv_archive(suite, args.uv_archive)
+            print(
+                "Prepared local uv archive for "
+                f"{prepared_uv_tasks.task_count} task image(s)",
+                flush=True,
+            )
         for profile, job_name in run_specs:
             print(f"Starting profile: {profile}", flush=True)
             prepared_cache = None
@@ -314,6 +331,11 @@ def main(argv: list[str] | None = None) -> int:
                     if prepared_cache is not None
                     else None
                 ),
+                task_dataset_path=(
+                    prepared_uv_tasks.dataset_path
+                    if prepared_uv_tasks is not None
+                    else None
+                ),
             )
             profile_return_code = execute(
                 command,
@@ -335,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                     flush=True,
                 )
-    except (FileNotFoundError, RuntimeError) as error:
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
         raise SystemExit(
             "error: benchmark setup failed; run 'zg-bench doctor' to check the "
             f"setup ({error})"

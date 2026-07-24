@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,9 +26,11 @@ from .settings import (
     OPENCODE_DASHSCOPE_BASE_URL,
     OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
     OPENCODE_VERSION,
+    PIP_INDEX_URL,
     QWEN_CODE_DASHSCOPE_BASE_URL,
     QWEN_CODE_DASHSCOPE_MODEL,
     QWEN_CODE_VERSION,
+    UV_VERSION,
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
     ZVEC_GREP_EMBEDDING,
@@ -51,7 +55,9 @@ OPENCODE_ACP_REGISTRY_ENTRY_PATH = (
 SETUP_CACHE_DIR = BENCHMARKS_DIR / ".cache" / "agent-setup"
 LOCAL_PACKAGE_DIR = SETUP_CACHE_DIR / "local-package"
 LOCAL_NPM_CACHE_DIR = SETUP_CACHE_DIR / "npm-cache"
+LOCAL_UV_TASKS_DIR = SETUP_CACHE_DIR / "uv-tasks"
 LOCAL_ZVEC_GREP_PACKAGE_TARGET = "/tmp/zg-bench-zvec-grep.tgz"
+LOCAL_UV_ARCHIVE_NAME = "zg-bench-uv.tar.gz"
 _SETUP_CACHE_TARGET = "/root/.nvm"
 _CODEX_AGENT = "codex"
 _QWEN_CODE_AGENT = "qwen-coder"
@@ -90,6 +96,12 @@ class BenchmarkSuite:
     dataset: str
     tier: Tier
     tasks: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
+class PreparedUvTasks:
+    dataset_path: Path
+    task_count: int
 
 
 @dataclass(frozen=True)
@@ -473,6 +485,158 @@ def setup_cache_compose_path(agent: str, profile: Profile) -> Path:
     return SETUP_CACHE_DIR / f"{_cache_slug(agent)}-{profile}.compose.json"
 
 
+def validate_uv_archive(archive: Path) -> Path:
+    """Validate an official-style uv release archive before using it in builds."""
+    archive = archive.expanduser().resolve()
+    if not archive.is_file():
+        raise ValueError(f"uv archive does not exist: {archive}")
+
+    try:
+        with tarfile.open(archive, "r:gz") as contents:
+            members = contents.getmembers()
+    except (tarfile.TarError, OSError) as error:
+        raise ValueError(
+            f"uv archive is not a readable tar.gz file: {archive}"
+        ) from error
+
+    unsafe = [
+        member.name
+        for member in members
+        if Path(member.name).is_absolute() or ".." in Path(member.name).parts
+    ]
+    if unsafe:
+        raise ValueError(f"uv archive contains an unsafe path: {unsafe[0]}")
+
+    binary_members = [
+        member
+        for member in members
+        if member.isfile() and Path(member.name).name in {"uv", "uvx"}
+    ]
+    binaries = {Path(member.name).name for member in binary_members}
+    missing = sorted({"uv", "uvx"} - binaries)
+    if missing:
+        raise ValueError(
+            f"uv archive is missing required binary: {', '.join(missing)}"
+        )
+    binary_paths = [Path(member.name).parts for member in binary_members]
+    if any(len(parts) != 2 for parts in binary_paths) or len(
+        {parts[0] for parts in binary_paths}
+    ) != 1:
+        raise ValueError(
+            "uv archive must contain uv and uvx under one top-level directory"
+        )
+    return archive
+
+
+def patch_task_uv_install(task_dir: Path, archive: Path) -> bool:
+    """Replace Harbor's online uv install layer with a local release archive."""
+    archive = validate_uv_archive(archive)
+    environment_dir = task_dir / "environment"
+    dockerfile = environment_dir / "Dockerfile"
+    if not dockerfile.is_file():
+        return False
+
+    online_install = (
+        f"RUN curl -LsSf https://astral.sh/uv/{UV_VERSION}/install.sh | sh"
+    )
+    local_install = (
+        f"COPY {LOCAL_UV_ARCHIVE_NAME} /tmp/{LOCAL_UV_ARCHIVE_NAME}\n"
+        "RUN mkdir -p /tmp/zg-bench-uv \\\n"
+        f"    && tar -xzf /tmp/{LOCAL_UV_ARCHIVE_NAME} "
+        "-C /tmp/zg-bench-uv --strip-components=1 --no-same-owner \\\n"
+        "    && install -m 0755 /tmp/zg-bench-uv/uv /usr/local/bin/uv \\\n"
+        "    && install -m 0755 /tmp/zg-bench-uv/uvx /usr/local/bin/uvx \\\n"
+        f"    && rm -rf /tmp/zg-bench-uv /tmp/{LOCAL_UV_ARCHIVE_NAME}"
+    )
+    contents = dockerfile.read_text(encoding="utf-8")
+    if online_install in contents:
+        dockerfile.write_text(
+            contents.replace(online_install, local_install, 1),
+            encoding="utf-8",
+        )
+    elif f"COPY {LOCAL_UV_ARCHIVE_NAME} " not in contents:
+        return False
+
+    shutil.copy2(archive, environment_dir / LOCAL_UV_ARCHIVE_NAME)
+    return True
+
+
+async def _download_suite_task_paths(
+    suite: BenchmarkSuite,
+) -> tuple[tuple[str, Path], ...]:
+    """Resolve and cache the same task packages selected by the Harbor command."""
+    from harbor.models.job.config import DatasetConfig
+    from harbor.tasks.client import TaskClient
+
+    if "@" in suite.dataset:
+        dataset_name, dataset_ref = suite.dataset.split("@", 1)
+    else:
+        dataset_name, dataset_ref = suite.dataset, "latest"
+    dataset = DatasetConfig(
+        name=dataset_name,
+        ref=dataset_ref,
+        task_names=list(suite.tasks) if suite.tasks is not None else None,
+    )
+    task_configs = await dataset.get_task_configs()
+    task_ids = [config.get_task_id() for config in task_configs]
+    result = await TaskClient().download_tasks(
+        task_ids
+    )
+    return tuple(
+        (task_id.get_name(), path)
+        for task_id, path in zip(task_ids, result.paths, strict=True)
+    )
+
+
+def prepare_suite_uv_archive(
+    suite: BenchmarkSuite, archive: Path
+) -> PreparedUvTasks:
+    """Cache selected tasks and make their Docker builds use a local uv archive."""
+    archive = validate_uv_archive(archive)
+    try:
+        downloaded_tasks = asyncio.run(_download_suite_task_paths(suite))
+    except Exception as error:
+        raise RuntimeError("could not cache the selected Harbor tasks") from error
+
+    with archive.open("rb") as archive_file:
+        archive_digest = hashlib.file_digest(archive_file, "sha256").hexdigest()
+    cache_identity = json.dumps(
+        {
+            "dataset": suite.dataset,
+            "tasks": suite.tasks,
+            "uv_archive_sha256": archive_digest,
+        },
+        sort_keys=True,
+    ).encode()
+    cache_digest = hashlib.sha256(cache_identity).hexdigest()[:16]
+    dataset_path = LOCAL_UV_TASKS_DIR / cache_digest
+    dataset_path.mkdir(parents=True, exist_ok=True)
+
+    missed_tasks: list[str] = []
+    local_names: set[str] = set()
+    for task_name, task_path in downloaded_tasks:
+        local_name = task_name.rsplit("/", 1)[-1]
+        if local_name in local_names:
+            raise RuntimeError(
+                f"selected tasks have duplicate local name: {local_name}"
+            )
+        local_names.add(local_name)
+        local_task_path = dataset_path / local_name
+        shutil.copytree(task_path, local_task_path, dirs_exist_ok=True)
+        if not patch_task_uv_install(local_task_path, archive):
+            missed_tasks.append(task_name)
+
+    if missed_tasks:
+        names = ", ".join(missed_tasks)
+        raise RuntimeError(
+            f"could not replace Harbor's uv {UV_VERSION} install layer in: {names}"
+        )
+    return PreparedUvTasks(
+        dataset_path=dataset_path.resolve(),
+        task_count=len(downloaded_tasks),
+    )
+
+
 def _cache_local_package(package: Path) -> tuple[Path, str]:
     with package.open("rb") as package_file:
         digest = hashlib.file_digest(package_file, "sha256").hexdigest()
@@ -602,6 +766,9 @@ def prepare_setup_cache(
     overlay = {
         "services": {
             "main": {
+                "environment": {
+                    "PIP_INDEX_URL": PIP_INDEX_URL,
+                },
                 "platform": "linux/amd64",
                 "volumes": service_volumes,
             }
@@ -656,6 +823,7 @@ def build_harbor_command(
     harbor_executable: str = "harbor",
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     zvec_grep_package_sha256: str | None = None,
+    task_dataset_path: Path | None = None,
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
@@ -737,27 +905,33 @@ def build_harbor_command(
     command = [
         harbor_executable,
         "run",
-        "--dataset",
-        suite.dataset,
-        "--agent",
-        harbor_agent,
-        "--model",
-        harbor_model,
-        "--env",
-        "docker",
-        "--n-attempts",
-        "1",
-        "--n-concurrent",
-        "1",
-        "--agent-setup-timeout-multiplier",
-        AGENT_SETUP_TIMEOUT_MULTIPLIER,
-        "--jobs-dir",
-        str(jobs_dir.resolve()),
-        "--job-name",
-        job_name,
     ]
+    if task_dataset_path is None:
+        command.extend(["--dataset", suite.dataset])
+    else:
+        command.extend(["--path", str(task_dataset_path.resolve())])
+    command.extend(
+        [
+            "--agent",
+            harbor_agent,
+            "--model",
+            harbor_model,
+            "--env",
+            "docker",
+            "--n-attempts",
+            "1",
+            "--n-concurrent",
+            "1",
+            "--agent-setup-timeout-multiplier",
+            AGENT_SETUP_TIMEOUT_MULTIPLIER,
+            "--jobs-dir",
+            str(jobs_dir.resolve()),
+            "--job-name",
+            job_name,
+        ]
+    )
 
-    if suite.tasks is not None:
+    if task_dataset_path is None and suite.tasks is not None:
         for task in suite.tasks:
             command.extend(["--include-task-name", task])
 

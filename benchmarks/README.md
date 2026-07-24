@@ -114,6 +114,33 @@ uv run zg-bench doctor \
 command is useful while preparing a machine because it stops before packaging
 or creating any Docker resources.
 
+SWE-bench task images install `uv 0.7.13` while Docker builds them. If GitHub is
+unavailable from the Docker build network, download the Linux x86-64 release
+archive once on a machine with access:
+
+```sh
+curl -L \
+  https://github.com/astral-sh/uv/releases/download/0.7.13/uv-x86_64-unknown-linux-gnu.tar.gz \
+  -o .cache/uv-x86_64-unknown-linux-gnu.tar.gz
+```
+
+Then pass it to the benchmark run:
+
+```sh
+uv run zg-bench run swebench-verified \
+  --tier smoke \
+  --agent opencode \
+  --model aliyun-glm-5.2 \
+  --profile all \
+  --uv-archive .cache/uv-x86_64-unknown-linux-gnu.tar.gz
+```
+
+The runner resolves the selected Harbor tasks, creates an isolated task copy
+under `benchmarks/.cache/agent-setup/uv-tasks`, copies the archive into each
+Docker build context, and replaces the online installer layer with a local
+`COPY` and install step. Harbor's global content-addressed task cache is left
+unchanged. The archive must contain both `uv` and `uvx`.
+
 ### Ubuntu 24.04 OpenCode + GLM-5.2 quickstart
 
 From the repository root:
@@ -253,7 +280,9 @@ through to Codex's native model catalog.
 
 The first run may take several minutes while Docker downloads and builds the
 task image and prepares the agent environment. This is expected. By default,
-the zvec-grep profile installs the pinned npm package. Pass
+the generated Compose overlay sets `PIP_INDEX_URL` to the USTC PyPI mirror for
+pip commands executed inside the task container. The zvec-grep profile installs
+the pinned npm package. Pass
 `--zvec-grep-package <version-or-npm-spec>` to select another published package,
 or `--zvec-grep-package <directory-or-tgz>` to test local code. Local directories
 are packaged with `npm pack`, and only the resulting tarball is mounted into the

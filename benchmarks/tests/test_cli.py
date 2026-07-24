@@ -105,6 +105,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.agent, "opencode")
         self.assertEqual(args.model, "qwen3.7-max")
 
+    def test_accepts_pre_downloaded_uv_archive(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "swebench-verified",
+                "--agent",
+                "opencode",
+                "--model",
+                "qwen3.7-max",
+                "--uv-archive",
+                "/tmp/uv.tar.gz",
+            ]
+        )
+
+        self.assertEqual(args.uv_archive, Path("/tmp/uv.tar.gz"))
+
     def test_legacy_package_fails_before_harbor(self) -> None:
         with self.assertRaisesRegex(SystemExit, "does not support"):
             main(

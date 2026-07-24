@@ -1,14 +1,134 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from zg_bench import runner
+
+
+def _write_uv_archive(path: Path) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        for name in ("uv", "uvx"):
+            contents = f"{name} binary".encode()
+            info = tarfile.TarInfo(f"uv-x86_64-unknown-linux-gnu/{name}")
+            info.size = len(contents)
+            info.mode = 0o755
+            archive.addfile(info, io.BytesIO(contents))
+
+
+class UvArchiveTests(unittest.TestCase):
+    def test_patches_swebench_dockerfile_to_install_local_uv_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_dir = Path(temp_dir) / "task"
+            environment_dir = task_dir / "environment"
+            environment_dir.mkdir(parents=True)
+            dockerfile = environment_dir / "Dockerfile"
+            dockerfile.write_text(
+                "FROM example\n"
+                "WORKDIR /testbed\n"
+                "RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh\n"
+                "RUN mkdir -p /logs\n"
+            )
+            archive = Path(temp_dir) / "uv.tar.gz"
+            _write_uv_archive(archive)
+
+            patched = runner.patch_task_uv_install(task_dir, archive)
+
+            self.assertTrue(patched)
+            contents = dockerfile.read_text()
+            self.assertNotIn("curl -LsSf https://astral.sh/uv", contents)
+            self.assertIn("COPY zg-bench-uv.tar.gz", contents)
+            self.assertIn("--no-same-owner", contents)
+            self.assertIn("/usr/local/bin/uv", contents)
+            self.assertEqual(
+                (environment_dir / "zg-bench-uv.tar.gz").read_bytes(),
+                archive.read_bytes(),
+            )
+
+    def test_rejects_archive_without_uvx(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "uv.tar.gz"
+            with tarfile.open(archive, "w:gz") as contents:
+                data = b"uv binary"
+                info = tarfile.TarInfo("uv-x86_64-unknown-linux-gnu/uv")
+                info.size = len(data)
+                contents.addfile(info, io.BytesIO(data))
+
+            with self.assertRaisesRegex(ValueError, "uvx"):
+                runner.validate_uv_archive(archive)
+
+    def test_prepares_isolated_local_dataset_without_modifying_harbor_cache(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            harbor_task = root / "harbor-cache" / "digest"
+            environment_dir = harbor_task / "environment"
+            environment_dir.mkdir(parents=True)
+            original = (
+                "FROM example\n"
+                "RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh\n"
+            )
+            (environment_dir / "Dockerfile").write_text(original)
+            archive = root / "uv.tar.gz"
+            _write_uv_archive(archive)
+            suite = runner.BenchmarkSuite(
+                name="suite",
+                dataset="swe-bench/suite@2",
+                tier="smoke",
+                tasks=("swe-bench/example",),
+            )
+
+            with (
+                patch.object(runner, "LOCAL_UV_TASKS_DIR", root / "local-tasks"),
+                patch.object(
+                    runner,
+                    "_download_suite_task_paths",
+                    new=AsyncMock(
+                        return_value=(("swe-bench/example", harbor_task),)
+                    ),
+                ),
+            ):
+                prepared = runner.prepare_suite_uv_archive(suite, archive)
+
+            self.assertEqual(
+                (environment_dir / "Dockerfile").read_text(),
+                original,
+            )
+            local_dockerfile = (
+                prepared.dataset_path / "example" / "environment" / "Dockerfile"
+            )
+            self.assertIn("COPY zg-bench-uv.tar.gz", local_dockerfile.read_text())
+            self.assertEqual(prepared.task_count, 1)
+
+    def test_harbor_command_uses_prepared_local_dataset(self) -> None:
+        suite = runner.BenchmarkSuite(
+            name="suite",
+            dataset="swe-bench/suite@2",
+            tier="smoke",
+            tasks=("swe-bench/example",),
+        )
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="qwen3.7-max",
+            job_name="local-uv-test",
+            task_dataset_path=Path("/tmp/local-swebench"),
+        )
+
+        self.assertIn("--path", command)
+        self.assertIn("/tmp/local-swebench", command)
+        self.assertNotIn("--dataset", command)
+        self.assertNotIn("--include-task-name", command)
 
 
 class LocalPackageTests(unittest.TestCase):
@@ -74,6 +194,10 @@ class LocalPackageTests(unittest.TestCase):
                 )
 
             overlay = json.loads(prepared.compose_path.read_text())
+            self.assertEqual(
+                overlay["services"]["main"]["environment"]["PIP_INDEX_URL"],
+                runner.PIP_INDEX_URL,
+            )
             service_volumes = overlay["services"]["main"]["volumes"]
             self.assertEqual(
                 service_volumes[1],
