@@ -243,6 +243,7 @@ tasks selected by a tier:
 uv run zg-bench list agent-models
 uv run zg-bench list suites
 uv run zg-bench list tasks swebench-verified --tier smoke
+uv run zg-bench list tasks django-focused --tier full
 ```
 
 `run` and run-specific `doctor` commands reject unknown agents and unsupported
@@ -318,6 +319,20 @@ uv run zg-bench run swebench-verified \
 The CLI supports CI tiers, but a suite must define its curated task list first.
 The current built-in suites do not yet define one; attempting to run it reports
 the configured tiers instead of silently substituting smoke tasks.
+
+### Run the focused Django suite
+
+The `django-focused` suite contains five curated SWE-bench Verified tasks
+covering query compilation, fast deletion, form data flow, constraint
+validation, and the middleware response chain. Run the complete group with:
+
+```sh
+uv run zg-bench run django-focused \
+  --tier full --agent <agent> --model <provider/model>
+```
+
+Add `--profile baseline` or `--profile zvec-grep` to run only one tool profile.
+Use `list tasks` as shown above to inspect the exact task names before a run.
 
 ### Run the full benchmark
 

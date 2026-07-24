@@ -42,6 +42,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(return_code, 0)
         self.assertIn("swe-bench/pallets__flask-5014", output.getvalue())
 
+    def test_lists_django_focused_tasks(self) -> None:
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            return_code = main(
+                ["list", "tasks", "django-focused", "--tier", "full"]
+            )
+
+        self.assertEqual(return_code, 0)
+        listing = output.getvalue()
+        self.assertIn("Tasks: 5", listing)
+        self.assertIn("swe-bench/django__django-11734", listing)
+        self.assertIn("swe-bench/django__django-13344", listing)
+
     def test_lists_supported_agent_models(self) -> None:
         output = io.StringIO()
 

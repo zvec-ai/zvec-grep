@@ -304,6 +304,20 @@ class SuiteTierTests(unittest.TestCase):
         ]
         self.assertEqual(filters, ["org/task-one", "org/task-two"])
 
+    def test_django_focused_full_tier_selects_curated_tasks(self) -> None:
+        suite = runner.load_suite("django-focused", tier="full")
+
+        self.assertEqual(
+            suite.tasks,
+            (
+                "swe-bench/django__django-11734",
+                "swe-bench/django__django-11885",
+                "swe-bench/django__django-14631",
+                "swe-bench/django__django-16560",
+                "swe-bench/django__django-13344",
+            ),
+        )
+
     def test_unconfigured_ci_tier_has_actionable_error(self) -> None:
         with self.assertRaisesRegex(runner.SuiteConfigError, "available: smoke, full"):
             runner.load_suite("swebench-verified", tier="ci")
