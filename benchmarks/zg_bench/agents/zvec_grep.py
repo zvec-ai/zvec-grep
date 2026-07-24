@@ -24,6 +24,8 @@ from ..settings import (
 _SETUP_METADATA_FILENAME = "zvec-grep-setup.json"
 _MAX_METADATA_OUTPUT_CHARS = 20_000
 _NVM_INIT = 'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi;'
+_NVM_NODEJS_ORG_MIRROR = "https://npmmirror.com/mirrors/node"
+_NPM_CONFIG_REGISTRY = "https://registry.npmmirror.com"
 
 
 class ZvecGrepMixin:
@@ -286,6 +288,10 @@ class ZvecGrepMixin:
             environment,
             command=(
                 "set -e; "
+                "export NVM_NODEJS_ORG_MIRROR="
+                f"{shlex.quote(_NVM_NODEJS_ORG_MIRROR)}; "
+                "export NPM_CONFIG_REGISTRY="
+                f"{shlex.quote(_NPM_CONFIG_REGISTRY)}; "
                 f"{ensure_node_command}; "
                 f"{install_command}; "
                 "printf '\\nZG_INSTALL_REUSED=%s\\nZG_NODE_PATH=%s\\n"

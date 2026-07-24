@@ -112,6 +112,29 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(version, "0.1.5")
         self.assertFalse(reused)
 
+    async def test_uses_mirrors_for_node_and_npm_installation(self) -> None:
+        harness = _InstallHarness()
+
+        await harness._install_zvec_grep(object())
+
+        install_command = harness.agent_commands[0]
+        self.assertIn(
+            "export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node",
+            install_command,
+        )
+        self.assertIn(
+            "export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com",
+            install_command,
+        )
+        self.assertLess(
+            install_command.index("export NVM_NODEJS_ORG_MIRROR"),
+            install_command.index("nvm install 22"),
+        )
+        self.assertLess(
+            install_command.index("export NPM_CONFIG_REGISTRY"),
+            install_command.index("npm install -g"),
+        )
+
     async def test_npm_failure_cannot_be_masked_by_marker_output(self) -> None:
         harness = _InstallHarness(package="@zvec/zvec-grep")
 
