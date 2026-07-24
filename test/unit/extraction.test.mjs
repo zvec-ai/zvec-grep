@@ -238,6 +238,33 @@ test("code extractor parses TypeScript and script blocks", async () => {
   assert.ok(defaults.length > 0);
 });
 
+test("code extractor applies character limits to oversized single lines", async () => {
+  const maxChunkChars = 48;
+  const extractor = new CodeExtractor({
+    maxChunkChars,
+    chunkOverlapChars: 6,
+  });
+  const source = textSource(
+    `export function f() { return "${"value".repeat(40)}"; }`,
+    { kind: "code", format: "typescript", relativePath: "fixture.ts" },
+  );
+
+  const fragments = (await extractor.extract(source)).filter(
+    (fragment) => fragment.metadata?.symbolName === "f",
+  );
+  assert.ok(fragments.length > 2);
+
+  for (const fragment of fragments) {
+    assert.ok(fragment.content.text.length <= maxChunkChars);
+  }
+  for (const fragment of fragments.slice(1)) {
+    assert.equal(
+      fragment.content.text,
+      source.text.slice(fragment.range.startOffset, fragment.range.endOffset),
+    );
+  }
+});
+
 test("code extractor supports the bundled language grammar and adapter matrix", async () => {
   const extractor = new CodeExtractor({
     maxChunkChars: 500,

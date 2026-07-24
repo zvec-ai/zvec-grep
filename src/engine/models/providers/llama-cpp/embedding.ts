@@ -13,6 +13,7 @@ import type { Content, TextContent } from "../../../types.js";
 import { defaultHome } from "../../../utils/path.js";
 import {
   EmbeddingModel,
+  type EmbeddingBatchResult,
   type EmbeddingLimits,
   type EmbeddingVector,
   type NormalizedEmbeddingOptions,
@@ -178,6 +179,20 @@ export class LlamaCppEmbeddingModel extends EmbeddingModel {
     contents: readonly Content[],
     options: NormalizedEmbeddingOptions,
   ): Promise<EmbeddingVector[]> {
+    return (await this.embedBatch(contents, options)).vectors;
+  }
+
+  protected override async doEmbedWithDiagnostics(
+    contents: readonly Content[],
+    options: NormalizedEmbeddingOptions,
+  ): Promise<EmbeddingBatchResult> {
+    return await this.embedBatch(contents, options);
+  }
+
+  private async embedBatch(
+    contents: readonly Content[],
+    options: NormalizedEmbeddingOptions,
+  ): Promise<EmbeddingBatchResult> {
     this.ensureNotDisposed();
     const texts = (contents as readonly TextContent[]).map((content) =>
       formatTextForEmbedding(content.text, options.purpose, this.entry),
@@ -207,13 +222,21 @@ export class LlamaCppEmbeddingModel extends EmbeddingModel {
 
   private async embedTexts(
     texts: readonly string[],
-  ): Promise<EmbeddingVector[]> {
+  ): Promise<EmbeddingBatchResult> {
     const contexts = await this.ensureEmbeddingContexts(texts.length);
+    const truncatedInputIndexes: number[] = [];
+    const safeTexts = texts.map((text, index) => {
+      const result = this.truncateToContextSize(text);
+      if (result.truncated) {
+        truncatedInputIndexes.push(index);
+      }
+      return result.text;
+    });
     const chunkSize = Math.ceil(texts.length / contexts.length);
     const chunks = contexts
       .map((context, index) => ({
         context,
-        texts: texts.slice(index * chunkSize, (index + 1) * chunkSize),
+        texts: safeTexts.slice(index * chunkSize, (index + 1) * chunkSize),
       }))
       .filter((chunk) => chunk.texts.length > 0);
 
@@ -221,15 +244,17 @@ export class LlamaCppEmbeddingModel extends EmbeddingModel {
       chunks.map(async (chunk) => {
         const vectors: EmbeddingVector[] = [];
         for (const text of chunk.texts) {
-          const safeText = this.truncateToContextSize(text);
-          const embedding = await chunk.context.getEmbeddingFor(safeText);
+          const embedding = await chunk.context.getEmbeddingFor(text);
           vectors.push(Array.from(embedding.vector));
         }
         return vectors;
       }),
     );
 
-    return results.flat();
+    return {
+      vectors: results.flat(),
+      diagnostics: { truncatedInputIndexes },
+    };
   }
 
   private async ensureLlama(): Promise<Llama> {
@@ -522,10 +547,13 @@ export class LlamaCppEmbeddingModel extends EmbeddingModel {
     return Math.max(1, Math.floor(cores / parallelism));
   }
 
-  private truncateToContextSize(text: string): string {
+  private truncateToContextSize(text: string): {
+    text: string;
+    truncated: boolean;
+  } {
     const model = this.model;
     if (!model?.tokenize || !model.detokenize) {
-      return text;
+      return { text, truncated: false };
     }
 
     const limit = Math.max(
@@ -537,10 +565,13 @@ export class LlamaCppEmbeddingModel extends EmbeddingModel {
     );
     const tokens = model.tokenize(text);
     if (tokens.length <= limit) {
-      return text;
+      return { text, truncated: false };
     }
 
-    return model.detokenize(tokens.slice(0, Math.max(1, limit - 4)));
+    return {
+      text: model.detokenize(tokens.slice(0, Math.max(1, limit - 4))),
+      truncated: true,
+    };
   }
 
   private ensureNotDisposed(): void {

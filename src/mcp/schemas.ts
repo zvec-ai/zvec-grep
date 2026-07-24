@@ -504,6 +504,7 @@ export const zvecGrepIndexStatusOutputSchema = z.object({
         deleted: z.number().int().nonnegative(),
         unchanged: z.number().int().nonnegative(),
         entities: z.number().int().nonnegative(),
+        truncated_fragments: z.number().int().nonnegative(),
       })
       .optional(),
     suggestion: z.string().optional(),

@@ -13,3 +13,8 @@ export {
   TransformersJsEmbeddingModel,
   setTransformersJsRuntimeForTesting,
 } from "./transformers-js/index.js";
+
+export {
+  Model2VecEmbeddingModel,
+  setModel2VecRuntimeForTesting,
+} from "./model2vec/index.js";

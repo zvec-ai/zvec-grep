@@ -31,10 +31,7 @@ import {
   type ZvecGrepRgInput,
   type ZvecGrepSearchIndexing,
 } from "./schemas.js";
-import {
-  textToolResult,
-  toolResult,
-} from "./result-format.js";
+import { textToolResult, toolResult } from "./result-format.js";
 import type {
   RemoteEmbeddingAuthorizationPlan,
   RemoteEmbeddingAuthorizationScope,
@@ -121,6 +118,7 @@ export type ZvecGrepIndexStatusResult = {
       deleted: number;
       unchanged: number;
       entities: number;
+      truncated_fragments: number;
     };
     suggestion?: string;
   };
@@ -354,9 +352,12 @@ export function registerZvecGrepTools(
       // otherwise dominates the agent's context. `short` keeps a bounded source
       // snippet per hit so relevance is judgeable without extra file reads.
       return textToolResult(
-        `${statusLines.join("\n")}\n${formatAgentContextResult(response.result, {
-          preview: "short",
-        })}`,
+        `${statusLines.join("\n")}\n${formatAgentContextResult(
+          response.result,
+          {
+            preview: "short",
+          },
+        )}`,
       );
     },
   );

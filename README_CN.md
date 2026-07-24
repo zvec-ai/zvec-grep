@@ -164,7 +164,8 @@ MCP 客户端可使用 `zvec_grep_search`、`zvec_grep_rg`、`zvec_grep_index`�
 
 ## <a id="models"></a>🧠 模型
 
-本地模型通过 `node-llama-cpp` 或 Transformers.js 运行，适合把代码检索留在本机。
+本地模型通过 `node-llama-cpp`、Transformers.js 或原生 Model2Vec Safetensors adapter
+运行，适合把代码检索留在本机。
 可以参考[本地 Embedding 模型选型指南](docs/embedding.md)，按使用场景比较
 模型大小、上下文长度和兼容性。
 
@@ -173,6 +174,8 @@ zg index --embedding local/embeddinggemma-300m
 zg index --embedding local/qwen3-embedding-0.6b
 zg index --embedding local/jina-embeddings-v2-base-code
 zg index --embedding local/multilingual-e5-small
+zg index --embedding local/potion-base-8m
+zg index --embedding local/potion-code-16m-v2
 ```
 
 在 Apple Silicon 上，本地构建默认使用更安静的 llama.cpp CMake 配置，避免无害的 OpenMP 和 ARM native 探测 warning。可以通过 `NODE_LLAMA_CPP_CMAKE_OPTION_<name>` 覆盖任意 llama.cpp CMake 选项，例如设置 `NODE_LLAMA_CPP_CMAKE_OPTION_GGML_NATIVE=ON` 重新启用 native CPU 优化。

@@ -26,6 +26,43 @@ function entry(overrides = {}) {
   };
 }
 
+function fakeTokenizer(tokenCount = () => 1) {
+  const calls = [];
+  return Object.assign(
+    async (input, options) => {
+      calls.push({ input, options });
+      const texts = Array.isArray(input) ? input : [input];
+      const tokenCounts = texts.map((text) =>
+        Math.min(tokenCount(text), options.max_length),
+      );
+      const sequenceLength = Math.max(0, ...tokenCounts);
+      const inputIds = new BigInt64Array(texts.length * sequenceLength);
+      const attentionMask = new BigInt64Array(texts.length * sequenceLength);
+      for (let inputIndex = 0; inputIndex < texts.length; inputIndex++) {
+        const offset = inputIndex * sequenceLength;
+        for (
+          let tokenIndex = 0;
+          tokenIndex < tokenCounts[inputIndex];
+          tokenIndex++
+        ) {
+          attentionMask[offset + tokenIndex] = 1n;
+        }
+      }
+      return {
+        input_ids: {
+          data: inputIds,
+          dims: [texts.length, sequenceLength],
+        },
+        attention_mask: {
+          data: attentionMask,
+          dims: [texts.length, sequenceLength],
+        },
+      };
+    },
+    { calls, model_max_length: 4096 },
+  );
+}
+
 test("Transformers.js adapter fixes artifact recipe and formats query/document inputs", async (t) => {
   const loads = [];
   const calls = [];
@@ -41,7 +78,7 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
       };
     },
     {
-      tokenizer: { model_max_length: 4096 },
+      tokenizer: fakeTokenizer(),
       async dispose() {
         disposals++;
       },
@@ -86,14 +123,42 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
     },
   ]);
   assert.equal(extractor.tokenizer.model_max_length, 512);
+  assert.deepEqual(extractor.tokenizer.calls, [
+    {
+      input: ["query: find auth", "query: find parser"],
+      options: {
+        truncation: true,
+        max_length: 513,
+        padding: true,
+      },
+    },
+    {
+      input: ["passage: implementation"],
+      options: {
+        truncation: true,
+        max_length: 513,
+        padding: true,
+      },
+    },
+  ]);
   assert.deepEqual(calls, [
     {
       texts: ["query: find auth", "query: find parser"],
-      options: { pooling: "cls", normalize: true },
+      options: {
+        pooling: "cls",
+        normalize: true,
+        truncation: true,
+        max_length: 512,
+      },
     },
     {
       texts: ["passage: implementation"],
-      options: { pooling: "cls", normalize: true },
+      options: {
+        pooling: "cls",
+        normalize: true,
+        truncation: true,
+        max_length: 512,
+      },
     },
   ]);
 
@@ -109,7 +174,7 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
 test("Transformers.js adapter validates the returned batch tensor", async (t) => {
   const extractor = Object.assign(
     async () => ({ dims: [1, 2], data: new Float32Array(2) }),
-    { tokenizer: { model_max_length: 4096 }, async dispose() {} },
+    { tokenizer: fakeTokenizer(), async dispose() {} },
   );
   setTransformersJsRuntimeForTesting(async () => ({
     async pipeline() {
@@ -132,7 +197,7 @@ test("Transformers.js adapter maps Metal to WebGPU", async (t) => {
   const loads = [];
   const extractor = Object.assign(
     async () => ({ dims: [1, 3], data: new Float32Array(3) }),
-    { tokenizer: { model_max_length: 4096 }, async dispose() {} },
+    { tokenizer: fakeTokenizer(), async dispose() {} },
   );
   setTransformersJsRuntimeForTesting(async () => ({
     async pipeline(task, repo, options) {
@@ -158,7 +223,7 @@ test("Transformers.js adapter falls back to CPU when GPU initialization fails", 
   const providers = [];
   const extractor = Object.assign(
     async () => ({ dims: [1, 3], data: new Float32Array(3) }),
-    { tokenizer: { model_max_length: 4096 }, async dispose() {} },
+    { tokenizer: fakeTokenizer(), async dispose() {} },
   );
   setTransformersJsRuntimeForTesting(async () => ({
     async pipeline(_task, _repo, options) {
@@ -202,7 +267,7 @@ test("Transformers.js adapter retries on CPU when GPU inference returns invalid 
             : new Float32Array([1, 2, 3]),
       }),
       {
-        tokenizer: { model_max_length: 4096 },
+        tokenizer: fakeTokenizer(),
         async dispose() {
           if (provider === "webgpu") {
             gpuDisposals++;
@@ -236,5 +301,80 @@ test("Transformers.js adapter retries on CPU when GPU inference returns invalid 
   assert.equal(activeProvider, "cpu");
   assert.equal(gpuDisposals, 1);
   assert.match(writes.join(""), /inference failed.*falling back to CPU/);
+  await model.dispose();
+});
+
+test("Transformers.js reports inputs truncated by the feature extraction pipeline", async (t) => {
+  const tokenizer = fakeTokenizer((text) =>
+    text.includes("overflow") ? 3 : 2,
+  );
+  const extractor = Object.assign(
+    async () => ({
+      dims: [2, 3],
+      data: Float32Array.from([1, 0, 0, 0, 1, 0]),
+    }),
+    { tokenizer, async dispose() {} },
+  );
+  setTransformersJsRuntimeForTesting(async () => ({
+    async pipeline() {
+      return extractor;
+    },
+  }));
+  t.after(() => setTransformersJsRuntimeForTesting(null));
+
+  const model = new TransformersJsEmbeddingModel(entry({ maxInputTokens: 2 }), {
+    apiKey: "",
+  });
+  const result = await model.embedWithDiagnostics([
+    { kind: "text", text: "fits" },
+    { kind: "text", text: "overflow" },
+  ]);
+
+  assert.deepEqual(result.diagnostics.truncatedInputIndexes, [1]);
+  assert.deepEqual(result.vectors, [
+    [1, 0, 0],
+    [0, 1, 0],
+  ]);
+  assert.equal(tokenizer.calls.length, 1);
+  assert.deepEqual(tokenizer.calls[0].input, [
+    "passage: fits",
+    "passage: overflow",
+  ]);
+  await model.dispose();
+});
+
+test("Transformers.js does not treat tokenizer failures as GPU inference failures", async (t) => {
+  const providers = [];
+  const extractor = Object.assign(
+    async () => ({ dims: [1, 3], data: new Float32Array(3) }),
+    {
+      tokenizer: Object.assign(
+        async () => {
+          throw new Error("tokenizer failed");
+        },
+        { model_max_length: 4096 },
+      ),
+      async dispose() {},
+    },
+  );
+  setTransformersJsRuntimeForTesting(async () => ({
+    async pipeline(_task, _repo, options) {
+      providers.push(options.session_options?.executionProviders[0]);
+      return extractor;
+    },
+  }));
+  t.after(() => setTransformersJsRuntimeForTesting(null));
+
+  const model = new TransformersJsEmbeddingModel(entry(), {
+    apiKey: "",
+    llamaGpu: "metal",
+  });
+  await assert.rejects(
+    model.embed([{ kind: "text", text: "value" }]),
+    (error) =>
+      error.message === "Transformers.js tokenization failed" &&
+      error.cause?.message === "tokenizer failed",
+  );
+  assert.deepEqual(providers, ["webgpu"]);
   await model.dispose();
 });

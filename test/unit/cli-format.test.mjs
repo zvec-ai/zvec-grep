@@ -61,6 +61,7 @@ function status(overrides = {}) {
     filesStored: 3,
     filesIndexed: 2,
     entitiesIndexed: 7,
+    fragmentsTruncated: 3,
     filesPending: 1,
     filesFailed: 1,
     filesAdded: 1,
@@ -453,6 +454,7 @@ test("status formatters cover collections, anonymous states, failures, filters, 
             deleted: 0,
             unchanged: 2,
             entities: 7,
+            truncated_fragments: 4,
           },
           suggestion: "zg index",
         },
@@ -486,6 +488,7 @@ test("status formatters cover collections, anonymous states, failures, filters, 
     );
   });
   assert.match(output.logs.join("\n"), /failed_reasons/);
+  assert.match(output.logs.join("\n"), /Truncated\s+4 fragments/);
   assert.match(output.logs.join("\n"), /1m 5s/);
   assert.match(output.logs.join("\n"), /ignore-file=\.rgignore/);
   assert.match(output.logs.join("\n"), /Default indexing skips/);
@@ -578,6 +581,7 @@ test("workspace status uses a status-first grouped layout", async () => {
             filesStored: 1132,
             filesIndexed: 1132,
             entitiesIndexed: 22037,
+            fragmentsTruncated: 12,
             filesPending: 0,
             filesFailed: 0,
             filesAdded: 0,
@@ -596,6 +600,7 @@ test("workspace status uses a status-first grouped layout", async () => {
       "",
       `  Coverage    ${progressBar(20)} 100%  1,132 / 1,132 files`,
       "  Entities    22,037",
+      "  Truncated   12 fragments",
       "  Queue       0 pending · 0 failed",
       "",
       "  Embedding   qwen/text-embedding-v4",
@@ -633,6 +638,7 @@ test("workspace status uses a status-first grouped layout", async () => {
               deleted: 0,
               unchanged: 1,
               entities: 3,
+              truncated_fragments: 0,
             },
           },
         },
@@ -687,6 +693,7 @@ test("server workspace status reports changed files as stale", async () => {
             deleted: 3,
             unchanged: 3,
             entities: 7,
+            truncated_fragments: 0,
           },
         },
       },

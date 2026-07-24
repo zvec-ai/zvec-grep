@@ -22,7 +22,6 @@ import {
   type CreateZvecGrepOptions,
   type IndexProgress,
   type RootPath,
-  type ZvecGrepContextResult,
   type ZvecGrepContextOptions,
   type ZvecGrepContextRoute,
   type ZvecGrep,
@@ -1455,40 +1454,36 @@ async function runServerQuery(
   const vector = routes
     .filter((route) => route.mode === "vector")
     .map((route) => route.query);
-  const response = await daemonClient(options).callTool("zvec_grep_search", {
-    root: resolve(process.cwd()),
-    queries: queries.length ? queries : undefined,
-    fts: fts.length ? fts : undefined,
-    vector: vector.length ? vector : undefined,
-    fuse: options.fuse,
-    limit: options.limit,
-    trace: options.trace,
-    preferSymbol: options.preferSymbol,
-    symbolTypes: options.symbolTypes,
-    globs: options.globs,
-    insensitiveGlobs: options.insensitiveGlobs,
-    fileTypes: options.fileTypes,
-    excludedFileTypes: options.excludedFileTypes,
-    hidden: options.hidden,
-    noIgnore: options.noIgnore,
-    ignoreFiles: options.ignoreFiles,
-    maxDepth: options.maxDepth,
-    maxFileSizeBytes: options.maxFileSizeBytes,
-    follow: options.follow,
-    embeddingConcurrency: options.embeddingConcurrency,
-    modifiedAfter: options.modifiedAfter,
-    modifiedBefore: options.modifiedBefore,
-    freshness: searchPolicy.freshness,
-    autoUpdate: searchPolicy.autoUpdate,
-  });
-  const result = response.result as ZvecGrepContextResult;
-  if (options.human) printHumanContextResult(result, options);
-  else printAgentContextResult(result, options);
-  if (response.freshness === "possibly_stale") {
-    const indexing = response.indexing as
-      { state?: string; completed?: number; total?: number } | undefined;
-    printStaleIndexStatus(indexing?.state, indexing);
-  }
+  const response = await daemonClient(options).callTextTool(
+    "zvec_grep_search",
+    {
+      root: resolve(process.cwd()),
+      queries: queries.length ? queries : undefined,
+      fts: fts.length ? fts : undefined,
+      vector: vector.length ? vector : undefined,
+      fuse: options.fuse,
+      limit: options.limit,
+      trace: options.trace,
+      preferSymbol: options.preferSymbol,
+      symbolTypes: options.symbolTypes,
+      globs: options.globs,
+      insensitiveGlobs: options.insensitiveGlobs,
+      fileTypes: options.fileTypes,
+      excludedFileTypes: options.excludedFileTypes,
+      hidden: options.hidden,
+      noIgnore: options.noIgnore,
+      ignoreFiles: options.ignoreFiles,
+      maxDepth: options.maxDepth,
+      maxFileSizeBytes: options.maxFileSizeBytes,
+      follow: options.follow,
+      embeddingConcurrency: options.embeddingConcurrency,
+      modifiedAfter: options.modifiedAfter,
+      modifiedBefore: options.modifiedBefore,
+      freshness: searchPolicy.freshness,
+      autoUpdate: searchPolicy.autoUpdate,
+    },
+  );
+  console.log(response);
 }
 
 function printStaleIndexStatus(

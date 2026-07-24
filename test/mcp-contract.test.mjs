@@ -86,6 +86,7 @@ function createBackend() {
           deleted: 3,
           unchanged: 0,
           entities: 1,
+          truncated_fragments: 2,
         },
       },
       runtime: {
@@ -244,16 +245,10 @@ test("server contract exposes final tools with stable annotations", async (t) =>
   assert.match(rg.description, /explicit rg-mode request/);
   assert.match(rg.description, /do not switch to rg merely/);
   assert.equal(rg.outputSchema, undefined);
-  assert.match(
-    search.outputSchema.properties.indexing.description,
-    /possibly stale results/,
-  );
-  assert.ok(
-    search.outputSchema.properties.indexing.properties.state.enum.includes(
-      "cancelled",
-    ),
-  );
-  for (const tool of tools.filter((tool) => tool.name !== "zvec_grep_rg")) {
+  assert.equal(search.outputSchema, undefined);
+  for (const tool of tools.filter(
+    (tool) => tool.name !== "zvec_grep_rg" && tool.name !== "zvec_grep_search",
+  )) {
     assert.ok(tool.outputSchema, `${tool.name} must declare structured output`);
   }
 });
@@ -905,7 +900,7 @@ test("input upper bounds are enforced", async (t) => {
   assert.equal(excessivePathFilters.isError, true);
 });
 
-test("structured tools return schema-compatible content and rg returns only compact text", async (t) => {
+test("structured tools return schema-compatible content and searches return only compact text", async (t) => {
   const { client, server } = await connect();
   t.after(async () => {
     await client.close();
@@ -915,7 +910,6 @@ test("structured tools return schema-compatible content and rg returns only comp
   const calls = [
     ["zvec_grep_index", { root }],
     ["zvec_grep_index_drop", { root }],
-    ["zvec_grep_search", { root, query: "query" }],
     ["zvec_grep_index_status", { root }],
     ["zvec_grep_server_status", {}],
   ];
@@ -931,6 +925,10 @@ test("structured tools return schema-compatible content and rg returns only comp
   });
   assert.equal(status.structuredContent.persistent.home, `${root}/.zvec-grep`);
   assert.equal(status.structuredContent.persistent.files.indexed, 1);
+  assert.equal(
+    status.structuredContent.persistent.files.truncated_fragments,
+    2,
+  );
   assert.deepEqual(
     {
       added: status.structuredContent.persistent.files.added,
@@ -945,19 +943,11 @@ test("structured tools return schema-compatible content and rg returns only comp
     name: "zvec_grep_search",
     arguments: { root, query: "query" },
   });
-  assert.equal(
-    search.structuredContent.result.items[0].content,
-    longIndexedContent,
-  );
-  assert.equal(search.content[0].text.includes(longIndexedContent), true);
-  assert.doesNotMatch(search.content[0].text, /\[truncated \d+ chars\]/);
-  assert.deepEqual(search.structuredContent.indexing, {
-    state: "running",
-    completed: 12,
-    total: 20,
-  });
-  assert.equal(search.structuredContent.update_job_id, undefined);
+  assert.equal(search.structuredContent, undefined);
+  assert.match(search.content[0].text, /^freshness: possibly_stale$/m);
   assert.match(search.content[0].text, /indexing: running \(12\/20\)/);
+  assert.match(search.content[0].text, /src\/index\.ts:1-2/);
+  assert.equal(search.content[0].text.includes(longIndexedContent), false);
 
   const rg = await client.callTool({
     name: "zvec_grep_rg",

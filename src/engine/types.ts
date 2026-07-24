@@ -39,6 +39,7 @@ export type FileIndexStatus = {
   indexedTime: number | null;
   entityCount: number;
   tokenCount?: number;
+  truncatedFragmentCount?: number;
   error?: string;
 };
 
@@ -258,6 +259,7 @@ export type CollectionIndexStatus = {
   filesStored: number;
   filesIndexed: number;
   entitiesIndexed: number;
+  fragmentsTruncated: number;
   filesPending: number;
   filesFailed: number;
   filesAdded: number;

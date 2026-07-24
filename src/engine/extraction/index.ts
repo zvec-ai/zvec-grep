@@ -6,7 +6,7 @@ import type {
   TextRange,
 } from "../types.js";
 import { makeEntityId } from "./ids.js";
-import { CodeExtractor } from "./code/extractor.js";
+import { CodeExtractor, type CodeExtractorOptions } from "./code/extractor.js";
 import { MarkdownExtractor } from "./markdown/extractor.js";
 
 export type SourceKind = "text" | "image";
@@ -151,17 +151,25 @@ export class ImageExtractor implements Extractor {
   }
 }
 
-const DEFAULT_EXTRACTORS: readonly Extractor[] = [
-  new CodeExtractor(),
-  new MarkdownExtractor(),
-  new TextExtractor(),
-  new ImageExtractor(),
-];
+export type DefaultExtractorOptions = {
+  code?: CodeExtractorOptions;
+};
+
+function createDefaultExtractors(
+  options: DefaultExtractorOptions = {},
+): readonly Extractor[] {
+  return [
+    new CodeExtractor(options.code),
+    new MarkdownExtractor(),
+    new TextExtractor(),
+    new ImageExtractor(),
+  ];
+}
 
 export class ExtractorRegistry {
   private readonly extractors: readonly Extractor[];
 
-  constructor(extractors: readonly Extractor[] = DEFAULT_EXTRACTORS) {
+  constructor(extractors: readonly Extractor[] = createDefaultExtractors()) {
     if (extractors.length === 0) {
       throw new EngineError(
         "Extractor registry requires at least one extractor",
@@ -217,6 +225,12 @@ export class ExtractorRegistry {
       context: `fileId=${source.file.id} sourceKind=${source.kind}`,
     });
   }
+}
+
+export function createDefaultExtractorRegistry(
+  options: DefaultExtractorOptions = {},
+): ExtractorRegistry {
+  return new ExtractorRegistry(createDefaultExtractors(options));
 }
 
 export function extractFragments(source: Source): Promise<EntityFragment[]> {

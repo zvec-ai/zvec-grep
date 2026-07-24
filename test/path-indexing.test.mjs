@@ -184,6 +184,63 @@ test("changedPaths indexes and deletes only the affected paths", async () => {
   }
 });
 
+test("indexing approximates code chunk characters from the model input limit", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-token-chunks-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  const nearLimit = `export function nearLimit() { return "${"x".repeat(180)}"; }\n`;
+  const oversized = `export function oversized() { return "${"x".repeat(520)}"; }\n`;
+  const oversizedPath = join(root, "oversized.ts");
+  assert.ok(nearLimit.length > 120);
+  assert.ok(nearLimit.length <= 120 * 2);
+  assert.ok(oversized.length > 120 * 2);
+  await writeFile(join(root, "near-limit.ts"), nearLimit);
+  await writeFile(oversizedPath, oversized);
+  const model = new InputLimitedEmbeddingModel();
+  let service = await createZvecGrep({ root, embeddingModel: model });
+
+  try {
+    await service.index();
+    assert.equal(
+      model.embeddedTexts.filter((text) =>
+        text.includes("symbol: function nearLimit"),
+      ).length,
+      1,
+    );
+    assert.ok(
+      model.embeddedTexts.filter((text) =>
+        text.includes("symbol: function oversized"),
+      ).length > 2,
+    );
+    const truncatedFragmentCount = model.embeddedTexts.filter((text) =>
+      text.includes("symbol: function oversized"),
+    ).length;
+    assert.equal(
+      (await service.info()).status.fragmentsTruncated,
+      truncatedFragmentCount,
+    );
+
+    await service.close();
+    service = await createZvecGrep({ root, embeddingModel: model });
+    assert.equal(
+      (await service.info()).status.fragmentsTruncated,
+      truncatedFragmentCount,
+    );
+
+    await writeFile(
+      oversizedPath,
+      "export function compact() { return true; }\n",
+    );
+    await service.index({ changedPaths: [oversizedPath] });
+    assert.equal((await service.info()).status.fragmentsTruncated, 0);
+  } finally {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 class CountingEmbeddingModel extends EmbeddingModel {
   ref = { provider: "test", model: "counting" };
   dimension = 8;
@@ -198,5 +255,23 @@ class CountingEmbeddingModel extends EmbeddingModel {
       this.embeddedTexts.push(text);
       return [1, 0, 0, 0, 0, 0, 0, 0];
     });
+  }
+}
+
+class InputLimitedEmbeddingModel extends CountingEmbeddingModel {
+  limits = { maxBatchSize: 64, maxInputTokens: 120 };
+
+  async doEmbedWithDiagnostics(contents, options) {
+    return {
+      vectors: await this.doEmbed(contents, options),
+      diagnostics: {
+        truncatedInputIndexes: contents.flatMap((content, index) =>
+          content.kind === "text" &&
+          content.text.includes("symbol: function oversized")
+            ? [index]
+            : [],
+        ),
+      },
+    };
   }
 }

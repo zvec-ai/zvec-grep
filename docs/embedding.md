@@ -24,22 +24,30 @@ Embedding 服务。模型会在第一次使用时自动下载，并缓存到
 
 ## 完整对比
 
-下载大小是 zvec-grep 固定版本所使用的量化权重近似大小。完整缓存还会包含 tokenizer
+下载大小是 zvec-grep 固定版本所使用的模型权重近似大小。完整缓存还会包含 tokenizer
 和配置文件，体积会略大一些。
 
-| 模型                                 | 主要用途             | 语言                 | 参数量 | 量化格式  | 约下载大小 | 最大输入 tokens | 向量维度 |
-| ------------------------------------ | -------------------- | -------------------- | -----: | --------- | ---------: | --------------: | -------: |
-| `local/all-minilm-l6-v2`             | 快速英文搜索         | 英文                 |  22.7M | ONNX Q4   |      55 MB |             256 |      384 |
-| `local/bge-small-en-v1.5`            | 轻量英文检索         | 英文                 |  33.4M | ONNX Q4   |      61 MB |             512 |      384 |
-| `local/multilingual-e5-small`        | 轻量多语言搜索       | 94 种语言            |   118M | ONNX Q8   |     118 MB |             512 |      384 |
-| `local/nomic-embed-text-v1.5`        | 英文长文本           | 英文                 |   137M | ONNX Q4   |     165 MB |           8,192 |      768 |
-| `local/gte-modernbert-base`          | 英文长文档           | 英文                 |   149M | ONNX Q4   |     224 MB |           8,192 |      768 |
-| `local/jina-embeddings-v2-base-code` | 代码搜索             | 英文及 30 种编程语言 |   161M | ONNX Q8   |     162 MB |           8,192 |      768 |
-| `local/embeddinggemma-300m`          | 通用多语言搜索       | 100 多种语言         |   308M | GGUF Q8_0 |     334 MB |           2,048 |      768 |
-| `local/qwen3-embedding-0.6b`         | 更高容量的多语言搜索 | 100 多种语言         |   600M | GGUF Q8_0 |     639 MB |           8,192 |    1,024 |
+| 模型                                 | 主要用途             | 语言                 | 参数量 | 模型格式         | 约下载大小 | 最大输入 tokens | 向量维度 |
+| ------------------------------------ | -------------------- | -------------------- | -----: | ---------------- | ---------: | --------------: | -------: |
+| `local/all-minilm-l6-v2`             | 快速英文搜索         | 英文                 |  22.7M | ONNX Q4          |      55 MB |             256 |      384 |
+| `local/potion-base-8m`               | 极低延迟英文搜索     | 英文                 |     8M | Safetensors FP32 |      30 MB |             512 |      256 |
+| `local/potion-code-16m-v2`           | 极低延迟代码检索     | 英文及 6 种编程语言  |  16.2M | Safetensors FP16 |      33 MB |           8,192 |      256 |
+| `local/bge-small-en-v1.5`            | 轻量英文检索         | 英文                 |  33.4M | ONNX Q4          |      61 MB |             512 |      384 |
+| `local/multilingual-e5-small`        | 轻量多语言搜索       | 94 种语言            |   118M | ONNX Q8          |     118 MB |             512 |      384 |
+| `local/nomic-embed-text-v1.5`        | 英文长文本           | 英文                 |   137M | ONNX Q4          |     165 MB |           8,192 |      768 |
+| `local/gte-modernbert-base`          | 英文长文档           | 英文                 |   149M | ONNX Q4          |     224 MB |           8,192 |      768 |
+| `local/jina-embeddings-v2-base-code` | 代码搜索             | 英文及 30 种编程语言 |   161M | ONNX Q8          |     162 MB |           8,192 |      768 |
+| `local/embeddinggemma-300m`          | 通用多语言搜索       | 100 多种语言         |   308M | GGUF Q8_0        |     334 MB |           2,048 |      768 |
+| `local/qwen3-embedding-0.6b`         | 更高容量的多语言搜索 | 100 多种语言         |   600M | GGUF Q8_0        |     639 MB |           8,192 |    1,024 |
 
 最大输入长度针对每个提取后的文本实体，并不意味着 zvec-grep 一定会生成这么大的
 文本块。实际进入模型的上下文仍取决于文件解析和切分策略。
+
+索引代码文件时，zvec-grep 会按更保守的 `1 token ≈ 2 chars` 把模型的最大输入
+tokens 换算成 CodeExtractor 的字符上限，近似控制过大代码实体的 fragment 大小。
+这不等同于精确的 token 计数；本地 embedding provider 会记录实际发生截断的
+fragment 数量，并在 `zg status` 中显示。普通文本和 Markdown 仍使用各自的结构与
+字符切分策略。
 
 ## 使用方法
 
@@ -94,6 +102,7 @@ Transformers.js -> ONNX Runtime WebGPU -> Metal
 在当前 Apple Silicon 环境中，MiniLM 和 BGE 可以通过 WebGPU 加速；E5、Jina、GTE
 和 Nomic 会自动回退 CPU。CUDA、DirectML、不同版本的 ONNX Runtime 或不同的模型
 导出方式可能会有不同结果。自动回退可以保证命令继续完成，但回退后不再是 GPU 加速。
+Potion 使用 Model2Vec 静态向量查表，`--gpu` 对它不起作用。
 
 如果索引已经存在，不传 `--embedding` 会继续使用索引中保存的模型。切换模型时需要
 显式重建：

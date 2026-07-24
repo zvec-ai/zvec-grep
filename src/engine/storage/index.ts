@@ -29,6 +29,10 @@ export type StorageSearchHit = StoredEntityFragment & {
   score: number;
 };
 
+export type FileIndexDiagnostics = {
+  truncatedFragmentCount?: number;
+};
+
 export interface CollectionStorage {
   getFileById(fileId: string): FileInfo | null;
   getFileByPath(absolutePath: string): FileInfo | null;
@@ -46,6 +50,7 @@ export interface CollectionStorage {
     file: FileInfo,
     fragments: readonly EntityFragment[],
     vectors: readonly number[][],
+    diagnostics?: FileIndexDiagnostics,
   ): void;
   markFileFailed(file: FileInfo, error: string): void;
   deleteFile(fileId: string): void;

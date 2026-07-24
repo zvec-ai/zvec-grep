@@ -141,8 +141,8 @@ Use the MCP tools `zvec_grep_search`, `zvec_grep_rg`, `zvec_grep_index`, `zvec_g
 
 ## <a id="models"></a>🧠 Models
 
-Local models run through `node-llama-cpp` or Transformers.js and keep code
-search private to your machine. See the
+Local models run through `node-llama-cpp`, Transformers.js, or the native
+Model2Vec Safetensors adapter and keep code search private to your machine. See the
 [local embedding model guide](docs/embedding.md) for a scenario-based
 selection table, model sizes, context limits, and compatibility notes.
 
@@ -151,6 +151,8 @@ zg index --embedding local/embeddinggemma-300m
 zg index --embedding local/qwen3-embedding-0.6b
 zg index --embedding local/jina-embeddings-v2-base-code
 zg index --embedding local/multilingual-e5-small
+zg index --embedding local/potion-base-8m
+zg index --embedding local/potion-code-16m-v2
 ```
 
 On Apple Silicon, local builds use quiet llama.cpp CMake defaults to avoid harmless OpenMP and ARM native-detection warnings. Override any llama.cpp CMake option with `NODE_LLAMA_CPP_CMAKE_OPTION_<name>`, for example `NODE_LLAMA_CPP_CMAKE_OPTION_GGML_NATIVE=ON` to opt back into native CPU tuning.

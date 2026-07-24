@@ -7,6 +7,7 @@ import {
   isEngineError,
 } from "../../errors/index.js";
 import type {
+  EmbeddingBatchResult,
   EmbeddingModel,
   EmbeddingVector,
 } from "../../models/embeddings.js";
@@ -26,12 +27,19 @@ import type {
 import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
-import { ExtractorRegistry, type Source } from "../../extraction/index.js";
+import {
+  createDefaultExtractorRegistry,
+  type ExtractorRegistry,
+  type Source,
+} from "../../extraction/index.js";
 import {
   scanDirectoryPath,
   scanFilePath,
   scanRootPaths,
 } from "./scanner/index.js";
+
+const APPROXIMATE_CODE_CHARS_PER_TOKEN = 2;
+const CODE_CHUNK_OVERLAP_RATIO = 0.15;
 
 export type IndexContext = {
   collection: CollectionInfo;
@@ -174,6 +182,10 @@ export async function getCollectionIndexStatus(
       (count, file) => count + (file.indexStatus?.entityCount ?? 0),
       0,
     );
+    const fragmentsTruncated = indexedFiles.reduce(
+      (count, file) => count + (file.indexStatus?.truncatedFragmentCount ?? 0),
+      0,
+    );
 
     return {
       collectionId: collection.id,
@@ -182,6 +194,7 @@ export async function getCollectionIndexStatus(
       filesStored: storedFiles.length,
       filesIndexed: indexedFiles.length,
       entitiesIndexed,
+      fragmentsTruncated,
       filesPending: pendingFiles.length,
       filesFailed: failedFiles.length,
       filesAdded: diff.added.length,
@@ -638,6 +651,7 @@ async function indexFiles(
   );
   const embeddingTiming = new ConcurrentTiming(timings, "index_embedding");
   const runningEmbeddings = new Set<Promise<void>>();
+  const extractorRegistry = createIndexExtractorRegistry(ctx);
   const reportEmbeddingProgress = (
     currentStats: IndexStats,
     detail: string,
@@ -687,7 +701,7 @@ async function indexFiles(
       throwIfIndexCancelled(ctx);
       onProgress(stats, `reading ${file.relativePath}`);
       const prepared = await timings.time("index_prepare", () =>
-        prepareFile(file, ctx),
+        prepareFile(file, ctx, extractorRegistry),
       );
       throwIfIndexCancelled(ctx);
 
@@ -751,11 +765,12 @@ async function indexFiles(
 async function prepareFile(
   file: FileInfo,
   ctx: IndexContext,
+  extractorRegistry: ExtractorRegistry,
 ): Promise<PreparedFile | FailedPreparedFile> {
   try {
     throwIfIndexCancelled(ctx);
     const source = await readSource(file);
-    const extracted = await new ExtractorRegistry().extract(source);
+    const extracted = await extractorRegistry.extract(source);
     throwIfIndexCancelled(ctx);
     const fragments = extracted.filter((fragment) =>
       ctx.embeddingModel.supportedContentKinds.includes(fragment.content.kind),
@@ -771,6 +786,23 @@ async function prepareFile(
       failedReason: markFileFailed(ctx, file, error, "prepare"),
     };
   }
+}
+
+function createIndexExtractorRegistry(ctx: IndexContext): ExtractorRegistry {
+  const maxInputTokens = ctx.embeddingModel.limits.maxInputTokens;
+  if (maxInputTokens === undefined) {
+    return createDefaultExtractorRegistry();
+  }
+  const maxChunkChars = Math.floor(
+    maxInputTokens * APPROXIMATE_CODE_CHARS_PER_TOKEN,
+  );
+
+  return createDefaultExtractorRegistry({
+    code: {
+      maxChunkChars,
+      chunkOverlapChars: Math.floor(maxChunkChars * CODE_CHUNK_OVERLAP_RATIO),
+    },
+  });
 }
 
 async function embedAndCommitBatch(
@@ -792,7 +824,7 @@ async function embedAndCommitBatch(
       `embedding ${describePreparedFiles(files)}`,
       embeddingScheduler.snapshot(),
     );
-    const vectors = await embeddingTiming.time(() =>
+    const embedding = await embeddingTiming.time(() =>
       embedContentsWithRetry(
         contents,
         ctx.embeddingModel,
@@ -800,15 +832,25 @@ async function embedAndCommitBatch(
         ctx.signal,
       ),
     );
+    const truncatedInputIndexes = new Set(
+      embedding.diagnostics.truncatedInputIndexes,
+    );
     throwIfIndexCancelled(ctx);
     let offset = 0;
 
     for (const file of files) {
       throwIfIndexCancelled(ctx);
-      const fileVectors = vectors.slice(offset, offset + file.fragments.length);
+      const end = offset + file.fragments.length;
+      const fileVectors = embedding.vectors.slice(offset, end);
+      let truncatedFragmentCount = 0;
+      for (let index = offset; index < end; index++) {
+        if (truncatedInputIndexes.has(index)) {
+          truncatedFragmentCount++;
+        }
+      }
       offset += file.fragments.length;
       const committed = timings.timeSync("index_commit", () =>
-        commitFile(file, fileVectors, ctx, stats),
+        commitFile(file, fileVectors, ctx, stats, truncatedFragmentCount),
       );
       onProgress(stats, finishedFileDetail(committed, file.file.relativePath));
     }
@@ -855,7 +897,7 @@ async function embedAndCommitFile(
 ): Promise<void> {
   try {
     throwIfIndexCancelled(ctx);
-    const vectors = await embeddingTiming.time(() =>
+    const embedding = await embeddingTiming.time(() =>
       embedFragments(
         file.fragments,
         ctx.embeddingModel,
@@ -865,7 +907,13 @@ async function embedAndCommitFile(
     );
     throwIfIndexCancelled(ctx);
     const committed = timings.timeSync("index_commit", () =>
-      commitFile(file, vectors, ctx, stats),
+      commitFile(
+        file,
+        embedding.vectors,
+        ctx,
+        stats,
+        embedding.diagnostics.truncatedInputIndexes.length,
+      ),
     );
     onProgress(stats, finishedFileDetail(committed, file.file.relativePath));
   } catch (error) {
@@ -883,10 +931,13 @@ function commitFile(
   vectors: readonly EmbeddingVector[],
   ctx: IndexContext,
   stats: IndexStats,
+  truncatedFragmentCount = 0,
 ): boolean {
   try {
     throwIfIndexCancelled(ctx);
-    ctx.storage.upsertFile(file.file, file.fragments, vectors);
+    ctx.storage.upsertFile(file.file, file.fragments, vectors, {
+      truncatedFragmentCount,
+    });
     stats.filesIndexed++;
     stats.entitiesCreated += countPublicEntities(file.fragments);
     return true;
@@ -989,7 +1040,7 @@ async function embedFragments(
   model: EmbeddingModel,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingVector[]> {
+): Promise<EmbeddingBatchResult> {
   const batches: { start: number; fragments: EntityFragment[] }[] = [];
 
   for (
@@ -1002,6 +1053,7 @@ async function embedFragments(
   }
 
   const vectors: EmbeddingVector[] = new Array(fragments.length);
+  const truncatedInputIndexes: number[] = [];
   const results = await Promise.allSettled(
     batches.map((batch) =>
       embedFragmentBatch(
@@ -1022,16 +1074,24 @@ async function embedFragments(
     }
 
     const start = batches[index].start;
-    for (const [offset, vector] of result.value.entries()) {
+    for (const [offset, vector] of result.value.vectors.entries()) {
       vectors[start + offset] = vector;
     }
+    truncatedInputIndexes.push(
+      ...result.value.diagnostics.truncatedInputIndexes.map(
+        (inputIndex) => start + inputIndex,
+      ),
+    );
   }
 
   if (firstError) {
     throw firstError;
   }
 
-  return vectors;
+  return {
+    vectors,
+    diagnostics: { truncatedInputIndexes },
+  };
 }
 
 async function embedFragmentBatch(
@@ -1040,7 +1100,7 @@ async function embedFragmentBatch(
   startIndex: number,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingVector[]> {
+): Promise<EmbeddingBatchResult> {
   const contents = fragments.map(vectorContentForFragment);
 
   try {
@@ -1071,18 +1131,22 @@ async function embedFragmentBatchOneByOne(
   startIndex: number,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingVector[]> {
+): Promise<EmbeddingBatchResult> {
   const vectors: EmbeddingVector[] = [];
+  const truncatedInputIndexes: number[] = [];
 
   for (const [index, fragment] of fragments.entries()) {
     try {
-      const [vector] = await embedContentsWithRetry(
+      const result = await embedContentsWithRetry(
         [vectorContentForFragment(fragment)],
         model,
         embeddingScheduler,
         signal,
       );
-      vectors.push(vector);
+      vectors.push(result.vectors[0]);
+      if (result.diagnostics.truncatedInputIndexes.length > 0) {
+        truncatedInputIndexes.push(index);
+      }
     } catch (error) {
       throw new EngineError(
         "Embedding entity fragment failed after one-by-one fallback",
@@ -1095,7 +1159,10 @@ async function embedFragmentBatchOneByOne(
     }
   }
 
-  return vectors;
+  return {
+    vectors,
+    diagnostics: { truncatedInputIndexes },
+  };
 }
 
 function vectorContentForFragment(fragment: EntityFragment): Content {
@@ -1153,7 +1220,7 @@ async function embedContentsWithRetry(
   model: EmbeddingModel,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingVector[]> {
+): Promise<EmbeddingBatchResult> {
   let attempt = 0;
 
   while (true) {
@@ -1162,8 +1229,12 @@ async function embedContentsWithRetry(
 
     try {
       throwIfAborted(signal);
-      const vectors = await embeddingScheduler.run(
-        () => model.embed(contents, { purpose: "document", signal }),
+      const result = await embeddingScheduler.run(
+        () =>
+          model.embedWithDiagnostics(contents, {
+            purpose: "document",
+            signal,
+          }),
         signal,
         (error) => {
           retry = classifyEmbeddingRetry(error);
@@ -1177,7 +1248,7 @@ async function embedContentsWithRetry(
         },
       );
       embeddingScheduler.recordSuccess();
-      return vectors;
+      return result;
     } catch (error) {
       if (signal?.aborted) {
         throw signal.reason instanceof Error
