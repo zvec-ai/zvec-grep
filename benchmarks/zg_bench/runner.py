@@ -16,6 +16,10 @@ from typing import Any, Literal, Sequence
 
 import yaml
 
+from .github_proxy import (
+    normalize_github_proxy_prefix,
+    rewrite_github_downloads,
+)
 from .settings import (
     AGENT_SETUP_TIMEOUT_MULTIPLIER,
     CODEX_VERSION,
@@ -47,6 +51,8 @@ ZVEC_QWEN_CODE_IMPORT_PATH = (
 )
 ZVEC_OPENCODE_IMPORT_PATH = "zg_bench.agents.zvec_opencode:ZvecOpenCode"
 OPENCODE_ACP_IMPORT_PATH = "zg_bench.agents.opencode_acp:OpenCodeACP"
+PROXY_CODEX_IMPORT_PATH = "zg_bench.github_proxy:ProxyCodex"
+PROXY_QWEN_CODE_IMPORT_PATH = "zg_bench.github_proxy:ProxyQwenCode"
 OPENCODE_ACP_REGISTRY_ENTRY_PATH = (
     Path(__file__).resolve().parent
     / "agents"
@@ -561,6 +567,32 @@ def patch_task_uv_install(task_dir: Path, archive: Path) -> bool:
     return True
 
 
+def patch_task_github_downloads(task_dir: Path, proxy_prefix: str) -> int:
+    """Rewrite task setup files that download content from GitHub."""
+    proxy_prefix = normalize_github_proxy_prefix(proxy_prefix)
+    candidates = {
+        path
+        for path in (task_dir / "environment").rglob("*")
+        if path.is_file()
+    }
+    candidates.update(
+        path for path in task_dir.rglob("*.sh") if path.is_file()
+    )
+
+    patched = 0
+    for path in candidates:
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        rewritten = rewrite_github_downloads(contents, proxy_prefix)
+        if rewritten == contents:
+            continue
+        path.write_text(rewritten, encoding="utf-8")
+        patched += 1
+    return patched
+
+
 async def _download_suite_task_paths(
     suite: BenchmarkSuite,
 ) -> tuple[tuple[str, Path], ...]:
@@ -588,23 +620,39 @@ async def _download_suite_task_paths(
     )
 
 
-def prepare_suite_uv_archive(
-    suite: BenchmarkSuite, archive: Path
+def prepare_suite_task_overrides(
+    suite: BenchmarkSuite,
+    *,
+    uv_archive: Path | None = None,
+    github_proxy_prefix: str | None = None,
 ) -> PreparedUvTasks:
-    """Cache selected tasks and make their Docker builds use a local uv archive."""
-    archive = validate_uv_archive(archive)
+    """Create isolated task copies with requested download overrides."""
+    if uv_archive is None and github_proxy_prefix is None:
+        raise ValueError("at least one task download override is required")
+    if uv_archive is not None:
+        uv_archive = validate_uv_archive(uv_archive)
+    if github_proxy_prefix is not None:
+        github_proxy_prefix = normalize_github_proxy_prefix(
+            github_proxy_prefix
+        )
+
     try:
         downloaded_tasks = asyncio.run(_download_suite_task_paths(suite))
     except Exception as error:
         raise RuntimeError("could not cache the selected Harbor tasks") from error
 
-    with archive.open("rb") as archive_file:
-        archive_digest = hashlib.file_digest(archive_file, "sha256").hexdigest()
+    archive_digest = None
+    if uv_archive is not None:
+        with uv_archive.open("rb") as archive_file:
+            archive_digest = hashlib.file_digest(
+                archive_file, "sha256"
+            ).hexdigest()
     cache_identity = json.dumps(
         {
             "dataset": suite.dataset,
             "tasks": suite.tasks,
             "uv_archive_sha256": archive_digest,
+            "github_proxy_prefix": github_proxy_prefix,
         },
         sort_keys=True,
     ).encode()
@@ -623,8 +671,15 @@ def prepare_suite_uv_archive(
         local_names.add(local_name)
         local_task_path = dataset_path / local_name
         shutil.copytree(task_path, local_task_path, dirs_exist_ok=True)
-        if not patch_task_uv_install(local_task_path, archive):
+        if uv_archive is not None and not patch_task_uv_install(
+            local_task_path, uv_archive
+        ):
             missed_tasks.append(task_name)
+        if github_proxy_prefix is not None:
+            patch_task_github_downloads(
+                local_task_path,
+                github_proxy_prefix,
+            )
 
     if missed_tasks:
         names = ", ".join(missed_tasks)
@@ -635,6 +690,13 @@ def prepare_suite_uv_archive(
         dataset_path=dataset_path.resolve(),
         task_count=len(downloaded_tasks),
     )
+
+
+def prepare_suite_uv_archive(
+    suite: BenchmarkSuite, archive: Path
+) -> PreparedUvTasks:
+    """Create isolated task copies that install uv from a local archive."""
+    return prepare_suite_task_overrides(suite, uv_archive=archive)
 
 
 def _cache_local_package(package: Path) -> tuple[Path, str]:
@@ -824,6 +886,7 @@ def build_harbor_command(
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     zvec_grep_package_sha256: str | None = None,
     task_dataset_path: Path | None = None,
+    github_proxy_prefix: str | None = None,
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
@@ -901,6 +964,21 @@ def build_harbor_command(
                     f"zvec-grep skill not found: {ZVEC_GREP_SKILL_DIR}"
                 )
             skills.append(str(ZVEC_GREP_SKILL_DIR.resolve()))
+
+    if github_proxy_prefix is not None:
+        github_proxy_prefix = normalize_github_proxy_prefix(
+            github_proxy_prefix
+        )
+        if profile == "baseline":
+            proxy_agents = {
+                _CODEX_AGENT: PROXY_CODEX_IMPORT_PATH,
+                _QWEN_CODE_AGENT: PROXY_QWEN_CODE_IMPORT_PATH,
+                _OPENCODE_AGENT: OPENCODE_ACP_IMPORT_PATH,
+            }
+            harbor_agent = proxy_agents[agent]
+        agent_kwargs.append(
+            f"github_proxy_prefix={github_proxy_prefix}"
+        )
 
     command = [
         harbor_executable,

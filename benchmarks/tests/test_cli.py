@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from zg_bench.cli import build_parser, main
@@ -121,6 +122,35 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.uv_archive, Path("/tmp/uv.tar.gz"))
 
+    def test_enables_github_proxy_by_default(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "swebench-verified",
+                "--agent",
+                "opencode",
+                "--model",
+                "qwen3.7-max",
+            ]
+        )
+
+        self.assertTrue(args.github_proxy)
+
+    def test_accepts_github_proxy_opt_out(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "swebench-verified",
+                "--agent",
+                "opencode",
+                "--model",
+                "qwen3.7-max",
+                "--no-github-proxy",
+            ]
+        )
+
+        self.assertFalse(args.github_proxy)
+
     def test_legacy_package_fails_before_harbor(self) -> None:
         with self.assertRaisesRegex(SystemExit, "does not support"):
             main(
@@ -182,6 +212,13 @@ class CliTests(unittest.TestCase):
                 patch("zg_bench.cli.collect_checks", return_value=[]),
                 patch("zg_bench.cli.print_report", return_value=0),
                 patch("zg_bench.cli.prepare_setup_cache", return_value=None),
+                patch(
+                    "zg_bench.cli.prepare_suite_task_overrides",
+                    return_value=SimpleNamespace(
+                        dataset_path=jobs_dir / "prepared-tasks",
+                        task_count=1,
+                    ),
+                ),
                 patch("zg_bench.cli.execute", side_effect=fake_execute),
                 contextlib.redirect_stderr(stderr),
                 contextlib.redirect_stdout(stdout),

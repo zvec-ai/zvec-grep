@@ -130,6 +130,79 @@ class UvArchiveTests(unittest.TestCase):
         self.assertNotIn("--dataset", command)
         self.assertNotIn("--include-task-name", command)
 
+    def test_rewrites_github_downloads_in_task_setup_files_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_dir = Path(temp_dir)
+            environment_dir = task_dir / "environment"
+            tests_dir = task_dir / "tests"
+            environment_dir.mkdir()
+            tests_dir.mkdir()
+            dockerfile = environment_dir / "Dockerfile"
+            dockerfile.write_text(
+                "FROM example\n"
+                "RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh\n"
+                "RUN curl -fL https://github.com/example/tool/archive.tar.gz\n"
+            )
+            test_script = tests_dir / "test.sh"
+            test_script.write_text(
+                "curl https://raw.githubusercontent.com/example/repo/main/test.py\n"
+            )
+            instruction = task_dir / "instruction.md"
+            instruction.write_text(
+                "See https://github.com/example/repo/issues/1\n"
+            )
+
+            patched = runner.patch_task_github_downloads(
+                task_dir,
+                "https://gh-proxy.com/",
+            )
+
+            self.assertEqual(patched, 2)
+            self.assertIn(
+                "UV_INSTALLER_GITHUB_BASE_URL="
+                "https://gh-proxy.com/https://github.com",
+                dockerfile.read_text(),
+            )
+            self.assertIn(
+                "https://gh-proxy.com/https://github.com/example/tool",
+                dockerfile.read_text(),
+            )
+            self.assertIn(
+                "https://gh-proxy.com/https://raw.githubusercontent.com/example",
+                test_script.read_text(),
+            )
+            self.assertEqual(
+                instruction.read_text(),
+                "See https://github.com/example/repo/issues/1\n",
+            )
+
+    def test_github_proxy_uses_proxy_agent_and_forwards_prefix(self) -> None:
+        suite = runner.BenchmarkSuite(
+            name="suite",
+            dataset="swe-bench/suite@2",
+            tier="smoke",
+            tasks=("swe-bench/example",),
+        )
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="codex",
+            model="gpt-test",
+            job_name="github-proxy-test",
+            github_proxy_prefix="https://gh-proxy.com/",
+        )
+
+        agent_index = command.index("--agent")
+        self.assertEqual(
+            command[agent_index + 1],
+            runner.PROXY_CODEX_IMPORT_PATH,
+        )
+        self.assertIn(
+            "github_proxy_prefix=https://gh-proxy.com/",
+            command,
+        )
+
 
 class LocalPackageTests(unittest.TestCase):
     def test_packs_current_checkout_and_names_artifact_by_digest(self) -> None:

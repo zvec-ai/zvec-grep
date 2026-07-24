@@ -9,8 +9,10 @@ from typing import Any
 from harbor.agents.installed.acp import AcpAgent
 from harbor.environments.base import BaseEnvironment
 
+from ..github_proxy import GithubProxyMixin
 
-class OpenCodeACP(AcpAgent):
+
+class OpenCodeACP(GithubProxyMixin, AcpAgent):
     """Run OpenCode through its official ACP server with project config."""
 
     _ACP_PYTHON_PACKAGE = "agent-client-protocol==0.11.0"

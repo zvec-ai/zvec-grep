@@ -16,6 +16,7 @@ OPENCODE_DASHSCOPE_BASE_URL = (
     "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
 OPENCODE_OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible"
+GITHUB_PROXY_PREFIX = "https://gh-proxy.com/"
 PIP_INDEX_URL = "https://mirrors.ustc.edu.cn/pypi/simple"
 UV_VERSION = "0.7.13"
 ZVEC_GREP_PACKAGE = "@zvec/zvec-grep@0.1.6-alpha.3"

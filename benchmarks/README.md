@@ -141,6 +141,29 @@ Docker build context, and replaces the online installer layer with a local
 `COPY` and install step. Harbor's global content-addressed task cache is left
 unchanged. The archive must contain both `uv` and `uvx`.
 
+Benchmark-controlled GitHub downloads use `gh-proxy.com` by default:
+
+```sh
+uv run zg-bench run swebench-verified \
+  --tier smoke \
+  --agent opencode \
+  --model aliyun-glm-5.2 \
+  --profile all
+```
+
+This applies to GitHub Release assets, Raw content, archives, git clone URLs,
+the internal GitHub download performed by the uv installer, and the internal
+nvm repository clone. It covers supported agent setup commands and setup files
+inside the selected benchmark tasks. The runner uses an isolated task copy, so
+Harbor's global task cache remains unchanged. To use direct GitHub downloads
+for a run, pass `--no-github-proxy`.
+
+The proxy is a third-party trust dependency. Existing SHA-256 checks remain
+enforced, including the pinned OpenCode binary checksum. Downloads without an
+upstream checksum retain their existing risk and add the proxy operator to the
+trust path. Do not send GitHub credentials or private-repository URLs through
+this public proxy.
+
 ### Ubuntu 24.04 OpenCode + GLM-5.2 quickstart
 
 From the repository root:

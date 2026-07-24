@@ -20,7 +20,7 @@ from .runner import (
     load_suite,
     new_run_id,
     prepare_setup_cache,
-    prepare_suite_uv_archive,
+    prepare_suite_task_overrides,
     profile_job_name,
     resolve_agent_model,
     selected_profiles,
@@ -29,7 +29,11 @@ from .runner import (
     validate_zvec_grep_package_compatibility,
     zvec_grep_package_install_spec,
 )
-from .settings import ZVEC_GREP_EMBEDDING, ZVEC_GREP_PACKAGE
+from .settings import (
+    GITHUB_PROXY_PREFIX,
+    ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_PACKAGE,
+)
 
 
 class BenchmarkArgumentParser(argparse.ArgumentParser):
@@ -157,6 +161,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--github-proxy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "route GitHub setup downloads through "
+            f"{GITHUB_PROXY_PREFIX} while retaining checksum verification "
+            "(default: enabled; use --no-github-proxy to disable)"
+        ),
+    )
+    run.add_argument(
         "--dry-run",
         action="store_true",
         help="print the Harbor command without running it",
@@ -222,6 +236,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         suite = load_suite(args.suite, tier=args.tier, task_overrides=args.tasks)
         profiles = selected_profiles(args.profile)
+        github_proxy_prefix = (
+            GITHUB_PROXY_PREFIX if args.github_proxy else None
+        )
         validate_zvec_grep_package_compatibility(
             profiles,
             agent=args.agent,
@@ -254,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
                     zvec_grep_package=zvec_grep_package_install_spec(
                         args.zvec_grep_package
                     ),
+                    github_proxy_prefix=github_proxy_prefix,
                 ),
             )
             for profile, job_name in run_specs
@@ -296,12 +314,16 @@ def main(argv: list[str] | None = None) -> int:
 
     return_code = 0
     try:
-        prepared_uv_tasks = None
-        if args.uv_archive is not None:
-            prepared_uv_tasks = prepare_suite_uv_archive(suite, args.uv_archive)
+        prepared_tasks = None
+        if args.uv_archive is not None or github_proxy_prefix is not None:
+            prepared_tasks = prepare_suite_task_overrides(
+                suite,
+                uv_archive=args.uv_archive,
+                github_proxy_prefix=github_proxy_prefix,
+            )
             print(
-                "Prepared local uv archive for "
-                f"{prepared_uv_tasks.task_count} task image(s)",
+                "Prepared isolated download overrides for "
+                f"{prepared_tasks.task_count} task image(s)",
                 flush=True,
             )
         for profile, job_name in run_specs:
@@ -332,10 +354,11 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 task_dataset_path=(
-                    prepared_uv_tasks.dataset_path
-                    if prepared_uv_tasks is not None
+                    prepared_tasks.dataset_path
+                    if prepared_tasks is not None
                     else None
                 ),
+                github_proxy_prefix=github_proxy_prefix,
             )
             profile_return_code = execute(
                 command,
