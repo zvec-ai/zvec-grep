@@ -260,7 +260,7 @@ class ZvecGrepMixin:
             expected_digest = shlex.quote(self._zvec_grep_package_sha256)
             install_command = (
                 'package_marker="$HOME/.nvm/.zg-bench-zvec-grep-sha256"; '
-                "if command -v zg >/dev/null 2>&1 && "
+                'if [ -x "$zg_path" ] && '
                 f'[ "$(cat "$package_marker" 2>/dev/null)" = {expected_digest} ] && '
                 f"npm list -g --depth=0 {binding_package} >/dev/null 2>&1; "
                 "then reused=1; else "
@@ -277,8 +277,8 @@ class ZvecGrepMixin:
         else:
             expected = shlex.quote(expected_version)
             install_command = (
-                "if command -v zg >/dev/null 2>&1 && "
-                f"[ \"$(zg version -v)\" = {expected} ] && "
+                'if [ -x "$zg_path" ] && '
+                f'[ "$("$zg_path" version -v)" = {expected} ] && '
                 f"npm list -g --depth=0 {binding_package} >/dev/null 2>&1; "
                 "then reused=1; else "
                 f"npm install -g {package} {binding_package} "
@@ -293,10 +293,14 @@ class ZvecGrepMixin:
                 "export NPM_CONFIG_REGISTRY="
                 f"{shlex.quote(_NPM_CONFIG_REGISTRY)}; "
                 f"{ensure_node_command}; "
+                'zg_path="$(npm prefix -g)/bin/zg"; '
                 f"{install_command}; "
+                '[ -x "$zg_path" ] || { '
+                'echo "Error: npm global zg executable not found at '
+                '$zg_path" >&2; exit 1; }; '
                 "printf '\\nZG_INSTALL_REUSED=%s\\nZG_NODE_PATH=%s\\n"
                 "ZG_BIN_PATH=%s\\n' \"$reused\" \"$(command -v node)\" "
-                '"$(command -v zg)"'
+                '"$zg_path"'
             ),
         )
         reused = self._parse_install_value(

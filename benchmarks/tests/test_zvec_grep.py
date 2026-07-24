@@ -135,6 +135,17 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             install_command.index("npm install -g"),
         )
 
+    async def test_resolves_zg_from_the_npm_global_prefix(self) -> None:
+        harness = _InstallHarness()
+
+        await harness._install_zvec_grep(object())
+
+        install_command = harness.agent_commands[0]
+        self.assertIn('zg_path="$(npm prefix -g)/bin/zg"', install_command)
+        self.assertIn('[ -x "$zg_path" ]', install_command)
+        self.assertIn('"$zg_path"', install_command)
+        self.assertNotIn('"$(command -v zg)"', install_command)
+
     async def test_npm_failure_cannot_be_masked_by_marker_output(self) -> None:
         harness = _InstallHarness(package="@zvec/zvec-grep")
 
