@@ -271,6 +271,10 @@ class LocalPackageTests(unittest.TestCase):
                 overlay["services"]["main"]["environment"]["PIP_INDEX_URL"],
                 runner.PIP_INDEX_URL,
             )
+            self.assertEqual(
+                overlay["services"]["main"]["environment"]["UV_DEFAULT_INDEX"],
+                runner.UV_DEFAULT_INDEX,
+            )
             service_volumes = overlay["services"]["main"]["volumes"]
             self.assertEqual(
                 service_volumes[1],

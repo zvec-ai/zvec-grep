@@ -18,6 +18,7 @@ OPENCODE_DASHSCOPE_BASE_URL = (
 OPENCODE_OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible"
 GITHUB_PROXY_PREFIX = "https://gh-proxy.com/"
 PIP_INDEX_URL = "https://mirrors.ustc.edu.cn/pypi/simple"
+UV_DEFAULT_INDEX = PIP_INDEX_URL
 UV_VERSION = "0.7.13"
 ZVEC_GREP_PACKAGE = "@zvec/zvec-grep@0.1.6-alpha.3"
 ZVEC_GREP_BINDING_PACKAGE = "@zvec/bindings-linux-x64@0.5.0"

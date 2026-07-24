@@ -34,6 +34,7 @@ from .settings import (
     QWEN_CODE_DASHSCOPE_BASE_URL,
     QWEN_CODE_DASHSCOPE_MODEL,
     QWEN_CODE_VERSION,
+    UV_DEFAULT_INDEX,
     UV_VERSION,
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
@@ -830,6 +831,7 @@ def prepare_setup_cache(
             "main": {
                 "environment": {
                     "PIP_INDEX_URL": PIP_INDEX_URL,
+                    "UV_DEFAULT_INDEX": UV_DEFAULT_INDEX,
                 },
                 "platform": "linux/amd64",
                 "volumes": service_volumes,
