@@ -23,7 +23,6 @@ import {
   zvecGrepIndexStatusOutputSchema,
   zvecGrepRgInputSchema,
   zvecGrepSearchInputSchema,
-  zvecGrepSearchOutputSchema,
   zvecGrepServerStatusInputSchema,
   zvecGrepServerStatusOutputSchema,
   type ZvecGrepIndexInput,
@@ -33,8 +32,6 @@ import {
   type ZvecGrepSearchIndexing,
 } from "./schemas.js";
 import {
-  contextText,
-  simplifyContextResult,
   textToolResult,
   toolResult,
 } from "./result-format.js";
@@ -319,7 +316,6 @@ export function registerZvecGrepTools(
       description:
         "Search an existing repository index first for repository investigation. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
       inputSchema: zvecGrepSearchInputSchema.shape,
-      outputSchema: zvecGrepSearchOutputSchema.shape,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -347,21 +343,20 @@ export function registerZvecGrepTools(
       const response = await backend.search(effectiveSearch, {
         authorization: resolution.authorization,
       });
-      const structuredContent = {
-        root: response.root,
-        freshness: response.freshness,
-        indexing: response.indexing,
-        result: simplifyContextResult(response.result),
-      };
       const statusLines = [
         `freshness: ${response.freshness}`,
         ...(response.indexing
           ? [`indexing: ${formatSearchIndexing(response.indexing)}`]
           : []),
       ];
-      return toolResult(
-        `${statusLines.join("\n")}\n${contextText(response.result)}`,
-        structuredContent,
+      // Mirror the compact rg output: return agent-formatted text only and drop
+      // the verbose structuredContent (per-item outline + full source), which
+      // otherwise dominates the agent's context. `short` keeps a bounded source
+      // snippet per hit so relevance is judgeable without extra file reads.
+      return textToolResult(
+        `${statusLines.join("\n")}\n${formatAgentContextResult(response.result, {
+          preview: "short",
+        })}`,
       );
     },
   );
