@@ -101,6 +101,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   const address = await server.start();
   const mcpUrl = new URL(`http://127.0.0.1:${address.port}/mcp`);
+  const adminMcpUrl = new URL("/mcp/admin", mcpUrl);
   await mkdir(join(temporaryDirectory, "daemon"));
   await writeFile(join(temporaryDirectory, "daemon", "token"), `${token}\n`);
   t.after(async () => {
@@ -156,9 +157,26 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   assert.equal(getMcp.status, 405);
 
+  const publicClient = await connectClient(mcpUrl, "public-client");
+  t.after(async () => publicClient.close());
+  const publicTools = await publicClient.listTools();
+  assert.deepEqual(publicTools.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_rg",
+    "zvec_grep_search",
+  ]);
+  const hiddenManagementCall = await publicClient.callTool({
+    name: "zvec_grep_index_status",
+    arguments: { root },
+  });
+  assert.equal(hiddenManagementCall.isError, true);
+  assert.match(
+    hiddenManagementCall.content[0].text,
+    /tool.*not found|not found.*tool/i,
+  );
+
   const clients = await Promise.all([
-    connectClient(mcpUrl, "client-a"),
-    connectClient(mcpUrl, "client-b"),
+    connectClient(adminMcpUrl, "client-a"),
+    connectClient(adminMcpUrl, "client-b"),
   ]);
   t.after(async () => Promise.all(clients.map((client) => client.close())));
 
@@ -384,6 +402,36 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.equal(droppedStatus.structuredContent.indexed, false);
 });
 
+test("full MCP toolset restores all tools on the public endpoint", async (t) => {
+  const server = new DaemonHttpServer({
+    host: "127.0.0.1",
+    port: 0,
+    token,
+    version: "1.0.0",
+    backend: {},
+    mcpToolset: "full",
+  });
+  const address = await server.start();
+  const client = await connectClient(
+    new URL(`http://127.0.0.1:${address.port}/mcp`),
+    "full-toolset-client",
+  );
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const listed = await client.listTools();
+  assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_index",
+    "zvec_grep_index_drop",
+    "zvec_grep_index_status",
+    "zvec_grep_rg",
+    "zvec_grep_search",
+    "zvec_grep_server_status",
+  ]);
+});
+
 test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-qwen-http-"),
@@ -435,7 +483,7 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   });
   const address = await server.start();
   const client = await connectClient(
-    new URL(`http://127.0.0.1:${address.port}/mcp`),
+    new URL(`http://127.0.0.1:${address.port}/mcp/admin`),
     "qwen-client",
     async () => ({
       action: "accept",

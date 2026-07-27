@@ -5,6 +5,12 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { daemonHome, resolveClientToken } from "./config.js";
 import { processIsAlive } from "../engine/utils/daemon-lease.js";
+import {
+  DEFAULT_MCP_TOOLSET,
+  MCP_TOOLSET_ENV,
+  resolveMcpToolset,
+  type McpToolset,
+} from "../mcp/toolset.js";
 
 export type DaemonInstanceRecord = {
   pid: number;
@@ -14,6 +20,7 @@ export type DaemonInstanceRecord = {
   updatedAt: number;
   serverUrl: string;
   ready: boolean;
+  mcpToolset: McpToolset;
 };
 
 export type DaemonControlStatus = {
@@ -21,6 +28,7 @@ export type DaemonControlStatus = {
   ready: boolean;
   pid?: number;
   serverUrl?: string;
+  mcpToolset?: McpToolset;
 };
 
 export class DaemonInstanceLock {
@@ -34,6 +42,7 @@ export class DaemonInstanceLock {
   static async acquire(
     home: string | undefined,
     serverUrl: string,
+    mcpToolset: McpToolset = DEFAULT_MCP_TOOLSET,
   ): Promise<DaemonInstanceLock> {
     const path = join(daemonHome(home), "instance.lock");
     const record: DaemonInstanceRecord = {
@@ -44,6 +53,7 @@ export class DaemonInstanceLock {
       updatedAt: Date.now(),
       serverUrl,
       ready: false,
+      mcpToolset,
     };
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -141,6 +151,7 @@ export async function serverStatus(
       ready: response.ok && record.ready,
       pid: record.pid,
       serverUrl: record.serverUrl,
+      mcpToolset: record.mcpToolset,
     };
   } catch {
     return {
@@ -148,6 +159,7 @@ export async function serverStatus(
       ready: false,
       pid: record.pid,
       serverUrl: record.serverUrl,
+      mcpToolset: record.mcpToolset,
     };
   }
 }
@@ -158,14 +170,33 @@ export async function startServer(options: {
   tokenFile?: string;
   home?: string;
   timeoutMs?: number;
+  mcpToolset?: McpToolset;
 }): Promise<DaemonControlStatus> {
+  const environmentToolset = process.env[MCP_TOOLSET_ENV];
+  const requestedToolset = resolveMcpToolset(
+    options.mcpToolset,
+    environmentToolset,
+  );
+  const toolsetWasExplicit =
+    options.mcpToolset !== undefined || environmentToolset !== undefined;
   const current = await serverStatus(options.home);
-  if (current.running && current.ready) return current;
-  if (current.running)
+  if (current.running) {
+    if (
+      toolsetWasExplicit &&
+      current.mcpToolset !== undefined &&
+      current.mcpToolset !== requestedToolset
+    ) {
+      throw new Error(
+        `zvec-grep server is already running with MCP toolset "${current.mcpToolset}". Run \`zg server off\`, then restart it with \`zg server on --mcp-toolset ${requestedToolset}\`.`,
+      );
+    }
+    if (current.ready) return current;
     throw new Error(
       `zvec-grep server process ${current.pid} is running but not ready`,
     );
+  }
   const args = [options.cliPath, "server", "run"];
+  args.push("--mcp-toolset", requestedToolset);
   if (options.listen) args.push("--listen", options.listen);
   if (options.tokenFile) args.push("--token-file", options.tokenFile);
   if (options.home) args.push("--home", options.home);
@@ -229,10 +260,18 @@ async function readRecordPath(
       typeof value.startedAt !== "number" ||
       typeof value.updatedAt !== "number" ||
       typeof value.serverUrl !== "string" ||
-      typeof value.ready !== "boolean"
+      typeof value.ready !== "boolean" ||
+      (value.mcpToolset !== undefined &&
+        value.mcpToolset !== "agent" &&
+        value.mcpToolset !== "full")
     )
       return undefined;
-    return value as DaemonInstanceRecord;
+    return {
+      ...(value as Omit<DaemonInstanceRecord, "mcpToolset">),
+      // Locks written before toolset profiles exposed the full six-tool MCP
+      // surface, so preserve that behavior when reporting a live legacy daemon.
+      mcpToolset: value.mcpToolset ?? "full",
+    };
   } catch {
     return undefined;
   }

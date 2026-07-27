@@ -9,6 +9,7 @@ import type {
   QueryRefreshMode,
 } from "./types.js";
 import { VALID_SYMBOL_TYPES } from "./types.js";
+import { parseMcpToolset } from "../mcp/toolset.js";
 
 const RG_OPTIONS_WITH_VALUE = new Set([
   "--dfa-size-limit",
@@ -155,6 +156,10 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.mode = parseClientMode(readOptionValue(args, ++index, arg));
     } else if (arg === "--force-direct") {
       options.forceDirect = true;
+    } else if (isLongOptionWithValue(arg, "--mcp-toolset")) {
+      options.mcpToolset = parseMcpToolset(valueFromLongOption(arg));
+    } else if (arg === "--mcp-toolset") {
+      options.mcpToolset = parseMcpToolset(readOptionValue(args, ++index, arg));
     } else if (isLongOptionWithValue(arg, "--listen")) {
       options.listen = valueFromLongOption(arg);
     } else if (arg === "--listen") {
@@ -753,6 +758,17 @@ function validateCliShape(
     ) {
       throw new Error("--token-file cannot be used with zg server status");
     }
+    if (
+      options.mcpToolset !== undefined &&
+      options.serverAction !== "on" &&
+      options.serverAction !== "run"
+    ) {
+      throw new Error(
+        "--mcp-toolset can only be used with zg server on or run",
+      );
+    }
+  } else if (options.mcpToolset !== undefined) {
+    throw new Error("--mcp-toolset can only be used with zg server on or run");
   }
 
   if (

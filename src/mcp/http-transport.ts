@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import type { ZvecGrepDaemonBackend } from "./tools.js";
+import type {
+  ZvecGrepDaemonBackend,
+  ZvecGrepMcpServerOptions,
+} from "./tools.js";
 import { createZvecGrepMcpServer } from "./tools.js";
 
 type McpSession = {
@@ -14,11 +17,15 @@ type McpSession = {
 export class McpHttpSessionManager {
   private readonly sessions = new Map<string, McpSession>();
   private readonly initializing = new Set<McpSession>();
+  private readonly serverOptions: Readonly<ZvecGrepMcpServerOptions>;
 
   constructor(
     private readonly backend: ZvecGrepDaemonBackend,
     private readonly version: string,
-  ) {}
+    serverOptions: Readonly<ZvecGrepMcpServerOptions> = {},
+  ) {
+    this.serverOptions = Object.freeze({ ...serverOptions });
+  }
 
   async handlePost(
     request: IncomingMessage,
@@ -55,7 +62,11 @@ export class McpHttpSessionManager {
         this.sessions.set(id, session);
       },
     });
-    const server = createZvecGrepMcpServer(this.backend, this.version);
+    const server = createZvecGrepMcpServer(
+      this.backend,
+      this.version,
+      this.serverOptions,
+    );
     const session: McpSession = { server, transport };
     holder.session = session;
     this.initializing.add(session);

@@ -1,5 +1,6 @@
 import type { CodeSymbolType, ZvecGrepContextRoute } from "../index.js";
 import type { ZvecGrepClientMode } from "../engine/config.js";
+import type { McpToolset } from "../mcp/toolset.js";
 
 export type ColorMode = "auto" | "always" | "never";
 
@@ -14,6 +15,7 @@ export type CliOptions = {
   authorizationScope?: "workspace";
   allowRemote?: boolean;
   serverAction?: "on" | "off" | "status" | "run";
+  mcpToolset?: McpToolset;
   listen?: string;
   serverTokenFile?: string;
   mode?: ZvecGrepClientMode;

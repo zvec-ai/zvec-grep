@@ -137,7 +137,7 @@ export class DaemonClient {
       }
     });
     const transport = new StreamableHTTPClientTransport(
-      new URL(this.options.serverUrl),
+      daemonAdminServerUrl(this.options.serverUrl),
       {
         requestInit: {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -181,6 +181,18 @@ export class DaemonClient {
       await client.close().catch(() => undefined);
     }
   }
+}
+
+export function daemonAdminServerUrl(serverUrl: string): URL {
+  const url = new URL(serverUrl);
+  const publicPath = url.pathname.replace(/\/+$/, "");
+  if (!publicPath.endsWith("/mcp")) {
+    throw new Error(
+      `zvec-grep server URL must end with /mcp (received ${url.pathname})`,
+    );
+  }
+  url.pathname = `${publicPath}/admin`;
+  return url;
 }
 
 function toolResultText(content: unknown): string | undefined {

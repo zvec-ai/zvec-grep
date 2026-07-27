@@ -5,8 +5,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   createZvecGrepMcpServer,
+  ZVEC_GREP_AGENT_MCP_INSTRUCTIONS,
+  ZVEC_GREP_FULL_MCP_INSTRUCTIONS,
   ZVEC_GREP_MCP_INSTRUCTIONS,
 } from "../dist/mcp/tools.js";
+import {
+  DEFAULT_MCP_TOOLSET,
+  parseMcpToolset,
+  resolveMcpToolset,
+} from "../dist/mcp/toolset.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { withProgressHeartbeat } from "../dist/mcp/progress-heartbeat.js";
 import { indexProgressFromMessage } from "../dist/index-progress.js";
@@ -139,8 +146,8 @@ function createBackend() {
   };
 }
 
-async function connect(backend = createBackend()) {
-  const server = createZvecGrepMcpServer(backend, "1.0.0");
+async function connect(backend = createBackend(), options = {}) {
+  const server = createZvecGrepMcpServer(backend, "1.0.0", options);
   const client = new Client({ name: "mcp-contract-test", version: "1.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -151,8 +158,79 @@ async function connect(backend = createBackend()) {
   return { client, server };
 }
 
-test("server contract exposes final tools with stable annotations", async (t) => {
-  const { client, server } = await connect();
+async function connectFull(backend = createBackend()) {
+  return await connect(backend, { toolset: "full" });
+}
+
+test("MCP toolset resolution prefers explicit configuration and defaults to agent", () => {
+  assert.equal(DEFAULT_MCP_TOOLSET, "agent");
+  assert.equal(resolveMcpToolset(), "agent");
+  assert.equal(resolveMcpToolset(undefined, "full"), "full");
+  assert.equal(resolveMcpToolset("agent", "full"), "agent");
+  assert.equal(parseMcpToolset("full"), "full");
+  assert.throws(() => parseMcpToolset("all"), /Expected "agent" or "full"/);
+});
+
+test("default agent contract exposes only search and rg", async (t) => {
+  const backend = createBackend();
+  let managementCalls = 0;
+  backend.index = async (input) => {
+    managementCalls += 1;
+    return await createBackend().index(input);
+  };
+  backend.dropIndex = async (input) => {
+    managementCalls += 1;
+    return await createBackend().dropIndex(input);
+  };
+  backend.indexStatus = async (input) => {
+    managementCalls += 1;
+    return await createBackend().indexStatus(input);
+  };
+  backend.serverStatus = async () => {
+    managementCalls += 1;
+    return await createBackend().serverStatus();
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const listed = await client.listTools();
+  assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_rg",
+    "zvec_grep_search",
+  ]);
+
+  const instructions = client.getInstructions();
+  assert.equal(instructions, ZVEC_GREP_AGENT_MCP_INSTRUCTIONS);
+  assert.equal(instructions, ZVEC_GREP_MCP_INSTRUCTIONS);
+  assert.doesNotMatch(
+    instructions,
+    /zvec_grep_(?:index|index_drop|index_status|server_status)/,
+  );
+  const search = listed.tools.find((tool) => tool.name === "zvec_grep_search");
+  assert.ok(search);
+  assert.doesNotMatch(
+    search.description,
+    /zvec_grep_(?:index|index_drop|index_status|server_status)/,
+  );
+
+  for (const [name, arguments_] of [
+    ["zvec_grep_index", { root }],
+    ["zvec_grep_index_drop", { root }],
+    ["zvec_grep_index_status", { root }],
+    ["zvec_grep_server_status", {}],
+  ]) {
+    const result = await client.callTool({ name, arguments: arguments_ });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /not found/i);
+  }
+  assert.equal(managementCalls, 0);
+});
+
+test("full server contract exposes all tools with stable annotations", async (t) => {
+  const { client, server } = await connectFull();
   t.after(async () => {
     await client.close();
     await server.close();
@@ -173,6 +251,8 @@ test("server contract exposes final tools with stable annotations", async (t) =>
       "zvec_grep_server_status",
     ],
   );
+  const instructions = client.getInstructions();
+  assert.equal(instructions, ZVEC_GREP_FULL_MCP_INSTRUCTIONS);
   const toolContracts = JSON.stringify(
     tools.map((tool) => ({
       title: tool.title,
@@ -183,26 +263,23 @@ test("server contract exposes final tools with stable annotations", async (t) =>
   );
   assert.doesNotMatch(toolContracts, /\bCLI\b/i);
   assert.doesNotMatch(toolContracts, /`?zg(?:\s|`)/i);
-  assert.match(ZVEC_GREP_MCP_INSTRUCTIONS, /mandatory repository search layer/);
+  assert.match(instructions, /mandatory repository search layer/);
+  assert.match(instructions, /replaces ad-hoc grep\/rg exploration/);
+  assert.match(instructions, /call a zvec_grep_\* tool first/);
   assert.match(
-    ZVEC_GREP_MCP_INSTRUCTIONS,
-    /replaces ad-hoc grep\/rg exploration/,
-  );
-  assert.match(ZVEC_GREP_MCP_INSTRUCTIONS, /call a zvec_grep_\* tool first/);
-  assert.match(
-    ZVEC_GREP_MCP_INSTRUCTIONS,
+    instructions,
     /forbidden substitutes for zvec_grep_\* operations/,
   );
   assert.match(
-    ZVEC_GREP_MCP_INSTRUCTIONS,
+    instructions,
     /Exact text and regex searches are not exceptions/,
   );
   assert.match(
-    ZVEC_GREP_MCP_INSTRUCTIONS,
+    instructions,
     /Do not re-verify zvec_grep results by running grep or rg/,
   );
-  assert.doesNotMatch(ZVEC_GREP_MCP_INSTRUCTIONS, /\bCLI\b/i);
-  assert.doesNotMatch(ZVEC_GREP_MCP_INSTRUCTIONS, /`?zg(?:\s|`)/i);
+  assert.doesNotMatch(instructions, /\bCLI\b/i);
+  assert.doesNotMatch(instructions, /`?zg(?:\s|`)/i);
 
   const annotations = Object.fromEntries(
     tools.map((tool) => [tool.name, tool.annotations]),
@@ -254,7 +331,7 @@ test("server contract exposes final tools with stable annotations", async (t) =>
 });
 
 test("index contract documents background submission as the default", async (t) => {
-  const { client, server } = await connect();
+  const { client, server } = await connectFull();
   t.after(async () => {
     await client.close();
     await server.close();
@@ -281,7 +358,7 @@ test("index contract documents background submission as the default", async (t) 
 });
 
 test("index drop returns the daemon deletion result", async (t) => {
-  const { client, server } = await connect();
+  const { client, server } = await connectFull();
   t.after(async () => {
     await client.close();
     await server.close();
@@ -308,7 +385,7 @@ test("index result includes an immediately available failure reason", async (t) 
       message: "Embedding schema could not be resolved.",
     },
   });
-  const { client, server } = await connect(backend);
+  const { client, server } = await connectFull(backend);
   t.after(async () => {
     await client.close();
     await server.close();
@@ -351,7 +428,7 @@ test("index streams daemon progress through MCP", async (t) => {
       reused: false,
     };
   };
-  const { client, server } = await connect(backend);
+  const { client, server } = await connectFull(backend);
   t.after(async () => {
     await client.close();
     await server.close();
@@ -424,7 +501,9 @@ test("index authorization keeps the requested model and offers no local fallback
     return await originalIndex(input);
   };
 
-  const server = createZvecGrepMcpServer(backend, "1.0.0");
+  const server = createZvecGrepMcpServer(backend, "1.0.0", {
+    toolset: "full",
+  });
   const client = new Client(
     { name: "mcp-index-auth-test", version: "1.0.0" },
     { capabilities: { elicitation: { form: {} } } },
@@ -638,7 +717,7 @@ test("Remote Embedding authorization stays alive while waiting for user input", 
 });
 
 test("root tools require an absolute root", async (t) => {
-  const { client, server } = await connect();
+  const { client, server } = await connectFull();
   t.after(async () => {
     await client.close();
     await server.close();
@@ -687,7 +766,7 @@ test("index supports drop mode", async (t) => {
     received = input;
     return createBackend().index(input);
   };
-  const { client, server } = await connect(backend);
+  const { client, server } = await connectFull(backend);
   t.after(async () => {
     await client.close();
     await server.close();
@@ -901,7 +980,7 @@ test("input upper bounds are enforced", async (t) => {
 });
 
 test("structured tools return schema-compatible content and searches return only compact text", async (t) => {
-  const { client, server } = await connect();
+  const { client, server } = await connectFull();
   t.after(async () => {
     await client.close();
     await server.close();

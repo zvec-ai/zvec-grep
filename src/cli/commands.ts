@@ -1031,6 +1031,7 @@ async function runServer(parsed: ParsedArgs): Promise<void> {
       listen: parsed.options.listen,
       tokenFile: parsed.options.serverTokenFile,
       home: parsed.options.home,
+      mcpToolset: parsed.options.mcpToolset,
     });
     printServerControlStatus(status);
     return;
@@ -1061,6 +1062,7 @@ async function runServer(parsed: ParsedArgs): Promise<void> {
     listen: parsed.options.listen,
     tokenFile: parsed.options.serverTokenFile,
     home: parsed.options.home,
+    mcpToolset: parsed.options.mcpToolset,
     serviceOptions: createServiceOptions(parsed.options, process.cwd()),
   });
 }
@@ -1703,6 +1705,7 @@ function printServerControlStatus(
   );
   if (status.pid) console.log(`PID: ${status.pid}`);
   if (status.serverUrl) console.log(`URL: ${status.serverUrl}`);
+  if (status.mcpToolset) console.log(`MCP toolset: ${status.mcpToolset}`);
 }
 
 function assertDirectOnlyMode(options: CliOptions, command: string): void {
@@ -2389,8 +2392,8 @@ function agentGuidanceBlock(): string {
 
 Use zvec-grep before grep, rg, or broad file reads when you need to understand or locate code.
 
-- **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search, \`zvec_grep_index\` to ensure an index, and the two status tools to inspect index or server state.
-- **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. For \`zvec_grep_index\`, \`wait\` defaults to false: submit it in the background and poll \`zvec_grep_index_status\`; set \`wait: true\` only when completion is required before continuing.
+- **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search and \`zvec_grep_rg\` for exhaustive literal or regex search.
+- **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. Manage persistent indexes with \`zg index\`, inspect them with \`zg status\`, and inspect the daemon with \`zg server status\`.
 - **Remote data authorization**: MCP tool trust does not authorize Remote Embedding. zvec-grep requests its own once or workspace authorization before sending query text or workspace content to a remote provider.
 - **Shell fallback**: If the MCP server is unavailable, use \`zg status\`, \`zg query "<query>"\`, and \`zg query --rg "<pattern>"\`.
 

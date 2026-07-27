@@ -24,29 +24,33 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
   assert.match(skill, /Use zvec-grep before raw `grep` or `rg`/);
   assert.match(
     skill,
-    /Use native HTTP MCP tools as the primary interface when the matching `zvec_grep_\*` tool is present/,
+    /Use the public native HTTP MCP search tools as the primary interface when the matching `zvec_grep_\*` tool is present/,
   );
-  assert.match(skill, /required MCP tool is absent from the current task/);
+  assert.match(
+    skill,
+    /index lifecycle or daemon diagnostics, which are intentionally\s+kept out of the default agent MCP toolset/,
+  );
+  assert.match(
+    skill,
+    /default public MCP endpoint intentionally exposes only search and managed\s+ripgrep/,
+  );
   assert.match(skill, /default Auto mode can select Server or Direct/);
   assert.match(
     skill,
     /do not probe forced Server mode and then retry forced Direct mode/,
   );
-  assert.match(skill, /`wait` parameter defaults to false/i);
-  assert.match(skill, /Poll `zvec_grep_index_status` only when completion/);
-  assert.match(skill, /server default is known; never guess a model/);
-  assert.match(skill, /zvec_grep_index_status/);
   assert.match(skill, /Call `zvec_grep_search` first/);
   assert.match(skill, /Call `zvec_grep_rg` for exhaustive local ripgrep/);
-  assert.match(skill, /Its `drop` parameter deletes the workspace index/);
   assert.match(skill, /`freshness` and `indexing`/);
-  assert.doesNotMatch(skill, /Call `zvec_grep_index_status` once at the start/);
+  assert.match(skill, /After authorization, use the CLI lifecycle workflow/);
+  assert.doesNotMatch(skill, /zvec_grep_index(?:_drop|_status)?/);
+  assert.doesNotMatch(skill, /zvec_grep_server_status/);
   assert.match(skill, /references\/cli-fallback\.md/);
   assert.doesNotMatch(skill, /Use zvec-grep through the `zg` command/);
-  assert.match(metadata, /Repository search, indexing, and daemon diagnostics/);
+  assert.match(metadata, /Repository search with explicit index lifecycle/);
   assert.match(
     metadata,
-    /Use \$zvec-grep to investigate this repository before raw grep or rg/,
+    /Prefer the public MCP search tools, and use the zg CLI only for authorized index lifecycle or daemon diagnostics/,
   );
   assert.match(fallback, /Leave `--mode` unset/);
   assert.match(fallback, /zg status\r?\n/);

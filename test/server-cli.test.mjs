@@ -36,6 +36,22 @@ test("server lifecycle and client mode arguments are parsed", () => {
     assert.equal(parsed.options.serverAction, action);
   }
   assert.equal(
+    parseArgs(["server", "on", "--mcp-toolset", "full"]).options.mcpToolset,
+    "full",
+  );
+  assert.equal(
+    parseArgs(["server", "run", "--mcp-toolset=agent"]).options.mcpToolset,
+    "agent",
+  );
+  assert.throws(
+    () => parseArgs(["server", "on", "--mcp-toolset", "all"]),
+    /agent.*full/i,
+  );
+  assert.throws(
+    () => parseArgs(["server", "off", "--mcp-toolset", "full"]),
+    /only be used with zg server on or run/i,
+  );
+  assert.equal(
     parseArgs(["query", "--mode", "server", "query"]).options.mode,
     "server",
   );
@@ -145,6 +161,7 @@ test("server on, status and off are idempotent", async (t) => {
     ...args,
   ]);
   assert.match(first.stdout, /Server: ready/);
+  assert.equal((await readInstanceRecord(home)).mcpToolset, "agent");
   const second = await execFileAsync(process.execPath, [
     cliPath,
     "server",
@@ -160,6 +177,7 @@ test("server on, status and off are idempotent", async (t) => {
     ...args,
   ]);
   assert.match(status.stdout, new RegExp(`127\\.0\\.0\\.1:${port}`));
+  assert.match(status.stdout, /MCP toolset: agent/);
   const mcpResponse = await fetch(`http://127.0.0.1:${port}/mcp`, {
     method: "POST",
     headers: {
@@ -195,6 +213,52 @@ test("server on, status and off are idempotent", async (t) => {
     ...args,
   ]);
   assert.match(stoppedAgain.stdout, /Server: stopped/);
+});
+
+test("server toolset flag overrides the environment and the environment is a fallback", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "zvec-grep-server-toolset-"));
+  const port = await availablePort();
+  const env = { ...process.env, ZVEC_GREP_MCP_TOOLSET: "full" };
+  const commonArgs = ["--listen", `127.0.0.1:${port}`, "--home", home];
+  t.after(async () => {
+    await execFileAsync(
+      process.execPath,
+      [cliPath, "server", "off", "--home", home],
+      { env },
+    ).catch(() => undefined);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "server", "on", "--mcp-toolset", "agent", ...commonArgs],
+    { env },
+  );
+  assert.equal((await readInstanceRecord(home)).mcpToolset, "agent");
+  const agentStatus = await execFileAsync(
+    process.execPath,
+    [cliPath, "server", "status", "--home", home],
+    { env },
+  );
+  assert.match(agentStatus.stdout, /MCP toolset: agent/);
+
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "server", "off", "--home", home],
+    { env },
+  );
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "server", "on", ...commonArgs],
+    { env },
+  );
+  assert.equal((await readInstanceRecord(home)).mcpToolset, "full");
+  const fullStatus = await execFileAsync(
+    process.execPath,
+    [cliPath, "server", "status", "--home", home],
+    { env },
+  );
+  assert.match(fullStatus.stdout, /MCP toolset: full/);
 });
 
 test("server token file enables authentication", async (t) => {

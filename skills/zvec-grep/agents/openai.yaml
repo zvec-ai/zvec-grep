@@ -1,4 +1,4 @@
 interface:
   display_name: "zvec-grep"
-  short_description: "Repository search, indexing, and daemon diagnostics"
-  default_prompt: "Use $zvec-grep to investigate this repository before raw grep or rg, selecting an available native MCP tool first and falling back to the zg CLI when needed."
+  short_description: "Repository search with explicit index lifecycle"
+  default_prompt: "Use $zvec-grep to investigate this repository before raw grep or rg. Prefer the public MCP search tools, and use the zg CLI only for authorized index lifecycle or daemon diagnostics."
