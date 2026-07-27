@@ -62,7 +62,7 @@
     "typescript-eslint": "^8.64.0"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
+    "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@vscode/ripgrep": "^1.18.0",
     "@zvec/zvec": "^0.5.0",
