@@ -151,6 +151,45 @@ class CliTests(unittest.TestCase):
 
         self.assertFalse(args.github_proxy)
 
+    def test_enables_zvec_index_cache_by_default(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "swebench-verified",
+                "--agent",
+                "opencode",
+                "--model",
+                "qwen3.7-max",
+            ]
+        )
+
+        self.assertTrue(args.zvec_index_cache)
+        self.assertEqual(
+            args.zvec_index_cache_dir,
+            Path(__file__).parents[1] / ".cache" / "zvec-grep-indexes",
+        )
+
+    def test_accepts_zvec_index_cache_opt_out_and_directory(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                "swebench-verified",
+                "--agent",
+                "opencode",
+                "--model",
+                "qwen3.7-max",
+                "--no-zvec-index-cache",
+                "--zvec-index-cache-dir",
+                "/tmp/zg-index-cache",
+            ]
+        )
+
+        self.assertFalse(args.zvec_index_cache)
+        self.assertEqual(
+            args.zvec_index_cache_dir,
+            Path("/tmp/zg-index-cache"),
+        )
+
     def test_legacy_package_fails_before_harbor(self) -> None:
         with self.assertRaisesRegex(SystemExit, "does not support"):
             main(

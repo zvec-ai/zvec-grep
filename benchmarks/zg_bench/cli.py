@@ -8,6 +8,7 @@ from pathlib import Path
 from .diagnostics import format_job_diagnostics, job_has_exceptions, latest_job
 from .doctor import collect_checks, print_report, run_doctor
 from .runner import (
+    DEFAULT_ZVEC_INDEX_CACHE_DIR,
     DEFAULT_RUNS_DIR,
     PROFILE_SELECTIONS,
     TIERS,
@@ -171,6 +172,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--zvec-index-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "reuse isolated per-case zvec-grep indexes "
+            "(default: enabled; use --no-zvec-index-cache to disable)"
+        ),
+    )
+    run.add_argument(
+        "--zvec-index-cache-dir",
+        type=Path,
+        default=DEFAULT_ZVEC_INDEX_CACHE_DIR,
+        help=(
+            "host directory for per-case zvec-grep index backups "
+            f"(default: {DEFAULT_ZVEC_INDEX_CACHE_DIR})"
+        ),
+    )
+    run.add_argument(
         "--dry-run",
         action="store_true",
         help="print the Harbor command without running it",
@@ -239,6 +258,11 @@ def main(argv: list[str] | None = None) -> int:
         github_proxy_prefix = (
             GITHUB_PROXY_PREFIX if args.github_proxy else None
         )
+        zvec_index_cache_dir = (
+            args.zvec_index_cache_dir
+            if args.zvec_index_cache
+            else None
+        )
         validate_zvec_grep_package_compatibility(
             profiles,
             agent=args.agent,
@@ -272,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.zvec_grep_package
                     ),
                     github_proxy_prefix=github_proxy_prefix,
+                    zvec_index_cache_dir=zvec_index_cache_dir,
                 ),
             )
             for profile, job_name in run_specs
@@ -334,7 +359,20 @@ def main(argv: list[str] | None = None) -> int:
                     args.agent,
                     profile,
                     zvec_grep_package=args.zvec_grep_package,
+                    zvec_index_cache_dir=zvec_index_cache_dir,
                 )
+            profile_index_cache_dir = zvec_index_cache_dir
+            if profile == "zvec-grep" and prepared_cache is not None:
+                profile_index_cache_dir = (
+                    prepared_cache.zvec_index_cache_dir
+                )
+                if prepared_cache.zvec_index_cache_error is not None:
+                    print(
+                        "Warning: zvec-grep index cache disabled for this "
+                        f"run ({prepared_cache.zvec_index_cache_error})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             command = build_harbor_command(
                 suite,
                 profile=profile,
@@ -359,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 github_proxy_prefix=github_proxy_prefix,
+                zvec_index_cache_dir=profile_index_cache_dir,
             )
             profile_return_code = execute(
                 command,

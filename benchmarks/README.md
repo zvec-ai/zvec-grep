@@ -317,6 +317,19 @@ zvec-grep. They contain neither credentials, the repository index, nor the MCP
 configuration. The zvec-grep profile also skips the unused local embedding
 runtime when Qwen embeddings are selected.
 
+The zvec-grep profile also caches the complete `.zvec-grep` workspace directory
+after a successful index build. The default cache root is
+`benchmarks/.cache/zvec-grep-indexes`, organized by dataset, case, and embedding
+model. A later run copies the backup into its own workspace before validating
+the index, so benchmark trials remain isolated from both the backup and each
+other. Concurrent first runs for the same key share a host lock. An invalid
+backup is quarantined and rebuilt once; cache mount or copy failures fall back
+to the normal index build without failing the benchmark.
+
+Use `--zvec-index-cache-dir <path>` to move the persistent cache, or
+`--no-zvec-index-cache` to disable it. Dataset revisions such as `@2` are not
+part of the cache key because benchmark cases are treated as stable.
+
 Each command runs both profiles by default. Use `--profile baseline` or
 `--profile zvec-grep` to run one profile. The zvec-grep profile supports Codex,
 Qwen Code, and OpenCode and builds its index before agent execution. Codex and

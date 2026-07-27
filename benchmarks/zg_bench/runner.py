@@ -45,6 +45,9 @@ from .settings import (
 BENCHMARKS_DIR = Path(__file__).resolve().parents[1]
 SUITES_DIR = BENCHMARKS_DIR / "suites"
 DEFAULT_RUNS_DIR = BENCHMARKS_DIR / "runs"
+DEFAULT_ZVEC_INDEX_CACHE_DIR = (
+    BENCHMARKS_DIR / ".cache" / "zvec-grep-indexes"
+)
 ZVEC_GREP_SKILL_DIR = BENCHMARKS_DIR / "skills" / "zvec-grep"
 ZVEC_CODEX_IMPORT_PATH = "zg_bench.agents.zvec_codex:ZvecCodex"
 ZVEC_QWEN_CODE_IMPORT_PATH = (
@@ -65,6 +68,7 @@ LOCAL_NPM_CACHE_DIR = SETUP_CACHE_DIR / "npm-cache"
 LOCAL_UV_TASKS_DIR = SETUP_CACHE_DIR / "uv-tasks"
 LOCAL_ZVEC_GREP_PACKAGE_TARGET = "/tmp/zg-bench-zvec-grep.tgz"
 LOCAL_UV_ARCHIVE_NAME = "zg-bench-uv.tar.gz"
+ZVEC_INDEX_CACHE_TARGET = "/opt/zvec-grep-index-cache"
 _SETUP_CACHE_TARGET = "/root/.nvm"
 _CODEX_AGENT = "codex"
 _QWEN_CODE_AGENT = "qwen-coder"
@@ -165,6 +169,8 @@ class PreparedSetupCache:
     compose_path: Path
     zvec_grep_package: str | None = None
     zvec_grep_package_sha256: str | None = None
+    zvec_index_cache_dir: Path | None = None
+    zvec_index_cache_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -797,6 +803,7 @@ def prepare_setup_cache(
     profile: Profile,
     *,
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+    zvec_index_cache_dir: Path | None = None,
 ) -> PreparedSetupCache:
     """Create the profile-isolated Docker volume and its Compose overlay."""
     prepared_package = PreparedZvecGrepPackage(install_spec=zvec_grep_package)
@@ -817,6 +824,8 @@ def prepare_setup_cache(
             "target": _SETUP_CACHE_TARGET,
         }
     ]
+    resolved_index_cache_dir: Path | None = None
+    index_cache_error: str | None = None
     if prepared_package.bind_source is not None:
         service_volumes.append(
             {
@@ -826,6 +835,23 @@ def prepare_setup_cache(
                 "read_only": True,
             }
         )
+    if profile == "zvec-grep" and zvec_index_cache_dir is not None:
+        try:
+            resolved_index_cache_dir = (
+                zvec_index_cache_dir.expanduser().resolve()
+            )
+            resolved_index_cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            resolved_index_cache_dir = None
+            index_cache_error = str(error)
+        else:
+            service_volumes.append(
+                {
+                    "type": "bind",
+                    "source": str(resolved_index_cache_dir),
+                    "target": ZVEC_INDEX_CACHE_TARGET,
+                }
+            )
     overlay = {
         "services": {
             "main": {
@@ -873,6 +899,8 @@ def prepare_setup_cache(
             prepared_package.install_spec if profile == "zvec-grep" else None
         ),
         zvec_grep_package_sha256=prepared_package.sha256,
+        zvec_index_cache_dir=resolved_index_cache_dir,
+        zvec_index_cache_error=index_cache_error,
     )
 
 
@@ -889,6 +917,7 @@ def build_harbor_command(
     zvec_grep_package_sha256: str | None = None,
     task_dataset_path: Path | None = None,
     github_proxy_prefix: str | None = None,
+    zvec_index_cache_dir: Path | None = None,
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
@@ -954,6 +983,15 @@ def build_harbor_command(
                 f"embedding_model={ZVEC_GREP_EMBEDDING}",
             ]
         )
+        if zvec_index_cache_dir is not None:
+            agent_kwargs.extend(
+                [
+                    "index_cache_host_root="
+                    + str(zvec_index_cache_dir.expanduser().resolve()),
+                    f"index_cache_container_root={ZVEC_INDEX_CACHE_TARGET}",
+                    "index_cache_dataset=" + suite.dataset.split("@", 1)[0],
+                ]
+            )
         if zvec_grep_package_sha256 is not None:
             agent_kwargs.append(
                 f"zvec_grep_package_sha256={zvec_grep_package_sha256}"

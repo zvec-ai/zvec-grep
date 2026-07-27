@@ -245,6 +245,7 @@ class LocalPackageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir) / "agent-setup"
+            index_cache_dir = Path(temp_dir) / "index-cache"
             source_dir = Path(temp_dir) / "source"
             source_dir.mkdir()
             package = Path(temp_dir) / "zvec-grep.tgz"
@@ -264,6 +265,7 @@ class LocalPackageTests(unittest.TestCase):
                     "opencode",
                     "zvec-grep",
                     zvec_grep_package=str(source_dir),
+                    zvec_index_cache_dir=index_cache_dir,
                 )
 
             overlay = json.loads(prepared.compose_path.read_text())
@@ -285,6 +287,20 @@ class LocalPackageTests(unittest.TestCase):
                     "read_only": True,
                 },
             )
+            self.assertEqual(
+                service_volumes[2],
+                {
+                    "type": "bind",
+                    "source": str(index_cache_dir.resolve()),
+                    "target": runner.ZVEC_INDEX_CACHE_TARGET,
+                },
+            )
+            self.assertTrue(index_cache_dir.is_dir())
+            self.assertEqual(
+                prepared.zvec_index_cache_dir,
+                index_cache_dir.resolve(),
+            )
+            self.assertIsNone(prepared.zvec_index_cache_error)
             self.assertIn(
                 f"local-{digest[:16]}",
                 overlay["volumes"]["agent-setup-cache"]["name"],
@@ -294,6 +310,37 @@ class LocalPackageTests(unittest.TestCase):
                 runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET,
             )
             self.assertEqual(prepared.zvec_grep_package_sha256, digest)
+
+    def test_index_cache_directory_failure_disables_only_index_cache(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache_dir = root / "agent-setup"
+            blocking_file = root / "not-a-directory"
+            blocking_file.write_text("file")
+            inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+            with (
+                patch.object(runner, "SETUP_CACHE_DIR", cache_dir),
+                patch.object(runner.subprocess, "run", return_value=inspected),
+            ):
+                prepared = runner.prepare_setup_cache(
+                    "opencode",
+                    "zvec-grep",
+                    zvec_index_cache_dir=blocking_file / "index-cache",
+                )
+
+            overlay = json.loads(prepared.compose_path.read_text())
+            service_volumes = overlay["services"]["main"]["volumes"]
+            self.assertFalse(
+                any(
+                    volume.get("target") == runner.ZVEC_INDEX_CACHE_TARGET
+                    for volume in service_volumes
+                )
+            )
+            self.assertIsNone(prepared.zvec_index_cache_dir)
+            self.assertIsNotNone(prepared.zvec_index_cache_error)
 
     def test_version_shorthand_selects_published_npm_package(self) -> None:
         prepared = runner.prepare_zvec_grep_package("0.1.5")
@@ -325,6 +372,58 @@ class LocalPackageTests(unittest.TestCase):
             f"zvec_grep_package={runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET}", command
         )
         self.assertIn(f"zvec_grep_package_sha256={digest}", command)
+
+    def test_harbor_command_passes_index_cache_identity_to_zvec_agent(self) -> None:
+        suite = runner.BenchmarkSuite(
+            name="swebench-verified",
+            dataset="swe-bench/swe-bench-verified@2",
+            tier="smoke",
+            tasks=("swe-bench/pallets__flask-5014",),
+        )
+        cache_dir = Path("/tmp/zg-index-cache")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="zvec-grep",
+            agent="opencode",
+            model="aliyun-glm-5.2",
+            job_name="index-cache-test",
+            zvec_index_cache_dir=cache_dir,
+        )
+
+        self.assertIn(
+            f"index_cache_host_root={cache_dir.resolve()}",
+            command,
+        )
+        self.assertIn(
+            f"index_cache_container_root={runner.ZVEC_INDEX_CACHE_TARGET}",
+            command,
+        )
+        self.assertIn(
+            "index_cache_dataset=swe-bench/swe-bench-verified",
+            command,
+        )
+
+    def test_baseline_does_not_receive_index_cache_arguments(self) -> None:
+        suite = runner.BenchmarkSuite(
+            name="swebench-verified",
+            dataset="swe-bench/swe-bench-verified@2",
+            tier="smoke",
+            tasks=("swe-bench/pallets__flask-5014",),
+        )
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="aliyun-glm-5.2",
+            job_name="baseline-index-cache-test",
+            zvec_index_cache_dir=Path("/tmp/zg-index-cache"),
+        )
+
+        self.assertFalse(
+            any("index_cache_" in argument for argument in command)
+        )
 
 
 class RunValidationTests(unittest.TestCase):
