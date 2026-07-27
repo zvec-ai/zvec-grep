@@ -145,6 +145,12 @@ export type ZvecGrepContextContainer = {
   metadata?: EntityMetadata;
 };
 
+export type ZvecGrepContextExcerpt = {
+  range: Range;
+  content: string;
+  metadata?: EntityMetadata;
+};
+
 export type ZvecGrepContextItem = {
   kind: ZvecGrepContextItemKind;
   rank: number;
@@ -154,6 +160,7 @@ export type ZvecGrepContextItem = {
   content: string;
   contentRole?: "source" | "outline";
   outline?: string;
+  relatedExcerpts?: ZvecGrepContextExcerpt[];
   status: "fresh" | "possibly_stale";
   score?: number;
   matchedBy: SearchMatchedBy | "lexical";

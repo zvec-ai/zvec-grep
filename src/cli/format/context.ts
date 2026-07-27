@@ -61,9 +61,10 @@ function agentContextLines(
       lines.push(`${item.file.relativePath}:${rangeLabel(headerRange(item))}`);
       const matched = matchedRangeLine(item);
       const outlineLines = agentOutlineLines(item, preview);
-      const sourceLines = sourceLinesForPreview(item, preview, highlighter, {
+      const sourceBlocks = sourceBlocksForPreview(item, preview, highlighter, {
         maxLineLength: AGENT_PREVIEW_MAX_LINE_LENGTH,
       });
+      const sourceLines = sourceBlocks.flatMap((block) => block.lines);
       lines.push(
         ...agentMetadataLines(item, [...outlineLines, ...sourceLines]),
         ...outlineLines,
@@ -72,10 +73,16 @@ function agentContextLines(
         lines.push(matched);
       }
       if (sourceLines.length > 0) {
-        if (item.kind !== "lexical_match" && preview !== "none") {
-          lines.push("source:");
+        if (sourceBlocks.length > 1) {
+          for (const block of sourceBlocks) {
+            lines.push(`source ${rangeLabel(block.range)}:`, ...block.lines);
+          }
+        } else {
+          if (item.kind !== "lexical_match" && preview !== "none") {
+            lines.push("source:");
+          }
+          lines.push(...sourceLines);
         }
-        lines.push(...sourceLines);
       }
       if (options.trace) {
         const trace = traceDetailLine(item);
@@ -159,13 +166,25 @@ export function printHumanContextResult(
           console.log(`    ${line}`);
         }
       }
-      const sourceLines = sourceLinesForPreview(item, preview, highlighter, {
+      const sourceBlocks = sourceBlocksForPreview(item, preview, highlighter, {
         maxLineLength: HUMAN_PREVIEW_MAX_LINE_LENGTH,
       });
+      const sourceLines = sourceBlocks.flatMap((block) => block.lines);
       if (sourceLines.length > 0) {
-        console.log(`  ${theme.label("Source")}:`);
-        for (const line of sourceLines) {
-          console.log(`    ${line}`);
+        if (sourceBlocks.length > 1) {
+          for (const block of sourceBlocks) {
+            console.log(
+              `  ${theme.label("Source")} ${theme.accent(rangeLabel(block.range))}:`,
+            );
+            for (const line of block.lines) {
+              console.log(`    ${line}`);
+            }
+          }
+        } else {
+          console.log(`  ${theme.label("Source")}:`);
+          for (const line of sourceLines) {
+            console.log(`    ${line}`);
+          }
         }
       }
       if (options.trace) {
@@ -436,6 +455,65 @@ type SourceLineEntry = {
   text: string;
 };
 
+type SourcePreviewBlock = {
+  range: Range;
+  lines: string[];
+};
+
+function sourceBlocksForPreview(
+  item: ZvecGrepContextItem,
+  preview: PreviewMode,
+  highlighter: (value: string) => string,
+  options: { maxLineLength: number },
+): SourcePreviewBlock[] {
+  const lines = sourceLinesForPreview(item, preview, highlighter, options);
+  const blocks =
+    lines.length > 0 ? [{ range: sourceContentRange(item), lines }] : [];
+
+  if (preview === "none") {
+    return blocks;
+  }
+
+  for (const excerpt of item.relatedExcerpts ?? []) {
+    if (
+      excerpt.content.length === 0 ||
+      sameSourceExcerpt(item, excerpt.range, excerpt.content)
+    ) {
+      continue;
+    }
+
+    const excerptItem: ZvecGrepContextItem = {
+      ...item,
+      range: excerpt.range,
+      excerptRange: excerpt.range,
+      content: excerpt.content,
+      contentRole: "source",
+      outline: undefined,
+      relatedExcerpts: undefined,
+      metadata: excerpt.metadata ?? item.metadata,
+      container: undefined,
+    };
+    const excerptLines = sourceLinesForPreview(
+      excerptItem,
+      preview,
+      highlighter,
+      options,
+    );
+    if (excerptLines.length > 0) {
+      blocks.push({
+        range: sourceContentRange(excerptItem),
+        lines: excerptLines,
+      });
+    }
+
+    if (blocks.length >= 2) {
+      break;
+    }
+  }
+
+  return blocks;
+}
+
 function sourceLinesForPreview(
   item: ZvecGrepContextItem,
   preview: PreviewMode,
@@ -491,6 +569,21 @@ function sourceLineEntries(item: ZvecGrepContextItem): SourceLineEntry[] {
     lineNumber: startLine === null ? null : startLine + index,
     text: line,
   }));
+}
+
+function sourceContentRange(item: ZvecGrepContextItem): Range {
+  return contentRangeForItem(item, splitContentLines(item.content).length);
+}
+
+function sameSourceExcerpt(
+  item: ZvecGrepContextItem,
+  range: Range,
+  content: string,
+): boolean {
+  return (
+    JSON.stringify(item.excerptRange ?? item.range) === JSON.stringify(range) &&
+    item.content === content
+  );
 }
 
 function contentRangeForItem(
@@ -621,6 +714,10 @@ function traceDetailLine(item: ZvecGrepContextItem): string | null {
   if (trace.ranking) {
     const forced = trace.ranking.forced ? " forced" : "";
     parts.push(`reranked #${trace.ranking.rank}${forced}`);
+  }
+
+  if (trace.compact) {
+    parts.push(`compact ${trace.compact.originalRanks.length}->1`);
   }
 
   return parts.length > 0 ? parts.join("; ") : null;

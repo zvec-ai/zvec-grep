@@ -10,6 +10,7 @@ import {
 } from "../../dist/cli/format/context.js";
 import { printDebug } from "../../dist/cli/format/debug.js";
 import { createIndexProgressReporter } from "../../dist/cli/format/progress.js";
+import { contextItemTarget } from "../../dist/engine/service/zvec-grep.js";
 import {
   printAnonymousInfo,
   printCollectionInfo,
@@ -320,6 +321,407 @@ test("context formatters render indexed, lexical, metadata, preview, trace, and 
       reason === "no_searchable_files" ? 0 : 1,
     );
   }
+});
+
+test("ordinary context item targets keep the first non-entity evidence only", () => {
+  const parentRange = {
+    kind: "text",
+    startLine: 1,
+    endLine: 80,
+    startOffset: 0,
+    endOffset: 800,
+  };
+  const parentOutline = "export class Family\n  primary\n  secondary";
+  const mainRange = {
+    kind: "text",
+    startLine: 20,
+    endLine: 22,
+    startOffset: 200,
+    endOffset: 240,
+  };
+  const mainContent = {
+    kind: "text",
+    text: "primary() {\n  return 1;\n}",
+  };
+  const relatedRange = {
+    kind: "text",
+    startLine: 40,
+    endLine: 42,
+    startOffset: 400,
+    endOffset: 440,
+  };
+  const relatedContent = {
+    kind: "text",
+    text: "secondary() {\n  return 2;\n}",
+  };
+  const evidence = (range, content, overrides = {}) => ({
+    range,
+    content,
+    publicEntityId: "family",
+    isEntity: false,
+    path: "fts",
+    ...overrides,
+  });
+  const entity = {
+    id: "family",
+    range: parentRange,
+    content: { kind: "text", text: parentOutline },
+    metadata: {
+      kind: "code",
+      symbolType: "class",
+      symbolName: "Family",
+      nodeType: "class_declaration",
+      modifiers: ["exported"],
+    },
+  };
+
+  const target = contextItemTarget({
+    entity,
+    evidence: [
+      evidence(mainRange, mainContent),
+      evidence(relatedRange, relatedContent),
+    ],
+  });
+
+  assert.deepEqual(target.excerptRange, mainRange);
+  assert.deepEqual(target.content, mainContent);
+  assert.equal(target.outline, parentOutline);
+  assert.equal(Object.hasOwn(target, "relatedExcerpts"), false);
+  assert.equal(Object.hasOwn(target, "container"), false);
+
+  const completeSourceEntity = {
+    ...entity,
+    range: {
+      kind: "text",
+      startLine: 1,
+      endLine: 3,
+      startOffset: 0,
+      endOffset: 48,
+    },
+    content: {
+      kind: "text",
+      text: "export class Family {\n  primary() {}\n}",
+    },
+  };
+  const completeSourceTarget = contextItemTarget({
+    entity: completeSourceEntity,
+    evidence: [evidence(mainRange, mainContent)],
+  });
+  assert.equal(completeSourceTarget.outline, undefined);
+  assert.equal(Object.hasOwn(completeSourceTarget, "relatedExcerpts"), false);
+});
+
+test("family context targets keep child identity and skip major outlines", () => {
+  const range = (
+    startLine,
+    endLine,
+    startOffset = startLine * 10,
+    endOffset = endLine * 10,
+  ) => ({
+    kind: "text",
+    startLine,
+    endLine,
+    startOffset,
+    endOffset,
+  });
+  const metadata = (symbolType, symbolName, scope = null) => ({
+    kind: "code",
+    symbolType,
+    symbolName,
+    scope,
+    nodeType: `${symbolType}_declaration`,
+    modifiers: [],
+  });
+  const parent = {
+    id: "family",
+    range: range(10, 80, 100, 800),
+    content: {
+      kind: "text",
+      text: "export class Family\n  primary\n  secondary",
+    },
+    metadata: metadata("class", "Family"),
+  };
+  const child = {
+    id: "family-primary",
+    range: range(20, 22, 200, 240),
+    content: {
+      kind: "text",
+      text: "primary() {\n  return 1;\n}",
+    },
+    metadata: metadata("function", "primary", "Family"),
+  };
+  const longChildOutline = {
+    range: range(30, 50, 300, 500),
+    content: {
+      kind: "text",
+      text: "longMethod()\n  calls: helper",
+    },
+    metadata: metadata("function", "longMethod", "Family"),
+    publicEntityId: "family-long",
+    isEntity: true,
+    path: "fts",
+  };
+  const childMajor = {
+    range: child.range,
+    content: child.content,
+    metadata: child.metadata,
+    publicEntityId: child.id,
+    isEntity: true,
+    path: "fts",
+  };
+  const relatedWindow = {
+    range: range(40, 42, 400, 440),
+    content: {
+      kind: "text",
+      text: "secondary() {\n  return 2;\n}",
+    },
+    metadata: metadata("function", "secondary", "Family"),
+    publicEntityId: "family-secondary",
+    isEntity: false,
+    path: "vector",
+  };
+
+  const target = contextItemTarget({
+    entity: child,
+    family: {
+      root: parent,
+      members: [
+        { entityId: child.id, rank: 1, score: 0.9 },
+        { entityId: "family-long", rank: 2, score: 0.8 },
+        { entityId: "family-secondary", rank: 3, score: 0.7 },
+        { entityId: parent.id, rank: 8, score: 0.2 },
+      ],
+    },
+    evidence: [
+      {
+        range: parent.range,
+        content: parent.content,
+        metadata: parent.metadata,
+        publicEntityId: parent.id,
+        isEntity: true,
+        path: "fts",
+      },
+      longChildOutline,
+      childMajor,
+      { ...childMajor, path: "vector" },
+      relatedWindow,
+    ],
+  });
+
+  assert.deepEqual(target.content, child.content);
+  assert.deepEqual(target.excerptRange, child.range);
+  assert.equal(target.outline, parent.content.text);
+  assert.deepEqual(target.container, {
+    entityId: parent.id,
+    range: parent.range,
+    metadata: parent.metadata,
+  });
+  assert.equal(target.relatedExcerpts.length, 1);
+  assert.deepEqual(target.relatedExcerpts[0].range, relatedWindow.range);
+  assert.deepEqual(target.relatedExcerpts[0].content, relatedWindow.content);
+  assert.notDeepEqual(target.content, longChildOutline.content);
+
+  const outlineOnlyTarget = contextItemTarget({
+    entity: {
+      id: longChildOutline.publicEntityId,
+      range: longChildOutline.range,
+      content: longChildOutline.content,
+      metadata: longChildOutline.metadata,
+    },
+    family: {
+      root: parent,
+      members: [
+        {
+          entityId: longChildOutline.publicEntityId,
+          rank: 1,
+          score: 0.8,
+        },
+        { entityId: parent.id, rank: 8, score: 0.2 },
+      ],
+    },
+    evidence: [
+      {
+        range: parent.range,
+        content: parent.content,
+        metadata: parent.metadata,
+        publicEntityId: parent.id,
+        isEntity: true,
+        path: "fts",
+      },
+      longChildOutline,
+    ],
+  });
+  assert.deepEqual(outlineOnlyTarget.content, parent.content);
+  assert.equal(outlineOnlyTarget.contentRole, "outline");
+  assert.equal(outlineOnlyTarget.outline, undefined);
+  assert.equal(Object.hasOwn(outlineOnlyTarget, "relatedExcerpts"), false);
+
+  const rootWindow = {
+    range: range(12, 14, 120, 160),
+    content: {
+      kind: "text",
+      text: "export class Family {\n  primary() {}\n}",
+    },
+    metadata: parent.metadata,
+    publicEntityId: parent.id,
+    isEntity: false,
+    path: "vector",
+  };
+  const rootWindowTarget = contextItemTarget({
+    entity: child,
+    family: {
+      root: parent,
+      members: [
+        { entityId: child.id, rank: 1, score: 0.9 },
+        { entityId: parent.id, rank: 2, score: 0.8 },
+      ],
+    },
+    evidence: [rootWindow],
+  });
+  assert.deepEqual(rootWindowTarget.content, rootWindow.content);
+  assert.deepEqual(rootWindowTarget.excerptRange, rootWindow.range);
+  assert.equal(rootWindowTarget.outline, parent.content.text);
+});
+
+test("short agent context renders related excerpts under one parent header", () => {
+  const item = {
+    kind: "indexed_entity",
+    rank: 1,
+    file: {
+      absolutePath: "/repo/src/family.ts",
+      relativePath: "src/family.ts",
+    },
+    range: {
+      kind: "text",
+      startLine: 20,
+      endLine: 22,
+      startOffset: 200,
+      endOffset: 240,
+    },
+    excerptRange: {
+      kind: "text",
+      startLine: 20,
+      endLine: 22,
+      startOffset: 200,
+      endOffset: 240,
+    },
+    content: "primary() {\n  return 1;\n}",
+    contentRole: "source",
+    outline: "export class Family\n  primary\n  secondary",
+    relatedExcerpts: [
+      {
+        range: {
+          kind: "text",
+          startLine: 20,
+          endLine: 22,
+          startOffset: 200,
+          endOffset: 240,
+        },
+        content: "primary() {\n  return 1;\n}",
+      },
+      {
+        range: {
+          kind: "text",
+          startLine: 40,
+          endLine: 42,
+          startOffset: 400,
+          endOffset: 440,
+        },
+        content: "secondary() {\n  return 2;\n}",
+      },
+      {
+        range: {
+          kind: "text",
+          startLine: 60,
+          endLine: 62,
+          startOffset: 600,
+          endOffset: 640,
+        },
+        content: "third() {\n  return 3;\n}",
+      },
+    ],
+    status: "fresh",
+    matchedBy: "fts+vector",
+    metadata: {
+      kind: "code",
+      symbolType: "function",
+      symbolName: "primary",
+      scope: "Family",
+      nodeType: "function_declaration",
+      modifiers: [],
+    },
+    entityId: "family-primary",
+    container: {
+      entityId: "family",
+      range: {
+        kind: "text",
+        startLine: 10,
+        endLine: 80,
+        startOffset: 100,
+        endOffset: 800,
+      },
+      metadata: {
+        kind: "code",
+        symbolType: "class",
+        symbolName: "Family",
+        nodeType: "class_declaration",
+        modifiers: ["exported"],
+      },
+    },
+    trace: {
+      recall: [],
+      compact: {
+        familyRootEntityId: "family",
+        originalRanks: [1, 2, 3],
+        suppressed: [
+          {
+            entityId: "family-primary",
+            rank: 1,
+            reason: "parent_child_family",
+          },
+          {
+            entityId: "family-secondary",
+            rank: 3,
+            reason: "parent_child_family",
+          },
+        ],
+      },
+      final: { returnedByLimit: true, cutoffRank: 5 },
+    },
+  };
+  const result = contextResult({ items: [item] });
+
+  const text = formatAgentContextResult(result, {
+    preview: "short",
+    trace: true,
+    color: "never",
+  });
+
+  assert.equal((text.match(/^src\/family\.ts:10-80$/gm) ?? []).length, 1);
+  assert.equal((text.match(/^outline:$/gm) ?? []).length, 1);
+  assert.equal((text.match(/^export class Family$/gm) ?? []).length, 1);
+  assert.match(text, /^source 20-22:$/m);
+  assert.match(text, /^source 40-42:$/m);
+  assert.doesNotMatch(text, /^source 60-62:$/m);
+  assert.match(text, /primary\(\)/);
+  assert.match(text, /secondary\(\)/);
+  assert.doesNotMatch(text, /third\(\)/);
+  assert.match(text, /^trace: compact 3->1$/m);
+  assert.equal(item.entityId, "family-primary");
+  assert.equal(item.range.startLine, 20);
+  assert.equal(item.metadata.symbolName, "primary");
+
+  const legacyItem = { ...item };
+  delete legacyItem.relatedExcerpts;
+  const legacyText = formatAgentContextResult(
+    contextResult({ items: [legacyItem] }),
+    {
+      preview: "short",
+      color: "never",
+    },
+  );
+  assert.match(legacyText, /^source:$/m);
+  assert.doesNotMatch(legacyText, /^source 20-22:$/m);
 });
 
 test("debug formatter reports every diagnostic and trace availability state", async () => {

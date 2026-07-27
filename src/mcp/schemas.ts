@@ -112,7 +112,9 @@ const searchFields = {
   fuse: z
     .boolean()
     .optional()
-    .describe("Fuse every query group into one ranked search plan."),
+    .describe(
+      "Fuse every query group into one ranked search plan. Defaults to true; set false to preserve independent groups.",
+    ),
   preferSymbol: z
     .boolean()
     .optional()

@@ -156,7 +156,7 @@ function normalizeSearchFields(
       ...fts.map((query) => ({ mode: "fts" as const, query })),
       ...vector.map((query) => ({ mode: "vector" as const, query })),
     ],
-    fuse: input.fuse,
+    fuse: input.fuse ?? true,
     limit: input.limit,
     trace: input.trace,
     preferSymbol: input.preferSymbol,

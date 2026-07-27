@@ -300,6 +300,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   const search = tools.find((tool) => tool.name === "zvec_grep_search");
   assert.match(search.description, /Search an existing repository index first/);
   assert.match(search.description, /missing indexes/);
+  assert.match(
+    search.inputSchema.properties.fuse.description,
+    /Defaults to true/,
+  );
   for (const tool of [index, search]) {
     assert.match(
       tool.inputSchema.properties.fileTypes.description,
@@ -838,6 +842,16 @@ test("search normalizes query, path and time inputs before calling the backend",
   assert.equal(received.modifiedAfter, Date.parse("2025-01-01T00:00:00.000Z"));
   assert.equal(received.freshness, "eventual");
   assert.equal(received.autoUpdate, true);
+
+  await client.callTool({
+    name: "zvec_grep_search",
+    arguments: {
+      root,
+      query: "preserve query groups",
+      fuse: false,
+    },
+  });
+  assert.equal(received.fuse, false);
 });
 
 test("search accepts JSON-encoded string lists from loose MCP clients", async (t) => {
@@ -869,6 +883,7 @@ test("search accepts JSON-encoded string lists from loose MCP clients", async (t
   ]);
   assert.deepEqual(received.excludePaths, ["thirdparty/**", "build/**"]);
   assert.deepEqual(received.fileTypes, ["h", "cc"]);
+  assert.equal(received.fuse, true);
 });
 
 test("search can return the current index without scheduling an update", async (t) => {

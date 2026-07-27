@@ -65,6 +65,7 @@ import type {
   ZvecGrep,
   ZvecGrepCollectionIndexOptions,
   ZvecGrepCollections,
+  ZvecGrepContextContainer,
   ZvecGrepContextItem,
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
@@ -1862,6 +1863,11 @@ function searchPlanToContextItems(
 ): ZvecGrepContextItem[] {
   return result.hits.map((hit) => {
     const target = contextItemTarget(hit);
+    const relatedExcerpts = target.relatedExcerpts?.map((excerpt) => ({
+      range: excerpt.range,
+      content: contentToText(excerpt.content),
+      metadata: excerpt.metadata,
+    }));
 
     return {
       kind: "indexed_entity",
@@ -1877,6 +1883,10 @@ function searchPlanToContextItems(
       content: contentToText(target.content),
       contentRole: target.contentRole,
       outline: target.outline,
+      ...(relatedExcerpts && relatedExcerpts.length > 0
+        ? { relatedExcerpts }
+        : {}),
+      ...(target.container ? { container: target.container } : {}),
       status: fileFreshnessStatus(hit.file),
       score: hit.score,
       matchedBy: hit.matchedBy,
@@ -1919,14 +1929,24 @@ function contextItemDedupeKey(item: ZvecGrepContextItem): string {
   );
 }
 
-type ContextItemTarget = {
+export type ContextItemTarget = {
   content: SearchHit["entity"]["content"];
   contentRole: "source" | "outline";
   excerptRange?: SearchHit["entity"]["range"];
   outline?: string;
+  relatedExcerpts?: Array<
+    Pick<SearchHit["evidence"][number], "range" | "content" | "metadata">
+  >;
+  container?: ZvecGrepContextContainer;
 };
 
-function contextItemTarget(hit: SearchHit): ContextItemTarget {
+export function contextItemTarget(hit: SearchHit): ContextItemTarget {
+  return hit.family
+    ? familyContextItemTarget(hit)
+    : ordinaryContextItemTarget(hit);
+}
+
+function ordinaryContextItemTarget(hit: SearchHit): ContextItemTarget {
   const evidence = hit.evidence.find((item) => !item.isEntity);
   const hasSeparateEvidence =
     evidence && !sameDisplayedContent(hit.entity, evidence);
@@ -1937,7 +1957,9 @@ function contextItemTarget(hit: SearchHit): ContextItemTarget {
       : "outline";
   const excerptRange = hasSeparateEvidence ? evidence.range : undefined;
   const outline =
-    contentRole === "source" ? contextItemOutline(hit, evidence) : undefined;
+    contentRole === "source"
+      ? contextItemOutline(hit.entity, evidence)
+      : undefined;
 
   return {
     content,
@@ -1947,7 +1969,96 @@ function contextItemTarget(hit: SearchHit): ContextItemTarget {
   };
 }
 
-function entityContentLooksLikeSource(entity: SearchHit["entity"]): boolean {
+function familyContextItemTarget(hit: SearchHit): ContextItemTarget {
+  const family = hit.family!;
+  const sourceEvidence = familySourceEvidence(hit);
+  const evidence = sourceEvidence[0];
+  const relatedEvidence = sourceEvidence[1];
+  const representativeIsSource = entityContentLooksLikeSource(hit.entity);
+  const parentOutline = entityOutlineContent(family.root);
+  const useParentOutlineAsContent =
+    evidence === undefined &&
+    !representativeIsSource &&
+    parentOutline !== undefined;
+  const content = useParentOutlineAsContent
+    ? family.root.content
+    : (evidence?.content ?? hit.entity.content);
+  const contentRole = evidence || representativeIsSource ? "source" : "outline";
+  const excerptRange = evidence?.range;
+  const outlineEvidence =
+    evidence ?? (contentRole === "source" ? hit.entity : undefined);
+  const outline =
+    contentRole === "source"
+      ? contextItemOutline(family.root, outlineEvidence)
+      : undefined;
+
+  return {
+    content,
+    contentRole,
+    excerptRange,
+    outline,
+    container: {
+      entityId: family.root.id,
+      range: family.root.range,
+      metadata: family.root.metadata,
+    },
+    ...(relatedEvidence
+      ? {
+          relatedExcerpts: [
+            {
+              range: relatedEvidence.range,
+              content: relatedEvidence.content,
+              metadata: relatedEvidence.metadata,
+            },
+          ],
+        }
+      : {}),
+  };
+}
+
+function familySourceEvidence(hit: SearchHit): SearchHit["evidence"][number][] {
+  const family = hit.family!;
+  const memberIds = new Set(family.members.map((member) => member.entityId));
+  const selected: SearchHit["evidence"][number][] = [];
+
+  for (const evidence of hit.evidence) {
+    if (
+      !memberIds.has(evidence.publicEntityId) ||
+      !isFamilySourceEvidence(evidence, family.root)
+    ) {
+      continue;
+    }
+
+    if (selected.some((existing) => sameDisplayedContent(existing, evidence))) {
+      continue;
+    }
+
+    selected.push(evidence);
+    if (selected.length >= 2) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+function isFamilySourceEvidence(
+  evidence: SearchHit["evidence"][number],
+  root: SearchHit["entity"],
+): boolean {
+  if (!evidence.isEntity) {
+    return true;
+  }
+
+  return (
+    evidence.publicEntityId !== root.id &&
+    entityContentLooksLikeSource(evidence)
+  );
+}
+
+function entityContentLooksLikeSource(
+  entity: Pick<SearchHit["entity"], "content" | "range">,
+): boolean {
   if (entity.content.kind !== "text" || entity.range.kind !== "text") {
     return true;
   }
@@ -1959,15 +2070,11 @@ function entityContentLooksLikeSource(entity: SearchHit["entity"]): boolean {
 }
 
 function contextItemOutline(
-  hit: SearchHit,
-  evidence: SearchHit["evidence"][number] | undefined,
+  entity: SearchHit["entity"],
+  evidence: Pick<SearchHit["entity"], "range" | "content"> | undefined,
 ): string | undefined {
-  if (hit.entity.content.kind !== "text") {
-    return undefined;
-  }
-
-  const outline = hit.entity.content.text.trim();
-  if (outline.length === 0) {
+  const outline = entityOutlineContent(entity);
+  if (!outline) {
     return undefined;
   }
 
@@ -1975,11 +2082,7 @@ function contextItemOutline(
     return undefined;
   }
 
-  if (evidence && sameDisplayedContent(hit.entity, evidence)) {
-    return undefined;
-  }
-
-  if (!isUsefulOutline(hit.entity.metadata, outline)) {
+  if (evidence && sameDisplayedContent(entity, evidence)) {
     return undefined;
   }
 
@@ -1991,6 +2094,17 @@ function contextItemOutline(
   }
 
   return outline;
+}
+
+function entityOutlineContent(entity: SearchHit["entity"]): string | undefined {
+  if (entity.content.kind !== "text" || entityContentLooksLikeSource(entity)) {
+    return undefined;
+  }
+
+  const outline = entity.content.text.trim();
+  return outline.length > 0 && isUsefulOutline(entity.metadata, outline)
+    ? outline
+    : undefined;
 }
 
 function isUsefulOutline(

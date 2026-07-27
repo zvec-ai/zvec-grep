@@ -18,9 +18,11 @@ import type {
   FileInfo,
   ResolvedSearchPlan,
   ResolvedSearchPlanRoute,
+  SearchCompactTrace,
   SearchFinalTrace,
   SearchHit,
   SearchHitEvidence,
+  SearchHitFamily,
   SearchHitTrace,
   SearchMatchedBy,
   SearchPlan,
@@ -69,6 +71,19 @@ type InternalSearchEvidence = {
   forced?: boolean;
 };
 
+type CompactCandidate = {
+  candidate: Candidate;
+  rank: number;
+  returnedByLimit: boolean;
+  family?: SearchHitFamily;
+  trace?: SearchCompactTrace;
+};
+
+type CandidateFamily = {
+  root: Candidate;
+  members: Candidate[];
+};
+
 type PathFilterMatcher = (file: FileInfo) => boolean;
 
 const DEFAULT_LIMIT = 7;
@@ -78,6 +93,8 @@ const RECALL_MAX_DEPTH = 2000;
 const RECALL_GROWTH_FACTOR = 2;
 const RECALL_TARGET_FACTOR = 5;
 const RECALL_MIN_TARGET_CANDIDATES = 50;
+const FAMILY_EVIDENCE_LIMIT = 2;
+const FAMILY_EVIDENCE_OVERLAP_RATIO = 0.8;
 
 type RecallRoute = ResolvedSearchPlanRoute & {
   filter?: StorageSearchFilter;
@@ -148,13 +165,22 @@ export async function searchPlanCollection(
     }
 
     const fused = timings.timeSync("fusion", () => fuseCandidates(candidates));
-    const visible = fused.slice(0, limit);
+    const visible = timings.timeSync("compact", () =>
+      compactCandidates(fused, limit, normalized.trackEntityId),
+    );
     const tracked = normalized.trackEntityId
       ? fused.find((candidate) => candidate.id === normalized.trackEntityId)
       : undefined;
 
-    if (tracked && !visible.some((candidate) => candidate.id === tracked.id)) {
-      visible.push(tracked);
+    if (
+      tracked &&
+      !visible.some(({ candidate }) => candidate.id === tracked.id)
+    ) {
+      visible.push({
+        candidate: tracked,
+        rank: visible.length + 1,
+        returnedByLimit: false,
+      });
     }
 
     const hits = timings.timeSync("materialize", () =>
@@ -1168,30 +1194,416 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
   return fused;
 }
 
-function candidateToHit(
+function compactCandidates(
+  fused: readonly Candidate[],
+  limit: number,
+  trackEntityId?: string,
+): CompactCandidate[] {
+  const familyByCandidate = candidateFamilies(fused, trackEntityId);
+  const seenFamilies = new Set<string>();
+  const compacted: CompactCandidate[] = [];
+
+  for (const candidate of fused) {
+    const family = familyByCandidate.get(candidate.id);
+    if (!family || seenFamilies.has(family.root.id)) {
+      continue;
+    }
+
+    seenFamilies.add(family.root.id);
+    const merged = compactFamily(family);
+    compacted.push({
+      ...merged,
+      rank: compacted.length + 1,
+      returnedByLimit: true,
+    });
+
+    if (compacted.length >= limit) {
+      break;
+    }
+  }
+
+  return compacted;
+}
+
+function candidateFamilies(
+  fused: readonly Candidate[],
+  trackEntityId?: string,
+): Map<string, CandidateFamily> {
+  const containersByFile = new Map<string, Candidate[]>();
+
+  for (const candidate of fused) {
+    if (candidate.id === trackEntityId || !isFamilyContainer(candidate)) {
+      continue;
+    }
+
+    const containers = containersByFile.get(candidate.file.id) ?? [];
+    containers.push(candidate);
+    containersByFile.set(candidate.file.id, containers);
+  }
+
+  const familyByRoot = new Map<string, CandidateFamily>();
+  const familyByCandidate = new Map<string, CandidateFamily>();
+
+  for (const candidate of fused) {
+    const root =
+      candidate.id === trackEntityId
+        ? candidate
+        : closestFamilyRoot(
+            candidate,
+            containersByFile.get(candidate.file.id) ?? [],
+          );
+    const family = familyByRoot.get(root.id) ?? { root, members: [] };
+    family.members.push(candidate);
+    familyByRoot.set(root.id, family);
+    familyByCandidate.set(candidate.id, family);
+  }
+
+  return familyByCandidate;
+}
+
+function closestFamilyRoot(
   candidate: Candidate,
+  containersInFile: readonly Candidate[],
+): Candidate {
+  if (isFamilyContainer(candidate)) {
+    return candidate;
+  }
+
+  let closest: Candidate | undefined;
+
+  for (const possibleParent of containersInFile) {
+    if (!isStructuralParent(possibleParent, candidate)) {
+      continue;
+    }
+
+    if (
+      !closest ||
+      textRangeLength(possibleParent.entity.range) <
+        textRangeLength(closest.entity.range) ||
+      (textRangeLength(possibleParent.entity.range) ===
+        textRangeLength(closest.entity.range) &&
+        compareCandidateRank(possibleParent, closest) < 0)
+    ) {
+      closest = possibleParent;
+    }
+  }
+
+  return closest ?? candidate;
+}
+
+function isFamilyContainer(candidate: Candidate): boolean {
+  const metadata = candidate.entity.metadata;
+  return (
+    metadata?.kind === "code" &&
+    (metadata.symbolType === "class" || metadata.symbolType === "interface") &&
+    metadata.symbolName !== null &&
+    candidate.entity.range.kind === "text"
+  );
+}
+
+function isStructuralParent(parent: Candidate, child: Candidate): boolean {
+  if (
+    parent.file.id !== child.file.id ||
+    parent.entity.fileId !== child.entity.fileId ||
+    parent.entity.range.kind !== "text" ||
+    child.entity.range.kind !== "text"
+  ) {
+    return false;
+  }
+
+  if (
+    parent.entity.range.startOffset >= child.entity.range.startOffset ||
+    parent.entity.range.endOffset <= child.entity.range.endOffset
+  ) {
+    return false;
+  }
+
+  const parentMetadata = parent.entity.metadata;
+  const childMetadata = child.entity.metadata;
+  if (
+    parentMetadata?.kind !== "code" ||
+    childMetadata?.kind !== "code" ||
+    parentMetadata.symbolName === null ||
+    childMetadata.scope === null
+  ) {
+    return false;
+  }
+
+  const qualifiedParentName = parentMetadata.scope
+    ? `${parentMetadata.scope}::${parentMetadata.symbolName}`
+    : parentMetadata.symbolName;
+
+  return (
+    childMetadata.scope === qualifiedParentName ||
+    childMetadata.scope.startsWith(`${qualifiedParentName}::`)
+  );
+}
+
+function textRangeLength(range: Entity["range"]): number {
+  return range.kind === "text"
+    ? Math.max(0, range.endOffset - range.startOffset)
+    : Number.POSITIVE_INFINITY;
+}
+
+function compareCandidateRank(left: Candidate, right: Candidate): number {
+  if (left.rank !== right.rank) {
+    return left.rank - right.rank;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function compactFamily(family: CandidateFamily): {
+  candidate: Candidate;
+  family?: SearchHitFamily;
+  trace?: SearchCompactTrace;
+} {
+  if (family.members.length === 1) {
+    return { candidate: family.root };
+  }
+
+  const members = [...family.members].sort(compareCandidateRank);
+  const representative = members[0]!;
+  const candidate: Candidate = {
+    ...representative,
+    sources: new Set(),
+    recall: [],
+    evidence: selectFamilyEvidence(family),
+    score: Math.max(...members.map((member) => member.score)),
+    rank: Math.min(...members.map((member) => member.rank)),
+    forced: members.some((member) => member.forced),
+  };
+
+  for (const member of members) {
+    for (const source of member.sources) {
+      candidate.sources.add(source);
+    }
+    for (const recall of member.recall) {
+      addOrUpdateRecall(candidate, { ...recall });
+    }
+  }
+
+  return {
+    candidate,
+    family: {
+      root: family.root.entity,
+      members: members.map((member) => ({
+        entityId: member.id,
+        rank: member.rank,
+        score: member.score,
+      })),
+    },
+    trace: {
+      familyRootEntityId: family.root.id,
+      originalRanks: members.map((member) => member.rank),
+      suppressed: members
+        .filter((member) => member.id !== representative.id)
+        .map((member) => ({
+          entityId: member.id,
+          rank: member.rank,
+          reason: "parent_child_family" as const,
+        })),
+    },
+  };
+}
+
+function selectFamilyEvidence(
+  family: CandidateFamily,
+): InternalSearchEvidence[] {
+  const ranked = family.members
+    .flatMap((member) =>
+      member.evidence.map((evidence) => ({ evidence, member })),
+    )
+    .filter(
+      ({ evidence }) => !isRootEntityEvidence(evidence, family.root.entity.id),
+    )
+    .sort(compareRankedEvidence);
+  const selected: InternalSearchEvidence[] = [];
+
+  for (const { evidence } of ranked) {
+    if (
+      selected.some((existing) => sameEvidencePreview(existing, evidence)) ||
+      selected.some(
+        (existing) =>
+          evidenceOverlapRatio(existing, evidence) >=
+          FAMILY_EVIDENCE_OVERLAP_RATIO,
+      )
+    ) {
+      continue;
+    }
+
+    selected.push(evidence);
+    if (selected.length >= FAMILY_EVIDENCE_LIMIT) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+function isRootEntityEvidence(
+  evidence: InternalSearchEvidence,
+  rootEntityId: string,
+): boolean {
+  return (
+    evidence.fragment.id === rootEntityId &&
+    publicEntityId(evidence.fragment) === rootEntityId
+  );
+}
+
+function compareRankedEvidence(
+  left: { evidence: InternalSearchEvidence; member: Candidate },
+  right: { evidence: InternalSearchEvidence; member: Candidate },
+): number {
+  const leftIsSourceCapable = isSourceCapableEvidence(left.evidence);
+  const rightIsSourceCapable = isSourceCapableEvidence(right.evidence);
+  if (leftIsSourceCapable !== rightIsSourceCapable) {
+    return leftIsSourceCapable ? -1 : 1;
+  }
+
+  const candidateOrder = compareCandidateRank(left.member, right.member);
+  if (candidateOrder !== 0) {
+    return candidateOrder;
+  }
+
+  const leftRank = left.evidence.rank ?? Number.POSITIVE_INFINITY;
+  const rightRank = right.evidence.rank ?? Number.POSITIVE_INFINITY;
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank;
+  }
+
+  const leftScore = left.evidence.score ?? Number.NEGATIVE_INFINITY;
+  const rightScore = right.evidence.score ?? Number.NEGATIVE_INFINITY;
+  if (leftScore !== rightScore) {
+    return rightScore - leftScore;
+  }
+
+  if (left.evidence.path !== right.evidence.path) {
+    return left.evidence.path.localeCompare(right.evidence.path);
+  }
+
+  return left.evidence.fragment.id.localeCompare(right.evidence.fragment.id);
+}
+
+function isEntityEvidence(evidence: InternalSearchEvidence): boolean {
+  return evidence.fragment.id === publicEntityId(evidence.fragment);
+}
+
+function isSourceCapableEvidence(evidence: InternalSearchEvidence): boolean {
+  if (!isEntityEvidence(evidence)) {
+    return true;
+  }
+
+  const { content, range } = evidence.fragment;
+  if (content.kind !== "text" || range.kind !== "text") {
+    return false;
+  }
+
+  const rangeLineCount = Math.max(1, range.endLine - range.startLine + 1);
+  const contentLineCount =
+    content.text.length === 0 ? 0 : content.text.split(/\r\n|\r|\n/).length;
+  return contentLineCount >= rangeLineCount;
+}
+
+function sameEvidencePreview(
+  left: InternalSearchEvidence,
+  right: InternalSearchEvidence,
+): boolean {
+  return (
+    sameTextRange(left.fragment.range, right.fragment.range) &&
+    sameContent(left.fragment.content, right.fragment.content)
+  );
+}
+
+function sameTextRange(
+  left: EntityFragment["range"],
+  right: EntityFragment["range"],
+): boolean {
+  return (
+    left.kind === "text" &&
+    right.kind === "text" &&
+    left.startOffset === right.startOffset &&
+    left.endOffset === right.endOffset
+  );
+}
+
+function sameContent(
+  left: EntityFragment["content"],
+  right: EntityFragment["content"],
+): boolean {
+  if (left.kind !== right.kind) {
+    return false;
+  }
+
+  if (left.kind === "text" && right.kind === "text") {
+    return left.text === right.text;
+  }
+
+  if (left.kind !== "image" || right.kind !== "image") {
+    return false;
+  }
+
+  if (left.format !== right.format || left.data.length !== right.data.length) {
+    return false;
+  }
+
+  return left.data.every((value, index) => value === right.data[index]);
+}
+
+function evidenceOverlapRatio(
+  left: InternalSearchEvidence,
+  right: InternalSearchEvidence,
+): number {
+  const leftRange = left.fragment.range;
+  const rightRange = right.fragment.range;
+  if (leftRange.kind !== "text" || rightRange.kind !== "text") {
+    return 0;
+  }
+
+  const intersection = Math.max(
+    0,
+    Math.min(leftRange.endOffset, rightRange.endOffset) -
+      Math.max(leftRange.startOffset, rightRange.startOffset),
+  );
+  const shortest = Math.min(
+    leftRange.endOffset - leftRange.startOffset,
+    rightRange.endOffset - rightRange.startOffset,
+  );
+
+  return shortest > 0 ? intersection / shortest : 0;
+}
+
+function candidateToHit(
+  compacted: CompactCandidate,
   limit: number,
   trace: boolean,
 ): SearchHit {
+  const { candidate } = compacted;
+  const evidence = compacted.family
+    ? candidate.evidence
+    : sortEvidence(candidate.evidence);
   return {
     entity: candidate.entity,
     file: candidate.file,
-    evidence: sortEvidence(candidate.evidence).map(evidenceToSearchHitEvidence),
-    rank: candidate.rank,
+    evidence: evidence.map(evidenceToSearchHitEvidence),
+    ...(compacted.family ? { family: compacted.family } : {}),
+    rank: compacted.rank,
     score: candidate.score,
     matchedBy: deriveMatchedBy(candidate.sources),
-    trace: trace ? candidateToTrace(candidate, limit) : undefined,
+    trace: trace ? candidateToTrace(compacted, limit) : undefined,
   };
 }
 
 function evidenceToSearchHitEvidence(
   evidence: InternalSearchEvidence,
 ): SearchHitEvidence {
+  const entityId = publicEntityId(evidence.fragment);
   return {
     range: evidence.fragment.range,
     content: evidence.fragment.content,
     metadata: evidence.fragment.metadata,
-    isEntity: evidence.fragment.id === publicEntityId(evidence.fragment),
+    publicEntityId: entityId,
+    isEntity: isEntityEvidence(evidence),
     path: evidence.path,
     routeId: evidence.routeId,
     query: evidence.query,
@@ -1220,9 +1632,13 @@ function sortEvidence(
   });
 }
 
-function candidateToTrace(candidate: Candidate, limit: number): SearchHitTrace {
+function candidateToTrace(
+  compacted: CompactCandidate,
+  limit: number,
+): SearchHitTrace {
+  const { candidate } = compacted;
   const final: SearchFinalTrace = {
-    returnedByLimit: candidate.rank <= limit,
+    returnedByLimit: compacted.returnedByLimit,
     cutoffRank: limit,
   };
 
@@ -1233,6 +1649,7 @@ function candidateToTrace(candidate: Candidate, limit: number): SearchHitTrace {
       score: candidate.score,
       forced: candidate.forced || undefined,
     },
+    compact: compacted.trace,
     final,
   };
 }

@@ -301,10 +301,21 @@ export type SearchFinalTrace = {
   cutoffRank: number;
 };
 
+export type SearchCompactTrace = {
+  familyRootEntityId: string;
+  originalRanks: readonly number[];
+  suppressed: readonly {
+    entityId: string;
+    rank: number;
+    reason: "parent_child_family";
+  }[];
+};
+
 export type SearchHitTrace = {
   recall: SearchRecallTrace[];
   fusion?: SearchStageTrace;
   ranking?: SearchStageTrace;
+  compact?: SearchCompactTrace;
   final: SearchFinalTrace;
 };
 
@@ -312,6 +323,7 @@ export type SearchHitEvidence = {
   range: Range;
   content: Content;
   metadata?: EntityMetadata;
+  publicEntityId: string;
   isEntity: boolean;
   path: "fts" | "vector";
   routeId?: string;
@@ -321,10 +333,20 @@ export type SearchHitEvidence = {
   forced?: boolean;
 };
 
+export type SearchHitFamily = {
+  root: Entity;
+  members: readonly {
+    entityId: string;
+    rank: number;
+    score: number;
+  }[];
+};
+
 export type SearchHit = {
   entity: Entity;
   file: FileInfo;
   evidence: SearchHitEvidence[];
+  family?: SearchHitFamily;
   rank: number;
   score: number;
   matchedBy: SearchMatchedBy;
