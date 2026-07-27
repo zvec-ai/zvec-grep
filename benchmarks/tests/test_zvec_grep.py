@@ -192,12 +192,20 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             "export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com",
             install_command,
         )
+        self.assertIn(
+            "export ONNXRUNTIME_NODE_INSTALL_CUDA=skip",
+            install_command,
+        )
         self.assertLess(
             install_command.index("export NVM_NODEJS_ORG_MIRROR"),
             install_command.index("nvm install 22"),
         )
         self.assertLess(
             install_command.index("export NPM_CONFIG_REGISTRY"),
+            install_command.index("npm install -g"),
+        )
+        self.assertLess(
+            install_command.index("export ONNXRUNTIME_NODE_INSTALL_CUDA"),
             install_command.index("npm install -g"),
         )
 

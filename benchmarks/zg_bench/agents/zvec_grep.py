@@ -693,6 +693,7 @@ class ZvecGrepMixin:
                 f"{shlex.quote(_NVM_NODEJS_ORG_MIRROR)}; "
                 "export NPM_CONFIG_REGISTRY="
                 f"{shlex.quote(_NPM_CONFIG_REGISTRY)}; "
+                "export ONNXRUNTIME_NODE_INSTALL_CUDA=skip; "
                 f"{ensure_node_command}; "
                 'zg_path="$(npm prefix -g)/bin/zg"; '
                 f"{install_command}; "
