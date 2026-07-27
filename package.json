@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^22.20.1",
+    "@types/node": "^26.1.2",
     "c8": "^11.0.0",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
