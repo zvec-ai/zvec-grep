@@ -20,6 +20,7 @@ test("daemon instance lock is exclusive, heartbeat-safe and owner-released", asy
   const record = await readInstanceRecord(home);
   assert.equal(record.pid, process.pid);
   assert.equal(record.ready, false);
+  assert.equal(record.mcpToolset, "agent");
   await assert.rejects(
     DaemonInstanceLock.acquire(home, serverUrl),
     /already running/i,
@@ -73,4 +74,27 @@ test("a dead daemon instance record is replaced", async (t) => {
   } finally {
     await lock.release();
   }
+});
+
+test("legacy daemon records without a toolset preserve the full MCP surface", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "zvec-grep-controller-legacy-"));
+  t.after(async () => rm(home, { recursive: true, force: true }));
+  const daemon = join(home, "daemon");
+  const now = Date.now();
+  await mkdir(daemon);
+  await writeFile(
+    join(daemon, "instance.lock"),
+    `${JSON.stringify({
+      pid: process.pid,
+      hostname: hostname(),
+      instanceToken: "legacy-instance",
+      startedAt: now,
+      updatedAt: now,
+      serverUrl: "http://127.0.0.1:7999/mcp",
+      ready: false,
+    })}\n`,
+  );
+
+  const record = await readInstanceRecord(home);
+  assert.equal(record.mcpToolset, "full");
 });

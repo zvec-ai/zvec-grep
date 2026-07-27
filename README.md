@@ -26,7 +26,7 @@ zg query "where query auto update happens"
 - **Managed ripgrep Route**: `zg query --rg` supports common `rg` flags and works even before a repository is indexed.
 - **Explicit Model Choice**: The first index build requires a model such as `local/embeddinggemma-300m`, `local/qwen3-embedding-0.6b`, or `qwen/text-embedding-v4`.
 - **Schema Reuse**: Re-running `zg index` on an existing index reuses the stored embedding schema unless you explicitly change it.
-- **Shared MCP Server**: Run `zg server on` to expose indexed search, managed ripgrep, indexing, index-status, and server-status tools over loopback Streamable HTTP.
+- **Focused MCP Server**: Run `zg server on` to expose only indexed search and managed ripgrep to agents by default, while the CLI keeps index lifecycle and diagnostics on an internal admin endpoint.
 - **Library API**: Use `createZvecGrep()` directly from Node.js tools, agents, or MCP servers.
 
 ## <a id="installation"></a>📦 Installation
@@ -79,7 +79,14 @@ timeout; override it with `--mcp-tool-timeout <seconds>`. The local server only
 listens on loopback and has no token by default. To require Bearer authentication,
 set `ZVEC_GREP_SERVER_TOKEN` before install and pass
 `--mcp-token-env ZVEC_GREP_SERVER_TOKEN`. The MCP URL is
-`http://127.0.0.1:7999/mcp`; stop the daemon with `zg server off`.
+`http://127.0.0.1:7999/mcp`; it exposes `zvec_grep_search` and
+`zvec_grep_rg` by default. Index lifecycle and daemon diagnostics remain
+available through `zg` commands, which use the reserved `/mcp/admin` endpoint
+internally. For compatibility with clients that require all six MCP tools on the
+public endpoint, restart the daemon with
+`zg server on --mcp-toolset full`. `ZVEC_GREP_MCP_TOOLSET=full` is the
+environment fallback; an explicit flag takes precedence. `zg server status`
+reports the active toolset. Stop the daemon with `zg server off`.
 
 CLI indexed queries and index commands can use `--mode direct`, `--mode server`, or `--mode auto`. The default is `auto`: it uses the daemon only when it is ready and otherwise falls back before submitting a request.
 Daemon logs are written as JSON lines to `~/.zvec-grep/daemon/logs/server.log`; credentials and complete query text are not recorded.
@@ -137,20 +144,28 @@ Switch to human-readable output:
 zg query --human "root local index discovery" --limit 3
 ```
 
-Use the MCP tools `zvec_grep_search`, `zvec_grep_rg`, `zvec_grep_index`, `zvec_grep_index_drop`, `zvec_grep_index_status`, and `zvec_grep_server_status`. MCP inputs use JSON-friendly fields such as `globs: ["src/**"]`. The installer writes user-level MCP configuration for Codex, Claude Code, OpenCode, and Cursor. Codex and Claude Code also receive managed guidance and local tool trust configuration. `cc` and `claude-code` remain accepted aliases for the canonical `claude` target.
+The default public MCP toolset contains `zvec_grep_search` and
+`zvec_grep_rg`. MCP inputs use JSON-friendly fields such as
+`globs: ["src/**"]`. Use the `zg index`, `zg status`, and `zg server status`
+CLI commands for lifecycle and diagnostics. The installer writes user-level MCP
+configuration for Codex, Claude Code, OpenCode, and Cursor. Codex and Claude
+Code also receive managed guidance and local tool trust configuration. `cc` and
+`claude-code` remain accepted aliases for the canonical `claude` target.
 
 ## <a id="models"></a>🧠 Models
 
-Local models run through `node-llama-cpp` or Transformers.js and keep code
-search private to your machine. See the
-[local embedding model guide](docs/embedding.md) for a scenario-based
-selection table, model sizes, context limits, and compatibility notes.
+Local models run through `node-llama-cpp`, Transformers.js, or the native
+Model2Vec Safetensors adapter and keep code search private to your machine. See the
+[embedding model selection guide](docs/embedding.md) for scenario-based
+recommendations, measured retrieval quality, resource usage, and context limits.
 
 ```bash
 zg index --embedding local/embeddinggemma-300m
 zg index --embedding local/qwen3-embedding-0.6b
 zg index --embedding local/jina-embeddings-v2-base-code
 zg index --embedding local/multilingual-e5-small
+zg index --embedding local/potion-base-8m
+zg index --embedding local/potion-code-16m-v2
 ```
 
 On Apple Silicon, local builds use quiet llama.cpp CMake defaults to avoid harmless OpenMP and ARM native-detection warnings. Override any llama.cpp CMake option with `NODE_LLAMA_CPP_CMAKE_OPTION_<name>`, for example `NODE_LLAMA_CPP_CMAKE_OPTION_GGML_NATIVE=ON` to opt back into native CPU tuning.

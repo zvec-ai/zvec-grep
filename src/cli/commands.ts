@@ -22,7 +22,6 @@ import {
   type CreateZvecGrepOptions,
   type IndexProgress,
   type RootPath,
-  type ZvecGrepContextResult,
   type ZvecGrepContextOptions,
   type ZvecGrepContextRoute,
   type ZvecGrep,
@@ -1032,6 +1031,7 @@ async function runServer(parsed: ParsedArgs): Promise<void> {
       listen: parsed.options.listen,
       tokenFile: parsed.options.serverTokenFile,
       home: parsed.options.home,
+      mcpToolset: parsed.options.mcpToolset,
     });
     printServerControlStatus(status);
     return;
@@ -1062,6 +1062,7 @@ async function runServer(parsed: ParsedArgs): Promise<void> {
     listen: parsed.options.listen,
     tokenFile: parsed.options.serverTokenFile,
     home: parsed.options.home,
+    mcpToolset: parsed.options.mcpToolset,
     serviceOptions: createServiceOptions(parsed.options, process.cwd()),
   });
 }
@@ -1455,40 +1456,36 @@ async function runServerQuery(
   const vector = routes
     .filter((route) => route.mode === "vector")
     .map((route) => route.query);
-  const response = await daemonClient(options).callTool("zvec_grep_search", {
-    root: resolve(process.cwd()),
-    queries: queries.length ? queries : undefined,
-    fts: fts.length ? fts : undefined,
-    vector: vector.length ? vector : undefined,
-    fuse: options.fuse,
-    limit: options.limit,
-    trace: options.trace,
-    preferSymbol: options.preferSymbol,
-    symbolTypes: options.symbolTypes,
-    globs: options.globs,
-    insensitiveGlobs: options.insensitiveGlobs,
-    fileTypes: options.fileTypes,
-    excludedFileTypes: options.excludedFileTypes,
-    hidden: options.hidden,
-    noIgnore: options.noIgnore,
-    ignoreFiles: options.ignoreFiles,
-    maxDepth: options.maxDepth,
-    maxFileSizeBytes: options.maxFileSizeBytes,
-    follow: options.follow,
-    embeddingConcurrency: options.embeddingConcurrency,
-    modifiedAfter: options.modifiedAfter,
-    modifiedBefore: options.modifiedBefore,
-    freshness: searchPolicy.freshness,
-    autoUpdate: searchPolicy.autoUpdate,
-  });
-  const result = response.result as ZvecGrepContextResult;
-  if (options.human) printHumanContextResult(result, options);
-  else printAgentContextResult(result, options);
-  if (response.freshness === "possibly_stale") {
-    const indexing = response.indexing as
-      { state?: string; completed?: number; total?: number } | undefined;
-    printStaleIndexStatus(indexing?.state, indexing);
-  }
+  const response = await daemonClient(options).callTextTool(
+    "zvec_grep_search",
+    {
+      root: resolve(process.cwd()),
+      queries: queries.length ? queries : undefined,
+      fts: fts.length ? fts : undefined,
+      vector: vector.length ? vector : undefined,
+      fuse: options.fuse,
+      limit: options.limit,
+      trace: options.trace,
+      preferSymbol: options.preferSymbol,
+      symbolTypes: options.symbolTypes,
+      globs: options.globs,
+      insensitiveGlobs: options.insensitiveGlobs,
+      fileTypes: options.fileTypes,
+      excludedFileTypes: options.excludedFileTypes,
+      hidden: options.hidden,
+      noIgnore: options.noIgnore,
+      ignoreFiles: options.ignoreFiles,
+      maxDepth: options.maxDepth,
+      maxFileSizeBytes: options.maxFileSizeBytes,
+      follow: options.follow,
+      embeddingConcurrency: options.embeddingConcurrency,
+      modifiedAfter: options.modifiedAfter,
+      modifiedBefore: options.modifiedBefore,
+      freshness: searchPolicy.freshness,
+      autoUpdate: searchPolicy.autoUpdate,
+    },
+  );
+  console.log(response);
 }
 
 function printStaleIndexStatus(
@@ -1708,6 +1705,7 @@ function printServerControlStatus(
   );
   if (status.pid) console.log(`PID: ${status.pid}`);
   if (status.serverUrl) console.log(`URL: ${status.serverUrl}`);
+  if (status.mcpToolset) console.log(`MCP toolset: ${status.mcpToolset}`);
 }
 
 function assertDirectOnlyMode(options: CliOptions, command: string): void {
@@ -2394,8 +2392,8 @@ function agentGuidanceBlock(): string {
 
 Use zvec-grep before grep, rg, or broad file reads when you need to understand or locate code.
 
-- **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search, \`zvec_grep_index\` to ensure an index, and the two status tools to inspect index or server state.
-- **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. For \`zvec_grep_index\`, \`wait\` defaults to false: submit it in the background and poll \`zvec_grep_index_status\`; set \`wait: true\` only when completion is required before continuing.
+- **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search and \`zvec_grep_rg\` for exhaustive literal or regex search.
+- **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. Manage persistent indexes with \`zg index\`, inspect them with \`zg status\`, and inspect the daemon with \`zg server status\`.
 - **Remote data authorization**: MCP tool trust does not authorize Remote Embedding. zvec-grep requests its own once or workspace authorization before sending query text or workspace content to a remote provider.
 - **Shell fallback**: If the MCP server is unavailable, use \`zg status\`, \`zg query "<query>"\`, and \`zg query --rg "<pattern>"\`.
 

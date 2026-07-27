@@ -8,6 +8,7 @@ import {
 import type { AddressInfo } from "node:net";
 import type { ZvecGrepDaemonBackend } from "../mcp/tools.js";
 import { McpHttpSessionManager } from "../mcp/http-transport.js";
+import { DEFAULT_MCP_TOOLSET, type McpToolset } from "../mcp/toolset.js";
 import { isLoopbackHost, type ServerListenAddress } from "./config.js";
 import { requestId, type DaemonLogger } from "./logger.js";
 
@@ -16,6 +17,7 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 export type DaemonHttpServerOptions = ServerListenAddress & {
   token?: string;
   version: string;
+  mcpToolset?: McpToolset;
   backend: ZvecGrepDaemonBackend;
   onShutdown?: () => void | Promise<void>;
   logger?: DaemonLogger;
@@ -24,6 +26,7 @@ export type DaemonHttpServerOptions = ServerListenAddress & {
 export class DaemonHttpServer {
   private server?: Server;
   private readonly mcpSessions: McpHttpSessionManager;
+  private readonly adminMcpSessions: McpHttpSessionManager;
 
   constructor(private readonly options: DaemonHttpServerOptions) {
     if (!isLoopbackHost(options.host)) {
@@ -32,6 +35,12 @@ export class DaemonHttpServer {
     this.mcpSessions = new McpHttpSessionManager(
       options.backend,
       options.version,
+      { toolset: options.mcpToolset ?? DEFAULT_MCP_TOOLSET },
+    );
+    this.adminMcpSessions = new McpHttpSessionManager(
+      options.backend,
+      options.version,
+      { toolset: "full" },
     );
   }
 
@@ -97,7 +106,10 @@ export class DaemonHttpServer {
     if (!server) {
       return;
     }
-    await this.mcpSessions.close();
+    await Promise.all([
+      this.mcpSessions.close(),
+      this.adminMcpSessions.close(),
+    ]);
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
@@ -140,7 +152,13 @@ export class DaemonHttpServer {
       return;
     }
 
-    if (url.pathname !== "/mcp") {
+    const mcpSessions =
+      url.pathname === "/mcp"
+        ? this.mcpSessions
+        : url.pathname === "/mcp/admin"
+          ? this.adminMcpSessions
+          : undefined;
+    if (!mcpSessions) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
@@ -157,7 +175,7 @@ export class DaemonHttpServer {
       return;
     }
     if (request.method === "GET" || request.method === "DELETE") {
-      await this.mcpSessions.handleSessionRequest(request, response);
+      await mcpSessions.handleSessionRequest(request, response);
       return;
     }
     if (request.method !== "POST") {
@@ -189,7 +207,7 @@ export class DaemonHttpServer {
       client_id: request.headers["x-client-id"] as string | undefined,
       tool: toolName(body),
     });
-    await this.mcpSessions.handlePost(request, response, body);
+    await mcpSessions.handlePost(request, response, body);
   }
 }
 

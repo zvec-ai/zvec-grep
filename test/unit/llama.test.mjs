@@ -135,7 +135,7 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
     llamaGpu: false,
     embeddingParallelism: 2,
   });
-  const vectors = await model.embed(
+  const result = await model.embedWithDiagnostics(
     [
       { kind: "text", text: "abcdefghijk" },
       { kind: "text", text: "second" },
@@ -143,7 +143,9 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
     ],
     { purpose: "query" },
   );
+  const vectors = result.vectors;
   assert.equal(vectors.length, 3);
+  assert.deepEqual(result.diagnostics.truncatedInputIndexes, [0, 1, 2]);
   assert.equal(fake.calls.contexts.length, 2);
   assert.equal(fake.calls.contexts[0].threads, 4);
   assert.equal(

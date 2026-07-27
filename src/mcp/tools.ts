@@ -31,10 +31,7 @@ import {
   type ZvecGrepRgInput,
   type ZvecGrepSearchIndexing,
 } from "./schemas.js";
-import {
-  textToolResult,
-  toolResult,
-} from "./result-format.js";
+import { textToolResult, toolResult } from "./result-format.js";
 import type {
   RemoteEmbeddingAuthorizationPlan,
   RemoteEmbeddingAuthorizationScope,
@@ -46,6 +43,7 @@ import {
   withProgressHeartbeat,
 } from "./progress-heartbeat.js";
 import { indexProgressMessage } from "../index-progress.js";
+import { DEFAULT_MCP_TOOLSET, type McpToolset } from "./toolset.js";
 
 export type IndexJobState =
   "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -121,6 +119,7 @@ export type ZvecGrepIndexStatusResult = {
       deleted: number;
       unchanged: number;
       entities: number;
+      truncated_fragments: number;
     };
     suggestion?: string;
   };
@@ -197,28 +196,22 @@ export interface ZvecGrepDaemonBackend {
 }
 
 export const ZVEC_GREP_MCP_INSTRUCTIONS = [
-  "zvec-grep is the mandatory repository search layer for this workspace: a pre-built search/index surface that replaces ad-hoc grep/rg exploration.",
-  "Mandatory rule: whenever you need to locate, understand, or inspect repository code, docs, config, symbols, exact text, regex matches, concepts, or broad file sets, call a zvec_grep_* tool first.",
-  "Do not start repository investigation with raw grep, raw rg, or hand-rolled filesystem search. Those are forbidden substitutes for zvec_grep_* operations.",
-  "Exact text and regex searches are not exceptions: use zvec_grep_rg for those cases.",
-  "Do not re-verify zvec_grep results by running grep or rg over the same target; use the returned files, ranges, and snippets as the search result, then inspect only the specific files or lines the tool points to.",
-  "Every repository operation requires an absolute root path visible to the daemon.",
-  "Use the zvec_grep_* tools directly for repository search, status, indexing, deletion, and exhaustive lexical search.",
-  "Call zvec_grep_search first. Use its freshness and indexing fields without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
-  "Use possibly_stale search results immediately when they are sufficient; do not call status merely because a background update is active.",
-  "Use zvec_grep_rg for exhaustive local ripgrep when an index is missing and literal or regex search can answer the task, or when the user explicitly requests rg mode.",
-  "Do not switch to zvec_grep_rg merely because semantic search or embedding is unavailable unless exhaustive lexical search fits the task.",
-  "Apply focused globs, path filters, and file type filters early; exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.",
-  "Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.",
-  "For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.",
-  "zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.",
-  "Use zvec_grep_index with drop: true, or zvec_grep_index_drop, only when index deletion is explicitly requested.",
-  "Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.",
+  "Use zvec-grep for local workspace search instead of raw grep, rg, or equivalent local text-search tools.",
+  "zvec-grep is a more capable superset replacement for rg.",
+  "When the exact keyword, text, or symbol is unknown, start with zvec_grep_search to quickly identify relevant concepts, files, and locations.",
+  "When the exact keyword, text, or symbol is known, use zvec_grep_rg.",
+  "Scope searches with paths or globs when you already know likely locations or file types, and refine broad or noisy searches by narrowing the query and search scope.",
+  "Trust zvec-grep results; if results are too broad, sparse, or low-quality, refine the query, scope, or search options and try zvec-grep again instead of switching to another local text-search tool.",
 ].join(" ");
+
+export const ZVEC_GREP_AGENT_MCP_INSTRUCTIONS = ZVEC_GREP_MCP_INSTRUCTIONS;
+
+export const ZVEC_GREP_FULL_MCP_INSTRUCTIONS = ZVEC_GREP_MCP_INSTRUCTIONS;
 
 export type ZvecGrepMcpServerOptions = {
   authorizationHeartbeatMs?: number;
   authorizationRequestTimeoutMs?: number;
+  toolset?: McpToolset;
 };
 
 export function createZvecGrepMcpServer(
@@ -226,13 +219,17 @@ export function createZvecGrepMcpServer(
   version: string,
   options: ZvecGrepMcpServerOptions = {},
 ): McpServer {
+  const toolset = options.toolset ?? DEFAULT_MCP_TOOLSET;
   const server = new McpServer(
     { name: "zvec-grep", version },
     {
-      instructions: ZVEC_GREP_MCP_INSTRUCTIONS,
+      instructions:
+        toolset === "full"
+          ? ZVEC_GREP_FULL_MCP_INSTRUCTIONS
+          : ZVEC_GREP_AGENT_MCP_INSTRUCTIONS,
     },
   );
-  registerZvecGrepTools(server, backend, options);
+  registerZvecGrepTools(server, backend, { ...options, toolset });
   return server;
 }
 
@@ -241,80 +238,86 @@ export function registerZvecGrepTools(
   backend: ZvecGrepDaemonBackend,
   options: ZvecGrepMcpServerOptions = {},
 ): void {
-  server.registerTool(
-    "zvec_grep_index",
-    {
-      title: "Ensure or drop zvec-grep index",
-      description:
-        "Activate an absolute repository root to create, incrementally update, rebuild, or explicitly drop its index. Do not call this tool to create, rebuild, or drop an index unless the user requested persistent indexing or index deletion.",
-      inputSchema: zvecGrepIndexInputSchema.shape,
-      outputSchema: zvecGrepIndexOutputSchema.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: true,
+  const toolset = options.toolset ?? DEFAULT_MCP_TOOLSET;
+  const full = toolset === "full";
+
+  if (full) {
+    server.registerTool(
+      "zvec_grep_index",
+      {
+        title: "Ensure or drop zvec-grep index",
+        description:
+          "Activate an absolute repository root to create, incrementally update, rebuild, or explicitly drop its index. Do not call this tool to create, rebuild, or drop an index unless the user requested persistent indexing or index deletion.",
+        inputSchema: zvecGrepIndexInputSchema.shape,
+        outputSchema: zvecGrepIndexOutputSchema.shape,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
       },
-    },
-    async (input, extra) => {
-      const plan = await backend.planIndexAuthorization?.(input);
-      const resolution = plan
-        ? await resolveRemoteEmbeddingAuthorization(
-            server,
-            backend,
-            plan,
-            undefined,
-            extra,
-            options,
-          )
-        : {};
-      const progress = createMcpIndexProgressReporter(extra);
-      let result: ZvecGrepIndexResult;
-      try {
-        result = await backend.index(input, {
-          authorization: resolution.authorization,
-          onProgress: progress.report,
-        });
-      } finally {
-        await progress.flush();
-      }
-      const structuredContent = {
-        root: result.root,
-        job_id: result.jobId,
-        state: result.state,
-        reused: result.reused,
-        action: result.action,
-        dropped: result.dropped,
-        error: result.error,
-      };
-      return toolResult(
-        [
-          `root: ${result.root}`,
-          `job_id: ${result.jobId}`,
-          `state: ${result.state}`,
-          `reused: ${result.reused}`,
-          ...(result.action ? [`action: ${result.action}`] : []),
-          ...(result.dropped !== undefined
-            ? [`dropped: ${result.dropped}`]
-            : []),
-          ...(result.error
-            ? [
-                `error_code: ${result.error.code}`,
-                `error_message: ${result.error.message}`,
-              ]
-            : []),
-        ].join("\n"),
-        structuredContent,
-      );
-    },
-  );
+      async (input, extra) => {
+        const plan = await backend.planIndexAuthorization?.(input);
+        const resolution = plan
+          ? await resolveRemoteEmbeddingAuthorization(
+              server,
+              backend,
+              plan,
+              undefined,
+              extra,
+              options,
+            )
+          : {};
+        const progress = createMcpIndexProgressReporter(extra);
+        let result: ZvecGrepIndexResult;
+        try {
+          result = await backend.index(input, {
+            authorization: resolution.authorization,
+            onProgress: progress.report,
+          });
+        } finally {
+          await progress.flush();
+        }
+        const structuredContent = {
+          root: result.root,
+          job_id: result.jobId,
+          state: result.state,
+          reused: result.reused,
+          action: result.action,
+          dropped: result.dropped,
+          error: result.error,
+        };
+        return toolResult(
+          [
+            `root: ${result.root}`,
+            `job_id: ${result.jobId}`,
+            `state: ${result.state}`,
+            `reused: ${result.reused}`,
+            ...(result.action ? [`action: ${result.action}`] : []),
+            ...(result.dropped !== undefined
+              ? [`dropped: ${result.dropped}`]
+              : []),
+            ...(result.error
+              ? [
+                  `error_code: ${result.error.code}`,
+                  `error_message: ${result.error.message}`,
+                ]
+              : []),
+          ].join("\n"),
+          structuredContent,
+        );
+      },
+    );
+  }
 
   server.registerTool(
     "zvec_grep_search",
     {
       title: "Search with zvec-grep",
-      description:
-        "Search an existing repository index first for repository investigation. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
+      description: full
+        ? "Search an existing repository index first for repository investigation. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring."
+        : "Search an existing repository index first for repository investigation. Read freshness and indexing directly from the response without a status preflight. When an index is unavailable, use the returned diagnostics to decide whether managed ripgrep can answer the task.",
       inputSchema: zvecGrepSearchInputSchema.shape,
       annotations: {
         readOnlyHint: false,
@@ -354,42 +357,47 @@ export function registerZvecGrepTools(
       // otherwise dominates the agent's context. `short` keeps a bounded source
       // snippet per hit so relevance is judgeable without extra file reads.
       return textToolResult(
-        `${statusLines.join("\n")}\n${formatAgentContextResult(response.result, {
-          preview: "short",
-        })}`,
+        `${statusLines.join("\n")}\n${formatAgentContextResult(
+          response.result,
+          {
+            preview: "short",
+          },
+        )}`,
       );
     },
   );
 
-  server.registerTool(
-    "zvec_grep_index_drop",
-    {
-      title: "Drop zvec-grep Workspace index",
-      description:
-        "Delete the persisted index for an absolute Workspace root and release its daemon runtime.",
-      inputSchema: zvecGrepIndexDropInputSchema.shape,
-      outputSchema: zvecGrepIndexDropOutputSchema.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
+  if (full) {
+    server.registerTool(
+      "zvec_grep_index_drop",
+      {
+        title: "Drop zvec-grep Workspace index",
+        description:
+          "Delete the persisted index for an absolute Workspace root and release its daemon runtime.",
+        inputSchema: zvecGrepIndexDropInputSchema.shape,
+        outputSchema: zvecGrepIndexDropOutputSchema.shape,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
       },
-    },
-    async (input) => {
-      const result = await backend.dropIndex(input);
-      const structuredContent = {
-        root: result.root,
-        removed: result.removed,
-      };
-      return toolResult(
-        result.removed
-          ? `Dropped Workspace index for ${result.root}`
-          : `No Workspace index found for ${result.root}`,
-        structuredContent,
-      );
-    },
-  );
+      async (input) => {
+        const result = await backend.dropIndex(input);
+        const structuredContent = {
+          root: result.root,
+          removed: result.removed,
+        };
+        return toolResult(
+          result.removed
+            ? `Dropped Workspace index for ${result.root}`
+            : `No Workspace index found for ${result.root}`,
+          structuredContent,
+        );
+      },
+    );
+  }
 
   server.registerTool(
     "zvec_grep_rg",
@@ -411,66 +419,68 @@ export function registerZvecGrepTools(
     },
   );
 
-  server.registerTool(
-    "zvec_grep_index_status",
-    {
-      title: "Inspect zvec-grep index status",
-      description:
-        "Read persisted index status and, when active, daemon runtime and job status for an absolute root. Use only after a missing-index response, indexing failure or cancellation, explicit progress monitoring, or daemon diagnostics.",
-      inputSchema: zvecGrepIndexStatusInputSchema.shape,
-      outputSchema: zvecGrepIndexStatusOutputSchema.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-    },
-    async (input) => {
-      const result = await backend.indexStatus(input);
-      const structuredContent = formatIndexStatus(result);
-      return toolResult(
-        JSON.stringify(structuredContent, null, 2),
-        structuredContent,
-      );
-    },
-  );
-
-  server.registerTool(
-    "zvec_grep_server_status",
-    {
-      title: "Inspect zvec-grep server status",
-      description:
-        "Read daemon version, queue, runtime and model-pool summary without exposing repository paths.",
-      inputSchema: zvecGrepServerStatusInputSchema.shape,
-      outputSchema: zvecGrepServerStatusOutputSchema.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-    },
-    async () => {
-      const result = await backend.serverStatus();
-      const structuredContent = {
-        version: result.version,
-        uptime_ms: result.uptimeMs,
-        shutting_down: result.shuttingDown,
-        active_runtimes: result.activeRuntimes,
-        queued_jobs: result.queuedJobs,
-        running_jobs: result.runningJobs,
-        models: {
-          loaded: result.models.loaded,
-          active_leases: result.models.activeLeases,
+  if (full) {
+    server.registerTool(
+      "zvec_grep_index_status",
+      {
+        title: "Inspect zvec-grep index status",
+        description:
+          "Read persisted index status and, when active, daemon runtime and job status for an absolute root. Use only after a missing-index response, indexing failure or cancellation, explicit progress monitoring, or daemon diagnostics.",
+        inputSchema: zvecGrepIndexStatusInputSchema.shape,
+        outputSchema: zvecGrepIndexStatusOutputSchema.shape,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
         },
-      };
-      return toolResult(
-        JSON.stringify(structuredContent, null, 2),
-        structuredContent,
-      );
-    },
-  );
+      },
+      async (input) => {
+        const result = await backend.indexStatus(input);
+        const structuredContent = formatIndexStatus(result);
+        return toolResult(
+          JSON.stringify(structuredContent, null, 2),
+          structuredContent,
+        );
+      },
+    );
+
+    server.registerTool(
+      "zvec_grep_server_status",
+      {
+        title: "Inspect zvec-grep server status",
+        description:
+          "Read daemon version, queue, runtime and model-pool summary without exposing repository paths.",
+        inputSchema: zvecGrepServerStatusInputSchema.shape,
+        outputSchema: zvecGrepServerStatusOutputSchema.shape,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async () => {
+        const result = await backend.serverStatus();
+        const structuredContent = {
+          version: result.version,
+          uptime_ms: result.uptimeMs,
+          shutting_down: result.shuttingDown,
+          active_runtimes: result.activeRuntimes,
+          queued_jobs: result.queuedJobs,
+          running_jobs: result.runningJobs,
+          models: {
+            loaded: result.models.loaded,
+            active_leases: result.models.activeLeases,
+          },
+        };
+        return toolResult(
+          JSON.stringify(structuredContent, null, 2),
+          structuredContent,
+        );
+      },
+    );
+  }
 }
 
 function createMcpIndexProgressReporter(

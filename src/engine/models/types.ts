@@ -76,7 +76,27 @@ export type TransformersJsEmbeddingCatalogEntry = {
   maxBatchSize: number;
 };
 
+export type Model2VecEmbeddingCatalogEntry = {
+  backend: "model2vec";
+  id: string;
+  provider: "local";
+  model: string;
+  repo: string;
+  revision: string;
+  modelFile: string;
+  embeddingTensor: string;
+  tokenizerFile: string;
+  dimension: number;
+  metric: VectorMetric;
+  normalize: boolean;
+  queryPrefix?: string;
+  documentPrefix?: string;
+  maxInputTokens: number;
+  maxBatchSize: number;
+};
+
 export type EmbeddingCatalogEntry =
   | LlamaCppEmbeddingCatalogEntry
   | RemoteEmbeddingCatalogEntry
+  | Model2VecEmbeddingCatalogEntry
   | TransformersJsEmbeddingCatalogEntry;

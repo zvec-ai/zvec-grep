@@ -6,6 +6,7 @@ import {
 import type { EmbeddingModel } from "./embeddings.js";
 import {
   LlamaCppEmbeddingModel,
+  Model2VecEmbeddingModel,
   Qwen37TextEmbeddingModel,
   Qwen3VlEmbeddingModel,
   QwenTextEmbeddingV4Model,
@@ -31,6 +32,10 @@ export function createEmbeddingModel(
 
     if (entry.backend === "llama-cpp") {
       return new LlamaCppEmbeddingModel(entry, options);
+    }
+
+    if (entry.backend === "model2vec") {
+      return new Model2VecEmbeddingModel(entry, options);
     }
 
     return new TransformersJsEmbeddingModel(entry, options);

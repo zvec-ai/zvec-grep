@@ -30,6 +30,7 @@ import type {
 } from "../types.js";
 import { normalizePath } from "../utils/path.js";
 import type {
+  FileIndexDiagnostics,
   CollectionStorage,
   StorageSearchFilter,
   StorageSearchHit,
@@ -188,6 +189,7 @@ export class ZvecCollectionStorage implements CollectionStorage {
     file: FileInfo,
     fragments: readonly EntityFragment[],
     vectors: readonly number[][],
+    diagnostics: FileIndexDiagnostics = {},
   ): void {
     if (fragments.length !== vectors.length) {
       throw new EngineError(
@@ -211,6 +213,7 @@ export class ZvecCollectionStorage implements CollectionStorage {
       indexStatus: {
         indexedTime: now,
         entityCount: entityIds.length,
+        truncatedFragmentCount: diagnostics.truncatedFragmentCount ?? 0,
       },
       entityIds,
     };
@@ -451,6 +454,21 @@ export class ZvecFileMetaStore {
         ZVecCreateAndOpen(path, createFilesSchema()),
       );
     }
+
+    if (
+      !readOnly &&
+      !this.collection.schema
+        .fields()
+        .some((field) => field.name === "truncated_fragment_count")
+    ) {
+      this.collection.addColumnSync({
+        fieldSchema: {
+          name: "truncated_fragment_count",
+          dataType: ZVecDataType.INT32,
+          nullable: true,
+        },
+      });
+    }
   }
 
   list(collectionId: string): FileRecord[] {
@@ -556,6 +574,11 @@ function createFilesSchema(): ZVecCollectionSchema {
         dataType: ZVecDataType.INT32,
         nullable: true,
       },
+      {
+        name: "truncated_fragment_count",
+        dataType: ZVecDataType.INT32,
+        nullable: true,
+      },
       stringField("error", true),
       stringField("entity_ids_json"),
     ],
@@ -593,6 +616,10 @@ function fileRecordToDoc(file: FileRecord): ZVecDocInput {
     fields.token_count = file.indexStatus.tokenCount;
   }
 
+  if (file.indexStatus?.truncatedFragmentCount !== undefined) {
+    fields.truncated_fragment_count = file.indexStatus.truncatedFragmentCount;
+  }
+
   if (file.indexStatus?.error !== undefined) {
     fields.error = file.indexStatus.error;
   }
@@ -608,6 +635,10 @@ function docToFileRecord(doc: ZVecDoc): FileRecord {
   const hasIndexStatus = readBooleanFieldFromFields(fields, "has_index_status");
   const indexedTime = readNullableNumberFieldFromFields(fields, "indexed_time");
   const tokenCount = readNullableNumberFieldFromFields(fields, "token_count");
+  const truncatedFragmentCount = readNullableNumberFieldFromFields(
+    fields,
+    "truncated_fragment_count",
+  );
   const error = readNullableStringFieldFromFields(fields, "error");
 
   return {
@@ -627,6 +658,9 @@ function docToFileRecord(doc: ZVecDoc): FileRecord {
           indexedTime,
           entityCount: readNumberFieldFromFields(fields, "entity_count"),
           ...(tokenCount === null ? {} : { tokenCount }),
+          ...(truncatedFragmentCount === null
+            ? {}
+            : { truncatedFragmentCount }),
           ...(error === null ? {} : { error }),
         }
       : undefined,

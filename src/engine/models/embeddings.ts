@@ -4,6 +4,15 @@ import type { ModelRef, VectorMetric } from "./types.js";
 
 export type EmbeddingVector = number[];
 
+export type EmbeddingDiagnostics = {
+  truncatedInputIndexes: number[];
+};
+
+export type EmbeddingBatchResult = {
+  vectors: EmbeddingVector[];
+  diagnostics: EmbeddingDiagnostics;
+};
+
 export type EmbeddingPurpose = "document" | "query";
 
 export type EmbeddingOptions = {
@@ -35,14 +44,22 @@ export abstract class EmbeddingModel {
     contents: readonly Content[],
     options: EmbeddingOptions = {},
   ): Promise<EmbeddingVector[]> {
+    return (await this.embedWithDiagnostics(contents, options)).vectors;
+  }
+
+  async embedWithDiagnostics(
+    contents: readonly Content[],
+    options: EmbeddingOptions = {},
+  ): Promise<EmbeddingBatchResult> {
     this.validateContents(contents);
-    const vectors = await this.doEmbed(contents, {
+    const result = await this.doEmbedWithDiagnostics(contents, {
       purpose: options.purpose ?? "document",
       signal: options.signal,
     });
-    this.validateVectors(contents, vectors);
+    this.validateVectors(contents, result.vectors);
+    this.validateDiagnostics(contents, result.diagnostics);
 
-    return vectors;
+    return result;
   }
 
   async dispose(): Promise<void> {
@@ -53,6 +70,16 @@ export abstract class EmbeddingModel {
     contents: readonly Content[],
     options: NormalizedEmbeddingOptions,
   ): Promise<EmbeddingVector[]>;
+
+  protected async doEmbedWithDiagnostics(
+    contents: readonly Content[],
+    options: NormalizedEmbeddingOptions,
+  ): Promise<EmbeddingBatchResult> {
+    return {
+      vectors: await this.doEmbed(contents, options),
+      diagnostics: { truncatedInputIndexes: [] },
+    };
+  }
 
   private validateContents(contents: readonly Content[]): void {
     if (contents.length === 0) {
@@ -164,6 +191,37 @@ export abstract class EmbeddingModel {
           );
         }
       }
+    }
+  }
+
+  private validateDiagnostics(
+    contents: readonly Content[],
+    diagnostics: EmbeddingDiagnostics,
+  ): void {
+    if (!diagnostics || !Array.isArray(diagnostics.truncatedInputIndexes)) {
+      throw new EngineError("Embedding model returned invalid diagnostics", {
+        code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_INVALID_DIAGNOSTICS",
+        context: `model=${this.ref.model}`,
+      });
+    }
+
+    const seen = new Set<number>();
+    for (const index of diagnostics.truncatedInputIndexes) {
+      if (
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= contents.length ||
+        seen.has(index)
+      ) {
+        throw new EngineError(
+          "Embedding model returned an invalid truncated input index",
+          {
+            code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_INVALID_TRUNCATED_INPUT_INDEX",
+            context: `model=${this.ref.model} index=${index} inputCount=${contents.length}`,
+          },
+        );
+      }
+      seen.add(index);
     }
   }
 }

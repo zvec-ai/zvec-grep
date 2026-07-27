@@ -11,6 +11,10 @@ import {
   withProgressHeartbeat,
 } from "../mcp/progress-heartbeat.js";
 
+type DaemonToolCallOptions = {
+  onProgress?: (progress: Progress) => void;
+};
+
 export class DaemonClient {
   constructor(
     private readonly options: {
@@ -24,10 +28,30 @@ export class DaemonClient {
   async callTool(
     name: string,
     args: Record<string, unknown>,
-    callOptions: {
-      onProgress?: (progress: Progress) => void;
-    } = {},
+    callOptions: DaemonToolCallOptions = {},
   ): Promise<Record<string, unknown>> {
+    return (await this.invokeTool(
+      name,
+      args,
+      callOptions,
+      "structured",
+    )) as Record<string, unknown>;
+  }
+
+  async callTextTool(
+    name: string,
+    args: Record<string, unknown>,
+    callOptions: DaemonToolCallOptions = {},
+  ): Promise<string> {
+    return (await this.invokeTool(name, args, callOptions, "text")) as string;
+  }
+
+  private async invokeTool(
+    name: string,
+    args: Record<string, unknown>,
+    callOptions: DaemonToolCallOptions,
+    resultKind: "structured" | "text",
+  ): Promise<Record<string, unknown> | string> {
     const abortController = new AbortController();
     let cancelledByCtrlC = false;
     const onInterrupt = (): void => {
@@ -113,7 +137,7 @@ export class DaemonClient {
       }
     });
     const transport = new StreamableHTTPClientTransport(
-      new URL(this.options.serverUrl),
+      daemonAdminServerUrl(this.options.serverUrl),
       {
         requestInit: {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -136,10 +160,15 @@ export class DaemonClient {
         throw new Error("Operation cancelled by user.");
       }
       if (result.isError) {
-        const text = Array.isArray(result.content)
-          ? result.content.find((item) => item.type === "text")?.text
-          : undefined;
+        const text = toolResultText(result.content);
         throw new Error(text ?? `${name} failed`);
+      }
+      if (resultKind === "text") {
+        const text = toolResultText(result.content);
+        if (text === undefined) {
+          throw new Error(`${name} returned no text content`);
+        }
+        return text;
       }
       return (result.structuredContent ?? {}) as Record<string, unknown>;
     } catch (error) {
@@ -152,6 +181,34 @@ export class DaemonClient {
       await client.close().catch(() => undefined);
     }
   }
+}
+
+export function daemonAdminServerUrl(serverUrl: string): URL {
+  const url = new URL(serverUrl);
+  const publicPath = url.pathname.replace(/\/+$/, "");
+  if (!publicPath.endsWith("/mcp")) {
+    throw new Error(
+      `zvec-grep server URL must end with /mcp (received ${url.pathname})`,
+    );
+  }
+  url.pathname = `${publicPath}/admin`;
+  return url;
+}
+
+function toolResultText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  for (const value of content as unknown[]) {
+    if (typeof value !== "object" || value === null) {
+      continue;
+    }
+    const item = value as Record<string, unknown>;
+    if (item.type === "text" && typeof item.text === "string") {
+      return item.text;
+    }
+  }
+  return undefined;
 }
 
 function isCtrlCError(error: unknown): boolean {

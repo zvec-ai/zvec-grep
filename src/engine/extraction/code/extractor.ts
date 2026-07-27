@@ -263,7 +263,7 @@ function codeEntityToSearchFragments(
     range: nodeToWindow(entity.node).range,
     content: {
       kind: "text",
-      text: codeEntityOutline(entity, adapter),
+      text: codeEntityOutline(entity, adapter, maxChars),
     },
     metadata,
   };
@@ -435,6 +435,19 @@ function* splitTextByLines(
   let offset = startOffset;
 
   while (lineIndex < lines.length) {
+    if (lines[lineIndex].length > maxChars) {
+      yield* splitLongLineByChars(
+        lines[lineIndex],
+        maxChars,
+        startLine + lineIndex,
+        offset,
+        overlapChars,
+      );
+      offset += lines[lineIndex].length + 1;
+      lineIndex++;
+      continue;
+    }
+
     let endIndex = lineIndex;
     let usedChars = 0;
 
@@ -476,6 +489,71 @@ function* splitTextByLines(
     }
     lineIndex = nextIndex;
   }
+}
+
+function* splitLongLineByChars(
+  text: string,
+  maxChars: number,
+  line: number,
+  startOffset: number,
+  overlapChars: number,
+): Generator<CodeWindow> {
+  let relativeStart = 0;
+
+  while (relativeStart < text.length) {
+    const rawEnd = Math.min(text.length, relativeStart + maxChars);
+    const relativeEnd = safeCharacterEnd(text, relativeStart, rawEnd);
+
+    yield {
+      text: text.slice(relativeStart, relativeEnd),
+      range: {
+        kind: "text",
+        startLine: line,
+        endLine: line,
+        startOffset: startOffset + relativeStart,
+        endOffset: startOffset + relativeEnd,
+      },
+    };
+
+    if (relativeEnd >= text.length) {
+      break;
+    }
+
+    const rawStart = Math.max(relativeStart + 1, relativeEnd - overlapChars);
+    relativeStart = safeCharacterStart(text, rawStart);
+  }
+}
+
+function safeCharacterEnd(text: string, start: number, end: number): number {
+  if (
+    end > start &&
+    end < text.length &&
+    isHighSurrogate(text.charCodeAt(end - 1)) &&
+    isLowSurrogate(text.charCodeAt(end))
+  ) {
+    return end - 1 > start ? end - 1 : end + 1;
+  }
+  return end;
+}
+
+function safeCharacterStart(text: string, start: number): number {
+  if (
+    start > 0 &&
+    start < text.length &&
+    isHighSurrogate(text.charCodeAt(start - 1)) &&
+    isLowSurrogate(text.charCodeAt(start))
+  ) {
+    return start + 1;
+  }
+  return start;
+}
+
+function isHighSurrogate(value: number): boolean {
+  return value >= 0xd800 && value <= 0xdbff;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xdc00 && value <= 0xdfff;
 }
 
 function computeOverlapStart(
@@ -542,6 +620,7 @@ type OutlineMember = {
 function codeEntityOutline(
   entity: CodeEntity,
   adapter: LanguageAdapter,
+  maxChars: number,
 ): string {
   const header = extractCodeHeader(entity.node.text);
   const lines = [
@@ -564,7 +643,17 @@ function codeEntityOutline(
     }
   }
 
-  return lines.join("\n").trim();
+  return truncateOutline(lines.join("\n").trim(), maxChars);
+}
+
+function truncateOutline(outline: string, maxChars: number): string {
+  if (outline.length <= maxChars) {
+    return outline;
+  }
+  if (maxChars <= 3) {
+    return ".".repeat(maxChars);
+  }
+  return `${outline.slice(0, maxChars - 3).trimEnd()}...`;
 }
 
 function extractCodeHeader(text: string): string {

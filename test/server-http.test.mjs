@@ -101,6 +101,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   const address = await server.start();
   const mcpUrl = new URL(`http://127.0.0.1:${address.port}/mcp`);
+  const adminMcpUrl = new URL("/mcp/admin", mcpUrl);
   await mkdir(join(temporaryDirectory, "daemon"));
   await writeFile(join(temporaryDirectory, "daemon", "token"), `${token}\n`);
   t.after(async () => {
@@ -156,9 +157,26 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   assert.equal(getMcp.status, 405);
 
+  const publicClient = await connectClient(mcpUrl, "public-client");
+  t.after(async () => publicClient.close());
+  const publicTools = await publicClient.listTools();
+  assert.deepEqual(publicTools.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_rg",
+    "zvec_grep_search",
+  ]);
+  const hiddenManagementCall = await publicClient.callTool({
+    name: "zvec_grep_index_status",
+    arguments: { root },
+  });
+  assert.equal(hiddenManagementCall.isError, true);
+  assert.match(
+    hiddenManagementCall.content[0].text,
+    /tool.*not found|not found.*tool/i,
+  );
+
   const clients = await Promise.all([
-    connectClient(mcpUrl, "client-a"),
-    connectClient(mcpUrl, "client-b"),
+    connectClient(adminMcpUrl, "client-a"),
+    connectClient(adminMcpUrl, "client-b"),
   ]);
   t.after(async () => Promise.all(clients.map((client) => client.close())));
 
@@ -183,6 +201,10 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   });
   assert.equal(coldIndexStatus.structuredContent.indexed, true);
   assert.equal(coldIndexStatus.structuredContent.runtime, undefined);
+  assert.equal(
+    coldIndexStatus.structuredContent.persistent.files.truncated_fragments,
+    0,
+  );
   const afterColdIndexStatus = await clients[0].callTool({
     name: "zvec_grep_server_status",
     arguments: {},
@@ -200,7 +222,9 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     },
   });
   assert.equal(freshSearch.isError, undefined);
-  assert.equal(freshSearch.structuredContent.freshness, "fresh");
+  assert.equal(freshSearch.structuredContent, undefined);
+  assert.match(freshSearch.content[0].text, /^freshness: fresh$/m);
+  assert.match(freshSearch.content[0].text, /src\/answer\.ts:/);
 
   const searchRoots = [root, join(root, "src")];
   const searches = await Promise.all(
@@ -218,12 +242,8 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   await backend.scheduler.waitForRootIdle(canonicalRoot);
   for (const search of searches) {
     assert.equal(search.isError, undefined);
-    assert.equal(search.structuredContent.root, canonicalRoot);
-    assert.ok(search.structuredContent.result.items.length > 0);
-    assert.equal(
-      search.structuredContent.result.items[0].file.relativePath,
-      "src/answer.ts",
-    );
+    assert.equal(search.structuredContent, undefined);
+    assert.match(search.content[0].text, /src\/answer\.ts:/);
   }
   assert.equal(modelLoads, 1);
 
@@ -250,10 +270,8 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     arguments: { root, fts: "updatedAnswer" },
   });
   assert.equal(refreshedSearch.isError, undefined);
-  assert.match(
-    refreshedSearch.structuredContent.result.items[0].content,
-    /updatedAnswer/,
-  );
+  assert.equal(refreshedSearch.structuredContent, undefined);
+  assert.match(refreshedSearch.content[0].text, /updatedAnswer/);
 
   const unindexedRoot = join(temporaryDirectory, "unindexed");
   await mkdir(unindexedRoot);
@@ -335,17 +353,13 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.equal(searchSettled, true);
   const writerSearch = await writerSearchPromise;
   assert.equal(writerSearch.isError, undefined);
-  assert.equal(writerSearch.structuredContent.freshness, "possibly_stale");
-  assert.equal(writerSearch.structuredContent.indexing.state, "running");
-  assert.equal(
-    typeof writerSearch.structuredContent.indexing.completed,
-    "number",
+  assert.equal(writerSearch.structuredContent, undefined);
+  assert.match(writerSearch.content[0].text, /^freshness: possibly_stale$/m);
+  const progressMatch = /^indexing: running \((\d+)\/(\d+)\)$/m.exec(
+    writerSearch.content[0].text,
   );
-  assert.equal(typeof writerSearch.structuredContent.indexing.total, "number");
-  assert.ok(
-    writerSearch.structuredContent.indexing.completed <=
-      writerSearch.structuredContent.indexing.total,
-  );
+  assert.ok(progressMatch);
+  assert.ok(Number(progressMatch[1]) <= Number(progressMatch[2]));
   blockEmbedding = false;
   releaseEmbedding();
   const waited = await waitedPromise;
@@ -370,10 +384,8 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     arguments: { root: unindexedRoot, query: "newly indexed" },
   });
   assert.equal(newSearch.isError, undefined);
-  assert.equal(
-    newSearch.structuredContent.result.items[0].file.relativePath,
-    "new.ts",
-  );
+  assert.equal(newSearch.structuredContent, undefined);
+  assert.match(newSearch.content[0].text, /new\.ts:/);
   assert.equal(modelLoads, 1);
 
   const dropped = await clients[0].callTool({
@@ -388,6 +400,36 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     arguments: { root: unindexedRoot },
   });
   assert.equal(droppedStatus.structuredContent.indexed, false);
+});
+
+test("full MCP toolset restores all tools on the public endpoint", async (t) => {
+  const server = new DaemonHttpServer({
+    host: "127.0.0.1",
+    port: 0,
+    token,
+    version: "1.0.0",
+    backend: {},
+    mcpToolset: "full",
+  });
+  const address = await server.start();
+  const client = await connectClient(
+    new URL(`http://127.0.0.1:${address.port}/mcp`),
+    "full-toolset-client",
+  );
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const listed = await client.listTools();
+  assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_index",
+    "zvec_grep_index_drop",
+    "zvec_grep_index_status",
+    "zvec_grep_rg",
+    "zvec_grep_search",
+    "zvec_grep_server_status",
+  ]);
 });
 
 test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (t) => {
@@ -441,7 +483,7 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   });
   const address = await server.start();
   const client = await connectClient(
-    new URL(`http://127.0.0.1:${address.port}/mcp`),
+    new URL(`http://127.0.0.1:${address.port}/mcp/admin`),
     "qwen-client",
     async () => ({
       action: "accept",
@@ -473,8 +515,9 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
     },
   });
   assert.equal(search.isError, undefined);
-  assert.equal(search.structuredContent.freshness, "fresh");
-  assert.ok(search.structuredContent.result.items.length > 0);
+  assert.equal(search.structuredContent, undefined);
+  assert.match(search.content[0].text, /^freshness: fresh$/m);
+  assert.match(search.content[0].text, /answer\.ts:/);
   assert.ok(requests.length > requestsAfterIndex);
   assert.ok(
     requests.every(

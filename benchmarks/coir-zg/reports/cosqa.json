@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "benchmark": "CoIR-ZG",
+  "task": "cosqa",
+  "run_date": "2026-07-25",
+  "zvec_grep_commit": "796a3c5762160110dbf6a04c956fc1f2935870b2",
+  "protocol": {
+    "corpus_documents": 20604,
+    "queries": 500,
+    "corpus_sha256": "753082a57c28ef708ccf1fe327067b99a96c04e4383921be9099742a5f681fac",
+    "retrieval": "vector-only",
+    "fragment_limit": 500,
+    "document_top_k": 100,
+    "evaluation_level": "document",
+    "external_evaluator": "ir-measures==0.4.1"
+  },
+  "environment": {
+    "machine": "Apple M4 Pro",
+    "memory_bytes": 51539607552,
+    "operating_system": "macOS 15.1.1",
+    "node": "25.5.0",
+    "@zvec/zvec": "0.5.0",
+    "@huggingface/transformers": "3.8.1",
+    "node-llama-cpp": "3.18.1"
+  },
+  "results": [
+    {
+      "model": "local/jina-embeddings-v2-base-code",
+      "metrics": {
+        "nDCG@10": 0.39472749695577114,
+        "Recall@10": 0.686,
+        "MAP@10": 0.3059785714285713,
+        "MRR@10": 0.3059785714285713,
+        "nDCG@100": 0.45905976386746616,
+        "Recall@100": 0.982,
+        "MAP@100": 0.3195784313137985
+      },
+      "index_wall_time_ms": 432170.339583,
+      "query_mean_ms": 355.53540098999804,
+      "index_peak_rss_bytes": 2770157568,
+      "query_peak_rss_bytes": 3712417792
+    },
+    {
+      "model": "local/embeddinggemma-300m",
+      "metrics": {
+        "nDCG@10": 0.38921646462148296,
+        "Recall@10": 0.69,
+        "MAP@10": 0.2975277777777777,
+        "MRR@10": 0.2975277777777777,
+        "nDCG@100": 0.4531917051973859,
+        "Recall@100": 0.974,
+        "MAP@100": 0.31193423003844756
+      },
+      "index_wall_time_ms": 794279.159833,
+      "query_mean_ms": 368.4925340019979,
+      "index_peak_rss_bytes": 2937470976,
+      "query_peak_rss_bytes": 3728343040
+    },
+    {
+      "model": "local/qwen3-embedding-0.6b",
+      "metrics": {
+        "nDCG@10": 0.36796565506534873,
+        "Recall@10": 0.652,
+        "MAP@10": 0.28122698412698405,
+        "MRR@10": 0.28122698412698405,
+        "nDCG@100": 0.43242552412280744,
+        "Recall@100": 0.952,
+        "MAP@100": 0.2946717197060853
+      },
+      "index_wall_time_ms": 1695470.376167,
+      "query_mean_ms": 358.6321637679907,
+      "index_peak_rss_bytes": 4763222016,
+      "query_peak_rss_bytes": 7447281664
+    },
+    {
+      "model": "qwen/qwen3.7-text-embedding",
+      "metrics": {
+        "nDCG@10": 0.3381161953045241,
+        "Recall@10": 0.612,
+        "MAP@10": 0.25485714285714284,
+        "MRR@10": 0.25485714285714284,
+        "nDCG@100": 0.40919537944841783,
+        "Recall@100": 0.938,
+        "MAP@100": 0.26999031706525045
+      },
+      "index_wall_time_ms": 169526.752834,
+      "query_mean_ms": 576.2744940840015,
+      "index_peak_rss_bytes": 1161740288,
+      "query_peak_rss_bytes": 1692565504
+    },
+    {
+      "model": "qwen/text-embedding-v4",
+      "metrics": {
+        "nDCG@10": 0.3304393828114326,
+        "Recall@10": 0.578,
+        "MAP@10": 0.2548555555555555,
+        "MRR@10": 0.2548555555555555,
+        "nDCG@100": 0.40544772459161044,
+        "Recall@100": 0.93,
+        "MAP@100": 0.27005655508383447
+      },
+      "index_wall_time_ms": 142629.163542,
+      "query_mean_ms": 542.3482945019997,
+      "index_peak_rss_bytes": 1208500224,
+      "query_peak_rss_bytes": 1696595968
+    },
+    {
+      "model": "local/all-minilm-l6-v2",
+      "metrics": {
+        "nDCG@10": 0.28496875775929464,
+        "Recall@10": 0.496,
+        "MAP@10": 0.22091190476190484,
+        "MRR@10": 0.22091190476190484,
+        "nDCG@100": 0.365483285005944,
+        "Recall@100": 0.874,
+        "MAP@100": 0.23742623527378878
+      },
+      "index_wall_time_ms": 197082.91016700002,
+      "query_mean_ms": 348.004303840003,
+      "index_peak_rss_bytes": 1322319872,
+      "query_peak_rss_bytes": 1918205952
+    },
+    {
+      "model": "local/bge-small-en-v1.5",
+      "metrics": {
+        "nDCG@10": 0.2797560262219524,
+        "Recall@10": 0.508,
+        "MAP@10": 0.21011507936507948,
+        "MRR@10": 0.21011507936507948,
+        "nDCG@100": 0.34926049153503613,
+        "Recall@100": 0.842,
+        "MAP@100": 0.22360755463673526
+      },
+      "index_wall_time_ms": 305895.215042,
+      "query_mean_ms": 331.1092995059997,
+      "index_peak_rss_bytes": 1437859840,
+      "query_peak_rss_bytes": 2134818816
+    },
+    {
+      "model": "local/potion-code-16m-v2",
+      "metrics": {
+        "nDCG@10": 0.24859298779884048,
+        "Recall@10": 0.452,
+        "MAP@10": 0.186723015873016,
+        "MRR@10": 0.186723015873016,
+        "nDCG@100": 0.32963439029402675,
+        "Recall@100": 0.844,
+        "MAP@100": 0.20217195156820322
+      },
+      "index_wall_time_ms": 39978.807,
+      "query_mean_ms": 349.5175803839997,
+      "index_peak_rss_bytes": 1142358016,
+      "query_peak_rss_bytes": 1708933120
+    },
+    {
+      "model": "local/potion-base-8m",
+      "metrics": {
+        "nDCG@10": 0.14635203887796588,
+        "Recall@10": 0.268,
+        "MAP@10": 0.10972222222222235,
+        "MRR@10": 0.10972222222222235,
+        "nDCG@100": 0.21031231297714037,
+        "Recall@100": 0.578,
+        "MAP@100": 0.12178820141233997
+      },
+      "index_wall_time_ms": 41593.868833,
+      "query_mean_ms": 339.4245969340002,
+      "index_peak_rss_bytes": 1133903872,
+      "query_peak_rss_bytes": 1845706752
+    }
+  ]
+}

@@ -49,6 +49,7 @@ type WorkspaceStatusView = {
     indexed: number;
     total: number;
     entities: number;
+    truncated: number;
     pending: number;
     failed: number;
   };
@@ -110,6 +111,7 @@ type ServerIndexInfo = {
       deleted: number;
       unchanged: number;
       entities: number;
+      truncated_fragments?: number;
     };
     suggestion?: string;
   };
@@ -282,6 +284,7 @@ export function printAnonymousInfo(
           indexed: completion?.completed ?? 0,
           total: completion?.total ?? 0,
           entities: status.entitiesIndexed ?? 0,
+          truncated: status.fragmentsTruncated ?? 0,
           pending: status.filesPending,
           failed: status.filesFailed,
         }
@@ -327,6 +330,7 @@ export function printServerIndexInfo(
             files.scanned ??
             Math.max(0, files.stored + files.added - files.deleted),
           entities: files.entities,
+          truncated: files.truncated_fragments ?? 0,
           pending: files.pending,
           failed: info.runtime?.progress?.files_failed ?? files.failed,
         }
@@ -353,7 +357,7 @@ function printWorkspaceIndexStatus(
 
   const sections: string[][] = [];
   if (view.files) {
-    const { indexed, total, entities, pending, failed } = view.files;
+    const { indexed, total, entities, truncated, pending, failed } = view.files;
     const percent =
       total === 0
         ? 0
@@ -366,6 +370,13 @@ function printWorkspaceIndexStatus(
         `${bar} ${String(percent).padStart(3)}%  ${formatCount(indexed)} / ${formatCount(total)} files`,
       ),
       ...formatStatusField(theme, "Entities", formatCount(entities)),
+      ...formatStatusField(
+        theme,
+        "Truncated",
+        truncated > 0
+          ? theme.warning(`${formatCount(truncated)} fragments`)
+          : theme.muted("0 fragments"),
+      ),
       ...formatStatusField(
         theme,
         "Queue",
@@ -724,6 +735,11 @@ function printIndexStatus(
     `${status.filesIndexed}/${status.filesScanned} indexed`,
   );
   printField(theme, "entities", String(status.entitiesIndexed ?? 0));
+  printField(
+    theme,
+    "truncated_fragments",
+    String(status.fragmentsTruncated ?? 0),
+  );
   printField(
     theme,
     "fresh",

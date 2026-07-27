@@ -4,6 +4,11 @@ import { configuredListenAddress, resolveServerToken } from "./config.js";
 import { DaemonHttpServer } from "./http-server.js";
 import { DaemonInstanceLock } from "./server-controller.js";
 import { createDaemonLogger } from "./logger.js";
+import {
+  MCP_TOOLSET_ENV,
+  resolveMcpToolset,
+  type McpToolset,
+} from "../mcp/toolset.js";
 
 export type RunDaemonOptions = {
   version: string;
@@ -11,17 +16,23 @@ export type RunDaemonOptions = {
   token?: string;
   tokenFile?: string;
   home?: string;
+  mcpToolset?: McpToolset;
   serviceOptions?: CreateZvecGrepOptions;
 };
 
 export async function runDaemonForeground(
   options: RunDaemonOptions,
 ): Promise<void> {
+  const mcpToolset = resolveMcpToolset(
+    options.mcpToolset,
+    process.env[MCP_TOOLSET_ENV],
+  );
   const listen = configuredListenAddress(options.listen);
   const displayAddress = `http://${displayHost(listen.host)}:${listen.port}/mcp`;
   const instanceLock = await DaemonInstanceLock.acquire(
     options.home,
     displayAddress,
+    mcpToolset,
   );
   const logger = createDaemonLogger(options.home);
   let auth;
@@ -45,6 +56,7 @@ export async function runDaemonForeground(
     ...listen,
     token: auth.token,
     version: options.version,
+    mcpToolset,
     backend,
     logger,
     onShutdown: () => requestStop?.(),
@@ -85,10 +97,12 @@ export async function runDaemonForeground(
     host: listen.host,
     port: address.port,
     pid: process.pid,
+    mcp_toolset: mcpToolset,
   });
   console.log(
     `zvec-grep server listening on http://${displayHost(address.address)}:${address.port}/mcp`,
   );
+  console.log(`MCP toolset: ${mcpToolset}`);
   if (auth.tokenFile) {
     console.log(`Bearer token file: ${auth.tokenFile}`);
   }

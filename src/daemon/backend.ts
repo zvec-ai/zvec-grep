@@ -1113,6 +1113,7 @@ function persistentStatus(
           deleted: info.status.filesDeleted,
           unchanged: info.status.filesUnchanged,
           entities: info.status.entitiesIndexed,
+          truncated_fragments: info.status.fragmentsTruncated,
         }
       : undefined,
     suggestion: info.suggestion,

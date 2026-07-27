@@ -47,6 +47,7 @@ import {
   ConcurrentTiming,
   TimingCollector,
 } from "../../dist/engine/utils/timing.js";
+import { contextOptionsFromRgInput } from "../../dist/mcp/input-normalization.js";
 
 test("CLI argument parser handles command, provider, path, and rg options", () => {
   const parsed = parseArgs([
@@ -110,6 +111,10 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
     "test/**",
     "docs/**",
   ]);
+  assert.deepEqual(
+    splitPathFilters(String.raw`src/\,name.ts, test/[a,b].ts, *.{py,{cc,h}}`),
+    [String.raw`src/\,name.ts`, "test/[a,b].ts", "*.{py,{cc,h}}"],
+  );
   assert.equal(
     parseModifiedTime("1700000000000", "--modified-after"),
     1700000000000,
@@ -129,6 +134,22 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
   );
   assert.throws(() => parseArgs(["query", "--json", "query"]), /removed/);
   assert.throws(() => parseArgs(["--unknown"]), /Unknown command/);
+});
+
+test("MCP rg normalization preserves brace glob entries", () => {
+  const braceGlob = "*.{py,cc,cpp,h,hpp}";
+  const scalar = contextOptionsFromRgInput({
+    pattern: "valid",
+    glob: braceGlob,
+  });
+  assert.deepEqual(scalar.includePaths, [braceGlob]);
+
+  const array = contextOptionsFromRgInput({
+    pattern: "valid",
+    glob: [braceGlob, "!test/**"],
+  });
+  assert.deepEqual(array.includePaths, [braceGlob]);
+  assert.deepEqual(array.excludePaths, ["test/**"]);
 });
 
 test("CLI parser covers utility commands, provider controls, routes, and equals syntax", () => {
@@ -470,7 +491,7 @@ test("file, model, content, and entity helpers classify inputs", () => {
   });
   assert.equal(detectFileType("archive.zip"), null);
   assert.deepEqual(detectFileType("NOTICE"), { kind: "text", format: "text" });
-  assert.equal(listEmbeddingModels().length, 9);
+  assert.equal(listEmbeddingModels().length, 11);
   assert.equal(
     getEmbeddingModelCatalogEntry("local/embeddinggemma-300m")?.dimension,
     768,
@@ -502,6 +523,32 @@ test("file, model, content, and entity helpers classify inputs", () => {
   assert.equal(
     getEmbeddingModelCatalogEntry("local/all-minilm-l6-v2")?.maxBatchSize,
     4,
+  );
+  assert.deepEqual(
+    {
+      backend: getEmbeddingModelCatalogEntry("local/potion-base-8m")?.backend,
+      modelFile: getEmbeddingModelCatalogEntry("local/potion-base-8m")
+        ?.modelFile,
+      dimension: getEmbeddingModelCatalogEntry("local/potion-base-8m")
+        ?.dimension,
+      maxBatchSize: getEmbeddingModelCatalogEntry("local/potion-base-8m")
+        ?.maxBatchSize,
+    },
+    {
+      backend: "model2vec",
+      modelFile: "model.safetensors",
+      dimension: 256,
+      maxBatchSize: 256,
+    },
+  );
+  assert.deepEqual(
+    {
+      modelFile: getEmbeddingModelCatalogEntry("local/potion-code-16m-v2")
+        ?.modelFile,
+      dimension: getEmbeddingModelCatalogEntry("local/potion-code-16m-v2")
+        ?.dimension,
+    },
+    { modelFile: "model.safetensors", dimension: 256 },
   );
   assert.deepEqual(
     {

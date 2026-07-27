@@ -51,7 +51,7 @@ zg query "where query auto update happens"
 - **托管 ripgrep 通道**：`zg query --rg` 支持常见 `rg` 参数，未建索引仓库也能使用。
 - **显式模型选择**：第一次建索引必须指定模型，例如 `local/embeddinggemma-300m`、`local/qwen3-embedding-0.6b` 或 `qwen/text-embedding-v4`。
 - **Schema 复用**：已有索引再次运行 `zg index` 会复用保存的 embedding schema，除非你显式切换模型。
-- **共享 MCP Server**：运行 `zg server on`，通过 loopback Streamable HTTP 暴露索引检索、托管 ripgrep、建索引、索引状态和服务状态工具，并可按需启用 Bearer 鉴权。
+- **聚焦的 MCP Server**：运行 `zg server on` 后，默认只向 Agent 暴露索引检索和托管 ripgrep；索引生命周期与诊断由 CLI 通过内部管理端点完成。
 - **库 API**：Node.js 工具、agent 或 MCP server 可以直接使用 `createZvecGrep()`。
 
 ## <a id="installation"></a>📦 安装
@@ -102,7 +102,12 @@ Codex MCP 工具调用和 OpenCode MCP 初始化默认超时为 600 秒，可通
 `--mcp-tool-timeout <秒数>` 覆盖。本地 server 默认只监听 loopback 且不启用 token。
 如需 Bearer 鉴权，请在 install 前设置 `ZVEC_GREP_SERVER_TOKEN`，并传入
 `--mcp-token-env ZVEC_GREP_SERVER_TOKEN`。MCP URL 为
-`http://127.0.0.1:7999/mcp`；使用 `zg server off` 停止 daemon。
+`http://127.0.0.1:7999/mcp`，默认暴露 `zvec_grep_search` 和
+`zvec_grep_rg`。索引生命周期与 daemon 诊断继续通过 `zg` 命令提供，CLI 会在内部使用
+保留的 `/mcp/admin` 端点。若已有客户端需要从公开端点访问全部六个 MCP 工具，可重启
+daemon 并执行 `zg server on --mcp-toolset full`。环境变量
+`ZVEC_GREP_MCP_TOOLSET=full` 可作为回退，显式命令行参数优先。
+`zg server status` 会显示当前 toolset。使用 `zg server off` 停止 daemon。
 
 CLI 的索引检索和建索引命令支持 `--mode direct`、`--mode server` 和 `--mode auto`。默认模式为 `auto`：只在 daemon ready 时使用 server，否则在提交请求前回退 Direct。
 Daemon 以 JSON Lines 写日志到 `~/.zvec-grep/daemon/logs/server.log`，不会记录凭证或完整查询文本。
@@ -160,19 +165,26 @@ zg query --rg -F "ZVEC_GREP_HOME" src
 zg query --human "root local index discovery" --limit 3
 ```
 
-MCP 客户端可使用 `zvec_grep_search`、`zvec_grep_rg`、`zvec_grep_index`、`zvec_grep_index_drop`、`zvec_grep_index_status` 和 `zvec_grep_server_status`。MCP 输入使用 JSON 友好的字段，例如 `globs: ["src/**"]`。installer 会为 Codex、Claude Code、OpenCode 和 Cursor 写入用户级 MCP 配置；Codex 和 Claude Code 还会获得托管指导与本机工具信任配置。`cc` 和 `claude-code` 仍可作为正式 target `claude` 的兼容别名。
+默认公开 MCP toolset 包含 `zvec_grep_search` 和 `zvec_grep_rg`。MCP 输入使用
+JSON 友好的字段，例如 `globs: ["src/**"]`。索引生命周期与诊断请使用
+`zg index`、`zg status` 和 `zg server status`。installer 会为 Codex、Claude
+Code、OpenCode 和 Cursor 写入用户级 MCP 配置；Codex 和 Claude Code 还会获得托管
+指导与本机工具信任配置。`cc` 和 `claude-code` 仍可作为正式 target `claude` 的兼容别名。
 
 ## <a id="models"></a>🧠 模型
 
-本地模型通过 `node-llama-cpp` 或 Transformers.js 运行，适合把代码检索留在本机。
-可以参考[本地 Embedding 模型选型指南](docs/embedding.md)，按使用场景比较
-模型大小、上下文长度和兼容性。
+本地模型通过 `node-llama-cpp`、Transformers.js 或原生 Model2Vec Safetensors adapter
+运行，适合把代码检索留在本机。
+可以参考 [Embedding 模型选型指南](docs/embedding.md)，按使用场景比较
+实测检索质量、资源占用和上下文长度。
 
 ```bash
 zg index --embedding local/embeddinggemma-300m
 zg index --embedding local/qwen3-embedding-0.6b
 zg index --embedding local/jina-embeddings-v2-base-code
 zg index --embedding local/multilingual-e5-small
+zg index --embedding local/potion-base-8m
+zg index --embedding local/potion-code-16m-v2
 ```
 
 在 Apple Silicon 上，本地构建默认使用更安静的 llama.cpp CMake 配置，避免无害的 OpenMP 和 ARM native 探测 warning。可以通过 `NODE_LLAMA_CPP_CMAKE_OPTION_<name>` 覆盖任意 llama.cpp CMake 选项，例如设置 `NODE_LLAMA_CPP_CMAKE_OPTION_GGML_NATIVE=ON` 重新启用 native CPU 优化。

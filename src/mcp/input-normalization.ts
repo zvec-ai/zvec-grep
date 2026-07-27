@@ -221,7 +221,10 @@ export function normalizePlainStringList(
 
 export function normalizePathFilters(value: StringListInput): string[] {
   const items = stringListItems(value);
-  return items.flatMap(splitPathFilters);
+  if (typeof value !== "string" || items.length !== 1 || items[0] !== value) {
+    return items.map((item) => item.trim()).filter((item) => item.length > 0);
+  }
+  return splitPathFilters(value);
 }
 
 function stringListItems(value: StringListInput): string[] {

@@ -10,9 +10,11 @@ export { EmbeddingModel } from "./embeddings.js";
 
 export {
   LlamaCppEmbeddingModel,
+  Model2VecEmbeddingModel,
   Qwen3VlEmbeddingModel,
   QwenTextEmbeddingV4Model,
   setLlamaCppRuntimeForTesting,
+  setModel2VecRuntimeForTesting,
   setTransformersJsRuntimeForTesting,
   TransformersJsEmbeddingModel,
 } from "./providers/index.js";
@@ -34,6 +36,7 @@ export type {
   LlamaCppEmbeddingCatalogEntry,
   LlamaGpuMode,
   LocalEmbeddingFormat,
+  Model2VecEmbeddingCatalogEntry,
   ModelProviderOptions,
   TransformersJsEmbeddingCatalogEntry,
 } from "./types.js";

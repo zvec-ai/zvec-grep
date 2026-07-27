@@ -163,13 +163,17 @@ that command only. This authorization is not persisted. API credentials
 configure a provider but do not grant permission.`;
     case "server":
       return `Usage:
-  zg server on [--listen 127.0.0.1:7999] [--token-file <path>]
+  zg server on [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset <agent|full>]
   zg server off [--token-file <path>]
   zg server status [--check-ready]
-  zg server run [--listen 127.0.0.1:7999] [--token-file <path>]
+  zg server run [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset <agent|full>]
 
 The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
+The public MCP endpoint defaults to the agent toolset (search and rg only).
+Use --mcp-toolset full, or ZVEC_GREP_MCP_TOOLSET=full, for compatibility with
+clients that require the four index and status tools. CLI index and status
+commands continue to use the daemon's internal administration endpoint.
 --check-ready exits non-zero unless the server is ready.`;
     case "install":
       return `Usage:

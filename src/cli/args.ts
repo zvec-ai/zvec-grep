@@ -9,6 +9,7 @@ import type {
   QueryRefreshMode,
 } from "./types.js";
 import { VALID_SYMBOL_TYPES } from "./types.js";
+import { parseMcpToolset } from "../mcp/toolset.js";
 
 const RG_OPTIONS_WITH_VALUE = new Set([
   "--dfa-size-limit",
@@ -155,6 +156,10 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.mode = parseClientMode(readOptionValue(args, ++index, arg));
     } else if (arg === "--force-direct") {
       options.forceDirect = true;
+    } else if (isLongOptionWithValue(arg, "--mcp-toolset")) {
+      options.mcpToolset = parseMcpToolset(valueFromLongOption(arg));
+    } else if (arg === "--mcp-toolset") {
+      options.mcpToolset = parseMcpToolset(readOptionValue(args, ++index, arg));
     } else if (isLongOptionWithValue(arg, "--listen")) {
       options.listen = valueFromLongOption(arg);
     } else if (arg === "--listen") {
@@ -753,6 +758,17 @@ function validateCliShape(
     ) {
       throw new Error("--token-file cannot be used with zg server status");
     }
+    if (
+      options.mcpToolset !== undefined &&
+      options.serverAction !== "on" &&
+      options.serverAction !== "run"
+    ) {
+      throw new Error(
+        "--mcp-toolset can only be used with zg server on or run",
+      );
+    }
+  } else if (options.mcpToolset !== undefined) {
+    throw new Error("--mcp-toolset can only be used with zg server on or run");
   }
 
   if (
@@ -1389,10 +1405,54 @@ function parseSymbolType(value: string): CodeSymbolType {
 }
 
 export function splitPathFilters(value: string): string[] {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
+  const filters: string[] = [];
+  let start = 0;
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let escaped = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (character === "]" && bracketDepth > 0) {
+      bracketDepth -= 1;
+      continue;
+    }
+    if (bracketDepth === 0 && character === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (bracketDepth === 0 && character === "}" && braceDepth > 0) {
+      braceDepth -= 1;
+      continue;
+    }
+    if (character !== "," || braceDepth > 0 || bracketDepth > 0) {
+      continue;
+    }
+
+    const filter = value.slice(start, index).trim();
+    if (filter.length > 0) {
+      filters.push(filter);
+    }
+    start = index + 1;
+  }
+
+  const finalFilter = value.slice(start).trim();
+  if (finalFilter.length > 0) {
+    filters.push(finalFilter);
+  }
+  return filters;
 }
 
 function appendValue(
