@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from harbor.agents.installed.codex import Codex
+from harbor.agents.installed.opencode import OpenCode
 from harbor.agents.installed.qwen_code import QwenCode
 from harbor.environments.base import BaseEnvironment
 
@@ -153,6 +154,10 @@ class GithubProxyMixin:
 
 class ProxyCodex(GithubProxyMixin, Codex):
     """Codex agent whose GitHub setup downloads can use a URL proxy."""
+
+
+class ProxyOpenCode(GithubProxyMixin, OpenCode):
+    """OpenCode agent whose GitHub setup downloads can use a URL proxy."""
 
 
 class ProxyQwenCode(GithubProxyMixin, QwenCode):

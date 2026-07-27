@@ -211,6 +211,14 @@ test("default agent contract exposes only search and rg", async (t) => {
   );
   const search = listed.tools.find((tool) => tool.name === "zvec_grep_search");
   assert.ok(search);
+  assert.match(search.description, /exact keyword, text, symbol/);
+  assert.match(search.description, /unknown and conceptual discovery is needed/);
+  assert.match(
+    search.description,
+    /known class, function, or symbol name is an exact anchor/,
+  );
+  assert.match(search.description, /use the managed ripgrep tool instead/);
+  assert.doesNotMatch(search.description, /index first/);
   assert.doesNotMatch(
     search.description,
     /zvec_grep_(?:index|index_drop|index_status|server_status)/,
@@ -301,7 +309,14 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.match(index.description, /Do not call this tool/);
   assert.match(index.description, /index deletion/);
   const search = tools.find((tool) => tool.name === "zvec_grep_search");
-  assert.match(search.description, /Search an existing repository index first/);
+  assert.match(search.description, /exact keyword, text, symbol/);
+  assert.match(search.description, /unknown and conceptual discovery is needed/);
+  assert.match(
+    search.description,
+    /known class, function, or symbol name is an exact anchor/,
+  );
+  assert.match(search.description, /use the managed ripgrep tool instead/);
+  assert.doesNotMatch(search.description, /index first/);
   assert.match(search.description, /missing indexes/);
   for (const tool of [index, search]) {
     assert.match(
@@ -322,8 +337,13 @@ test("full server contract exposes all tools with stable annotations", async (t)
     );
   }
   const rg = tools.find((tool) => tool.name === "zvec_grep_rg");
-  assert.match(rg.description, /explicit rg-mode request/);
-  assert.match(rg.description, /do not switch to rg merely/);
+  assert.match(rg.description, /Use it first when an exact keyword/);
+  assert.match(rg.description, /filename, path, configuration key, error message/);
+  assert.match(
+    rg.description,
+    /named class, function, or symbol remains an exact anchor/,
+  );
+  assert.match(rg.description, /Scope broad matches with paths or globs/);
   assert.equal(rg.outputSchema, undefined);
   assert.equal(search.outputSchema, undefined);
   for (const tool of tools.filter(

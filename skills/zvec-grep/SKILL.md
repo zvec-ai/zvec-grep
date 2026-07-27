@@ -7,7 +7,9 @@ description: Repository code search and indexing with zvec-grep. Use when explor
 
 ## Select the transport
 
-Use zvec-grep before raw `grep` or `rg` for repository investigation.
+Route repository investigation through zvec-grep instead of raw `grep` or
+`rg`. Choose the MCP tool by search intent; this does not mean indexed search
+must run before an exact search.
 
 Use the public native HTTP MCP search tools as the primary interface when the matching `zvec_grep_*` tool is present. Call them directly; do not run `zg`, probe the daemon through shell, or choose CLI for convenience.
 
@@ -26,10 +28,22 @@ Do not retry a submitted indexing write through another transport after a connec
 
 Pass the repository's daemon-visible absolute path as `root` on every repository call.
 
-1. Call `zvec_grep_search` first for repository investigation. Search defaults to `freshness: "eventual"`; use `freshness: "wait_for_fresh"` only when the result must include all pending changes. Use hybrid `queries` for concepts, `fts` for exact lexical anchors, and `vector` for semantic-only intent.
-2. Read the search response's `freshness` and `indexing` fields. Use `possibly_stale` results immediately when they are sufficient; do not call status merely because a background update is active.
-3. Call `zvec_grep_rg` for exhaustive local ripgrep when an index is missing and the task can be answered with literal or regex search, or when the user explicitly requests rg mode.
-4. Apply focused path and file-type filters early. Exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.
+1. Call `zvec_grep_rg` first when an exact keyword, text, symbol, filename,
+   path, configuration key, error message, source fragment, literal, or regex
+   anchor is known. A named class, function, or symbol remains an exact anchor
+   even when its file or definition location is unknown. Scope broad matches
+   with paths or globs.
+2. Call `zvec_grep_search` when the exact anchor is unknown and conceptual
+   discovery is needed. Search defaults to `freshness: "eventual"`; use
+   `freshness: "wait_for_fresh"` only when the result must include all pending
+   changes. Use hybrid `queries` for concepts plus known lexical constraints,
+   `fts` for indexed lexical-only intent, and `vector` for semantic-only intent.
+3. Read the indexed search response's `freshness` and `indexing` fields. Use
+   `possibly_stale` results immediately when they are sufficient; do not call
+   status merely because a background update is active.
+4. Apply focused path and file-type filters early. Exclude dependencies,
+   generated output, caches, build artifacts, fixtures, and logs unless the
+   task concerns them.
 
 The default public MCP endpoint intentionally exposes only search and managed
 ripgrep. If the index is missing, explain that indexed search requires an index

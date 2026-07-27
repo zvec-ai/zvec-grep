@@ -438,6 +438,7 @@ async function installOpenCodeIntegration(
   options: InstallAgentOptions,
 ): Promise<InstallAgentResult> {
   const configPath = resolveOpenCodeConfigPath();
+  const guidancePath = resolve(dirname(configPath), "AGENTS.md");
   await installJsonMcpServer({
     path: configPath,
     containerKey: "mcp",
@@ -458,13 +459,29 @@ async function installOpenCodeIntegration(
     force: options.force,
     label: "OpenCode",
   });
-  return { files: [configPath] };
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: agentGuidanceBlock({
+      rg: "zvec_grep_zvec_grep_rg",
+      search: "zvec_grep_zvec_grep_search",
+    }),
+    force: true,
+  });
+  return { files: [configPath, guidancePath] };
 }
 
 async function uninstallOpenCodeIntegration(): Promise<InstallAgentResult> {
   const configPath = resolveOpenCodeConfigPath();
+  const guidancePath = resolve(dirname(configPath), "AGENTS.md");
   await uninstallJsonMcpServer(configPath, "mcp");
-  return { files: [configPath] };
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+  return { files: [configPath, guidancePath] };
 }
 
 async function installCursorIntegration(
@@ -2386,13 +2403,18 @@ default_tools_approval_mode = "approve"
 ${ZVEC_GREP_CONFIG_END}`;
 }
 
-function agentGuidanceBlock(): string {
+function agentGuidanceBlock(toolNames?: {
+  rg: string;
+  search: string;
+}): string {
+  const rgTool = toolNames?.rg ?? "zvec_grep_rg";
+  const searchTool = toolNames?.search ?? "zvec_grep_search";
   return `${ZVEC_GREP_AGENTS_START}
 ## zvec-grep
 
-Use zvec-grep before grep, rg, or broad file reads when you need to understand or locate code.
+Route repository search through zvec-grep instead of raw grep, rg, or broad file reads. Choose the tool by intent; indexed search does not need to run before exact search.
 
-- **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search and \`zvec_grep_rg\` for exhaustive literal or regex search.
+- **MCP tools**: Use \`${rgTool}\` first when an exact keyword, text, symbol, filename, path, configuration key, error message, source fragment, literal, or regex anchor is known. A named class, function, or symbol remains an exact anchor even when its file or definition location is unknown. Use \`${searchTool}\` only when the exact anchor is unknown and conceptual discovery is needed.
 - **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. Manage persistent indexes with \`zg index\`, inspect them with \`zg status\`, and inspect the daemon with \`zg server status\`.
 - **Remote data authorization**: MCP tool trust does not authorize Remote Embedding. zvec-grep requests its own once or workspace authorization before sending query text or workspace content to a remote provider.
 - **Shell fallback**: If the MCP server is unavailable, use \`zg status\`, \`zg query "<query>"\`, and \`zg query --rg "<pattern>"\`.

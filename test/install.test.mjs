@@ -401,6 +401,19 @@ test("Codex installer refreshes legacy managed guidance", async (t) => {
   const agents = await readFile(agentsPath, "utf8");
   assert.match(agents, /# Existing instructions/);
   assert.match(agents, /ZVEC_GREP_START|Remote data authorization/);
+  assert.match(
+    agents,
+    /Use `zvec_grep_rg` first when an exact keyword, text, symbol, filename/,
+  );
+  assert.match(
+    agents,
+    /Use `zvec_grep_search` only when the exact anchor is unknown and conceptual discovery is needed/,
+  );
+  assert.match(
+    agents,
+    /named class, function, or symbol remains an exact anchor even when its file or definition location is unknown/,
+  );
+  assert.doesNotMatch(agents, /indexed search first/);
   assert.doesNotMatch(agents, /legacy guidance/);
 });
 
@@ -609,10 +622,12 @@ test("OpenCode installer preserves config and manages a remote MCP server", asyn
     join(tmpdir(), "zvec-grep-install-opencode-"),
   );
   const configPath = join(temporaryDirectory, "opencode.json");
+  const guidancePath = join(temporaryDirectory, "AGENTS.md");
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
+  await writeFile(guidancePath, "# Existing OpenCode guidance\n");
   await writeFile(
     configPath,
     `${JSON.stringify({ model: "custom/model", mcp: { other: { type: "remote", url: "https://example.com/mcp" } } }, null, 2)}\n`,
@@ -635,11 +650,30 @@ test("OpenCode installer preserves config and manages a remote MCP server", asyn
       Authorization: "Bearer {env:ZVEC_GREP_SERVER_TOKEN}",
     },
   });
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.match(guidance, /# Existing OpenCode guidance/);
+  assert.match(
+    guidance,
+    /Use `zvec_grep_zvec_grep_rg` first when an exact keyword, text, symbol, filename/,
+  );
+  assert.match(
+    guidance,
+    /Use `zvec_grep_zvec_grep_search` only when the exact anchor is unknown and conceptual discovery is needed/,
+  );
+  assert.match(
+    guidance,
+    /named class, function, or symbol remains an exact anchor even when its file or definition location is unknown/,
+  );
+  assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_START -->"), 1);
+  assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_END -->"), 1);
 
   await uninstallTarget("opencode", { OPENCODE_CONFIG: configPath });
   const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
   assert.equal(uninstalled.mcp.zvec_grep, undefined);
   assert.equal(uninstalled.mcp.other.url, "https://example.com/mcp");
+  const uninstalledGuidance = await readFile(guidancePath, "utf8");
+  assert.match(uninstalledGuidance, /# Existing OpenCode guidance/);
+  assert.doesNotMatch(uninstalledGuidance, /ZVEC_GREP|## zvec-grep/);
 });
 
 test("JSON installers require force before replacing an unmanaged server", async (t) => {

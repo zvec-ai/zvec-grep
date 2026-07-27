@@ -187,9 +187,10 @@ Options:
   --force                           Replace conflicting unmanaged configuration
 
 Interactive setup detects supported agents, configures the local MCP server,
-and starts it. Codex and Claude Code also receive managed guidance and local
-tool pre-approval. Remote Embedding authorization remains separate and is
-requested by zvec-grep on first remote use. This does not install the npm package.`;
+and starts it. Codex, Claude Code, and OpenCode also receive managed guidance;
+Codex and Claude Code receive local tool pre-approval. Remote Embedding
+authorization remains separate and is requested by zvec-grep on first remote
+use. This does not install the npm package.`;
     case "uninstall":
       return `Usage:
   zg uninstall [--target codex|claude|opencode|cursor|all|auto] [--yes]

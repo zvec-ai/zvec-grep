@@ -316,8 +316,8 @@ export function registerZvecGrepTools(
     {
       title: "Search with zvec-grep",
       description: full
-        ? "Search an existing repository index first for repository investigation. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring."
-        : "Search an existing repository index first for repository investigation. Read freshness and indexing directly from the response without a status preflight. When an index is unavailable, use the returned diagnostics to decide whether managed ripgrep can answer the task.",
+        ? "Search an existing repository index only when the exact keyword, text, symbol, filename, or path is unknown and conceptual discovery is needed. A known class, function, or symbol name is an exact anchor even when its file or definition location is unknown; use the managed ripgrep tool instead. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring."
+        : "Search an existing repository index only when the exact keyword, text, symbol, filename, or path is unknown and conceptual discovery is needed. A known class, function, or symbol name is an exact anchor even when its file or definition location is unknown; use the managed ripgrep tool instead. Read freshness and indexing directly from the response without a status preflight. When an index is unavailable, use the returned diagnostics to decide whether managed ripgrep can answer the task.",
       inputSchema: zvecGrepSearchInputSchema.shape,
       annotations: {
         readOnlyHint: false,
@@ -404,7 +404,7 @@ export function registerZvecGrepTools(
     {
       title: "Search with managed ripgrep",
       description:
-        "Run exhaustive managed ripgrep locally without requiring an index. Use it for literal or regex search, an unindexed repository that can be answered lexically, or an explicit rg-mode request; do not switch to rg merely because semantic search is unavailable.",
+        "Run exhaustive managed ripgrep locally without requiring an index. Use it first when an exact keyword, text, symbol, filename, path, configuration key, error message, source fragment, literal, or regex anchor is known. A named class, function, or symbol remains an exact anchor even when its file or definition location is unknown. Scope broad matches with paths or globs.",
       inputSchema: zvecGrepRgInputSchema.shape,
       annotations: {
         readOnlyHint: true,
