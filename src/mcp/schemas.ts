@@ -284,7 +284,9 @@ export const zvecGrepRgInputSchema = z.object({
     .positive()
     .max(200)
     .optional()
-    .describe("Maximum returned matches."),
+    .describe(
+      "Maximum logical results after grouping matches by enclosing symbol or overlapping context.",
+    ),
 });
 
 const jobStateSchema = z.enum([

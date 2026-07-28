@@ -18,6 +18,7 @@ export type {
   ZvecGrepContextFile,
   ZvecGrepContextItem,
   ZvecGrepContextItemKind,
+  ZvecGrepLexicalOccurrence,
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
   ZvecGrepContextRoute,

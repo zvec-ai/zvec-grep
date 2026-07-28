@@ -322,6 +322,283 @@ test("context formatters render indexed, lexical, metadata, preview, trace, and 
   }
 });
 
+test("context formatters merge grouped lexical occurrences by source line", async () => {
+  const item = {
+    kind: "lexical_match",
+    rank: 1,
+    file: { absolutePath: "/repo/src/a.ts", relativePath: "src/a.ts" },
+    range: {
+      kind: "text",
+      startLine: 10,
+      endLine: 12,
+      startOffset: 0,
+      endOffset: 9,
+    },
+    excerptRange: {
+      kind: "text",
+      startLine: 11,
+      endLine: 11,
+      startOffset: 0,
+      endOffset: 9,
+    },
+    content: "line 10\nquery first\nshared 12",
+    occurrences: [
+      {
+        rank: 1,
+        range: {
+          kind: "text",
+          startLine: 10,
+          endLine: 12,
+          startOffset: 0,
+          endOffset: 9,
+        },
+        excerptRange: {
+          kind: "text",
+          startLine: 11,
+          endLine: 11,
+          startOffset: 0,
+          endOffset: 9,
+        },
+        content: "line 10\nquery first\nshared 12",
+      },
+      {
+        rank: 2,
+        range: {
+          kind: "text",
+          startLine: 12,
+          endLine: 14,
+          startOffset: 0,
+          endOffset: 9,
+        },
+        excerptRange: {
+          kind: "text",
+          startLine: 13,
+          endLine: 13,
+          startOffset: 0,
+          endOffset: 9,
+        },
+        content: "shared 12\nquery second\nline 14",
+      },
+      {
+        rank: 3,
+        range: {
+          kind: "text",
+          startLine: 20,
+          endLine: 21,
+          startOffset: 0,
+          endOffset: 9,
+        },
+        excerptRange: {
+          kind: "text",
+          startLine: 20,
+          endLine: 20,
+          startOffset: 0,
+          endOffset: 9,
+        },
+        content: "query third\nline 21",
+      },
+    ],
+    status: "fresh",
+    matchedBy: "lexical",
+    metadata: {
+      kind: "code",
+      symbolType: "function",
+      symbolName: "prepare",
+      scope: "Container",
+      nodeType: "function_declaration",
+      signature: "function prepare()",
+      doc: null,
+      modifiers: [],
+    },
+    container: {
+      entityId: "prepare",
+      range: {
+        kind: "text",
+        startLine: 8,
+        endLine: 25,
+        startOffset: 0,
+        endOffset: 9,
+      },
+      metadata: {
+        kind: "code",
+        symbolType: "function",
+        symbolName: "prepare",
+        scope: "Container",
+        nodeType: "function_declaration",
+        signature: "function prepare()",
+        doc: null,
+        modifiers: [],
+      },
+    },
+  };
+  const result = contextResult({
+    query: "query",
+    source: "rg",
+    coverage: "rg_exhaustive",
+    collection: undefined,
+    items: [item],
+    diagnostics: {
+      rg: {
+        backend: "rg",
+        command: "rg",
+        args: ["--json", "query"],
+        ignoredDirectories: [],
+        truncated: false,
+      },
+    },
+  });
+
+  const agentText = formatAgentContextResult(result, { color: "never" });
+  assert.equal(
+    agentText,
+    [
+      "src/a.ts:8-25",
+      "symbol: function prepare scope: Container",
+      "matches: 3 at L11, L13, L20",
+      "10-\tline 10",
+      "11:\tquery first",
+      "12-\tshared 12",
+      "13:\tquery second",
+      "14-\tline 14",
+      "...",
+      "20:\tquery third",
+      "21-\tline 21",
+    ].join("\n"),
+  );
+  assert.equal((agentText.match(/shared 12/g) ?? []).length, 1);
+
+  const human = await captureConsole(() =>
+    printHumanContextResult(result, { human: true, color: "never" }),
+  );
+  const humanText = human.logs.join("\n");
+  assert.match(humanText, /^Hits: 3$/m);
+  assert.match(humanText, /Matches: 3 at L11, L13, L20/);
+  assert.equal((humanText.match(/shared 12/g) ?? []).length, 1);
+  assert.match(humanText, /14-\tline 14\n\s+\.\.\.\n\s+20:\tquery third/);
+
+  const truncatedText = formatAgentContextResult(
+    {
+      ...result,
+      coverage: "rg_truncated",
+      diagnostics: {
+        rg: {
+          ...result.diagnostics.rg,
+          truncated: true,
+        },
+      },
+    },
+    { color: "never" },
+  );
+  assert.match(truncatedText, /matches: 3\+ at L11, L13, L20/);
+});
+
+test("a single lexical occurrence preserves the existing formatter output", async () => {
+  const baseItem = contextResult().items[1];
+  const withOccurrence = {
+    ...baseItem,
+    occurrences: [
+      {
+        rank: baseItem.rank,
+        range: baseItem.range,
+        excerptRange: baseItem.excerptRange,
+        content: baseItem.content,
+      },
+    ],
+  };
+  const baseResult = contextResult({
+    source: "rg",
+    coverage: "rg_exhaustive",
+    collection: undefined,
+    items: [baseItem],
+  });
+  const occurrenceResult = contextResult({
+    source: "rg",
+    coverage: "rg_exhaustive",
+    collection: undefined,
+    items: [withOccurrence],
+  });
+
+  assert.equal(
+    formatAgentContextResult(occurrenceResult, { color: "never" }),
+    formatAgentContextResult(baseResult, { color: "never" }),
+  );
+
+  const baseHuman = await captureConsole(() =>
+    printHumanContextResult(baseResult, { human: true, color: "never" }),
+  );
+  const occurrenceHuman = await captureConsole(() =>
+    printHumanContextResult(occurrenceResult, {
+      human: true,
+      color: "never",
+    }),
+  );
+  assert.deepEqual(occurrenceHuman.logs, baseHuman.logs);
+});
+
+test("grouped lexical rendering has a bounded source-line budget", () => {
+  const occurrences = Array.from({ length: 8 }, (_, index) => {
+    const startLine = index * 100 + 1;
+    return {
+      rank: index + 1,
+      range: {
+        kind: "text",
+        startLine,
+        endLine: startLine + 40,
+        startOffset: 0,
+        endOffset: 9,
+      },
+      excerptRange: {
+        kind: "text",
+        startLine: startLine + 20,
+        endLine: startLine + 20,
+        startOffset: 0,
+        endOffset: 9,
+      },
+      content: Array.from(
+        { length: 41 },
+        (_, line) => `window ${index} line ${line}`,
+      ).join("\n"),
+    };
+  });
+  const item = {
+    kind: "lexical_match",
+    rank: 1,
+    file: { absolutePath: "/repo/noisy.ts", relativePath: "noisy.ts" },
+    range: occurrences[0].range,
+    excerptRange: occurrences[0].excerptRange,
+    content: occurrences[0].content,
+    occurrenceCount: 6_000,
+    occurrences,
+    status: "fresh",
+    matchedBy: "lexical",
+    container: {
+      entityId: "function:noisy",
+      range: {
+        kind: "text",
+        startLine: 1,
+        endLine: 741,
+        startOffset: 0,
+        endOffset: 9,
+      },
+    },
+  };
+  const text = formatAgentContextResult(
+    contextResult({
+      query: "needle",
+      source: "rg",
+      coverage: "rg_exhaustive",
+      collection: undefined,
+      items: [item],
+    }),
+    { color: "never" },
+  );
+
+  assert.match(text, /matches: 6000\+? at .*?, \.\.\./);
+  assert.ok(
+    text.split("\n").filter((line) => /^\d+[-:]\t/.test(line)).length <= 80,
+  );
+});
+
 test("debug formatter reports every diagnostic and trace availability state", async () => {
   const full = await captureConsole(() =>
     printDebug(contextResult(), { trace: true }),

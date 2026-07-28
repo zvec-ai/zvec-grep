@@ -35,6 +35,20 @@ export function printDebug(
     if (rg.missingPaths && rg.missingPaths.length > 0) {
       console.error(`rg_missing=${rg.missingPaths.join(",")}`);
     }
+    if (rg.rawOccurrences !== undefined) {
+      console.error(
+        `rg_compaction=raw:${rg.rawOccurrences} unique:${rg.uniqueOccurrences ?? rg.rawOccurrences} ` +
+          `groups:${rg.groupsReturned ?? result.items.length}/${rg.groupsFound ?? result.items.length} ` +
+          `exact_duplicates:${rg.exactDuplicatesRemoved ?? 0} collapsed:${rg.occurrencesCollapsed ?? 0} ` +
+          `windows_merged:${rg.contextWindowsMerged ?? 0}`,
+      );
+    }
+    if (rg.generatedCandidates !== undefined && rg.generatedCandidates > 0) {
+      console.error(
+        `rg_generated=candidates:${rg.generatedCandidates} ` +
+          `canonicalized:${rg.generatedMirrorsCanonicalized ?? 0} demoted:${rg.generatedMatchesDemoted ?? 0}`,
+      );
+    }
   }
 
   if (result.diagnostics.structure) {

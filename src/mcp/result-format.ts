@@ -1,4 +1,5 @@
 import type { ZvecGrepContextResult } from "../index.js";
+import { formatAgentContextResult } from "../cli/format/context.js";
 
 export type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -28,27 +29,15 @@ export function contextToolResult(result: ZvecGrepContextResult): ToolResult {
 }
 
 export function contextText(result: ZvecGrepContextResult): string {
-  const lines = [
+  return [
     `query: ${result.query}`,
     `root: ${result.root}`,
     `source: ${result.source}`,
     `coverage: ${result.coverage}`,
     `hits: ${result.items.length}`,
-  ];
-
-  for (const item of result.items) {
-    lines.push("");
-    lines.push(
-      `${item.file.relativePath}:${rangeLabel(item.range)} rank=${item.rank} matchedBy=${item.matchedBy}`,
-    );
-    if (item.outline) {
-      lines.push(`outline: ${item.outline}`);
-    }
-    lines.push("source:");
-    lines.push(item.content);
-  }
-
-  return lines.join("\n");
+    "",
+    formatAgentContextResult(result, {}),
+  ].join("\n");
 }
 
 export function simplifyContextResult(
@@ -79,27 +68,4 @@ export function simplifyContextResult(
       trace: item.trace,
     })),
   };
-}
-
-function rangeLabel(range: {
-  kind: string;
-  startLine?: number;
-  endLine?: number;
-  startOffset?: number;
-  endOffset?: number;
-}): string {
-  if (
-    range.kind === "text" &&
-    typeof range.startLine === "number" &&
-    typeof range.endLine === "number"
-  ) {
-    return `${range.startLine}-${range.endLine}`;
-  }
-  if (
-    typeof range.startOffset === "number" &&
-    typeof range.endOffset === "number"
-  ) {
-    return `${range.startOffset}-${range.endOffset}`;
-  }
-  return range.kind;
 }

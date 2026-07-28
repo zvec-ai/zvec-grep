@@ -15,11 +15,16 @@ type ContextItemGroup = {
   items: ZvecGrepContextItem[];
 };
 
+type ContextOccurrence = NonNullable<
+  ZvecGrepContextItem["occurrences"]
+>[number];
+
 const SHORT_SOURCE_MAX_LINES = 10;
 const SHORT_SOURCE_CONTEXT_BEFORE = 2;
 const SHORT_OUTLINE_MAX_LINES = 7;
 const AGENT_PREVIEW_MAX_LINE_LENGTH = 160;
 const HUMAN_PREVIEW_MAX_LINE_LENGTH = 120;
+const MAX_GROUPED_SOURCE_LINES = 80;
 
 export function printAgentContextResult(
   result: ZvecGrepContextResult,
@@ -66,8 +71,15 @@ function agentContextLines(
       });
       lines.push(
         ...agentMetadataLines(item, [...outlineLines, ...sourceLines]),
-        ...outlineLines,
       );
+      const occurrenceSummary = groupedOccurrenceSummary(
+        item,
+        result.diagnostics.rg?.truncated === true,
+      );
+      if (occurrenceSummary) {
+        lines.push(`matches: ${occurrenceSummary}`);
+      }
+      lines.push(...outlineLines);
       if (matched && preview !== "none") {
         lines.push(matched);
       }
@@ -84,6 +96,11 @@ function agentContextLines(
         }
       }
     }
+  }
+
+  const compactionSummary = agentRgCompactionSummary(result);
+  if (compactionSummary) {
+    lines.push("", compactionSummary);
   }
 
   return lines;
@@ -110,7 +127,7 @@ export function printHumanContextResult(
   }
   printHumanField(theme, "Coverage", theme.status(result.coverage));
   printHumanField(theme, "Files", String(groups.length));
-  printHumanField(theme, "Hits", String(result.items.length));
+  printHumanField(theme, "Hits", String(contextItemMatchCount(result.items)));
 
   if (groups.length === 0) {
     printHumanField(
@@ -128,7 +145,7 @@ export function printHumanContextResult(
   for (const group of groups) {
     console.log("");
     printHumanField(theme, "File", theme.path(group.file.relativePath));
-    printHumanField(theme, "Hits", String(group.items.length));
+    printHumanField(theme, "Hits", String(contextItemMatchCount(group.items)));
 
     for (const item of group.items.sort(compareContextItems)) {
       const score =
@@ -144,6 +161,15 @@ export function printHumanContextResult(
       console.log(
         `  ${theme.label("Range")}: ${rangeLabel(item.range)}  ${theme.label("Status")}: ${theme.status(item.status)}`,
       );
+      const occurrenceSummary = groupedOccurrenceSummary(
+        item,
+        result.diagnostics.rg?.truncated === true,
+      );
+      if (occurrenceSummary) {
+        console.log(
+          `  ${theme.label("Matches")}: ${theme.accent(occurrenceSummary)}`,
+        );
+      }
       if (matched && preview !== "none") {
         console.log(
           `  ${theme.label("Matched")}: ${theme.accent(rangeLabel(item.excerptRange ?? item.range))}`,
@@ -220,6 +246,42 @@ function emptyContextDetailLines(result: ZvecGrepContextResult): string[] {
   }
 
   return lines;
+}
+
+function agentRgCompactionSummary(
+  result: ZvecGrepContextResult,
+): string | null {
+  const rg = result.diagnostics.rg;
+  if (
+    !rg ||
+    rg.rawOccurrences === undefined ||
+    (rg.rawOccurrences === (rg.groupsReturned ?? result.items.length) &&
+      (rg.generatedMirrorsCanonicalized ?? 0) === 0 &&
+      rg.groupTruncated !== true)
+  ) {
+    return null;
+  }
+
+  const raw = `${rg.rawOccurrences}${rg.truncated ? "+" : ""}`;
+  const returned = rg.groupsReturned ?? result.items.length;
+  const resultLabel = returned === 1 ? "result" : "results";
+  const details: string[] = [];
+  if ((rg.generatedMirrorsCanonicalized ?? 0) > 0) {
+    details.push(
+      `${rg.generatedMirrorsCanonicalized} generated mirror occurrences mapped to source`,
+    );
+  }
+  if (
+    rg.groupTruncated &&
+    rg.groupsFound !== undefined &&
+    rg.groupsFound > returned
+  ) {
+    details.push(`limited from ${rg.groupsFound} groups`);
+  }
+
+  return `compacted: ${raw} occurrences -> ${returned} ${resultLabel}${
+    details.length > 0 ? `; ${details.join("; ")}` : ""
+  }`;
 }
 
 function groupContextItems(
@@ -436,12 +498,28 @@ type SourceLineEntry = {
   text: string;
 };
 
+type GroupedSourceLineEntry = {
+  lineNumber: number;
+  text: string;
+  matched: boolean;
+};
+
 function sourceLinesForPreview(
   item: ZvecGrepContextItem,
   preview: PreviewMode,
   highlighter: (value: string) => string,
   options: { maxLineLength: number },
 ): string[] {
+  const groupedLines = groupedSourceLinesForPreview(
+    item,
+    preview,
+    highlighter,
+    options,
+  );
+  if (groupedLines) {
+    return groupedLines;
+  }
+
   if (!itemHasSourceContent(item)) {
     return [];
   }
@@ -480,6 +558,145 @@ function sourceLinesForPreview(
           sourceLineMarker(item, line),
         ),
   );
+}
+
+function groupedSourceLinesForPreview(
+  item: ZvecGrepContextItem,
+  preview: PreviewMode,
+  highlighter: (value: string) => string,
+  options: { maxLineLength: number },
+): string[] | null {
+  const occurrences = groupedOccurrences(item);
+  if (!occurrences || item.contentRole === "outline") {
+    return null;
+  }
+
+  const entries = mergedOccurrenceSourceEntries(occurrences);
+  if (!entries) {
+    return null;
+  }
+
+  const maxLineLength = preview === "full" ? undefined : options.maxLineLength;
+  return clipGroupedSourceEntries(entries, MAX_GROUPED_SOURCE_LINES).map(
+    (entry) =>
+      typeof entry === "string"
+        ? entry
+        : formatSourceLine(
+            entry,
+            highlighter,
+            maxLineLength,
+            entry.matched ? ":" : "-",
+          ),
+  );
+}
+
+function clipGroupedSourceEntries(
+  entries: readonly (GroupedSourceLineEntry | string)[],
+  maxLines: number,
+): (GroupedSourceLineEntry | string)[] {
+  const sourceEntries = entries.filter(
+    (entry): entry is GroupedSourceLineEntry => typeof entry !== "string",
+  );
+  if (sourceEntries.length <= maxLines) {
+    return [...entries];
+  }
+
+  const matchedIndexes = sourceEntries.flatMap((entry, index) =>
+    entry.matched ? [index] : [],
+  );
+  const anchors =
+    matchedIndexes.length > 0
+      ? matchedIndexes
+      : [0, Math.max(0, sourceEntries.length - 1)];
+  const selected = new Set<number>();
+
+  for (let radius = 0; selected.size < maxLines; radius++) {
+    let added = false;
+    for (const anchor of anchors) {
+      for (const index of radius === 0
+        ? [anchor]
+        : [anchor - radius, anchor + radius]) {
+        if (
+          index >= 0 &&
+          index < sourceEntries.length &&
+          selected.size < maxLines &&
+          !selected.has(index)
+        ) {
+          selected.add(index);
+          added = true;
+        }
+      }
+    }
+    if (!added && radius > sourceEntries.length) {
+      break;
+    }
+  }
+
+  const kept = [...selected]
+    .sort((left, right) => left - right)
+    .map((index) => sourceEntries[index]!);
+  const clipped: (GroupedSourceLineEntry | string)[] = [];
+  let previousLine: number | null = null;
+  for (const entry of kept) {
+    if (previousLine !== null && entry.lineNumber > previousLine + 1) {
+      clipped.push("...");
+    }
+    clipped.push(entry);
+    previousLine = entry.lineNumber;
+  }
+  return clipped;
+}
+
+function mergedOccurrenceSourceEntries(
+  occurrences: readonly ContextOccurrence[],
+): (GroupedSourceLineEntry | string)[] | null {
+  if (occurrences.some((occurrence) => occurrence.range.kind !== "text")) {
+    return null;
+  }
+
+  const entriesByLine = new Map<number, GroupedSourceLineEntry>();
+  const orderedOccurrences = [...occurrences].sort(
+    (left, right) =>
+      rangeStartLine(left.range) - rangeStartLine(right.range) ||
+      left.rank - right.rank,
+  );
+
+  for (const occurrence of orderedOccurrences) {
+    if (occurrence.range.kind !== "text" || occurrence.content.length === 0) {
+      continue;
+    }
+
+    const matchRange = occurrence.excerptRange ?? occurrence.range;
+    const contentLines = splitContentLines(occurrence.content);
+    for (const [index, text] of contentLines.entries()) {
+      const lineNumber = occurrence.range.startLine + index;
+      const matched =
+        matchRange.kind !== "text" ||
+        (lineNumber >= matchRange.startLine &&
+          lineNumber <= matchRange.endLine);
+      const existing = entriesByLine.get(lineNumber);
+      if (existing) {
+        existing.matched ||= matched;
+      } else {
+        entriesByLine.set(lineNumber, { lineNumber, text, matched });
+      }
+    }
+  }
+
+  const orderedEntries = [...entriesByLine.values()].sort(
+    (left, right) => left.lineNumber - right.lineNumber,
+  );
+  const merged: (GroupedSourceLineEntry | string)[] = [];
+  let previousLine: number | null = null;
+  for (const entry of orderedEntries) {
+    if (previousLine !== null && entry.lineNumber > previousLine + 1) {
+      merged.push("...");
+    }
+    merged.push(entry);
+    previousLine = entry.lineNumber;
+  }
+
+  return merged;
 }
 
 function sourceLineEntries(item: ZvecGrepContextItem): SourceLineEntry[] {
@@ -593,6 +810,65 @@ function sourceLineMarker(
     entry.lineNumber <= matchRange.endLine
     ? ":"
     : "-";
+}
+
+function groupedOccurrences(
+  item: ZvecGrepContextItem,
+): readonly ContextOccurrence[] | null {
+  const occurrences = item.occurrences;
+  return item.kind === "lexical_match" &&
+    occurrences &&
+    (item.occurrenceCount ?? occurrences.length) > 1
+    ? occurrences
+    : null;
+}
+
+function groupedOccurrenceSummary(
+  item: ZvecGrepContextItem,
+  lowerBound = false,
+): string | null {
+  const occurrences = groupedOccurrences(item);
+  if (!occurrences) {
+    return null;
+  }
+
+  const locations = [...occurrences]
+    .sort((left, right) => {
+      const leftRange = left.excerptRange ?? left.range;
+      const rightRange = right.excerptRange ?? right.range;
+      return (
+        rangeStartLine(leftRange) - rangeStartLine(rightRange) ||
+        rangeLabel(leftRange).localeCompare(rangeLabel(rightRange)) ||
+        left.rank - right.rank
+      );
+    })
+    .map((occurrence) =>
+      occurrenceLocationLabel(occurrence.excerptRange ?? occurrence.range),
+    );
+  const count = item.occurrenceCount ?? occurrences.length;
+  const omitted = count > occurrences.length ? ", ..." : "";
+  return `${count}${lowerBound ? "+" : ""} at ${locations.join(", ")}${omitted}`;
+}
+
+function occurrenceLocationLabel(range: Range): string {
+  if (range.kind !== "text") {
+    return rangeLabel(range);
+  }
+
+  return range.startLine === range.endLine
+    ? `L${range.startLine}`
+    : `L${range.startLine}-${range.endLine}`;
+}
+
+function contextItemMatchCount(items: readonly ZvecGrepContextItem[]): number {
+  return items.reduce(
+    (count, item) =>
+      count +
+      (groupedOccurrences(item)
+        ? (item.occurrenceCount ?? item.occurrences?.length ?? 1)
+        : 1),
+    0,
+  );
 }
 
 function clipLines(lines: readonly string[], maxLines: number): string[] {

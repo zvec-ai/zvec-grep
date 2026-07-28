@@ -18,6 +18,7 @@ type RgSearchOptions = {
   patterns: readonly string[];
   paths?: readonly string[];
   limit?: number;
+  scanLimit?: number;
   includePaths?: readonly string[];
   excludePaths?: readonly string[];
   globs?: readonly string[];
@@ -78,6 +79,7 @@ export async function runRgSearch(
         missingPaths: paths.missingPaths,
         searchedPaths: [],
         limit: options.limit,
+        scanLimit: options.scanLimit,
         truncated: false,
       },
     };
@@ -105,6 +107,7 @@ export async function runRgSearch(
             paths.missingPaths.length > 0 ? paths.missingPaths : undefined,
           searchedPaths: paths.paths,
           limit: options.limit,
+          scanLimit: options.scanLimit,
           truncated: result.truncated,
         },
       };
@@ -165,7 +168,7 @@ function runRipgrep(
     command,
     args,
     root: options.root,
-    limit: options.limit,
+    limit: options.scanLimit ?? options.limit,
     modifiedAfter: options.modifiedAfter,
     modifiedBefore: options.modifiedBefore,
     rgOptions: options.rgOptions,
@@ -349,7 +352,7 @@ function runCommand(options: {
   modifiedAfter?: number;
   modifiedBefore?: number;
   rgOptions?: ZvecGrepSearchOptions;
-  parseLine(line: string, rank: number): ZvecGrepContextItem | null;
+  parseLine(line: string, rank: number): readonly ZvecGrepContextItem[];
 }): Promise<CommandResult> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(options.command, options.args, {
@@ -364,6 +367,27 @@ function runCommand(options: {
     const hasLimit = options.limit !== undefined;
     const mtimeCache = new Map<string, boolean>();
     const contextCache = new Map<string, string[] | null>();
+    const appendParsedItems = (line: string): boolean => {
+      const parsedItems = options.parseLine(line, items.length + 1);
+      for (const parsedItem of parsedItems) {
+        const item = expandContextItem(
+          parsedItem,
+          options.rgOptions,
+          contextCache,
+        );
+        if (matchesModifiedTime(item.file.absolutePath, options, mtimeCache)) {
+          items.push(item);
+        }
+
+        if (hasLimit && items.length > options.limit!) {
+          truncated = true;
+          killedAfterLimit = true;
+          child.kill();
+          return true;
+        }
+      }
+      return false;
+    };
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -377,21 +401,7 @@ function runCommand(options: {
         stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
         newlineIndex = stdoutBuffer.indexOf("\n");
 
-        const parsedItem = options.parseLine(line, items.length + 1);
-        const item = parsedItem
-          ? expandContextItem(parsedItem, options.rgOptions, contextCache)
-          : null;
-        if (
-          item &&
-          matchesModifiedTime(item.file.absolutePath, options, mtimeCache)
-        ) {
-          items.push(item);
-        }
-
-        if (hasLimit && items.length > options.limit!) {
-          truncated = true;
-          killedAfterLimit = true;
-          child.kill();
+        if (appendParsedItems(line)) {
           break;
         }
       }
@@ -411,16 +421,7 @@ function runCommand(options: {
         stdoutBuffer.length > 0 &&
         (!hasLimit || items.length < options.limit!)
       ) {
-        const parsedItem = options.parseLine(stdoutBuffer, items.length + 1);
-        const item = parsedItem
-          ? expandContextItem(parsedItem, options.rgOptions, contextCache)
-          : null;
-        if (
-          item &&
-          matchesModifiedTime(item.file.absolutePath, options, mtimeCache)
-        ) {
-          items.push(item);
-        }
+        appendParsedItems(stdoutBuffer);
       }
 
       if (code === 0 || code === 1 || killedAfterLimit) {
@@ -544,67 +545,76 @@ function parseRipgrepJsonLine(
   line: string,
   root: string,
   rank: number,
-): ZvecGrepContextItem | null {
+): ZvecGrepContextItem[] {
   if (line.trim().length === 0) {
-    return null;
+    return [];
   }
 
   let event: unknown;
   try {
     event = JSON.parse(line);
   } catch {
-    return null;
+    return [];
   }
 
   if (!isRecord(event) || event.type !== "match" || !isRecord(event.data)) {
-    return null;
+    return [];
   }
 
   const data = event.data;
   if (!isRecord(data.path) || typeof data.path.text !== "string") {
-    return null;
+    return [];
   }
 
   if (!isRecord(data.lines) || typeof data.lines.text !== "string") {
-    return null;
+    return [];
   }
 
   if (typeof data.line_number !== "number") {
-    return null;
+    return [];
   }
 
   const path = normalizeResultPath(root, data.path.text);
   const lineText = trimTrailingNewline(data.lines.text);
-  const firstSubmatch =
-    Array.isArray(data.submatches) && isRecord(data.submatches[0])
-      ? data.submatches[0]
-      : undefined;
-  const start = textPositionAtByteOffset(
-    lineText,
-    typeof firstSubmatch?.start === "number" ? firstSubmatch.start : 0,
-  );
-  const end = textPositionAtByteOffset(
-    lineText,
-    typeof firstSubmatch?.end === "number"
-      ? firstSubmatch.end
-      : Buffer.byteLength(lineText, "utf8"),
-  );
+  const lineNumber = data.line_number;
+  const submatches = Array.isArray(data.submatches)
+    ? data.submatches.filter(
+        (submatch) =>
+          isRecord(submatch) &&
+          typeof submatch.start === "number" &&
+          typeof submatch.end === "number",
+      )
+    : [];
+  const matches =
+    submatches.length > 0
+      ? submatches
+      : [
+          {
+            start: 0,
+            end: Buffer.byteLength(lineText, "utf8"),
+          },
+        ];
 
-  return {
-    kind: "lexical_match",
-    rank,
-    file: path,
-    range: {
-      kind: "text",
-      startLine: data.line_number + start.lineOffset,
-      endLine: data.line_number + end.lineOffset,
-      startOffset: start.column,
-      endOffset: end.column,
-    },
-    content: lineText,
-    status: "fresh",
-    matchedBy: "lexical",
-  };
+  return matches.map((submatch, index) => {
+    const start = textPositionAtByteOffset(lineText, submatch.start as number);
+    const end = textPositionAtByteOffset(lineText, submatch.end as number);
+
+    return {
+      kind: "lexical_match",
+      rank: rank + index,
+      file: path,
+      range: {
+        kind: "text",
+        startLine: lineNumber + start.lineOffset,
+        endLine: lineNumber + end.lineOffset,
+        startOffset: start.column,
+        endOffset: end.column,
+      },
+      content: lineText,
+      status: "fresh",
+      matchedBy: "lexical",
+    };
+  });
 }
 
 function normalizeResultPath(root: string, path: string) {

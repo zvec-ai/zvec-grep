@@ -145,6 +145,13 @@ export type ZvecGrepContextContainer = {
   metadata?: EntityMetadata;
 };
 
+export type ZvecGrepLexicalOccurrence = {
+  rank: number;
+  range: Range;
+  excerptRange?: Range;
+  content: string;
+};
+
 export type ZvecGrepContextItem = {
   kind: ZvecGrepContextItemKind;
   rank: number;
@@ -160,6 +167,10 @@ export type ZvecGrepContextItem = {
   metadata?: EntityMetadata;
   entityId?: string;
   container?: ZvecGrepContextContainer;
+  /** Total lexical matches represented by a compacted rg result. */
+  occurrenceCount?: number;
+  /** Bounded representative windows used only to render compact rg context. */
+  occurrences?: readonly ZvecGrepLexicalOccurrence[];
   trace?: SearchHitTrace;
 };
 
@@ -178,7 +189,19 @@ export type ZvecGrepRgDiagnostics = {
   missingPaths?: readonly string[];
   searchedPaths?: readonly string[];
   limit?: number;
+  scanLimit?: number;
   truncated: boolean;
+  rawOccurrences?: number;
+  uniqueOccurrences?: number;
+  exactDuplicatesRemoved?: number;
+  groupsFound?: number;
+  groupsReturned?: number;
+  occurrencesCollapsed?: number;
+  contextWindowsMerged?: number;
+  generatedCandidates?: number;
+  generatedMirrorsCanonicalized?: number;
+  generatedMatchesDemoted?: number;
+  groupTruncated?: boolean;
 };
 
 export type ZvecGrepStructureEnrichmentDiagnostics = {

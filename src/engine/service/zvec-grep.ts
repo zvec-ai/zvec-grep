@@ -73,11 +73,17 @@ import type {
   ZvecGrepIndexOptions,
 } from "./types.js";
 import { enrichLexicalItemsWithStructure } from "./structure-enrichment.js";
+import { compactRgContextItems } from "./rg-compaction.js";
+import { canonicalizeGeneratedArtifactMatches } from "./generated-artifacts.js";
 import { remoteEmbeddingAuthorizationGuard } from "../../authorization/operation.js";
 import { RemoteEmbeddingAuthorizationStore } from "../../authorization/store.js";
 
 const DEFAULT_CONTEXT_LIMIT = 10;
 const DEFAULT_CONTEXT_TOTAL_LIMIT = 30;
+const DEFAULT_RG_RAW_SCAN_LIMIT = 200;
+const MAX_RG_RAW_SCAN_LIMIT = 5_000;
+const RG_RAW_SCAN_LIMIT_MULTIPLIER = 20;
+const RG_RAW_SCAN_RETRY_MULTIPLIER = 5;
 const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
 const MAX_RECOVERED_EMBEDDING_MODELS = 4;
 
@@ -876,44 +882,107 @@ class ZvecGrepService implements ZvecGrep {
     options: ZvecGrepContextOptions,
     timings: TimingCollector,
   ): Promise<ZvecGrepContextResult> {
-    let rgResult;
-    try {
-      rgResult = await timings.time("rg_search", () =>
-        runRgSearch({
+    let scanLimit = initialRgRawScanLimit(options.limit);
+    let finalResult:
+      | {
+          rg: Awaited<ReturnType<typeof runRgSearch>>;
+          structure: Awaited<
+            ReturnType<typeof enrichLexicalItemsWithStructure>
+          >;
+          generated: Awaited<
+            ReturnType<typeof canonicalizeGeneratedArtifactMatches>
+          >;
+          compacted: ReturnType<typeof compactRgContextItems>;
+        }
+      | undefined;
+
+    while (true) {
+      let rgResult;
+      try {
+        rgResult = await timings.time("rg_search", () =>
+          runRgSearch({
+            root,
+            patterns: request.rgPatterns,
+            paths: options.rgPaths,
+            limit: options.limit,
+            scanLimit,
+            includePaths: options.includePaths,
+            excludePaths: options.excludePaths,
+            globs: options.globs,
+            insensitiveGlobs: options.insensitiveGlobs,
+            fileTypes: options.fileTypes,
+            excludedFileTypes: options.excludedFileTypes,
+            hidden: options.hidden,
+            noIgnore: options.noIgnore,
+            ignoreFiles: options.ignoreFiles,
+            maxDepth: options.maxDepth,
+            maxFileSizeBytes: options.maxFileSizeBytes,
+            follow: options.follow,
+            modifiedAfter: options.modifiedAfter,
+            modifiedBefore: options.modifiedBefore,
+            rgOptions: options.rgOptions,
+          }),
+        );
+      } catch (cause) {
+        throw new EngineError("Search failed", {
+          code: "ZVEC_GREP.ENGINE.SEARCH.FAILED",
+          context: errorDetails([detail("source", "rg"), detail("root", root)]),
+          cause,
+        });
+      }
+
+      const generated = await timings.time("rg_generated_artifacts", () =>
+        canonicalizeGeneratedArtifactMatches({
           root,
-          patterns: request.rgPatterns,
+          items: rgResult.items,
           paths: options.rgPaths,
-          limit: options.limit,
           includePaths: options.includePaths,
-          excludePaths: options.excludePaths,
           globs: options.globs,
           insensitiveGlobs: options.insensitiveGlobs,
-          fileTypes: options.fileTypes,
-          excludedFileTypes: options.excludedFileTypes,
-          hidden: options.hidden,
-          noIgnore: options.noIgnore,
-          ignoreFiles: options.ignoreFiles,
-          maxDepth: options.maxDepth,
-          maxFileSizeBytes: options.maxFileSizeBytes,
-          follow: options.follow,
-          modifiedAfter: options.modifiedAfter,
-          modifiedBefore: options.modifiedBefore,
-          rgOptions: options.rgOptions,
         }),
       );
-    } catch (cause) {
-      throw new EngineError("Search failed", {
-        code: "ZVEC_GREP.ENGINE.SEARCH.FAILED",
-        context: errorDetails([detail("source", "rg"), detail("root", root)]),
-        cause,
+      const structuralEnrichment = await timings.time(
+        "structure_enrichment",
+        () => enrichLexicalItemsWithStructure(root, generated.items),
+      );
+      const compacted = compactRgContextItems({
+        items: structuralEnrichment.items,
+        limit: options.limit,
+        rawOccurrences: rgResult.items.length,
       });
+      finalResult = {
+        rg: rgResult,
+        structure: structuralEnrichment,
+        generated,
+        compacted,
+      };
+
+      if (
+        !shouldRetryRgScan({
+          requestedLimit: options.limit,
+          scanLimit,
+          truncated: rgResult.diagnostics.truncated,
+          groupsFound: compacted.diagnostics.groupsFound,
+          demotedGeneratedReturned:
+            generated.demotedGeneratedPaths.size > 0 &&
+            compacted.items.some((item) =>
+              generated.demotedGeneratedPaths.has(
+                normalizePath(item.file.absolutePath),
+              ),
+            ),
+        })
+      ) {
+        break;
+      }
+
+      scanLimit = Math.min(
+        MAX_RG_RAW_SCAN_LIMIT,
+        scanLimit! * RG_RAW_SCAN_RETRY_MULTIPLIER,
+      );
     }
 
-    const structuralEnrichment = await timings.time(
-      "structure_enrichment",
-      () => enrichLexicalItemsWithStructure(root, rgResult.items),
-    );
-    const items = dedupeAndRerankContextItems(structuralEnrichment.items);
+    const { rg: rgResult, structure, generated, compacted } = finalResult!;
+    const items = compacted.items;
     const emptyReason =
       items.length === 0 ? rgEmptyReason(rgResult.diagnostics) : undefined;
 
@@ -921,14 +990,19 @@ class ZvecGrepService implements ZvecGrep {
       query: request.displayQuery,
       root,
       source: "rg",
-      coverage: rgResult.diagnostics.truncated
-        ? "rg_truncated"
-        : "rg_exhaustive",
+      coverage:
+        rgResult.diagnostics.truncated || compacted.diagnostics.groupTruncated
+          ? "rg_truncated"
+          : "rg_exhaustive",
       items,
       diagnostics: {
         emptyReason,
-        rg: rgResult.diagnostics,
-        structure: structuralEnrichment.diagnostics,
+        rg: {
+          ...rgResult.diagnostics,
+          ...compacted.diagnostics,
+          ...generated.diagnostics,
+        },
+        structure: structure.diagnostics,
       },
     };
   }
@@ -1735,6 +1809,34 @@ function contextGroupLimit(
   }
 
   return Math.max(1, Math.ceil(DEFAULT_CONTEXT_TOTAL_LIMIT / safeGroupCount));
+}
+
+function initialRgRawScanLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined) {
+    return undefined;
+  }
+
+  return Math.min(
+    MAX_RG_RAW_SCAN_LIMIT,
+    Math.max(DEFAULT_RG_RAW_SCAN_LIMIT, limit * RG_RAW_SCAN_LIMIT_MULTIPLIER),
+  );
+}
+
+function shouldRetryRgScan(options: {
+  requestedLimit: number | undefined;
+  scanLimit: number | undefined;
+  truncated: boolean;
+  groupsFound: number;
+  demotedGeneratedReturned: boolean;
+}): boolean {
+  return (
+    options.requestedLimit !== undefined &&
+    options.scanLimit !== undefined &&
+    options.truncated &&
+    (options.groupsFound < options.requestedLimit ||
+      options.demotedGeneratedReturned) &&
+    options.scanLimit < MAX_RG_RAW_SCAN_LIMIT
+  );
 }
 
 type NormalizedContextRequest = {
