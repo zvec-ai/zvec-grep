@@ -19,6 +19,7 @@ import yaml
 from .github_proxy import (
     normalize_github_proxy_prefix,
     rewrite_github_downloads,
+    rewrite_swebench_test_spec_downloads,
 )
 from .settings import (
     AGENT_SETUP_TIMEOUT_MULTIPLIER,
@@ -588,6 +589,10 @@ def patch_task_github_downloads(task_dir: Path, proxy_prefix: str) -> int:
         except UnicodeDecodeError:
             continue
         rewritten = rewrite_github_downloads(contents, proxy_prefix)
+        rewritten = rewrite_swebench_test_spec_downloads(
+            rewritten,
+            proxy_prefix,
+        )
         if rewritten == contents:
             continue
         path.write_text(rewritten, encoding="utf-8")

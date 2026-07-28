@@ -176,6 +176,60 @@ class UvArchiveTests(unittest.TestCase):
                 "See https://github.com/example/repo/issues/1\n",
             )
 
+    def test_routes_swebench_test_spec_downloads_through_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_dir = Path(temp_dir)
+            tests_dir = task_dir / "tests"
+            tests_dir.mkdir()
+            test_script = tests_dir / "test.sh"
+            test_script.write_text(
+                "cat > parser.py <<'EOF'\n"
+                "from swebench.harness.test_spec.test_spec "
+                "import make_test_spec\n"
+                "\n"
+                'test_spec = make_test_spec({"repo": "example/repo"})\n'
+                "EOF\n"
+            )
+
+            patched = runner.patch_task_github_downloads(
+                task_dir,
+                "https://gh-proxy.com/",
+            )
+
+            contents = test_script.read_text()
+            self.assertEqual(patched, 1)
+            self.assertIn(
+                "import swebench.harness.test_spec.python "
+                "as _swebench_test_spec_python\n",
+                contents,
+            )
+            self.assertIn(
+                "_swebench_test_spec_python.SWE_BENCH_URL_RAW = "
+                '"https://gh-proxy.com/'
+                'https://raw.githubusercontent.com/"\n',
+                contents,
+            )
+            self.assertIn(
+                'kwargs.setdefault("timeout", (10, 30))\n',
+                contents,
+            )
+            make_test_spec_position = contents.index(
+                'test_spec = make_test_spec({"repo": "example/repo"})'
+            )
+            restore_position = contents.index(
+                "_swebench_test_spec_python.requests.get = "
+                "_swebench_requests_get",
+                make_test_spec_position,
+            )
+            self.assertGreater(restore_position, make_test_spec_position)
+            self.assertEqual(
+                runner.patch_task_github_downloads(
+                    task_dir,
+                    "https://gh-proxy.com/",
+                ),
+                0,
+            )
+
     def test_github_proxy_uses_proxy_agent_and_forwards_prefix(self) -> None:
         suite = runner.BenchmarkSuite(
             name="suite",

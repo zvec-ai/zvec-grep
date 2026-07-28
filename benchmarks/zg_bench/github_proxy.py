@@ -25,6 +25,17 @@ _NVM_INSTALLER_PATTERN = re.compile(
     r"https://raw\.githubusercontent\.com/nvm-sh/nvm/"
     r"[^/\s]+/install\.sh"
 )
+_SWEBENCH_TEST_SPEC_IMPORT = (
+    "from swebench.harness.test_spec.test_spec import make_test_spec"
+)
+_SWEBENCH_PROXY_MARKER = (
+    "_swebench_test_spec_python.SWE_BENCH_URL_RAW ="
+)
+_SWEBENCH_MAKE_TEST_SPEC_PATTERN = re.compile(
+    r"^(?P<indent>[ \t]*)test_spec[ \t]*=[ \t]*"
+    r"make_test_spec\([^\r\n]*\)(?P<newline>\r?\n)",
+    re.MULTILINE,
+)
 
 
 def _inject_installer_environment(
@@ -87,6 +98,55 @@ def rewrite_github_downloads(command: str, proxy_prefix: str) -> str:
 
     rewritten = _GITHUB_DOWNLOAD_PATTERN.sub(replace_origin, rewritten)
     return rewritten
+
+
+def rewrite_swebench_test_spec_downloads(
+    contents: str,
+    proxy_prefix: str,
+) -> str:
+    """Route SWE-bench test-spec metadata downloads through a URL proxy."""
+    prefix = normalize_github_proxy_prefix(proxy_prefix)
+    make_test_spec_match = _SWEBENCH_MAKE_TEST_SPEC_PATTERN.search(contents)
+    if (
+        _SWEBENCH_TEST_SPEC_IMPORT not in contents
+        or _SWEBENCH_PROXY_MARKER in contents
+        or make_test_spec_match is None
+    ):
+        return contents
+
+    raw_github_base = prefix + "https://raw.githubusercontent.com/"
+    proxy_setup = (
+        f"{_SWEBENCH_TEST_SPEC_IMPORT}\n"
+        "import swebench.harness.test_spec.python "
+        "as _swebench_test_spec_python\n"
+        "\n"
+        "_swebench_requests_get = "
+        "_swebench_test_spec_python.requests.get\n"
+        "\n"
+        "def _swebench_requests_get_with_timeout(*args, **kwargs):\n"
+        '    kwargs.setdefault("timeout", (10, 30))\n'
+        "    return _swebench_requests_get(*args, **kwargs)\n"
+        "\n"
+        "_swebench_test_spec_python.requests.get = "
+        "_swebench_requests_get_with_timeout\n"
+        f'{_SWEBENCH_PROXY_MARKER} "{raw_github_base}"'
+    )
+    rewritten = contents.replace(
+        _SWEBENCH_TEST_SPEC_IMPORT,
+        proxy_setup,
+        1,
+    )
+    return _SWEBENCH_MAKE_TEST_SPEC_PATTERN.sub(
+        lambda match: (
+            match.group(0)
+            + match.group("indent")
+            + "_swebench_test_spec_python.requests.get = "
+            "_swebench_requests_get"
+            + match.group("newline")
+        ),
+        rewritten,
+        count=1,
+    )
 
 
 class GithubProxyMixin:

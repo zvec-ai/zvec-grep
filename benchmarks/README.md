@@ -154,9 +154,11 @@ uv run zg-bench run swebench-verified \
 This applies to GitHub Release assets, Raw content, archives, git clone URLs,
 the internal GitHub download performed by the uv installer, and the internal
 nvm repository clone. It covers supported agent setup commands and setup files
-inside the selected benchmark tasks. The runner uses an isolated task copy, so
-Harbor's global task cache remains unchanged. To use direct GitHub downloads
-for a run, pass `--no-github-proxy`.
+inside the selected benchmark tasks. Generated SWE-bench verifier parsers also
+route test-spec metadata downloads through the proxy and use 10-second connect
+and 30-second read timeouts. The runner uses an isolated task copy, so Harbor's
+global task cache remains unchanged. To use direct GitHub downloads for a run,
+pass `--no-github-proxy`.
 
 The proxy is a third-party trust dependency. Existing SHA-256 checks remain
 enforced, including the pinned OpenCode binary checksum. Downloads without an
