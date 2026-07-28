@@ -212,7 +212,10 @@ test("default agent contract exposes only search and rg", async (t) => {
   const search = listed.tools.find((tool) => tool.name === "zvec_grep_search");
   assert.ok(search);
   assert.match(search.description, /exact keyword, text, symbol/);
-  assert.match(search.description, /unknown and conceptual discovery is needed/);
+  assert.match(
+    search.description,
+    /unknown and conceptual discovery is needed/,
+  );
   assert.match(
     search.description,
     /known class, function, or symbol name is an exact anchor/,
@@ -310,7 +313,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.match(index.description, /index deletion/);
   const search = tools.find((tool) => tool.name === "zvec_grep_search");
   assert.match(search.description, /exact keyword, text, symbol/);
-  assert.match(search.description, /unknown and conceptual discovery is needed/);
+  assert.match(
+    search.description,
+    /unknown and conceptual discovery is needed/,
+  );
   assert.match(
     search.description,
     /known class, function, or symbol name is an exact anchor/,
@@ -338,7 +344,10 @@ test("full server contract exposes all tools with stable annotations", async (t)
   }
   const rg = tools.find((tool) => tool.name === "zvec_grep_rg");
   assert.match(rg.description, /Use it first when an exact keyword/);
-  assert.match(rg.description, /filename, path, configuration key, error message/);
+  assert.match(
+    rg.description,
+    /filename, path, configuration key, error message/,
+  );
   assert.match(
     rg.description,
     /named class, function, or symbol remains an exact anchor/,
