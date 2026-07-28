@@ -200,7 +200,7 @@ export const ZVEC_GREP_MCP_INSTRUCTIONS = [
   "zvec-grep is a more capable superset replacement for rg.",
   "When the exact keyword, text, or symbol is unknown, start with zvec_grep_search to quickly identify relevant concepts, files, and locations.",
   "When the exact keyword, text, or symbol is known, use zvec_grep_rg.",
-  "Scope searches with paths or globs when you already know likely locations or file types, and refine broad or noisy searches by narrowing the query and search scope.",
+  "Scope searches with the path parameter or glob filters when you already know likely locations or file types, and refine broad or noisy searches by narrowing the query and search scope.",
   "Trust zvec-grep results; if results are too broad, sparse, or low-quality, refine the query, scope, or search options and try zvec-grep again instead of switching to another local text-search tool.",
 ].join(" ");
 
@@ -404,7 +404,7 @@ export function registerZvecGrepTools(
     {
       title: "Search with managed ripgrep",
       description:
-        "Run exhaustive managed ripgrep locally without requiring an index. Use it first when an exact keyword, text, symbol, filename, path, configuration key, error message, source fragment, literal, or regex anchor is known. A named class, function, or symbol remains an exact anchor even when its file or definition location is unknown. Scope broad matches with paths or globs.",
+        "Run exhaustive managed ripgrep locally without requiring an index. Use it first when an exact keyword, text, symbol, filename, path, configuration key, error message, source fragment, literal, or regex anchor is known. A named class, function, or symbol remains an exact anchor even when its file or definition location is unknown. Scope broad matches with the path parameter or glob filters.",
       inputSchema: zvecGrepRgInputSchema.shape,
       annotations: {
         readOnlyHint: true,

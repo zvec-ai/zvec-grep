@@ -154,6 +154,22 @@ test("MCP rg normalization preserves brace glob entries", () => {
   assert.deepEqual(array.excludePaths, ["test/**"]);
 });
 
+test("MCP rg normalization accepts scalar and array path input", () => {
+  const scalar = contextOptionsFromRgInput({
+    root: "/repo",
+    pattern: "valid",
+    path: "src",
+  });
+  assert.deepEqual(scalar.rgPaths, ["src"]);
+
+  const array = contextOptionsFromRgInput({
+    root: "/repo",
+    pattern: "valid",
+    path: ["src", "test"],
+  });
+  assert.deepEqual(array.rgPaths, ["src", "test"]);
+});
+
 test("CLI parser covers utility commands, provider controls, routes, and equals syntax", () => {
   const install = parseArgs([
     "install",

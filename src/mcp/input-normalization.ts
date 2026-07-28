@@ -75,7 +75,7 @@ export function contextOptionsFromRgInput(
     queries,
     rg: true,
     rgOptions,
-    rgPaths: normalizePlainStringList(input.paths),
+    rgPaths: normalizePlainStringList(input.path),
     root: input.root,
     limit: input.limit,
     includePaths,

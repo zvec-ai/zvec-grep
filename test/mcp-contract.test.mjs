@@ -285,7 +285,7 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.match(instructions, /start with zvec_grep_search/);
   assert.match(instructions, /exact keyword, text, or symbol is known/);
   assert.match(instructions, /use zvec_grep_rg/);
-  assert.match(instructions, /Scope searches with paths or globs/);
+  assert.match(instructions, /Scope searches with the path parameter/);
   assert.match(instructions, /refine broad or noisy searches/);
   assert.match(instructions, /Trust zvec-grep results/);
   assert.match(
@@ -352,7 +352,9 @@ test("full server contract exposes all tools with stable annotations", async (t)
     rg.description,
     /named class, function, or symbol remains an exact anchor/,
   );
-  assert.match(rg.description, /Scope broad matches with paths or globs/);
+  assert.match(rg.description, /Scope broad matches with the path parameter/);
+  assert.ok(rg.inputSchema.properties.path);
+  assert.equal(rg.inputSchema.properties.paths, undefined);
   assert.equal(rg.outputSchema, undefined);
   assert.equal(search.outputSchema, undefined);
   for (const tool of tools.filter(
@@ -914,6 +916,7 @@ test("rg normalizes managed ripgrep input before calling the backend", async (t)
       pattern: "needle",
       fixedStrings: true,
       ignoreCase: true,
+      path: ["src", "test"],
       glob: ["src/**", "!dist/**"],
       context: 2,
     },
@@ -922,6 +925,7 @@ test("rg normalizes managed ripgrep input before calling the backend", async (t)
   assert.equal(received.pattern, "needle");
   assert.equal(received.fixedStrings, true);
   assert.equal(received.ignoreCase, true);
+  assert.deepEqual(received.path, ["src", "test"]);
   assert.deepEqual(received.glob, ["src/**", "!dist/**"]);
   assert.equal(received.context, 2);
   assert.equal(result.structuredContent, undefined);
@@ -949,17 +953,17 @@ test("rg does not apply indexed search input bounds", async (t) => {
 
   const pattern = "n".repeat(4_001);
   const patterns = Array.from({ length: 33 }, (_, index) => `pattern-${index}`);
-  const paths = Array.from({ length: 129 }, (_, index) => `path-${index}`);
+  const path = Array.from({ length: 129 }, (_, index) => `path-${index}`);
   const glob = Array.from({ length: 129 }, (_, index) => `glob-${index}`);
   const result = await client.callTool({
     name: "zvec_grep_rg",
-    arguments: { root, pattern, patterns, paths, glob },
+    arguments: { root, pattern, patterns, path, glob },
   });
 
   assert.notEqual(result.isError, true);
   assert.equal(received.pattern, pattern);
   assert.deepEqual(received.patterns, patterns);
-  assert.deepEqual(received.paths, paths);
+  assert.deepEqual(received.path, path);
   assert.deepEqual(received.glob, glob);
 });
 

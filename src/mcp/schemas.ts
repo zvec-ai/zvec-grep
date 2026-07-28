@@ -238,8 +238,8 @@ export const zvecGrepRgInputSchema = z.object({
     "Multiple regex or literal patterns to search for.",
   ),
   root: absoluteRootSchema,
-  paths: unboundedStringList.describe(
-    "Optional paths to search within the root.",
+  path: unboundedStringList.describe(
+    "Optional path or array of paths to search within the root.",
   ),
   fixedStrings: z
     .boolean()
