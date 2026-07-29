@@ -40,7 +40,7 @@ export function printDebug(
         `rg_compaction=raw:${rg.rawOccurrences} unique:${rg.uniqueOccurrences ?? rg.rawOccurrences} ` +
           `groups:${rg.groupsReturned ?? result.items.length}/${rg.groupsFound ?? result.items.length} ` +
           `exact_duplicates:${rg.exactDuplicatesRemoved ?? 0} collapsed:${rg.occurrencesCollapsed ?? 0} ` +
-          `windows_merged:${rg.contextWindowsMerged ?? 0}`,
+          `group_truncated:${rg.groupTruncated === true ? "yes" : "no"}`,
       );
     }
     if (rg.generatedCandidates !== undefined && rg.generatedCandidates > 0) {

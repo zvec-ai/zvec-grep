@@ -24,7 +24,6 @@ const SHORT_SOURCE_CONTEXT_BEFORE = 2;
 const SHORT_OUTLINE_MAX_LINES = 7;
 const AGENT_PREVIEW_MAX_LINE_LENGTH = 160;
 const HUMAN_PREVIEW_MAX_LINE_LENGTH = 120;
-const MAX_GROUPED_SOURCE_LINES = 80;
 
 export function printAgentContextResult(
   result: ZvecGrepContextResult,
@@ -498,28 +497,12 @@ type SourceLineEntry = {
   text: string;
 };
 
-type GroupedSourceLineEntry = {
-  lineNumber: number;
-  text: string;
-  matched: boolean;
-};
-
 function sourceLinesForPreview(
   item: ZvecGrepContextItem,
   preview: PreviewMode,
   highlighter: (value: string) => string,
   options: { maxLineLength: number },
 ): string[] {
-  const groupedLines = groupedSourceLinesForPreview(
-    item,
-    preview,
-    highlighter,
-    options,
-  );
-  if (groupedLines) {
-    return groupedLines;
-  }
-
   if (!itemHasSourceContent(item)) {
     return [];
   }
@@ -558,145 +541,6 @@ function sourceLinesForPreview(
           sourceLineMarker(item, line),
         ),
   );
-}
-
-function groupedSourceLinesForPreview(
-  item: ZvecGrepContextItem,
-  preview: PreviewMode,
-  highlighter: (value: string) => string,
-  options: { maxLineLength: number },
-): string[] | null {
-  const occurrences = groupedOccurrences(item);
-  if (!occurrences || item.contentRole === "outline") {
-    return null;
-  }
-
-  const entries = mergedOccurrenceSourceEntries(occurrences);
-  if (!entries) {
-    return null;
-  }
-
-  const maxLineLength = preview === "full" ? undefined : options.maxLineLength;
-  return clipGroupedSourceEntries(entries, MAX_GROUPED_SOURCE_LINES).map(
-    (entry) =>
-      typeof entry === "string"
-        ? entry
-        : formatSourceLine(
-            entry,
-            highlighter,
-            maxLineLength,
-            entry.matched ? ":" : "-",
-          ),
-  );
-}
-
-function clipGroupedSourceEntries(
-  entries: readonly (GroupedSourceLineEntry | string)[],
-  maxLines: number,
-): (GroupedSourceLineEntry | string)[] {
-  const sourceEntries = entries.filter(
-    (entry): entry is GroupedSourceLineEntry => typeof entry !== "string",
-  );
-  if (sourceEntries.length <= maxLines) {
-    return [...entries];
-  }
-
-  const matchedIndexes = sourceEntries.flatMap((entry, index) =>
-    entry.matched ? [index] : [],
-  );
-  const anchors =
-    matchedIndexes.length > 0
-      ? matchedIndexes
-      : [0, Math.max(0, sourceEntries.length - 1)];
-  const selected = new Set<number>();
-
-  for (let radius = 0; selected.size < maxLines; radius++) {
-    let added = false;
-    for (const anchor of anchors) {
-      for (const index of radius === 0
-        ? [anchor]
-        : [anchor - radius, anchor + radius]) {
-        if (
-          index >= 0 &&
-          index < sourceEntries.length &&
-          selected.size < maxLines &&
-          !selected.has(index)
-        ) {
-          selected.add(index);
-          added = true;
-        }
-      }
-    }
-    if (!added && radius > sourceEntries.length) {
-      break;
-    }
-  }
-
-  const kept = [...selected]
-    .sort((left, right) => left - right)
-    .map((index) => sourceEntries[index]!);
-  const clipped: (GroupedSourceLineEntry | string)[] = [];
-  let previousLine: number | null = null;
-  for (const entry of kept) {
-    if (previousLine !== null && entry.lineNumber > previousLine + 1) {
-      clipped.push("...");
-    }
-    clipped.push(entry);
-    previousLine = entry.lineNumber;
-  }
-  return clipped;
-}
-
-function mergedOccurrenceSourceEntries(
-  occurrences: readonly ContextOccurrence[],
-): (GroupedSourceLineEntry | string)[] | null {
-  if (occurrences.some((occurrence) => occurrence.range.kind !== "text")) {
-    return null;
-  }
-
-  const entriesByLine = new Map<number, GroupedSourceLineEntry>();
-  const orderedOccurrences = [...occurrences].sort(
-    (left, right) =>
-      rangeStartLine(left.range) - rangeStartLine(right.range) ||
-      left.rank - right.rank,
-  );
-
-  for (const occurrence of orderedOccurrences) {
-    if (occurrence.range.kind !== "text" || occurrence.content.length === 0) {
-      continue;
-    }
-
-    const matchRange = occurrence.excerptRange ?? occurrence.range;
-    const contentLines = splitContentLines(occurrence.content);
-    for (const [index, text] of contentLines.entries()) {
-      const lineNumber = occurrence.range.startLine + index;
-      const matched =
-        matchRange.kind !== "text" ||
-        (lineNumber >= matchRange.startLine &&
-          lineNumber <= matchRange.endLine);
-      const existing = entriesByLine.get(lineNumber);
-      if (existing) {
-        existing.matched ||= matched;
-      } else {
-        entriesByLine.set(lineNumber, { lineNumber, text, matched });
-      }
-    }
-  }
-
-  const orderedEntries = [...entriesByLine.values()].sort(
-    (left, right) => left.lineNumber - right.lineNumber,
-  );
-  const merged: (GroupedSourceLineEntry | string)[] = [];
-  let previousLine: number | null = null;
-  for (const entry of orderedEntries) {
-    if (previousLine !== null && entry.lineNumber > previousLine + 1) {
-      merged.push("...");
-    }
-    merged.push(entry);
-    previousLine = entry.lineNumber;
-  }
-
-  return merged;
 }
 
 function sourceLineEntries(item: ZvecGrepContextItem): SourceLineEntry[] {
@@ -801,13 +645,16 @@ function sourceLineMarker(
     return undefined;
   }
 
-  const matchRange = item.excerptRange ?? item.range;
-  if (matchRange.kind !== "text") {
-    return ":";
-  }
+  const lineNumber = entry.lineNumber;
+  const matchRanges = groupedOccurrences(item)?.map(
+    (occurrence) => occurrence.excerptRange ?? occurrence.range,
+  ) ?? [item.excerptRange ?? item.range];
 
-  return entry.lineNumber >= matchRange.startLine &&
-    entry.lineNumber <= matchRange.endLine
+  return matchRanges.some(
+    (range) =>
+      range.kind !== "text" ||
+      (lineNumber >= range.startLine && lineNumber <= range.endLine),
+  )
     ? ":"
     : "-";
 }

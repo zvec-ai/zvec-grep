@@ -322,7 +322,7 @@ test("context formatters render indexed, lexical, metadata, preview, trace, and 
   }
 });
 
-test("context formatters merge grouped lexical occurrences by source line", async () => {
+test("context formatters summarize grouped symbols without merging occurrence windows", async () => {
   const item = {
     kind: "lexical_match",
     rank: 1,
@@ -359,7 +359,6 @@ test("context formatters merge grouped lexical occurrences by source line", asyn
           startOffset: 0,
           endOffset: 9,
         },
-        content: "line 10\nquery first\nshared 12",
       },
       {
         rank: 2,
@@ -377,7 +376,6 @@ test("context formatters merge grouped lexical occurrences by source line", asyn
           startOffset: 0,
           endOffset: 9,
         },
-        content: "shared 12\nquery second\nline 14",
       },
       {
         rank: 3,
@@ -395,7 +393,6 @@ test("context formatters merge grouped lexical occurrences by source line", asyn
           startOffset: 0,
           endOffset: 9,
         },
-        content: "query third\nline 21",
       },
     ],
     status: "fresh",
@@ -458,14 +455,10 @@ test("context formatters merge grouped lexical occurrences by source line", asyn
       "10-\tline 10",
       "11:\tquery first",
       "12-\tshared 12",
-      "13:\tquery second",
-      "14-\tline 14",
-      "...",
-      "20:\tquery third",
-      "21-\tline 21",
     ].join("\n"),
   );
   assert.equal((agentText.match(/shared 12/g) ?? []).length, 1);
+  assert.doesNotMatch(agentText, /query second|query third/);
 
   const human = await captureConsole(() =>
     printHumanContextResult(result, { human: true, color: "never" }),
@@ -474,7 +467,7 @@ test("context formatters merge grouped lexical occurrences by source line", asyn
   assert.match(humanText, /^Hits: 3$/m);
   assert.match(humanText, /Matches: 3 at L11, L13, L20/);
   assert.equal((humanText.match(/shared 12/g) ?? []).length, 1);
-  assert.match(humanText, /14-\tline 14\n\s+\.\.\.\n\s+20:\tquery third/);
+  assert.doesNotMatch(humanText, /query second|query third/);
 
   const truncatedText = formatAgentContextResult(
     {
@@ -501,7 +494,6 @@ test("a single lexical occurrence preserves the existing formatter output", asyn
         rank: baseItem.rank,
         range: baseItem.range,
         excerptRange: baseItem.excerptRange,
-        content: baseItem.content,
       },
     ],
   };
@@ -535,7 +527,7 @@ test("a single lexical occurrence preserves the existing formatter output", asyn
   assert.deepEqual(occurrenceHuman.logs, baseHuman.logs);
 });
 
-test("grouped lexical rendering has a bounded source-line budget", () => {
+test("grouped lexical rendering does not expand representative occurrence windows", () => {
   const occurrences = Array.from({ length: 8 }, (_, index) => {
     const startLine = index * 100 + 1;
     return {
@@ -554,19 +546,19 @@ test("grouped lexical rendering has a bounded source-line budget", () => {
         startOffset: 0,
         endOffset: 9,
       },
-      content: Array.from(
-        { length: 41 },
-        (_, line) => `window ${index} line ${line}`,
-      ).join("\n"),
     };
   });
+  const baseContent = Array.from(
+    { length: 41 },
+    (_, line) => `window 0 line ${line}`,
+  ).join("\n");
   const item = {
     kind: "lexical_match",
     rank: 1,
     file: { absolutePath: "/repo/noisy.ts", relativePath: "noisy.ts" },
     range: occurrences[0].range,
     excerptRange: occurrences[0].excerptRange,
-    content: occurrences[0].content,
+    content: baseContent,
     occurrenceCount: 6_000,
     occurrences,
     status: "fresh",
@@ -594,9 +586,11 @@ test("grouped lexical rendering has a bounded source-line budget", () => {
   );
 
   assert.match(text, /matches: 6000\+? at .*?, \.\.\./);
-  assert.ok(
-    text.split("\n").filter((line) => /^\d+[-:]\t/.test(line)).length <= 80,
+  assert.equal(
+    text.split("\n").filter((line) => /^\d+[-:]\t/.test(line)).length,
+    41,
   );
+  assert.doesNotMatch(text, /window 1 line/);
 });
 
 test("debug formatter reports every diagnostic and trace availability state", async () => {

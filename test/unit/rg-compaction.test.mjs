@@ -102,7 +102,6 @@ test("compacts every occurrence in the same structural container", () => {
     groupsFound: 1,
     groupsReturned: 1,
     occurrencesCollapsed: 2,
-    contextWindowsMerged: 2,
     groupTruncated: false,
   });
 });
@@ -142,7 +141,7 @@ test("uses the stable entity id within each canonical file", () => {
   );
 });
 
-test("falls back to connected context windows without a container", () => {
+test("does not group connected context windows without a symbol", () => {
   const result = compactRgContextItems({
     items: [
       lexicalItem({
@@ -166,11 +165,17 @@ test("falls back to connected context windows without a container", () => {
     ],
   });
 
-  assert.equal(result.items.length, 2);
-  assert.equal(result.items[0].occurrences.length, 2);
-  assert.deepEqual(result.items[0].range, textRange(10, 15));
-  assert.equal(result.items[1].occurrences, undefined);
-  assert.equal(result.diagnostics.contextWindowsMerged, 1);
+  assert.equal(result.items.length, 3);
+  assert.deepEqual(
+    result.items.map((item) => item.range),
+    [textRange(10, 12), textRange(13, 15), textRange(29, 31)],
+  );
+  assert.equal(
+    result.items.every((item) => item.occurrences === undefined),
+    true,
+  );
+  assert.equal(result.diagnostics.groupsFound, 3);
+  assert.equal(result.diagnostics.occurrencesCollapsed, 0);
 });
 
 test("removes exact canonical occurrence duplicates before grouping", () => {
@@ -293,7 +298,7 @@ test("only exact-dedupes non-text ranges even when a container is present", () =
   );
 });
 
-test("bounds representative occurrence windows for a very noisy symbol", () => {
+test("bounds representative occurrence locations for a very noisy symbol", () => {
   const occurrenceCount = 6_000;
   const result = compactRgContextItems({
     items: Array.from({ length: occurrenceCount }, (_, index) =>

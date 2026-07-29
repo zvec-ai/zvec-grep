@@ -64,7 +64,9 @@ test("rg canonicalizes exact build mirrors and groups source occurrences by symb
     formatted,
     /compacted: 6 occurrences -> 1 result; 3 generated mirror occurrences mapped to source/,
   );
-  assert.equal((formatted.match(/Content-Length/g) ?? []).length, 3);
+  assert.equal((formatted.match(/Content-Length/g) ?? []).length, 2);
+  assert.match(formatted, /^4:\t/m);
+  assert.doesNotMatch(formatted, /^5[:-]\t/m);
   assert.doesNotMatch(formatted, /build\/lib/);
 });
 

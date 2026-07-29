@@ -149,7 +149,6 @@ export type ZvecGrepLexicalOccurrence = {
   rank: number;
   range: Range;
   excerptRange?: Range;
-  content: string;
 };
 
 export type ZvecGrepContextItem = {
@@ -169,7 +168,7 @@ export type ZvecGrepContextItem = {
   container?: ZvecGrepContextContainer;
   /** Total lexical matches represented by a compacted rg result. */
   occurrenceCount?: number;
-  /** Bounded representative windows used only to render compact rg context. */
+  /** Bounded representative match locations used by compact rg summaries. */
   occurrences?: readonly ZvecGrepLexicalOccurrence[];
   trace?: SearchHitTrace;
 };
@@ -197,7 +196,6 @@ export type ZvecGrepRgDiagnostics = {
   groupsFound?: number;
   groupsReturned?: number;
   occurrencesCollapsed?: number;
-  contextWindowsMerged?: number;
   generatedCandidates?: number;
   generatedMirrorsCanonicalized?: number;
   generatedMatchesDemoted?: number;

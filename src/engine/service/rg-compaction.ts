@@ -12,7 +12,6 @@ export type RgCompactionDiagnostics = {
   groupsFound: number;
   groupsReturned: number;
   occurrencesCollapsed: number;
-  contextWindowsMerged: number;
   groupTruncated: boolean;
 };
 
@@ -56,10 +55,6 @@ export function compactRgContextItems(options: {
       groupsFound: compacted.length,
       groupsReturned: returned.length,
       occurrencesCollapsed: Math.max(0, unique.length - compacted.length),
-      contextWindowsMerged: groups.reduce(
-        (total, group) => total + mergedContextWindowCount(group.entries),
-        0,
-      ),
       groupTruncated: returned.length < compacted.length,
     },
   };
@@ -103,7 +98,7 @@ function groupContextItems(
   entries: readonly IndexedContextItem[],
 ): ContextItemGroup[] {
   const containerGroups = new Map<string, ContextItemGroup>();
-  const fallbackByFile = new Map<string, IndexedContextItem[]>();
+  const ungrouped: ContextItemGroup[] = [];
 
   for (const entry of entries) {
     const containerKey = structuralContainerKey(entry.item);
@@ -121,17 +116,13 @@ function groupContextItems(
       continue;
     }
 
-    const fileKey = normalizePath(entry.item.file.absolutePath);
-    fallbackByFile.set(fileKey, [
-      ...(fallbackByFile.get(fileKey) ?? []),
-      entry,
-    ]);
+    ungrouped.push({
+      firstIndex: entry.index,
+      entries: [entry],
+    });
   }
 
-  const groups = [
-    ...containerGroups.values(),
-    ...[...fallbackByFile.values()].flatMap(groupFallbackFileItems),
-  ];
+  const groups = [...containerGroups.values(), ...ungrouped];
   return groups.sort((left, right) => left.firstIndex - right.firstIndex);
 }
 
@@ -150,57 +141,6 @@ function structuralContainerKey(item: ZvecGrepContextItem): string | null {
   ].join(":");
 }
 
-function groupFallbackFileItems(
-  entries: readonly IndexedContextItem[],
-): ContextItemGroup[] {
-  const textEntries = entries
-    .filter(
-      (
-        entry,
-      ): entry is IndexedContextItem & {
-        item: ZvecGrepContextItem & {
-          range: Extract<Range, { kind: "text" }>;
-        };
-      } => entry.item.range.kind === "text",
-    )
-    .sort(
-      (left, right) =>
-        left.item.range.startLine - right.item.range.startLine ||
-        left.item.range.endLine - right.item.range.endLine ||
-        left.index - right.index,
-    );
-  const otherEntries = entries.filter(
-    (entry) => entry.item.range.kind !== "text",
-  );
-  const groups: ContextItemGroup[] = [];
-  let current: ContextItemGroup | undefined;
-  let currentEndLine = 0;
-
-  for (const entry of textEntries) {
-    if (!current || entry.item.range.startLine > currentEndLine + 1) {
-      current = {
-        firstIndex: entry.index,
-        entries: [entry],
-      };
-      currentEndLine = entry.item.range.endLine;
-      groups.push(current);
-      continue;
-    }
-
-    current.entries.push(entry);
-    current.firstIndex = Math.min(current.firstIndex, entry.index);
-    currentEndLine = Math.max(currentEndLine, entry.item.range.endLine);
-  }
-
-  groups.push(
-    ...otherEntries.map((entry) => ({
-      firstIndex: entry.index,
-      entries: [entry],
-    })),
-  );
-  return groups;
-}
-
 function compactContextItemGroup(group: ContextItemGroup): ZvecGrepContextItem {
   const ordered = [...group.entries].sort(
     (left, right) =>
@@ -214,10 +154,6 @@ function compactContextItemGroup(group: ContextItemGroup): ZvecGrepContextItem {
 
   return {
     ...base,
-    range:
-      base.container === undefined
-        ? (mergedDisplayRange(ordered.map(({ item }) => item)) ?? base.range)
-        : base.range,
     container:
       mergedContainer(ordered.map(({ item }) => item)) ?? base.container,
     occurrenceCount: ordered.length,
@@ -243,18 +179,6 @@ function sampleGroupEntries(
     sampled.push(entries[sourceIndex]!);
   }
   return sampled;
-}
-
-function mergedDisplayRange(
-  items: readonly ZvecGrepContextItem[],
-): Extract<Range, { kind: "text" }> | null {
-  const ranges = items.map((item) => item.range);
-  if (ranges.length === 0 || ranges.some((range) => range.kind !== "text")) {
-    return null;
-  }
-
-  const textRanges = ranges as Extract<Range, { kind: "text" }>[];
-  return mergeTextRanges(textRanges);
 }
 
 function mergedContainer(
@@ -316,7 +240,6 @@ function lexicalOccurrence(
     rank: item.rank,
     range: item.range,
     excerptRange: item.excerptRange,
-    content: item.content,
   };
 }
 
@@ -367,34 +290,4 @@ function stableRangeKey(range: Range): string {
         range.height,
       ].join(":");
   }
-}
-
-function mergedContextWindowCount(
-  entries: readonly IndexedContextItem[],
-): number {
-  const ranges = entries
-    .map(({ item }) => item.range)
-    .filter(
-      (range): range is Extract<Range, { kind: "text" }> =>
-        range.kind === "text",
-    )
-    .sort(
-      (left, right) =>
-        left.startLine - right.startLine || left.endLine - right.endLine,
-    );
-  if (ranges.length < 2) {
-    return 0;
-  }
-
-  let merged = 0;
-  let endLine = ranges[0]!.endLine;
-  for (const range of ranges.slice(1)) {
-    if (range.startLine <= endLine + 1) {
-      merged++;
-      endLine = Math.max(endLine, range.endLine);
-    } else {
-      endLine = range.endLine;
-    }
-  }
-  return merged;
 }
