@@ -21,7 +21,14 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
     skill,
     /repository investigation would otherwise use grep, rg, or broad file reads/,
   );
-  assert.match(skill, /Use zvec-grep before raw `grep` or `rg`/);
+  assert.match(
+    skill,
+    /Route repository investigation through zvec-grep instead of raw `grep` or\s+`rg`/,
+  );
+  assert.match(
+    skill,
+    /this does not mean indexed search\s+must run before an exact search/,
+  );
   assert.match(
     skill,
     /Use the public native HTTP MCP search tools as the primary interface when the matching `zvec_grep_\*` tool is present/,
@@ -39,8 +46,19 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
     skill,
     /do not probe forced Server mode and then retry forced Direct mode/,
   );
-  assert.match(skill, /Call `zvec_grep_search` first/);
-  assert.match(skill, /Call `zvec_grep_rg` for exhaustive local ripgrep/);
+  assert.match(
+    skill,
+    /Call `zvec_grep_rg` first when an exact keyword, text, symbol, filename/,
+  );
+  assert.match(
+    skill,
+    /named class, function, or symbol remains an exact anchor\s+even when its file or definition location is unknown/,
+  );
+  assert.match(
+    skill,
+    /Call `zvec_grep_search` when the exact anchor is unknown and conceptual\s+discovery is needed/,
+  );
+  assert.doesNotMatch(skill, /Call `zvec_grep_search` first/);
   assert.match(skill, /`freshness` and `indexing`/);
   assert.match(skill, /After authorization, use the CLI lifecycle workflow/);
   assert.doesNotMatch(skill, /zvec_grep_index(?:_drop|_status)?/);
@@ -74,4 +92,23 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
   assert.match(fallback, /server default model is known/);
   assert.match(fallback, /zg index\r?\n/);
   assert.doesNotMatch(fallback, /zg index[^\n]*--mode (?:server|direct)/);
+});
+
+test("benchmark skill routes exact and conceptual searches by intent", async () => {
+  const skill = await readFile("benchmarks/skills/zvec-grep/SKILL.md", "utf8");
+
+  assert.match(
+    skill,
+    /When an exact keyword, text, symbol, filename, path, configuration key/,
+  );
+  assert.match(skill, /start with managed\s+ripgrep/);
+  assert.match(
+    skill,
+    /named class, function, or symbol remains an exact anchor even when\s+its file or definition location is unknown/,
+  );
+  assert.match(
+    skill,
+    /When the exact anchor is unknown and conceptual discovery is needed/,
+  );
+  assert.doesNotMatch(skill, /Start exploratory searches/);
 });

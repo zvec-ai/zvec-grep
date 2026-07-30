@@ -391,8 +391,6 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           trace: input.trace,
           preferSymbol: input.preferSymbol,
           symbolTypes: input.symbolTypes,
-          includePaths: input.includePaths,
-          excludePaths: input.excludePaths,
           globs: normalizePlainStringList(input.globs),
           insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
           fileTypes: normalizePlainStringList(input.fileTypes),

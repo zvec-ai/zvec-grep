@@ -18,13 +18,10 @@ const boundedStringList = (description: string) =>
     ])
     .optional();
 
-const pathFilter = z.string().max(MCP_MAX_PATH_CHARS);
-const legacyStringListInputSchema = z
+const unboundedStringList = z
   .union([z.string(), z.array(z.string())])
   .optional();
-const legacyTimeInputSchema = z
-  .union([z.number().int().nonnegative(), z.string()])
-  .optional();
+const pathFilter = z.string().max(MCP_MAX_PATH_CHARS);
 
 export const stringListInputSchema = boundedStringList(
   "A string or a list of strings.",
@@ -73,8 +70,6 @@ const searchFields = {
     .max(MCP_MAX_SEARCH_LIMIT)
     .optional()
     .describe("Maximum returned items per query/group."),
-  include: pathFilterInputSchema.describe("Glob filters for paths to include."),
-  exclude: pathFilterInputSchema.describe("Glob filters for paths to exclude."),
   globs: pathFilterInputSchema.describe(
     "Ordered case-sensitive rg-style glob rules. Later rules override earlier rules.",
   ),
@@ -237,12 +232,12 @@ export const zvecGrepRgInputSchema = z.object({
     .describe(
       "Regex or literal pattern to search for. Use zvec_grep_rg for exhaustive lexical search, unindexed repositories that can be answered lexically, or explicit rg-mode requests.",
     ),
-  patterns: legacyStringListInputSchema.describe(
+  patterns: unboundedStringList.describe(
     "Multiple regex or literal patterns to search for.",
   ),
   root: absoluteRootSchema,
-  paths: legacyStringListInputSchema.describe(
-    "Optional paths to search within the root.",
+  path: unboundedStringList.describe(
+    "Optional path or array of paths to search within the root.",
   ),
   fixedStrings: z
     .boolean()
@@ -275,7 +270,7 @@ export const zvecGrepRgInputSchema = z.object({
     .boolean()
     .optional()
     .describe("Search hidden files and directories."),
-  glob: legacyStringListInputSchema.describe(
+  glob: unboundedStringList.describe(
     "ripgrep glob filters, for example '*.ts' or '!dist/**'. Accepts an array or comma-separated string.",
   ),
   limit: z
@@ -549,134 +544,6 @@ export const zvecGrepServerStatusOutputSchema = z.object({
   }),
 });
 
-export const legacySearchInputSchema = z.object({
-  query: z
-    .string()
-    .optional()
-    .describe("Natural-language or exact search query."),
-  queries: legacyStringListInputSchema.describe(
-    "Multiple query groups. Use this for related concepts.",
-  ),
-  fts: legacyStringListInputSchema.describe(
-    "Exact lexical anchors, such as symbols, flags, or error messages.",
-  ),
-  vector: legacyStringListInputSchema.describe(
-    "Explicit semantic/vector-only queries.",
-  ),
-  root: z
-    .string()
-    .optional()
-    .describe("Repository root. Defaults to the MCP server working directory."),
-  collection: z
-    .string()
-    .optional()
-    .describe(
-      "Named collection to query instead of the anonymous repository index.",
-    ),
-  limit: z
-    .number()
-    .int()
-    .positive()
-    .max(50)
-    .optional()
-    .describe("Maximum returned items per query/group."),
-  include: legacyStringListInputSchema.describe(
-    "Glob filters for paths to include. Accepts an array or comma-separated string.",
-  ),
-  exclude: legacyStringListInputSchema.describe(
-    "Glob filters for paths to exclude. Accepts an array or comma-separated string.",
-  ),
-  preferSymbol: z
-    .boolean()
-    .optional()
-    .describe("Prefer exact indexed symbols when query names a symbol."),
-  symbolTypes: z
-    .array(codeSymbolTypeSchema)
-    .default([])
-    .describe("Restrict indexed results to symbol types."),
-  modifiedAfter: legacyTimeInputSchema.describe(
-    "Only query files modified after this time. Accepts epoch milliseconds or a parseable date string.",
-  ),
-  modifiedBefore: legacyTimeInputSchema.describe(
-    "Only query files modified before this time. Accepts epoch milliseconds or a parseable date string.",
-  ),
-  autoUpdate: z
-    .boolean()
-    .optional()
-    .describe(
-      "Refresh an existing stale anonymous index before query. Defaults to true.",
-    ),
-  embeddingConcurrency: z
-    .number()
-    .int()
-    .positive()
-    .max(64)
-    .optional()
-    .describe("Embedding task concurrency for automatic index refresh."),
-  trace: z
-    .boolean()
-    .optional()
-    .describe("Include per-hit search trace in structured output."),
-});
-
-export const legacyRgInputSchema = z.object({
-  pattern: z
-    .string()
-    .optional()
-    .describe("Regex or literal pattern to search for."),
-  patterns: legacyStringListInputSchema.describe(
-    "Multiple regex or literal patterns to search for.",
-  ),
-  root: z
-    .string()
-    .optional()
-    .describe("Repository root. Defaults to the MCP server working directory."),
-  paths: legacyStringListInputSchema.describe(
-    "Optional paths to search within the root.",
-  ),
-  fixedStrings: z
-    .boolean()
-    .optional()
-    .describe("Treat pattern as a literal string."),
-  ignoreCase: z.boolean().optional().describe("Search case-insensitively."),
-  wordRegexp: z.boolean().optional().describe("Only match whole words."),
-  context: z
-    .number()
-    .int()
-    .nonnegative()
-    .max(20)
-    .optional()
-    .describe("Context lines before and after each match."),
-  beforeContext: z
-    .number()
-    .int()
-    .nonnegative()
-    .max(20)
-    .optional()
-    .describe("Context lines before each match."),
-  afterContext: z
-    .number()
-    .int()
-    .nonnegative()
-    .max(20)
-    .optional()
-    .describe("Context lines after each match."),
-  hidden: z
-    .boolean()
-    .optional()
-    .describe("Search hidden files and directories."),
-  glob: legacyStringListInputSchema.describe(
-    "ripgrep glob filters, for example '*.ts' or '!dist/**'. Accepts an array or comma-separated string.",
-  ),
-  limit: z
-    .number()
-    .int()
-    .positive()
-    .max(200)
-    .optional()
-    .describe("Maximum returned matches."),
-});
-
 export type ZvecGrepIndexInput = z.infer<typeof zvecGrepIndexInputSchema>;
 export type ZvecGrepIndexDropInput = z.infer<
   typeof zvecGrepIndexDropInputSchema
@@ -686,7 +553,5 @@ export type ZvecGrepIndexStatusInput = z.infer<
   typeof zvecGrepIndexStatusInputSchema
 >;
 export type ZvecGrepRgInput = z.infer<typeof zvecGrepRgInputSchema>;
-export type LegacySearchInput = z.infer<typeof legacySearchInputSchema>;
-export type LegacyRgInput = z.infer<typeof legacyRgInputSchema>;
 export type StringListInput = z.infer<typeof stringListInputSchema>;
 export type TimeInput = z.infer<typeof timeInputSchema>;

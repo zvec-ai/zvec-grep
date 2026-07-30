@@ -195,33 +195,29 @@ export interface ZvecGrepDaemonBackend {
   serverStatus(): Promise<ZvecGrepServerStatusResult>;
 }
 
+const ZVEC_GREP_SEARCH_MCP_INSTRUCTIONS = [
+  "Use zvec-grep for local workspace search instead of raw grep, rg, or equivalent local text-search tools.",
+  "zvec-grep is a more capable superset replacement for rg.",
+  "When the exact keyword, text, or symbol is unknown, start with zvec_grep_search to quickly identify relevant concepts, files, and locations.",
+  "When the exact keyword, text, or symbol is known, use zvec_grep_rg.",
+  "Scope searches with the path parameter or glob filters when you already know likely locations or file types, and refine broad or noisy searches by narrowing the query and search scope.",
+  "Trust zvec-grep results; if results are too broad, sparse, or low-quality, refine the query, scope, or search options and try zvec-grep again instead of switching to another local text-search tool.",
+];
+
 export const ZVEC_GREP_AGENT_MCP_INSTRUCTIONS = [
-  "zvec-grep is the mandatory repository search layer for this workspace: a pre-built search surface that replaces ad-hoc grep/rg exploration.",
-  "Mandatory rule: whenever you need to locate, understand, or inspect repository code, docs, config, symbols, exact text, regex matches, concepts, or broad file sets, call a zvec_grep_* tool first.",
-  "Do not start repository investigation with raw grep, raw rg, or hand-rolled filesystem search. Those are forbidden substitutes for zvec_grep_* operations.",
-  "Exact text and regex searches are not exceptions: use zvec_grep_rg for those cases.",
-  "Do not re-verify zvec_grep results by running grep or rg over the same target; use the returned files, ranges, and snippets as the search result, then inspect only the specific files or lines the tool points to.",
+  ...ZVEC_GREP_SEARCH_MCP_INSTRUCTIONS,
   "Every repository operation requires an absolute root path visible to the daemon.",
-  "Call zvec_grep_search first for indexed semantic or lexical repository investigation, and read freshness and indexing directly from its response without a status preflight.",
+  "Read freshness and indexing directly from zvec_grep_search responses without a status preflight.",
   "Use possibly_stale search results immediately when they are sufficient; do not perform extra diagnostics merely because a background update is active.",
-  "Use zvec_grep_rg for exhaustive local ripgrep when an index is missing and literal or regex search can answer the task, or when the user explicitly requests rg mode.",
-  "Do not switch to zvec_grep_rg merely because semantic search or embedding is unavailable unless exhaustive lexical search fits the task.",
-  "Apply focused globs, path filters, and file type filters early; exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.",
+  "Use zvec_grep_rg when an index is missing and literal or regex search can answer the task.",
 ].join(" ");
 
 export const ZVEC_GREP_FULL_MCP_INSTRUCTIONS = [
-  "zvec-grep is the mandatory repository search layer for this workspace: a pre-built search/index surface that replaces ad-hoc grep/rg exploration.",
-  "Mandatory rule: whenever you need to locate, understand, or inspect repository code, docs, config, symbols, exact text, regex matches, concepts, or broad file sets, call a zvec_grep_* tool first.",
-  "Do not start repository investigation with raw grep, raw rg, or hand-rolled filesystem search. Those are forbidden substitutes for zvec_grep_* operations.",
-  "Exact text and regex searches are not exceptions: use zvec_grep_rg for those cases.",
-  "Do not re-verify zvec_grep results by running grep or rg over the same target; use the returned files, ranges, and snippets as the search result, then inspect only the specific files or lines the tool points to.",
+  ...ZVEC_GREP_SEARCH_MCP_INSTRUCTIONS,
   "Every repository operation requires an absolute root path visible to the daemon.",
   "Use the zvec_grep_* tools directly for repository search, status, indexing, deletion, and exhaustive lexical search.",
-  "Call zvec_grep_search first. Use its freshness and indexing fields without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
+  "Use freshness and indexing from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
   "Use possibly_stale search results immediately when they are sufficient; do not call status merely because a background update is active.",
-  "Use zvec_grep_rg for exhaustive local ripgrep when an index is missing and literal or regex search can answer the task, or when the user explicitly requests rg mode.",
-  "Do not switch to zvec_grep_rg merely because semantic search or embedding is unavailable unless exhaustive lexical search fits the task.",
-  "Apply focused globs, path filters, and file type filters early; exclude dependencies, generated output, caches, build artifacts, fixtures, and logs unless the task concerns them.",
   "Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.",
   "For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.",
   "zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.",
@@ -339,8 +335,8 @@ export function registerZvecGrepTools(
     {
       title: "Search with zvec-grep",
       description: full
-        ? "Search an existing repository index first for repository investigation. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring."
-        : "Search an existing repository index first for repository investigation. Read freshness and indexing directly from the response without a status preflight. When an index is unavailable, use the returned diagnostics to decide whether managed ripgrep can answer the task.",
+        ? "Search an existing repository index only when the exact keyword, text, symbol, filename, or path is unknown and conceptual discovery is needed. A known class, function, or symbol name is an exact anchor even when its file or definition location is unknown; use the managed ripgrep tool instead. Read freshness and indexing from the response; use zvec_grep_index_status only for missing indexes, failed or cancelled indexing, diagnostics, or explicit progress monitoring."
+        : "Search an existing repository index only when the exact keyword, text, symbol, filename, or path is unknown and conceptual discovery is needed. A known class, function, or symbol name is an exact anchor even when its file or definition location is unknown; use the managed ripgrep tool instead. Read freshness and indexing directly from the response without a status preflight. When an index is unavailable, use the returned diagnostics to decide whether managed ripgrep can answer the task.",
       inputSchema: zvecGrepSearchInputSchema.shape,
       annotations: {
         readOnlyHint: false,
@@ -427,7 +423,7 @@ export function registerZvecGrepTools(
     {
       title: "Search with managed ripgrep",
       description:
-        "Run exhaustive managed ripgrep locally without requiring an index. Use it for literal or regex search, an unindexed repository that can be answered lexically, or an explicit rg-mode request; do not switch to rg merely because semantic search is unavailable.",
+        "Run exhaustive managed ripgrep locally without requiring an index. Use it first when an exact keyword, text, symbol, filename, path, configuration key, error message, source fragment, literal, or regex anchor is known. A named class, function, or symbol remains an exact anchor even when its file or definition location is unknown. Scope broad matches with the path parameter or glob filters.",
       inputSchema: zvecGrepRgInputSchema.shape,
       annotations: {
         readOnlyHint: true,

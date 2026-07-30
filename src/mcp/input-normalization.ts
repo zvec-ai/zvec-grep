@@ -5,8 +5,6 @@ import type {
 } from "../index.js";
 import { parseModifiedTime, splitPathFilters } from "../cli/args.js";
 import type {
-  LegacyRgInput,
-  LegacySearchInput,
   StringListInput,
   TimeInput,
   ZvecGrepRgInput,
@@ -23,8 +21,6 @@ export type NormalizedSearchInput = {
   autoUpdate: boolean;
   preferSymbol?: boolean;
   symbolTypes?: CodeSymbolType[];
-  includePaths?: string[];
-  excludePaths?: string[];
   globs?: string[];
   insensitiveGlobs?: string[];
   fileTypes?: string[];
@@ -53,30 +49,8 @@ export function normalizeSearchInput(
   };
 }
 
-export function contextOptionsFromSearchInput(
-  input: LegacySearchInput,
-): ZvecGrepContextOptions {
-  const normalized = normalizeSearchFields(input);
-  return {
-    queries: normalized.queries,
-    routes: normalized.routes,
-    root: normalizeOptionalString(input.root),
-    collection: normalizeOptionalString(input.collection),
-    limit: input.limit,
-    autoUpdate: input.autoUpdate ?? true,
-    trace: input.trace,
-    preferSymbol: input.preferSymbol,
-    symbolTypes: normalized.symbolTypes,
-    includePaths: normalized.includePaths,
-    excludePaths: normalized.excludePaths,
-    modifiedAfter: normalized.modifiedAfter,
-    modifiedBefore: normalized.modifiedBefore,
-    embeddingConcurrency: input.embeddingConcurrency,
-  };
-}
-
 export function contextOptionsFromRgInput(
-  input: LegacyRgInput | ZvecGrepRgInput,
+  input: ZvecGrepRgInput,
 ): ZvecGrepContextOptions {
   const queries = [
     ...normalizeQueryList(input.pattern),
@@ -99,8 +73,8 @@ export function contextOptionsFromRgInput(
     queries,
     rg: true,
     rgOptions,
-    rgPaths: normalizePlainStringList(input.paths),
-    root: normalizeOptionalString(input.root),
+    rgPaths: normalizePlainStringList(input.path),
+    root: input.root,
     limit: input.limit,
     includePaths,
     excludePaths,
@@ -114,8 +88,6 @@ function normalizeSearchFields(
     | "queries"
     | "fts"
     | "vector"
-    | "include"
-    | "exclude"
     | "globs"
     | "insensitiveGlobs"
     | "fileTypes"
@@ -148,8 +120,6 @@ function normalizeSearchFields(
     );
   }
 
-  const includePaths = normalizePathFilters(input.include);
-  const excludePaths = normalizePathFilters(input.exclude);
   return {
     queries: queries.length > 0 ? queries : undefined,
     routes: [
@@ -161,8 +131,6 @@ function normalizeSearchFields(
     trace: input.trace,
     preferSymbol: input.preferSymbol,
     symbolTypes: input.symbolTypes.length > 0 ? input.symbolTypes : undefined,
-    includePaths: includePaths.length > 0 ? includePaths : undefined,
-    excludePaths: excludePaths.length > 0 ? excludePaths : undefined,
     globs: normalizePlainStringList(input.globs),
     insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
     fileTypes: normalizePlainStringList(input.fileTypes),
@@ -212,7 +180,8 @@ export function normalizeQueryList(value: StringListInput): string[] {
 export function normalizePlainStringList(
   value: StringListInput,
 ): string[] | undefined {
-  const items = stringListItems(value);
+  const items =
+    value === undefined ? [] : Array.isArray(value) ? value : [value];
   const normalized = items
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
@@ -220,39 +189,13 @@ export function normalizePlainStringList(
 }
 
 export function normalizePathFilters(value: StringListInput): string[] {
-  const items = stringListItems(value);
-  if (typeof value !== "string" || items.length !== 1 || items[0] !== value) {
-    return items.map((item) => item.trim()).filter((item) => item.length > 0);
-  }
-  return splitPathFilters(value);
-}
-
-function stringListItems(value: StringListInput): string[] {
   if (value === undefined) {
     return [];
   }
   if (Array.isArray(value)) {
-    return value;
+    return value.map((item) => item.trim()).filter((item) => item.length > 0);
   }
-
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("[")) {
-    return [value];
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (
-      Array.isArray(parsed) &&
-      parsed.every((item) => typeof item === "string")
-    ) {
-      return parsed;
-    }
-  } catch {
-    // Treat malformed JSON-like input as a literal string.
-  }
-
-  return [value];
+  return splitPathFilters(value);
 }
 
 export function normalizeModifiedTime(
@@ -263,11 +206,4 @@ export function normalizeModifiedTime(
     return undefined;
   }
   return typeof value === "number" ? value : parseModifiedTime(value, option);
-}
-
-export function normalizeOptionalString(
-  value: string | undefined,
-): string | undefined {
-  const normalized = value?.trim() ?? "";
-  return normalized.length > 0 ? normalized : undefined;
 }

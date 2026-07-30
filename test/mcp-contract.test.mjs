@@ -211,6 +211,17 @@ test("default agent contract exposes only search and rg", async (t) => {
   );
   const search = listed.tools.find((tool) => tool.name === "zvec_grep_search");
   assert.ok(search);
+  assert.match(search.description, /exact keyword, text, symbol/);
+  assert.match(
+    search.description,
+    /unknown and conceptual discovery is needed/,
+  );
+  assert.match(
+    search.description,
+    /known class, function, or symbol name is an exact anchor/,
+  );
+  assert.match(search.description, /use the managed ripgrep tool instead/);
+  assert.doesNotMatch(search.description, /index first/);
   assert.doesNotMatch(
     search.description,
     /zvec_grep_(?:index|index_drop|index_status|server_status)/,
@@ -253,6 +264,7 @@ test("full server contract exposes all tools with stable annotations", async (t)
   );
   const instructions = client.getInstructions();
   assert.equal(instructions, ZVEC_GREP_FULL_MCP_INSTRUCTIONS);
+  assert.notEqual(instructions, ZVEC_GREP_AGENT_MCP_INSTRUCTIONS);
   const toolContracts = JSON.stringify(
     tools.map((tool) => ({
       title: tool.title,
@@ -263,21 +275,26 @@ test("full server contract exposes all tools with stable annotations", async (t)
   );
   assert.doesNotMatch(toolContracts, /\bCLI\b/i);
   assert.doesNotMatch(toolContracts, /`?zg(?:\s|`)/i);
-  assert.match(instructions, /mandatory repository search layer/);
-  assert.match(instructions, /replaces ad-hoc grep\/rg exploration/);
-  assert.match(instructions, /call a zvec_grep_\* tool first/);
+  assert.match(instructions, /local workspace search/);
   assert.match(
     instructions,
-    /forbidden substitutes for zvec_grep_\* operations/,
+    /instead of raw grep, rg, or equivalent local text-search tools/,
   );
+  assert.match(instructions, /superset replacement for rg/);
+  assert.match(instructions, /exact keyword, text, or symbol is unknown/);
+  assert.match(instructions, /start with zvec_grep_search/);
+  assert.match(instructions, /exact keyword, text, or symbol is known/);
+  assert.match(instructions, /use zvec_grep_rg/);
+  assert.match(instructions, /Scope searches with the path parameter/);
+  assert.match(instructions, /refine broad or noisy searches/);
+  assert.match(instructions, /Trust zvec-grep results/);
   assert.match(
     instructions,
-    /Exact text and regex searches are not exceptions/,
+    /try zvec-grep again instead of switching to another local text-search tool/,
   );
-  assert.match(
-    instructions,
-    /Do not re-verify zvec_grep results by running grep or rg/,
-  );
+  assert.match(instructions, /repository search, status, indexing, deletion/);
+  assert.match(instructions, /zvec_grep_index_status/);
+  assert.match(instructions, /zvec_grep_server_status/);
   assert.doesNotMatch(instructions, /\bCLI\b/i);
   assert.doesNotMatch(instructions, /`?zg(?:\s|`)/i);
 
@@ -298,7 +315,17 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.match(index.description, /Do not call this tool/);
   assert.match(index.description, /index deletion/);
   const search = tools.find((tool) => tool.name === "zvec_grep_search");
-  assert.match(search.description, /Search an existing repository index first/);
+  assert.match(search.description, /exact keyword, text, symbol/);
+  assert.match(
+    search.description,
+    /unknown and conceptual discovery is needed/,
+  );
+  assert.match(
+    search.description,
+    /known class, function, or symbol name is an exact anchor/,
+  );
+  assert.match(search.description, /use the managed ripgrep tool instead/);
+  assert.doesNotMatch(search.description, /index first/);
   assert.match(search.description, /missing indexes/);
   for (const tool of [index, search]) {
     assert.match(
@@ -319,8 +346,18 @@ test("full server contract exposes all tools with stable annotations", async (t)
     );
   }
   const rg = tools.find((tool) => tool.name === "zvec_grep_rg");
-  assert.match(rg.description, /explicit rg-mode request/);
-  assert.match(rg.description, /do not switch to rg merely/);
+  assert.match(rg.description, /Use it first when an exact keyword/);
+  assert.match(
+    rg.description,
+    /filename, path, configuration key, error message/,
+  );
+  assert.match(
+    rg.description,
+    /named class, function, or symbol remains an exact anchor/,
+  );
+  assert.match(rg.description, /Scope broad matches with the path parameter/);
+  assert.ok(rg.inputSchema.properties.path);
+  assert.equal(rg.inputSchema.properties.paths, undefined);
   assert.equal(rg.outputSchema, undefined);
   assert.equal(search.outputSchema, undefined);
   for (const tool of tools.filter(
@@ -801,8 +838,6 @@ test("search normalizes query, path and time inputs before calling the backend",
       root,
       query: "  service lifecycle  ",
       fts: ["  ModelLease  "],
-      include: "src/**, test/**",
-      exclude: ["dist/**", " coverage/** "],
       globs: ["!*.ts", "keep.ts"],
       insensitiveGlobs: ["README*"],
       fileTypes: ["ts"],
@@ -821,8 +856,6 @@ test("search normalizes query, path and time inputs before calling the backend",
 
   assert.deepEqual(received.queries, ["service lifecycle"]);
   assert.deepEqual(received.routes, [{ mode: "fts", query: "ModelLease" }]);
-  assert.deepEqual(received.includePaths, ["src/**", "test/**"]);
-  assert.deepEqual(received.excludePaths, ["dist/**", "coverage/**"]);
   assert.deepEqual(received.globs, ["!*.ts", "keep.ts"]);
   assert.deepEqual(received.insensitiveGlobs, ["README*"]);
   assert.deepEqual(received.fileTypes, ["ts"]);
@@ -838,37 +871,6 @@ test("search normalizes query, path and time inputs before calling the backend",
   assert.equal(received.modifiedAfter, Date.parse("2025-01-01T00:00:00.000Z"));
   assert.equal(received.freshness, "eventual");
   assert.equal(received.autoUpdate, true);
-});
-
-test("search accepts JSON-encoded string lists from loose MCP clients", async (t) => {
-  let received;
-  const backend = createBackend();
-  backend.search = async (input) => {
-    received = input;
-    return createBackend().search(input);
-  };
-  const { client, server } = await connect(backend);
-  t.after(async () => {
-    await client.close();
-    await server.close();
-  });
-
-  await client.callTool({
-    name: "zvec_grep_search",
-    arguments: {
-      root,
-      fts: JSON.stringify(["RocksdbContext", "rocksdb_context_"]),
-      exclude: JSON.stringify(["thirdparty/**", "build/**"]),
-      fileTypes: JSON.stringify(["h", "cc"]),
-    },
-  });
-
-  assert.deepEqual(received.routes, [
-    { mode: "fts", query: "RocksdbContext" },
-    { mode: "fts", query: "rocksdb_context_" },
-  ]);
-  assert.deepEqual(received.excludePaths, ["thirdparty/**", "build/**"]);
-  assert.deepEqual(received.fileTypes, ["h", "cc"]);
 });
 
 test("search can return the current index without scheduling an update", async (t) => {
@@ -913,6 +915,7 @@ test("rg normalizes managed ripgrep input before calling the backend", async (t)
       pattern: "needle",
       fixedStrings: true,
       ignoreCase: true,
+      path: ["src", "test"],
       glob: ["src/**", "!dist/**"],
       context: 2,
     },
@@ -921,6 +924,7 @@ test("rg normalizes managed ripgrep input before calling the backend", async (t)
   assert.equal(received.pattern, "needle");
   assert.equal(received.fixedStrings, true);
   assert.equal(received.ignoreCase, true);
+  assert.deepEqual(received.path, ["src", "test"]);
   assert.deepEqual(received.glob, ["src/**", "!dist/**"]);
   assert.equal(received.context, 2);
   assert.equal(result.structuredContent, undefined);
@@ -931,6 +935,35 @@ test("rg normalizes managed ripgrep input before calling the backend", async (t)
   assert.equal(result.content[0].text, expected);
   assert.match(result.content[0].text, /^src\/index\.ts:1\n1:\t/);
   assert.doesNotMatch(result.content[0].text, /rank=|matchedBy=|source:/);
+});
+
+test("rg does not apply indexed search input bounds", async (t) => {
+  let received;
+  const backend = createBackend();
+  backend.rg = async (input) => {
+    received = input;
+    return createBackend().rg(input);
+  };
+  const { client, server } = await connect(backend);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const pattern = "n".repeat(4_001);
+  const patterns = Array.from({ length: 33 }, (_, index) => `pattern-${index}`);
+  const path = Array.from({ length: 129 }, (_, index) => `path-${index}`);
+  const glob = Array.from({ length: 129 }, (_, index) => `glob-${index}`);
+  const result = await client.callTool({
+    name: "zvec_grep_rg",
+    arguments: { root, pattern, patterns, path, glob },
+  });
+
+  assert.notEqual(result.isError, true);
+  assert.equal(received.pattern, pattern);
+  assert.deepEqual(received.patterns, patterns);
+  assert.deepEqual(received.path, path);
+  assert.deepEqual(received.glob, glob);
 });
 
 test("input upper bounds are enforced", async (t) => {
@@ -964,7 +997,7 @@ test("input upper bounds are enforced", async (t) => {
 
   const excessivePath = await client.callTool({
     name: "zvec_grep_search",
-    arguments: { root, query: "query", include: "p".repeat(1_025) },
+    arguments: { root, query: "query", globs: "p".repeat(1_025) },
   });
   assert.equal(excessivePath.isError, true);
 
@@ -973,7 +1006,7 @@ test("input upper bounds are enforced", async (t) => {
     arguments: {
       root,
       query: "query",
-      exclude: Array.from({ length: 129 }, (_, index) => `path-${index}/**`),
+      globs: Array.from({ length: 129 }, (_, index) => `path-${index}/**`),
     },
   });
   assert.equal(excessivePathFilters.isError, true);

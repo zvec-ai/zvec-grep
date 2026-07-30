@@ -199,8 +199,9 @@ class RunValidationTests(unittest.TestCase):
 
         agent_index = command.index("--agent")
         model_index = command.index("--model")
-        self.assertEqual(command[agent_index + 1], runner.OPENCODE_ACP_IMPORT_PATH)
+        self.assertEqual(command[agent_index + 1], "opencode")
         self.assertEqual(command[model_index + 1], "dashscope/qwen3.7-max")
+        self.assertIn(f"version={runner.OPENCODE_VERSION}", command)
 
         config_argument = next(
             value for value in command if value.startswith("opencode_config=")
@@ -224,6 +225,36 @@ class RunValidationTests(unittest.TestCase):
         )
         self.assertEqual(
             environment["OPENAI_BASE_URL"], runner.OPENCODE_DASHSCOPE_BASE_URL
+        )
+
+    def test_opencode_zvec_profile_keeps_mcp_in_native_config(self) -> None:
+        suite = runner.load_suite("swebench-verified", tier="smoke")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="zvec-grep",
+            agent="opencode",
+            model="aliyun-glm-5.2",
+            job_name="opencode-native-zvec-test",
+        )
+
+        agent_index = command.index("--agent")
+        self.assertEqual(
+            command[agent_index + 1], runner.ZVEC_OPENCODE_IMPORT_PATH
+        )
+        config_argument = next(
+            value for value in command if value.startswith("opencode_config=")
+        )
+        config = json.loads(config_argument.removeprefix("opencode_config="))
+        self.assertEqual(
+            config["mcp"]["zvec_grep"],
+            {
+                "type": "remote",
+                "url": "http://127.0.0.1:7999/mcp",
+                "enabled": True,
+                "timeout": 600_000,
+                "oauth": False,
+            },
         )
 
     def test_remote_auth_rejects_published_package_without_workspace_grants(

@@ -42,12 +42,6 @@ ZVEC_QWEN_CODE_IMPORT_PATH = (
     "zg_bench.agents.zvec_qwen_code:ZvecQwenCode"
 )
 ZVEC_OPENCODE_IMPORT_PATH = "zg_bench.agents.zvec_opencode:ZvecOpenCode"
-OPENCODE_ACP_IMPORT_PATH = "zg_bench.agents.opencode_acp:OpenCodeACP"
-OPENCODE_ACP_REGISTRY_ENTRY_PATH = (
-    Path(__file__).resolve().parent
-    / "agents"
-    / f"opencode-{OPENCODE_VERSION}.json"
-)
 SETUP_CACHE_DIR = BENCHMARKS_DIR / ".cache" / "agent-setup"
 LOCAL_PACKAGE_DIR = SETUP_CACHE_DIR / "local-package"
 LOCAL_NPM_CACHE_DIR = SETUP_CACHE_DIR / "npm-cache"
@@ -674,14 +668,10 @@ def build_harbor_command(
             harbor_model = QWEN_CODE_DASHSCOPE_MODEL
             agent_kwargs.append(f"base_url={QWEN_CODE_DASHSCOPE_BASE_URL}")
     elif agent == _OPENCODE_AGENT:
+        agent_kwargs.append(f"version={OPENCODE_VERSION}")
         opencode_model_id = _opencode_dashscope_model_id(agent, model)
         if opencode_model_id is not None:
-            harbor_agent = OPENCODE_ACP_IMPORT_PATH
             harbor_model = f"dashscope/{opencode_model_id}"
-            agent_kwargs.append(
-                "registry_entry_path="
-                + str(OPENCODE_ACP_REGISTRY_ENTRY_PATH.resolve())
-            )
             opencode_config = {
                 "provider": {
                     "dashscope": {
@@ -699,12 +689,24 @@ def build_harbor_command(
                     }
                 }
             }
+            if profile == "zvec-grep":
+                # ZvecGrepMixin provisions this entry during setup, but the
+                # native OpenCode adapter renders opencode.json again just
+                # before execution. Include the managed MCP entry in that
+                # render so the provider config does not overwrite it.
+                opencode_config["mcp"] = {
+                    "zvec_grep": {
+                        "type": "remote",
+                        "url": "http://127.0.0.1:7999/mcp",
+                        "enabled": True,
+                        "timeout": 600_000,
+                        "oauth": False,
+                    }
+                }
             agent_kwargs.append(
                 "opencode_config="
                 + json.dumps(opencode_config, separators=(",", ":"))
             )
-        else:
-            agent_kwargs.append(f"version={OPENCODE_VERSION}")
 
     if profile == "zvec-grep":
         if agent not in _ZVEC_AGENT_IMPORT_PATHS:

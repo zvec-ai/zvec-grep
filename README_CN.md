@@ -175,8 +175,8 @@ Code、OpenCode 和 Cursor 写入用户级 MCP 配置；Codex 和 Claude Code �
 
 本地模型通过 `node-llama-cpp`、Transformers.js 或原生 Model2Vec Safetensors adapter
 运行，适合把代码检索留在本机。
-可以参考[本地 Embedding 模型选型指南](docs/embedding.md)，按使用场景比较
-模型大小、上下文长度和兼容性。
+可以参考 [Embedding 模型选型指南](docs/embedding.md)，按使用场景比较
+实测检索质量、资源占用和上下文长度。
 
 ```bash
 zg index --embedding local/embeddinggemma-300m
