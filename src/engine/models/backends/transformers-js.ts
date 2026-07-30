@@ -4,12 +4,10 @@ import type { Content, TextContent } from "../../types.js";
 import { defaultHome } from "../../utils/path.js";
 import {
   BaseEmbeddingModel,
+  type CreateEmbeddingModelOptions,
+  type EmbeddingModelInfo,
+  type EmbeddingResult,
   type NormalizedEmbeddingOptions,
-} from "../embeddings.js";
-import type {
-  CreateEmbeddingModelOptions,
-  EmbeddingModelInfo,
-  EmbeddingResult,
 } from "../embeddings.js";
 import type { TransformersJsEmbeddingCatalogEntry } from "../catalog.js";
 

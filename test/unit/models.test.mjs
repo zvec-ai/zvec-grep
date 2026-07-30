@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BaseEmbeddingModel } from "../../dist/engine/models/embeddings.js";
-import { getEmbeddingModelCatalogEntry } from "../../dist/engine/models/catalog.js";
+import {
+  getEmbeddingModelCatalogEntry,
+  listEmbeddingModels,
+} from "../../dist/engine/models/catalog.js";
 import { createEmbeddingModel } from "../../dist/engine/models/factory.js";
+import { LlamaCppEmbeddingModel } from "../../dist/engine/models/backends/llama-cpp.js";
+import { Model2VecEmbeddingModel } from "../../dist/engine/models/backends/model2vec.js";
 import {
   Qwen37TextEmbeddingModel,
   Qwen3VlEmbeddingModel,
@@ -423,41 +428,41 @@ test("Qwen VL model validates images, encodes bytes, and accepts provider index 
 
 test("embedding factory resolves catalog entries and rejects unknown models", () => {
   const options = { apiKey: "secret", endpoint: "https://example.test" };
-  assert.ok(
-    createEmbeddingModel("qwen/text-embedding-v4", options) instanceof
-      QwenTextEmbeddingV4Model,
+  const expectedModelClasses = new Map([
+    ["local/embeddinggemma-300m", LlamaCppEmbeddingModel],
+    ["local/qwen3-embedding-0.6b", LlamaCppEmbeddingModel],
+    ["qwen/text-embedding-v4", QwenTextEmbeddingV4Model],
+    ["qwen/qwen3.7-text-embedding", Qwen37TextEmbeddingModel],
+    ["qwen/qwen3-vl-embedding", Qwen3VlEmbeddingModel],
+    ["local/bge-small-en-v1.5", TransformersJsEmbeddingModel],
+    ["local/all-minilm-l6-v2", TransformersJsEmbeddingModel],
+    ["local/potion-base-8m", Model2VecEmbeddingModel],
+    ["local/potion-code-16m-v2", Model2VecEmbeddingModel],
+    ["local/multilingual-e5-small", TransformersJsEmbeddingModel],
+    ["local/jina-embeddings-v2-base-code", TransformersJsEmbeddingModel],
+    ["local/gte-modernbert-base", TransformersJsEmbeddingModel],
+    ["local/nomic-embed-text-v1.5", TransformersJsEmbeddingModel],
+  ]);
+  const catalogEntries = listEmbeddingModels();
+
+  assert.deepEqual(
+    catalogEntries.map((entry) => entry.reference).sort(),
+    [...expectedModelClasses.keys()].sort(),
   );
-  assert.ok(
-    createEmbeddingModel("qwen/qwen3.7-text-embedding", options) instanceof
-      Qwen37TextEmbeddingModel,
-  );
-  assert.ok(
-    createEmbeddingModel("qwen/qwen3-vl-embedding", options) instanceof
-      Qwen3VlEmbeddingModel,
-  );
-  assert.equal(
-    createEmbeddingModel("local/embeddinggemma-300m", options).info.reference,
-    "local/embeddinggemma-300m",
-  );
-  assert.equal(
-    createEmbeddingModel("local/qwen3-embedding-0.6b", options).info.reference,
-    "local/qwen3-embedding-0.6b",
-  );
-  assert.ok(
-    createEmbeddingModel("local/bge-small-en-v1.5", options) instanceof
-      TransformersJsEmbeddingModel,
-  );
-  for (const reference of [
-    "local/multilingual-e5-small",
-    "local/jina-embeddings-v2-base-code",
-    "local/gte-modernbert-base",
-    "local/nomic-embed-text-v1.5",
-  ]) {
+
+  for (const entry of catalogEntries) {
+    const model = createEmbeddingModel(entry.reference, options);
+    const ExpectedModel = expectedModelClasses.get(entry.reference);
+
     assert.ok(
-      createEmbeddingModel(reference, options) instanceof
-        TransformersJsEmbeddingModel,
+      model instanceof ExpectedModel,
+      `${entry.reference} resolved to ${model.constructor.name}`,
     );
+    assert.equal(model.info.reference, entry.reference);
+    assert.equal(model.info.dimension, entry.dimension);
+    assert.equal(model.info.metric, entry.metric);
   }
+
   assert.throws(
     () => createEmbeddingModel("missing", options),
     /not in the zvec-grep catalog/,

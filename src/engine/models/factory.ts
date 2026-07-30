@@ -1,5 +1,8 @@
 import { EngineError } from "../errors/index.js";
-import { getEmbeddingModelCatalogEntry } from "./catalog.js";
+import {
+  getEmbeddingModelCatalogEntry,
+  type QwenEmbeddingCatalogEntry,
+} from "./catalog.js";
 import type {
   CreateEmbeddingModelOptions,
   EmbeddingModel,
@@ -12,6 +15,7 @@ import {
   QwenTextEmbeddingV4Model,
 } from "./backends/qwen.js";
 import { TransformersJsEmbeddingModel } from "./backends/transformers-js.js";
+
 export function createEmbeddingModel(
   reference: string,
   options: CreateEmbeddingModelOptions = {},
@@ -24,25 +28,44 @@ export function createEmbeddingModel(
     });
   }
 
-  if (catalogEntry.backend === "llama-cpp") {
-    return new LlamaCppEmbeddingModel(catalogEntry, options);
+  switch (catalogEntry.backend) {
+    case "llama-cpp":
+      return new LlamaCppEmbeddingModel(catalogEntry, options);
+    case "model2vec":
+      return new Model2VecEmbeddingModel(catalogEntry, options);
+    case "transformers-js":
+      return new TransformersJsEmbeddingModel(catalogEntry, options);
+    case "qwen":
+      return createQwenEmbeddingModel(catalogEntry, options);
+    default:
+      return unsupportedCatalogEntry(catalogEntry);
   }
+}
 
-  if (catalogEntry.backend === "model2vec") {
-    return new Model2VecEmbeddingModel(catalogEntry, options);
+function createQwenEmbeddingModel(
+  entry: QwenEmbeddingCatalogEntry,
+  options: CreateEmbeddingModelOptions,
+): EmbeddingModel {
+  switch (entry.kind) {
+    case "multimodal":
+      return new Qwen3VlEmbeddingModel(entry, options);
+    case "text":
+      switch (entry.model) {
+        case "text-embedding-v4":
+          return new QwenTextEmbeddingV4Model(entry, options);
+        case "qwen3.7-text-embedding":
+          return new Qwen37TextEmbeddingModel(entry, options);
+        default:
+          return unsupportedCatalogEntry(entry);
+      }
+    default:
+      return unsupportedCatalogEntry(entry);
   }
+}
 
-  if (catalogEntry.backend === "transformers-js") {
-    return new TransformersJsEmbeddingModel(catalogEntry, options);
-  }
-
-  if (catalogEntry.kind === "multimodal") {
-    return new Qwen3VlEmbeddingModel(catalogEntry, options);
-  }
-
-  if (catalogEntry.model === "text-embedding-v4") {
-    return new QwenTextEmbeddingV4Model(catalogEntry, options);
-  }
-
-  return new Qwen37TextEmbeddingModel(catalogEntry, options);
+function unsupportedCatalogEntry(entry: never): never {
+  throw new EngineError("Embedding catalog entry is not implemented", {
+    code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_MODEL_NOT_IMPLEMENTED",
+    context: JSON.stringify(entry),
+  });
 }

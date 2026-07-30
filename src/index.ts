@@ -65,7 +65,4 @@ export type {
   EmbeddingModelInfo,
   EmbeddingOptions,
   EmbeddingResult,
-  RankingCandidate,
-  RankingModel,
-  RankingScore,
 } from "./engine/models/index.js";

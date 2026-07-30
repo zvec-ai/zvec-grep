@@ -1,15 +1,13 @@
-import { EngineError, type EngineErrorCode } from "../../errors/index.js";
 import { globalConfigPath } from "../../config.js";
+import { EngineError, type EngineErrorCode } from "../../errors/index.js";
 import { resolveRemoteEmbeddingEndpoint } from "../../remote-embedding.js";
 import type { Content, ImageFormat, TextContent } from "../../types.js";
 import {
   BaseEmbeddingModel,
+  type CreateEmbeddingModelOptions,
+  type EmbeddingModelInfo,
+  type EmbeddingResult,
   type NormalizedEmbeddingOptions,
-} from "../embeddings.js";
-import type {
-  CreateEmbeddingModelOptions,
-  EmbeddingModelInfo,
-  EmbeddingResult,
 } from "../embeddings.js";
 import type {
   QwenMultimodalEmbeddingCatalogEntry,
@@ -23,22 +21,29 @@ import type {
 const DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS = 60_000;
 
 type QwenTextEmbeddingSpec = {
-  model: string;
   displayName: string;
   errorCodePrefix: string;
 };
 
 const QWEN_TEXT_EMBEDDING_V4_SPEC = {
-  model: "text-embedding-v4",
   displayName: "Qwen text-embedding-v4",
   errorCodePrefix: "QWEN_TEXT_EMBEDDING_V4",
 } as const satisfies QwenTextEmbeddingSpec;
 
 const QWEN37_TEXT_EMBEDDING_SPEC = {
-  model: "qwen3.7-text-embedding",
   displayName: "Qwen3.7 text embedding",
   errorCodePrefix: "QWEN37_TEXT_EMBEDDING",
 } as const satisfies QwenTextEmbeddingSpec;
+
+type QwenTextEmbeddingV4CatalogEntry = Extract<
+  QwenTextEmbeddingCatalogEntry,
+  { model: "text-embedding-v4" }
+>;
+
+type Qwen37TextEmbeddingCatalogEntry = Extract<
+  QwenTextEmbeddingCatalogEntry,
+  { model: "qwen3.7-text-embedding" }
+>;
 
 abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
   readonly info: EmbeddingModelInfo;
@@ -212,7 +217,7 @@ abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
 
 export class QwenTextEmbeddingV4Model extends QwenTextEmbeddingModel {
   constructor(
-    entry: QwenTextEmbeddingCatalogEntry,
+    entry: QwenTextEmbeddingV4CatalogEntry,
     options: CreateEmbeddingModelOptions,
   ) {
     super(entry, QWEN_TEXT_EMBEDDING_V4_SPEC, options);
@@ -221,7 +226,7 @@ export class QwenTextEmbeddingV4Model extends QwenTextEmbeddingModel {
 
 export class Qwen37TextEmbeddingModel extends QwenTextEmbeddingModel {
   constructor(
-    entry: QwenTextEmbeddingCatalogEntry,
+    entry: Qwen37TextEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
   ) {
     super(entry, QWEN37_TEXT_EMBEDDING_SPEC, options);
