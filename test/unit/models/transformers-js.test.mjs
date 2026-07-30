@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   TransformersJsEmbeddingModel,
   setTransformersJsRuntimeForTesting,
-} from "../../dist/engine/models/backends/transformers-js.js";
+} from "../../../dist/engine/models/backends/transformers-js.js";
 
 function entry(overrides = {}) {
   return {

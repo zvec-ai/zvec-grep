@@ -5,8 +5,8 @@ import test from "node:test";
 import {
   Model2VecEmbeddingModel,
   setModel2VecRuntimeForTesting,
-} from "../../dist/engine/models/backends/model2vec.js";
-import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
+} from "../../../dist/engine/models/backends/model2vec.js";
+import { createTemporaryDirectory } from "../../helpers/fixtures.mjs";
 
 function entry(overrides = {}) {
   return {

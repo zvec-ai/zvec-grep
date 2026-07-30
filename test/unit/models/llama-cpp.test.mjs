@@ -5,8 +5,8 @@ import test from "node:test";
 import {
   LlamaCppEmbeddingModel,
   setLlamaCppRuntimeForTesting,
-} from "../../dist/engine/models/backends/llama-cpp.js";
-import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
+} from "../../../dist/engine/models/backends/llama-cpp.js";
+import { createTemporaryDirectory } from "../../helpers/fixtures.mjs";
 
 function entry(overrides = {}) {
   return {

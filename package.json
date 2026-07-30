@@ -42,11 +42,11 @@
     "lint": "eslint .",
     "prepack": "npm run build",
     "test:coverage": "npm run build && c8 --all --include=dist/**/*.js --check-coverage --lines=80 --statements=80 --functions=80 --branches=80 npm run test:all",
-    "test:all": "node --test --test-concurrency=1 test/*.test.mjs && node --test --test-concurrency=1 test/unit/*.test.mjs && node --test --test-concurrency=1 test/integration/*.test.mjs && node --test --test-concurrency=1 test/e2e/*.test.mjs",
+    "test:all": "node --test --test-concurrency=1 test/*.test.mjs && node --test --test-concurrency=1 test/unit/*.test.mjs test/unit/models/*.test.mjs && node --test --test-concurrency=1 test/integration/*.test.mjs && node --test --test-concurrency=1 test/e2e/*.test.mjs",
     "test:e2e": "npm run build && node --test --test-concurrency=1 test/e2e/*.test.mjs",
     "test:integration": "npm run build && node --test --test-concurrency=1 test/*.test.mjs && node --test --test-concurrency=1 test/integration/*.test.mjs",
     "test:package": "npm run build && node --test --test-concurrency=1 test/package/*.test.mjs",
-    "test:unit": "npm run build && node --test --test-concurrency=1 test/unit/*.test.mjs",
+    "test:unit": "npm run build && node --test --test-concurrency=1 test/unit/*.test.mjs test/unit/models/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && npm run test:all"
   },
