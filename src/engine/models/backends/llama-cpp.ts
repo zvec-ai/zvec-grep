@@ -64,6 +64,14 @@ type NodeLlamaCppModule = {
 };
 
 type NodeLlamaCppLoader = () => Promise<NodeLlamaCppModule>;
+type LlamaCppRuntimeState = {
+  failedGpuInitModes: Set<LlamaGpuSelection>;
+  cpuCompatibleFallbackWarningShown: boolean;
+};
+type LlamaCppDependencies = {
+  loadRuntime: NodeLlamaCppLoader;
+  runtimeState: LlamaCppRuntimeState;
+};
 
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
 const GGUF_MAGIC = Buffer.from("GGUF");
@@ -76,11 +84,6 @@ const DEFAULT_DARWIN_ARM64_CMAKE_OPTIONS = {
   GGML_NATIVE: "OFF",
 } as const;
 const SUPPRESSED_LLAMA_CPP_LOG_MESSAGES = new Set(["Failed to get swap info"]);
-
-let nodeLlamaCppImport: Promise<NodeLlamaCppModule> | null = null;
-let nodeLlamaCppLoader: NodeLlamaCppLoader = defaultNodeLlamaCppLoader;
-const failedGpuInitModes = new Set<LlamaGpuSelection>();
-let cpuCompatibleFallbackWarningShown = false;
 
 async function defaultNodeLlamaCppLoader(): Promise<NodeLlamaCppModule> {
   const moduleName = "node-llama-cpp";
@@ -112,19 +115,18 @@ function installDarwinMetalResidencyMitigation(): void {
   process.env.GGML_METAL_NO_RESIDENCY ??= "1";
 }
 
-async function loadNodeLlamaCpp(): Promise<NodeLlamaCppModule> {
-  nodeLlamaCppImport ??= nodeLlamaCppLoader();
-  return nodeLlamaCppImport;
-}
+let defaultRuntimeImport: Promise<NodeLlamaCppModule> | null = null;
 
-export function setLlamaCppRuntimeForTesting(
-  loader: NodeLlamaCppLoader | null,
-): void {
-  nodeLlamaCppImport = null;
-  nodeLlamaCppLoader = loader ?? defaultNodeLlamaCppLoader;
-  failedGpuInitModes.clear();
-  cpuCompatibleFallbackWarningShown = false;
-}
+const defaultDependencies: LlamaCppDependencies = {
+  loadRuntime() {
+    defaultRuntimeImport ??= defaultNodeLlamaCppLoader();
+    return defaultRuntimeImport;
+  },
+  runtimeState: {
+    failedGpuInitModes: new Set<LlamaGpuSelection>(),
+    cpuCompatibleFallbackWarningShown: false,
+  },
+};
 
 export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
   readonly info: EmbeddingModelInfo;
@@ -132,7 +134,9 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
   private readonly modelCacheDir: string;
   private readonly gpu: LlamaGpuSelection;
   private readonly parallelism?: number;
+  private readonly dependencies: LlamaCppDependencies;
 
+  private runtimeImport: Promise<NodeLlamaCppModule> | null = null;
   private llama: Llama | null = null;
   private model: LlamaModel | null = null;
   private contexts: LlamaEmbeddingContext[] = [];
@@ -145,6 +149,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
   constructor(
     private readonly entry: LlamaCppEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<LlamaCppDependencies> = {},
   ) {
     super();
 
@@ -168,6 +173,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     this.parallelism = resolveParallelismOverride(
       process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM,
     );
+    this.dependencies = { ...defaultDependencies, ...dependencies };
   }
 
   protected async doEmbed(
@@ -261,8 +267,13 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     }
   }
 
+  private async loadRuntime(): Promise<NodeLlamaCppModule> {
+    this.runtimeImport ??= this.dependencies.loadRuntime();
+    return await this.runtimeImport;
+  }
+
   private async loadLlamaWithFallback(): Promise<Llama> {
-    const runtime = await loadNodeLlamaCpp();
+    const runtime = await this.loadRuntime();
     const requestedGpu = this.usingCpuFallback ? false : this.gpu;
     const load = (gpu: LlamaGpuSelection) =>
       runtime.getLlama({
@@ -279,7 +290,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
       return this.llama;
     }
 
-    if (failedGpuInitModes.has(requestedGpu)) {
+    if (this.dependencies.runtimeState.failedGpuInitModes.has(requestedGpu)) {
       process.stderr.write(
         `zvec-grep warning: skipping previously failed llama.cpp GPU init${requestedGpu === "auto" ? "" : ` for device=${requestedGpu}`}, using CPU.\n`,
       );
@@ -291,7 +302,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     try {
       this.llama = await load(requestedGpu);
     } catch (error) {
-      failedGpuInitModes.add(requestedGpu);
+      this.dependencies.runtimeState.failedGpuInitModes.add(requestedGpu);
       process.stderr.write(
         `zvec-grep warning: llama.cpp GPU init failed (${formatErrorMessage(error)}), falling back to CPU.\n`,
       );
@@ -308,8 +319,8 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     try {
       return await load(false);
     } catch (error) {
-      if (!cpuCompatibleFallbackWarningShown) {
-        cpuCompatibleFallbackWarningShown = true;
+      if (!this.dependencies.runtimeState.cpuCompatibleFallbackWarningShown) {
+        this.dependencies.runtimeState.cpuCompatibleFallbackWarningShown = true;
         process.stderr.write(
           `zvec-grep warning: CPU-only llama.cpp backend unavailable (${formatErrorMessage(error)}); using packaged backend with GPU model offloading disabled.\n`,
         );
@@ -477,7 +488,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
   private async resolveModelPath(): Promise<string> {
     mkdirSync(this.modelCacheDir, { recursive: true });
 
-    const runtime = await loadNodeLlamaCpp();
+    const runtime = await this.loadRuntime();
     const modelPath = await runtime.resolveModelFile(this.entry.uri, {
       directory: this.modelCacheDir,
       cli: false,

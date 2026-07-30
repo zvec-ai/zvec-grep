@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  LlamaCppEmbeddingModel,
-  setLlamaCppRuntimeForTesting,
-} from "../../../dist/engine/models/backends/llama-cpp.js";
+import { LlamaCppEmbeddingModel } from "../../../dist/engine/models/backends/llama-cpp.js";
 import { createTemporaryDirectory } from "../../helpers/fixtures.mjs";
 
 function entry(overrides = {}) {
@@ -31,7 +28,7 @@ async function ggufFile(t, name = "model.gguf", contents = "GGUFpayload") {
   return { root, path };
 }
 
-function fakeRuntime(modelPath, options = {}) {
+function createDependencies(modelPath, options = {}) {
   const calls = {
     llama: [],
     model: [],
@@ -107,7 +104,16 @@ function fakeRuntime(modelPath, options = {}) {
       return makeLlama(llamaOptions.gpu);
     },
   };
-  return { runtime, calls };
+  return {
+    dependencies: {
+      loadRuntime: async () => runtime,
+      runtimeState: {
+        failedGpuInitModes: new Set(),
+        cpuCompatibleFallbackWarningShown: false,
+      },
+    },
+    calls,
+  };
 }
 
 async function captureStderr(callback) {
@@ -126,12 +132,10 @@ async function captureStderr(callback) {
 
 test("local embedding loads GGUF, formats and truncates text, parallelizes, caches, and disposes", async (t) => {
   const modelFile = await ggufFile(t);
-  const fake = fakeRuntime(modelFile.path);
+  const setup = createDependencies(modelFile.path);
   const previousParallelism = process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM;
   process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM = "2";
-  setLlamaCppRuntimeForTesting(async () => fake.runtime);
   t.after(() => {
-    setLlamaCppRuntimeForTesting(null);
     if (previousParallelism === undefined) {
       delete process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM;
     } else {
@@ -139,10 +143,14 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
     }
   });
 
-  const model = new LlamaCppEmbeddingModel(entry(), {
-    modelCacheDir: modelFile.root,
-    device: "cpu",
-  });
+  const model = new LlamaCppEmbeddingModel(
+    entry(),
+    {
+      modelCacheDir: modelFile.root,
+      device: "cpu",
+    },
+    setup.dependencies,
+  );
   const result = await model.embed(
     [
       { kind: "text", text: "abcdefghijk" },
@@ -154,22 +162,22 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
   const vectors = result.vectors;
   assert.equal(vectors.length, 3);
   assert.deepEqual(result.truncated, [0, 1, 2]);
-  assert.equal(fake.calls.contexts.length, 2);
-  assert.equal(fake.calls.contexts[0].threads, 4);
+  assert.equal(setup.calls.contexts.length, 2);
+  assert.equal(setup.calls.contexts[0].threads, 4);
   assert.equal(
-    fake.calls.texts.every((text) => text.length <= 2),
+    setup.calls.texts.every((text) => text.length <= 2),
     true,
   );
-  assert.equal(fake.calls.model[0].gpuLayers, 0);
-  assert.equal(fake.calls.resolveOptions.cli, false);
+  assert.equal(setup.calls.model[0].gpuLayers, 0);
+  assert.equal(setup.calls.resolveOptions.cli, false);
 
   await model.embed([{ kind: "text", text: "cached" }]);
-  assert.equal(fake.calls.model.length, 1);
+  assert.equal(setup.calls.model.length, 1);
   await model.dispose();
   await model.dispose();
-  assert.equal(fake.calls.disposedContexts, 2);
-  assert.equal(fake.calls.disposedModels, 1);
-  assert.equal(fake.calls.disposedLlamas, 1);
+  assert.equal(setup.calls.disposedContexts, 2);
+  assert.equal(setup.calls.disposedModels, 1);
+  assert.equal(setup.calls.disposedLlamas, 1);
   await assert.rejects(
     model.embed([{ kind: "text", text: "after dispose" }]),
     /model is disposed/,
@@ -178,15 +186,14 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
 
 test("local embedding supports qwen query format, automatic GPU parallelism, and context partial capacity", async (t) => {
   const modelFile = await ggufFile(t);
-  const fake = fakeRuntime(modelFile.path, {
+  const setup = createDependencies(modelFile.path, {
     failContextAfter: 2,
     trainContextSize: 200,
   });
-  setLlamaCppRuntimeForTesting(async () => fake.runtime);
-  t.after(() => setLlamaCppRuntimeForTesting(null));
   const model = new LlamaCppEmbeddingModel(
     entry({ format: "qwen3", contextSize: 100 }),
     { modelCacheDir: modelFile.root, device: "metal" },
+    setup.dependencies,
   );
   const { vectors } = await model.embed(
     Array.from({ length: 4 }, (_, index) => ({
@@ -196,52 +203,47 @@ test("local embedding supports qwen query format, automatic GPU parallelism, and
     { purpose: "query" },
   );
   assert.equal(vectors.length, 4);
-  assert.equal(fake.calls.contexts.length, 3);
-  assert.match(fake.calls.texts[0], /^Instruct:/);
-  assert.equal(fake.calls.contexts[0].threads, 0);
-  assert.equal("gpuLayers" in fake.calls.model[0], false);
+  assert.equal(setup.calls.contexts.length, 3);
+  assert.match(setup.calls.texts[0], /^Instruct:/);
+  assert.equal(setup.calls.contexts[0].threads, 0);
+  assert.equal("gpuLayers" in setup.calls.model[0], false);
   await model.dispose();
 });
 
-test("local embedding falls back from GPU initialization and cached failed modes to CPU", async (t) => {
+test("local embedding falls back from GPU initialization to CPU", async (t) => {
   const modelFile = await ggufFile(t);
-  const first = fakeRuntime(modelFile.path, { failGpu: true });
-  setLlamaCppRuntimeForTesting(async () => first.runtime);
-  t.after(() => setLlamaCppRuntimeForTesting(null));
+  const setup = createDependencies(modelFile.path, { failGpu: true });
   const output = await captureStderr(async () => {
-    const model = new LlamaCppEmbeddingModel(entry(), {
-      modelCacheDir: modelFile.root,
-      device: "metal",
-    });
+    const model = new LlamaCppEmbeddingModel(
+      entry(),
+      {
+        modelCacheDir: modelFile.root,
+        device: "metal",
+      },
+      setup.dependencies,
+    );
     await model.embed([{ kind: "text", text: "value" }]);
     await model.dispose();
   });
   assert.match(output.messages.join(""), /GPU init failed/);
   assert.deepEqual(
-    first.calls.llama.map((item) => item.gpu),
+    setup.calls.llama.map((item) => item.gpu),
     ["metal", false],
   );
-
-  const second = fakeRuntime(modelFile.path);
-  setLlamaCppRuntimeForTesting(async () => second.runtime);
-  const model = new LlamaCppEmbeddingModel(entry(), {
-    modelCacheDir: modelFile.root,
-    device: "cpu",
-  });
-  await model.embed([{ kind: "text", text: "value" }]);
-  await model.dispose();
 });
 
 test("local embedding falls back to packaged backend and retries model/context GPU failures", async (t) => {
   const modelFile = await ggufFile(t);
-  const cpuFallback = fakeRuntime(modelFile.path, { failCpu: true });
-  setLlamaCppRuntimeForTesting(async () => cpuFallback.runtime);
-  t.after(() => setLlamaCppRuntimeForTesting(null));
+  const cpuFallback = createDependencies(modelFile.path, { failCpu: true });
   const cpuOutput = await captureStderr(async () => {
-    const model = new LlamaCppEmbeddingModel(entry(), {
-      modelCacheDir: modelFile.root,
-      device: "cpu",
-    });
+    const model = new LlamaCppEmbeddingModel(
+      entry(),
+      {
+        modelCacheDir: modelFile.root,
+        device: "cpu",
+      },
+      cpuFallback.dependencies,
+    );
     await model.embed([{ kind: "text", text: "value" }]);
     await model.dispose();
   });
@@ -254,13 +256,18 @@ test("local embedding falls back to packaged backend and retries model/context G
     [false, "auto"],
   );
 
-  const modelRetry = fakeRuntime(modelFile.path, { failFirstModel: true });
-  setLlamaCppRuntimeForTesting(async () => modelRetry.runtime);
+  const modelRetry = createDependencies(modelFile.path, {
+    failFirstModel: true,
+  });
   const retryOutput = await captureStderr(async () => {
-    const model = new LlamaCppEmbeddingModel(entry(), {
-      modelCacheDir: modelFile.root,
-      device: "auto",
-    });
+    const model = new LlamaCppEmbeddingModel(
+      entry(),
+      {
+        modelCacheDir: modelFile.root,
+        device: "auto",
+      },
+      modelRetry.dependencies,
+    );
     await model.embed([{ kind: "text", text: "value" }]);
     await model.dispose();
   });
@@ -274,12 +281,15 @@ test("local embedding rejects invalid downloaded GGUF and removes corrupt artifa
     ["NOPE invalid binary", /not a valid GGUF/],
   ]) {
     const modelFile = await ggufFile(t, `bad-${Math.random()}.gguf`, contents);
-    const fake = fakeRuntime(modelFile.path);
-    setLlamaCppRuntimeForTesting(async () => fake.runtime);
-    const model = new LlamaCppEmbeddingModel(entry(), {
-      modelCacheDir: modelFile.root,
-      device: "cpu",
-    });
+    const setup = createDependencies(modelFile.path);
+    const model = new LlamaCppEmbeddingModel(
+      entry(),
+      {
+        modelCacheDir: modelFile.root,
+        device: "cpu",
+      },
+      setup.dependencies,
+    );
     await assert.rejects(
       model.embed([{ kind: "text", text: "value" }]),
       (error) =>
@@ -287,21 +297,22 @@ test("local embedding rejects invalid downloaded GGUF and removes corrupt artifa
         message.test(String(error.cause?.message)),
     );
   }
-  setLlamaCppRuntimeForTesting(null);
 });
 
 test("local embedding reports context and embedding runtime failures", async (t) => {
   const modelFile = await ggufFile(t);
-  const failed = fakeRuntime(modelFile.path, {
+  const setup = createDependencies(modelFile.path, {
     failContextAfter: 0,
     failEmbedding: true,
   });
-  setLlamaCppRuntimeForTesting(async () => failed.runtime);
-  t.after(() => setLlamaCppRuntimeForTesting(null));
-  const model = new LlamaCppEmbeddingModel(entry(), {
-    modelCacheDir: modelFile.root,
-    device: "cpu",
-  });
+  const model = new LlamaCppEmbeddingModel(
+    entry(),
+    {
+      modelCacheDir: modelFile.root,
+      device: "cpu",
+    },
+    setup.dependencies,
+  );
   await assert.rejects(
     model.embed([{ kind: "text", text: "value" }]),
     /embedding failed/,

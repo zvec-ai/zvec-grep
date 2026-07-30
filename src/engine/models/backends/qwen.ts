@@ -20,6 +20,14 @@ import type {
 
 const DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS = 60_000;
 
+type QwenDependencies = {
+  fetch: typeof globalThis.fetch;
+};
+
+const defaultDependencies: QwenDependencies = {
+  fetch: (...args) => globalThis.fetch(...args),
+};
+
 type QwenTextEmbeddingSpec = {
   displayName: string;
   errorCodePrefix: string;
@@ -53,11 +61,13 @@ abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
   private readonly endpoint: string;
   private readonly displayName: string;
   private readonly errorCodePrefix: string;
+  private readonly dependencies: QwenDependencies;
 
   constructor(
     entry: QwenTextEmbeddingCatalogEntry,
     spec: QwenTextEmbeddingSpec,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<QwenDependencies>,
   ) {
     super();
 
@@ -76,6 +86,7 @@ abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
     };
     this.displayName = spec.displayName;
     this.errorCodePrefix = spec.errorCodePrefix;
+    this.dependencies = { ...defaultDependencies, ...dependencies };
 
     const apiKey = options.apiKey?.trim() ?? "";
     if (apiKey.length === 0) {
@@ -113,7 +124,7 @@ abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
     const signal = remoteEmbeddingSignal(options.signal);
 
     try {
-      response = await fetch(this.endpoint, {
+      response = await this.dependencies.fetch(this.endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
@@ -219,8 +230,9 @@ export class QwenTextEmbeddingV4Model extends QwenTextEmbeddingModel {
   constructor(
     entry: QwenTextEmbeddingV4CatalogEntry,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<QwenDependencies> = {},
   ) {
-    super(entry, QWEN_TEXT_EMBEDDING_V4_SPEC, options);
+    super(entry, QWEN_TEXT_EMBEDDING_V4_SPEC, options, dependencies);
   }
 }
 
@@ -228,8 +240,9 @@ export class Qwen37TextEmbeddingModel extends QwenTextEmbeddingModel {
   constructor(
     entry: Qwen37TextEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<QwenDependencies> = {},
   ) {
-    super(entry, QWEN37_TEXT_EMBEDDING_SPEC, options);
+    super(entry, QWEN37_TEXT_EMBEDDING_SPEC, options, dependencies);
   }
 }
 
@@ -251,14 +264,17 @@ export class Qwen3VlEmbeddingModel extends BaseEmbeddingModel {
   private readonly entry: QwenMultimodalEmbeddingCatalogEntry;
   private readonly apiKey: string;
   private readonly endpoint: string;
+  private readonly dependencies: QwenDependencies;
 
   constructor(
     entry: QwenMultimodalEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<QwenDependencies> = {},
   ) {
     super();
 
     this.entry = entry;
+    this.dependencies = { ...defaultDependencies, ...dependencies };
     this.info = {
       reference: entry.reference,
       provider: entry.provider,
@@ -319,7 +335,7 @@ export class Qwen3VlEmbeddingModel extends BaseEmbeddingModel {
     const signal = remoteEmbeddingSignal(options.signal);
 
     try {
-      response = await fetch(this.endpoint, {
+      response = await this.dependencies.fetch(this.endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,

@@ -14,14 +14,27 @@ const qwen37TextEntry = getEmbeddingModelCatalogEntry(
 );
 const qwenVlEntry = getEmbeddingModelCatalogEntry("qwen/qwen3-vl-embedding");
 
-async function withFetch(mock, callback) {
-  const original = globalThis.fetch;
-  globalThis.fetch = mock;
-  try {
-    return await callback();
-  } finally {
-    globalThis.fetch = original;
-  }
+function createDependencies() {
+  let currentFetch;
+  return {
+    dependencies: {
+      fetch(...args) {
+        if (!currentFetch) {
+          throw new Error("Fetch dependency is not configured");
+        }
+        return currentFetch(...args);
+      },
+    },
+    async withFetch(fetch, callback) {
+      const previousFetch = currentFetch;
+      currentFetch = fetch;
+      try {
+        return await callback();
+      } finally {
+        currentFetch = previousFetch;
+      }
+    },
+  };
 }
 
 function jsonResponse(body, init = {}) {
@@ -32,6 +45,7 @@ function jsonResponse(body, init = {}) {
 }
 
 test("Qwen text model sends ordered batches and validates all response shapes", async () => {
+  const { dependencies, withFetch } = createDependencies();
   assert.throws(
     () => new QwenTextEmbeddingV4Model(qwenTextEntry, { apiKey: " " }),
     /requires an API key/,
@@ -44,10 +58,14 @@ test("Qwen text model sends ordered batches and validates all response shapes", 
       }),
     /requires an endpoint/,
   );
-  const model = new QwenTextEmbeddingV4Model(qwenTextEntry, {
-    apiKey: "secret-value",
-    endpoint: " https://example.test/embeddings ",
-  });
+  const model = new QwenTextEmbeddingV4Model(
+    qwenTextEntry,
+    {
+      apiKey: "secret-value",
+      endpoint: " https://example.test/embeddings ",
+    },
+    dependencies,
+  );
   let request;
   const result = await withFetch(
     async (_url, init) => {
@@ -165,15 +183,20 @@ test("Qwen text model sends ordered batches and validates all response shapes", 
 });
 
 test("Qwen3.7 text embedding uses its model name and expanded limits", async () => {
+  const { dependencies, withFetch } = createDependencies();
   assert.throws(
     () => new Qwen37TextEmbeddingModel(qwen37TextEntry, { apiKey: " " }),
     /requires an API key/,
   );
 
-  const model = new Qwen37TextEmbeddingModel(qwen37TextEntry, {
-    apiKey: "secret-value",
-    endpoint: "https://example.test/embeddings",
-  });
+  const model = new Qwen37TextEmbeddingModel(
+    qwen37TextEntry,
+    {
+      apiKey: "secret-value",
+      endpoint: "https://example.test/embeddings",
+    },
+    dependencies,
+  );
   assert.deepEqual(model.info.limits, {
     maxBatchSize: 20,
     maxInputTokens: 128000,
@@ -210,6 +233,7 @@ test("Qwen3.7 text embedding uses its model name and expanded limits", async () 
 });
 
 test("Qwen VL model validates images, encodes bytes, and accepts provider index variants", async () => {
+  const { dependencies, withFetch } = createDependencies();
   assert.throws(
     () => new Qwen3VlEmbeddingModel(qwenVlEntry, { apiKey: "" }),
     /requires an API key/,
@@ -222,10 +246,14 @@ test("Qwen VL model validates images, encodes bytes, and accepts provider index 
       }),
     /requires an endpoint/,
   );
-  const model = new Qwen3VlEmbeddingModel(qwenVlEntry, {
-    apiKey: "secret",
-    endpoint: "https://example.test/vl",
-  });
+  const model = new Qwen3VlEmbeddingModel(
+    qwenVlEntry,
+    {
+      apiKey: "secret",
+      endpoint: "https://example.test/vl",
+    },
+    dependencies,
+  );
   await assert.rejects(
     model.embed([{ kind: "image", data: new Uint8Array([1]), format: "gif" }]),
     /does not support image format/,

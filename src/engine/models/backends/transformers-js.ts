@@ -75,10 +75,11 @@ type TransformersJsModule = {
 
 type TransformersJsLoader = () => Promise<TransformersJsModule>;
 type TransformersJsExecutionProvider = "cpu" | "webgpu" | "cuda" | "dml";
+type TransformersJsDependencies = {
+  loadRuntime: TransformersJsLoader;
+};
 
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
-let transformersJsImport: Promise<TransformersJsModule> | null = null;
-let transformersJsLoader: TransformersJsLoader = defaultTransformersJsLoader;
 
 async function defaultTransformersJsLoader(): Promise<TransformersJsModule> {
   try {
@@ -95,23 +96,21 @@ async function defaultTransformersJsLoader(): Promise<TransformersJsModule> {
   }
 }
 
-async function loadTransformersJs(): Promise<TransformersJsModule> {
-  transformersJsImport ??= transformersJsLoader();
-  return await transformersJsImport;
-}
+let defaultRuntimeImport: Promise<TransformersJsModule> | null = null;
 
-export function setTransformersJsRuntimeForTesting(
-  loader: TransformersJsLoader | null,
-): void {
-  transformersJsImport = null;
-  transformersJsLoader = loader ?? defaultTransformersJsLoader;
-}
+const defaultDependencies: TransformersJsDependencies = {
+  loadRuntime() {
+    defaultRuntimeImport ??= defaultTransformersJsLoader();
+    return defaultRuntimeImport;
+  },
+};
 
 export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
   readonly info: EmbeddingModelInfo;
 
   private readonly modelCacheDir: string;
   private readonly executionProvider: TransformersJsExecutionProvider | null;
+  private readonly dependencies: TransformersJsDependencies;
   private pipeline: FeatureExtractionPipeline | null = null;
   private pipelineLoadPromise: Promise<FeatureExtractionPipeline> | null = null;
   private usingCpuFallback = false;
@@ -120,6 +119,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
   constructor(
     private readonly entry: TransformersJsEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<TransformersJsDependencies> = {},
   ) {
     super();
     this.info = {
@@ -139,6 +139,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
       process.env.ZVEC_GREP_MODEL_CACHE ??
       DEFAULT_MODEL_CACHE_DIR;
     this.executionProvider = resolveExecutionProvider(options.device);
+    this.dependencies = { ...defaultDependencies, ...dependencies };
   }
 
   protected async doEmbed(
@@ -236,7 +237,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
   }
 
   private async loadPipeline(): Promise<FeatureExtractionPipeline> {
-    const runtime = await loadTransformersJs();
+    const runtime = await this.dependencies.loadRuntime();
     let pipeline: FeatureExtractionPipeline;
     const executionProvider = this.usingCpuFallback
       ? "cpu"

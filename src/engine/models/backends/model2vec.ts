@@ -44,7 +44,7 @@ type StaticEmbeddingTable = {
   rows: number;
 };
 
-type Model2VecRuntime = {
+type Model2VecDependencies = {
   loadTokenizer(
     repo: string,
     options: {
@@ -62,9 +62,8 @@ type Model2VecRuntime = {
 };
 
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
-let runtimeOverride: Partial<Model2VecRuntime> | null = null;
 
-const defaultRuntime: Model2VecRuntime = {
+const defaultDependencies: Model2VecDependencies = {
   async loadTokenizer(repo, options) {
     return (await AutoTokenizer.from_pretrained(
       repo,
@@ -86,16 +85,11 @@ const defaultRuntime: Model2VecRuntime = {
   },
 };
 
-export function setModel2VecRuntimeForTesting(
-  runtime: Partial<Model2VecRuntime> | null,
-): void {
-  runtimeOverride = runtime;
-}
-
 export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
   readonly info: EmbeddingModelInfo;
 
   private readonly modelCacheDir: string;
+  private readonly dependencies: Model2VecDependencies;
   private tokenizer: TokenizerLike | null = null;
   private staticTable: StaticEmbeddingTable | null = null;
   private loadPromise: Promise<void> | null = null;
@@ -104,6 +98,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
   constructor(
     private readonly entry: Model2VecEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
+    dependencies: Partial<Model2VecDependencies> = {},
   ) {
     super();
     this.info = {
@@ -122,6 +117,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
       options.modelCacheDir ??
       process.env.ZVEC_GREP_MODEL_CACHE ??
       DEFAULT_MODEL_CACHE_DIR;
+    this.dependencies = { ...defaultDependencies, ...dependencies };
   }
 
   protected async doEmbed(
@@ -179,12 +175,9 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
   }
 
   private async loadModel(): Promise<void> {
-    const runtime: Model2VecRuntime = runtimeOverride
-      ? { ...defaultRuntime, ...runtimeOverride }
-      : defaultRuntime;
-    const modelPath = await this.resolveModelPath(runtime);
-    const tokenizerSource = await this.resolveTokenizerSource(runtime);
-    const tokenizerPromise = runtime.loadTokenizer(tokenizerSource, {
+    const modelPath = await this.resolveModelPath();
+    const tokenizerSource = await this.resolveTokenizerSource();
+    const tokenizerPromise = this.dependencies.loadTokenizer(tokenizerSource, {
       cache_dir: this.modelCacheDir,
       revision: this.entry.revision,
       ...(tokenizerSource !== this.entry.repo
@@ -193,7 +186,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
     });
     const [tokenizer, staticTable] = await Promise.all([
       tokenizerPromise,
-      runtime.loadSafetensors(
+      this.dependencies.loadSafetensors(
         modelPath,
         this.entry.embeddingTensor,
         this.info.dimension,
@@ -204,7 +197,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
     this.staticTable = staticTable;
   }
 
-  private async resolveModelPath(runtime: Model2VecRuntime): Promise<string> {
+  private async resolveModelPath(): Promise<string> {
     const modelPath = join(
       this.modelCacheDir,
       "model2vec",
@@ -212,16 +205,10 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
       this.entry.revision,
       basename(this.entry.modelFile),
     );
-    return await this.resolveCachedFile(
-      runtime,
-      this.entry.modelFile,
-      modelPath,
-    );
+    return await this.resolveCachedFile(this.entry.modelFile, modelPath);
   }
 
-  private async resolveTokenizerSource(
-    runtime: Model2VecRuntime,
-  ): Promise<string> {
+  private async resolveTokenizerSource(): Promise<string> {
     const tokenizerDirectory = join(
       this.modelCacheDir,
       "model2vec",
@@ -230,7 +217,6 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
       "tokenizer",
     );
     await this.resolveCachedFile(
-      runtime,
       this.entry.tokenizerFile,
       join(tokenizerDirectory, "tokenizer.json"),
     );
@@ -245,7 +231,6 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
   }
 
   private async resolveCachedFile(
-    runtime: Model2VecRuntime,
     remoteFile: string,
     localPath: string,
   ): Promise<string> {
@@ -257,7 +242,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
     const partialPath = `${localPath}.part-${process.pid}-${Date.now()}`;
     const url = `https://huggingface.co/${this.entry.repo}/resolve/${this.entry.revision}/${remoteFile}`;
     try {
-      await runtime.download(url, partialPath);
+      await this.dependencies.download(url, partialPath);
       if (!isUsableModelFile(partialPath)) {
         throw new Error("Downloaded model file is empty");
       }
