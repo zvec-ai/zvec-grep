@@ -5,12 +5,12 @@ import test from "node:test";
 import {
   LlamaCppEmbeddingModel,
   setLlamaCppRuntimeForTesting,
-} from "../../dist/engine/models/providers/llama-cpp/embedding.js";
+} from "../../dist/engine/models/backends/llama-cpp.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 
 function entry(overrides = {}) {
   return {
-    id: "local/test-model",
+    reference: "local/test-model",
     provider: "local",
     model: "test-model",
     uri: "hf:test/model.gguf",
@@ -127,15 +127,23 @@ async function captureStderr(callback) {
 test("local embedding loads GGUF, formats and truncates text, parallelizes, caches, and disposes", async (t) => {
   const modelFile = await ggufFile(t);
   const fake = fakeRuntime(modelFile.path);
+  const previousParallelism = process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM;
+  process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM = "2";
   setLlamaCppRuntimeForTesting(async () => fake.runtime);
-  t.after(() => setLlamaCppRuntimeForTesting(null));
+  t.after(() => {
+    setLlamaCppRuntimeForTesting(null);
+    if (previousParallelism === undefined) {
+      delete process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM;
+    } else {
+      process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM = previousParallelism;
+    }
+  });
 
   const model = new LlamaCppEmbeddingModel(entry(), {
     modelCacheDir: modelFile.root,
-    llamaGpu: false,
-    embeddingParallelism: 2,
+    device: "cpu",
   });
-  const result = await model.embedWithDiagnostics(
+  const result = await model.embed(
     [
       { kind: "text", text: "abcdefghijk" },
       { kind: "text", text: "second" },
@@ -145,7 +153,7 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
   );
   const vectors = result.vectors;
   assert.equal(vectors.length, 3);
-  assert.deepEqual(result.diagnostics.truncatedInputIndexes, [0, 1, 2]);
+  assert.deepEqual(result.truncated, [0, 1, 2]);
   assert.equal(fake.calls.contexts.length, 2);
   assert.equal(fake.calls.contexts[0].threads, 4);
   assert.equal(
@@ -178,9 +186,9 @@ test("local embedding supports qwen query format, automatic GPU parallelism, and
   t.after(() => setLlamaCppRuntimeForTesting(null));
   const model = new LlamaCppEmbeddingModel(
     entry({ format: "qwen3", contextSize: 100 }),
-    { modelCacheDir: modelFile.root, llamaGpu: "metal" },
+    { modelCacheDir: modelFile.root, device: "metal" },
   );
-  const vectors = await model.embed(
+  const { vectors } = await model.embed(
     Array.from({ length: 4 }, (_, index) => ({
       kind: "text",
       text: `query-${index}`,
@@ -203,7 +211,7 @@ test("local embedding falls back from GPU initialization and cached failed modes
   const output = await captureStderr(async () => {
     const model = new LlamaCppEmbeddingModel(entry(), {
       modelCacheDir: modelFile.root,
-      llamaGpu: "metal",
+      device: "metal",
     });
     await model.embed([{ kind: "text", text: "value" }]);
     await model.dispose();
@@ -218,7 +226,7 @@ test("local embedding falls back from GPU initialization and cached failed modes
   setLlamaCppRuntimeForTesting(async () => second.runtime);
   const model = new LlamaCppEmbeddingModel(entry(), {
     modelCacheDir: modelFile.root,
-    llamaGpu: false,
+    device: "cpu",
   });
   await model.embed([{ kind: "text", text: "value" }]);
   await model.dispose();
@@ -232,7 +240,7 @@ test("local embedding falls back to packaged backend and retries model/context G
   const cpuOutput = await captureStderr(async () => {
     const model = new LlamaCppEmbeddingModel(entry(), {
       modelCacheDir: modelFile.root,
-      llamaGpu: false,
+      device: "cpu",
     });
     await model.embed([{ kind: "text", text: "value" }]);
     await model.dispose();
@@ -251,7 +259,7 @@ test("local embedding falls back to packaged backend and retries model/context G
   const retryOutput = await captureStderr(async () => {
     const model = new LlamaCppEmbeddingModel(entry(), {
       modelCacheDir: modelFile.root,
-      llamaGpu: "auto",
+      device: "auto",
     });
     await model.embed([{ kind: "text", text: "value" }]);
     await model.dispose();
@@ -270,7 +278,7 @@ test("local embedding rejects invalid downloaded GGUF and removes corrupt artifa
     setLlamaCppRuntimeForTesting(async () => fake.runtime);
     const model = new LlamaCppEmbeddingModel(entry(), {
       modelCacheDir: modelFile.root,
-      llamaGpu: false,
+      device: "cpu",
     });
     await assert.rejects(
       model.embed([{ kind: "text", text: "value" }]),
@@ -292,7 +300,7 @@ test("local embedding reports context and embedding runtime failures", async (t)
   t.after(() => setLlamaCppRuntimeForTesting(null));
   const model = new LlamaCppEmbeddingModel(entry(), {
     modelCacheDir: modelFile.root,
-    llamaGpu: false,
+    device: "cpu",
   });
   await assert.rejects(
     model.embed([{ kind: "text", text: "value" }]),

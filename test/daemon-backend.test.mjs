@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DaemonBackend } from "../dist/daemon/backend.js";
-import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
 
 const noopWatchManagerFactory = () => ({
@@ -24,14 +24,8 @@ test("index releases its model lease when service creation fails", async () => {
     version: "1.0.0",
     watchManagerFactory: noopWatchManagerFactory,
     modelPoolOptions: {
-      createModel: () => ({ dispose: async () => {} }),
+      createModel: () => new TestEmbeddingModel(),
     },
-    resolveEmbeddingSchema: () => ({
-      provider: "test",
-      model: "deterministic",
-      dimension: 8,
-      metric: "cosine",
-    }),
     createService: async () => {
       throw new Error("service creation failed");
     },
@@ -163,12 +157,6 @@ test("drop index cancels an active backend index job before dropping", async () 
     version: "1.0.0",
     watchManagerFactory: noopWatchManagerFactory,
     modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
-    resolveEmbeddingSchema: () => ({
-      provider: "test",
-      model: "deterministic",
-      dimension: 8,
-      metric: "cosine",
-    }),
     createService: async () => ({
       index: async (options) => {
         indexSignal = options.signal;
@@ -1353,12 +1341,16 @@ test("daemon restart forgets runtimes and jobs but preserves index discovery", a
   }
 });
 
-class TestEmbeddingModel extends EmbeddingModel {
-  ref = { provider: "test", model: "deterministic" };
-  dimension = 8;
-  metric = "cosine";
-  supportedContentKinds = ["text"];
-  limits = { maxBatchSize: 64 };
+class TestEmbeddingModel extends BaseEmbeddingModel {
+  info = {
+    reference: "test/deterministic",
+    provider: "test",
+    name: "deterministic",
+    dimension: 8,
+    metric: "cosine",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 64 },
+  };
 
   constructor(beforeEmbed = async () => {}) {
     super();
@@ -1367,12 +1359,23 @@ class TestEmbeddingModel extends EmbeddingModel {
 
   async doEmbed(contents) {
     await this.beforeEmbed(contents);
-    return contents.map(() => [1, 0, 0, 0, 0, 0, 0, 0]);
+    return {
+      vectors: contents.map(() => [1, 0, 0, 0, 0, 0, 0, 0]),
+      truncated: [],
+    };
   }
 }
 
 class QwenTestEmbeddingModel extends TestEmbeddingModel {
-  ref = { provider: "qwen", model: "text-embedding-v4" };
+  info = {
+    reference: "qwen/text-embedding-v4",
+    provider: "qwen",
+    name: "text-embedding-v4",
+    dimension: 8,
+    metric: "cosine",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 64 },
+  };
 }
 
 function searchInput(root, query, freshness) {

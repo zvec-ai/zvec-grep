@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { updateGlobalConfig } from "../dist/engine/config.js";
-import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
 import {
   createRemoteEmbeddingOperationPermit,
@@ -19,7 +19,7 @@ test("recovered embedding model cache is bounded and defers disposal until activ
   const root = join(temporaryDirectory, "repo");
   const originalHome = process.env.HOME;
   const originalFetch = globalThis.fetch;
-  const originalDispose = EmbeddingModel.prototype.dispose;
+  const originalDispose = BaseEmbeddingModel.prototype.dispose;
   const disposedModels = [];
   let releaseBlockedRequest;
   let service;
@@ -39,7 +39,7 @@ test("recovered embedding model cache is bounded and defers disposal until activ
   });
 
   process.env.HOME = temporaryDirectory;
-  EmbeddingModel.prototype.dispose = async function disposeForTest() {
+  BaseEmbeddingModel.prototype.dispose = async function disposeForTest() {
     disposedModels.push(this);
   };
 
@@ -95,7 +95,7 @@ test("recovered embedding model cache is bounded and defers disposal until activ
     releaseBlockedRequest?.();
     await blockedContext?.catch(() => undefined);
     await service?.close();
-    EmbeddingModel.prototype.dispose = originalDispose;
+    BaseEmbeddingModel.prototype.dispose = originalDispose;
     globalThis.fetch = originalFetch;
     if (originalHome === undefined) {
       delete process.env.HOME;

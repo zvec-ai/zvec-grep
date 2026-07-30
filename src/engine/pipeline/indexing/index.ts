@@ -6,11 +6,7 @@ import {
   errorDetails,
   isEngineError,
 } from "../../errors/index.js";
-import type {
-  EmbeddingBatchResult,
-  EmbeddingModel,
-  EmbeddingVector,
-} from "../../models/embeddings.js";
+import type { EmbeddingModel, EmbeddingResult } from "../../models/index.js";
 import type { CollectionStorage } from "../../storage/index.js";
 import type {
   CollectionIndexStatus,
@@ -93,9 +89,6 @@ type IndexProgressReporter = (
   embedding?: IndexEmbeddingProgress,
 ) => void;
 
-const DEFAULT_EMBEDDING_CONCURRENCY = 4;
-const DEFAULT_EMBEDDING_MIN_CONCURRENCY = 4;
-const DEFAULT_EMBEDDING_MAX_CONCURRENCY = 12;
 const EMBEDDING_TRANSIENT_MAX_RETRIES = 3;
 const EMBEDDING_RATE_LIMIT_MAX_RETRIES = 6;
 const EMBEDDING_TRANSIENT_RETRY_BASE_DELAY_MS = 500;
@@ -717,7 +710,9 @@ async function indexFiles(
         continue;
       }
 
-      if (prepared.fragments.length > ctx.embeddingModel.limits.maxBatchSize) {
+      if (
+        prepared.fragments.length > ctx.embeddingModel.info.limits.maxBatchSize
+      ) {
         await flushBatch();
         await scheduleEmbeddingTask(async () => {
           throwIfIndexCancelled(ctx);
@@ -738,7 +733,7 @@ async function indexFiles(
       if (
         batchFragmentCount > 0 &&
         batchFragmentCount + prepared.fragments.length >
-          ctx.embeddingModel.limits.maxBatchSize
+          ctx.embeddingModel.info.limits.maxBatchSize
       ) {
         await flushBatch();
       }
@@ -746,7 +741,7 @@ async function indexFiles(
       batchFiles.push(prepared);
       batchFragmentCount += prepared.fragments.length;
 
-      if (batchFragmentCount === ctx.embeddingModel.limits.maxBatchSize) {
+      if (batchFragmentCount === ctx.embeddingModel.info.limits.maxBatchSize) {
         await flushBatch();
       }
     }
@@ -773,7 +768,7 @@ async function prepareFile(
     const extracted = await extractorRegistry.extract(source);
     throwIfIndexCancelled(ctx);
     const fragments = extracted.filter((fragment) =>
-      ctx.embeddingModel.supportedContentKinds.includes(fragment.content.kind),
+      ctx.embeddingModel.info.inputKinds.includes(fragment.content.kind),
     );
 
     return { file, fragments };
@@ -789,7 +784,7 @@ async function prepareFile(
 }
 
 function createIndexExtractorRegistry(ctx: IndexContext): ExtractorRegistry {
-  const maxInputTokens = ctx.embeddingModel.limits.maxInputTokens;
+  const maxInputTokens = ctx.embeddingModel.info.limits.maxInputTokens;
   if (maxInputTokens === undefined) {
     return createDefaultExtractorRegistry();
   }
@@ -832,9 +827,7 @@ async function embedAndCommitBatch(
         ctx.signal,
       ),
     );
-    const truncatedInputIndexes = new Set(
-      embedding.diagnostics.truncatedInputIndexes,
-    );
+    const truncatedInputIndexes = new Set(embedding.truncated);
     throwIfIndexCancelled(ctx);
     let offset = 0;
 
@@ -912,7 +905,7 @@ async function embedAndCommitFile(
         embedding.vectors,
         ctx,
         stats,
-        embedding.diagnostics.truncatedInputIndexes.length,
+        embedding.truncated.length,
       ),
     );
     onProgress(stats, finishedFileDetail(committed, file.file.relativePath));
@@ -928,7 +921,7 @@ async function embedAndCommitFile(
 
 function commitFile(
   file: PreparedFile,
-  vectors: readonly EmbeddingVector[],
+  vectors: readonly number[][],
   ctx: IndexContext,
   stats: IndexStats,
   truncatedFragmentCount = 0,
@@ -1040,19 +1033,22 @@ async function embedFragments(
   model: EmbeddingModel,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingBatchResult> {
+): Promise<EmbeddingResult> {
   const batches: { start: number; fragments: EntityFragment[] }[] = [];
 
   for (
     let start = 0;
     start < fragments.length;
-    start += model.limits.maxBatchSize
+    start += model.info.limits.maxBatchSize
   ) {
-    const batch = fragments.slice(start, start + model.limits.maxBatchSize);
+    const batch = fragments.slice(
+      start,
+      start + model.info.limits.maxBatchSize,
+    );
     batches.push({ start, fragments: batch });
   }
 
-  const vectors: EmbeddingVector[] = new Array(fragments.length);
+  const vectors: number[][] = new Array(fragments.length);
   const truncatedInputIndexes: number[] = [];
   const results = await Promise.allSettled(
     batches.map((batch) =>
@@ -1078,9 +1074,7 @@ async function embedFragments(
       vectors[start + offset] = vector;
     }
     truncatedInputIndexes.push(
-      ...result.value.diagnostics.truncatedInputIndexes.map(
-        (inputIndex) => start + inputIndex,
-      ),
+      ...result.value.truncated.map((inputIndex) => start + inputIndex),
     );
   }
 
@@ -1090,7 +1084,7 @@ async function embedFragments(
 
   return {
     vectors,
-    diagnostics: { truncatedInputIndexes },
+    truncated: truncatedInputIndexes,
   };
 }
 
@@ -1100,7 +1094,7 @@ async function embedFragmentBatch(
   startIndex: number,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingBatchResult> {
+): Promise<EmbeddingResult> {
   const contents = fragments.map(vectorContentForFragment);
 
   try {
@@ -1131,8 +1125,8 @@ async function embedFragmentBatchOneByOne(
   startIndex: number,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingBatchResult> {
-  const vectors: EmbeddingVector[] = [];
+): Promise<EmbeddingResult> {
+  const vectors: number[][] = [];
   const truncatedInputIndexes: number[] = [];
 
   for (const [index, fragment] of fragments.entries()) {
@@ -1144,7 +1138,7 @@ async function embedFragmentBatchOneByOne(
         signal,
       );
       vectors.push(result.vectors[0]);
-      if (result.diagnostics.truncatedInputIndexes.length > 0) {
+      if (result.truncated.length > 0) {
         truncatedInputIndexes.push(index);
       }
     } catch (error) {
@@ -1152,7 +1146,7 @@ async function embedFragmentBatchOneByOne(
         "Embedding entity fragment failed after one-by-one fallback",
         {
           code: "ZVEC_GREP.ENGINE.INDEXING.EMBEDDING_FRAGMENT_FAILED",
-          context: `model=${model.ref.model} fragmentId=${fragment.id} fragmentIndex=${startIndex + index}`,
+          context: `model=${model.info.reference} fragmentId=${fragment.id} fragmentIndex=${startIndex + index}`,
           cause: error,
         },
       );
@@ -1161,7 +1155,7 @@ async function embedFragmentBatchOneByOne(
 
   return {
     vectors,
-    diagnostics: { truncatedInputIndexes },
+    truncated: truncatedInputIndexes,
   };
 }
 
@@ -1220,7 +1214,7 @@ async function embedContentsWithRetry(
   model: EmbeddingModel,
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
-): Promise<EmbeddingBatchResult> {
+): Promise<EmbeddingResult> {
   let attempt = 0;
 
   while (true) {
@@ -1231,7 +1225,7 @@ async function embedContentsWithRetry(
       throwIfAborted(signal);
       const result = await embeddingScheduler.run(
         () =>
-          model.embedWithDiagnostics(contents, {
+          model.embed(contents, {
             purpose: "document",
             signal,
           }),
@@ -1296,12 +1290,11 @@ function resolveEmbeddingConcurrencyPolicy(
     };
   }
 
-  const initial =
-    model.recommendedIndexConcurrency ?? DEFAULT_EMBEDDING_CONCURRENCY;
-  const max =
-    model.maxIndexConcurrency ??
-    (initial <= 1 ? initial : DEFAULT_EMBEDDING_MAX_CONCURRENCY);
-  const min = Math.min(initial, DEFAULT_EMBEDDING_MIN_CONCURRENCY);
+  const remote = model.info.provider === "qwen";
+  const multimodal = model.info.inputKinds.includes("image");
+  const initial = remote ? (multimodal ? 4 : 8) : 1;
+  const max = remote ? (multimodal ? 8 : 12) : 1;
+  const min = Math.min(initial, 4);
 
   return {
     initial,

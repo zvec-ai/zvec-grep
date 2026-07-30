@@ -1,12 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { EngineError } from "../engine/errors/index.js";
-import type { ModelRemoteEmbeddingRequest } from "../engine/models/types.js";
 import { RemoteEmbeddingAuthorizationStore } from "./store.js";
 import {
   REMOTE_EMBEDDING_CAPABILITY,
   type RemoteEmbeddingAuthorizationScope,
   type RemoteEmbeddingOperationPermit,
+  type RemoteEmbeddingRequest,
   type RemoteEmbeddingTarget,
 } from "./types.js";
 
@@ -37,7 +37,7 @@ export function remoteEmbeddingAuthorizationGuard(
   options: {
     store?: RemoteEmbeddingAuthorizationStore;
   } = {},
-): (request: ModelRemoteEmbeddingRequest) => Promise<void> {
+): (request: RemoteEmbeddingRequest) => Promise<void> {
   const store = options.store ?? new RemoteEmbeddingAuthorizationStore();
   return async (request) => {
     const permit = operationPermit.getStore();
@@ -63,7 +63,7 @@ export function remoteEmbeddingAuthorizationGuard(
 }
 
 function authorizationRequiredError(
-  request: ModelRemoteEmbeddingRequest,
+  request: RemoteEmbeddingRequest,
   detail?: string,
 ): EngineError {
   return new EngineError("Remote Embedding authorization is required", {

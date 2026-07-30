@@ -18,6 +18,15 @@ export type RemoteEmbeddingTarget = {
   targetFingerprint: string;
 };
 
+export type RemoteEmbeddingRequest = {
+  provider: string;
+  model: string;
+  endpoint: string;
+  purpose: "document" | "query";
+  contentKinds: readonly ("text" | "image")[];
+  contentCount: number;
+};
+
 export type RemoteEmbeddingAuthorizationPlan = {
   operation: RemoteEmbeddingOperation;
   target: RemoteEmbeddingTarget;

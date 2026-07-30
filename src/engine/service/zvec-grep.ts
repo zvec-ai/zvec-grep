@@ -1,11 +1,4 @@
-import {
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import {
@@ -25,11 +18,14 @@ import {
   EngineError,
   errorDetails,
 } from "../errors/index.js";
-import type { EmbeddingModel } from "../models/embeddings.js";
 import {
   createEmbeddingModel,
-  createEmbeddingModelFromReference,
+  EmbeddingPurpose,
+  type CreateEmbeddingModelOptions,
+  type EmbeddingModel,
+  type EmbeddingModelInfo,
 } from "../models/index.js";
+import { resolveRemoteEmbeddingEndpoint } from "../remote-embedding.js";
 import type {
   CollectionEmbeddingSchema,
   CollectionInfo,
@@ -80,6 +76,11 @@ const DEFAULT_CONTEXT_LIMIT = 10;
 const DEFAULT_CONTEXT_TOTAL_LIMIT = 30;
 const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
 const MAX_RECOVERED_EMBEDDING_MODELS = 4;
+
+export type EmbeddingModelIdentity = Pick<
+  EmbeddingModelInfo,
+  "provider" | "name"
+>;
 
 export async function createZvecGrep(
   options: CreateZvecGrepOptions = {},
@@ -157,46 +158,27 @@ export function openAnonymousReadSession(
   };
 }
 
-export function createEmbeddingModelForSchema(
-  schema: CollectionEmbeddingSchema,
-  root: string,
-  registryHome: string,
+export function createEmbeddingModelForIdentity(
+  identity: EmbeddingModelIdentity,
   options: CreateZvecGrepOptions = {},
 ): EmbeddingModel {
-  return createEmbeddingModel(
-    { provider: schema.provider, model: schema.model },
-    providerOptions(
-      options,
-      root,
-      registryHome,
-      schema.provider,
-      `${schema.provider}/${schema.model}`,
-    ),
+  const reference = embeddingModelReference(identity);
+  return createServiceEmbeddingModel(
+    reference,
+    providerOptions(options, identity),
+    options,
   );
 }
 
-export function embeddingModelPoolKeyForSchema(
-  schema: CollectionEmbeddingSchema,
-  root: string,
-  registryHome: string,
+export function embeddingModelPoolKeyForIdentity(
+  identity: EmbeddingModelIdentity,
   options: CreateZvecGrepOptions = {},
 ): string {
+  const reference = embeddingModelReference(identity);
   const fingerprint = providerOptionsFingerprint(
-    providerOptions(
-      options,
-      root,
-      registryHome,
-      schema.provider,
-      `${schema.provider}/${schema.model}`,
-    ),
+    providerOptions(options, identity),
   );
-  return [
-    schema.provider,
-    schema.model,
-    schema.dimension,
-    schema.metric,
-    fingerprint,
-  ].join("/");
+  return [reference, fingerprint].join("/");
 }
 
 class ZvecGrepService implements ZvecGrep {
@@ -241,7 +223,6 @@ class ZvecGrepService implements ZvecGrep {
             );
             const embeddingModel = this.embeddingModelForIndex(
               existing,
-              location.home,
               "index",
             );
             const registry = new CollectionRegistry(
@@ -575,7 +556,6 @@ class ZvecGrepService implements ZvecGrep {
           const existing = readCollectionInfo(home, name);
           const embeddingModel = this.embeddingModelForIndex(
             existing,
-            home,
             "collections.index",
           );
           const registry = this.createRegistry(false, embeddingModel);
@@ -737,7 +717,6 @@ class ZvecGrepService implements ZvecGrep {
 
           const embeddingModel = this.embeddingModelForIndex(
             existing,
-            location.home,
             "context.refresh",
           );
           assertCollectionEmbeddingMatchesCurrentModel(
@@ -947,11 +926,7 @@ class ZvecGrepService implements ZvecGrep {
   ): Collection {
     return new Collection(
       info,
-      this.embeddingModelForSearch(
-        indexedEmbeddingSchema(info),
-        request,
-        registryHome,
-      ),
+      this.embeddingModelForSearch(indexedEmbeddingSchema(info), request),
       true,
       join(registryHome, "files.zvec"),
     );
@@ -960,7 +935,6 @@ class ZvecGrepService implements ZvecGrep {
   private embeddingModelForSearch(
     schema: CollectionEmbeddingSchema,
     request: NormalizedContextRequest,
-    registryHome: string,
   ): EmbeddingModel | undefined {
     if (!request.routes.some((route) => route.mode === "vector")) {
       return undefined;
@@ -970,12 +944,11 @@ class ZvecGrepService implements ZvecGrep {
       return this.embeddingModel;
     }
 
-    return this.recoverEmbeddingModel(schema, registryHome);
+    return this.recoverEmbeddingModel(schema);
   }
 
   private embeddingModelForIndex(
     existing: CollectionInfo | null,
-    registryHome: string,
     operation: string,
   ): EmbeddingModel {
     if (
@@ -983,7 +956,7 @@ class ZvecGrepService implements ZvecGrep {
       !this.embeddingModel &&
       !this.options.embedding
     ) {
-      return this.recoverEmbeddingModel(existing.embedding, registryHome);
+      return this.recoverEmbeddingModel(existing.embedding);
     }
 
     const reference =
@@ -993,68 +966,47 @@ class ZvecGrepService implements ZvecGrep {
         : undefined);
     return (
       this.embeddingModel ??
-      (reference
-        ? this.embeddingModelFromReference(reference, registryHome)
-        : undefined) ??
-      this.configuredEmbeddingModel(registryHome) ??
+      (reference ? this.embeddingModelFromReference(reference) : undefined) ??
+      this.configuredEmbeddingModel() ??
       this.requireEmbeddingModel(operation)
     );
   }
 
   private recoverEmbeddingModel(
     schema: CollectionEmbeddingSchema,
-    registryHome: string,
   ): EmbeddingModel {
     const config = readGlobalConfig();
-    const options = providerOptions(
-      this.options,
-      this.root,
-      registryHome,
-      schema.provider,
-      `${schema.provider}/${schema.model}`,
-      config,
-    );
-    const key = `${schema.provider}/${schema.model}/${providerOptionsFingerprint(options)}`;
+    const identity = {
+      provider: schema.provider,
+      name: schema.model,
+    };
+    const reference = embeddingModelReference(identity);
+    const options = providerOptions(this.options, identity, config);
+    const key = `${reference}/${providerOptionsFingerprint(options)}`;
     return this.cachedEmbeddingModel(key, () =>
-      createEmbeddingModel(
-        {
-          provider: schema.provider,
-          model: schema.model,
-        },
-        options,
-      ),
+      createServiceEmbeddingModel(reference, options, this.options),
     );
   }
 
-  private configuredEmbeddingModel(
-    registryHome: string,
-  ): EmbeddingModel | undefined {
+  private configuredEmbeddingModel(): EmbeddingModel | undefined {
     const config = readGlobalConfig();
     const reference = config.defaults?.embedding;
     if (!reference) {
       return undefined;
     }
 
-    return this.embeddingModelFromReference(reference, registryHome, config);
+    return this.embeddingModelFromReference(reference, config);
   }
 
   private embeddingModelFromReference(
     reference: string,
-    registryHome: string,
     config: ZvecGrepGlobalConfig = readGlobalConfig(),
   ): EmbeddingModel {
-    const provider = providerFromReference(reference);
-    const options = providerOptions(
-      this.options,
-      this.root,
-      registryHome,
-      provider,
-      reference,
-      config,
-    );
+    const identity = parseEmbeddingModelReference(reference);
+    const options = providerOptions(this.options, identity, config);
     const key = `configured/${reference}/${providerOptionsFingerprint(options)}`;
     return this.cachedEmbeddingModel(key, () =>
-      createEmbeddingModelFromReference(reference, options),
+      createServiceEmbeddingModel(reference, options, this.options),
     );
   }
 
@@ -1575,13 +1527,11 @@ function indexedEmbeddingSchema(
 
 function providerOptions(
   options: CreateZvecGrepOptions,
-  root: string,
-  registryHome?: string,
-  provider?: string,
-  reference?: string,
+  identity: EmbeddingModelIdentity,
   config: ZvecGrepGlobalConfig = readGlobalConfig(),
-) {
-  const providerConfig = provider ? config.providers?.[provider] : undefined;
+): CreateEmbeddingModelOptions & { apiKey: string } {
+  const providerConfig = config.providers?.[identity.provider];
+  const reference = embeddingModelReference(identity);
   const runtime = resolveEmbeddingRuntimeOptions(reference, options, config);
   return {
     apiKey: options.apiKey ?? providerConfig?.apiKey ?? "",
@@ -1590,32 +1540,74 @@ function providerOptions(
       options.modelCacheDir ??
       process.env.ZVEC_GREP_MODEL_CACHE ??
       config.defaults?.modelCacheDir ??
-      modelCacheDir(options, root, registryHome),
-    llamaGpu: runtime.llamaGpu,
-    embeddingParallelism: runtime.embeddingParallelism,
-    authorizeRemoteEmbedding:
-      provider === "qwen"
-        ? remoteEmbeddingAuthorizationGuard({
-            store: new RemoteEmbeddingAuthorizationStore({
-              signingKeyPath: options.authorizationSigningKeyPath,
-            }),
-          })
-        : undefined,
+      join(options.home ?? defaultHome(), "models"),
+    device: runtime.device,
   };
 }
 
-function providerFromReference(reference: string): string | undefined {
+function createServiceEmbeddingModel(
+  reference: string,
+  modelOptions: CreateEmbeddingModelOptions,
+  serviceOptions: CreateZvecGrepOptions,
+): EmbeddingModel {
+  const model = createEmbeddingModel(reference, modelOptions);
+  if (model.info.provider !== "qwen") {
+    return model;
+  }
+
+  const endpoint = resolveRemoteEmbeddingEndpoint(
+    model.info.reference,
+    modelOptions.endpoint,
+  );
+  const authorize = remoteEmbeddingAuthorizationGuard({
+    store: new RemoteEmbeddingAuthorizationStore({
+      signingKeyPath: serviceOptions.authorizationSigningKeyPath,
+    }),
+  });
+
+  const authorizedModel: EmbeddingModel = {
+    info: model.info,
+    async embed(contents, embedOptions) {
+      await authorize({
+        provider: model.info.provider,
+        model: model.info.name,
+        endpoint,
+        purpose: embedOptions?.purpose ?? EmbeddingPurpose.Document,
+        contentKinds: contents.map((content) => content.kind),
+        contentCount: contents.length,
+      });
+      return await model.embed(contents, embedOptions);
+    },
+    dispose: () => model.dispose(),
+  };
+  return authorizedModel;
+}
+
+function parseEmbeddingModelReference(
+  reference: string,
+): EmbeddingModelIdentity {
   const separator = reference.indexOf("/");
-  return separator > 0 ? reference.slice(0, separator) : undefined;
+  if (separator <= 0 || separator === reference.length - 1) {
+    throw new EngineError("Embedding model reference is invalid", {
+      code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_INVALID_REFERENCE",
+      context: `reference=${reference}`,
+    });
+  }
+  return {
+    provider: reference.slice(0, separator),
+    name: reference.slice(separator + 1),
+  };
+}
+
+function embeddingModelReference(identity: EmbeddingModelIdentity): string {
+  return `${identity.provider}/${identity.name}`;
 }
 
 function providerOptionsFingerprint(options: {
   apiKey: string;
   endpoint?: string;
   modelCacheDir?: string;
-  llamaGpu?: "auto" | "metal" | "vulkan" | "cuda" | false;
-  embeddingParallelism?: number;
-  authorizeRemoteEmbedding?: unknown;
+  device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
 }): string {
   return createHash("sha256")
     .update(
@@ -1623,8 +1615,7 @@ function providerOptionsFingerprint(options: {
         options.apiKey,
         options.endpoint,
         options.modelCacheDir,
-        options.llamaGpu,
-        options.embeddingParallelism,
+        options.device,
       ]),
     )
     .digest("hex");
@@ -1641,10 +1632,10 @@ function assertCollectionEmbeddingMatchesCurrentModel(
 
   const expected = info.embedding;
   const changed =
-    expected.provider !== model.ref.provider ||
-    expected.model !== model.ref.model ||
-    expected.dimension !== model.dimension ||
-    expected.metric !== model.metric;
+    expected.provider !== model.info.provider ||
+    expected.model !== model.info.name ||
+    expected.dimension !== model.info.dimension ||
+    expected.metric !== model.info.metric;
 
   if (!changed) {
     return;
@@ -1657,7 +1648,7 @@ function assertCollectionEmbeddingMatchesCurrentModel(
       context: errorDetails([
         collectionDetail(info.name),
         detail("existing", `${expected.provider}/${expected.model}`),
-        detail("requested", `${model.ref.provider}/${model.ref.model}`),
+        detail("requested", model.info.reference),
         detail(
           "hint",
           `Run "${rebuildCommand}" to rebuild this index with the requested embedding model.`,
@@ -1665,60 +1656,6 @@ function assertCollectionEmbeddingMatchesCurrentModel(
       ]),
     },
   );
-}
-
-function modelCacheDir(
-  options: CreateZvecGrepOptions,
-  root: string,
-  registryHome?: string,
-): string {
-  if (options.modelCacheDir || process.env.ZVEC_GREP_MODEL_CACHE) {
-    return options.modelCacheDir ?? process.env.ZVEC_GREP_MODEL_CACHE!;
-  }
-
-  const globalCache = join(options.home ?? defaultHome(), "models");
-  const legacyCaches = [
-    registryHome ? join(registryHome, "models") : undefined,
-    join(anonymousHome(root), "models"),
-  ];
-  const globalHasModel = directoryHasGguf(globalCache);
-
-  for (const legacyCache of legacyCaches) {
-    if (legacyCache && directoryHasGguf(legacyCache) && !globalHasModel) {
-      return legacyCache;
-    }
-  }
-
-  if (globalHasModel || canWriteCacheDirectory(globalCache)) {
-    return globalCache;
-  }
-
-  return join(anonymousHome(root), "models");
-}
-
-function directoryHasGguf(path: string): boolean {
-  try {
-    return readdirSync(path, { withFileTypes: true }).some(
-      (entry) => entry.isFile() && entry.name.endsWith(".gguf"),
-    );
-  } catch {
-    return false;
-  }
-}
-
-function canWriteCacheDirectory(path: string): boolean {
-  const probe = join(
-    path,
-    `.zvec-grep-write-test-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
-  try {
-    mkdirSync(path, { recursive: true });
-    writeFileSync(probe, "");
-    unlinkSync(probe);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function contextGroupLimit(

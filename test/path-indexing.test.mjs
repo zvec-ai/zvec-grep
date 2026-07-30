@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import {
   scanDirectoryPath,
   scanFilePath,
@@ -241,37 +241,51 @@ test("indexing approximates code chunk characters from the model input limit", a
   }
 });
 
-class CountingEmbeddingModel extends EmbeddingModel {
-  ref = { provider: "test", model: "counting" };
-  dimension = 8;
-  metric = "cosine";
-  supportedContentKinds = ["text"];
-  limits = { maxBatchSize: 64 };
+class CountingEmbeddingModel extends BaseEmbeddingModel {
+  info = {
+    reference: "test/counting",
+    provider: "test",
+    name: "counting",
+    dimension: 8,
+    metric: "cosine",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 64 },
+  };
   embeddedTexts = [];
 
   async doEmbed(contents) {
-    return contents.map((content) => {
-      const text = content.kind === "text" ? content.text : "";
-      this.embeddedTexts.push(text);
-      return [1, 0, 0, 0, 0, 0, 0, 0];
-    });
+    return {
+      vectors: contents.map((content) => {
+        const text = content.kind === "text" ? content.text : "";
+        this.embeddedTexts.push(text);
+        return [1, 0, 0, 0, 0, 0, 0, 0];
+      }),
+      truncated: [],
+    };
   }
 }
 
 class InputLimitedEmbeddingModel extends CountingEmbeddingModel {
-  limits = { maxBatchSize: 64, maxInputTokens: 120 };
+  info = {
+    reference: "test/counting",
+    provider: "test",
+    name: "counting",
+    dimension: 8,
+    metric: "cosine",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 64, maxInputTokens: 120 },
+  };
 
-  async doEmbedWithDiagnostics(contents, options) {
+  async doEmbed(contents, options) {
+    const result = await super.doEmbed(contents, options);
     return {
-      vectors: await this.doEmbed(contents, options),
-      diagnostics: {
-        truncatedInputIndexes: contents.flatMap((content, index) =>
-          content.kind === "text" &&
-          content.text.includes("symbol: function oversized")
-            ? [index]
-            : [],
-        ),
-      },
+      vectors: result.vectors,
+      truncated: contents.flatMap((content, index) =>
+        content.kind === "text" &&
+        content.text.includes("symbol: function oversized")
+          ? [index]
+          : [],
+      ),
     };
   }
 }

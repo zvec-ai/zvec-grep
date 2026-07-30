@@ -1,18 +1,25 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { EmbeddingModel } from "../../dist/engine/models/embeddings.js";
+import { BaseEmbeddingModel } from "../../dist/engine/models/embeddings.js";
 
-export class FakeEmbeddingModel extends EmbeddingModel {
-  ref = { provider: "test", model: "deterministic" };
-  dimension = 16;
-  metric = "cosine";
-  supportedContentKinds = ["text"];
-  limits = { maxBatchSize: 128 };
+export class FakeEmbeddingModel extends BaseEmbeddingModel {
+  info = {
+    reference: "test/deterministic",
+    provider: "test",
+    name: "deterministic",
+    dimension: 16,
+    metric: "cosine",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 128 },
+  };
 
   async doEmbed(contents) {
-    return contents.map((content) =>
-      deterministicVector(content.text, this.dimension),
-    );
+    return {
+      vectors: contents.map((content) =>
+        deterministicVector(content.text, this.info.dimension),
+      ),
+      truncated: [],
+    };
   }
 }
 

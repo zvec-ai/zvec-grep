@@ -74,14 +74,7 @@ test("embedding model pool single-flights loads and disposes after the final lea
     },
   });
   const request = {
-    schema: {
-      provider: "local",
-      model: "test",
-      dimension: 3,
-      metric: "cosine",
-    },
-    root: "/tmp/repo",
-    registryHome: "/tmp/repo/.zvec-grep",
+    model: { provider: "local", name: "test" },
   };
 
   const [first, second] = await Promise.all([
@@ -103,18 +96,21 @@ test("model pool rolls back an unreturned lease when capacity trimming fails", a
   const pool = new EmbeddingModelPool({
     idleTtlMs: 60_000,
     maxLoadedModels: 1,
-    keyForRequest: (request) => request.schema.model,
+    keyForRequest: (request) => request.model.name,
     createModel: (request) => ({
       dispose: async () => {
-        if (request.schema.model === "model-a") {
+        if (request.model.name === "model-a") {
           throw new Error("dispose failed");
         }
       },
     }),
   });
-  const first = await pool.acquire(modelRequest("model-a"));
+  const first = await pool.acquire(modelLoadRequest("model-a"));
   first.release();
-  await assert.rejects(pool.acquire(modelRequest("model-b")), /dispose failed/);
+  await assert.rejects(
+    pool.acquire(modelLoadRequest("model-b")),
+    /dispose failed/,
+  );
   assert.equal(pool.snapshot().activeLeases, 0);
   await pool.close();
 });
@@ -133,7 +129,7 @@ test("model pool close drains an in-flight load without returning a lease", asyn
           });
       }),
   });
-  const acquiring = pool.acquire(modelRequest("model-a"));
+  const acquiring = pool.acquire(modelLoadRequest("model-a"));
   while (!finishLoad) {
     await new Promise((resolve) => setImmediate(resolve));
   }
@@ -166,7 +162,7 @@ test("root runtime releases model leases when the read collection closes", async
   let modelDisposals = 0;
   const pool = new EmbeddingModelPool({
     idleTtlMs: 0,
-    keyForRequest: (request) => request.schema.model,
+    keyForRequest: (request) => request.model.name,
     createModel: () => ({
       dispose: async () => {
         modelDisposals += 1;
@@ -176,7 +172,7 @@ test("root runtime releases model leases when the read collection closes", async
   const runtime = new RootRuntime({
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
-    modelRequest: modelRequest("model-a"),
+    modelLoadRequest: modelLoadRequest("model-a"),
     readCollectionIdleTtlMs: 0,
     openSession: async () => ({
       root: "/tmp/repo",
@@ -197,13 +193,13 @@ test("root runtime releases model leases when the read collection closes", async
   await pool.close();
 });
 
-test("root runtime replaces a cached session when the embedding schema changes", async () => {
+test("root runtime replaces a cached session when the embedding model changes", async () => {
   let modelLoads = 0;
   let sessionCloses = 0;
   const pool = new EmbeddingModelPool({
     idleTtlMs: 0,
     maxLoadedModels: 2,
-    keyForRequest: (request) => request.schema.model,
+    keyForRequest: (request) => request.model.name,
     createModel: () => {
       modelLoads += 1;
       return { dispose: async () => {} };
@@ -212,7 +208,7 @@ test("root runtime replaces a cached session when the embedding schema changes",
   const runtime = new RootRuntime({
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
-    modelRequest: modelRequest("model-a"),
+    modelLoadRequest: modelLoadRequest("model-a"),
     readCollectionIdleTtlMs: 60_000,
     openSession: async () => ({
       root: "/tmp/repo",
@@ -224,7 +220,7 @@ test("root runtime replaces a cached session when the embedding schema changes",
   });
 
   await runtime.search({ query: "first" });
-  runtime.updateModelRequest(modelRequest("model-b"));
+  runtime.updateModelLoadRequest(modelLoadRequest("model-b"));
   await runtime.search({ query: "second" });
   assert.equal(modelLoads, 2);
   assert.equal(sessionCloses, 1);
@@ -239,7 +235,7 @@ test("root runtime searches the writer context as soon as it becomes available",
   const runtime = new RootRuntime({
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
-    modelRequest: modelRequest("model-a"),
+    modelLoadRequest: modelLoadRequest("model-a"),
   });
 
   runtime.setWriterPending(true);
@@ -275,7 +271,7 @@ test("root runtime releases its daemon lease when read cache close fails", async
   const runtime = new RootRuntime({
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
-    modelRequest: modelRequest("model-a"),
+    modelLoadRequest: modelLoadRequest("model-a"),
     rootLease: {
       root: "/tmp/repo",
       release: async () => {
@@ -304,7 +300,7 @@ test("root runtime initial probe marks a clean index reconciled", async () => {
   const runtime = new RootRuntime({
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
-    modelRequest: modelRequest("model-a"),
+    modelLoadRequest: modelLoadRequest("model-a"),
   });
 
   assert.equal(runtime.needsReconciliation(), true);
@@ -321,7 +317,7 @@ test("root runtime initial probe does not hide pending watcher changes", async (
   const runtime = new RootRuntime({
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
-    modelRequest: modelRequest("model-a"),
+    modelLoadRequest: modelLoadRequest("model-a"),
   });
   let finishProbe;
   const probe = runtime.probeInitialFreshness(
@@ -339,11 +335,9 @@ test("root runtime initial probe does not hide pending watcher changes", async (
   await pool.close();
 });
 
-function modelRequest(model) {
+function modelLoadRequest(model) {
   return {
-    schema: { provider: "test", model, dimension: 3, metric: "cosine" },
-    root: "/tmp/repo",
-    registryHome: "/tmp/repo/.zvec-grep",
+    model: { provider: "test", name: model },
   };
 }
 

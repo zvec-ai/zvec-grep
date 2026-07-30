@@ -76,14 +76,11 @@ E5、GTE 和 Nomic 已受 zvec-grep 支持，但尚未纳入上面的 CoIR-ZG �
 
 ## 远程模型
 
-| 模型                            | 适用场景                             | CoIR-ZG 状态 |
-| ------------------------------- | ------------------------------------ | ------------ |
-| `qwen/qwen3.7-text-embedding`   | 托管文本 Embedding，代码检索质量优先 | 已测试       |
-| `qwen/text-embedding-v4`        | 托管文本 Embedding，索引吞吐优先     | 已测试       |
-| `qwen/qwen3-vl-embedding`       | 同时检索文本和图片                   | 未测试       |
-| `openai/text-embedding-3-small` | 通用文本检索，优先考虑成本           | 未测试       |
-| `openai/text-embedding-3-large` | 通用文本检索，优先考虑模型容量       | 未测试       |
-| `jina/jina-embeddings-v3`       | 多语言和长文本检索                   | 未测试       |
+| 模型                          | 适用场景                             | CoIR-ZG 状态 |
+| ----------------------------- | ------------------------------------ | ------------ |
+| `qwen/qwen3.7-text-embedding` | 托管文本 Embedding，代码检索质量优先 | 已测试       |
+| `qwen/text-embedding-v4`      | 托管文本 Embedding，索引吞吐优先     | 已测试       |
+| `qwen/qwen3-vl-embedding`     | 同时检索文本和图片                   | 未测试       |
 
 远程模型的实际延迟、价格和服务端实现可能变化。上表的“已测试”只表示本页对应的
 CoIR-ZG 运行已完成，不代表服务商之间的价格或多语言能力排名。
@@ -130,19 +127,20 @@ zg index \
 使用远程模型前，请确认仓库内容允许发送给服务商。zvec-grep 会在远程 Embedding
 发生前展示授权信息；MCP 工具本身的信任设置不会替代这次数据发送授权。
 
-## GPU
+## 执行设备
 
-本地 Transformer 和 GGUF 模型可以使用 `--gpu` 请求 GPU 加速：
+本地 Transformer 和 GGUF 模型可以用 `--device` 选择执行设备：
 
 ```bash
-zg index --embedding local/jina-embeddings-v2-base-code --gpu
+zg index --embedding local/jina-embeddings-v2-base-code --device auto
 ```
 
-`--gpu` 是优先尝试，不保证每种模型、操作系统和推理后端都能加速。如果 GPU 初始化
-或执行不兼容，zvec-grep 会给出警告并回退 CPU。Potion 属于静态向量查表模型，
-`--gpu` 不会带来收益。
+可选值是 `auto`、`cpu`、`metal`、`vulkan` 和 `cuda`。也可以通过
+`ZVEC_GREP_DEVICE` 设置默认设备，或用 `zg config model set <local/model>
+--device <device>` 为单个模型保存配置。Potion 属于静态向量查表模型，选择 GPU
+不会带来收益。
 
-建议在自己的机器上分别测试 CPU 和 GPU；参数量、量化格式、批量大小和执行后端都会
+建议在自己的机器上分别测试 CPU 和加速设备；参数量、量化格式、批量大小和执行后端都会
 影响实际速度。
 
 ## 输入长度与截断

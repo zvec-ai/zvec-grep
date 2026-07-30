@@ -16,10 +16,9 @@ import {
   createRemoteEmbeddingTarget,
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,
-  remoteEmbeddingAuthorizationGuard,
   withRemoteEmbeddingOperationPermit,
 } from "../dist/authorization/index.js";
-import { QwenTextEmbeddingV4Model } from "../dist/engine/models/providers/qwen/embedding.js";
+import { createEmbeddingModelForIdentity } from "../dist/engine/service/zvec-grep.js";
 
 test("Workspace Remote Embedding grants are signed, target-bound, and revocable", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "zg-auth-store-"));
@@ -91,11 +90,14 @@ test("remote provider guard fails closed and re-checks Workspace revocation", as
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
   };
-  const model = new QwenTextEmbeddingV4Model({
-    apiKey: "test-key",
-    endpoint,
-    authorizeRemoteEmbedding: remoteEmbeddingAuthorizationGuard({ store }),
-  });
+  const model = createEmbeddingModelForIdentity(
+    { provider: "qwen", name: "text-embedding-v4" },
+    {
+      apiKey: "test-key",
+      endpoint,
+      authorizationSigningKeyPath: join(temporaryDirectory, "signing.key"),
+    },
+  );
   t.after(async () => {
     globalThis.fetch = originalFetch;
     await rm(temporaryDirectory, { recursive: true, force: true });

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { readGlobalConfig } from "../engine/config.js";
-import { resolveRemoteEmbeddingEndpoint } from "../engine/models/providers/qwen/embedding.js";
+import { resolveRemoteEmbeddingEndpoint } from "../engine/remote-embedding.js";
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import type { RemoteEmbeddingTarget } from "./types.js";
 
@@ -57,7 +57,7 @@ export async function createRemoteEmbeddingTarget(input: {
     input.serviceOptions?.endpoint ??
     config.providers?.[input.provider]?.endpoint;
   const endpoint = resolveRemoteEmbeddingEndpoint(
-    { provider: input.provider, model: input.model },
+    `${input.provider}/${input.model}`,
     configuredEndpoint,
   );
   const rootFingerprint = workspaceFingerprint(workspaceRoots);

@@ -56,6 +56,24 @@ export default tseslint.config(
     },
   },
   {
+    files: ["src/**/*.ts"],
+    ignores: ["src/engine/models/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex: "(^|/)models/(?!index\\.js$)",
+              message:
+                "Import the models module through models/index.ts outside src/engine/models.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["**/*.js", "**/*.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: {

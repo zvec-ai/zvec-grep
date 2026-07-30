@@ -16,7 +16,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DaemonBackend } from "../dist/daemon/backend.js";
 import { DaemonHttpServer } from "../dist/daemon/http-server.js";
-import { EmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
 import { DaemonClient } from "../dist/client/daemon-client.js";
 
@@ -84,12 +84,6 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
         });
       },
     },
-    resolveEmbeddingSchema: () => ({
-      provider: "test",
-      model: "deterministic",
-      dimension: 8,
-      metric: "cosine",
-    }),
     readCollectionIdleTtlMs: 60_000,
   });
   const server = new DaemonHttpServer({
@@ -540,7 +534,7 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   assert.deepEqual(unsupported.structuredContent.error, {
     code: "MODEL_LOAD_FAILED",
     message:
-      "[MODEL_LOAD_FAILED] Server MVP cannot resolve embedding schema for qwen/unsupported-embedding.",
+      "[MODEL_LOAD_FAILED] Embedding model qwen/unsupported-embedding could not be created: Embedding model is not in the zvec-grep catalog",
   });
   assert.match(unsupported.content[0].text, /qwen\/unsupported-embedding/);
   const unsupportedStatus = await client.callTool({
@@ -600,12 +594,16 @@ async function rawRequestStatus(url, options) {
   });
 }
 
-class TestEmbeddingModel extends EmbeddingModel {
-  ref = { provider: "test", model: "deterministic" };
-  dimension = 8;
-  metric = "cosine";
-  supportedContentKinds = ["text"];
-  limits = { maxBatchSize: 64 };
+class TestEmbeddingModel extends BaseEmbeddingModel {
+  info = {
+    reference: "test/deterministic",
+    provider: "test",
+    name: "deterministic",
+    dimension: 8,
+    metric: "cosine",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 64 },
+  };
 
   constructor(beforeEmbed = async () => {}) {
     super();
@@ -614,15 +612,18 @@ class TestEmbeddingModel extends EmbeddingModel {
 
   async doEmbed(contents) {
     await this.beforeEmbed();
-    return contents.map((content) => {
-      const text = content.kind === "text" ? content.text : "";
-      const vector = new Array(this.dimension).fill(0);
-      for (let index = 0; index < text.length; index++) {
-        vector[index % vector.length] += text.charCodeAt(index) / 255;
-      }
-      const norm =
-        Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
-      return vector.map((value) => value / norm);
-    });
+    return {
+      vectors: contents.map((content) => {
+        const text = content.kind === "text" ? content.text : "";
+        const vector = new Array(this.info.dimension).fill(0);
+        for (let index = 0; index < text.length; index++) {
+          vector[index % vector.length] += text.charCodeAt(index) / 255;
+        }
+        const norm =
+          Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
+        return vector.map((value) => value / norm);
+      }),
+      truncated: [],
+    };
   }
 }

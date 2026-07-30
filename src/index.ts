@@ -25,15 +25,8 @@ export type {
   ZvecGrepSearchOptions,
 } from "./engine/service/index.js";
 export {
-  EMBEDDING_MODEL_CATALOG,
-  MODEL_CATALOG,
   createEmbeddingModel,
-  createEmbeddingModelFromCatalog,
-  createEmbeddingModelFromReference,
-  EmbeddingModel,
-  getEmbeddingModelCatalogEntry,
-  getEmbeddingModelCatalogEntryByRef,
-  listEmbeddingModels,
+  EmbeddingPurpose,
 } from "./engine/models/index.js";
 export { isImageContent, isTextContent } from "./engine/types.js";
 export type {
@@ -67,10 +60,12 @@ export type {
   TimingEntry,
 } from "./engine/types.js";
 export type {
-  EmbeddingCatalogEntry,
-  LlamaCppEmbeddingCatalogEntry,
-  LlamaGpuMode,
-  LocalEmbeddingFormat,
-  ModelProviderOptions,
-  TransformersJsEmbeddingCatalogEntry,
+  CreateEmbeddingModelOptions,
+  EmbeddingModel,
+  EmbeddingModelInfo,
+  EmbeddingOptions,
+  EmbeddingResult,
+  RankingCandidate,
+  RankingModel,
+  RankingScore,
 } from "./engine/models/index.js";

@@ -16,14 +16,11 @@ test("config model set parses local runtime settings", () => {
     "model",
     "set",
     "local/embeddinggemma-300m",
-    "--llama-gpu",
+    "--device",
     "metal",
-    "--embedding-parallelism",
-    "2",
   ]);
   assert.equal(parsed.options.configAction, "model-set");
-  assert.equal(parsed.options.llamaGpu, "metal");
-  assert.equal(parsed.options.embeddingParallelism, 2);
+  assert.equal(parsed.options.device, "metal");
   assert.deepEqual(parsed.positionals, ["local/embeddinggemma-300m"]);
 });
 
@@ -44,10 +41,8 @@ test("config model set persists independent local model settings", async (t) => 
       "model",
       "set",
       "local/embeddinggemma-300m",
-      "--llama-gpu",
+      "--device",
       "metal",
-      "--embedding-parallelism",
-      "2",
     ],
     { env, cwd: workspace },
   );
@@ -59,7 +54,8 @@ test("config model set persists independent local model settings", async (t) => 
       "model",
       "set",
       "local/embeddinggemma-300m",
-      "--no-gpu",
+      "--device",
+      "cpu",
     ],
     { env, cwd: workspace },
   );
@@ -71,7 +67,8 @@ test("config model set persists independent local model settings", async (t) => 
       "model",
       "set",
       "local/qwen3-embedding-0.6b",
-      "--no-gpu",
+      "--device",
+      "cpu",
     ],
     { env, cwd: workspace },
   );
@@ -80,8 +77,8 @@ test("config model set persists independent local model settings", async (t) => 
     await readFile(join(home, ".zvec-grep", "config.json"), "utf8"),
   );
   assert.deepEqual(config.models, {
-    "local/embeddinggemma-300m": { llamaGpu: false, embeddingParallelism: 2 },
-    "local/qwen3-embedding-0.6b": { llamaGpu: false },
+    "local/embeddinggemma-300m": { device: "cpu" },
+    "local/qwen3-embedding-0.6b": { device: "cpu" },
   });
   await assert.rejects(access(join(workspace, ".zvec-grep")), {
     code: "ENOENT",
@@ -97,7 +94,7 @@ test("config model set rejects missing settings and remote models", async () => 
       "set",
       "local/embeddinggemma-300m",
     ]),
-    /requires --llama-gpu/,
+    /requires --device/,
   );
   await assert.rejects(
     execFileAsync(process.execPath, [
@@ -106,7 +103,8 @@ test("config model set rejects missing settings and remote models", async () => 
       "model",
       "set",
       "qwen/text-embedding-v4",
-      "--no-gpu",
+      "--device",
+      "cpu",
     ]),
     /only supports local embedding models/,
   );
@@ -117,10 +115,24 @@ test("config model set rejects missing settings and remote models", async () => 
       "model",
       "set",
       "local/unknown",
-      "--no-gpu",
+      "--device",
+      "cpu",
     ]),
-    /Unsupported local embedding model/,
+    /not in the zvec-grep catalog/,
   );
+  for (const option of ["--gpu", "--no-gpu", "--llama-gpu"]) {
+    assert.throws(
+      () =>
+        parseArgs([
+          "config",
+          "model",
+          "set",
+          "local/embeddinggemma-300m",
+          option,
+        ]),
+      /Unknown option/,
+    );
+  }
   assert.throws(
     () =>
       parseArgs([
@@ -128,19 +140,8 @@ test("config model set rejects missing settings and remote models", async () => 
         "model",
         "set",
         "local/embeddinggemma-300m",
-        "--no-gpu",
-        "--gpu",
-      ]),
-    /conflicts with an earlier GPU option/,
-  );
-  assert.throws(
-    () =>
-      parseArgs([
-        "config",
-        "model",
-        "set",
-        "local/embeddinggemma-300m",
-        "--no-gpu",
+        "--device",
+        "cpu",
         "--api-key",
         "secret",
       ]),

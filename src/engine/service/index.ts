@@ -1,10 +1,13 @@
 export {
-  createEmbeddingModelForSchema,
+  createEmbeddingModelForIdentity,
   createZvecGrep,
-  embeddingModelPoolKeyForSchema,
+  embeddingModelPoolKeyForIdentity,
   openAnonymousReadSession,
 } from "./zvec-grep.js";
-export type { AnonymousReadSession } from "./zvec-grep.js";
+export type {
+  AnonymousReadSession,
+  EmbeddingModelIdentity,
+} from "./zvec-grep.js";
 export type {
   CreateZvecGrepOptions,
   ZvecGrep,

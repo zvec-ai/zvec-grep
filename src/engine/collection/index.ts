@@ -17,7 +17,7 @@ import {
   EngineError,
   errorDetails,
 } from "../errors/index.js";
-import type { EmbeddingModel } from "../models/embeddings.js";
+import type { EmbeddingModel } from "../models/index.js";
 import {
   getCollectionIndexStatus,
   indexCollection,
@@ -225,7 +225,7 @@ export class Collection {
 
     const expected = this.embedding;
 
-    if (expected.provider !== current.ref.provider) {
+    if (expected.provider !== current.info.provider) {
       throw new EngineError(
         "Collection embedding provider does not match current model",
         {
@@ -233,13 +233,13 @@ export class Collection {
           context: collectionMismatchDetails(
             this.name,
             expected.provider,
-            current.ref.provider,
+            current.info.provider,
           ),
         },
       );
     }
 
-    if (expected.model !== current.ref.model) {
+    if (expected.model !== current.info.name) {
       throw new EngineError(
         "Collection embedding model does not match current model",
         {
@@ -247,13 +247,13 @@ export class Collection {
           context: collectionMismatchDetails(
             this.name,
             expected.model,
-            current.ref.model,
+            current.info.name,
           ),
         },
       );
     }
 
-    if (expected.dimension !== current.dimension) {
+    if (expected.dimension !== current.info.dimension) {
       throw new EngineError(
         "Collection embedding dimension does not match current model",
         {
@@ -261,13 +261,13 @@ export class Collection {
           context: collectionMismatchDetails(
             this.name,
             expected.dimension,
-            current.dimension,
+            current.info.dimension,
           ),
         },
       );
     }
 
-    if (expected.metric !== current.metric) {
+    if (expected.metric !== current.info.metric) {
       throw new EngineError(
         "Collection embedding metric does not match current model",
         {
@@ -275,7 +275,7 @@ export class Collection {
           context: collectionMismatchDetails(
             this.name,
             expected.metric,
-            current.metric,
+            current.info.metric,
           ),
         },
       );
@@ -1035,10 +1035,10 @@ function currentEmbeddingSchema(
   model: EmbeddingModel,
 ): CollectionEmbeddingSchema {
   return {
-    provider: model.ref.provider,
-    model: model.ref.model,
-    dimension: model.dimension,
-    metric: model.metric,
+    provider: model.info.provider,
+    model: model.info.name,
+    dimension: model.info.dimension,
+    metric: model.info.metric,
   };
 }
 

@@ -5,20 +5,19 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { AutoTokenizer } from "@huggingface/transformers";
-import { EngineError } from "../../../errors/index.js";
-import type { Content, TextContent } from "../../../types.js";
-import { defaultHome } from "../../../utils/path.js";
+import { EngineError } from "../../errors/index.js";
+import type { Content, TextContent } from "../../types.js";
+import { defaultHome } from "../../utils/path.js";
 import {
-  EmbeddingModel,
-  type EmbeddingBatchResult,
-  type EmbeddingLimits,
-  type EmbeddingOptions,
-  type EmbeddingVector,
-} from "../../embeddings.js";
+  BaseEmbeddingModel,
+  type NormalizedEmbeddingOptions,
+} from "../embeddings.js";
 import type {
-  Model2VecEmbeddingCatalogEntry,
-  ModelProviderOptions,
-} from "../../types.js";
+  CreateEmbeddingModelOptions,
+  EmbeddingModelInfo,
+  EmbeddingResult,
+} from "../embeddings.js";
+import type { Model2VecEmbeddingCatalogEntry } from "../catalog.js";
 
 type TokenTensor = {
   data: ArrayLike<number | bigint>;
@@ -95,14 +94,8 @@ export function setModel2VecRuntimeForTesting(
   runtimeOverride = runtime;
 }
 
-export class Model2VecEmbeddingModel extends EmbeddingModel {
-  readonly ref;
-  readonly dimension;
-  readonly metric;
-  readonly supportedContentKinds = ["text"] as const;
-  readonly limits;
-  override readonly recommendedIndexConcurrency = 1;
-  override readonly maxIndexConcurrency = 1;
+export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
+  readonly info: EmbeddingModelInfo;
 
   private readonly modelCacheDir: string;
   private tokenizer: TokenizerLike | null = null;
@@ -112,16 +105,21 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
 
   constructor(
     private readonly entry: Model2VecEmbeddingCatalogEntry,
-    options: ModelProviderOptions,
+    options: CreateEmbeddingModelOptions,
   ) {
     super();
-    this.ref = { provider: entry.provider, model: entry.model } as const;
-    this.dimension = entry.dimension;
-    this.metric = entry.metric;
-    this.limits = {
-      maxBatchSize: entry.maxBatchSize,
-      maxInputTokens: entry.maxInputTokens,
-    } as const satisfies EmbeddingLimits;
+    this.info = {
+      reference: entry.reference,
+      provider: entry.provider,
+      name: entry.model,
+      dimension: entry.dimension,
+      metric: entry.metric,
+      inputKinds: ["text"],
+      limits: {
+        maxBatchSize: entry.maxBatchSize,
+        maxInputTokens: entry.maxInputTokens,
+      },
+    };
     this.modelCacheDir =
       options.modelCacheDir ??
       process.env.ZVEC_GREP_MODEL_CACHE ??
@@ -130,22 +128,15 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
 
   protected async doEmbed(
     contents: readonly Content[],
-    options: Required<EmbeddingOptions>,
-  ): Promise<EmbeddingVector[]> {
-    return (await this.embedBatch(contents, options)).vectors;
-  }
-
-  protected override async doEmbedWithDiagnostics(
-    contents: readonly Content[],
-    options: Required<EmbeddingOptions>,
-  ): Promise<EmbeddingBatchResult> {
+    options: NormalizedEmbeddingOptions,
+  ): Promise<EmbeddingResult> {
     return await this.embedBatch(contents, options);
   }
 
   private async embedBatch(
     contents: readonly Content[],
-    options: Required<EmbeddingOptions>,
-  ): Promise<EmbeddingBatchResult> {
+    options: NormalizedEmbeddingOptions,
+  ): Promise<EmbeddingResult> {
     this.ensureNotDisposed();
     await this.ensureLoaded();
 
@@ -157,7 +148,7 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
     } catch (cause) {
       throw new EngineError("Model2Vec embedding failed", {
         code: "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_EMBED_FAILED",
-        context: `model=${this.entry.id} repo=${this.entry.repo}`,
+        context: `model=${this.entry.reference} repo=${this.entry.repo}`,
         cause,
       });
     }
@@ -207,7 +198,7 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
       runtime.loadSafetensors(
         modelPath,
         this.entry.embeddingTensor,
-        this.dimension,
+        this.info.dimension,
       ),
     ]);
     this.ensureNotDisposed();
@@ -278,13 +269,13 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
       await rm(partialPath, { force: true });
       throw new EngineError("Unable to download Model2Vec model artifact", {
         code: "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DOWNLOAD_FAILED",
-        context: `model=${this.entry.id} url=${url}`,
+        context: `model=${this.entry.reference} url=${url}`,
         cause,
       });
     }
   }
 
-  private async embedTexts(texts: string[]): Promise<EmbeddingBatchResult> {
+  private async embedTexts(texts: string[]): Promise<EmbeddingResult> {
     const tokenizer = this.tokenizer;
     const staticTable = this.staticTable;
     if (!tokenizer || !staticTable) {
@@ -319,14 +310,10 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
       vectors: embedStaticTokenLists(
         tokenLists,
         staticTable,
-        this.dimension,
+        this.info.dimension,
         this.entry.normalize,
       ),
-      diagnostics: {
-        truncatedInputIndexes: truncatedInputIndexes.sort(
-          (left, right) => left - right,
-        ),
-      },
+      truncated: truncatedInputIndexes.sort((left, right) => left - right),
     };
   }
 
@@ -334,7 +321,7 @@ export class Model2VecEmbeddingModel extends EmbeddingModel {
     if (this.disposed) {
       throw new EngineError("Model2Vec embedding model is disposed", {
         code: "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DISPOSED",
-        context: `model=${this.entry.id}`,
+        context: `model=${this.entry.reference}`,
       });
     }
   }
@@ -346,10 +333,17 @@ function isUsableModelFile(path: string): boolean {
 
 function formatText(
   text: string,
-  purpose: Required<EmbeddingOptions>["purpose"],
+  purpose: NormalizedEmbeddingOptions["purpose"],
   entry: Model2VecEmbeddingCatalogEntry,
 ): string {
-  const prefix = purpose === "query" ? entry.queryPrefix : entry.documentPrefix;
+  const prefix =
+    purpose === "query"
+      ? "queryPrefix" in entry && typeof entry.queryPrefix === "string"
+        ? entry.queryPrefix
+        : undefined
+      : "documentPrefix" in entry && typeof entry.documentPrefix === "string"
+        ? entry.documentPrefix
+        : undefined;
   return prefix ? `${prefix}${text}` : text;
 }
 
@@ -423,7 +417,7 @@ function embedStaticTokenLists(
   table: StaticEmbeddingTable,
   dimension: number,
   normalize: boolean,
-): EmbeddingVector[] {
+): number[][] {
   const halfValues = table.dtype === "F16" ? halfFloatValues() : null;
   return tokenLists.map((tokenIds) => {
     const vector = Array.from({ length: dimension }, () => 0);

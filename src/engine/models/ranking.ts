@@ -1,5 +1,4 @@
 import type { Content, ContentKind } from "../types.js";
-import type { ModelRef } from "./types.js";
 
 export type RankingCandidate = {
   id: string;
@@ -12,11 +11,17 @@ export type RankingScore = {
 };
 
 export interface RankingModel {
-  readonly ref: ModelRef;
-  readonly supportedContentKinds: readonly ContentKind[];
+  readonly info: Readonly<{
+    reference: string;
+    provider: string;
+    name: string;
+    inputKinds: readonly ContentKind[];
+  }>;
 
   rank(
     query: Content,
     candidates: readonly RankingCandidate[],
   ): Promise<RankingScore[]>;
+
+  dispose(): Promise<void>;
 }

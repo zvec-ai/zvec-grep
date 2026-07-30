@@ -3,12 +3,12 @@ import test from "node:test";
 import {
   TransformersJsEmbeddingModel,
   setTransformersJsRuntimeForTesting,
-} from "../../dist/engine/models/providers/transformers-js/embedding.js";
+} from "../../dist/engine/models/backends/transformers-js.js";
 
 function entry(overrides = {}) {
   return {
     backend: "transformers-js",
-    id: "local/test-transformer",
+    reference: "local/test-transformer",
     provider: "local",
     model: "test-transformer",
     repo: "test/model-ONNX",
@@ -104,10 +104,13 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
       ],
       { purpose: "query" },
     ),
-    [
-      Array.from(Float32Array.from([0.1, 0.2, 0.3])),
-      Array.from(Float32Array.from([1.1, 1.2, 1.3])),
-    ],
+    {
+      vectors: [
+        Array.from(Float32Array.from([0.1, 0.2, 0.3])),
+        Array.from(Float32Array.from([1.1, 1.2, 1.3])),
+      ],
+      truncated: [],
+    },
   );
   await model.embed([{ kind: "text", text: "implementation" }]);
 
@@ -209,7 +212,7 @@ test("Transformers.js adapter maps Metal to WebGPU", async (t) => {
 
   const model = new TransformersJsEmbeddingModel(entry(), {
     apiKey: "",
-    llamaGpu: "metal",
+    device: "metal",
   });
   await model.embed([{ kind: "text", text: "value" }]);
 
@@ -244,7 +247,7 @@ test("Transformers.js adapter falls back to CPU when GPU initialization fails", 
   });
   const model = new TransformersJsEmbeddingModel(entry(), {
     apiKey: "",
-    llamaGpu: "metal",
+    device: "metal",
   });
   await model.embed([{ kind: "text", text: "value" }]);
 
@@ -291,12 +294,13 @@ test("Transformers.js adapter retries on CPU when GPU inference returns invalid 
   });
   const model = new TransformersJsEmbeddingModel(entry(), {
     apiKey: "",
-    llamaGpu: "metal",
+    device: "metal",
   });
 
-  assert.deepEqual(await model.embed([{ kind: "text", text: "value" }]), [
-    [1, 2, 3],
-  ]);
+  assert.deepEqual(await model.embed([{ kind: "text", text: "value" }]), {
+    vectors: [[1, 2, 3]],
+    truncated: [],
+  });
   assert.deepEqual(providers, ["webgpu", "cpu"]);
   assert.equal(activeProvider, "cpu");
   assert.equal(gpuDisposals, 1);
@@ -325,12 +329,12 @@ test("Transformers.js reports inputs truncated by the feature extraction pipelin
   const model = new TransformersJsEmbeddingModel(entry({ maxInputTokens: 2 }), {
     apiKey: "",
   });
-  const result = await model.embedWithDiagnostics([
+  const result = await model.embed([
     { kind: "text", text: "fits" },
     { kind: "text", text: "overflow" },
   ]);
 
-  assert.deepEqual(result.diagnostics.truncatedInputIndexes, [1]);
+  assert.deepEqual(result.truncated, [1]);
   assert.deepEqual(result.vectors, [
     [1, 0, 0],
     [0, 1, 0],
@@ -367,7 +371,7 @@ test("Transformers.js does not treat tokenizer failures as GPU inference failure
 
   const model = new TransformersJsEmbeddingModel(entry(), {
     apiKey: "",
-    llamaGpu: "metal",
+    device: "metal",
   });
   await assert.rejects(
     model.embed([{ kind: "text", text: "value" }]),

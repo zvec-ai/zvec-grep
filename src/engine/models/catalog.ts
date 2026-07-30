@@ -1,46 +1,7 @@
-import type { EmbeddingCatalogEntry, ModelCatalog, ModelRef } from "./types.js";
-
-export const MODEL_CATALOG = {
-  openai: {
-    embedding: ["text-embedding-3-small", "text-embedding-3-large"],
-    ranking: [],
-  },
-
-  qwen: {
-    embedding: [
-      "qwen3.7-text-embedding",
-      "text-embedding-v4",
-      "qwen3-vl-embedding",
-    ],
-    ranking: ["gte-rerank-v2"],
-  },
-
-  jina: {
-    embedding: ["jina-embeddings-v3"],
-    ranking: ["jina-reranker-v2-base-multilingual"],
-  },
-
-  local: {
-    embedding: [
-      "embeddinggemma-300m",
-      "qwen3-embedding-0.6b",
-      "bge-small-en-v1.5",
-      "all-minilm-l6-v2",
-      "potion-base-8m",
-      "potion-code-16m-v2",
-      "multilingual-e5-small",
-      "jina-embeddings-v2-base-code",
-      "gte-modernbert-base",
-      "nomic-embed-text-v1.5",
-    ],
-    ranking: [],
-  },
-} as const satisfies ModelCatalog;
-
 export const EMBEDDING_MODEL_CATALOG = {
   "local/embeddinggemma-300m": {
     backend: "llama-cpp",
-    id: "local/embeddinggemma-300m",
+    reference: "local/embeddinggemma-300m",
     provider: "local",
     model: "embeddinggemma-300m",
     uri: "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf",
@@ -53,7 +14,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/qwen3-embedding-0.6b": {
     backend: "llama-cpp",
-    id: "local/qwen3-embedding-0.6b",
+    reference: "local/qwen3-embedding-0.6b",
     provider: "local",
     model: "qwen3-embedding-0.6b",
     uri: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
@@ -65,16 +26,45 @@ export const EMBEDDING_MODEL_CATALOG = {
   },
 
   "qwen/text-embedding-v4": {
-    id: "qwen/text-embedding-v4",
+    backend: "qwen",
+    kind: "text",
+    reference: "qwen/text-embedding-v4",
     provider: "qwen",
     model: "text-embedding-v4",
     dimension: 1024,
     metric: "cosine",
+    maxBatchSize: 10,
+    maxInputTokens: 8192,
+  },
+
+  "qwen/qwen3.7-text-embedding": {
+    backend: "qwen",
+    kind: "text",
+    reference: "qwen/qwen3.7-text-embedding",
+    provider: "qwen",
+    model: "qwen3.7-text-embedding",
+    dimension: 1024,
+    metric: "cosine",
+    maxBatchSize: 20,
+    maxInputTokens: 128000,
+  },
+
+  "qwen/qwen3-vl-embedding": {
+    backend: "qwen",
+    kind: "multimodal",
+    reference: "qwen/qwen3-vl-embedding",
+    provider: "qwen",
+    model: "qwen3-vl-embedding",
+    dimension: 2560,
+    metric: "cosine",
+    maxBatchSize: 20,
+    maxInputTokens: 32000,
+    maxImageBytes: 10 * 1024 * 1024,
   },
 
   "local/bge-small-en-v1.5": {
     backend: "transformers-js",
-    id: "local/bge-small-en-v1.5",
+    reference: "local/bge-small-en-v1.5",
     provider: "local",
     model: "bge-small-en-v1.5",
     repo: "onnx-community/bge-small-en-v1.5-ONNX",
@@ -91,7 +81,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/all-minilm-l6-v2": {
     backend: "transformers-js",
-    id: "local/all-minilm-l6-v2",
+    reference: "local/all-minilm-l6-v2",
     provider: "local",
     model: "all-minilm-l6-v2",
     repo: "onnx-community/all-MiniLM-L6-v2-ONNX",
@@ -107,7 +97,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/potion-base-8m": {
     backend: "model2vec",
-    id: "local/potion-base-8m",
+    reference: "local/potion-base-8m",
     provider: "local",
     model: "potion-base-8m",
     repo: "minishlab/potion-base-8M",
@@ -124,7 +114,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/potion-code-16m-v2": {
     backend: "model2vec",
-    id: "local/potion-code-16m-v2",
+    reference: "local/potion-code-16m-v2",
     provider: "local",
     model: "potion-code-16m-v2",
     repo: "minishlab/potion-code-16M-v2",
@@ -141,7 +131,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/multilingual-e5-small": {
     backend: "transformers-js",
-    id: "local/multilingual-e5-small",
+    reference: "local/multilingual-e5-small",
     provider: "local",
     model: "multilingual-e5-small",
     repo: "Xenova/multilingual-e5-small",
@@ -159,7 +149,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/jina-embeddings-v2-base-code": {
     backend: "transformers-js",
-    id: "local/jina-embeddings-v2-base-code",
+    reference: "local/jina-embeddings-v2-base-code",
     provider: "local",
     model: "jina-embeddings-v2-base-code",
     repo: "jinaai/jina-embeddings-v2-base-code",
@@ -175,7 +165,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/gte-modernbert-base": {
     backend: "transformers-js",
-    id: "local/gte-modernbert-base",
+    reference: "local/gte-modernbert-base",
     provider: "local",
     model: "gte-modernbert-base",
     repo: "Alibaba-NLP/gte-modernbert-base",
@@ -191,7 +181,7 @@ export const EMBEDDING_MODEL_CATALOG = {
 
   "local/nomic-embed-text-v1.5": {
     backend: "transformers-js",
-    id: "local/nomic-embed-text-v1.5",
+    reference: "local/nomic-embed-text-v1.5",
     provider: "local",
     model: "nomic-embed-text-v1.5",
     repo: "nomic-ai/nomic-embed-text-v1.5",
@@ -206,7 +196,40 @@ export const EMBEDDING_MODEL_CATALOG = {
     maxInputTokens: 8192,
     maxBatchSize: 2,
   },
-} as const satisfies Record<string, EmbeddingCatalogEntry>;
+} as const;
+
+export type EmbeddingCatalogEntry =
+  (typeof EMBEDDING_MODEL_CATALOG)[keyof typeof EMBEDDING_MODEL_CATALOG];
+
+export type LlamaCppEmbeddingCatalogEntry = Extract<
+  EmbeddingCatalogEntry,
+  { backend: "llama-cpp" }
+>;
+
+export type TransformersJsEmbeddingCatalogEntry = Extract<
+  EmbeddingCatalogEntry,
+  { backend: "transformers-js" }
+>;
+
+export type Model2VecEmbeddingCatalogEntry = Extract<
+  EmbeddingCatalogEntry,
+  { backend: "model2vec" }
+>;
+
+export type QwenEmbeddingCatalogEntry = Extract<
+  EmbeddingCatalogEntry,
+  { backend: "qwen" }
+>;
+
+export type QwenTextEmbeddingCatalogEntry = Extract<
+  QwenEmbeddingCatalogEntry,
+  { kind: "text" }
+>;
+
+export type QwenMultimodalEmbeddingCatalogEntry = Extract<
+  QwenEmbeddingCatalogEntry,
+  { kind: "multimodal" }
+>;
 
 export type EmbeddingModelCatalogId = keyof typeof EMBEDDING_MODEL_CATALOG;
 
@@ -215,15 +238,7 @@ export function listEmbeddingModels(): EmbeddingCatalogEntry[] {
 }
 
 export function getEmbeddingModelCatalogEntry(
-  id: string,
+  reference: string,
 ): EmbeddingCatalogEntry | undefined {
-  return EMBEDDING_MODEL_CATALOG[id as EmbeddingModelCatalogId];
-}
-
-export function getEmbeddingModelCatalogEntryByRef(
-  ref: ModelRef,
-): EmbeddingCatalogEntry | undefined {
-  return listEmbeddingModels().find(
-    (entry) => entry.provider === ref.provider && entry.model === ref.model,
-  );
+  return EMBEDDING_MODEL_CATALOG[reference as EmbeddingModelCatalogId];
 }

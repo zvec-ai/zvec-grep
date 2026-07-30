@@ -5,13 +5,13 @@ import test from "node:test";
 import {
   Model2VecEmbeddingModel,
   setModel2VecRuntimeForTesting,
-} from "../../dist/engine/models/providers/model2vec/embedding.js";
+} from "../../dist/engine/models/backends/model2vec.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 
 function entry(overrides = {}) {
   return {
     backend: "model2vec",
-    id: "local/test-potion",
+    reference: "local/test-potion",
     provider: "local",
     model: "test-potion",
     repo: "test/potion",
@@ -108,7 +108,7 @@ test("Model2Vec downloads pinned Safetensors assets and performs normalized stat
     apiKey: "",
     modelCacheDir: root,
   });
-  const vectors = await model.embed(
+  const { vectors } = await model.embed(
     [
       { kind: "text", text: "both tokens" },
       { kind: "text", text: "unknown-only" },
@@ -226,10 +226,13 @@ test("Model2Vec parses real F32 and F16 Safetensors embedding tables", async (t)
         { kind: "text", text: "first" },
         { kind: "text", text: "second" },
       ]),
-      [
-        [1, 2, 3],
-        [4, 5, 6],
-      ],
+      {
+        vectors: [
+          [1, 2, 3],
+          [4, 5, 6],
+        ],
+        truncated: [],
+      },
     );
     await model.dispose();
   }
@@ -268,11 +271,9 @@ test("Model2Vec reports and truncates inputs beyond the model token limit", asyn
     apiKey: "",
     modelCacheDir: root,
   });
-  const result = await model.embedWithDiagnostics([
-    { kind: "text", text: "too many tokens" },
-  ]);
+  const result = await model.embed([{ kind: "text", text: "too many tokens" }]);
 
-  assert.deepEqual(result.diagnostics.truncatedInputIndexes, [0]);
+  assert.deepEqual(result.truncated, [0]);
   assert.ok(Math.abs(result.vectors[0][0] - Math.SQRT1_2) < 1e-7);
   assert.ok(Math.abs(result.vectors[0][1] - Math.SQRT1_2) < 1e-7);
   assert.equal(result.vectors[0][2], 0);

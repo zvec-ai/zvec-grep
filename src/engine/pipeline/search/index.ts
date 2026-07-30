@@ -4,7 +4,7 @@ import {
   EngineError,
   errorDetails,
 } from "../../errors/index.js";
-import type { EmbeddingModel } from "../../models/embeddings.js";
+import type { EmbeddingModel } from "../../models/index.js";
 import type {
   CollectionStorage,
   StorageSearchFilter,
@@ -439,10 +439,13 @@ async function embedVectorRoutes(
   for (
     let start = 0;
     start < vectorRoutes.length;
-    start += model.limits.maxBatchSize
+    start += model.info.limits.maxBatchSize
   ) {
-    const batch = vectorRoutes.slice(start, start + model.limits.maxBatchSize);
-    const vectors = await model.embed(
+    const batch = vectorRoutes.slice(
+      start,
+      start + model.info.limits.maxBatchSize,
+    );
+    const { vectors } = await model.embed(
       batch.map((route) => ({
         kind: "text",
         text: route.query,
@@ -1256,7 +1259,9 @@ async function chooseBestEntityInFile(
     ctx.storage,
   );
 
-  const [queryVector] = await requireEmbeddingModel(ctx, "diagnose").embed(
+  const {
+    vectors: [queryVector],
+  } = await requireEmbeddingModel(ctx, "diagnose").embed(
     [{ kind: "text", text: query }],
     { purpose: "query" },
   );

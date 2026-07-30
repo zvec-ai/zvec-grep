@@ -38,8 +38,7 @@ export type CliOptions = {
   home?: string;
   embedding?: string;
   modelCacheDir?: string;
-  llamaGpu?: "auto" | "metal" | "vulkan" | "cuda" | false;
-  embeddingParallelism?: number;
+  device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
   apiKey?: string;
   endpoint?: string;
   limit?: number;

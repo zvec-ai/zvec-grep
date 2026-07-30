@@ -7,7 +7,10 @@ import {
 } from "../engine/service/index.js";
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import { DaemonError } from "./errors.js";
-import type { EmbeddingModelPool, ModelLeaseRequest } from "./model-pool.js";
+import type {
+  EmbeddingModelLoadRequest,
+  EmbeddingModelPool,
+} from "./model-pool.js";
 import { RootRuntime } from "./root-runtime.js";
 import { RootLeaseManager } from "./root-lease.js";
 
@@ -20,7 +23,7 @@ export type RuntimeManagerOptions = {
   rootLeaseManager?: RootLeaseManager;
   createRuntime?: (input: {
     canonicalRoot: string;
-    modelRequest?: ModelLeaseRequest;
+    modelLoadRequest?: EmbeddingModelLoadRequest;
     modelPool: EmbeddingModelPool;
   }) => RootRuntime | Promise<RootRuntime>;
 };
@@ -90,9 +93,10 @@ export class RuntimeManager {
     const canonicalRoot = await realpath(info.root);
     this.aliases.set(canonicalRequestedRoot, canonicalRoot);
     return this.getOrCreate(canonicalRoot, {
-      schema: info.collection.embedding,
-      root: canonicalRoot,
-      registryHome: info.home,
+      model: {
+        provider: info.collection.embedding.provider,
+        name: info.collection.embedding.model,
+      },
     });
   }
 
@@ -189,25 +193,25 @@ export class RuntimeManager {
 
   private async getOrCreate(
     canonicalRoot: string,
-    modelRequest?: ModelLeaseRequest,
+    modelLoadRequest?: EmbeddingModelLoadRequest,
   ): Promise<RootRuntime> {
     const existing = this.runtimes.get(canonicalRoot);
     if (existing) {
-      if (modelRequest) {
-        existing.updateModelRequest(modelRequest);
+      if (modelLoadRequest) {
+        existing.updateModelLoadRequest(modelLoadRequest);
       }
       this.touchRuntime(canonicalRoot);
       return existing;
     }
     let pending = this.creating.get(canonicalRoot);
     if (!pending) {
-      pending = this.createRuntime(canonicalRoot, modelRequest);
+      pending = this.createRuntime(canonicalRoot, modelLoadRequest);
       this.creating.set(canonicalRoot, pending);
     }
     try {
       const runtime = await pending;
-      if (modelRequest) {
-        runtime.updateModelRequest(modelRequest);
+      if (modelLoadRequest) {
+        runtime.updateModelLoadRequest(modelLoadRequest);
       }
       this.touchRuntime(canonicalRoot);
       return runtime;
@@ -218,13 +222,13 @@ export class RuntimeManager {
 
   private async createRuntime(
     canonicalRoot: string,
-    modelRequest?: ModelLeaseRequest,
+    modelLoadRequest?: EmbeddingModelLoadRequest,
   ): Promise<RootRuntime> {
     let runtime: RootRuntime;
     if (this.options.createRuntime) {
       runtime = await this.options.createRuntime({
         canonicalRoot,
-        modelRequest,
+        modelLoadRequest,
         modelPool: this.options.modelPool,
       });
     } else {
@@ -232,7 +236,7 @@ export class RuntimeManager {
       runtime = new RootRuntime({
         canonicalRoot,
         modelPool: this.options.modelPool,
-        modelRequest,
+        modelLoadRequest,
         rootLease,
         readCollectionIdleTtlMs: this.options.readCollectionIdleTtlMs,
         onActivity: () => this.touchRuntime(canonicalRoot),

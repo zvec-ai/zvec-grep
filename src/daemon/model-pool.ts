@@ -1,16 +1,14 @@
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import {
-  createEmbeddingModelForSchema,
-  embeddingModelPoolKeyForSchema,
+  createEmbeddingModelForIdentity,
+  embeddingModelPoolKeyForIdentity,
+  type EmbeddingModelIdentity,
 } from "../engine/service/zvec-grep.js";
-import type { EmbeddingModel } from "../engine/models/embeddings.js";
-import type { CollectionEmbeddingSchema } from "../engine/types.js";
+import type { EmbeddingModel } from "../engine/models/index.js";
 import { opaqueIdentity, type DaemonLogger } from "./logger.js";
 
-export type ModelLeaseRequest = {
-  schema: CollectionEmbeddingSchema;
-  root: string;
-  registryHome: string;
+export type EmbeddingModelLoadRequest = {
+  model: EmbeddingModelIdentity;
 };
 
 export type ModelLease = {
@@ -29,9 +27,9 @@ export type EmbeddingModelPoolOptions = {
   maxLoadedModels?: number;
   serviceOptions?: CreateZvecGrepOptions;
   createModel?: (
-    request: ModelLeaseRequest,
+    request: EmbeddingModelLoadRequest,
   ) => EmbeddingModel | Promise<EmbeddingModel>;
-  keyForRequest?: (request: ModelLeaseRequest) => string;
+  keyForRequest?: (request: EmbeddingModelLoadRequest) => string;
   logger?: DaemonLogger;
 };
 
@@ -50,9 +48,11 @@ export class EmbeddingModelPool {
   private readonly idleTtlMs: number;
   private readonly maxLoadedModels: number;
   private readonly createModel: (
-    request: ModelLeaseRequest,
+    request: EmbeddingModelLoadRequest,
   ) => EmbeddingModel | Promise<EmbeddingModel>;
-  private readonly keyForRequest: (request: ModelLeaseRequest) => string;
+  private readonly keyForRequest: (
+    request: EmbeddingModelLoadRequest,
+  ) => string;
   private closed = false;
   private closePromise?: Promise<void>;
   private readonly logger?: DaemonLogger;
@@ -63,25 +63,18 @@ export class EmbeddingModelPool {
     this.createModel =
       options.createModel ??
       ((request) =>
-        createEmbeddingModelForSchema(
-          request.schema,
-          request.root,
-          request.registryHome,
-          options.serviceOptions,
-        ));
+        createEmbeddingModelForIdentity(request.model, options.serviceOptions));
     this.keyForRequest =
       options.keyForRequest ??
       ((request) =>
-        embeddingModelPoolKeyForSchema(
-          request.schema,
-          request.root,
-          request.registryHome,
+        embeddingModelPoolKeyForIdentity(
+          request.model,
           options.serviceOptions,
         ));
     this.logger = options.logger;
   }
 
-  async acquire(request: ModelLeaseRequest): Promise<ModelLease> {
+  async acquire(request: EmbeddingModelLoadRequest): Promise<ModelLease> {
     if (this.closed) {
       throw new Error("Embedding model pool is closed.");
     }
@@ -151,7 +144,7 @@ export class EmbeddingModelPool {
     };
   }
 
-  keyFor(request: ModelLeaseRequest): string {
+  keyFor(request: EmbeddingModelLoadRequest): string {
     return this.keyForRequest(request);
   }
 

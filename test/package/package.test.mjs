@@ -181,7 +181,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
     [
       "--input-type=module",
       "--eval",
-      "import { createZvecGrep } from '@zvec/zvec-grep'; if (typeof createZvecGrep !== 'function') process.exit(1);",
+      "import { createEmbeddingModel, createZvecGrep, EmbeddingPurpose } from '@zvec/zvec-grep'; if (typeof createZvecGrep !== 'function' || typeof createEmbeddingModel !== 'function' || EmbeddingPurpose.Query !== 'query') process.exit(1);",
     ],
     { cwd: consumerDirectory },
   );
@@ -190,7 +190,20 @@ test("npm package contains and exposes the supported public surface", async (t) 
   const typeFixture = join(consumerDirectory, "consume.ts");
   await writeFile(
     typeFixture,
-    "import { createZvecGrep } from '@zvec/zvec-grep';\nvoid createZvecGrep;\n",
+    [
+      "import { createEmbeddingModel, createZvecGrep } from '@zvec/zvec-grep';",
+      "import type { EmbeddingModel, EmbeddingOptions, EmbeddingResult, RankingCandidate, RankingModel, RankingScore } from '@zvec/zvec-grep';",
+      "void createZvecGrep;",
+      "const model: EmbeddingModel = createEmbeddingModel('local/embeddinggemma-300m');",
+      "const options: EmbeddingOptions = { purpose: 'query' };",
+      "const result: Promise<EmbeddingResult> = model.embed([{ kind: 'text', text: 'query' }], options);",
+      "declare const ranker: RankingModel;",
+      "declare const candidates: readonly RankingCandidate[];",
+      "const ranking: Promise<RankingScore[]> = ranker.rank({ kind: 'text', text: 'query' }, candidates);",
+      "void result;",
+      "void ranking;",
+      "",
+    ].join("\n"),
   );
   await execFileAsync(
     process.execPath,

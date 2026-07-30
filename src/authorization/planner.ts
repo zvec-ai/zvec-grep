@@ -10,7 +10,7 @@ import type { RemoteEmbeddingAuthorizationPlan } from "./types.js";
 
 export async function planRemoteIndexAuthorization(input: {
   info: ZvecGrepInfoResult;
-  schema: CollectionEmbeddingSchema;
+  schema: Pick<CollectionEmbeddingSchema, "provider" | "model">;
   rebuild?: boolean;
   needsUpdate?: boolean;
   serviceOptions?: CreateZvecGrepOptions;

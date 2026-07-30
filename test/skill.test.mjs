@@ -80,7 +80,6 @@ test("zvec-grep skill triggers by task and selects the available transport", asy
     fallback,
     /Do not repeat the query with an explicit CPU override/,
   );
-  assert.doesNotMatch(fallback, /--no-gpu --embedding-parallelism 1/);
   assert.match(
     fallback,
     /embedding context remains unavailable and exact anchors are available[\s\S]*existing indexed FTS route/,

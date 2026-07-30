@@ -16,9 +16,8 @@ import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
+  createEmbeddingModel,
   createZvecGrep,
-  getEmbeddingModelCatalogEntry,
-  getEmbeddingModelCatalogEntryByRef,
   type CreateZvecGrepOptions,
   type IndexProgress,
   type RootPath,
@@ -159,7 +158,7 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
       await runUninstall(parsed);
       return;
     case "config":
-      runConfig(parsed);
+      await runConfig(parsed);
       return;
     case "auth":
       await runAuth(parsed);
@@ -173,7 +172,7 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   }
 }
 
-function runConfig(parsed: ParsedArgs): void {
+async function runConfig(parsed: ParsedArgs): Promise<void> {
   if (parsed.options.configAction !== "model-set") {
     throw new Error("zg config requires model set");
   }
@@ -183,33 +182,26 @@ function runConfig(parsed: ParsedArgs): void {
     );
   }
   const reference = parsed.positionals[0]!;
-  const separator = reference.indexOf("/");
-  const provider = separator > 0 ? reference.slice(0, separator) : "";
-  const model = separator > 0 ? reference.slice(separator + 1) : "";
-  const catalogEntry = getEmbeddingModelCatalogEntryByRef({ provider, model });
-  if (provider !== "local") {
+  if (!reference.startsWith("local/")) {
     throw new Error("zg config model set only supports local embedding models");
   }
-  if (!catalogEntry || catalogEntry.provider !== "local") {
-    throw new Error(`Unsupported local embedding model: ${reference}`);
+  if (parsed.options.device === undefined) {
+    throw new Error("zg config model set requires --device");
   }
-  if (
-    parsed.options.llamaGpu === undefined &&
-    parsed.options.embeddingParallelism === undefined
-  ) {
-    throw new Error(
-      "zg config model set requires --llama-gpu, --gpu, --no-gpu, or --embedding-parallelism",
-    );
+  const model = createEmbeddingModel(reference, {
+    device: parsed.options.device,
+  });
+  try {
+    if (model.info.provider !== "local") {
+      throw new Error(`Unsupported local embedding model: ${reference}`);
+    }
+  } finally {
+    await model.dispose();
   }
   updateGlobalConfig({
     models: {
       [reference]: {
-        ...(parsed.options.llamaGpu !== undefined
-          ? { llamaGpu: parsed.options.llamaGpu }
-          : {}),
-        ...(parsed.options.embeddingParallelism !== undefined
-          ? { embeddingParallelism: parsed.options.embeddingParallelism }
-          : {}),
+        device: parsed.options.device,
       },
     },
   });
@@ -1326,8 +1318,7 @@ function collectionIndexOption(options: CliOptions): string | undefined {
     [options.resetPaths, "--reset-paths"],
     [options.embedding, "--embedding"],
     [options.modelCacheDir, "--model-cache"],
-    [options.llamaGpu, "--llama-gpu"],
-    [options.embeddingParallelism, "--embedding-parallelism"],
+    [options.device, "--device"],
     [options.apiKey, "--api-key"],
     [options.endpoint, "--endpoint"],
     [options.embeddingConcurrency, "--embedding-concurrency"],
@@ -1624,7 +1615,7 @@ function ftsFallbackContextRequest(
 function resolveAuthorizationSchema(
   reference: string | undefined,
   existing: CollectionEmbeddingSchema | null | undefined,
-): CollectionEmbeddingSchema | undefined {
+): Pick<CollectionEmbeddingSchema, "provider" | "model"> | undefined {
   if (!reference) return existing ?? undefined;
   const separator = reference.indexOf("/");
   if (separator <= 0 || separator === reference.length - 1) {
@@ -1632,26 +1623,15 @@ function resolveAuthorizationSchema(
   }
   const provider = reference.slice(0, separator);
   const model = reference.slice(separator + 1);
-  const catalog = getEmbeddingModelCatalogEntry(reference);
   return {
     provider,
     model,
-    dimension:
-      catalog?.dimension ??
-      (existing?.provider === provider && existing.model === model
-        ? existing.dimension
-        : 1),
-    metric:
-      catalog?.metric ??
-      (existing?.provider === provider && existing.model === model
-        ? existing.metric
-        : "cosine"),
   };
 }
 
 function assertEmbeddingModelCompatible(
   existing: CollectionEmbeddingSchema | null | undefined,
-  requested: CollectionEmbeddingSchema | undefined,
+  requested: Pick<CollectionEmbeddingSchema, "provider" | "model"> | undefined,
   rebuild: boolean,
 ): void {
   if (!existing || !requested || rebuild) return;
@@ -1813,11 +1793,7 @@ export function createServiceOptions(
     apiKey,
     endpoint,
     modelCacheDir: options.modelCacheDir ?? process.env.ZVEC_GREP_MODEL_CACHE,
-    llamaGpu:
-      options.llamaGpu ?? parseEnvLlamaGpu(process.env.ZVEC_GREP_LLAMA_GPU),
-    embeddingParallelism:
-      options.embeddingParallelism ??
-      parseEnvPositiveInteger(process.env.ZVEC_GREP_EMBED_PARALLELISM),
+    device: options.device,
     authorizationSigningKeyPath: process.env.ZVEC_GREP_AUTHORIZATION_KEY_FILE,
   };
 }
@@ -1837,44 +1813,6 @@ function embeddingReference(
   embedding: { provider: string; model: string } | null | undefined,
 ): string | undefined {
   return embedding ? `${embedding.provider}/${embedding.model}` : undefined;
-}
-
-function parseEnvLlamaGpu(
-  value: string | undefined,
-): CreateZvecGrepOptions["llamaGpu"] | undefined {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  if (!normalized) {
-    return undefined;
-  }
-
-  if (
-    normalized === "auto" ||
-    normalized === "metal" ||
-    normalized === "vulkan" ||
-    normalized === "cuda"
-  ) {
-    return normalized;
-  }
-
-  if (
-    ["false", "off", "none", "disable", "disabled", "0"].includes(normalized)
-  ) {
-    return false;
-  }
-
-  return undefined;
-}
-
-function parseEnvPositiveInteger(
-  value: string | undefined,
-): number | undefined {
-  const normalized = value?.trim() ?? "";
-  if (!/^\d+$/.test(normalized)) {
-    return undefined;
-  }
-
-  const parsed = Number(normalized);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function resolveCodexHome(): string {

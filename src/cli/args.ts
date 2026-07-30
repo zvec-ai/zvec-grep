@@ -268,27 +268,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.embedding = readOptionValue(args, ++index, arg);
     } else if (arg === "--model-cache") {
       options.modelCacheDir = readOptionValue(args, ++index, arg);
-    } else if (arg === "--gpu") {
-      setLlamaGpuOption(
-        options,
-        "auto",
-        arg,
-        commandInput.command === "config",
-      );
-    } else if (arg === "--no-gpu") {
-      setLlamaGpuOption(options, false, arg, commandInput.command === "config");
-    } else if (arg === "--llama-gpu") {
-      setLlamaGpuOption(
-        options,
-        parseLlamaGpu(readOptionValue(args, ++index, arg)),
-        arg,
-        commandInput.command === "config",
-      );
-    } else if (arg === "--embedding-parallelism") {
-      options.embeddingParallelism = parsePositiveInteger(
-        readOptionValue(args, ++index, arg),
-        arg,
-      );
+    } else if (arg === "--device") {
+      options.device = parseDevice(readOptionValue(args, ++index, arg));
     } else if (arg === "--api-key") {
       options.apiKey = readOptionValue(args, ++index, arg);
     } else if (arg === "--endpoint") {
@@ -864,8 +845,7 @@ function validateCliShape(
       [options.home, "--home"],
       [options.embedding, "--embedding"],
       [options.modelCacheDir, "--model-cache"],
-      [options.llamaGpu, "--llama-gpu"],
-      [options.embeddingParallelism, "--embedding-parallelism"],
+      [options.device, "--device"],
       [options.apiKey, "--api-key"],
       [options.endpoint, "--endpoint"],
       [options.rebuild, "--rebuild"],
@@ -918,8 +898,7 @@ function validateCliShape(
       options.home ||
       options.embedding ||
       options.modelCacheDir ||
-      options.llamaGpu !== undefined ||
-      options.embeddingParallelism ||
+      options.device !== undefined ||
       options.apiKey ||
       options.endpoint ||
       options.globs?.length ||
@@ -935,6 +914,20 @@ function validateCliShape(
       options.embeddingConcurrency)
   ) {
     throw new Error("zg index --drop cannot be combined with indexing options");
+  }
+
+  if (command === "query") {
+    const unsupported = firstEnabledOption([
+      [options.embedding, "--embedding"],
+      [options.modelCacheDir, "--model-cache"],
+      [options.device, "--device"],
+      [options.apiKey, "--api-key"],
+      [options.endpoint, "--endpoint"],
+      [options.embeddingConcurrency, "--embedding-concurrency"],
+    ]);
+    if (unsupported) {
+      throw new Error(`${unsupported} is not supported with zg query`);
+    }
   }
 
   if (command === "query" && !options.rg) {
@@ -1333,12 +1326,13 @@ function parsePreviewMode(value: string): PreviewMode {
   throw new Error(`Unsupported preview mode: ${value}`);
 }
 
-export function parseLlamaGpu(
+export function parseDevice(
   value: string,
-): "auto" | "metal" | "vulkan" | "cuda" | false {
+): "auto" | "cpu" | "metal" | "vulkan" | "cuda" {
   const normalized = value.trim().toLowerCase();
   if (
     normalized === "auto" ||
+    normalized === "cpu" ||
     normalized === "metal" ||
     normalized === "vulkan" ||
     normalized === "cuda"
@@ -1346,25 +1340,7 @@ export function parseLlamaGpu(
     return normalized;
   }
 
-  if (
-    ["false", "off", "none", "disable", "disabled", "0"].includes(normalized)
-  ) {
-    return false;
-  }
-
-  throw new Error(`Unsupported llama GPU mode: ${value}`);
-}
-
-function setLlamaGpuOption(
-  options: CliOptions,
-  value: "auto" | "metal" | "vulkan" | "cuda" | false,
-  option: string,
-  rejectDuplicate: boolean,
-): void {
-  if (rejectDuplicate && options.llamaGpu !== undefined) {
-    throw new Error(`${option} conflicts with an earlier GPU option`);
-  }
-  options.llamaGpu = value;
+  throw new Error(`Unsupported device: ${value}`);
 }
 
 function hasExplicitRoutes(options: CliOptions): boolean {

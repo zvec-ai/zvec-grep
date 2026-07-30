@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 import {
   parseArgs,
-  parseLlamaGpu,
+  parseDevice,
   parseModifiedTime,
   splitPathFilters,
 } from "../../dist/cli/args.js";
@@ -19,7 +19,6 @@ import { makeEntityId } from "../../dist/engine/extraction/ids.js";
 import { detectFileType } from "../../dist/engine/files/file-type.js";
 import {
   getEmbeddingModelCatalogEntry,
-  getEmbeddingModelCatalogEntryByRef,
   listEmbeddingModels,
 } from "../../dist/engine/models/catalog.js";
 import { isImageContent, isTextContent } from "../../dist/engine/types.js";
@@ -58,12 +57,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     "short",
     "--limit",
     "7",
-    "--embedding",
-    "qwen/text-embedding-v4",
-    "--api-key",
-    "secret",
-    "--endpoint",
-    "https://example.test/embeddings",
     "-g",
     "src/**",
     "-gtest/**",
@@ -78,10 +71,29 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(parsed.options.trace, true);
   assert.equal(parsed.options.preview, "short");
   assert.equal(parsed.options.limit, 7);
-  assert.equal(parsed.options.embedding, "qwen/text-embedding-v4");
-  assert.equal(parsed.options.endpoint, "https://example.test/embeddings");
   assert.deepEqual(parsed.options.globs, ["src/**", "test/**", "!dist/**"]);
   assert.equal(typeof parsed.options.modifiedAfter, "number");
+
+  const index = parseArgs([
+    "index",
+    "--embedding",
+    "qwen/text-embedding-v4",
+    "--api-key",
+    "secret",
+    "--endpoint",
+    "https://example.test/embeddings",
+    "--model-cache",
+    "/tmp/models",
+    "--device",
+    "CUDA",
+    "--embedding-concurrency",
+    "4",
+  ]);
+  assert.equal(index.options.embedding, "qwen/text-embedding-v4");
+  assert.equal(index.options.endpoint, "https://example.test/embeddings");
+  assert.equal(index.options.modelCacheDir, "/tmp/models");
+  assert.equal(index.options.device, "cuda");
+  assert.equal(index.options.embeddingConcurrency, 4);
 
   const rg = parseArgs([
     "query",
@@ -104,8 +116,8 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
 });
 
 test("CLI parsers reject invalid values and normalize supported values", () => {
-  assert.equal(parseLlamaGpu("off"), false);
-  assert.equal(parseLlamaGpu("CUDA"), "cuda");
+  assert.equal(parseDevice("cpu"), "cpu");
+  assert.equal(parseDevice("CUDA"), "cuda");
   assert.deepEqual(splitPathFilters("src/**, test/**, docs/**"), [
     "src/**",
     "test/**",
@@ -119,7 +131,7 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
     parseModifiedTime("1700000000000", "--modified-after"),
     1700000000000,
   );
-  assert.throws(() => parseLlamaGpu("magic"), /Unsupported llama GPU mode/);
+  assert.throws(() => parseDevice("magic"), /Unsupported device/);
   assert.throws(
     () => parseArgs(["query", "--limit", "0", "query"]),
     /positive integer/,
@@ -133,6 +145,15 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
     /Unsupported preview mode/,
   );
   assert.throws(() => parseArgs(["query", "--json", "query"]), /removed/);
+  assert.throws(
+    () => parseArgs(["query", "--device", "cpu", "query"]),
+    /--device is not supported with zg query/,
+  );
+  assert.throws(
+    () =>
+      parseArgs(["query", "--embedding", "local/embeddinggemma-300m", "query"]),
+    /--embedding is not supported with zg query/,
+  );
   assert.throws(() => parseArgs(["--unknown"]), /Unknown command/);
 });
 
@@ -252,16 +273,6 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     "docs",
     "--home",
     "/tmp/home",
-    "--model-cache",
-    "/tmp/models",
-    "--gpu",
-    "--no-gpu",
-    "--llama-gpu",
-    "vulkan",
-    "--embedding-parallelism",
-    "3",
-    "--embedding-concurrency",
-    "4",
     "--hybrid",
     "zero",
     "--fts",
@@ -287,8 +298,6 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     "-literal-query",
   ]);
   assert.equal(query.options.debug, true);
-  assert.equal(query.options.llamaGpu, "vulkan");
-  assert.equal(query.options.embeddingParallelism, 3);
   assert.deepEqual(query.options.hybridQueries, ["zero"]);
   assert.deepEqual(query.options.routes, [
     { mode: "fts", query: "one" },
@@ -509,7 +518,7 @@ test("file, model, content, and entity helpers classify inputs", () => {
   });
   assert.equal(detectFileType("archive.zip"), null);
   assert.deepEqual(detectFileType("NOTICE"), { kind: "text", format: "text" });
-  assert.equal(listEmbeddingModels().length, 11);
+  assert.equal(listEmbeddingModels().length, 13);
   assert.equal(
     getEmbeddingModelCatalogEntry("local/embeddinggemma-300m")?.dimension,
     768,
@@ -520,11 +529,8 @@ test("file, model, content, and entity helpers classify inputs", () => {
     1024,
   );
   assert.equal(
-    getEmbeddingModelCatalogEntryByRef({
-      provider: "local",
-      model: "qwen3-embedding-0.6b",
-    })?.dimension,
-    1024,
+    getEmbeddingModelCatalogEntry("local/qwen3-embedding-0.6b")?.reference,
+    "local/qwen3-embedding-0.6b",
   );
   assert.equal(
     getEmbeddingModelCatalogEntry("local/bge-small-en-v1.5")?.backend,

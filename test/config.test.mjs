@@ -23,7 +23,7 @@ test("global config is created securely and merged incrementally", async (t) => 
     {
       defaults: {
         embedding: "qwen/text-embedding-v4",
-        llamaGpu: false,
+        device: "cpu",
       },
       providers: {
         qwen: {
@@ -37,9 +37,6 @@ test("global config is created securely and merged incrementally", async (t) => 
   );
   updateGlobalConfig(
     {
-      defaults: {
-        embeddingParallelism: 3,
-      },
       providers: {
         qwen: {
           endpoint: "https://example.test/embeddings",
@@ -54,8 +51,7 @@ test("global config is created securely and merged incrementally", async (t) => 
     version: 1,
     defaults: {
       embedding: "qwen/text-embedding-v4",
-      llamaGpu: false,
-      embeddingParallelism: 3,
+      device: "cpu",
     },
     providers: {
       qwen: {
@@ -129,8 +125,7 @@ test("local embedding options are persisted per model", async (t) => {
     updateGlobalConfigFromExplicitOptions(
       {
         embedding: "local/embeddinggemma-300m",
-        llamaGpu: "metal",
-        embeddingParallelism: 2,
+        device: "metal",
       },
       undefined,
       configPath,
@@ -141,8 +136,7 @@ test("local embedding options are persisted per model", async (t) => {
     updateGlobalConfigFromExplicitOptions(
       {
         embedding: "local/qwen3-embedding-0.6b",
-        llamaGpu: false,
-        embeddingParallelism: 1,
+        device: "cpu",
       },
       undefined,
       configPath,
@@ -157,12 +151,10 @@ test("local embedding options are persisted per model", async (t) => {
     },
     models: {
       "local/embeddinggemma-300m": {
-        llamaGpu: "metal",
-        embeddingParallelism: 2,
+        device: "metal",
       },
       "local/qwen3-embedding-0.6b": {
-        llamaGpu: false,
-        embeddingParallelism: 1,
+        device: "cpu",
       },
     },
   });
@@ -179,7 +171,7 @@ test("existing local index persists runtime options for its stored model", async
 
   assert.equal(
     updateGlobalConfigFromExplicitOptions(
-      { llamaGpu: "metal" },
+      { device: "metal" },
       "local/embeddinggemma-300m",
       configPath,
     ),
@@ -188,7 +180,7 @@ test("existing local index persists runtime options for its stored model", async
   assert.deepEqual(readGlobalConfig(configPath), {
     version: 1,
     models: {
-      "local/embeddinggemma-300m": { llamaGpu: "metal" },
+      "local/embeddinggemma-300m": { device: "metal" },
     },
   });
 });
@@ -196,26 +188,25 @@ test("existing local index persists runtime options for its stored model", async
 test("model runtime settings override defaults and do not affect remote models", () => {
   const config = {
     version: 1,
-    defaults: { llamaGpu: false, embeddingParallelism: 1 },
+    defaults: { device: "cpu" },
     models: {
       "local/embeddinggemma-300m": {
-        llamaGpu: "metal",
-        embeddingParallelism: 2,
+        device: "metal",
       },
     },
   };
 
   assert.deepEqual(
     resolveEmbeddingRuntimeOptions("local/embeddinggemma-300m", {}, config),
-    { llamaGpu: "metal", embeddingParallelism: 2 },
+    { device: "metal" },
   );
   assert.deepEqual(
     resolveEmbeddingRuntimeOptions(
       "local/embeddinggemma-300m",
-      { llamaGpu: false },
+      { device: "cpu" },
       config,
     ),
-    { llamaGpu: false, embeddingParallelism: 2 },
+    { device: "cpu" },
   );
   assert.deepEqual(
     resolveEmbeddingRuntimeOptions("qwen/text-embedding-v4", {}, config),
@@ -259,7 +250,7 @@ test("global config rejects malformed fields without echoing secrets", async (t)
     JSON.stringify({
       version: 1,
       models: {
-        "qwen/text-embedding-v4": { llamaGpu: "metal" },
+        "qwen/text-embedding-v4": { device: "metal" },
       },
     }),
   );
@@ -267,6 +258,23 @@ test("global config rejects malformed fields without echoing secrets", async (t)
     () => readGlobalConfig(configPath),
     (error) => {
       assert.match(error.context, /only supports local embedding models/);
+      return true;
+    },
+  );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      defaults: {
+        llamaGpu: "metal",
+      },
+    }),
+  );
+  assert.throws(
+    () => readGlobalConfig(configPath),
+    (error) => {
+      assert.match(error.context, /defaults\.llamaGpu is not supported/);
       return true;
     },
   );

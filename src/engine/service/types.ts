@@ -1,4 +1,4 @@
-import type { EmbeddingModel } from "../models/embeddings.js";
+import type { EmbeddingModel } from "../models/index.js";
 import type {
   CodeSymbolType,
   CollectionIndexPolicy,
@@ -26,8 +26,7 @@ export type CreateZvecGrepOptions = {
   apiKey?: string;
   endpoint?: string;
   modelCacheDir?: string;
-  llamaGpu?: "auto" | "metal" | "vulkan" | "cuda" | false;
-  embeddingParallelism?: number;
+  device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
   defaultEmbedding?: boolean;
   authorizationSigningKeyPath?: string;
 };

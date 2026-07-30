@@ -5,9 +5,9 @@ import type {
   ZvecGrepContextResult,
 } from "../engine/service/types.js";
 import type {
+  EmbeddingModelLoadRequest,
   EmbeddingModelPool,
   ModelLease,
-  ModelLeaseRequest,
 } from "./model-pool.js";
 import { ReadCollectionCache } from "./read-collection-cache.js";
 import type { RootLease } from "./root-lease.js";
@@ -15,7 +15,7 @@ import type { RootLease } from "./root-lease.js";
 export type RootRuntimeOptions = {
   canonicalRoot: string;
   modelPool: EmbeddingModelPool;
-  modelRequest?: ModelLeaseRequest;
+  modelLoadRequest?: EmbeddingModelLoadRequest;
   rootLease?: RootLease;
   readCollectionIdleTtlMs?: number;
   openSession?: (
@@ -37,7 +37,7 @@ export class RootRuntime {
   readonly canonicalRoot: string;
   private generation?: ReadGeneration;
   private generationTail: Promise<void> = Promise.resolve();
-  private modelRequest?: ModelLeaseRequest;
+  private modelLoadRequest?: EmbeddingModelLoadRequest;
   private dirtyRevision = 0;
   private indexedRevision = 0;
   private fullReconciliationEpoch = 0;
@@ -60,15 +60,15 @@ export class RootRuntime {
 
   constructor(private readonly options: RootRuntimeOptions) {
     this.canonicalRoot = options.canonicalRoot;
-    this.modelRequest = options.modelRequest;
+    this.modelLoadRequest = options.modelLoadRequest;
   }
 
-  updateModelRequest(request: ModelLeaseRequest): void {
-    this.modelRequest = request;
+  updateModelLoadRequest(request: EmbeddingModelLoadRequest): void {
+    this.modelLoadRequest = request;
   }
 
   embeddingProvider(): string | undefined {
-    return this.modelRequest?.schema.provider;
+    return this.modelLoadRequest?.model.provider;
   }
 
   async search(
@@ -93,11 +93,9 @@ export class RootRuntime {
       if (this.closed) {
         throw new Error("Root runtime is closed.");
       }
-      const request = this.modelRequest;
+      const request = this.modelLoadRequest;
       if (!request) {
-        throw new Error(
-          "Root runtime does not have an indexed embedding schema.",
-        );
+        throw new Error("Root runtime does not have an embedding model.");
       }
       const desiredKey = this.options.modelPool.keyFor(request);
       if (this.generation?.key !== desiredKey) {
@@ -304,7 +302,7 @@ export class RootRuntime {
   }
 
   private async openLeasedSession(
-    request: ModelLeaseRequest,
+    request: EmbeddingModelLoadRequest,
   ): Promise<LeasedReadSession> {
     const lease = await this.options.modelPool.acquire(request);
     let session: AnonymousReadSession;
