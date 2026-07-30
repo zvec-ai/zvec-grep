@@ -32,6 +32,7 @@ export type EmbeddingModelInfo = Readonly<{
   name: string;
   dimension: number;
   metric: "cosine" | "dot" | "euclidean";
+  endpoint?: string;
   inputKinds: readonly ContentKind[];
   limits: Readonly<{
     maxBatchSize: number;

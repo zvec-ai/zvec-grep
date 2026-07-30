@@ -4,7 +4,10 @@ import type {
   ZvecGrepInfoResult,
 } from "../engine/service/types.js";
 import { isEngineError } from "../engine/errors/index.js";
-import type { EmbeddingModel } from "../engine/models/index.js";
+import type {
+  EmbeddingModel,
+  EmbeddingModelInfo,
+} from "../engine/models/index.js";
 import type {
   CollectionEmbeddingSchema,
   IndexProgress,
@@ -154,8 +157,14 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       }
       throw error;
     }
-    const schema = embeddingSchema(lease.model);
-    lease.release();
+    let schema: CollectionEmbeddingSchema;
+    let modelInfo: EmbeddingModelInfo;
+    try {
+      schema = embeddingSchema(lease.model);
+      modelInfo = lease.model.info;
+    } finally {
+      lease.release();
+    }
     const existing = info.collection?.embedding;
     if (
       existing &&
@@ -170,9 +179,8 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
     return await planRemoteIndexAuthorization({
       info,
-      schema,
+      model: modelInfo,
       rebuild: input.rebuild,
-      serviceOptions: this.options.serviceOptions,
       store: this.authorizationManager.store,
     });
   }
@@ -204,14 +212,22 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       info = cached;
     }
     const canonicalRoot = await resolveRequestedRoot(info.root, false);
+    const schema = info.collection?.embedding;
+    if (!info.indexed || !schema || schema.provider !== "qwen") {
+      return undefined;
+    }
+    const modelInfo = await this.loadEmbeddingModelInfo({
+      provider: schema.provider,
+      name: schema.model,
+    });
     return await planRemoteSearchAuthorization({
       info,
+      model: modelInfo,
       search: input,
       runtimeNeedsReconciliation:
         this.runtimeManager
           .getByCanonicalRoot(canonicalRoot)
           ?.needsReconciliation() ?? false,
-      serviceOptions: this.options.serviceOptions,
       store: this.authorizationManager.store,
     });
   }
@@ -888,12 +904,15 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const root = runtime.canonicalRoot;
     const info = await inspectRoot(root, this.options.serviceOptions);
     const schema = info.collection?.embedding;
-    if (!schema || schema.provider === "local") return { allowed: true };
+    if (!schema || schema.provider !== "qwen") return { allowed: true };
+    const modelInfo = await this.loadEmbeddingModelInfo({
+      provider: schema.provider,
+      name: schema.model,
+    });
     const plan = await planRemoteIndexAuthorization({
       info,
-      schema,
+      model: modelInfo,
       needsUpdate: true,
-      serviceOptions: this.options.serviceOptions,
       store: this.authorizationManager.store,
     });
     if (!plan) return { allowed: true };
@@ -950,6 +969,17 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             "Index reconciliation did not complete successfully.",
         );
       }
+    }
+  }
+
+  private async loadEmbeddingModelInfo(
+    model: EmbeddingModelLoadRequest["model"],
+  ): Promise<EmbeddingModelInfo> {
+    const lease = await this.modelPool.acquire({ model });
+    try {
+      return lease.model.info;
+    } finally {
+      lease.release();
     }
   }
 

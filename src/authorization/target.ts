@@ -1,9 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { readGlobalConfig } from "../engine/config.js";
-import { resolveRemoteEmbeddingEndpoint } from "../engine/remote-embedding.js";
-import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import type { RemoteEmbeddingTarget } from "./types.js";
 
 export async function canonicalizeWorkspaceRoots(
@@ -42,8 +39,7 @@ export async function createRemoteEmbeddingTarget(input: {
   roots: readonly string[];
   provider: string;
   model: string;
-  endpoint?: string;
-  serviceOptions?: CreateZvecGrepOptions;
+  endpoint: string;
 }): Promise<RemoteEmbeddingTarget> {
   const workspaceRoots = await canonicalizeWorkspaceRoots(input.roots);
   if (workspaceRoots.length === 0) {
@@ -51,15 +47,10 @@ export async function createRemoteEmbeddingTarget(input: {
       "Remote Embedding authorization requires a workspace root.",
     );
   }
-  const config = readGlobalConfig();
-  const configuredEndpoint =
-    input.endpoint ??
-    input.serviceOptions?.endpoint ??
-    config.providers?.[input.provider]?.endpoint;
-  const endpoint = resolveRemoteEmbeddingEndpoint(
-    `${input.provider}/${input.model}`,
-    configuredEndpoint,
-  );
+  const endpoint = input.endpoint.trim();
+  if (endpoint.length === 0) {
+    throw new Error("Remote Embedding authorization requires an endpoint.");
+  }
   const rootFingerprint = workspaceFingerprint(workspaceRoots);
   return {
     workspaceRoots,

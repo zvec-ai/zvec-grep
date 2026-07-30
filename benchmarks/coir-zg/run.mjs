@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { createZvecGrep } from "../../dist/index.js";
+import { createEmbeddingModel, createZvecGrep } from "../../dist/index.js";
 import {
   createRemoteEmbeddingOperationPermit,
   createRemoteEmbeddingTarget,
@@ -257,13 +257,19 @@ async function runModel(options, dataset) {
     apiKey,
   };
   const service = await createZvecGrep(serviceOptions);
+  const endpoint = remote
+    ? await remoteEmbeddingEndpoint(model, {
+        apiKey,
+        modelCacheDir: options.modelCacheDir,
+      })
+    : undefined;
   const remotePermit = remote
     ? createRemoteEmbeddingOperationPermit(
         await createRemoteEmbeddingTarget({
           roots: [corpusRoot],
           provider,
           model: providerModel,
-          serviceOptions,
+          endpoint,
         }),
         "once",
       )
@@ -443,6 +449,18 @@ async function runModel(options, dataset) {
   } finally {
     clearInterval(memorySampler);
     await service.close();
+  }
+}
+
+async function remoteEmbeddingEndpoint(reference, options) {
+  const model = createEmbeddingModel(reference, options);
+  try {
+    if (!model.info.endpoint) {
+      throw new Error(`Embedding model ${reference} has no remote endpoint`);
+    }
+    return model.info.endpoint;
+  } finally {
+    await model.dispose();
   }
 }
 

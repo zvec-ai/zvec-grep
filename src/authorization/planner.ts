@@ -1,39 +1,37 @@
 import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
-import type {
-  CreateZvecGrepOptions,
-  ZvecGrepInfoResult,
-} from "../engine/service/types.js";
-import type { CollectionEmbeddingSchema } from "../engine/types.js";
+import type { EmbeddingModelInfo } from "../engine/models/index.js";
+import type { ZvecGrepInfoResult } from "../engine/service/types.js";
 import { createRemoteEmbeddingTarget } from "./target.js";
 import { RemoteEmbeddingAuthorizationStore } from "./store.js";
 import type { RemoteEmbeddingAuthorizationPlan } from "./types.js";
 
 export async function planRemoteIndexAuthorization(input: {
   info: ZvecGrepInfoResult;
-  schema: Pick<CollectionEmbeddingSchema, "provider" | "model">;
+  model: EmbeddingModelInfo;
   rebuild?: boolean;
   needsUpdate?: boolean;
-  serviceOptions?: CreateZvecGrepOptions;
   store?: RemoteEmbeddingAuthorizationStore;
 }): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
-  if (input.schema.provider !== "qwen") return undefined;
+  if (input.model.provider !== "qwen") return undefined;
   const needsEmbedding =
     input.rebuild === true ||
     input.needsUpdate === true ||
     !input.info.indexed ||
     !indexStatusIsFresh(input.info);
   if (!needsEmbedding) return undefined;
+  const endpoint = input.model.endpoint;
+  if (endpoint === undefined) {
+    throw new Error(
+      `Embedding model ${input.model.reference} did not provide a remote endpoint.`,
+    );
+  }
   const target = await createRemoteEmbeddingTarget({
     roots: workspaceRoots(input.info),
-    provider: input.schema.provider,
-    model: input.schema.model,
-    serviceOptions: input.serviceOptions,
+    provider: input.model.provider,
+    model: input.model.name,
+    endpoint,
   });
-  const store =
-    input.store ??
-    new RemoteEmbeddingAuthorizationStore({
-      signingKeyPath: input.serviceOptions?.authorizationSigningKeyPath,
-    });
+  const store = input.store ?? new RemoteEmbeddingAuthorizationStore();
   return {
     operation: "index",
     target,
@@ -53,14 +51,22 @@ export async function planRemoteIndexAuthorization(input: {
 
 export async function planRemoteSearchAuthorization(input: {
   info: ZvecGrepInfoResult;
+  model: EmbeddingModelInfo;
   search: NormalizedSearchInput;
   runtimeNeedsReconciliation?: boolean;
-  serviceOptions?: CreateZvecGrepOptions;
   store?: RemoteEmbeddingAuthorizationStore;
 }): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
   const schema = input.info.collection?.embedding;
   if (!input.info.indexed || !schema || schema.provider !== "qwen") {
     return undefined;
+  }
+  if (
+    input.model.provider !== schema.provider ||
+    input.model.name !== schema.model
+  ) {
+    throw new Error(
+      `Embedding model ${input.model.reference} does not match indexed model ${schema.provider}/${schema.model}.`,
+    );
   }
   const usesVector = searchUsesVector(input.search);
   const needsUpdate =
@@ -70,17 +76,19 @@ export async function planRemoteSearchAuthorization(input: {
     needsUpdate &&
     (input.search.autoUpdate || input.search.freshness === "wait_for_fresh");
   if (!usesVector && !updatesIndex) return undefined;
+  const endpoint = input.model.endpoint;
+  if (endpoint === undefined) {
+    throw new Error(
+      `Embedding model ${input.model.reference} did not provide a remote endpoint.`,
+    );
+  }
   const target = await createRemoteEmbeddingTarget({
     roots: workspaceRoots(input.info),
-    provider: schema.provider,
-    model: schema.model,
-    serviceOptions: input.serviceOptions,
+    provider: input.model.provider,
+    model: input.model.name,
+    endpoint,
   });
-  const store =
-    input.store ??
-    new RemoteEmbeddingAuthorizationStore({
-      signingKeyPath: input.serviceOptions?.authorizationSigningKeyPath,
-    });
+  const store = input.store ?? new RemoteEmbeddingAuthorizationStore();
   return {
     operation: usesVector
       ? updatesIndex

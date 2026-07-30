@@ -1,3 +1,8 @@
+const DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT =
+  "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings";
+const DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT =
+  "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding";
+
 export const EMBEDDING_MODEL_CATALOG = {
   "local/embeddinggemma-300m": {
     backend: "llama-cpp",
@@ -33,6 +38,7 @@ export const EMBEDDING_MODEL_CATALOG = {
     model: "text-embedding-v4",
     dimension: 1024,
     metric: "cosine",
+    defaultEndpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
     maxBatchSize: 10,
     maxInputTokens: 8192,
   },
@@ -45,6 +51,7 @@ export const EMBEDDING_MODEL_CATALOG = {
     model: "qwen3.7-text-embedding",
     dimension: 1024,
     metric: "cosine",
+    defaultEndpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
     maxBatchSize: 20,
     maxInputTokens: 128000,
   },
@@ -57,6 +64,7 @@ export const EMBEDDING_MODEL_CATALOG = {
     model: "qwen3-vl-embedding",
     dimension: 2560,
     metric: "cosine",
+    defaultEndpoint: DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT,
     maxBatchSize: 20,
     maxInputTokens: 32000,
     maxImageBytes: 10 * 1024 * 1024,

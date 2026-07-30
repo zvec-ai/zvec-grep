@@ -1,6 +1,5 @@
 import { globalConfigPath } from "../../config.js";
 import { EngineError, type EngineErrorCode } from "../../errors/index.js";
-import { resolveRemoteEmbeddingEndpoint } from "../../remote-embedding.js";
 import type { Content, ImageFormat, TextContent } from "../../types.js";
 import {
   BaseEmbeddingModel,
@@ -72,12 +71,17 @@ abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
     super();
 
     this.entry = entry;
+    const endpoint =
+      options.endpoint === undefined
+        ? entry.defaultEndpoint
+        : options.endpoint.trim();
     this.info = {
       reference: entry.reference,
       provider: entry.provider,
       name: entry.model,
       dimension: entry.dimension,
       metric: entry.metric,
+      endpoint,
       inputKinds: ["text"],
       limits: {
         maxBatchSize: entry.maxBatchSize,
@@ -95,11 +99,6 @@ abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
         context: `model=${this.info.reference}\nhint=Pass --api-key, set ZVEC_GREP_API_KEY, or configure providers.qwen.apiKey in ${globalConfigPath()}.`,
       });
     }
-
-    const endpoint = resolveRemoteEmbeddingEndpoint(
-      entry.reference,
-      options.endpoint,
-    );
 
     if (endpoint.length === 0) {
       throw new EngineError(`${this.displayName} model requires an endpoint`, {
@@ -275,12 +274,17 @@ export class Qwen3VlEmbeddingModel extends BaseEmbeddingModel {
 
     this.entry = entry;
     this.dependencies = { ...defaultDependencies, ...dependencies };
+    const endpoint =
+      options.endpoint === undefined
+        ? entry.defaultEndpoint
+        : options.endpoint.trim();
     this.info = {
       reference: entry.reference,
       provider: entry.provider,
       name: entry.model,
       dimension: entry.dimension,
       metric: entry.metric,
+      endpoint,
       inputKinds: ["text", "image"],
       limits: {
         maxBatchSize: entry.maxBatchSize,
@@ -296,11 +300,6 @@ export class Qwen3VlEmbeddingModel extends BaseEmbeddingModel {
         context: `model=${this.info.reference}\nhint=Pass --api-key, set ZVEC_GREP_API_KEY, or configure providers.qwen.apiKey in ${globalConfigPath()}.`,
       });
     }
-
-    const endpoint = resolveRemoteEmbeddingEndpoint(
-      entry.reference,
-      options.endpoint,
-    );
 
     if (endpoint.length === 0) {
       throw new EngineError("Qwen3 VL embedding model requires an endpoint", {

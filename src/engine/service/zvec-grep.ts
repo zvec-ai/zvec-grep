@@ -25,7 +25,6 @@ import {
   type EmbeddingModel,
   type EmbeddingModelInfo,
 } from "../models/index.js";
-import { resolveRemoteEmbeddingEndpoint } from "../remote-embedding.js";
 import type {
   CollectionEmbeddingSchema,
   CollectionInfo,
@@ -1555,10 +1554,16 @@ function createServiceEmbeddingModel(
     return model;
   }
 
-  const endpoint = resolveRemoteEmbeddingEndpoint(
-    model.info.reference,
-    modelOptions.endpoint,
-  );
+  const endpoint = model.info.endpoint;
+  if (endpoint === undefined) {
+    throw new EngineError(
+      "Remote embedding model did not provide an endpoint",
+      {
+        code: "ZVEC_GREP.ENGINE.MODELS.REMOTE_ENDPOINT_NOT_IMPLEMENTED",
+        context: `model=${model.info.reference}`,
+      },
+    );
+  }
   const authorize = remoteEmbeddingAuthorizationGuard({
     store: new RemoteEmbeddingAuthorizationStore({
       signingKeyPath: serviceOptions.authorizationSigningKeyPath,

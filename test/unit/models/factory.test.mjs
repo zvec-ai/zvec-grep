@@ -46,7 +46,18 @@ test("embedding factory resolves catalog entries and rejects unknown models", ()
     assert.equal(model.info.reference, entry.reference);
     assert.equal(model.info.dimension, entry.dimension);
     assert.equal(model.info.metric, entry.metric);
+    assert.equal(
+      model.info.endpoint,
+      entry.backend === "qwen" ? options.endpoint : undefined,
+    );
   }
+
+  assert.equal(
+    createEmbeddingModel("qwen/text-embedding-v4", {
+      apiKey: "secret",
+    }).info.endpoint,
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+  );
 
   assert.throws(
     () => createEmbeddingModel("missing", options),

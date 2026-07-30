@@ -1373,6 +1373,7 @@ class QwenTestEmbeddingModel extends TestEmbeddingModel {
     name: "text-embedding-v4",
     dimension: 8,
     metric: "cosine",
+    endpoint: "https://qwen.test/embeddings",
     inputKinds: ["text"],
     limits: { maxBatchSize: 64 },
   };

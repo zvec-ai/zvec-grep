@@ -19,6 +19,7 @@ import {
   createEmbeddingModel,
   createZvecGrep,
   type CreateZvecGrepOptions,
+  type EmbeddingModelInfo,
   type IndexProgress,
   type RootPath,
   type ZvecGrepContextOptions,
@@ -43,6 +44,7 @@ import {
 } from "../client/mode-router.js";
 import { serverStatus } from "../daemon/server-controller.js";
 import { findNearestAnonymousWorkspace } from "../engine/service/root.js";
+import { createEmbeddingModelForIdentity } from "../engine/service/index.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
   contextWarningLines,
@@ -309,13 +311,20 @@ async function runAuth(parsed: ParsedArgs): Promise<void> {
     if (schema.provider === "local") {
       throw new Error("Local embedding models do not require authorization.");
     }
+    const modelInfo = await embeddingModelInfo(schema, serviceOptions);
+    const endpoint = modelInfo.endpoint;
+    if (endpoint === undefined) {
+      throw new Error(
+        `Embedding model ${modelInfo.reference} did not provide a remote endpoint.`,
+      );
+    }
     const target = await createRemoteEmbeddingTarget({
       roots: info.collection?.rootPaths.map((item) => item.absolutePath) ?? [
         root,
       ],
-      provider: schema.provider,
-      model: schema.model,
-      serviceOptions,
+      provider: modelInfo.provider,
+      model: modelInfo.name,
+      endpoint,
     });
     const manager = new RemoteEmbeddingAuthorizationManager(store);
     const plan: RemoteEmbeddingAuthorizationPlan = {
@@ -892,9 +901,11 @@ async function runDirectIndex(
   rootPath: RootPath,
   explicitRoot: boolean,
 ): Promise<void> {
-  const zvecGrep = await createZvecGrep(
-    createServiceOptions(parsed.options, rootPath.absolutePath),
+  const serviceOptions = createServiceOptions(
+    parsed.options,
+    rootPath.absolutePath,
   );
+  const zvecGrep = await createZvecGrep(serviceOptions);
   const progress = createIndexProgressReporter({ color: parsed.options.color });
   try {
     const infoBefore = await zvecGrep.info({ root: rootPath.absolutePath });
@@ -907,15 +918,15 @@ async function runDirectIndex(
       schema,
       parsed.options.rebuild === true,
     );
-    const plan = schema
+    const modelInfo =
+      schema?.provider === "qwen"
+        ? await embeddingModelInfo(schema, serviceOptions)
+        : undefined;
+    const plan = modelInfo
       ? await planRemoteIndexAuthorization({
           info: infoBefore,
-          schema,
+          model: modelInfo,
           rebuild: parsed.options.rebuild,
-          serviceOptions: createServiceOptions(
-            parsed.options,
-            rootPath.absolutePath,
-          ),
           store: authorizationStore(parsed.options),
         })
       : undefined;
@@ -1205,12 +1216,18 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
           collection: authorizationCollection,
           status,
         };
-        const plan = schema
+        const modelInfo =
+          schema?.provider === "qwen"
+            ? await embeddingModelInfo(
+                schema,
+                createServiceOptions(parsed.options, undefined),
+              )
+            : undefined;
+        const plan = modelInfo
           ? await planRemoteIndexAuthorization({
               info: infoBefore,
-              schema,
+              model: modelInfo,
               rebuild: parsed.options.rebuild,
-              serviceOptions: createServiceOptions(parsed.options, undefined),
               store: authorizationStore(parsed.options),
             })
           : undefined;
@@ -1385,9 +1402,8 @@ async function runDirectQuery(
       "warning: --refresh background requires Server mode; Direct mode uses --refresh off",
     );
   }
-  const zvecGrep = await createZvecGrep(
-    createServiceOptions(commandOptions, undefined),
-  );
+  const serviceOptions = createServiceOptions(commandOptions, undefined);
+  const zvecGrep = await createZvecGrep(serviceOptions);
   const progress = createIndexProgressReporter({
     color: commandOptions.color,
   });
@@ -1400,18 +1416,26 @@ async function runDirectQuery(
       },
     );
     const info = await directQueryInfo(zvecGrep, commandOptions);
-    const plan = commandOptions.rg
-      ? undefined
-      : await planRemoteSearchAuthorization({
+    const schema = info.collection?.embedding;
+    const modelInfo =
+      !commandOptions.rg && schema?.provider === "qwen"
+        ? await embeddingModelInfo(
+            schema,
+            createServiceOptions(commandOptions, info.root),
+          )
+        : undefined;
+    const plan = modelInfo
+      ? await planRemoteSearchAuthorization({
           info,
+          model: modelInfo,
           search: normalizedDirectSearchInput(
             commandOptions,
             queries,
             info.root,
           ),
-          serviceOptions: createServiceOptions(commandOptions, info.root),
           store: authorizationStore(commandOptions),
-        });
+        })
+      : undefined;
     const authorizationResolution = plan
       ? await authorizeCliPlan(plan, commandOptions, "local_search")
       : {};
@@ -1627,6 +1651,21 @@ function resolveAuthorizationSchema(
     provider,
     model,
   };
+}
+
+async function embeddingModelInfo(
+  schema: Pick<CollectionEmbeddingSchema, "provider" | "model">,
+  options: CreateZvecGrepOptions,
+): Promise<EmbeddingModelInfo> {
+  const model = createEmbeddingModelForIdentity(
+    { provider: schema.provider, name: schema.model },
+    options,
+  );
+  try {
+    return model.info;
+  } finally {
+    await model.dispose();
+  }
 }
 
 function assertEmbeddingModelCompatible(

@@ -148,6 +148,16 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
     dimension: 1024,
     metric: "cosine",
   };
+  const model = {
+    reference: "qwen/text-embedding-v4",
+    provider: "qwen",
+    name: "text-embedding-v4",
+    dimension: 1024,
+    metric: "cosine",
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 10, maxInputTokens: 8192 },
+  };
   const freshStatus = status(0);
   const staleStatus = status(1);
   const baseInfo = {
@@ -183,9 +193,14 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
 
   const queryPlan = await planRemoteSearchAuthorization({
     info: { ...baseInfo, status: freshStatus },
+    model,
     search: hybrid,
   });
   assert.equal(queryPlan.operation, "query");
+  assert.equal(
+    queryPlan.target.endpoint,
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+  );
   assert.deepEqual(queryPlan.disclosure, {
     queryText: true,
     workspaceContent: "none",
@@ -193,6 +208,7 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
 
   const coupledFtsPlan = await planRemoteSearchAuthorization({
     info: { ...baseInfo, status: staleStatus },
+    model,
     search: fts,
   });
   assert.equal(coupledFtsPlan.operation, "index");
@@ -204,13 +220,13 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
   assert.equal(
     await planRemoteIndexAuthorization({
       info: { ...baseInfo, status: freshStatus },
-      schema,
+      model,
     }),
     undefined,
   );
   const updatePlan = await planRemoteIndexAuthorization({
     info: { ...baseInfo, status: staleStatus },
-    schema,
+    model,
   });
   assert.equal(updatePlan.operation, "index");
   assert.equal(updatePlan.reason, "index_update");
