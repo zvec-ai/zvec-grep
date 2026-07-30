@@ -919,10 +919,6 @@ function validateCliShape(
   if (command === "query") {
     const unsupported = firstEnabledOption([
       [options.embedding, "--embedding"],
-      [options.modelCacheDir, "--model-cache"],
-      [options.device, "--device"],
-      [options.apiKey, "--api-key"],
-      [options.endpoint, "--endpoint"],
       [options.embeddingConcurrency, "--embedding-concurrency"],
     ]);
     if (unsupported) {

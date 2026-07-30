@@ -95,6 +95,26 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(index.options.device, "cuda");
   assert.equal(index.options.embeddingConcurrency, 4);
 
+  const queryRuntime = parseArgs([
+    "query",
+    "--api-key",
+    "secret",
+    "--endpoint",
+    "https://example.test/embeddings",
+    "--model-cache",
+    "/tmp/models",
+    "--device",
+    "CPU",
+    "query text",
+  ]);
+  assert.equal(queryRuntime.options.apiKey, "secret");
+  assert.equal(
+    queryRuntime.options.endpoint,
+    "https://example.test/embeddings",
+  );
+  assert.equal(queryRuntime.options.modelCacheDir, "/tmp/models");
+  assert.equal(queryRuntime.options.device, "cpu");
+
   const rg = parseArgs([
     "query",
     "--rg",
@@ -145,10 +165,6 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
     /Unsupported preview mode/,
   );
   assert.throws(() => parseArgs(["query", "--json", "query"]), /removed/);
-  assert.throws(
-    () => parseArgs(["query", "--device", "cpu", "query"]),
-    /--device is not supported with zg query/,
-  );
   assert.throws(
     () =>
       parseArgs(["query", "--embedding", "local/embeddinggemma-300m", "query"]),

@@ -69,6 +69,12 @@ Result options:
   --trace                           Include per-hit indexed search trace
   --refresh <background|wait|off>   Refresh policy (Server: background; Direct: off)
   --mode <direct|server|auto>       Select indexed query transport
+
+Embedding runtime:
+  --api-key <key>                   Embedding provider API key
+  --endpoint <url>                  Embedding provider endpoint
+  --model-cache <path>              Local model cache directory
+  --device <device>                 auto, cpu, metal, vulkan, cuda
   --allow-remote                    Allow Remote Embedding for this command only
 
 Direct mode warns and uses off when background is requested.
@@ -92,12 +98,22 @@ Options that replace rg's output format are rejected.`;
   zg index [root] --rebuild [options]
   zg index [root] --drop [--yes]
 
-Options:
-  --embedding <model>               Model such as local/embeddinggemma-300m or qwen/text-embedding-v4
+Index options:
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
   --yes                             Confirm --drop without prompting
   --mode <direct|server|auto>       Select indexing transport
+
+Embedding options:
+  --embedding <model>               Model such as local/embeddinggemma-300m or qwen/text-embedding-v4
+  --api-key <key>                   Embedding provider API key
+  --endpoint <url>                  Embedding provider endpoint
+  --model-cache <path>              Local model cache directory
+  --device <device>                 auto, cpu, metal, vulkan, cuda
+  --embedding-concurrency <n>       Embedding task concurrency
+  --allow-remote                    Allow Remote Embedding for this command only
+
+File selection:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
   -t, --type <type>                 Include a ripgrep file type; repeatable
@@ -109,12 +125,6 @@ Options:
   --max-filesize <size>             Maximum bytes or K/M/G/T size
   -L, --follow                      Follow symbolic links safely
   --reset-paths                     Clear inherited file-selection settings
-  --embedding-concurrency <n>       Embedding task concurrency
-  --api-key <key>                   Embedding provider API key
-  --endpoint <url>                  Embedding provider endpoint
-  --model-cache <path>              Local model cache directory
-  --device <device>                 auto, cpu, metal, vulkan, cuda
-  --allow-remote                    Allow Remote Embedding for this command only
 
 New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
 Existing indexes reuse their stored embedding schema.`;
