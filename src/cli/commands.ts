@@ -2393,9 +2393,7 @@ function agentGuidanceBlock(): string {
 Use zvec-grep before grep, rg, or broad file reads when you need to understand or locate code.
 
 - **MCP tools**: Use \`zvec_grep_search\` for indexed semantic/lexical code search and \`zvec_grep_rg\` for exhaustive literal or regex search.
-- **Indexing and status**: Every repository MCP call uses an absolute root visible to the local daemon. Start it with \`zg server on\`. Manage persistent indexes with \`zg index\`, inspect them with \`zg status\`, and inspect the daemon with \`zg server status\`.
-- **Remote data authorization**: MCP tool trust does not authorize Remote Embedding. zvec-grep requests its own once or workspace authorization before sending query text or workspace content to a remote provider.
-- **Shell fallback**: If the MCP server is unavailable, use \`zg status\`, \`zg query "<query>"\`, and \`zg query --rg "<pattern>"\`.
+- **Shell fallback**: If the MCP server is unavailable, use \`zg query "<query>"\` and \`zg query --rg "<pattern>"\`.
 
 Prefer focused -g/--glob and -t/--type filters, and exclude dependencies, generated output, caches, build artifacts, and logs unless the task is about those files.
 ${ZVEC_GREP_AGENTS_END}`;
