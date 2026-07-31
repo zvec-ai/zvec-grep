@@ -292,6 +292,9 @@ test("CLI exposes stable help, version, and failure behavior", async () => {
   const indexHelp = await runCli(["index", "-h"]);
   assert.match(indexHelp.stdout, /qwen\/text-embedding-v4/);
   assert.doesNotMatch(indexHelp.stdout, /qwen3\.7-text-embedding/);
+  const configHelp = await runCli(["config", "--help"]);
+  assert.match(configHelp.stdout, /Default API key for the provider/);
+  assert.match(configHelp.stdout, /Existing indexes continue to use/);
   const version = await runCli(["version"]);
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+/);
   const verboseVersion = await runCli(["version", "-v"]);

@@ -22,7 +22,7 @@ Commands:
   index          Build, rebuild, or drop the workspace index
   status         Show workspace and index status
   collections    Manage named collections
-  config         Configure per-model local embedding runtime settings
+  config         Configure provider credentials and embedding model defaults
   auth           Manage Workspace Remote Embedding authorization
   server         Start, stop, inspect, or run the shared MCP server
   install        Install agent integrations
@@ -148,12 +148,21 @@ rebuild, and embedding-concurrency options as zg index.`;
     case "config":
       return `Usage:
   zg config provider set <provider> --api-key <key>
-  zg config model set <provider/model> --endpoint <url>
-  zg config model set <local/model> --device <auto|cpu|metal|vulkan|cuda>
-  zg config model set <provider/model> --default
+  zg config model set <model> [--endpoint <url> | --device <device>] [--default]
 
-Stores provider credentials, per-model runtime defaults, and the default
-embedding model in ~/.zvec-grep/config.json.`;
+Provider options:
+  --api-key <key>                   Default API key for the provider
+
+Model options:
+  --endpoint <url>                  Endpoint for a remote embedding model
+  --device <device>                 Local device: auto, cpu, metal, vulkan, cuda
+  --default                         Use this model for new indexes
+
+Remote models support --endpoint; local models support --device. At least one
+model option is required. --default may be used alone or with a runtime option.
+Existing indexes continue to use their stored model.
+
+Global configuration is stored in ~/.zvec-grep/config.json.`;
     case "auth":
       return `Usage:
   zg auth grant [root] --capability embedding --scope workspace [--embedding <model>]
