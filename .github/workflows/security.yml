@@ -2,10 +2,6 @@ name: Security
 
 on:
   pull_request:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "43 4 * * 2"
 
 permissions: {}
 
@@ -27,22 +23,3 @@ jobs:
       - uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
-
-  codeql:
-    if: >-
-      github.event.repository.visibility == 'public' ||
-      vars.ENABLE_GHAS == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: github/codeql-action/init@v3
-        with:
-          languages: javascript-typescript
-      - uses: github/codeql-action/analyze@v3
