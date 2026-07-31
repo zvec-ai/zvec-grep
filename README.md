@@ -183,7 +183,10 @@ zg index \
   --api-key "$DASHSCOPE_API_KEY"
 ```
 
-After a successful index, explicitly passed global model and provider options are saved to `~/.zvec-grep/config.json` with user-only permissions. This lets an already-running `zg` MCP server load a newly configured remote API key on its next model request without restarting Codex. Values read only from environment variables are not persisted.
+`zg config` is the only command that changes `~/.zvec-grep/config.json`. An
+index stores its effective endpoint/device snapshot and an explicitly supplied
+API key in the workspace's internal metadata. Keys inherited from global config
+or environment variables are not copied into the workspace.
 
 ```json
 {
@@ -193,11 +196,13 @@ After a successful index, explicitly passed global model and provider options ar
   },
   "providers": {
     "qwen": {
-      "apiKey": "...",
-      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+      "apiKey": "..."
     }
   },
   "models": {
+    "qwen/text-embedding-v4": {
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+    },
     "local/embeddinggemma-300m": {
       "device": "metal"
     },
@@ -208,13 +213,18 @@ After a successful index, explicitly passed global model and provider options ar
 }
 ```
 
-For local embeddings, `models["provider/model"]` selects the execution device independently for each model; these settings apply to both daemon indexing and searching, and do not require rebuilding an existing index. Explicit CLI or library options override model settings, which override global defaults and `ZVEC_GREP_DEVICE`. Remote embeddings ignore local device settings. Repository roots and include/exclude filters remain in each repository's `.zvec-grep` metadata rather than global config.
+Runtime values resolve from request, workspace snapshot, global config, and
+environment variables in that order. API key and device changes do not require
+a rebuild. Changing an indexed model or endpoint does. Search API key/device
+overrides are one-shot and are never persisted; endpoint is index-only.
 
 Configure the same settings without editing JSON:
 
 ```bash
+zg config provider set qwen --api-key "$DASHSCOPE_API_KEY"
+zg config model set qwen/text-embedding-v4 --endpoint https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
+zg config model set qwen/text-embedding-v4 --default
 zg config model set local/embeddinggemma-300m --device metal
-zg config model set local/qwen3-embedding-0.6b --device cpu
 ```
 
 llama.cpp context parallelism is selected automatically. For low-level performance diagnostics, set `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` to a positive integer.

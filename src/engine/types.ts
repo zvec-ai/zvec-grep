@@ -178,7 +178,7 @@ export type EntityFragment = {
 // Collection types
 // -----------------------------------------------------------------------------
 
-export const CURRENT_INDEX_VERSION = 1;
+export const CURRENT_INDEX_VERSION = 2;
 
 export type CollectionEmbeddingSchema = {
   provider: string;

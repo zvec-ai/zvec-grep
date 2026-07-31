@@ -7,10 +7,9 @@ import {
   readGlobalConfig,
   resolveEmbeddingRuntimeOptions,
   updateGlobalConfig,
-  updateGlobalConfigFromExplicitOptions,
 } from "../dist/engine/config.js";
 
-test("global config is created securely and merged incrementally", async (t) => {
+test("global config v1 is created securely and merged incrementally", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-config-"));
   const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
   t.after(async () => {
@@ -23,11 +22,19 @@ test("global config is created securely and merged incrementally", async (t) => 
     {
       defaults: {
         embedding: "qwen/text-embedding-v4",
-        device: "cpu",
+        modelCacheDir: "/tmp/models",
       },
       providers: {
         qwen: {
           apiKey: "first-key",
+        },
+      },
+      models: {
+        "qwen/text-embedding-v4": {
+          endpoint: "https://example.test/embeddings",
+        },
+        "local/embeddinggemma-300m": {
+          device: "metal",
         },
       },
       client: { mode: "server", serverUrl: "http://127.0.0.1:8123/mcp" },
@@ -39,7 +46,7 @@ test("global config is created securely and merged incrementally", async (t) => 
     {
       providers: {
         qwen: {
-          endpoint: "https://example.test/embeddings",
+          apiKey: "rotated-key",
         },
       },
       client: { mode: "auto" },
@@ -51,12 +58,19 @@ test("global config is created securely and merged incrementally", async (t) => 
     version: 1,
     defaults: {
       embedding: "qwen/text-embedding-v4",
-      device: "cpu",
+      modelCacheDir: "/tmp/models",
     },
     providers: {
       qwen: {
-        apiKey: "first-key",
+        apiKey: "rotated-key",
+      },
+    },
+    models: {
+      "qwen/text-embedding-v4": {
         endpoint: "https://example.test/embeddings",
+      },
+      "local/embeddinggemma-300m": {
+        device: "metal",
       },
     },
     client: { mode: "auto", serverUrl: "http://127.0.0.1:8123/mcp" },
@@ -73,148 +87,87 @@ test("global config is created securely and merged incrementally", async (t) => 
   }
 });
 
-test("explicit index options become provider-aware global config", async (t) => {
-  const temporaryDirectory = await mkdtemp(
-    join(tmpdir(), "zvec-grep-config-explicit-"),
-  );
-  const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
-  t.after(async () => {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  });
-
-  assert.equal(
-    updateGlobalConfigFromExplicitOptions(
-      {
-        embedding: "qwen/text-embedding-v4",
-        apiKey: "explicit-key",
-        endpoint: "https://example.test/embeddings",
-      },
-      undefined,
-      configPath,
-    ),
-    true,
-  );
-  assert.deepEqual(readGlobalConfig(configPath), {
-    version: 1,
-    defaults: {
-      embedding: "qwen/text-embedding-v4",
-    },
-    providers: {
-      qwen: {
-        apiKey: "explicit-key",
-        endpoint: "https://example.test/embeddings",
-      },
-    },
-  });
-  assert.equal(
-    updateGlobalConfigFromExplicitOptions({}, "qwen", configPath),
-    false,
-  );
-});
-
-test("local embedding options are persisted per model", async (t) => {
-  const temporaryDirectory = await mkdtemp(
-    join(tmpdir(), "zvec-grep-config-model-"),
-  );
-  const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
-  t.after(async () => {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  });
-
-  assert.equal(
-    updateGlobalConfigFromExplicitOptions(
-      {
-        embedding: "local/embeddinggemma-300m",
-        device: "metal",
-      },
-      undefined,
-      configPath,
-    ),
-    true,
-  );
-  assert.equal(
-    updateGlobalConfigFromExplicitOptions(
-      {
-        embedding: "local/qwen3-embedding-0.6b",
-        device: "cpu",
-      },
-      undefined,
-      configPath,
-    ),
-    true,
-  );
-
-  assert.deepEqual(readGlobalConfig(configPath), {
-    version: 1,
-    defaults: {
-      embedding: "local/qwen3-embedding-0.6b",
-    },
-    models: {
-      "local/embeddinggemma-300m": {
-        device: "metal",
-      },
-      "local/qwen3-embedding-0.6b": {
-        device: "cpu",
-      },
-    },
-  });
-});
-
-test("existing local index persists runtime options for its stored model", async (t) => {
-  const temporaryDirectory = await mkdtemp(
-    join(tmpdir(), "zvec-grep-config-existing-model-"),
-  );
-  const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
-  t.after(async () => {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  });
-
-  assert.equal(
-    updateGlobalConfigFromExplicitOptions(
-      { device: "metal" },
-      "local/embeddinggemma-300m",
-      configPath,
-    ),
-    true,
-  );
-  assert.deepEqual(readGlobalConfig(configPath), {
-    version: 1,
-    models: {
-      "local/embeddinggemma-300m": { device: "metal" },
-    },
-  });
-});
-
-test("model runtime settings override defaults and do not affect remote models", () => {
+test("embedding runtime resolver preserves every precedence layer", () => {
   const config = {
     version: 1,
-    defaults: { device: "cpu" },
+    providers: { qwen: { apiKey: "global-key" } },
     models: {
-      "local/embeddinggemma-300m": {
-        device: "metal",
+      "qwen/text-embedding-v4": {
+        endpoint: "https://global.test/embeddings",
       },
+      "local/embeddinggemma-300m": { device: "metal" },
     },
+  };
+  const environment = {
+    ZVEC_GREP_API_KEY: "env-key",
+    ZVEC_GREP_ENDPOINT: "https://env.test/embeddings",
+    ZVEC_GREP_DEVICE: "cpu",
   };
 
   assert.deepEqual(
-    resolveEmbeddingRuntimeOptions("local/embeddinggemma-300m", {}, config),
-    { device: "metal" },
+    resolveEmbeddingRuntimeOptions(
+      "qwen/text-embedding-v4",
+      {
+        apiKey: "request-key",
+        endpoint: "https://request.test/embeddings",
+      },
+      {
+        apiKey: "workspace-key",
+        endpoint: "https://workspace.test/embeddings",
+      },
+      config,
+      environment,
+    ),
+    {
+      apiKey: "request-key",
+      endpoint: "https://request.test/embeddings",
+    },
+  );
+  assert.deepEqual(
+    resolveEmbeddingRuntimeOptions(
+      "qwen/text-embedding-v4",
+      {},
+      {
+        apiKey: "workspace-key",
+        endpoint: "https://workspace.test/embeddings",
+      },
+      config,
+      environment,
+    ),
+    {
+      apiKey: "workspace-key",
+      endpoint: "https://workspace.test/embeddings",
+    },
+  );
+  assert.deepEqual(
+    resolveEmbeddingRuntimeOptions(
+      "qwen/text-embedding-v4",
+      {},
+      {},
+      config,
+      environment,
+    ),
+    {
+      apiKey: "global-key",
+      endpoint: "https://global.test/embeddings",
+    },
   );
   assert.deepEqual(
     resolveEmbeddingRuntimeOptions(
       "local/embeddinggemma-300m",
-      { device: "cpu" },
+      {},
+      {},
       config,
+      environment,
     ),
-    { device: "cpu" },
-  );
-  assert.deepEqual(
-    resolveEmbeddingRuntimeOptions("qwen/text-embedding-v4", {}, config),
-    {},
+    {
+      apiKey: "env-key",
+      device: "metal",
+    },
   );
 });
 
-test("global config rejects malformed fields without echoing secrets", async (t) => {
+test("global config v1 rejects malformed schemas without echoing secrets", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-config-invalid-"),
   );
@@ -225,16 +178,23 @@ test("global config rejects malformed fields without echoing secrets", async (t)
 
   await writeFile(
     configPath,
-    JSON.stringify({
-      version: 1,
-      providers: {
-        qwen: {
-          apiKey: 12345,
-        },
-      },
-    }),
+    JSON.stringify({ version: 1, defaults: { device: "cpu" } }),
+  );
+  assert.throws(
+    () => readGlobalConfig(configPath),
+    (error) => {
+      assert.match(error.context, /defaults\.device is not supported/);
+      return true;
+    },
   );
 
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: { qwen: { apiKey: 12345 } },
+    }),
+  );
   assert.throws(
     () => readGlobalConfig(configPath),
     (error) => {
@@ -245,37 +205,16 @@ test("global config rejects malformed fields without echoing secrets", async (t)
     },
   );
 
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      models: {
-        "qwen/text-embedding-v4": { device: "metal" },
+  for (const models of [
+    { "qwen/text-embedding-v4": { device: "metal" } },
+    {
+      "local/embeddinggemma-300m": {
+        endpoint: "https://example.test/embeddings",
       },
-    }),
-  );
-  assert.throws(
-    () => readGlobalConfig(configPath),
-    (error) => {
-      assert.match(error.context, /only supports local embedding models/);
-      return true;
     },
-  );
-
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      version: 1,
-      defaults: {
-        llamaGpu: "metal",
-      },
-    }),
-  );
-  assert.throws(
-    () => readGlobalConfig(configPath),
-    (error) => {
-      assert.match(error.context, /defaults\.llamaGpu is not supported/);
-      return true;
-    },
-  );
+    { "qwen/text-embedding-v4": { endpoint: "not-a-url" } },
+  ]) {
+    await writeFile(configPath, JSON.stringify({ version: 1, models }));
+    assert.throws(() => readGlobalConfig(configPath));
+  }
 });

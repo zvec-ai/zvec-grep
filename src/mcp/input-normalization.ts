@@ -10,6 +10,8 @@ import type {
 
 export type NormalizedSearchInput = {
   root: string;
+  apiKey?: string;
+  device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
   queries?: string[];
   routes: Array<{ mode: "fts" | "vector"; query: string }>;
   fuse?: boolean;
@@ -40,6 +42,8 @@ export function normalizeSearchInput(
   const common = normalizeSearchFields(input);
   return {
     root: input.root,
+    apiKey: input.apiKey,
+    device: input.device,
     ...common,
     freshness: input.freshness,
     autoUpdate: input.autoUpdate,

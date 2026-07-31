@@ -5,6 +5,8 @@ import {
   globalConfigPath,
   readGlobalConfig,
   resolveEmbeddingRuntimeOptions,
+  type EmbeddingRuntimeConfig,
+  type ResolvedEmbeddingRuntimeConfig,
   type ZvecGrepGlobalConfig,
 } from "../config.js";
 import {
@@ -160,11 +162,12 @@ export function openAnonymousReadSession(
 export function createEmbeddingModelForIdentity(
   identity: EmbeddingModelIdentity,
   options: CreateZvecGrepOptions = {},
+  workspaceRuntime: EmbeddingRuntimeConfig = {},
 ): EmbeddingModel {
   const reference = embeddingModelReference(identity);
   return createServiceEmbeddingModel(
     reference,
-    providerOptions(options, identity),
+    providerOptions(options, identity, readGlobalConfig(), workspaceRuntime),
     options,
   );
 }
@@ -172,10 +175,11 @@ export function createEmbeddingModelForIdentity(
 export function embeddingModelPoolKeyForIdentity(
   identity: EmbeddingModelIdentity,
   options: CreateZvecGrepOptions = {},
+  workspaceRuntime: EmbeddingRuntimeConfig = {},
 ): string {
   const reference = embeddingModelReference(identity);
   const fingerprint = providerOptionsFingerprint(
-    providerOptions(options, identity),
+    providerOptions(options, identity, readGlobalConfig(), workspaceRuntime),
   );
   return [reference, fingerprint].join("/");
 }
@@ -220,10 +224,32 @@ class ZvecGrepService implements ZvecGrep {
               location.home,
               ANONYMOUS_COLLECTION_NAME,
             );
+            const existingRuntime = readCollectionEmbeddingRuntime(
+              location.home,
+              ANONYMOUS_COLLECTION_NAME,
+            );
             const embeddingModel = this.embeddingModelForIndex(
               existing,
               "index",
+              existingRuntime,
             );
+            const effectiveRuntime = effectiveEmbeddingRuntime(
+              this.options,
+              embeddingModel,
+              runtimeForModelProvider(
+                existing,
+                embeddingModel,
+                existingRuntime,
+              ),
+            );
+            if (!options.rebuild) {
+              assertCollectionEndpointMatchesCurrentRuntime(
+                existing,
+                existingRuntime,
+                effectiveRuntime,
+                "zg index --endpoint <url> --rebuild",
+              );
+            }
             const registry = new CollectionRegistry(
               location.home,
               embeddingModel,
@@ -281,13 +307,32 @@ class ZvecGrepService implements ZvecGrep {
                   ),
               );
               try {
-                return await collection.index({
+                const result = await collection.index({
                   rebuild: false,
                   embeddingConcurrency: options.embeddingConcurrency,
                   onProgress: options.onProgress,
                   changedPaths: options.changedPaths,
                   signal: options.signal,
                 });
+                registry.updateEmbeddingRuntime(
+                  ANONYMOUS_COLLECTION_NAME,
+                  embeddingRuntimeAfterSuccessfulIndex(
+                    existing,
+                    existingRuntime,
+                    embeddingModel,
+                    effectiveRuntime,
+                    this.options,
+                  ),
+                );
+                return result;
+              } catch (error) {
+                if (registry.get(ANONYMOUS_COLLECTION_NAME)) {
+                  registry.updateEmbeddingRuntime(
+                    ANONYMOUS_COLLECTION_NAME,
+                    existingRuntime,
+                  );
+                }
+                throw error;
               } finally {
                 await releaseWriterContext?.();
               }
@@ -544,6 +589,7 @@ class ZvecGrepService implements ZvecGrep {
     name: string,
     paths?: string | RootPath | readonly (string | RootPath)[],
     options: ZvecGrepCollectionIndexOptions = {},
+    persistRuntime = true,
   ): Promise<IndexResult> {
     this.ensureOpen();
     const home = serviceHome(this.options);
@@ -553,10 +599,25 @@ class ZvecGrepService implements ZvecGrep {
         options.rebuild ? "collections.index.rebuild" : "collections.index",
         async () => {
           const existing = readCollectionInfo(home, name);
+          const existingRuntime = readCollectionEmbeddingRuntime(home, name);
           const embeddingModel = this.embeddingModelForIndex(
             existing,
             "collections.index",
+            existingRuntime,
           );
+          const effectiveRuntime = effectiveEmbeddingRuntime(
+            this.options,
+            embeddingModel,
+            runtimeForModelProvider(existing, embeddingModel, existingRuntime),
+          );
+          if (!options.rebuild) {
+            assertCollectionEndpointMatchesCurrentRuntime(
+              existing,
+              existingRuntime,
+              effectiveRuntime,
+              "zg collections index <name> --endpoint <url> --rebuild",
+            );
+          }
           const registry = this.createRegistry(false, embeddingModel);
           try {
             const requestedRootPaths =
@@ -600,10 +661,30 @@ class ZvecGrepService implements ZvecGrep {
             }
             registry.prepareIndex(name, rootPaths);
 
-            return await registry.open(name).index({
-              embeddingConcurrency: options.embeddingConcurrency,
-              onProgress: options.onProgress,
-            });
+            try {
+              const result = await registry.open(name).index({
+                embeddingConcurrency: options.embeddingConcurrency,
+                onProgress: options.onProgress,
+              });
+              if (persistRuntime) {
+                registry.updateEmbeddingRuntime(
+                  name,
+                  embeddingRuntimeAfterSuccessfulIndex(
+                    existing,
+                    existingRuntime,
+                    embeddingModel,
+                    effectiveRuntime,
+                    this.options,
+                  ),
+                );
+              }
+              return result;
+            } catch (error) {
+              if (registry.get(name)) {
+                registry.updateEmbeddingRuntime(name, existingRuntime);
+              }
+              throw error;
+            }
           } finally {
             registry.close();
           }
@@ -647,6 +728,7 @@ class ZvecGrepService implements ZvecGrep {
         info,
         request,
         location.home,
+        registry.getEmbeddingRuntime(ANONYMOUS_COLLECTION_NAME),
       );
       try {
         return await this.contextFromCollection({
@@ -714,9 +796,24 @@ class ZvecGrepService implements ZvecGrep {
             return;
           }
 
+          const workspaceRuntime = readCollectionEmbeddingRuntime(
+            location.home,
+            ANONYMOUS_COLLECTION_NAME,
+          );
           const embeddingModel = this.embeddingModelForIndex(
             existing,
             "context.refresh",
+            workspaceRuntime,
+          );
+          assertCollectionEndpointMatchesCurrentRuntime(
+            existing,
+            workspaceRuntime,
+            effectiveEmbeddingRuntime(
+              this.options,
+              embeddingModel,
+              workspaceRuntime,
+            ),
+            "zg index --endpoint <url> --rebuild",
           );
           assertCollectionEmbeddingMatchesCurrentModel(
             existing,
@@ -757,10 +854,15 @@ class ZvecGrepService implements ZvecGrep {
     if (!indexStatusNeedsRefresh(status)) return;
 
     const result = await timings.time("auto_update", () =>
-      this.indexCollection(collectionName, undefined, {
-        embeddingConcurrency: options.embeddingConcurrency,
-        onProgress: options.onAutoUpdateProgress,
-      }),
+      this.indexCollection(
+        collectionName,
+        undefined,
+        {
+          embeddingConcurrency: options.embeddingConcurrency,
+          onProgress: options.onAutoUpdateProgress,
+        },
+        false,
+      ),
     );
     timings.addEntries(result.timings, "auto_update_");
   }
@@ -789,6 +891,7 @@ class ZvecGrepService implements ZvecGrep {
             info,
             request,
             registry.home,
+            registry.getEmbeddingRuntime(collectionName),
           );
           const root =
             collection.info.rootPaths[0]?.absolutePath ??
@@ -922,10 +1025,16 @@ class ZvecGrepService implements ZvecGrep {
     info: CollectionInfo,
     request: NormalizedContextRequest,
     registryHome: string,
+    workspaceRuntime: EmbeddingRuntimeConfig,
   ): Collection {
     return new Collection(
       info,
-      this.embeddingModelForSearch(indexedEmbeddingSchema(info), request),
+      this.embeddingModelForSearch(
+        indexedEmbeddingSchema(info),
+        request,
+        workspaceRuntime,
+        info,
+      ),
       true,
       join(registryHome, "files.zvec"),
     );
@@ -934,45 +1043,82 @@ class ZvecGrepService implements ZvecGrep {
   private embeddingModelForSearch(
     schema: CollectionEmbeddingSchema,
     request: NormalizedContextRequest,
+    workspaceRuntime: EmbeddingRuntimeConfig,
+    info: CollectionInfo,
   ): EmbeddingModel | undefined {
     if (!request.routes.some((route) => route.mode === "vector")) {
       return undefined;
     }
 
+    const identity = {
+      provider: schema.provider,
+      name: schema.model,
+    };
+    const effectiveRuntime = resolveEmbeddingRuntimeOptions(
+      embeddingModelReference(identity),
+      this.options,
+      workspaceRuntime,
+      readGlobalConfig(),
+    );
+    assertSearchEndpointMatchesWorkspace(
+      info,
+      workspaceRuntime,
+      effectiveRuntime,
+    );
+
     if (this.embeddingModel) {
       return this.embeddingModel;
     }
 
-    return this.recoverEmbeddingModel(schema);
+    return this.recoverEmbeddingModel(schema, workspaceRuntime);
   }
 
   private embeddingModelForIndex(
     existing: CollectionInfo | null,
     operation: string,
+    workspaceRuntime: EmbeddingRuntimeConfig = {},
   ): EmbeddingModel {
     if (
       isCollectionIndexed(existing) &&
       !this.embeddingModel &&
       !this.options.embedding
     ) {
-      return this.recoverEmbeddingModel(existing.embedding);
+      return this.recoverEmbeddingModel(existing.embedding, workspaceRuntime);
     }
 
+    const config = readGlobalConfig();
     const reference =
       this.options.embedding ??
+      config.defaults?.embedding ??
+      nonEmptyEnvironmentValue(process.env.ZVEC_GREP_EMBEDDING) ??
       (this.options.defaultEmbedding === true
         ? DEFAULT_LOCAL_EMBEDDING
         : undefined);
+    const referenceIdentity = reference
+      ? parseEmbeddingModelReference(reference)
+      : undefined;
+    const selectedWorkspaceRuntime =
+      isCollectionIndexed(existing) &&
+      referenceIdentity &&
+      existing.embedding.provider !== referenceIdentity.provider
+        ? {}
+        : workspaceRuntime;
     return (
       this.embeddingModel ??
-      (reference ? this.embeddingModelFromReference(reference) : undefined) ??
-      this.configuredEmbeddingModel() ??
+      (reference
+        ? this.embeddingModelFromReference(
+            reference,
+            config,
+            selectedWorkspaceRuntime,
+          )
+        : undefined) ??
       this.requireEmbeddingModel(operation)
     );
   }
 
   private recoverEmbeddingModel(
     schema: CollectionEmbeddingSchema,
+    workspaceRuntime: EmbeddingRuntimeConfig = {},
   ): EmbeddingModel {
     const config = readGlobalConfig();
     const identity = {
@@ -980,29 +1126,30 @@ class ZvecGrepService implements ZvecGrep {
       name: schema.model,
     };
     const reference = embeddingModelReference(identity);
-    const options = providerOptions(this.options, identity, config);
+    const options = providerOptions(
+      this.options,
+      identity,
+      config,
+      workspaceRuntime,
+    );
     const key = `${reference}/${providerOptionsFingerprint(options)}`;
     return this.cachedEmbeddingModel(key, () =>
       createServiceEmbeddingModel(reference, options, this.options),
     );
   }
 
-  private configuredEmbeddingModel(): EmbeddingModel | undefined {
-    const config = readGlobalConfig();
-    const reference = config.defaults?.embedding;
-    if (!reference) {
-      return undefined;
-    }
-
-    return this.embeddingModelFromReference(reference, config);
-  }
-
   private embeddingModelFromReference(
     reference: string,
     config: ZvecGrepGlobalConfig = readGlobalConfig(),
+    workspaceRuntime: EmbeddingRuntimeConfig = {},
   ): EmbeddingModel {
     const identity = parseEmbeddingModelReference(reference);
-    const options = providerOptions(this.options, identity, config);
+    const options = providerOptions(
+      this.options,
+      identity,
+      config,
+      workspaceRuntime,
+    );
     const key = `configured/${reference}/${providerOptionsFingerprint(options)}`;
     return this.cachedEmbeddingModel(key, () =>
       createServiceEmbeddingModel(reference, options, this.options),
@@ -1508,6 +1655,18 @@ function readCollectionInfo(home: string, name: string): CollectionInfo | null {
   }
 }
 
+function readCollectionEmbeddingRuntime(
+  home: string,
+  name: string,
+): EmbeddingRuntimeConfig {
+  const registry = new CollectionRegistry(home, undefined, true);
+  try {
+    return registry.getEmbeddingRuntime(name);
+  } finally {
+    registry.close();
+  }
+}
+
 function indexedEmbeddingSchema(
   info: CollectionInfo,
 ): CollectionEmbeddingSchema {
@@ -1528,17 +1687,22 @@ function providerOptions(
   options: CreateZvecGrepOptions,
   identity: EmbeddingModelIdentity,
   config: ZvecGrepGlobalConfig = readGlobalConfig(),
+  workspaceRuntime: EmbeddingRuntimeConfig = {},
 ): CreateEmbeddingModelOptions & { apiKey: string } {
-  const providerConfig = config.providers?.[identity.provider];
   const reference = embeddingModelReference(identity);
-  const runtime = resolveEmbeddingRuntimeOptions(reference, options, config);
+  const runtime = resolveEmbeddingRuntimeOptions(
+    reference,
+    options,
+    workspaceRuntime,
+    config,
+  );
   return {
-    apiKey: options.apiKey ?? providerConfig?.apiKey ?? "",
-    endpoint: options.endpoint ?? providerConfig?.endpoint,
+    apiKey: runtime.apiKey,
+    endpoint: runtime.endpoint,
     modelCacheDir:
       options.modelCacheDir ??
-      process.env.ZVEC_GREP_MODEL_CACHE ??
       config.defaults?.modelCacheDir ??
+      process.env.ZVEC_GREP_MODEL_CACHE ??
       join(options.home ?? defaultHome(), "models"),
     device: runtime.device,
   };
@@ -1624,6 +1788,123 @@ function providerOptionsFingerprint(options: {
       ]),
     )
     .digest("hex");
+}
+
+function effectiveEmbeddingRuntime(
+  options: CreateZvecGrepOptions,
+  model: EmbeddingModel,
+  workspaceRuntime: EmbeddingRuntimeConfig,
+): ResolvedEmbeddingRuntimeConfig {
+  const resolved = resolveEmbeddingRuntimeOptions(
+    model.info.reference,
+    options,
+    workspaceRuntime,
+    readGlobalConfig(),
+  );
+  return {
+    apiKey: resolved.apiKey,
+    ...((model.info.endpoint ?? resolved.endpoint)
+      ? { endpoint: model.info.endpoint ?? resolved.endpoint }
+      : {}),
+    ...(model.info.provider === "local"
+      ? { device: resolved.device ?? "auto" }
+      : {}),
+  };
+}
+
+function runtimeForModelProvider(
+  existing: CollectionInfo | null,
+  model: EmbeddingModel,
+  workspaceRuntime: EmbeddingRuntimeConfig,
+): EmbeddingRuntimeConfig {
+  return isCollectionIndexed(existing) &&
+    existing.embedding.provider !== model.info.provider
+    ? {}
+    : workspaceRuntime;
+}
+
+function embeddingRuntimeAfterSuccessfulIndex(
+  existing: CollectionInfo | null,
+  existingRuntime: EmbeddingRuntimeConfig,
+  model: EmbeddingModel,
+  effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
+  explicit: CreateZvecGrepOptions,
+): EmbeddingRuntimeConfig {
+  const sameProvider =
+    isCollectionIndexed(existing) &&
+    existing.embedding.provider === model.info.provider;
+  const apiKey =
+    model.info.provider === "local"
+      ? undefined
+      : (explicit.apiKey ??
+        (sameProvider ? existingRuntime.apiKey : undefined));
+  return {
+    ...(apiKey !== undefined ? { apiKey } : {}),
+    ...(model.info.provider !== "local" &&
+    effectiveRuntime.endpoint !== undefined
+      ? { endpoint: effectiveRuntime.endpoint }
+      : {}),
+    ...(model.info.provider === "local"
+      ? { device: effectiveRuntime.device ?? "auto" }
+      : {}),
+  };
+}
+
+function assertCollectionEndpointMatchesCurrentRuntime(
+  info: CollectionInfo | null,
+  workspaceRuntime: EmbeddingRuntimeConfig,
+  effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
+  rebuildCommand: string,
+): void {
+  if (
+    !isCollectionIndexed(info) ||
+    workspaceRuntime.endpoint === effectiveRuntime.endpoint
+  ) {
+    return;
+  }
+  throw new EngineError(
+    "Existing zvec-grep index uses a different embedding endpoint",
+    {
+      code: "ZVEC_GREP.ENGINE.SERVICE.EMBEDDING_ENDPOINT_CHANGE_REQUIRES_REBUILD",
+      context: errorDetails([
+        collectionDetail(info.name),
+        detail(
+          "hint",
+          `Run "${rebuildCommand}" to rebuild this index with the requested endpoint.`,
+        ),
+      ]),
+    },
+  );
+}
+
+function assertSearchEndpointMatchesWorkspace(
+  info: CollectionInfo,
+  workspaceRuntime: EmbeddingRuntimeConfig,
+  effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
+): void {
+  if (workspaceRuntime.endpoint === effectiveRuntime.endpoint) {
+    return;
+  }
+  throw new EngineError(
+    "Search cannot override the embedding endpoint of an existing index",
+    {
+      code: "ZVEC_GREP.ENGINE.SERVICE.SEARCH_ENDPOINT_CHANGE_REQUIRES_REBUILD",
+      context: errorDetails([
+        collectionDetail(info.name),
+        detail(
+          "hint",
+          'Run "zg index --endpoint <url> --rebuild" before searching with this endpoint.',
+        ),
+      ]),
+    },
+  );
+}
+
+function nonEmptyEnvironmentValue(
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
 }
 
 function assertCollectionEmbeddingMatchesCurrentModel(

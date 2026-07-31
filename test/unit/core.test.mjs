@@ -101,8 +101,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     "query",
     "--api-key",
     "secret",
-    "--endpoint",
-    "https://example.test/embeddings",
     "--model-cache",
     "/tmp/models",
     "--device",
@@ -110,10 +108,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     "query text",
   ]);
   assert.equal(queryRuntime.options.apiKey, "secret");
-  assert.equal(
-    queryRuntime.options.endpoint,
-    "https://example.test/embeddings",
-  );
   assert.equal(queryRuntime.options.modelCacheDir, "/tmp/models");
   assert.equal(queryRuntime.options.device, "cpu");
 
@@ -138,6 +132,16 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
 });
 
 test("CLI parsers reject invalid values and normalize supported values", () => {
+  assert.throws(
+    () =>
+      parseArgs([
+        "query",
+        "--endpoint",
+        "https://example.test/embeddings",
+        "query text",
+      ]),
+    /--endpoint is not supported with zg query/,
+  );
   assert.equal(parseDevice("cpu"), "cpu");
   assert.equal(parseDevice("CUDA"), "cuda");
   assert.deepEqual(splitPathFilters("src/**, test/**, docs/**"), [

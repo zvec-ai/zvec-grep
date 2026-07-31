@@ -53,6 +53,10 @@ test("explicit embedding reference reloads provider config before refresh and qu
       providers: {
         qwen: {
           apiKey: "key-a",
+        },
+      },
+      models: {
+        "qwen/text-embedding-v4": {
           endpoint: "https://endpoint-a.test/embeddings",
         },
       },
@@ -80,6 +84,10 @@ test("explicit embedding reference reloads provider config before refresh and qu
       providers: {
         qwen: {
           apiKey: "key-b",
+        },
+      },
+      models: {
+        "qwen/text-embedding-v4": {
           endpoint: "https://endpoint-b.test/embeddings",
         },
       },
@@ -89,7 +97,7 @@ test("explicit embedding reference reloads provider config before refresh and qu
       "export const answer = 43;\n",
     );
 
-    await withPermit(root, "https://endpoint-b.test/embeddings", () =>
+    await withPermit(root, "https://endpoint-a.test/embeddings", () =>
       service.context({
         root,
         query: "where is the answer defined",
@@ -99,7 +107,7 @@ test("explicit embedding reference reloads provider config before refresh and qu
     assert.ok(requests.length > 0);
     assert.ok(
       requests.every(
-        (request) => request.url === "https://endpoint-b.test/embeddings",
+        (request) => request.url === "https://endpoint-a.test/embeddings",
       ),
     );
     assert.ok(

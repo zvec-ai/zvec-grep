@@ -72,7 +72,6 @@ Result options:
 
 Embedding runtime:
   --api-key <key>                   Embedding provider API key
-  --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --allow-remote                    Allow Remote Embedding for this command only
@@ -148,10 +147,13 @@ Named collections support the same embedding, file-selection, discovery,
 rebuild, and embedding-concurrency options as zg index.`;
     case "config":
       return `Usage:
+  zg config provider set <provider> --api-key <key>
+  zg config model set <provider/model> --endpoint <url>
   zg config model set <local/model> --device <auto|cpu|metal|vulkan|cuda>
+  zg config model set <provider/model> --default
 
-Stores the runtime device for one local embedding model in
-~/.zvec-grep/config.json. These settings do not change index compatibility.`;
+Stores provider credentials, per-model runtime defaults, and the default
+embedding model in ~/.zvec-grep/config.json.`;
     case "auth":
       return `Usage:
   zg auth grant [root] --capability embedding --scope workspace [--embedding <model>]

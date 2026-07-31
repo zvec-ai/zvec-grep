@@ -4,6 +4,13 @@ import type {
   ZvecGrepInfoResult,
 } from "../engine/service/types.js";
 import { isEngineError } from "../engine/errors/index.js";
+import {
+  readGlobalConfig,
+  resolveEmbeddingRuntimeOptions,
+  type EmbeddingRuntimeConfig,
+} from "../engine/config.js";
+import { CollectionRegistry } from "../engine/collection/index.js";
+import { anonymousIndexLocation } from "../engine/service/root.js";
 import type {
   EmbeddingModel,
   EmbeddingModelInfo,
@@ -88,6 +95,7 @@ export type DaemonBackendOptions = {
 
 type DaemonIndexInput = ZvecGrepIndexInput & {
   changedPaths?: readonly string[];
+  runtimeOverridesAreEphemeral?: boolean;
 };
 
 export class DaemonBackend implements ZvecGrepDaemonBackend {
@@ -96,6 +104,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   readonly scheduler: JobScheduler;
   private readonly startedAt = Date.now();
   private readonly statusCache = new Map<string, ZvecGrepInfoResult>();
+  private readonly workspaceRuntimeCache = new Map<
+    string,
+    EmbeddingRuntimeConfig
+  >();
   private readonly watchers = new Map<string, WatchManager>();
   private readonly indexCoordinators = new Map<string, IndexCoordinator>();
   private readonly droppingRoots = new Set<string>();
@@ -139,9 +151,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       return undefined;
     }
     const info = await inspectRoot(input.root, this.options.serviceOptions);
-    let model: EmbeddingModelLoadRequest["model"];
+    let modelLoadRequest: EmbeddingModelLoadRequest;
     try {
-      model = this.indexModel(info, input);
+      modelLoadRequest = this.indexModelLoadRequest(info, input);
     } catch (error) {
       if (error instanceof DaemonError && error.code === "MODEL_LOAD_FAILED") {
         return undefined;
@@ -150,7 +162,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
     let lease: ModelLease;
     try {
-      lease = await this.modelPool.acquire({ model });
+      lease = await this.modelPool.acquire(modelLoadRequest);
     } catch (error) {
       if (isEngineError(error)) {
         return undefined;
@@ -216,10 +228,8 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     if (!info.indexed || !schema || schema.provider !== "qwen") {
       return undefined;
     }
-    const modelInfo = await this.loadEmbeddingModelInfo({
-      provider: schema.provider,
-      name: schema.model,
-    });
+    const modelLoadRequest = this.searchModelLoadRequest(info, input);
+    const modelInfo = await this.loadEmbeddingModelInfo(modelLoadRequest);
     return await planRemoteSearchAuthorization({
       info,
       model: modelInfo,
@@ -373,6 +383,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       return { root: canonicalRoot, removed };
     } finally {
       this.statusCache.delete(canonicalRoot);
+      this.workspaceRuntimeCache.delete(canonicalRoot);
       try {
         await this.runtimeManager.evict(canonicalRoot);
       } finally {
@@ -389,6 +400,21 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const requestedRoot = await resolveRequestedRoot(input.root, false);
     this.assertRootNotDropping(requestedRoot);
     const runtime = await this.runtimeManager.activate(requestedRoot);
+    const searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
+    const currentModelLoadRequest = runtime.currentModelLoadRequest();
+    const defaultModelLoadRequest = searchInfo.indexed
+      ? this.searchModelLoadRequest(searchInfo, {})
+      : currentModelLoadRequest;
+    if (!defaultModelLoadRequest) {
+      throw new DaemonError(
+        "INDEX_MISSING",
+        "Search requires an existing workspace index.",
+      );
+    }
+    const searchModelLoadRequest = searchInfo.indexed
+      ? this.searchModelLoadRequest(searchInfo, input)
+      : this.overrideActiveModelLoadRequest(defaultModelLoadRequest, input);
+    runtime.updateModelLoadRequest(defaultModelLoadRequest);
     this.ensureWatcher(runtime);
     await runtime.probeInitialFreshness(
       async () => {
@@ -411,35 +437,40 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     let updateJob: IndexJobSnapshot | undefined;
     const executeSearch = () =>
       withRemoteEmbeddingOperationPermit(options.authorization, () =>
-        runtime.search({
-          queries: input.queries,
-          routes: input.routes,
-          fuse: input.fuse,
-          limit: input.limit,
-          trace: input.trace,
-          preferSymbol: input.preferSymbol,
-          symbolTypes: input.symbolTypes,
-          globs: normalizePlainStringList(input.globs),
-          insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
-          fileTypes: normalizePlainStringList(input.fileTypes),
-          excludedFileTypes: normalizePlainStringList(input.excludedFileTypes),
-          hidden: input.hidden,
-          noIgnore: input.noIgnore,
-          ignoreFiles: input.ignoreFiles,
-          maxDepth: input.maxDepth,
-          maxFileSizeBytes: input.maxFileSizeBytes,
-          follow: input.follow,
-          embeddingConcurrency: input.embeddingConcurrency,
-          modifiedAfter: input.modifiedAfter,
-          modifiedBefore: input.modifiedBefore,
-          autoUpdate: false,
-        }),
+        runtime.search(
+          {
+            queries: input.queries,
+            routes: input.routes,
+            fuse: input.fuse,
+            limit: input.limit,
+            trace: input.trace,
+            preferSymbol: input.preferSymbol,
+            symbolTypes: input.symbolTypes,
+            globs: normalizePlainStringList(input.globs),
+            insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
+            fileTypes: normalizePlainStringList(input.fileTypes),
+            excludedFileTypes: normalizePlainStringList(
+              input.excludedFileTypes,
+            ),
+            hidden: input.hidden,
+            noIgnore: input.noIgnore,
+            ignoreFiles: input.ignoreFiles,
+            maxDepth: input.maxDepth,
+            maxFileSizeBytes: input.maxFileSizeBytes,
+            follow: input.follow,
+            embeddingConcurrency: input.embeddingConcurrency,
+            modifiedAfter: input.modifiedAfter,
+            modifiedBefore: input.modifiedBefore,
+            autoUpdate: false,
+          },
+          searchModelLoadRequest,
+        ),
       );
     let result;
     if (input.freshness === "wait_for_fresh") {
       while (true) {
         updateJob =
-          (await this.waitForFresh(runtime, options.authorization)) ??
+          (await this.waitForFresh(runtime, options.authorization, input)) ??
           updateJob;
         const beforeSearch = runtime.snapshot();
         result = await executeSearch();
@@ -474,7 +505,12 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       if (runtime.needsReconciliation() && !terminalKnownPathJob) {
         updateJob = await this.submitIndex(
           runtime,
-          { root: runtime.canonicalRoot },
+          {
+            root: runtime.canonicalRoot,
+            apiKey: input.apiKey,
+            device: input.device,
+            runtimeOverridesAreEphemeral: true,
+          },
           "background_reconcile",
           false,
           options.authorization,
@@ -628,6 +664,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       await this.scheduler.close();
       await this.runtimeManager.close();
       await this.modelPool.close();
+      this.workspaceRuntimeCache.clear();
     })();
     return this.closePromise;
   }
@@ -647,8 +684,8 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       true,
     );
     this.statusCache.set(runtime.canonicalRoot, before);
-    const model = this.indexModel(before, input);
-    const modelLoadRequest = { model };
+    const modelLoadRequest = this.indexModelLoadRequest(before, input);
+    const model = modelLoadRequest.model;
     runtime.updateModelLoadRequest(modelLoadRequest);
     let lease: ModelLease;
     try {
@@ -666,6 +703,14 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         root: runtime.canonicalRoot,
         embeddingModel: lease.model,
         embeddingModelOwnership: "borrowed",
+        embedding: input.runtimeOverridesAreEphemeral
+          ? undefined
+          : input.embedding,
+        apiKey: input.runtimeOverridesAreEphemeral ? undefined : input.apiKey,
+        endpoint: input.runtimeOverridesAreEphemeral
+          ? undefined
+          : input.endpoint,
+        device: input.runtimeOverridesAreEphemeral ? undefined : input.device,
         daemonInstanceToken: this.runtimeManager.instanceToken,
       });
       await withRemoteEmbeddingOperationPermit(authorization, () =>
@@ -714,12 +759,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         "Index completed without an embedding schema.",
       );
     }
-    runtime.updateModelLoadRequest({
-      model: {
-        provider: after.collection.embedding.provider,
-        name: after.collection.embedding.model,
-      },
-    });
+    runtime.updateModelLoadRequest(this.searchModelLoadRequest(after, {}));
     this.options.logger?.event("index.completed", {
       root_id: rootIdentity(runtime.canonicalRoot),
       duration_ms: Date.now() - startedAt,
@@ -905,10 +945,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const info = await inspectRoot(root, this.options.serviceOptions);
     const schema = info.collection?.embedding;
     if (!schema || schema.provider !== "qwen") return { allowed: true };
-    const modelInfo = await this.loadEmbeddingModelInfo({
-      provider: schema.provider,
-      name: schema.model,
-    });
+    const modelInfo = await this.loadEmbeddingModelInfo(
+      this.searchModelLoadRequest(info, {}),
+    );
     const plan = await planRemoteIndexAuthorization({
       info,
       model: modelInfo,
@@ -926,6 +965,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private async waitForFresh(
     runtime: RootRuntime,
     authorization?: RemoteEmbeddingOperationPermit,
+    runtimeOverrides: Pick<NormalizedSearchInput, "apiKey" | "device"> = {},
   ): Promise<IndexJobSnapshot | undefined> {
     let updateJob: IndexJobSnapshot | undefined;
     while (true) {
@@ -957,7 +997,12 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       }
       updateJob = await this.submitIndex(
         runtime,
-        { root: runtime.canonicalRoot },
+        {
+          root: runtime.canonicalRoot,
+          apiKey: runtimeOverrides.apiKey,
+          device: runtimeOverrides.device,
+          runtimeOverridesAreEphemeral: true,
+        },
         "fresh_query",
         true,
         authorization,
@@ -973,9 +1018,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   }
 
   private async loadEmbeddingModelInfo(
-    model: EmbeddingModelLoadRequest["model"],
+    request: EmbeddingModelLoadRequest,
   ): Promise<EmbeddingModelInfo> {
-    const lease = await this.modelPool.acquire({ model });
+    const lease = await this.modelPool.acquire(request);
     try {
       return lease.model.info;
     } finally {
@@ -1030,6 +1075,8 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const reference =
       input.embedding ??
       this.options.serviceOptions?.embedding ??
+      readGlobalConfig().defaults?.embedding ??
+      nonEmptyEnvironmentValue(process.env.ZVEC_GREP_EMBEDDING) ??
       (this.options.serviceOptions?.defaultEmbedding
         ? DEFAULT_LOCAL_EMBEDDING
         : undefined);
@@ -1041,6 +1088,152 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
     return parseEmbeddingModelReference(reference);
   }
+
+  private indexModelLoadRequest(
+    info: ZvecGrepInfoResult,
+    input: Pick<
+      DaemonIndexInput,
+      "embedding" | "apiKey" | "endpoint" | "device" | "rebuild"
+    >,
+  ): EmbeddingModelLoadRequest {
+    const model = this.indexModel(info, input as ZvecGrepIndexInput);
+    const workspaceRuntime =
+      info.collection?.embedding?.provider === model.provider
+        ? this.readWorkspaceEmbeddingRuntime(info)
+        : {};
+    const runtime = this.resolveModelRuntime(model, workspaceRuntime, input);
+    if (
+      input.rebuild !== true &&
+      info.collection?.embedding &&
+      workspaceRuntime.endpoint !== runtime.endpoint
+    ) {
+      throw new DaemonError(
+        "EMBEDDING_ENDPOINT_MISMATCH",
+        "The requested embedding endpoint differs from the workspace snapshot; use rebuild to change endpoints.",
+      );
+    }
+    return { model, runtime };
+  }
+
+  private searchModelLoadRequest(
+    info: ZvecGrepInfoResult,
+    overrides: Pick<NormalizedSearchInput, "apiKey" | "device">,
+  ): EmbeddingModelLoadRequest {
+    const schema = info.collection?.embedding;
+    if (!info.indexed || !schema) {
+      throw new DaemonError(
+        "INDEX_MISSING",
+        "Search requires an existing workspace index.",
+      );
+    }
+    const model = {
+      provider: schema.provider,
+      name: schema.model,
+    };
+    const workspaceRuntime = this.readWorkspaceEmbeddingRuntime(info);
+    const runtime = this.resolveModelRuntime(
+      model,
+      workspaceRuntime,
+      overrides,
+    );
+    return { model, runtime };
+  }
+
+  private resolveModelRuntime(
+    model: EmbeddingModelLoadRequest["model"],
+    workspaceRuntime: EmbeddingRuntimeConfig,
+    overrides: {
+      apiKey?: string;
+      endpoint?: string;
+      device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+    },
+  ): EmbeddingRuntimeConfig {
+    const serviceOptions = this.options.serviceOptions;
+    return resolveEmbeddingRuntimeOptions(
+      embeddingModelReference(model),
+      {
+        apiKey: overrides.apiKey ?? serviceOptions?.apiKey,
+        endpoint: overrides.endpoint ?? serviceOptions?.endpoint,
+        device: overrides.device ?? serviceOptions?.device,
+      },
+      workspaceRuntime,
+      readGlobalConfig(),
+    );
+  }
+
+  private overrideActiveModelLoadRequest(
+    request: EmbeddingModelLoadRequest,
+    overrides: Pick<NormalizedSearchInput, "apiKey" | "device">,
+  ): EmbeddingModelLoadRequest {
+    const runtime = resolveEmbeddingRuntimeOptions(
+      embeddingModelReference(request.model),
+      overrides,
+      request.runtime ?? {},
+      readGlobalConfig(),
+    );
+    return { model: request.model, runtime };
+  }
+
+  private readWorkspaceEmbeddingRuntime(
+    info: ZvecGrepInfoResult,
+  ): EmbeddingRuntimeConfig {
+    try {
+      const runtime = readWorkspaceEmbeddingRuntime(info);
+      this.workspaceRuntimeCache.set(info.root, runtime);
+      return runtime;
+    } catch (error) {
+      const cached = this.workspaceRuntimeCache.get(info.root);
+      if (
+        cached &&
+        isEngineError(error) &&
+        (error.code === "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED" ||
+          error.code === "ZVEC_GREP.ENGINE.LOCK.BUSY")
+      ) {
+        return cached;
+      }
+      throw error;
+    }
+  }
+
+  private async inspectRootWithCache(
+    root: string,
+  ): Promise<ZvecGrepInfoResult> {
+    try {
+      const info = await inspectRoot(root, this.options.serviceOptions);
+      this.statusCache.set(root, info);
+      return info;
+    } catch (error) {
+      const cached = this.statusCache.get(root);
+      if (
+        cached &&
+        isEngineError(error) &&
+        error.code === "ZVEC_GREP.ENGINE.LOCK.BUSY"
+      ) {
+        return cached;
+      }
+      throw error;
+    }
+  }
+}
+
+function readWorkspaceEmbeddingRuntime(
+  info: ZvecGrepInfoResult,
+): EmbeddingRuntimeConfig {
+  if (!info.collection) return {};
+  const location = anonymousIndexLocation(info.root);
+  const registry = new CollectionRegistry(location.home, undefined, true);
+  try {
+    return registry.getEmbeddingRuntime(info.collection.name);
+  } finally {
+    registry.close();
+  }
+}
+
+function nonEmptyEnvironmentValue(
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
 }
 
 function indexStatusIsFresh(info: ZvecGrepInfoResult): boolean {
@@ -1059,6 +1252,9 @@ function indexStatusIsFresh(info: ZvecGrepInfoResult): boolean {
 function assertDropOnlyInput(input: ZvecGrepIndexInput): void {
   const conflicts: Array<[boolean, string]> = [
     [input.embedding !== undefined, "embedding"],
+    [input.apiKey !== undefined, "apiKey"],
+    [input.endpoint !== undefined, "endpoint"],
+    [input.device !== undefined, "device"],
     [input.rebuild !== undefined, "rebuild"],
     [input.resetPaths !== undefined, "resetPaths"],
     [input.globs !== undefined, "globs"],

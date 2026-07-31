@@ -71,16 +71,30 @@ export class RootRuntime {
     return this.modelLoadRequest?.model.provider;
   }
 
+  currentModelLoadRequest(): EmbeddingModelLoadRequest | undefined {
+    return this.modelLoadRequest;
+  }
+
   async search(
     options: ZvecGrepContextOptions,
+    modelLoadRequest?: EmbeddingModelLoadRequest,
   ): Promise<ZvecGrepContextResult> {
     this.options.onActivity?.();
     if (this.closed) {
       throw new Error("Root runtime is closed.");
     }
+    const overrideModelKey = modelLoadRequest
+      ? this.options.modelPool.keyFor(modelLoadRequest)
+      : undefined;
     while (true) {
       const writerContext = this.writerContext;
-      if (writerContext) {
+      const writerModelKey = this.modelLoadRequest
+        ? this.options.modelPool.keyFor(this.modelLoadRequest)
+        : undefined;
+      if (
+        writerContext &&
+        (overrideModelKey === undefined || overrideModelKey === writerModelKey)
+      ) {
         return await this.withWriterContext(writerContext, options);
       }
       if (!this.writerPending || !this.writerReady) {
@@ -93,7 +107,7 @@ export class RootRuntime {
       if (this.closed) {
         throw new Error("Root runtime is closed.");
       }
-      const request = this.modelLoadRequest;
+      const request = modelLoadRequest ?? this.modelLoadRequest;
       if (!request) {
         throw new Error("Root runtime does not have an embedding model.");
       }

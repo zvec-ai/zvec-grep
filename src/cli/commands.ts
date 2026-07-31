@@ -16,7 +16,6 @@ import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
-  createEmbeddingModel,
   createZvecGrep,
   type CreateZvecGrepOptions,
   type EmbeddingModelInfo,
@@ -29,9 +28,15 @@ import {
 } from "../index.js";
 import {
   globalConfigPath,
+  readGlobalConfig,
   updateGlobalConfig,
-  updateGlobalConfigFromExplicitOptions,
+  type EmbeddingRuntimeConfig,
 } from "../engine/config.js";
+import {
+  getEmbeddingModelCatalogEntry,
+  listEmbeddingModels,
+} from "../engine/models/index.js";
+import { CollectionRegistry } from "../engine/collection/index.js";
 import { DaemonClient } from "../client/daemon-client.js";
 import {
   resolveDirectSearchPolicy,
@@ -176,40 +181,102 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
 }
 
 async function runConfig(parsed: ParsedArgs): Promise<void> {
-  if (parsed.options.configAction !== "model-set") {
-    throw new Error("zg config requires model set");
-  }
   if (parsed.positionals.length !== 1) {
     throw new Error(
-      "zg config model set requires exactly one local embedding reference",
+      `zg config ${parsed.options.configAction === "provider-set" ? "provider" : "model"} set requires exactly one reference`,
     );
   }
   const reference = parsed.positionals[0]!;
-  if (!reference.startsWith("local/")) {
-    throw new Error("zg config model set only supports local embedding models");
-  }
-  if (parsed.options.device === undefined) {
-    throw new Error("zg config model set requires --device");
-  }
-  const model = createEmbeddingModel(reference, {
-    device: parsed.options.device,
-  });
-  try {
-    if (model.info.provider !== "local") {
-      throw new Error(`Unsupported local embedding model: ${reference}`);
+  if (parsed.options.configAction === "provider-set") {
+    if (!/^[a-z][a-z0-9_-]*$/.test(reference)) {
+      throw new Error(`Invalid embedding provider: ${reference}`);
     }
-  } finally {
-    await model.dispose();
+    if (
+      reference === "local" ||
+      !listEmbeddingModels().some((entry) => entry.provider === reference)
+    ) {
+      throw new Error(`Unsupported remote embedding provider: ${reference}`);
+    }
+    if (parsed.options.apiKey === undefined) {
+      throw new Error("zg config provider set requires --api-key");
+    }
+    updateGlobalConfig({
+      providers: {
+        [reference]: {
+          apiKey: parsed.options.apiKey,
+        },
+      },
+    });
+    console.log(`Provider config: ${reference}`);
+    console.log(`Global config: ${globalConfigPath()}`);
+    return;
+  }
+
+  if (parsed.options.configAction !== "model-set") {
+    throw new Error("zg config requires provider set or model set");
+  }
+  const catalogEntry = getEmbeddingModelCatalogEntry(reference);
+  if (!catalogEntry) {
+    throw new Error(`Unsupported embedding model: ${reference}`);
+  }
+  if (
+    parsed.options.endpoint === undefined &&
+    parsed.options.device === undefined &&
+    !parsed.options.defaultModel
+  ) {
+    throw new Error(
+      "zg config model set requires --endpoint, --device, or --default",
+    );
+  }
+  if (
+    catalogEntry.provider === "local" &&
+    parsed.options.endpoint !== undefined
+  ) {
+    throw new Error("--endpoint is only supported for remote embedding models");
+  }
+  if (
+    catalogEntry.provider !== "local" &&
+    parsed.options.device !== undefined
+  ) {
+    throw new Error("--device is only supported for local embedding models");
+  }
+  if (parsed.options.endpoint !== undefined) {
+    assertHttpEndpoint(parsed.options.endpoint);
   }
   updateGlobalConfig({
-    models: {
-      [reference]: {
-        device: parsed.options.device,
-      },
-    },
+    ...(parsed.options.endpoint !== undefined ||
+    parsed.options.device !== undefined
+      ? {
+          models: {
+            [reference]: {
+              ...(parsed.options.endpoint !== undefined
+                ? { endpoint: parsed.options.endpoint }
+                : {}),
+              ...(parsed.options.device !== undefined
+                ? { device: parsed.options.device }
+                : {}),
+            },
+          },
+        }
+      : {}),
+    ...(parsed.options.defaultModel
+      ? { defaults: { embedding: reference } }
+      : {}),
   });
   console.log(`Model config: ${reference}`);
   console.log(`Global config: ${globalConfigPath()}`);
+}
+
+function assertHttpEndpoint(endpoint: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new Error("--endpoint must be a valid HTTP(S) URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("--endpoint must be a valid HTTP(S) URL");
+  }
 }
 
 async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -301,7 +368,7 @@ async function runAuth(parsed: ParsedArgs): Promise<void> {
   try {
     const info = await service.info({ root });
     const schema = resolveAuthorizationSchema(
-      parsed.options.embedding ?? process.env.ZVEC_GREP_EMBEDDING,
+      configuredEmbeddingReference(parsed.options),
       info.collection?.embedding,
     );
     if (!schema) {
@@ -312,7 +379,11 @@ async function runAuth(parsed: ParsedArgs): Promise<void> {
     if (schema.provider === "local") {
       throw new Error("Local embedding models do not require authorization.");
     }
-    const modelInfo = await embeddingModelInfo(schema, serviceOptions);
+    const modelInfo = await embeddingModelInfo(
+      schema,
+      serviceOptions,
+      workspaceRuntimeFromInfo(info),
+    );
     const endpoint = modelInfo.endpoint;
     if (endpoint === undefined) {
       throw new Error(
@@ -837,6 +908,9 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
           {
             root: rootPath.absolutePath,
             embedding: parsed.options.embedding,
+            apiKey: parsed.options.apiKey,
+            endpoint: parsed.options.endpoint,
+            device: parsed.options.device,
             rebuild: parsed.options.rebuild,
             resetPaths: parsed.options.resetPaths,
             globs: parsed.options.globs,
@@ -911,7 +985,7 @@ async function runDirectIndex(
   try {
     const infoBefore = await zvecGrep.info({ root: rootPath.absolutePath });
     const schema = resolveAuthorizationSchema(
-      parsed.options.embedding ?? process.env.ZVEC_GREP_EMBEDDING,
+      configuredEmbeddingReference(parsed.options),
       infoBefore.collection?.embedding,
     );
     assertEmbeddingModelCompatible(
@@ -919,9 +993,16 @@ async function runDirectIndex(
       schema,
       parsed.options.rebuild === true,
     );
+    const workspaceRuntime = workspaceRuntimeFromInfo(infoBefore);
+    assertRequestedEndpointCompatible(
+      infoBefore,
+      workspaceRuntime,
+      parsed.options.endpoint,
+      parsed.options.rebuild === true,
+    );
     const modelInfo =
       schema?.provider === "qwen"
-        ? await embeddingModelInfo(schema, serviceOptions)
+        ? await embeddingModelInfo(schema, serviceOptions, workspaceRuntime)
         : undefined;
     const plan = modelInfo
       ? await planRemoteIndexAuthorization({
@@ -964,10 +1045,6 @@ async function runDirectIndex(
       result,
       parsed.options,
       info.collection?.rootPaths,
-    );
-    persistExplicitGlobalConfig(
-      parsed.options,
-      embeddingReference(info.collection?.embedding),
     );
   } catch (error) {
     progress.finish();
@@ -1193,7 +1270,7 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
           zvecGrep.collections.status(name),
         ]);
         const schema = resolveAuthorizationSchema(
-          parsed.options.embedding ?? process.env.ZVEC_GREP_EMBEDDING,
+          configuredEmbeddingReference(parsed.options),
           existing?.embedding,
         );
         assertEmbeddingModelCompatible(
@@ -1217,11 +1294,19 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
           collection: authorizationCollection,
           status,
         };
+        const workspaceRuntime = workspaceRuntimeFromInfo(infoBefore);
+        assertRequestedEndpointCompatible(
+          infoBefore,
+          workspaceRuntime,
+          parsed.options.endpoint,
+          parsed.options.rebuild === true,
+        );
         const modelInfo =
           schema?.provider === "qwen"
             ? await embeddingModelInfo(
                 schema,
                 createServiceOptions(parsed.options, undefined),
+                workspaceRuntime,
               )
             : undefined;
         const plan = modelInfo
@@ -1262,10 +1347,6 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
           result,
           parsed.options,
           info?.rootPaths,
-        );
-        persistExplicitGlobalConfig(
-          parsed.options,
-          embeddingReference(info?.embedding),
         );
       } catch (error) {
         progress.finish();
@@ -1420,11 +1501,13 @@ async function runDirectQuery(
     );
     const info = await directQueryInfo(zvecGrep, commandOptions);
     const schema = info.collection?.embedding;
+    const workspaceRuntime = workspaceRuntimeFromInfo(info);
     const modelInfo =
       !commandOptions.rg && schema?.provider === "qwen"
         ? await embeddingModelInfo(
             schema,
             createServiceOptions(commandOptions, info.root),
+            workspaceRuntime,
           )
         : undefined;
     const plan = modelInfo
@@ -1495,6 +1578,8 @@ async function runServerQuery(
     "zvec_grep_search",
     {
       root: resolve(process.cwd()),
+      apiKey: options.apiKey,
+      device: options.device,
       queries: queries.length ? queries : undefined,
       fts: fts.length ? fts : undefined,
       vector: vector.length ? vector : undefined,
@@ -1659,10 +1744,12 @@ function resolveAuthorizationSchema(
 async function embeddingModelInfo(
   schema: Pick<CollectionEmbeddingSchema, "provider" | "model">,
   options: CreateZvecGrepOptions,
+  workspaceRuntime: EmbeddingRuntimeConfig = {},
 ): Promise<EmbeddingModelInfo> {
   const model = createEmbeddingModelForIdentity(
     { provider: schema.provider, name: schema.model },
     options,
+    workspaceRuntime,
   );
   try {
     return model.info;
@@ -1726,10 +1813,57 @@ function normalizedDirectSearchInput(
   const policy = resolveDirectSearchPolicy(options);
   return {
     root,
+    apiKey: options.apiKey,
+    device: options.device,
     queries: !options.rg && queries.length > 0 ? [...queries] : undefined,
     routes: [...(options.routes ?? [])],
     ...policy,
   };
+}
+
+function configuredEmbeddingReference(options: CliOptions): string | undefined {
+  return (
+    options.embedding ??
+    readGlobalConfig().defaults?.embedding ??
+    process.env.ZVEC_GREP_EMBEDDING
+  );
+}
+
+function workspaceRuntimeFromInfo(
+  info: ZvecGrepInfoResult,
+): EmbeddingRuntimeConfig {
+  const collection = info.collection;
+  if (!collection) return {};
+  const home =
+    info.home ||
+    (collection.name === "__anonymous__"
+      ? dirname(collection.path)
+      : dirname(dirname(collection.path)));
+  const registry = new CollectionRegistry(home, undefined, true);
+  try {
+    return registry.getEmbeddingRuntime(collection.name);
+  } finally {
+    registry.close();
+  }
+}
+
+function assertRequestedEndpointCompatible(
+  info: ZvecGrepInfoResult,
+  workspaceRuntime: EmbeddingRuntimeConfig,
+  requestedEndpoint: string | undefined,
+  rebuild: boolean,
+): void {
+  if (
+    rebuild ||
+    !info.collection?.embedding ||
+    requestedEndpoint === undefined ||
+    workspaceRuntime.endpoint === requestedEndpoint
+  ) {
+    return;
+  }
+  throw new Error(
+    "The requested embedding endpoint differs from the workspace snapshot. Run zg index --endpoint <url> --rebuild first.",
+  );
 }
 
 async function daemonIsReady(home?: string): Promise<boolean> {
@@ -1795,41 +1929,16 @@ export function createServiceOptions(
   options: CliOptions,
   root: string | undefined,
 ): CreateZvecGrepOptions {
-  const embedding = options.embedding ?? process.env.ZVEC_GREP_EMBEDDING;
-  const apiKey =
-    options.apiKey ??
-    process.env.ZVEC_GREP_API_KEY ??
-    process.env.DASHSCOPE_API_KEY ??
-    process.env.QWEN_API_KEY;
-  const endpoint = options.endpoint ?? process.env.ZVEC_GREP_ENDPOINT;
-
   return {
     root,
     home: options.home ?? process.env.ZVEC_GREP_HOME,
-    embedding,
-    apiKey,
-    endpoint,
-    modelCacheDir: options.modelCacheDir ?? process.env.ZVEC_GREP_MODEL_CACHE,
+    embedding: options.embedding,
+    apiKey: options.apiKey,
+    endpoint: options.endpoint,
+    modelCacheDir: options.modelCacheDir,
     device: options.device,
     authorizationSigningKeyPath: process.env.ZVEC_GREP_AUTHORIZATION_KEY_FILE,
   };
-}
-
-function persistExplicitGlobalConfig(
-  options: CliOptions,
-  indexedEmbedding: string | undefined,
-): void {
-  if (!updateGlobalConfigFromExplicitOptions(options, indexedEmbedding)) {
-    return;
-  }
-
-  console.log(`Global config: ${globalConfigPath()}`);
-}
-
-function embeddingReference(
-  embedding: { provider: string; model: string } | null | undefined,
-): string | undefined {
-  return embedding ? `${embedding.provider}/${embedding.model}` : undefined;
 }
 
 function resolveCodexHome(): string {

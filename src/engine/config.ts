@@ -7,16 +7,29 @@ import { acquireReadWriteLock } from "./utils/lock.js";
 export type ZvecGrepGlobalDefaults = {
   embedding?: string;
   modelCacheDir?: string;
-  device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
 };
 
 export type ZvecGrepProviderConfig = {
   apiKey?: string;
-  endpoint?: string;
 };
 
+export type EmbeddingDevice = "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+
 export type ZvecGrepEmbeddingModelConfig = {
-  device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+  endpoint?: string;
+  device?: EmbeddingDevice;
+};
+
+export type EmbeddingRuntimeConfig = {
+  apiKey?: string;
+  endpoint?: string;
+  device?: EmbeddingDevice;
+};
+
+export type ResolvedEmbeddingRuntimeConfig = {
+  apiKey: string;
+  endpoint?: string;
+  device?: EmbeddingDevice;
 };
 
 export type ZvecGrepClientMode = "direct" | "server" | "auto";
@@ -48,24 +61,53 @@ export type ZvecGrepGlobalConfigUpdate = {
   server?: ZvecGrepServerConfig;
 };
 
-export type ZvecGrepExplicitGlobalOptions = ZvecGrepGlobalDefaults & {
-  apiKey?: string;
-  endpoint?: string;
-};
-
 export function resolveEmbeddingRuntimeOptions(
-  reference: string | undefined,
-  explicit: Pick<ZvecGrepEmbeddingModelConfig, "device">,
+  reference: string,
+  explicit: EmbeddingRuntimeConfig,
+  workspace: EmbeddingRuntimeConfig,
   config: ZvecGrepGlobalConfig,
-): ZvecGrepEmbeddingModelConfig {
-  if (!reference?.startsWith("local/")) return {};
+  environment: NodeJS.ProcessEnv = process.env,
+): ResolvedEmbeddingRuntimeConfig {
+  const provider = providerFromEmbedding(reference);
+  const local = provider === "local";
+  if (local && explicit.endpoint !== undefined) {
+    throw invalidRuntime(
+      reference,
+      "endpoint is only supported for remote embedding models",
+    );
+  }
+  if (!local && explicit.device !== undefined) {
+    throw invalidRuntime(
+      reference,
+      "device is only supported for local embedding models",
+    );
+  }
   const model = config.models?.[reference];
-  return {
-    device:
-      explicit.device ??
+  const providerConfig = provider ? config.providers?.[provider] : undefined;
+  const endpoint = !local
+    ? (explicit.endpoint ??
+      workspace.endpoint ??
+      model?.endpoint ??
+      nonEmptyEnvironmentValue(environment.ZVEC_GREP_ENDPOINT))
+    : undefined;
+  if (endpoint !== undefined && !isHttpEndpoint(endpoint)) {
+    throw invalidRuntime(reference, "endpoint must be a valid HTTP(S) URL");
+  }
+  const device = local
+    ? (explicit.device ??
+      workspace.device ??
       model?.device ??
-      config.defaults?.device ??
-      environmentDevice(),
+      environmentDevice(environment))
+    : undefined;
+  return {
+    apiKey:
+      explicit.apiKey ??
+      workspace.apiKey ??
+      providerConfig?.apiKey ??
+      environmentApiKey(provider, environment) ??
+      "",
+    ...(endpoint !== undefined ? { endpoint } : {}),
+    ...(device !== undefined ? { device } : {}),
   };
 }
 
@@ -126,65 +168,6 @@ export function updateGlobalConfig(
   }
 }
 
-export function updateGlobalConfigFromExplicitOptions(
-  options: ZvecGrepExplicitGlobalOptions,
-  indexedEmbedding?: string,
-  path = globalConfigPath(),
-): boolean {
-  const modelReference =
-    options.embedding ??
-    (indexedEmbedding?.includes("/") ? indexedEmbedding : undefined);
-  const localModel = modelReference?.startsWith("local/")
-    ? modelReference
-    : undefined;
-  const defaults: ZvecGrepGlobalDefaults = {
-    ...(options.embedding !== undefined
-      ? { embedding: options.embedding }
-      : {}),
-    ...(options.modelCacheDir !== undefined
-      ? { modelCacheDir: options.modelCacheDir }
-      : {}),
-    ...(!localModel && options.device !== undefined
-      ? { device: options.device }
-      : {}),
-  };
-  const provider =
-    providerFromEmbedding(options.embedding) ??
-    providerFromEmbedding(indexedEmbedding) ??
-    indexedEmbedding;
-  const providerConfig: ZvecGrepProviderConfig =
-    provider && provider !== "local"
-      ? {
-          ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
-          ...(options.endpoint !== undefined
-            ? { endpoint: options.endpoint }
-            : {}),
-        }
-      : {};
-  const update: ZvecGrepGlobalConfigUpdate = {
-    ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
-    ...(provider && Object.keys(providerConfig).length > 0
-      ? { providers: { [provider]: providerConfig } }
-      : {}),
-    ...(localModel && options.device !== undefined
-      ? {
-          models: {
-            [localModel]: {
-              device: options.device,
-            },
-          },
-        }
-      : {}),
-  };
-
-  if (!update.defaults && !update.providers && !update.models) {
-    return false;
-  }
-
-  updateGlobalConfig(update, path);
-  return true;
-}
-
 function emptyGlobalConfig(): ZvecGrepGlobalConfig {
   return { version: GLOBAL_CONFIG_VERSION };
 }
@@ -242,19 +225,42 @@ function parseModels(
         `models.${reference} must be an object with a valid embedding reference`,
       );
     }
-    if (!reference.startsWith("local/")) {
+    assertKnownFields(
+      modelValue,
+      ["endpoint", "device"],
+      path,
+      `models.${reference}`,
+    );
+    const endpoint = optionalNonEmptyString(
+      modelValue.endpoint,
+      path,
+      `models.${reference}.endpoint`,
+    );
+    if (endpoint !== undefined && !isHttpEndpoint(endpoint)) {
       throw invalidConfig(
         path,
-        `models.${reference} only supports local embedding models`,
+        `models.${reference}.endpoint must be a valid HTTP(S) URL`,
       );
     }
-    assertKnownFields(modelValue, ["device"], path, `models.${reference}`);
     const device = optionalDevice(
       modelValue.device,
       path,
       `models.${reference}.device`,
     );
+    if (reference.startsWith("local/") && endpoint !== undefined) {
+      throw invalidConfig(
+        path,
+        `models.${reference}.endpoint is only supported for remote models`,
+      );
+    }
+    if (!reference.startsWith("local/") && device !== undefined) {
+      throw invalidConfig(
+        path,
+        `models.${reference}.device is only supported for local models`,
+      );
+    }
     const config: ZvecGrepEmbeddingModelConfig = {
+      ...(endpoint !== undefined ? { endpoint } : {}),
       ...(device !== undefined ? { device } : {}),
     };
     if (Object.keys(config).length > 0) models[reference] = config;
@@ -317,12 +323,7 @@ function parseDefaults(
   if (!isRecord(value)) {
     throw invalidConfig(path, "defaults must be an object");
   }
-  assertKnownFields(
-    value,
-    ["embedding", "modelCacheDir", "device"],
-    path,
-    "defaults",
-  );
+  assertKnownFields(value, ["embedding", "modelCacheDir"], path, "defaults");
 
   const embedding = optionalNonEmptyString(
     value.embedding,
@@ -334,11 +335,9 @@ function parseDefaults(
     path,
     "defaults.modelCacheDir",
   );
-  const device = optionalDevice(value.device, path, "defaults.device");
   const defaults: ZvecGrepGlobalDefaults = {
     ...(embedding ? { embedding } : {}),
     ...(modelCacheDir ? { modelCacheDir } : {}),
-    ...(device !== undefined ? { device } : {}),
   };
   return Object.keys(defaults).length > 0 ? defaults : undefined;
 }
@@ -362,26 +361,15 @@ function parseProviders(
         `providers.${provider} must be an object with a valid provider name`,
       );
     }
-    assertKnownFields(
-      providerValue,
-      ["apiKey", "endpoint"],
-      path,
-      `providers.${provider}`,
-    );
+    assertKnownFields(providerValue, ["apiKey"], path, `providers.${provider}`);
 
     const apiKey = optionalNonEmptyString(
       providerValue.apiKey,
       path,
       `providers.${provider}.apiKey`,
     );
-    const endpoint = optionalNonEmptyString(
-      providerValue.endpoint,
-      path,
-      `providers.${provider}.endpoint`,
-    );
     const config: ZvecGrepProviderConfig = {
       ...(apiKey ? { apiKey } : {}),
-      ...(endpoint ? { endpoint } : {}),
     };
     if (Object.keys(config).length > 0) {
       providers[provider] = config;
@@ -472,11 +460,33 @@ function optionalDevice(
   );
 }
 
-function environmentDevice(): "auto" | "cpu" | "metal" | "vulkan" | "cuda" {
-  const normalized = process.env.ZVEC_GREP_DEVICE?.trim().toLowerCase() ?? "";
+function environmentApiKey(
+  provider: string | undefined,
+  environment: NodeJS.ProcessEnv,
+): string | undefined {
+  const values =
+    provider === "qwen"
+      ? [
+          environment.ZVEC_GREP_API_KEY,
+          environment.DASHSCOPE_API_KEY,
+          environment.QWEN_API_KEY,
+        ]
+      : [environment.ZVEC_GREP_API_KEY];
+  return values.map(nonEmptyEnvironmentValue).find(Boolean);
+}
+
+function nonEmptyEnvironmentValue(
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function environmentDevice(environment: NodeJS.ProcessEnv): EmbeddingDevice {
+  const normalized = environment.ZVEC_GREP_DEVICE?.trim().toLowerCase() ?? "";
   if (["auto", "cpu", "metal", "vulkan", "cuda"].includes(normalized))
-    return normalized as "auto" | "cpu" | "metal" | "vulkan" | "cuda";
-  return "cpu";
+    return normalized as EmbeddingDevice;
+  return "auto";
 }
 
 function assertKnownFields(
@@ -498,6 +508,22 @@ function invalidConfig(path: string, detail: string): EngineError {
     code: "ZVEC_GREP.ENGINE.CONFIG.INVALID",
     context: `path=${path}\ndetail=${detail}`,
   });
+}
+
+function invalidRuntime(reference: string, message: string): EngineError {
+  return new EngineError("Embedding runtime configuration is invalid", {
+    code: "ZVEC_GREP.ENGINE.CONFIG.INVALID_EMBEDDING_RUNTIME",
+    context: `reference=${reference}\ndetail=${message}`,
+  });
+}
+
+function isHttpEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

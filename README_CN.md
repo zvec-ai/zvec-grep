@@ -200,7 +200,9 @@ zg index \
   --api-key "$DASHSCOPE_API_KEY"
 ```
 
-索引成功后，通过 CLI 显式传入的全局模型和 provider 参数会保存到 `~/.zvec-grep/config.json`，并使用仅当前用户可读写的权限。已经运行的 `zg` MCP server 会在下一次需要模型时读取新的远程 API key，不需要重启 Codex。只从环境变量读取、没有作为 CLI 参数显式传入的值不会被持久化。
+只有 `zg config` 会修改 `~/.zvec-grep/config.json`。索引会在 workspace
+内部元数据中保存实际使用的 endpoint/device 快照，以及本次显式传入的 API
+key；从 global config 或环境变量继承的 key 不会复制到 workspace。
 
 ```json
 {
@@ -210,11 +212,13 @@ zg index \
   },
   "providers": {
     "qwen": {
-      "apiKey": "...",
-      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+      "apiKey": "..."
     }
   },
   "models": {
+    "qwen/text-embedding-v4": {
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+    },
     "local/embeddinggemma-300m": {
       "device": "metal"
     },
@@ -225,13 +229,18 @@ zg index \
 }
 ```
 
-本地 embedding 会按 `models["provider/model"]` 为每个模型分别选择执行设备；daemon 建索引和搜索都会使用这份配置，切换运行配置不需要重建已有索引。显式 CLI 或库参数优先于模型配置，模型配置优先于全局默认值和 `ZVEC_GREP_DEVICE`。远程 embedding 会忽略本地设备配置。仓库 root 和 include/exclude 规则仍保存在各仓库自己的 `.zvec-grep` 元数据中，不进入全局配置。
+运行参数依次从请求、workspace 快照、global config 和环境变量解析。API key
+与 device 变化不需要 rebuild；已建索引的 model 或 endpoint 变化必须
+rebuild。搜索只支持单次覆盖 API key/device，永不持久化；endpoint 只在
+index 时设置。
 
 也可以通过命令配置，无需手工编辑 JSON：
 
 ```bash
+zg config provider set qwen --api-key "$DASHSCOPE_API_KEY"
+zg config model set qwen/text-embedding-v4 --endpoint https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
+zg config model set qwen/text-embedding-v4 --default
 zg config model set local/embeddinggemma-300m --device metal
-zg config model set local/qwen3-embedding-0.6b --device cpu
 ```
 
 llama.cpp context 并行度会自动选择。进行底层性能诊断时，可以将 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` 设置为正整数。

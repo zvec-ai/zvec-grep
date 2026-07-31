@@ -110,6 +110,9 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     if (args[1] === "model" && args[2] === "set") {
       options.configAction = "model-set";
       startIndex = 3;
+    } else if (args[1] === "provider" && args[2] === "set") {
+      options.configAction = "provider-set";
+      startIndex = 3;
     }
   } else if (commandInput.command === "auth") {
     if (args[1] === "grant" || args[1] === "status" || args[1] === "revoke") {
@@ -252,6 +255,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.force = true;
     } else if (arg === "--reset-paths") {
       options.resetPaths = true;
+    } else if (arg === "--default") {
+      options.defaultModel = true;
     } else if (isLongOptionWithValue(arg, "--refresh")) {
       options.refresh = parseQueryRefreshMode(valueFromLongOption(arg));
     } else if (arg === "--refresh") {
@@ -700,7 +705,7 @@ function validateCliShape(
 
   if (command === "config") {
     if (!options.configAction) {
-      throw new Error("zg config requires model set");
+      throw new Error("zg config requires provider set or model set");
     }
     const unsupported = firstEnabledOption([
       [options.installTargets?.length, "--target"],
@@ -711,15 +716,35 @@ function validateCliShape(
       [options.rg, "--rg"],
       [options.home, "--home"],
       [options.embedding, "--embedding"],
-      [options.apiKey, "--api-key"],
-      [options.endpoint, "--endpoint"],
+      [
+        options.configAction === "model-set" ? options.apiKey : undefined,
+        "--api-key",
+      ],
+      [
+        options.configAction === "provider-set" ? options.endpoint : undefined,
+        "--endpoint",
+      ],
+      [
+        options.configAction === "provider-set" ? options.device : undefined,
+        "--device",
+      ],
+      [
+        options.configAction === "provider-set"
+          ? options.defaultModel
+          : undefined,
+        "--default",
+      ],
       [options.mode, "--mode"],
       [options.listen, "--listen"],
       [options.serverTokenFile, "--token-file"],
     ]);
     if (unsupported) {
-      throw new Error(`zg config model set does not accept ${unsupported}`);
+      throw new Error(
+        `zg config ${options.configAction === "model-set" ? "model" : "provider"} set does not accept ${unsupported}`,
+      );
     }
+  } else if (options.defaultModel) {
+    throw new Error("--default can only be used with zg config model set");
   }
 
   if (command === "server") {
@@ -919,6 +944,7 @@ function validateCliShape(
   if (command === "query") {
     const unsupported = firstEnabledOption([
       [options.embedding, "--embedding"],
+      [options.endpoint, "--endpoint"],
       [options.embeddingConcurrency, "--embedding-concurrency"],
     ]);
     if (unsupported) {

@@ -9,7 +9,8 @@ export type PreviewMode = "none" | "short" | "full";
 export type QueryRefreshMode = "background" | "wait" | "off";
 
 export type CliOptions = {
-  configAction?: "model-set";
+  configAction?: "model-set" | "provider-set";
+  defaultModel?: boolean;
   authAction?: "grant" | "status" | "revoke";
   authorizationCapability?: "embedding";
   authorizationScope?: "workspace";

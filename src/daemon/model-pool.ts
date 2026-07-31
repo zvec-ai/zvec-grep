@@ -5,10 +5,12 @@ import {
   type EmbeddingModelIdentity,
 } from "../engine/service/zvec-grep.js";
 import type { EmbeddingModel } from "../engine/models/index.js";
+import type { EmbeddingRuntimeConfig } from "../engine/config.js";
 import { opaqueIdentity, type DaemonLogger } from "./logger.js";
 
 export type EmbeddingModelLoadRequest = {
   model: EmbeddingModelIdentity;
+  runtime?: EmbeddingRuntimeConfig;
 };
 
 export type ModelLease = {
@@ -63,14 +65,17 @@ export class EmbeddingModelPool {
     this.createModel =
       options.createModel ??
       ((request) =>
-        createEmbeddingModelForIdentity(request.model, options.serviceOptions));
+        createEmbeddingModelForIdentity(request.model, {
+          ...options.serviceOptions,
+          ...request.runtime,
+        }));
     this.keyForRequest =
       options.keyForRequest ??
       ((request) =>
-        embeddingModelPoolKeyForIdentity(
-          request.model,
-          options.serviceOptions,
-        ));
+        embeddingModelPoolKeyForIdentity(request.model, {
+          ...options.serviceOptions,
+          ...request.runtime,
+        }));
     this.logger = options.logger;
   }
 

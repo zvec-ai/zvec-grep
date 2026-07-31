@@ -51,7 +51,31 @@ export const absoluteRootSchema = z
   .refine((root) => isAbsolute(root), "root must be an absolute path.")
   .describe("Absolute repository path visible to the daemon.");
 
+const embeddingSearchRuntimeFields = {
+  apiKey: z
+    .string()
+    .min(1)
+    .max(8_192)
+    .optional()
+    .describe("One-request embedding provider API key override."),
+  device: z
+    .enum(["auto", "cpu", "metal", "vulkan", "cuda"])
+    .optional()
+    .describe("One-request local embedding device override."),
+};
+
+const embeddingIndexRuntimeFields = {
+  ...embeddingSearchRuntimeFields,
+  endpoint: z
+    .string()
+    .url()
+    .max(2_048)
+    .optional()
+    .describe("Remote embedding endpoint override."),
+};
+
 const searchFields = {
+  ...embeddingSearchRuntimeFields,
   query: boundedString("Natural-language or exact search query.").optional(),
   queries: boundedStringList(
     "Multiple query groups. Use this for related concepts.",
@@ -128,6 +152,7 @@ const searchFields = {
 
 export const zvecGrepIndexInputSchema = z.object({
   root: absoluteRootSchema,
+  ...embeddingIndexRuntimeFields,
   drop: z
     .boolean()
     .optional()

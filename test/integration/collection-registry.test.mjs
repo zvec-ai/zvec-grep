@@ -48,6 +48,16 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   assert.equal(registry.has("docs"), true);
   assert.equal(registry.get("docs")?.id, created.id);
   assert.equal(registry.list().length, 1);
+  assert.deepEqual(registry.getEmbeddingRuntime("docs"), {});
+  registry.updateEmbeddingRuntime("docs", {
+    apiKey: "workspace-key",
+    endpoint: "https://example.test/embeddings",
+  });
+  assert.deepEqual(registry.getEmbeddingRuntime("docs"), {
+    apiKey: "workspace-key",
+    endpoint: "https://example.test/embeddings",
+  });
+  assert.equal("apiKey" in registry.get("docs"), false);
   assert.throws(() => registry.create("docs", [root]), /already exists/);
 
   const collection = registry.open("docs");
@@ -87,6 +97,10 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   assert.equal(renamed?.name, "renamed");
   assert.equal(registry.has("docs"), false);
   assert.equal(registry.has("renamed"), true);
+  assert.deepEqual(registry.getEmbeddingRuntime("renamed"), {
+    apiKey: "workspace-key",
+    endpoint: "https://example.test/embeddings",
+  });
 
   const unchanged = registry.updateRootPaths("renamed", [root]);
   assert.equal(unchanged?.updatedTime, renamed?.updatedTime);
@@ -159,6 +173,7 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
     () => readOnly.prepareIndex("renamed", [root]),
     () => readOnly.disableIndex("renamed", [root]),
     () => readOnly.updateRootPaths("renamed", [root]),
+    () => readOnly.updateEmbeddingRuntime("renamed", { apiKey: "other" }),
   ]) {
     assert.throws(operation, /read-only/);
   }
