@@ -28,6 +28,7 @@ test("server-mode index reports Workspace progress", async (t) => {
   const port = await availablePort();
   const env = {
     HOME: home,
+    USERPROFILE: home,
     NO_COLOR: "1",
     ZVEC_GREP_API_KEY: "test-key",
     ZVEC_GREP_ENDPOINT: endpoint,
@@ -90,7 +91,15 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   );
 
   const endpoint = await createFakeEmbeddingServer(t);
-  const env = { HOME: home, NO_COLOR: "1" };
+  const env = { HOME: home, USERPROFILE: home, NO_COLOR: "1" };
+  await mkdir(join(home, ".zvec-grep"), { recursive: true });
+  await writeFile(
+    join(home, ".zvec-grep", "config.json"),
+    `${JSON.stringify({
+      version: 1,
+      defaults: { embedding: "qwen/text-embedding-v4" },
+    })}\n`,
+  );
 
   const indexed = await runCli(
     [

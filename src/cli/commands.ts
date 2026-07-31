@@ -368,7 +368,7 @@ async function runAuth(parsed: ParsedArgs): Promise<void> {
   try {
     const info = await service.info({ root });
     const schema = resolveAuthorizationSchema(
-      configuredEmbeddingReference(parsed.options),
+      configuredEmbeddingReference(parsed.options, info.collection?.embedding),
       info.collection?.embedding,
     );
     if (!schema) {
@@ -988,7 +988,10 @@ async function runDirectIndex(
       includeStatus: parsed.options.rebuild !== true,
     });
     const schema = resolveAuthorizationSchema(
-      configuredEmbeddingReference(parsed.options),
+      configuredEmbeddingReference(
+        parsed.options,
+        infoBefore.collection?.embedding,
+      ),
       infoBefore.collection?.embedding,
     );
     assertEmbeddingModelCompatible(
@@ -1273,7 +1276,7 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
           zvecGrep.collections.status(name),
         ]);
         const schema = resolveAuthorizationSchema(
-          configuredEmbeddingReference(parsed.options),
+          configuredEmbeddingReference(parsed.options, existing?.embedding),
           existing?.embedding,
         );
         assertEmbeddingModelCompatible(
@@ -1824,9 +1827,13 @@ function normalizedDirectSearchInput(
   };
 }
 
-function configuredEmbeddingReference(options: CliOptions): string | undefined {
+function configuredEmbeddingReference(
+  options: CliOptions,
+  existing?: CollectionEmbeddingSchema | null,
+): string | undefined {
   return (
     options.embedding ??
+    (existing ? `${existing.provider}/${existing.model}` : undefined) ??
     readGlobalConfig().defaults?.embedding ??
     process.env.ZVEC_GREP_EMBEDDING
   );
