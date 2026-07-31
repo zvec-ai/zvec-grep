@@ -150,7 +150,11 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     if (input.rebuild !== true && this.scheduler.hasActiveRoot(requestedRoot)) {
       return undefined;
     }
-    const info = await inspectRoot(input.root, this.options.serviceOptions);
+    const info = await inspectRoot(
+      input.root,
+      this.options.serviceOptions,
+      input.rebuild !== true,
+    );
     let modelLoadRequest: EmbeddingModelLoadRequest;
     try {
       modelLoadRequest = this.indexModelLoadRequest(info, input);
@@ -400,151 +404,158 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const requestedRoot = await resolveRequestedRoot(input.root, false);
     this.assertRootNotDropping(requestedRoot);
     const runtime = await this.runtimeManager.activate(requestedRoot);
-    const searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
-    const currentModelLoadRequest = runtime.currentModelLoadRequest();
-    const defaultModelLoadRequest = searchInfo.indexed
-      ? this.searchModelLoadRequest(searchInfo, {})
-      : currentModelLoadRequest;
-    if (!defaultModelLoadRequest) {
-      throw new DaemonError(
-        "INDEX_MISSING",
-        "Search requires an existing workspace index.",
-      );
-    }
-    const searchModelLoadRequest = searchInfo.indexed
-      ? this.searchModelLoadRequest(searchInfo, input)
-      : this.overrideActiveModelLoadRequest(defaultModelLoadRequest, input);
-    runtime.updateModelLoadRequest(defaultModelLoadRequest);
-    this.ensureWatcher(runtime);
-    await runtime.probeInitialFreshness(
-      async () => {
-        const info = await inspectRoot(
-          runtime.canonicalRoot,
-          this.options.serviceOptions,
+    const releaseRuntimeActivity = runtime.beginActivity();
+    try {
+      const searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
+      const currentModelLoadRequest = runtime.currentModelLoadRequest();
+      const defaultModelLoadRequest = searchInfo.indexed
+        ? this.searchModelLoadRequest(searchInfo, {})
+        : currentModelLoadRequest;
+      if (!defaultModelLoadRequest) {
+        throw new DaemonError(
+          "INDEX_MISSING",
+          "Search requires an existing workspace index.",
         );
-        this.statusCache.set(runtime.canonicalRoot, info);
-        return indexStatusIsFresh(info);
-      },
-      (initialFreshness) => {
-        this.options.logger?.event(
-          `runtime.initial_probe_${initialFreshness}`,
-          {
-            root_id: rootIdentity(runtime.canonicalRoot),
-          },
-        );
-      },
-    );
-    let updateJob: IndexJobSnapshot | undefined;
-    const executeSearch = () =>
-      withRemoteEmbeddingOperationPermit(options.authorization, () =>
-        runtime.search(
-          {
-            queries: input.queries,
-            routes: input.routes,
-            fuse: input.fuse,
-            limit: input.limit,
-            trace: input.trace,
-            preferSymbol: input.preferSymbol,
-            symbolTypes: input.symbolTypes,
-            globs: normalizePlainStringList(input.globs),
-            insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
-            fileTypes: normalizePlainStringList(input.fileTypes),
-            excludedFileTypes: normalizePlainStringList(
-              input.excludedFileTypes,
-            ),
-            hidden: input.hidden,
-            noIgnore: input.noIgnore,
-            ignoreFiles: input.ignoreFiles,
-            maxDepth: input.maxDepth,
-            maxFileSizeBytes: input.maxFileSizeBytes,
-            follow: input.follow,
-            embeddingConcurrency: input.embeddingConcurrency,
-            modifiedAfter: input.modifiedAfter,
-            modifiedBefore: input.modifiedBefore,
-            autoUpdate: false,
-          },
-          searchModelLoadRequest,
-        ),
+      }
+      const searchModelLoadRequest = searchInfo.indexed
+        ? this.searchModelLoadRequest(searchInfo, input)
+        : this.overrideActiveModelLoadRequest(defaultModelLoadRequest, input);
+      runtime.updateModelLoadRequest(defaultModelLoadRequest);
+      this.ensureWatcher(runtime);
+      await runtime.probeInitialFreshness(
+        async () => {
+          const info = await inspectRoot(
+            runtime.canonicalRoot,
+            this.options.serviceOptions,
+          );
+          this.statusCache.set(runtime.canonicalRoot, info);
+          return indexStatusIsFresh(info);
+        },
+        (initialFreshness) => {
+          this.options.logger?.event(
+            `runtime.initial_probe_${initialFreshness}`,
+            {
+              root_id: rootIdentity(runtime.canonicalRoot),
+            },
+          );
+        },
       );
-    let result;
-    if (input.freshness === "wait_for_fresh") {
-      while (true) {
-        updateJob =
-          (await this.waitForFresh(runtime, options.authorization, input)) ??
-          updateJob;
-        const beforeSearch = runtime.snapshot();
+      let updateJob: IndexJobSnapshot | undefined;
+      const executeSearch = () =>
+        withRemoteEmbeddingOperationPermit(options.authorization, () =>
+          runtime.search(
+            {
+              queries: input.queries,
+              routes: input.routes,
+              fuse: input.fuse,
+              limit: input.limit,
+              trace: input.trace,
+              preferSymbol: input.preferSymbol,
+              symbolTypes: input.symbolTypes,
+              globs: normalizePlainStringList(input.globs),
+              insensitiveGlobs: normalizePlainStringList(
+                input.insensitiveGlobs,
+              ),
+              fileTypes: normalizePlainStringList(input.fileTypes),
+              excludedFileTypes: normalizePlainStringList(
+                input.excludedFileTypes,
+              ),
+              hidden: input.hidden,
+              noIgnore: input.noIgnore,
+              ignoreFiles: input.ignoreFiles,
+              maxDepth: input.maxDepth,
+              maxFileSizeBytes: input.maxFileSizeBytes,
+              follow: input.follow,
+              embeddingConcurrency: input.embeddingConcurrency,
+              modifiedAfter: input.modifiedAfter,
+              modifiedBefore: input.modifiedBefore,
+              autoUpdate: false,
+            },
+            searchModelLoadRequest,
+          ),
+        );
+      let result;
+      if (input.freshness === "wait_for_fresh") {
+        while (true) {
+          updateJob =
+            (await this.waitForFresh(runtime, options.authorization, input)) ??
+            updateJob;
+          const beforeSearch = runtime.snapshot();
+          result = await executeSearch();
+          const afterSearch = runtime.snapshot();
+          if (
+            !afterSearch.watcherPending &&
+            afterSearch.watcherEpoch === beforeSearch.watcherEpoch &&
+            !runtime.needsReconciliation()
+          ) {
+            break;
+          }
+        }
+      } else {
         result = await executeSearch();
-        const afterSearch = runtime.snapshot();
+      }
+      if (
+        runtime.needsReconciliation() &&
+        input.autoUpdate &&
+        (runtime.requiresFullReconciliation() ||
+          !this.scheduler.hasActiveRoot(runtime.canonicalRoot))
+      ) {
         if (
-          !afterSearch.watcherPending &&
-          afterSearch.watcherEpoch === beforeSearch.watcherEpoch &&
-          !runtime.needsReconciliation()
+          !runtime.requiresFullReconciliation() ||
+          runtime.canProbeFullReconciliation()
         ) {
-          break;
+          await this.probeCurrentFreshness(runtime);
+        }
+        const currentJob = this.scheduler.getByRoot(runtime.canonicalRoot);
+        const terminalKnownPathJob =
+          !runtime.requiresFullReconciliation() &&
+          (currentJob?.state === "failed" || currentJob?.state === "cancelled");
+        if (runtime.needsReconciliation() && !terminalKnownPathJob) {
+          updateJob = await this.submitIndex(
+            runtime,
+            {
+              root: runtime.canonicalRoot,
+              apiKey: input.apiKey,
+              device: input.device,
+              runtimeOverridesAreEphemeral: true,
+            },
+            "background_reconcile",
+            false,
+            options.authorization,
+          );
         }
       }
-    } else {
-      result = await executeSearch();
+      const job = updateJob ?? this.scheduler.getByRoot(runtime.canonicalRoot);
+      const runtimeSnapshot = runtime.snapshot();
+      const freshness =
+        runtime.needsReconciliation() ||
+        runtimeSnapshot.watcherPending ||
+        job?.state === "queued" ||
+        job?.state === "running"
+          ? "possibly_stale"
+          : "fresh";
+      const response: ZvecGrepSearchResult = {
+        root: runtime.canonicalRoot,
+        freshness,
+        indexing:
+          freshness === "possibly_stale"
+            ? searchIndexingSnapshot(
+                job,
+                this.currentIndexCompletion(runtime.canonicalRoot),
+              )
+            : undefined,
+        result,
+      };
+      this.options.logger?.event("search.completed", {
+        root_id: rootIdentity(runtime.canonicalRoot),
+        duration_ms: Date.now() - startedAt,
+        freshness: response.freshness,
+        result_count: result.items.length,
+      });
+      return response;
+    } finally {
+      releaseRuntimeActivity();
     }
-    if (
-      runtime.needsReconciliation() &&
-      input.autoUpdate &&
-      (runtime.requiresFullReconciliation() ||
-        !this.scheduler.hasActiveRoot(runtime.canonicalRoot))
-    ) {
-      if (
-        !runtime.requiresFullReconciliation() ||
-        runtime.canProbeFullReconciliation()
-      ) {
-        await this.probeCurrentFreshness(runtime);
-      }
-      const currentJob = this.scheduler.getByRoot(runtime.canonicalRoot);
-      const terminalKnownPathJob =
-        !runtime.requiresFullReconciliation() &&
-        (currentJob?.state === "failed" || currentJob?.state === "cancelled");
-      if (runtime.needsReconciliation() && !terminalKnownPathJob) {
-        updateJob = await this.submitIndex(
-          runtime,
-          {
-            root: runtime.canonicalRoot,
-            apiKey: input.apiKey,
-            device: input.device,
-            runtimeOverridesAreEphemeral: true,
-          },
-          "background_reconcile",
-          false,
-          options.authorization,
-        );
-      }
-    }
-    const job = updateJob ?? this.scheduler.getByRoot(runtime.canonicalRoot);
-    const runtimeSnapshot = runtime.snapshot();
-    const freshness =
-      runtime.needsReconciliation() ||
-      runtimeSnapshot.watcherPending ||
-      job?.state === "queued" ||
-      job?.state === "running"
-        ? "possibly_stale"
-        : "fresh";
-    const response: ZvecGrepSearchResult = {
-      root: runtime.canonicalRoot,
-      freshness,
-      indexing:
-        freshness === "possibly_stale"
-          ? searchIndexingSnapshot(
-              job,
-              this.currentIndexCompletion(runtime.canonicalRoot),
-            )
-          : undefined,
-      result,
-    };
-    this.options.logger?.event("search.completed", {
-      root_id: rootIdentity(runtime.canonicalRoot),
-      duration_ms: Date.now() - startedAt,
-      freshness: response.freshness,
-      result_count: result.items.length,
-    });
-    return response;
   }
 
   private currentIndexCompletion(canonicalRoot: string) {
@@ -681,7 +692,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const before = await inspectRoot(
       runtime.canonicalRoot,
       this.options.serviceOptions,
-      true,
+      input.rebuild !== true,
     );
     this.statusCache.set(runtime.canonicalRoot, before);
     const modelLoadRequest = this.indexModelLoadRequest(before, input);

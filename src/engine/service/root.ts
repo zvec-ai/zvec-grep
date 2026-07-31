@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export const ZVEC_GREP_DIR = ".zvec-grep";
@@ -6,6 +6,7 @@ export const ANONYMOUS_COLLECTION_NAME = "__anonymous__";
 export const ANONYMOUS_COLLECTION_DIR = "index";
 
 const COLLECTIONS_ZVEC = "collections.zvec";
+const FILES_ZVEC = "files.zvec";
 const ENTITIES_ZVEC = "index.zvec";
 
 export type AnonymousIndexLocation = {
@@ -36,6 +37,21 @@ export function anonymousIndexLocation(root: string): AnonymousIndexLocation {
     collectionName: ANONYMOUS_COLLECTION_NAME,
     collectionPath: anonymousCollectionPath(resolvedRoot),
   };
+}
+
+export function resetAnonymousIndexStorage(
+  location: AnonymousIndexLocation,
+): void {
+  if (dirname(location.collectionPath) !== location.home) {
+    throw new Error("Anonymous index path must be inside its workspace home");
+  }
+  for (const target of [
+    join(location.home, COLLECTIONS_ZVEC),
+    join(location.home, FILES_ZVEC),
+    location.collectionPath,
+  ]) {
+    rmSync(target, { recursive: true, force: true });
+  }
 }
 
 export function findNearestAnonymousIndex(

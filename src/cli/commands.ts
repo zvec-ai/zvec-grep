@@ -983,7 +983,10 @@ async function runDirectIndex(
   const zvecGrep = await createZvecGrep(serviceOptions);
   const progress = createIndexProgressReporter({ color: parsed.options.color });
   try {
-    const infoBefore = await zvecGrep.info({ root: rootPath.absolutePath });
+    const infoBefore = await zvecGrep.info({
+      root: rootPath.absolutePath,
+      includeStatus: parsed.options.rebuild !== true,
+    });
     const schema = resolveAuthorizationSchema(
       configuredEmbeddingReference(parsed.options),
       infoBefore.collection?.embedding,

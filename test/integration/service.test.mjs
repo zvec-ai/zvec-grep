@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { CollectionRegistry } from "../../dist/engine/collection/index.js";
+import { CURRENT_INDEX_VERSION } from "../../dist/engine/types.js";
 import { createZvecGrep } from "../../dist/index.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
@@ -141,6 +143,68 @@ test("service optionally fuses independent query groups into one result list", a
   assert.equal(grouped.items.length, 2);
   assert.equal(fused.items.length, 1);
   assert.equal(fused.diagnostics.index?.routes.length, 2);
+});
+
+test("workspace rebuild recreates unsupported index metadata", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-version-rebuild-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const workspaceHome = join(root, ".zvec-grep");
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "legacy.ts"), "export const LegacyNeedle = 42;\n");
+
+  let service = await createZvecGrep({
+    root,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  t.after(async () => {
+    await service.close();
+  });
+  await service.index();
+  await service.close();
+
+  const registry = new CollectionRegistry(workspaceHome);
+  const info = registry.get("__anonymous__");
+  assert.ok(info);
+  registry.meta.upsert({ ...info, indexVersion: 1 });
+  registry.close();
+
+  const collectionsMarker = join(
+    workspaceHome,
+    "collections.zvec",
+    "legacy-marker",
+  );
+  const filesMarker = join(workspaceHome, "files.zvec", "legacy-marker");
+  const authorizationPath = join(workspaceHome, "authorization.json");
+  await writeFile(collectionsMarker, "legacy");
+  await writeFile(filesMarker, "legacy");
+  await writeFile(authorizationPath, "preserve");
+
+  service = await createZvecGrep({
+    root,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  await assert.rejects(
+    service.info(),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.COLLECTION.INDEX_VERSION_MISMATCH" &&
+      error.context.includes("zg index --rebuild"),
+  );
+
+  await service.index({ rebuild: true });
+  const rebuilt = await service.info();
+  assert.equal(rebuilt.collection?.indexVersion, CURRENT_INDEX_VERSION);
+  await assert.rejects(access(collectionsMarker), { code: "ENOENT" });
+  await assert.rejects(access(filesMarker), { code: "ENOENT" });
+  assert.equal(await readFile(authorizationPath, "utf8"), "preserve");
+
+  const result = await service.context({
+    routes: [{ mode: "fts", query: "LegacyNeedle" }],
+    autoUpdate: false,
+  });
+  assert.ok(result.items.length > 0);
 });
 
 test("service records failed files, retries them, deletes stale records, and rebuilds", async (t) => {

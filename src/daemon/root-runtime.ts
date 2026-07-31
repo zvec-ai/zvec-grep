@@ -56,6 +56,7 @@ export class RootRuntime {
   private activeWriterSearches = 0;
   private writerSearchesDrained?: Promise<void>;
   private writerSearchesDrainedResolve?: () => void;
+  private activeOperations = 0;
   private closed = false;
 
   constructor(private readonly options: RootRuntimeOptions) {
@@ -73,6 +74,23 @@ export class RootRuntime {
 
   currentModelLoadRequest(): EmbeddingModelLoadRequest | undefined {
     return this.modelLoadRequest;
+  }
+
+  beginActivity(): () => void {
+    if (this.closed) {
+      throw new Error("Root runtime is closed.");
+    }
+    this.activeOperations += 1;
+    this.options.onActivity?.();
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      this.activeOperations = Math.max(0, this.activeOperations - 1);
+      this.options.onActivity?.();
+    };
   }
 
   async search(
@@ -276,6 +294,7 @@ export class RootRuntime {
   snapshot(): {
     readCollectionOpen: boolean;
     activeReaders: number;
+    activeOperations: number;
     writerPending: boolean;
     dirtyRevision: number;
     indexedRevision: number;
@@ -287,6 +306,7 @@ export class RootRuntime {
     return {
       readCollectionOpen: read?.open ?? false,
       activeReaders: read?.activeReaders ?? 0,
+      activeOperations: this.activeOperations,
       writerPending: this.writerPending,
       dirtyRevision: this.dirtyRevision,
       indexedRevision: this.indexedRevision,

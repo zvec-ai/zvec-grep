@@ -216,6 +216,10 @@ export class Collection {
           collectionDetail(this.name),
           detail("expected", CURRENT_INDEX_VERSION),
           detail("actual", this.info.indexVersion),
+          detail(
+            "hint",
+            'Recreate the index with the current zvec-grep version; run "zg index --rebuild" for a workspace index.',
+          ),
         ]),
       });
     }

@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import {
   globalConfigPath,
@@ -38,6 +38,7 @@ import type {
   SearchPlan,
   SearchPlanResult,
 } from "../types.js";
+import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
 import {
   ANONYMOUS_COLLECTION_NAME,
@@ -45,6 +46,7 @@ import {
   anonymousHome,
   anonymousIndexLocation,
   findNearestAnonymousWorkspace,
+  resetAnonymousIndexStorage,
   resolveZvecGrepRoot,
   type AnonymousIndexLocation,
 } from "./root.js";
@@ -76,6 +78,7 @@ import { RemoteEmbeddingAuthorizationStore } from "../../authorization/store.js"
 const DEFAULT_CONTEXT_LIMIT = 10;
 const DEFAULT_CONTEXT_TOTAL_LIMIT = 30;
 const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
+const PROVIDER_OPTIONS_FINGERPRINT_SECRET = randomBytes(32);
 const MAX_RECOVERED_EMBEDDING_MODELS = 4;
 
 export type EmbeddingModelIdentity = Pick<
@@ -250,35 +253,43 @@ class ZvecGrepService implements ZvecGrep {
                 "zg index --endpoint <url> --rebuild",
               );
             }
+            const rootPaths = resolveIndexRootPaths(
+              existing,
+              options.rootPaths,
+              root,
+              {
+                resetPaths: options.resetPaths === true,
+                includePaths: options.includePaths,
+                excludePaths: options.excludePaths,
+                globs: options.globs,
+                insensitiveGlobs: options.insensitiveGlobs,
+                fileTypes: options.fileTypes,
+                excludedFileTypes: options.excludedFileTypes,
+                hidden: options.hidden,
+                noIgnore: options.noIgnore,
+                ignoreFiles: options.ignoreFiles,
+                maxDepth: options.maxDepth,
+                maxFileSizeBytes: options.maxFileSizeBytes,
+                follow: options.follow,
+              },
+            );
+            const resetUnsupportedStorage =
+              options.rebuild === true &&
+              isCollectionIndexed(existing) &&
+              existing.indexVersion !== CURRENT_INDEX_VERSION;
+            if (resetUnsupportedStorage) {
+              resetAnonymousIndexStorage(location);
+            }
             const registry = new CollectionRegistry(
               location.home,
               embeddingModel,
             );
 
             try {
-              const rootPaths = resolveIndexRootPaths(
-                existing,
-                options.rootPaths,
-                root,
-                {
-                  resetPaths: options.resetPaths === true,
-                  includePaths: options.includePaths,
-                  excludePaths: options.excludePaths,
-                  globs: options.globs,
-                  insensitiveGlobs: options.insensitiveGlobs,
-                  fileTypes: options.fileTypes,
-                  excludedFileTypes: options.excludedFileTypes,
-                  hidden: options.hidden,
-                  noIgnore: options.noIgnore,
-                  ignoreFiles: options.ignoreFiles,
-                  maxDepth: options.maxDepth,
-                  maxFileSizeBytes: options.maxFileSizeBytes,
-                  follow: options.follow,
-                },
-              );
-
               if (options.rebuild) {
-                registry.remove(ANONYMOUS_COLLECTION_NAME);
+                if (!resetUnsupportedStorage) {
+                  registry.remove(ANONYMOUS_COLLECTION_NAME);
+                }
               }
 
               const existingAfterRebuild = registry.get(
@@ -1778,7 +1789,7 @@ function providerOptionsFingerprint(options: {
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
 }): string {
-  return createHash("sha256")
+  return createHmac("sha256", PROVIDER_OPTIONS_FINGERPRINT_SECRET)
     .update(
       JSON.stringify([
         options.apiKey,

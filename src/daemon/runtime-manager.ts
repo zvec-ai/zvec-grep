@@ -279,6 +279,7 @@ export class RuntimeManager {
     const snapshot = runtime.snapshot();
     if (
       snapshot.activeReaders > 0 ||
+      snapshot.activeOperations > 0 ||
       snapshot.writerPending ||
       snapshot.watcherPending
     ) {
