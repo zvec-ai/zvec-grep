@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -31,6 +31,9 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
 
   const withoutModelHome = join(temporaryDirectory, "without-model");
   const withoutModel = new CollectionRegistry(withoutModelHome);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(withoutModelHome)).mode & 0o777, 0o700);
+  }
   assert.throws(
     () => withoutModel.create("missing-model", [root]),
     /requires an embedding model/,
@@ -164,7 +167,13 @@ test("collection registry covers lifecycle, caching, rename, roots, disable, rea
   registry.close();
   assert.doesNotThrow(() => registry.close());
   registry = undefined;
+  if (process.platform !== "win32") {
+    await chmod(home, 0o755);
+  }
   readOnly = new CollectionRegistry(home, embedding, true);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(home)).mode & 0o777, 0o700);
+  }
   assert.ok(readOnly.list().length > 0);
   for (const operation of [
     () => readOnly.create("readonly", [root]),

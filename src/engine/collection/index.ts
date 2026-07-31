@@ -9,7 +9,7 @@ import {
   type ZVecDocInput,
 } from "@zvec/zvec";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   collectionDetail,
@@ -65,6 +65,7 @@ import type { EmbeddingDevice, EmbeddingRuntimeConfig } from "../config.js";
 
 const COLLECTIONS_ZVEC = "collections.zvec";
 const FILES_ZVEC = "files.zvec";
+const COLLECTION_REGISTRY_HOME_MODE = 0o700;
 
 export class Collection {
   private readonly storage: CollectionStorage;
@@ -364,7 +365,13 @@ export class CollectionRegistry {
     private readonly readOnly = false,
   ) {
     if (!readOnly) {
-      mkdirSync(home, { recursive: true });
+      mkdirSync(home, {
+        recursive: true,
+        mode: COLLECTION_REGISTRY_HOME_MODE,
+      });
+    }
+    if (existsSync(home)) {
+      chmodSync(home, COLLECTION_REGISTRY_HOME_MODE);
     }
 
     this.meta = new ZvecCollectionsMetaStore(
