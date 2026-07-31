@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import {
   createEmbeddingModelForIdentity,
@@ -6,7 +7,7 @@ import {
 } from "../engine/service/zvec-grep.js";
 import type { EmbeddingModel } from "../engine/models/index.js";
 import type { EmbeddingRuntimeConfig } from "../engine/config.js";
-import { opaqueIdentity, type DaemonLogger } from "./logger.js";
+import type { DaemonLogger } from "./logger.js";
 
 export type EmbeddingModelLoadRequest = {
   model: EmbeddingModelIdentity;
@@ -37,6 +38,7 @@ export type EmbeddingModelPoolOptions = {
 
 type ModelEntry = {
   key: string;
+  logIdentity: string;
   model?: EmbeddingModel;
   loading?: Promise<EmbeddingModel>;
   leases: number;
@@ -89,6 +91,7 @@ export class EmbeddingModelPool {
     if (!entry) {
       entry = {
         key,
+        logIdentity: randomUUID(),
         leases: 0,
         lastUsedAt: Date.now(),
         retired: false,
@@ -103,7 +106,7 @@ export class EmbeddingModelPool {
 
     if (!entry.model) {
       if (!entry.loading) {
-        this.logger?.event("model.load", { model_id: opaqueIdentity(key) });
+        this.logger?.event("model.load", { model_id: entry.logIdentity });
         entry.loading = Promise.resolve(this.createModel(request));
       }
       try {
@@ -115,7 +118,7 @@ export class EmbeddingModelPool {
         entry.loading = undefined;
       }
     } else {
-      this.logger?.event("model.cache_hit", { model_id: opaqueIdentity(key) });
+      this.logger?.event("model.cache_hit", { model_id: entry.logIdentity });
     }
 
     if (this.closed) {
@@ -247,7 +250,7 @@ export class EmbeddingModelPool {
     this.entries.delete(entry.key);
     await model.dispose();
     this.logger?.event("model.evicted", {
-      model_id: opaqueIdentity(entry.key),
+      model_id: entry.logIdentity,
     });
   }
 }
