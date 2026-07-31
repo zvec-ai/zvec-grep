@@ -305,6 +305,16 @@ test("CLI exposes stable help, version, and failure behavior", async () => {
     return true;
   });
   await assert.rejects(
+    runCli(["index", "--embedding", "unknown/model"]),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /Unsupported embedding model: unknown\/model/);
+      assert.match(error.stderr, /local\/embeddinggemma-300m/);
+      assert.match(error.stderr, /qwen\/text-embedding-v4/);
+      return true;
+    },
+  );
+  await assert.rejects(
     runCli(["collections", "list", "extra"]),
     /does not accept/,
   );

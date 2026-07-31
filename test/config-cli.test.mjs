@@ -170,7 +170,12 @@ test("config model set rejects missing and incompatible settings", async () => {
       "--device",
       "cpu",
     ]),
-    /Unsupported embedding model/,
+    (error) => {
+      assert.match(error.stderr, /Unsupported embedding model/);
+      assert.match(error.stderr, /local\/embeddinggemma-300m/);
+      assert.match(error.stderr, /qwen\/text-embedding-v4/);
+      return true;
+    },
   );
   await assert.rejects(
     execFileAsync(process.execPath, [
@@ -194,7 +199,14 @@ test("config model set rejects missing and incompatible settings", async () => {
       "--api-key",
       "secret",
     ]),
-    /Unsupported remote embedding provider/,
+    (error) => {
+      assert.match(error.stderr, /Unsupported remote embedding provider/);
+      assert.match(
+        error.stderr,
+        /Supported remote embedding providers:\s+qwen/,
+      );
+      return true;
+    },
   );
   for (const option of ["--gpu", "--no-gpu", "--llama-gpu"]) {
     assert.throws(

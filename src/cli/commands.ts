@@ -189,13 +189,16 @@ async function runConfig(parsed: ParsedArgs): Promise<void> {
   const reference = parsed.positionals[0]!;
   if (parsed.options.configAction === "provider-set") {
     if (!/^[a-z][a-z0-9_-]*$/.test(reference)) {
-      throw new Error(`Invalid embedding provider: ${reference}`);
+      throw unsupportedRemoteEmbeddingProvider(
+        reference,
+        "Invalid embedding provider",
+      );
     }
     if (
       reference === "local" ||
       !listEmbeddingModels().some((entry) => entry.provider === reference)
     ) {
-      throw new Error(`Unsupported remote embedding provider: ${reference}`);
+      throw unsupportedRemoteEmbeddingProvider(reference);
     }
     if (parsed.options.apiKey === undefined) {
       throw new Error("zg config provider set requires --api-key");
@@ -215,10 +218,7 @@ async function runConfig(parsed: ParsedArgs): Promise<void> {
   if (parsed.options.configAction !== "model-set") {
     throw new Error("zg config requires provider set or model set");
   }
-  const catalogEntry = getEmbeddingModelCatalogEntry(reference);
-  if (!catalogEntry) {
-    throw new Error(`Unsupported embedding model: ${reference}`);
-  }
+  const catalogEntry = requireEmbeddingModelCatalogEntry(reference);
   if (
     parsed.options.endpoint === undefined &&
     parsed.options.device === undefined &&
@@ -892,6 +892,9 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
     await runDropIndex(parsed, rootPath.absolutePath);
     return;
   }
+  if (parsed.options.embedding) {
+    requireEmbeddingModelCatalogEntry(parsed.options.embedding);
+  }
 
   const mode = resolveClientMode(parsed.options.mode);
   await routeByMode({
@@ -1219,6 +1222,9 @@ async function runCollections(parsed: ParsedArgs): Promise<void> {
     throw new Error(
       `${indexOption} can only be used with zg collections index`,
     );
+  }
+  if (action === "index" && parsed.options.embedding) {
+    requireEmbeddingModelCatalogEntry(parsed.options.embedding);
   }
   const zvecGrep = await createZvecGrep(
     createServiceOptions(parsed.options, undefined),
@@ -1836,6 +1842,42 @@ function configuredEmbeddingReference(
     (existing ? `${existing.provider}/${existing.model}` : undefined) ??
     readGlobalConfig().defaults?.embedding ??
     process.env.ZVEC_GREP_EMBEDDING
+  );
+}
+
+function requireEmbeddingModelCatalogEntry(reference: string) {
+  const entry = getEmbeddingModelCatalogEntry(reference);
+  if (entry) {
+    return entry;
+  }
+  throw new Error(
+    [
+      `Unsupported embedding model: ${reference}`,
+      "Supported embedding models:",
+      ...[...listEmbeddingModels()]
+        .sort((left, right) => left.provider.localeCompare(right.provider))
+        .map((model) => `  ${model.reference}`),
+    ].join("\n"),
+  );
+}
+
+function unsupportedRemoteEmbeddingProvider(
+  reference: string,
+  message = "Unsupported remote embedding provider",
+): Error {
+  const providers = [
+    ...new Set(
+      listEmbeddingModels()
+        .map((model) => model.provider)
+        .filter((provider) => provider !== "local"),
+    ),
+  ];
+  return new Error(
+    [
+      `${message}: ${reference}`,
+      "Supported remote embedding providers:",
+      ...providers.map((provider) => `  ${provider}`),
+    ].join("\n"),
   );
 }
 
