@@ -168,7 +168,7 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
   const registry = new CollectionRegistry(workspaceHome);
   const info = registry.get("__anonymous__");
   assert.ok(info);
-  registry.meta.upsert({ ...info, indexVersion: 1 });
+  registry.meta.upsert({ ...info, indexVersion: 999 });
   registry.close();
 
   const collectionsMarker = join(
