@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import {
   globalConfigPath,
@@ -78,7 +78,7 @@ import { RemoteEmbeddingAuthorizationStore } from "../../authorization/store.js"
 const DEFAULT_CONTEXT_LIMIT = 10;
 const DEFAULT_CONTEXT_TOTAL_LIMIT = 30;
 const DEFAULT_LOCAL_EMBEDDING = "local/embeddinggemma-300m";
-const PROVIDER_API_KEY_IDENTITIES = new Map<string, string>();
+const PROVIDER_API_KEY_IDENTITY_SECRET = randomBytes(32);
 const MAX_RECOVERED_EMBEDDING_MODELS = 4;
 
 export type EmbeddingModelIdentity = Pick<
@@ -1798,13 +1798,9 @@ function providerOptionsFingerprint(options: {
 }
 
 function providerApiKeyIdentity(apiKey: string): string {
-  const existing = PROVIDER_API_KEY_IDENTITIES.get(apiKey);
-  if (existing) {
-    return existing;
-  }
-  const identity = randomBytes(32).toString("hex");
-  PROVIDER_API_KEY_IDENTITIES.set(apiKey, identity);
-  return identity;
+  return createHmac("sha256", PROVIDER_API_KEY_IDENTITY_SECRET)
+    .update(apiKey)
+    .digest("hex");
 }
 
 function effectiveEmbeddingRuntime(

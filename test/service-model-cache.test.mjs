@@ -5,12 +5,32 @@ import { join } from "node:path";
 import test from "node:test";
 import { updateGlobalConfig } from "../dist/engine/config.js";
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { embeddingModelPoolKeyForIdentity } from "../dist/engine/service/index.js";
 import { createZvecGrep } from "../dist/index.js";
 import {
   createRemoteEmbeddingOperationPermit,
   createRemoteEmbeddingTarget,
   withRemoteEmbeddingOperationPermit,
 } from "../dist/authorization/index.js";
+
+test("embedding model cache identities are stable without exposing API keys", () => {
+  const identity = { provider: "qwen", name: "text-embedding-v4" };
+  const options = {
+    apiKey: "first-secret-key",
+    endpoint: "https://example.test/embeddings",
+  };
+  const first = embeddingModelPoolKeyForIdentity(identity, options);
+  const repeated = embeddingModelPoolKeyForIdentity(identity, options);
+  const differentKey = embeddingModelPoolKeyForIdentity(identity, {
+    ...options,
+    apiKey: "second-secret-key",
+  });
+
+  assert.equal(repeated, first);
+  assert.notEqual(differentKey, first);
+  assert.doesNotMatch(first, /first-secret-key/);
+  assert.doesNotMatch(differentKey, /second-secret-key/);
+});
 
 test("recovered embedding model cache is bounded and defers disposal until active queries finish", async () => {
   const temporaryDirectory = await mkdtemp(
