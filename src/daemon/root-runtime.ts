@@ -53,6 +53,7 @@ export class RootRuntime {
   private writerContext?: (
     options: ZvecGrepContextOptions,
   ) => Promise<ZvecGrepContextResult>;
+  private writerModelKey?: string;
   private activeWriterSearches = 0;
   private writerSearchesDrained?: Promise<void>;
   private writerSearchesDrainedResolve?: () => void;
@@ -106,12 +107,10 @@ export class RootRuntime {
       : undefined;
     while (true) {
       const writerContext = this.writerContext;
-      const writerModelKey = this.modelLoadRequest
-        ? this.options.modelPool.keyFor(this.modelLoadRequest)
-        : undefined;
       if (
         writerContext &&
-        (overrideModelKey === undefined || overrideModelKey === writerModelKey)
+        (overrideModelKey === undefined ||
+          overrideModelKey === this.writerModelKey)
       ) {
         return await this.withWriterContext(writerContext, options);
       }
@@ -168,8 +167,10 @@ export class RootRuntime {
     context: (
       options: ZvecGrepContextOptions,
     ) => Promise<ZvecGrepContextResult>,
+    modelKey: string,
   ): () => Promise<void> {
     this.writerContext = context;
+    this.writerModelKey = modelKey;
     this.notifyWriterStateChanged();
     this.armWriterReady();
     return async () => {
@@ -177,6 +178,7 @@ export class RootRuntime {
         return;
       }
       this.writerContext = undefined;
+      this.writerModelKey = undefined;
       this.notifyWriterStateChanged();
       this.armWriterReady();
       if (this.activeWriterSearches > 0) {

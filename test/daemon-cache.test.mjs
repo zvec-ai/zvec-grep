@@ -247,11 +247,14 @@ test("root runtime searches the writer context as soon as it becomes available",
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(searchSettled, false);
 
-  const releaseWriterContext = runtime.setWriterContext(async (options) => {
-    assert.equal(options.root, "/tmp/repo");
-    assert.equal(options.autoUpdate, false);
-    return { ...emptyContextResult(), query: options.query };
-  });
+  const releaseWriterContext = runtime.setWriterContext(
+    async (options) => {
+      assert.equal(options.root, "/tmp/repo");
+      assert.equal(options.autoUpdate, false);
+      return { ...emptyContextResult(), query: options.query };
+    },
+    pool.keyFor(modelLoadRequest("model-a")),
+  );
 
   const result = await search;
   assert.equal(searchSettled, true);
@@ -261,6 +264,51 @@ test("root runtime searches the writer context as soon as it becomes available",
   runtime.setWriterPending(false);
   await runtime.close();
   await pool.close();
+});
+
+test("root runtime does not reuse a writer context with a different model runtime", async () => {
+  const pool = new EmbeddingModelPool({
+    keyForRequest: (request) => request.runtime.apiKey,
+    createModel: () => ({ dispose: async () => {} }),
+  });
+  const writerRequest = {
+    model: { provider: "qwen", name: "text-embedding-v4" },
+    runtime: { apiKey: "writer-key" },
+  };
+  const searchRequest = {
+    model: { provider: "qwen", name: "text-embedding-v4" },
+    runtime: { apiKey: "search-key" },
+  };
+  let writerSearches = 0;
+  const runtime = new RootRuntime({
+    canonicalRoot: "/tmp/repo",
+    modelPool: pool,
+    modelLoadRequest: writerRequest,
+    openSession: async (lease) => ({
+      root: "/tmp/repo",
+      context: async () => ({ ...emptyContextResult(), query: lease.key }),
+      close: async () => {},
+    }),
+  });
+
+  runtime.setWriterPending(true);
+  const releaseWriterContext = runtime.setWriterContext(async () => {
+    writerSearches += 1;
+    return { ...emptyContextResult(), query: "writer-key" };
+  }, pool.keyFor(writerRequest));
+  runtime.updateModelLoadRequest(searchRequest);
+  const search = runtime.search({ query: "query" }, searchRequest);
+  await new Promise((resolve) => setImmediate(resolve));
+  const writerSearchesBeforeRelease = writerSearches;
+
+  await releaseWriterContext();
+  runtime.setWriterPending(false);
+  const result = await search;
+  await runtime.close();
+  await pool.close();
+
+  assert.equal(writerSearchesBeforeRelease, 0);
+  assert.equal(result.query, "search-key");
 });
 
 test("root runtime releases its daemon lease when read cache close fails", async () => {

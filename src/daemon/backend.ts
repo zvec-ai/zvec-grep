@@ -743,7 +743,8 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           changedPaths: input.changedPaths,
           signal,
           onProgress: report,
-          onWriterContext: (context) => runtime.setWriterContext(context),
+          onWriterContext: (context) =>
+            runtime.setWriterContext(context, lease.key),
         }),
       );
     } finally {
