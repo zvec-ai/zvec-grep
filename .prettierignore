@@ -4,3 +4,4 @@ node_modules/
 .zvec-grep/
 package-lock.json
 *.tgz
+*.md
