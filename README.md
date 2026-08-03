@@ -1,349 +1,142 @@
-![WIP](https://img.shields.io/badge/status-WIP-orange)
+<p align="right">
+  English | <a href="./README_CN.md">中文</a>
+</p>
 
-**zvec-grep** is an agent-friendly hybrid code search tool built on Zvec. It gives repositories a root-local semantic index, combines vector search with full-text search, and keeps CLI output compact enough for AI agents while still offering rich terminal output for humans.
+<div align="center">
+  <p>
+    <img src="https://img.shields.io/badge/status-work%20in%20progress-F59E0B?style=for-the-badge" alt="Work in progress" />
+  </p>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/zg-logo-dark.svg">
+    <img src="./.github/assets/zg-logo.svg" width="150" alt="zg logo" />
+  </picture>
+  <p><strong>Know the words—or don’t. Just zg.</strong></p>
+  <p>The local-first search layer for humans and agents.</p>
 
-The command is intentionally short:
+  <p>
+    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm version" /></a>
+    <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 license" /></a>
+    <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js 22 or newer" />
+  </p>
 
-```bash
-zg query "where query auto update happens"
-```
+  <p>
+    <a href="#tour">🎬 <strong>Tour</strong></a> |
+    <a href="#features">💫 <strong>Features</strong></a> |
+    <a href="#quickstart">🚀 <strong>Quickstart</strong></a> |
+    <a href="#benchmarks">📊 <strong>Benchmarks</strong></a> |
+    <a href="#community">🤝 <strong>Community</strong></a>
+  </p>
+</div>
 
-> [!IMPORTANT]
-> **Command interface**
->
-> - **Hybrid Code Search**: Query code with natural language, exact terms, or both in one command.
-> - **Explicit Index Lifecycle**: New repositories require `zg index --embedding <model>`; agents do not silently create indexes.
-> - **Refresh Control**: Use `--refresh background|wait|off`. Server defaults to `background`; Direct defaults to `off`.
-> - **Token-Efficient Output**: Agent output defaults to `--preview none`; `--human` defaults to full source previews.
-> - **No-Index Lexical Search**: `zg query --rg` provides managed ripgrep search without requiring an index.
+**zg** (**z**vec-**g**rep) unifies ripgrep, BM25, and vector search behind one
+local-first interface. Use it directly from the terminal, or let your agent use
+it for you.
 
-## <a id="features"></a>💫 Features
+<a id="tour"></a>
 
-- **Semantic + Lexical Retrieval**: Blend vector search and full-text search for code, docs, tests, scripts, and configuration.
-- **Root-Local Indexes**: Anonymous indexes live under `<repo>/.zvec-grep/`, so repository state stays with the repository.
-- **Agent-Ready Output**: Default output is grouped by file and keeps previews small to save tokens.
-- **Human Output Mode**: Add `--human` for a terminal-friendly summary with full previews by default.
-- **Managed ripgrep Route**: `zg query --rg` supports common `rg` flags and works even before a repository is indexed.
-- **Explicit Model Choice**: The first index build requires a model such as `local/embeddinggemma-300m`, `local/qwen3-embedding-0.6b`, or `qwen/text-embedding-v4`.
-- **Schema Reuse**: Re-running `zg index` on an existing index reuses the stored embedding schema unless you explicitly change it.
-- **Focused MCP Server**: Run `zg server on` to expose only indexed search and managed ripgrep to agents by default, while the CLI keeps index lifecycle and diagnostics on an internal admin endpoint.
-- **Library API**: Use `createZvecGrep()` directly from Node.js tools, agents, or MCP servers.
+## 🎬 See it in action
 
-## <a id="installation"></a>📦 Installation
+<div align="center">
+  <img src="./.github/assets/zvec-grep-tour.gif" width="1000" alt="Install the agent integration, index a repository, and let the agent search it with zvec-grep" />
+</div>
 
-Install the CLI from npm:
+Install the integration once, index the workspace, then search from the terminal
+or ask your agent naturally.
+
+<a id="features"></a>
+
+## 💫 Why zg?
+
+- **Works out of the box** — one guided install connects zg to your agent on
+  macOS, Linux, or Windows; ask naturally, with no search syntax to learn.
+- **All-in-one retrieval layer** — semantic discovery, BM25-ranked retrieval,
+  exact text, and regex search all stay behind zg.
+- **Agent- and human-friendly** — compact, file-oriented context for agents
+  and readable terminal output for people, with less noise for both.
+- **Local first, permission aware** — ripgrep, indexes, and local models stay
+  on your machine; remote embeddings require explicit authorization.
+
+<a id="quickstart"></a>
+
+## 🚀 Quickstart
+
+Requires Node.js 22 or newer on macOS, Linux, or Windows.
+
+### 1. Install and connect your agent
 
 ```bash
 npm install -g @zvec/zvec-grep
-zg version
-```
-
-Or run it without a global install:
-
-```bash
-npx @zvec/zvec-grep help
-```
-
-Install the latest source checkout as a global `zg` command:
-
-```bash
-git clone https://github.com/zvec-ai/zvec-grep.git
-cd zvec-grep
-npm ci
-npm run build
-npm install -g .
-zg version
-```
-
-Configure the detected Claude Code and Codex integrations:
-
-```bash
 zg install
 ```
 
-Install the MCP integration for Codex, Claude Code, OpenCode, or Cursor:
+`zg install` detects Codex, Claude Code, Cursor, and OpenCode and configures the
+local MCP integration. You can also select one explicitly:
 
 ```bash
 zg install --target codex --yes
-zg install --target claude --yes
-zg install --target opencode --yes
-zg install --target cursor --yes
 ```
 
-Interactive setup detects supported agents and installs the selected integration.
-Codex and Claude Code also receive managed guidance and pre-approval for the local
-`zvec_grep` MCP tools. MCP trust and Remote Embedding authorization are separate:
-zg still asks before query text or workspace content is sent to a remote provider.
-Codex MCP tool calls and OpenCode MCP initialization default to a 600-second
-timeout; override it with `--mcp-tool-timeout <seconds>`. The local server only
-listens on loopback and has no token by default. To require Bearer authentication,
-set `ZVEC_GREP_SERVER_TOKEN` before install and pass
-`--mcp-token-env ZVEC_GREP_SERVER_TOKEN`. The MCP URL is
-`http://127.0.0.1:7999/mcp`; it exposes `zvec_grep_search` and
-`zvec_grep_rg` by default. Index lifecycle and daemon diagnostics remain
-available through `zg` commands, which use the reserved `/mcp/admin` endpoint
-internally. For compatibility with clients that require all six MCP tools on the
-public endpoint, restart the daemon with
-`zg server on --mcp-toolset full`. `ZVEC_GREP_MCP_TOOLSET=full` is the
-environment fallback; an explicit flag takes precedence. `zg server status`
-reports the active toolset. Stop the daemon with `zg server off`.
-
-CLI indexed queries and index commands can use `--mode direct`, `--mode server`, or `--mode auto`. The default is `auto`: it uses the daemon only when it is ready and otherwise falls back before submitting a request.
-Daemon logs are written as JSON lines to `~/.zvec-grep/daemon/logs/server.log`; credentials and complete query text are not recorded.
-
-### ✅ Requirements
-
-- Node.js 22 or newer
-- macOS, Linux, or Windows
-- A supported embedding model for indexed search
-
-`zg query --rg` works without any embedding model or index. It always runs locally, regardless of Direct, Server, or Auto mode, and does not stop the daemon or access the index writer.
-
-## <a id="quickstart"></a>⚡ Quickstart
-
-Index a repository with an explicit embedding model:
+### 2. Index your repository
 
 ```bash
-zg index \
-  --embedding local/embeddinggemma-300m \
-  -g "src/**" \
-  -g "docs/**" \
-  -g "test/**" \
-  -g "!dist/**" \
-  -g "!node_modules/**" \
-  -g "!coverage/**"
-```
-
-Check index state:
-
-```bash
-zg status
-```
-
-Search with natural language:
-
-```bash
-zg query "where query auto update happens"
-```
-
-Combine semantic intent with exact anchors:
-
-```bash
-zg query "GPU fallback" --fts "usingCpuFallback" -g "src/**" -t ts --limit 5
-```
-
-Use exhaustive lexical search without an index:
-
-```bash
-zg query --rg -F "ZVEC_GREP_HOME" src
-```
-
-Switch to human-readable output:
-
-```bash
-zg query --human "root local index discovery" --limit 3
-```
-
-The default public MCP toolset contains `zvec_grep_search` and
-`zvec_grep_rg`. Exact searches accept an absolute `root` and a familiar managed
-ripgrep command, for example
-`{"root": "/absolute/repo", "command": "rg -n -F 'needle' -g '*.ts' src"}`.
-The command is parsed into arguments and never executed through a shell.
-Results are exhaustive by default; append `| head -N` only when intentionally
-requesting bounded output. Use the
-`zg index`, `zg status`, and `zg server status` CLI commands for lifecycle and
-diagnostics. The installer writes user-level MCP
-configuration for Codex, Claude Code, OpenCode, and Cursor. Codex and Claude
-Code also receive managed guidance and local tool trust configuration. `cc` and
-`claude-code` remain accepted aliases for the canonical `claude` target.
-
-## <a id="models"></a>🧠 Models
-
-Local models run through `node-llama-cpp`, Transformers.js, or the native
-Model2Vec Safetensors adapter and keep code search private to your machine. See the
-[embedding model selection guide](docs/embedding.md) for scenario-based
-recommendations, measured retrieval quality, resource usage, and context limits.
-
-```bash
-zg index --embedding local/embeddinggemma-300m
-zg index --embedding local/qwen3-embedding-0.6b
-zg index --embedding local/jina-embeddings-v2-base-code
-zg index --embedding local/multilingual-e5-small
-zg index --embedding local/potion-base-8m
+cd your-repository
 zg index --embedding local/potion-code-16m-v2
 ```
 
-On Apple Silicon, local builds use quiet llama.cpp CMake defaults to avoid harmless OpenMP and ARM native-detection warnings. Override any llama.cpp CMake option with `NODE_LLAMA_CPP_CMAKE_OPTION_<name>`, for example `NODE_LLAMA_CPP_CMAKE_OPTION_GGML_NATIVE=ON` to opt back into native CPU tuning.
+This quickstart uses Potion Code v2, the fastest model in our benchmark. The
+first run downloads it; the index stays in `.zvec-grep/`, and later updates
+only need `zg index`.
 
-Remote Qwen embeddings are useful when you prefer a managed embedding service or want to avoid local model setup:
+### 3. Ask your agent
+
+```text
+My app forgets dark mode every time I refresh. Find out why.
+```
+
+The agent stays within zg for semantic discovery, ranked keyword retrieval, and
+exhaustive exact matching. You do not need to choose or invoke another search
+tool.
+
+To search directly from the terminal, use the same local layer:
 
 ```bash
-zg index \
-  --embedding qwen/text-embedding-v4 \
-  --api-key "$DASHSCOPE_API_KEY"
+zg query --human "theme preference persistence on startup" --limit 3
 ```
 
-`zg config` is the only command that changes `~/.zvec-grep/config.json`. An
-index stores its effective endpoint/device snapshot and an explicitly supplied
-API key in the workspace's internal metadata. Keys inherited from global config
-or environment variables are not copied into the workspace.
+<a id="benchmarks"></a>
 
-```json
-{
-  "version": 1,
-  "defaults": {
-    "embedding": "qwen/text-embedding-v4"
-  },
-  "providers": {
-    "qwen": {
-      "apiKey": "..."
-    }
-  },
-  "models": {
-    "qwen/text-embedding-v4": {
-      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
-    },
-    "local/embeddinggemma-300m": {
-      "device": "metal"
-    },
-    "local/qwen3-embedding-0.6b": {
-      "device": "cpu"
-    }
-  }
-}
-```
+## 📊 Benchmarks
 
-Runtime values resolve from request, workspace snapshot, global config, and
-environment variables in that order. API key and device changes do not require
-a rebuild. Changing an indexed model or endpoint does. Search API key/device
-overrides are one-shot and are never persisted; endpoint is index-only.
+CoIR-ZG measures zvec-grep's complete retrieval pipeline on 20,604 Python files
+and 500 queries.
 
-Configure the same settings without editing JSON:
+| Model | nDCG@10 | Recall@100 | Index time |
+| --- | ---: | ---: | ---: |
+| `local/jina-embeddings-v2-base-code` | **0.3947** | **0.9820** | 432.2 s |
+| `local/embeddinggemma-300m` | 0.3892 | 0.9740 | 794.3 s |
+| `local/potion-code-16m-v2` | 0.2486 | 0.8440 | **40.0 s** |
 
-```bash
-zg config provider set qwen --api-key "$DASHSCOPE_API_KEY"
-zg config model set qwen/text-embedding-v4 --endpoint https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
-zg config model set qwen/text-embedding-v4 --default
-zg config model set local/embeddinggemma-300m --device metal
-```
+Measured on an Apple M4 Pro with 48 GiB RAM; initial model downloads are
+excluded. See the [full report](./benchmarks/coir-zg/reports/cosqa.md) and
+[reproduction guide](./benchmarks/coir-zg/README.md).
 
-llama.cpp context parallelism is selected automatically. For low-level performance diagnostics, set `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` to a positive integer.
+<a id="community"></a>
 
-For existing indexes, `zg index` without `--embedding` reuses the stored schema. Use `--rebuild --embedding <model>` only when you intentionally want to rebuild with a different model:
-
-```bash
-zg index --rebuild --embedding local/qwen3-embedding-0.6b
-```
-
-## 🔎 Query Patterns
-
-Multiple quoted queries are treated as separate search groups:
-
-```bash
-zg query "request validation" "error handling" --limit 5
-```
-
-Route options each consume one query and can be repeated. Add `--fuse` when
-you want all groups combined into one ranked result list:
-
-```bash
-zg query \
-  --hybrid "authentication flow" \
-  --fts "AuthService" \
-  --vector "where credentials are validated" \
-  --fuse \
-  --limit 10
-```
-
-Use ripgrep-style path and file-type filters early to keep results focused.
-Positive globs include paths and globs beginning with `!` exclude them:
-
-```bash
-zg query "cache invalidation" \
-  -g "src/**" \
-  -g "!test/**" \
-  -g "!tests/**" \
-  -g "!fixtures/**" \
-  -g "!dist/**" \
-  -t ts
-```
-
-File-type filters are applied in addition to glob filters. For example,
-`-g "docs/**" -t ts` selects TypeScript files under `docs`, not every file in
-that directory.
-
-Use `--preview` to control indexed source previews:
-
-```bash
-zg query "plugin lifecycle" --preview none
-zg query "plugin lifecycle" --preview short --limit 5
-zg query "plugin lifecycle" --preview full --limit 2
-```
-
-For exact text, symbols, flags, or error codes, use `--fts` or `--rg`:
-
-```bash
-zg query "authentication flow" --fts "AuthService" --fts "ForbiddenError"
-zg query --rg -i -C 2 -g "*.ts" "needle text" src
-```
-
-Managed rg mode accepts common ripgrep matching, context, type, glob, ignore,
-depth, size, symlink, encoding, and regex-engine options. Zvec-grep owns the
-result format, so output-changing modes such as `--json`, `--count`, `--files`,
-`-l`, `-o`, `--replace`, and `--vimgrep` are rejected. `.git/**` and
-`.zvec-grep/**` remain excluded.
-
-## <a id="library-api"></a>🛠️ Library API
-
-```ts
-import { createZvecGrep } from "@zvec/zvec-grep";
-
-const zvecGrep = await createZvecGrep({
-  root: process.cwd(),
-});
-
-const result = await zvecGrep.context({
-  query: "ranking implementation",
-  limit: 5,
-});
-
-for (const item of result.items) {
-  const location =
-    item.range.kind === "text"
-      ? `${item.file.relativePath}:${item.range.startLine}`
-      : item.file.relativePath;
-  console.log(location);
-}
-
-await zvecGrep.close();
-```
-
-For explicit no-index lexical search:
-
-```ts
-const result = await zvecGrep.context({
-  query: "ZVEC_GREP_HOME",
-  rg: true,
-});
-```
-
-## 🤝 Join the Zvec Community
+## 🤝 Join Our Community
 
 <div align="center">
 
-|                                                  💬 DingTalk                                                  |                                                   📱 WeChat                                                   |                                                                       🎮 Discord                                                                        |                                             X (Twitter)                                              |
-| :-----------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------------: | :--------------------------------------------------------------------------------------------------: |
-| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="DingTalk QR Code"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v=6" width="150" alt="WeChat QR Code"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](https://x.com/ZvecAI) |
-|                                                 Scan to join                                                  |                                                 Scan to join                                                  |                                                                      Click to join                                                                      |                                           Click to follow                                            |
+| 💬 DingTalk | 📱 WeChat | 🎮 Discord | X (Twitter) |
+| :---: | :---: | :---: | :---: |
+| <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/dingding.png" width="150" alt="DingTalk QR Code"/> | <img src="https://zvec.oss-cn-hongkong.aliyuncs.com/qrcode/wechat.png?v1" width="150" alt="WeChat QR Code"/> | [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rKddFBBu9z) | [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/ZvecAI)](<https://x.com/ZvecAI>) |
+| Scan to join | Scan to join | Click to join | Click to follow |
 
 </div>
 
 ## ❤️ Contributing
 
-Issues and pull requests are welcome. Please keep changes focused, add tests for behavior changes, and run:
+Community contributions are always welcome—bug fixes, features, and
+documentation improvements all help make zvec-grep better.
 
-```bash
-npm run check
-```
-
-Pull request titles use Conventional Commits syntax.
+Check out our [Contributing Guide](./CONTRIBUTING.md) to get started!
