@@ -24,7 +24,6 @@
     <a href="#tour">🎬 <strong>功能演示</strong></a> |
     <a href="#features">💫 <strong>核心特性</strong></a> |
     <a href="#quickstart">🚀 <strong>快速开始</strong></a> |
-    <a href="#benchmarks">📊 <strong>性能测试</strong></a> |
     <a href="#community">🤝 <strong>社区</strong></a>
   </p>
 </div>
@@ -83,8 +82,8 @@ cd your-repository
 zg index --embedding local/potion-code-16m-v2
 ```
 
-快速开始使用基准测试中建索引最快的 Potion Code v2。第一次运行会下载模型，
-索引保存在 `.zvec-grep/` 下；后续更新只需运行 `zg index`。
+快速开始使用轻量的 Potion Code v2，以便快速完成首次建索引。第一次运行会下载
+模型，索引保存在 `.zvec-grep/` 下；后续更新只需运行 `zg index`。
 
 ### 3. 直接向 Agent 提问
 
@@ -100,21 +99,6 @@ Agent 会始终通过 zg 完成语义发现、关键词相关性检索与穷尽�
 ```bash
 zg query --human "theme preference persistence on startup" --limit 3
 ```
-
-<a id="benchmarks"></a>
-
-## 📊 性能测试
-
-CoIR-ZG 使用 20,604 个 Python 文件和 500 条查询，测试 zvec-grep 的完整检索链路。
-
-| 模型 | nDCG@10 | Recall@100 | 建索引耗时 |
-| --- | ---: | ---: | ---: |
-| `local/jina-embeddings-v2-base-code` | **0.3947** | **0.9820** | 432.2 秒 |
-| `local/embeddinggemma-300m` | 0.3892 | 0.9740 | 794.3 秒 |
-| `local/potion-code-16m-v2` | 0.2486 | 0.8440 | **40.0 秒** |
-
-测试机器为 Apple M4 Pro、48 GiB 内存，建索引耗时不包含模型的首次下载。查看
-[完整报告](./benchmarks/coir-zg/reports/cosqa.md)和[复现指南](./benchmarks/coir-zg/README.md)。
 
 <a id="community"></a>
 

@@ -24,7 +24,6 @@
     <a href="#tour">🎬 <strong>Tour</strong></a> |
     <a href="#features">💫 <strong>Features</strong></a> |
     <a href="#quickstart">🚀 <strong>Quickstart</strong></a> |
-    <a href="#benchmarks">📊 <strong>Benchmarks</strong></a> |
     <a href="#community">🤝 <strong>Community</strong></a>
   </p>
 </div>
@@ -84,9 +83,9 @@ cd your-repository
 zg index --embedding local/potion-code-16m-v2
 ```
 
-This quickstart uses Potion Code v2, the fastest model in our benchmark. The
-first run downloads it; the index stays in `.zvec-grep/`, and later updates
-only need `zg index`.
+This quickstart uses the lightweight Potion Code v2 model so you can build the
+first index quickly. The first run downloads it; the index stays in
+`.zvec-grep/`, and later updates only need `zg index`.
 
 ### 3. Ask your agent
 
@@ -103,23 +102,6 @@ To search directly from the terminal, use the same local layer:
 ```bash
 zg query --human "theme preference persistence on startup" --limit 3
 ```
-
-<a id="benchmarks"></a>
-
-## 📊 Benchmarks
-
-CoIR-ZG measures zvec-grep's complete retrieval pipeline on 20,604 Python files
-and 500 queries.
-
-| Model | nDCG@10 | Recall@100 | Index time |
-| --- | ---: | ---: | ---: |
-| `local/jina-embeddings-v2-base-code` | **0.3947** | **0.9820** | 432.2 s |
-| `local/embeddinggemma-300m` | 0.3892 | 0.9740 | 794.3 s |
-| `local/potion-code-16m-v2` | 0.2486 | 0.8440 | **40.0 s** |
-
-Measured on an Apple M4 Pro with 48 GiB RAM; initial model downloads are
-excluded. See the [full report](./benchmarks/coir-zg/reports/cosqa.md) and
-[reproduction guide](./benchmarks/coir-zg/README.md).
 
 <a id="community"></a>
 
