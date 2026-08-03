@@ -24,6 +24,7 @@
     <a href="#tour">🎬 <strong>功能演示</strong></a> |
     <a href="#features">💫 <strong>核心特性</strong></a> |
     <a href="#quickstart">🚀 <strong>快速开始</strong></a> |
+    <a href="#benchmarks">📊 <strong>性能测试</strong></a> |
     <a href="#community">🤝 <strong>社区</strong></a>
   </p>
 </div>
@@ -99,6 +100,12 @@ Agent 会始终通过 zg 完成语义发现、关键词相关性检索与穷尽�
 ```bash
 zg query --human "theme preference persistence on startup" --limit 3
 ```
+
+<a id="benchmarks"></a>
+
+## 📊 性能测试
+
+> 🚧 **正在完善中。**
 
 <a id="community"></a>
 

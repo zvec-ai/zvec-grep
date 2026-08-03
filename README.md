@@ -24,6 +24,7 @@
     <a href="#tour">🎬 <strong>Tour</strong></a> |
     <a href="#features">💫 <strong>Features</strong></a> |
     <a href="#quickstart">🚀 <strong>Quickstart</strong></a> |
+    <a href="#benchmarks">📊 <strong>Benchmarks</strong></a> |
     <a href="#community">🤝 <strong>Community</strong></a>
   </p>
 </div>
@@ -102,6 +103,12 @@ To search directly from the terminal, use the same local layer:
 ```bash
 zg query --human "theme preference persistence on startup" --limit 3
 ```
+
+<a id="benchmarks"></a>
+
+## 📊 Benchmarks
+
+> 🚧 **Work in progress.**
 
 <a id="community"></a>
 
