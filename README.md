@@ -34,10 +34,6 @@
 [one local-first interface](./docs/05-architecture.md). Use it directly from the
 terminal, or let your agent use it for you.
 
-zvec-grep is under active development. The [Roadmap](./docs/08-roadmap.md)
-covers richer multimodal data, stronger retrieval, simpler setup, and expansion
-from desktop to mobile.
-
 <a id="tour"></a>
 
 ## 🎬 See it in action
@@ -120,6 +116,13 @@ zg query --human "theme preference persistence on startup" --limit 3
 ## 📊 Benchmarks
 
 > 🚧 **Work in progress.**
+
+## 🗺️ Roadmap
+
+zg is moving toward richer multimodal formats, stronger hybrid retrieval, a
+more out-of-the-box experience, and support from desktop to mobile.
+
+Explore the full [Roadmap](./docs/08-roadmap.md).
 
 <a id="community"></a>
 

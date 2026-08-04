@@ -34,9 +34,6 @@
 [本地优先的检索入口](./docs/05-architecture.md)中。无论是人在终端中搜索，
 还是让 Agent 自主检索，只用 zg 即可。
 
-zvec-grep 仍在积极开发中。[Roadmap](./docs/08-roadmap.md)将重点覆盖更多多模态数据、
-更强的检索能力、更简单的开箱体验，以及从桌面端到移动端的全平台支持。
-
 <a id="tour"></a>
 
 ## 🎬 功能演示
@@ -115,6 +112,13 @@ zg query --human "theme preference persistence on startup" --limit 3
 ## 📊 性能测试
 
 > 🚧 **正在完善中。**
+
+## 🗺️ Roadmap
+
+zg 正在迈向更丰富的多模态格式、更强的混合检索、更开箱即用的体验，以及从
+桌面端到移动端的全平台支持。
+
+查看完整 [Roadmap](./docs/08-roadmap.md)。
 
 <a id="community"></a>
 
