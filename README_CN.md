@@ -4,7 +4,7 @@
 
 <div align="center">
   <p>
-    <img src="https://img.shields.io/badge/status-work%20in%20progress-F59E0B?style=for-the-badge" alt="项目开发中" />
+    <a href="./docs/08-roadmap.md"><img src="https://img.shields.io/badge/status-work%20in%20progress-F59E0B?style=for-the-badge" alt="项目开发中" /></a>
   </p>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/zg-logo-dark.svg">
@@ -24,13 +24,18 @@
     <a href="#tour">🎬 <strong>功能演示</strong></a> |
     <a href="#features">💫 <strong>核心特性</strong></a> |
     <a href="#quickstart">🚀 <strong>快速开始</strong></a> |
+    <a href="./docs/README.md">📚 <strong>文档</strong></a> |
     <a href="#benchmarks">📊 <strong>性能测试</strong></a> |
     <a href="#community">🤝 <strong>社区</strong></a>
   </p>
 </div>
 
-**zg**（**z**vec-**g**rep）将 ripgrep、BM25 与向量检索统一在一个本地优先
-的入口中。无论是人在终端中搜索，还是让 Agent 自主检索，只用 zg 即可。
+**zg**（**z**vec-**g**rep）将 ripgrep、BM25 与向量检索统一在一个
+[本地优先的检索入口](./docs/05-architecture.md)中。无论是人在终端中搜索，
+还是让 Agent 自主检索，只用 zg 即可。
+
+zvec-grep 仍在积极开发中。[Roadmap](./docs/08-roadmap.md)将重点覆盖更多多模态数据、
+更强的检索能力、更简单的开箱体验，以及从桌面端到移动端的全平台支持。
 
 <a id="tour"></a>
 
@@ -70,6 +75,7 @@ zg install
 ```
 
 `zg install` 会检测 Codex、Claude Code、Cursor 和 OpenCode，并配置本地 MCP 集成。
+查看 [Agent 集成指南](./docs/01-agents.md)，了解配置变更、权限和卸载方式。
 也可以明确指定目标：
 
 ```bash
@@ -83,8 +89,10 @@ cd your-repository
 zg index --embedding local/potion-code-16m-v2
 ```
 
-快速开始使用轻量的 Potion Code v2，以便快速完成首次建索引。第一次运行会下载
-模型，索引保存在 `.zvec-grep/` 下；后续更新只需运行 `zg index`。
+快速开始使用轻量的 [Potion Code v2](./docs/07-embedding.md)，以便快速完成首次建索引。
+第一次运行会下载模型，索引保存在 `.zvec-grep/` 下；后续更新只需运行
+`zg index`。查看 [检索 Pipeline](./docs/04-pipeline.md#indexing)，进一步控制检索范围、
+增量更新和重建。
 
 ### 3. 直接向 Agent 提问
 
@@ -93,9 +101,10 @@ zg index --embedding local/potion-code-16m-v2
 ```
 
 Agent 会始终通过 zg 完成语义发现、关键词相关性检索与穷尽精确匹配。你无需
-选择或调用其他搜索工具。
+选择或调用其他搜索工具。[MCP 指南](./docs/03-mcp.md)介绍了 Agent 使用的两个工具。
 
-也可以直接在终端中使用同一个本地检索层：
+也可以直接在终端中使用同一个本地检索层。查看 [CLI 指南](./docs/02-cli.md)，了解
+搜索方式、过滤条件和输出控制。
 
 ```bash
 zg query --human "theme preference persistence on startup" --limit 3

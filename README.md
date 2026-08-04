@@ -4,7 +4,7 @@
 
 <div align="center">
   <p>
-    <img src="https://img.shields.io/badge/status-work%20in%20progress-F59E0B?style=for-the-badge" alt="Work in progress" />
+    <a href="./docs/08-roadmap.md"><img src="https://img.shields.io/badge/status-work%20in%20progress-F59E0B?style=for-the-badge" alt="Work in progress" /></a>
   </p>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/zg-logo-dark.svg">
@@ -24,14 +24,19 @@
     <a href="#tour">🎬 <strong>Tour</strong></a> |
     <a href="#features">💫 <strong>Features</strong></a> |
     <a href="#quickstart">🚀 <strong>Quickstart</strong></a> |
+    <a href="./docs/README.md">📚 <strong>Docs</strong></a> |
     <a href="#benchmarks">📊 <strong>Benchmarks</strong></a> |
     <a href="#community">🤝 <strong>Community</strong></a>
   </p>
 </div>
 
-**zg** (**z**vec-**g**rep) unifies ripgrep, BM25, and vector search behind one
-local-first interface. Use it directly from the terminal, or let your agent use
-it for you.
+**zg** (**z**vec-**g**rep) unifies ripgrep, BM25, and vector search behind
+[one local-first interface](./docs/05-architecture.md). Use it directly from the
+terminal, or let your agent use it for you.
+
+zvec-grep is under active development. The [Roadmap](./docs/08-roadmap.md)
+covers richer multimodal data, stronger retrieval, simpler setup, and expansion
+from desktop to mobile.
 
 <a id="tour"></a>
 
@@ -71,7 +76,9 @@ zg install
 ```
 
 `zg install` detects Codex, Claude Code, Cursor, and OpenCode and configures the
-local MCP integration. You can also select one explicitly:
+local MCP integration. See [Agent integrations](./docs/01-agents.md) for managed
+configuration, permissions, and uninstall instructions. You can also select one
+explicitly:
 
 ```bash
 zg install --target codex --yes
@@ -84,9 +91,12 @@ cd your-repository
 zg index --embedding local/potion-code-16m-v2
 ```
 
-This quickstart uses the lightweight Potion Code v2 model so you can build the
-first index quickly. The first run downloads it; the index stays in
-`.zvec-grep/`, and later updates only need `zg index`.
+This quickstart uses the lightweight
+[Potion Code v2](./docs/07-embedding.md) model so you can build the first index
+quickly. The first run downloads it; the index stays in `.zvec-grep/`, and later
+updates only need `zg index`. See the
+[retrieval pipeline](./docs/04-pipeline.md#indexing) to control scope, updates, and
+rebuilds.
 
 ### 3. Ask your agent
 
@@ -96,9 +106,10 @@ My app forgets dark mode every time I refresh. Find out why.
 
 The agent stays within zg for semantic discovery, ranked keyword retrieval, and
 exhaustive exact matching. You do not need to choose or invoke another search
-tool.
+tool. The [MCP guide](./docs/03-mcp.md) describes the two tools exposed to agents.
 
-To search directly from the terminal, use the same local layer:
+To search directly from the terminal, use the same local layer. See the
+[CLI guide](./docs/02-cli.md) for routes, filters, and output controls.
 
 ```bash
 zg query --human "theme preference persistence on startup" --limit 3
