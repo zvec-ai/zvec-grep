@@ -3,8 +3,6 @@ type ErrorDetailValue = string | number | boolean | null | undefined;
 export type ErrorDetailEntry =
   string | readonly [string, ErrorDetailValue] | null | undefined;
 
-const ANONYMOUS_COLLECTION_NAME = "__anonymous__";
-
 export function errorDetails(
   entries: readonly ErrorDetailEntry[],
 ): string | undefined {
@@ -20,7 +18,7 @@ export function detail(key: string, value: ErrorDetailValue): ErrorDetailEntry {
 }
 
 export function collectionDetail(name: string): ErrorDetailEntry {
-  return name === ANONYMOUS_COLLECTION_NAME ? null : detail("collection", name);
+  return detail("collection", name);
 }
 
 function formatDetailEntry(entry: ErrorDetailEntry): string | null {

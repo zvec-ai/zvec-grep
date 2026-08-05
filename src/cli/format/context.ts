@@ -913,9 +913,7 @@ function entitySummary(item: ZvecGrepContextItem): string {
 
 function contextLabel(result: ZvecGrepContextResult): string {
   if (result.collection) {
-    return result.collection.anonymous
-      ? `${result.root} anonymous index`
-      : `collection ${result.collection.name}`;
+    return `${result.root} workspace index`;
   }
 
   return `${result.root} ${result.source}`;

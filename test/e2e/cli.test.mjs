@@ -314,14 +314,7 @@ test("CLI exposes stable help, version, and failure behavior", async () => {
       return true;
     },
   );
-  await assert.rejects(
-    runCli(["collections", "list", "extra"]),
-    /does not accept/,
-  );
-  await assert.rejects(
-    runCli(["collections", "list", "--rebuild"]),
-    /only be used with zg collections index/,
-  );
+  await assert.rejects(runCli(["collections"]), /Unknown command/);
 });
 
 async function availablePort() {

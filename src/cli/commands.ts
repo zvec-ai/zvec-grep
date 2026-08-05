@@ -36,7 +36,7 @@ import {
   getEmbeddingModelCatalogEntry,
   listEmbeddingModels,
 } from "../engine/models/index.js";
-import { CollectionRegistry } from "../engine/collection/index.js";
+import { readWorkspaceManifest } from "../engine/manifest.js";
 import { DaemonClient } from "../client/daemon-client.js";
 import {
   resolveDirectSearchPolicy,
@@ -48,7 +48,10 @@ import {
   routeByMode,
 } from "../client/mode-router.js";
 import { serverStatus } from "../daemon/server-controller.js";
-import { findNearestAnonymousWorkspace } from "../engine/service/root.js";
+import {
+  findNearestWorkspace,
+  workspaceIndexLocation,
+} from "../engine/service/root.js";
 import { createEmbeddingModelForIdentity } from "../engine/service/index.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
@@ -59,10 +62,7 @@ import {
 import { printDebug } from "./format/debug.js";
 import { createIndexProgressReporter } from "./format/progress.js";
 import {
-  printAnonymousInfo,
-  printCollectionInfo,
-  printCollectionList,
-  printCollectionRemoveResult,
+  printWorkspaceInfo,
   printIndexPathFilterTip,
   printIndexResult,
   printRemoteEmbeddingAuthorizationStatus,
@@ -155,9 +155,6 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
       return;
     case "status":
       await runStatus(parsed);
-      return;
-    case "collections":
-      await runCollections(parsed);
       return;
     case "install":
       await runInstall(parsed);
@@ -342,8 +339,7 @@ async function runUninstall(parsed: ParsedArgs): Promise<void> {
 
 async function runAuth(parsed: ParsedArgs): Promise<void> {
   const requestedRoot = resolve(parsed.positionals[0] ?? process.cwd());
-  const root =
-    findNearestAnonymousWorkspace(requestedRoot)?.root ?? requestedRoot;
+  const root = findNearestWorkspace(requestedRoot)?.root ?? requestedRoot;
   const store = authorizationStore(parsed.options);
   if (parsed.options.authAction === "status") {
     const status = await store.status(root);
@@ -1198,7 +1194,7 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
         createServiceOptions(parsed.options, root),
       );
       try {
-        return printAnonymousInfo(
+        return printWorkspaceInfo(
           await zvecGrep.info({ root }),
           parsed.options,
         );
@@ -1210,242 +1206,6 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
   if (parsed.options.checkReady && state !== "ready") {
     throw new Error(`Workspace index is not ready (state: ${state})`);
   }
-}
-
-async function runCollections(parsed: ParsedArgs): Promise<void> {
-  assertDirectOnlyMode(parsed.options, "--collections");
-  const [action = "list", name, root] = parsed.positionals;
-  validateCollectionArguments(action, parsed.positionals);
-  const indexOption = collectionIndexOption(parsed.options);
-  if (action !== "index" && indexOption) {
-    throw new Error(
-      `${indexOption} can only be used with zg collections index`,
-    );
-  }
-  if (action === "index" && parsed.options.embedding) {
-    requireEmbeddingModelCatalogEntry(parsed.options.embedding);
-  }
-  const zvecGrep = await createZvecGrep(
-    createServiceOptions(parsed.options, undefined),
-  );
-
-  try {
-    if (action === "list") {
-      if (parsed.options.resetPaths) {
-        throw new Error(
-          "--reset-paths can only be used with zg collections index",
-        );
-      }
-
-      printCollectionList(await zvecGrep.collections.list(), parsed.options);
-      return;
-    }
-
-    if (action === "info") {
-      if (parsed.options.resetPaths) {
-        throw new Error(
-          "--reset-paths can only be used with zg collections index",
-        );
-      }
-
-      if (!name) {
-        throw new Error("zg collections info requires <name>");
-      }
-
-      const [info, status] = await Promise.all([
-        zvecGrep.collections.info(name),
-        zvecGrep.collections.status(name),
-      ]);
-      if (!info) {
-        throw new Error(`Collection not found: ${name}`);
-      }
-
-      printCollectionInfo(info, status, parsed.options);
-      return;
-    }
-
-    if (action === "index") {
-      if (!name) {
-        throw new Error("zg collections index requires <name>");
-      }
-
-      const explicitRoot = root !== undefined;
-      const rootPath = indexRootPath(root ?? process.cwd(), parsed.options);
-      const rootPaths = explicitRoot ? rootPath : undefined;
-      const progress = createIndexProgressReporter({
-        color: parsed.options.color,
-      });
-      try {
-        const [existing, status] = await Promise.all([
-          zvecGrep.collections.info(name),
-          zvecGrep.collections.status(name),
-        ]);
-        const schema = resolveAuthorizationSchema(
-          configuredEmbeddingReference(parsed.options, existing?.embedding),
-          existing?.embedding,
-        );
-        assertEmbeddingModelCompatible(
-          existing?.embedding,
-          schema,
-          parsed.options.rebuild === true,
-        );
-        const authorizationCollection = existing
-          ? {
-              ...existing,
-              rootPaths: explicitRoot ? [rootPath] : existing.rootPaths,
-            }
-          : undefined;
-        const infoBefore: ZvecGrepInfoResult = {
-          root: rootPath.absolutePath,
-          indexed: Boolean(existing?.embedding),
-          indexPolicy: existing?.indexPolicy ?? "undecided",
-          home: parsed.options.home ?? "",
-          indexPath: existing?.path ?? "",
-          source: existing?.embedding ? "index" : "unindexed",
-          collection: authorizationCollection,
-          status,
-        };
-        const workspaceRuntime = workspaceRuntimeFromInfo(infoBefore);
-        assertRequestedEndpointCompatible(
-          infoBefore,
-          workspaceRuntime,
-          parsed.options.endpoint,
-          parsed.options.rebuild === true,
-        );
-        const modelInfo =
-          schema?.provider === "qwen"
-            ? await embeddingModelInfo(
-                schema,
-                createServiceOptions(parsed.options, undefined),
-                workspaceRuntime,
-              )
-            : undefined;
-        const plan = modelInfo
-          ? await planRemoteIndexAuthorization({
-              info: infoBefore,
-              model: modelInfo,
-              rebuild: parsed.options.rebuild,
-              store: authorizationStore(parsed.options),
-            })
-          : undefined;
-        const authorization = plan
-          ? (await authorizeCliPlan(plan, parsed.options)).authorization
-          : undefined;
-        const result = await withRemoteEmbeddingOperationPermit(
-          authorization,
-          () =>
-            zvecGrep.collections.index(name, rootPaths, {
-              rebuild: parsed.options.rebuild,
-              resetPaths: parsed.options.resetPaths,
-              globs: parsed.options.globs,
-              insensitiveGlobs: parsed.options.insensitiveGlobs,
-              fileTypes: parsed.options.fileTypes,
-              excludedFileTypes: parsed.options.excludedFileTypes,
-              hidden: parsed.options.hidden,
-              noIgnore: parsed.options.noIgnore,
-              ignoreFiles: parsed.options.ignoreFiles,
-              maxDepth: parsed.options.maxDepth,
-              maxFileSizeBytes: parsed.options.maxFileSizeBytes,
-              follow: parsed.options.follow,
-              embeddingConcurrency: parsed.options.embeddingConcurrency,
-              onProgress: progress.report,
-            }),
-        );
-        progress.finish();
-        const info = await zvecGrep.collections.info(name);
-        printIndexResult(
-          `Indexed collection ${name}`,
-          result,
-          parsed.options,
-          info?.rootPaths,
-        );
-      } catch (error) {
-        progress.finish();
-        throw error;
-      }
-      return;
-    }
-
-    if (action === "remove") {
-      if (parsed.options.resetPaths) {
-        throw new Error(
-          "--reset-paths can only be used with zg collections index",
-        );
-      }
-
-      if (!name) {
-        throw new Error("zg collections remove requires <name>");
-      }
-
-      const removed = await zvecGrep.collections.remove(name);
-      printCollectionRemoveResult(name, removed, parsed.options);
-      return;
-    }
-
-    if (parsed.options.resetPaths) {
-      throw new Error(
-        "--reset-paths can only be used with zg collections index",
-      );
-    }
-
-    throw new Error(`Unknown collections action: ${action}`);
-  } finally {
-    await zvecGrep.close();
-  }
-}
-
-function validateCollectionArguments(
-  action: string,
-  positionals: readonly string[],
-): void {
-  if (action === "list") {
-    if (positionals.length > 1) {
-      throw new Error("zg collections list does not accept arguments");
-    }
-    return;
-  }
-
-  if (action === "info" || action === "remove") {
-    if (positionals.length > 2) {
-      throw new Error(`zg collections ${action} accepts only <name>`);
-    }
-    return;
-  }
-
-  if (action === "index") {
-    if (positionals.length > 3) {
-      throw new Error("zg collections index accepts only <name> and [root]");
-    }
-    return;
-  }
-
-  throw new Error(`Unknown collections action: ${action}`);
-}
-
-function collectionIndexOption(options: CliOptions): string | undefined {
-  const candidates: readonly (readonly [unknown, string])[] = [
-    [options.rebuild, "--rebuild"],
-    [options.resetPaths, "--reset-paths"],
-    [options.embedding, "--embedding"],
-    [options.modelCacheDir, "--model-cache"],
-    [options.device, "--device"],
-    [options.apiKey, "--api-key"],
-    [options.endpoint, "--endpoint"],
-    [options.embeddingConcurrency, "--embedding-concurrency"],
-    [options.globs?.length, "--glob"],
-    [options.insensitiveGlobs?.length, "--iglob"],
-    [options.fileTypes?.length, "--type"],
-    [options.excludedFileTypes?.length, "--type-not"],
-    [options.hidden, "--hidden"],
-    [options.noIgnore, "--no-ignore"],
-    [options.ignoreFiles?.length, "--ignore-file"],
-    [options.maxDepth, "--max-depth"],
-    [options.maxFileSizeBytes, "--max-filesize"],
-    [options.follow, "--follow"],
-  ];
-  return candidates.find(([value]) =>
-    Array.isArray(value) ? value.length > 0 : value !== undefined,
-  )?.[1];
 }
 
 async function runQuery(parsed: ParsedArgs): Promise<void> {
@@ -1473,7 +1233,7 @@ async function runQuery(parsed: ParsedArgs): Promise<void> {
         : "zg query requires text or --hybrid/--fts/--vector routes. Use zg help query for examples.",
     );
   }
-  if (!commandOptions.rg && !commandOptions.collection) {
+  if (!commandOptions.rg) {
     const mode = resolveClientMode(commandOptions.mode);
     if (mode !== "direct") {
       await routeByMode({
@@ -1510,7 +1270,7 @@ async function runDirectQuery(
         if (progressEvent.phase !== "done") progress.report(progressEvent);
       },
     );
-    const info = await directQueryInfo(zvecGrep, commandOptions);
+    const info = await directQueryInfo(zvecGrep);
     const schema = info.collection?.embedding;
     const workspaceRuntime = workspaceRuntimeFromInfo(info);
     const modelInfo =
@@ -1791,29 +1551,8 @@ function assertEmbeddingModelCompatible(
   );
 }
 
-async function directQueryInfo(
-  service: ZvecGrep,
-  options: CliOptions,
-): Promise<ZvecGrepInfoResult> {
-  if (!options.collection) {
-    return await service.info({ root: process.cwd() });
-  }
-  const [collection, status] = await Promise.all([
-    service.collections.info(options.collection),
-    service.collections.status(options.collection),
-  ]);
-  if (!collection)
-    throw new Error(`Collection not found: ${options.collection}`);
-  return {
-    root: collection.rootPaths[0]?.absolutePath ?? process.cwd(),
-    indexed: collection.embedding !== null,
-    indexPolicy: collection.indexPolicy ?? "undecided",
-    home: options.home ?? "",
-    indexPath: collection.path,
-    source: collection.embedding ? "index" : "unindexed",
-    collection,
-    status,
-  };
+async function directQueryInfo(service: ZvecGrep): Promise<ZvecGrepInfoResult> {
+  return await service.info({ root: process.cwd() });
 }
 
 function normalizedDirectSearchInput(
@@ -1885,17 +1624,8 @@ function workspaceRuntimeFromInfo(
 ): EmbeddingRuntimeConfig {
   const collection = info.collection;
   if (!collection) return {};
-  const home =
-    info.home ||
-    (collection.name === "__anonymous__"
-      ? dirname(collection.path)
-      : dirname(dirname(collection.path)));
-  const registry = new CollectionRegistry(home, undefined, true);
-  try {
-    return registry.getEmbeddingRuntime(collection.name);
-  } finally {
-    registry.close();
-  }
+  const location = workspaceIndexLocation(info.root);
+  return readWorkspaceManifest(location.home)?.embeddingRuntime ?? {};
 }
 
 function assertRequestedEndpointCompatible(
@@ -1932,14 +1662,6 @@ function printServerControlStatus(
   if (status.mcpToolset) console.log(`MCP toolset: ${status.mcpToolset}`);
 }
 
-function assertDirectOnlyMode(options: CliOptions, command: string): void {
-  if (resolveClientMode(options.mode) === "server") {
-    throw new Error(
-      `${command} is Direct-only; use --mode direct after stopping the daemon`,
-    );
-  }
-}
-
 function contextOptions(
   options: CliOptions,
   queries: readonly string[],
@@ -1953,7 +1675,6 @@ function contextOptions(
     rgPaths: options.rgPaths,
     routes: options.routes,
     fuse: options.fuse,
-    collection: options.collection,
     limit: options.limit,
     autoUpdate: policy.autoUpdate,
     onAutoUpdateProgress,
@@ -2541,7 +2262,7 @@ function resolveIndexRoot(root: string | undefined): string {
     return root;
   }
 
-  return findNearestAnonymousWorkspace(process.cwd())?.root ?? process.cwd();
+  return findNearestWorkspace(process.cwd())?.root ?? process.cwd();
 }
 
 function indexRootPath(path: string, options: CliOptions): RootPath {

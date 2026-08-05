@@ -22,7 +22,6 @@ zg <command> --help
 | `query` | Search an index or run managed ripgrep |
 | `index` | Build, update, rebuild, or drop a Workspace index |
 | `status` | Inspect Workspace and index state |
-| `collections` | Manage named collections |
 | `install` / `uninstall` | Manage agent integrations |
 | `config` | Configure provider credentials and model defaults |
 | `auth` | Manage Remote Embedding authorization |
@@ -132,24 +131,6 @@ Status includes the selected root, index policy, stored schema and paths, file
 counts, refresh state, and a suggested next action. `--check-ready` preserves
 normal output and exits non-zero unless the index is ready, which is useful in
 scripts.
-
-## `zg collections`
-
-```text
-zg collections
-zg collections info <name>
-zg collections index <name> [root] [options]
-zg collections remove <name>
-```
-
-Named collections run in Direct mode and accept the same model, discovery,
-rebuild, reset-path, and Embedding-concurrency controls as `zg index`.
-
-Query a named collection with:
-
-```bash
-zg query --collection <name> "query text"
-```
 
 ## `zg install` and `zg uninstall`
 

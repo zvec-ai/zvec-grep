@@ -48,9 +48,7 @@ function formatContextLine(line: string): string[] {
     return [];
   }
 
-  const pairs = parseKeyValuePairs(trimmed).filter(
-    (pair) => !(pair.key === "collection" && pair.value === "__anonymous__"),
-  );
+  const pairs = parseKeyValuePairs(trimmed);
 
   return pairs.length > 0
     ? pairs.map((pair) => `${pair.key}: ${pair.value}`)

@@ -429,7 +429,7 @@ export class ZvecCollectionStorage implements CollectionStorage {
   }
 }
 
-export class ZvecFileMetaStore {
+class ZvecFileMetaStore {
   private readonly collection: ZVecCollection;
   private needsOptimize = false;
 
@@ -810,7 +810,7 @@ function validateFragmentGroups(
   }
 }
 
-export function initializeZvec(): void {
+function initializeZvec(): void {
   if (zvecInitialized) {
     return;
   }
@@ -819,7 +819,7 @@ export function initializeZvec(): void {
   zvecInitialized = true;
 }
 
-export function openZvecCollection(
+function openZvecCollection(
   zvecPath: string,
   readOnly: boolean,
   action: "open" | "create",
@@ -1191,7 +1191,7 @@ function readStringField(doc: ZVecDoc, field: string): string {
   return readStringFieldFromFields(doc.fields, field);
 }
 
-export function readStringFieldFromFields(
+function readStringFieldFromFields(
   fields: Record<string, unknown>,
   field: string,
 ): string {
@@ -1208,7 +1208,7 @@ export function readStringFieldFromFields(
   return String(value);
 }
 
-export function readNumberFieldFromFields(
+function readNumberFieldFromFields(
   fields: Record<string, unknown>,
   field: string,
 ): number {
@@ -1245,7 +1245,7 @@ function readBooleanFieldFromFields(
   return Boolean(value);
 }
 
-export function readNullableStringFieldFromFields(
+function readNullableStringFieldFromFields(
   fields: Record<string, unknown>,
   field: string,
 ): string | null {
@@ -1258,7 +1258,7 @@ export function readNullableStringFieldFromFields(
   return String(value);
 }
 
-export function readNullableNumberFieldFromFields(
+function readNullableNumberFieldFromFields(
   fields: Record<string, unknown>,
   field: string,
 ): number | null {
@@ -1303,7 +1303,7 @@ function parseStringArray(value: string): string[] {
   }
 }
 
-export function assertZvecStatus(
+function assertZvecStatus(
   status: ZVecStatus,
   operation: string,
   context: string,
@@ -1361,6 +1361,6 @@ function buildInFilter(field: string, values: readonly string[]): string {
   return `(${values.map((value) => `${field} = ${quoteFilterString(value)}`).join(" OR ")})`;
 }
 
-export function quoteFilterString(value: string): string {
+function quoteFilterString(value: string): string {
   return `'${value.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
 }

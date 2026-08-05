@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { CollectionRegistry } from "../../dist/engine/collection/index.js";
 import { CURRENT_INDEX_VERSION } from "../../dist/engine/types.js";
 import { createZvecGrep } from "../../dist/index.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
@@ -22,7 +21,7 @@ class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
   }
 }
 
-test("service indexes, searches, refreshes, and manages named collections", async (t) => {
+test("service indexes, searches, refreshes, and drops a workspace index", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-grep-integration-",
@@ -75,41 +74,6 @@ test("service indexes, searches, refreshes, and manages named collections", asyn
   assert.ok(
     refreshed.items.some((item) => item.file.relativePath.endsWith("alpha.ts")),
   );
-
-  const named = await service.collections.index("docs", [
-    {
-      absolutePath: root,
-      recursive: true,
-      include: ["src/**"],
-      exclude: ["**/*.log"],
-    },
-  ]);
-  assert.equal(named.filesAdded, 1);
-  assert.equal((await service.collections.list()).length, 1);
-  assert.equal((await service.collections.info("docs"))?.name, "docs");
-  assert.equal((await service.collections.status("docs"))?.filesIndexed, 1);
-  await writeFile(
-    join(root, "src", "alpha.ts"),
-    "export const NamedCollectionUpdatedSymbol = 43;\n",
-  );
-  const staleNamed = await service.context({
-    collection: "docs",
-    routes: [{ mode: "fts", query: "NamedCollectionUpdatedSymbol" }],
-    autoUpdate: false,
-  });
-  assert.equal(staleNamed.items.length, 0);
-  const refreshedNamed = await service.context({
-    collection: "docs",
-    routes: [{ mode: "fts", query: "NamedCollectionUpdatedSymbol" }],
-    autoUpdate: true,
-  });
-  assert.ok(
-    refreshedNamed.items.some((item) =>
-      item.content.includes("NamedCollectionUpdatedSymbol"),
-    ),
-  );
-  assert.equal(await service.collections.remove("docs"), true);
-  assert.equal(await service.collections.remove("docs"), false);
 
   assert.equal(await service.dropIndex(), true);
   assert.equal(await service.dropIndex(), false);
@@ -165,21 +129,18 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
   await service.index();
   await service.close();
 
-  const registry = new CollectionRegistry(workspaceHome);
-  const info = registry.get("__anonymous__");
-  assert.ok(info);
-  registry.meta.upsert({ ...info, indexVersion: 999 });
-  registry.close();
-
-  const collectionsMarker = join(
-    workspaceHome,
-    "collections.zvec",
-    "legacy-marker",
+  const manifestPath = join(workspaceHome, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, indexVersion: 999 }, null, 2)}\n`,
   );
+
   const filesMarker = join(workspaceHome, "files.zvec", "legacy-marker");
+  const indexMarker = join(workspaceHome, "index.zvec", "legacy-marker");
   const authorizationPath = join(workspaceHome, "authorization.json");
-  await writeFile(collectionsMarker, "legacy");
   await writeFile(filesMarker, "legacy");
+  await writeFile(indexMarker, "legacy");
   await writeFile(authorizationPath, "preserve");
 
   service = await createZvecGrep({
@@ -196,8 +157,8 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
   await service.index({ rebuild: true });
   const rebuilt = await service.info();
   assert.equal(rebuilt.collection?.indexVersion, CURRENT_INDEX_VERSION);
-  await assert.rejects(access(collectionsMarker), { code: "ENOENT" });
   await assert.rejects(access(filesMarker), { code: "ENOENT" });
+  await assert.rejects(access(indexMarker), { code: "ENOENT" });
   assert.equal(await readFile(authorizationPath, "utf8"), "preserve");
 
   const result = await service.context({

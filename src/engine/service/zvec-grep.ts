@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
-import { createHash, createHmac, randomBytes } from "node:crypto";
-import { dirname, join, relative, resolve } from "node:path";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   globalConfigPath,
   readGlobalConfig,
@@ -9,11 +9,7 @@ import {
   type ResolvedEmbeddingRuntimeConfig,
   type ZvecGrepGlobalConfig,
 } from "../config.js";
-import {
-  Collection,
-  CollectionRegistry,
-  isCollectionIndexed,
-} from "../collection/index.js";
+import { Collection, isCollectionIndexed } from "../collection/index.js";
 import {
   collectionDetail,
   detail,
@@ -41,14 +37,21 @@ import type {
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
 import {
-  ANONYMOUS_COLLECTION_NAME,
-  anonymousCollectionPath,
-  anonymousHome,
-  anonymousIndexLocation,
-  findNearestAnonymousWorkspace,
-  resetAnonymousIndexStorage,
+  collectionInfoFromWorkspaceManifest,
+  CURRENT_MANIFEST_VERSION,
+  readWorkspaceManifest,
+  type WorkspaceManifest,
+  writeWorkspaceManifest,
+} from "../manifest.js";
+import { validateRootPaths } from "../pipeline/indexing/root-paths.js";
+import {
+  findNearestWorkspace,
+  hasWorkspaceIndex,
+  resetWorkspaceIndexStorage,
   resolveZvecGrepRoot,
-  type AnonymousIndexLocation,
+  workspaceHome,
+  workspaceIndexLocation,
+  type WorkspaceIndexLocation,
 } from "./root.js";
 import { runRgSearch } from "./lexical.js";
 import { defaultHome, normalizePath } from "../utils/path.js";
@@ -62,8 +65,6 @@ import { TimingCollector } from "../utils/timing.js";
 import type {
   CreateZvecGrepOptions,
   ZvecGrep,
-  ZvecGrepCollectionIndexOptions,
-  ZvecGrepCollections,
   ZvecGrepContextItem,
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
@@ -92,29 +93,29 @@ export async function createZvecGrep(
   return new ZvecGrepService(options);
 }
 
-export type AnonymousReadSession = {
+export type WorkspaceReadSession = {
   readonly root: string;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
   close(): Promise<void>;
 };
 
-export function openAnonymousReadSession(
+export function openWorkspaceReadSession(
   startRoot: string,
   embeddingModel?: EmbeddingModel,
-): AnonymousReadSession {
+): WorkspaceReadSession {
   const start = resolveZvecGrepRoot(startRoot);
-  assertNearestAnonymousHomeUnlocked(start, "daemon.context.open");
-  const nearest = findNearestAnonymousCollection(start);
+  assertNearestWorkspaceHomeUnlocked(start, "daemon.context.open");
+  const nearest = findNearestWorkspaceCollection(start);
   if (!nearest) {
-    throw anonymousIndexMissingError(start, "undecided");
+    throw workspaceIndexMissingError(start, "undecided");
   }
 
   const { location, info } = nearest;
   if (info.indexPolicy === "disabled") {
-    throw anonymousIndexDisabledError(location.root);
+    throw workspaceIndexDisabledError(location.root);
   }
-  if (!isCollectionIndexed(info)) {
-    throw anonymousIndexMissingError(
+  if (!isCollectionIndexed(info) || !hasWorkspaceIndex(location)) {
+    throw workspaceIndexMissingError(
       location.root,
       info.indexPolicy ?? "enabled",
     );
@@ -124,7 +125,7 @@ export function openAnonymousReadSession(
     info,
     embeddingModel,
     true,
-    join(location.home, "files.zvec"),
+    location.filesPath,
   );
   let closed = false;
 
@@ -132,7 +133,7 @@ export function openAnonymousReadSession(
     root: location.root,
     async context(options) {
       if (closed) {
-        throw new EngineError("Anonymous read session is already closed", {
+        throw new EngineError("Workspace read session is already closed", {
           code: "ZVEC_GREP.ENGINE.SERVICE.READ_SESSION_CLOSED",
         });
       }
@@ -144,7 +145,6 @@ export function openAnonymousReadSession(
             root: location.root,
             request,
             collection,
-            anonymous: true,
             options: { ...options, autoUpdate: false },
             timings,
           }),
@@ -189,7 +189,6 @@ export function embeddingModelPoolKeyForIdentity(
 
 class ZvecGrepService implements ZvecGrep {
   readonly root: string;
-  readonly collections: ZvecGrepCollections;
   private readonly embeddingModel?: EmbeddingModel;
   private readonly recoveredEmbeddingModels = new Map<string, EmbeddingModel>();
   private readonly retiredEmbeddingModels = new Set<EmbeddingModel>();
@@ -199,14 +198,6 @@ class ZvecGrepService implements ZvecGrep {
   constructor(private readonly options: CreateZvecGrepOptions) {
     this.root = resolveZvecGrepRoot(options.root);
     this.embeddingModel = options.embeddingModel;
-    this.collections = {
-      list: () => this.listCollections(),
-      info: (name) => this.collectionInfo(name),
-      status: (name) => this.collectionStatus(name),
-      index: (name, paths, indexOptions) =>
-        this.indexCollection(name, paths, indexOptions),
-      remove: (name) => this.removeCollection(name),
-    };
   }
 
   async index(options: ZvecGrepIndexOptions = {}): Promise<IndexResult> {
@@ -216,21 +207,15 @@ class ZvecGrepService implements ZvecGrep {
       root,
       this.options.daemonInstanceToken,
     );
-    const location = anonymousIndexLocation(root);
+    const location = workspaceIndexLocation(root);
     try {
       return await this.withEmbeddingModelOperation(() =>
         withHomeWriteLock(
           location.home,
           options.rebuild ? "index.rebuild" : "index",
           async () => {
-            const existing = readCollectionInfo(
-              location.home,
-              ANONYMOUS_COLLECTION_NAME,
-            );
-            const existingRuntime = readCollectionEmbeddingRuntime(
-              location.home,
-              ANONYMOUS_COLLECTION_NAME,
-            );
+            const existing = readWorkspaceManifest(location.home);
+            const existingRuntime = existing?.embeddingRuntime ?? {};
             const embeddingModel = this.embeddingModelForIndex(
               existing,
               "index",
@@ -273,42 +258,35 @@ class ZvecGrepService implements ZvecGrep {
                 follow: options.follow,
               },
             );
-            const resetUnsupportedStorage =
-              options.rebuild === true &&
-              isCollectionIndexed(existing) &&
-              existing.indexVersion !== CURRENT_INDEX_VERSION;
-            if (resetUnsupportedStorage) {
-              resetAnonymousIndexStorage(location);
+            if (options.rebuild || !isCollectionIndexed(existing)) {
+              resetWorkspaceIndexStorage(location);
             }
-            const registry = new CollectionRegistry(
-              location.home,
+
+            const existingAfterRebuild = options.rebuild ? null : existing;
+            if (isCollectionIndexed(existingAfterRebuild)) {
+              assertCollectionEmbeddingMatchesCurrentModel(
+                existingAfterRebuild,
+                embeddingModel,
+                "zg index --rebuild",
+              );
+            }
+
+            const manifest = prepareWorkspaceManifest(
+              location,
+              existingAfterRebuild,
+              rootPaths,
               embeddingModel,
+              existingRuntime,
             );
+            const collection = new Collection(
+              manifest,
+              embeddingModel,
+              false,
+              location.filesPath,
+            );
+            writeWorkspaceManifest(location.home, manifest);
 
             try {
-              if (options.rebuild) {
-                if (!resetUnsupportedStorage) {
-                  registry.remove(ANONYMOUS_COLLECTION_NAME);
-                }
-              }
-
-              const existingAfterRebuild = registry.get(
-                ANONYMOUS_COLLECTION_NAME,
-              );
-              if (isCollectionIndexed(existingAfterRebuild)) {
-                assertCollectionEmbeddingMatchesCurrentModel(
-                  existingAfterRebuild,
-                  embeddingModel,
-                  "zg index --rebuild",
-                );
-              }
-              registry.prepareIndex(
-                ANONYMOUS_COLLECTION_NAME,
-                rootPaths,
-                anonymousCollectionPath(root),
-              );
-
-              const collection = registry.open(ANONYMOUS_COLLECTION_NAME);
               const releaseWriterContext = options.onWriterContext?.(
                 (contextOptions) =>
                   this.contextFromWriterCollection(
@@ -325,30 +303,30 @@ class ZvecGrepService implements ZvecGrep {
                   changedPaths: options.changedPaths,
                   signal: options.signal,
                 });
-                registry.updateEmbeddingRuntime(
-                  ANONYMOUS_COLLECTION_NAME,
-                  embeddingRuntimeAfterSuccessfulIndex(
+                writeWorkspaceManifest(location.home, {
+                  ...manifest,
+                  embeddingRuntime: embeddingRuntimeAfterSuccessfulIndex(
                     existing,
                     existingRuntime,
                     embeddingModel,
                     effectiveRuntime,
                     this.options,
                   ),
-                );
+                  updatedTime: Date.now(),
+                });
                 return result;
               } catch (error) {
-                if (registry.get(ANONYMOUS_COLLECTION_NAME)) {
-                  registry.updateEmbeddingRuntime(
-                    ANONYMOUS_COLLECTION_NAME,
-                    existingRuntime,
-                  );
-                }
+                writeWorkspaceManifest(location.home, {
+                  ...manifest,
+                  embeddingRuntime: existingRuntime,
+                  updatedTime: Date.now(),
+                });
                 throw error;
               } finally {
                 await releaseWriterContext?.();
               }
             } finally {
-              registry.close();
+              collection.close();
             }
           },
         ),
@@ -365,19 +343,15 @@ class ZvecGrepService implements ZvecGrep {
       root,
       this.options.daemonInstanceToken,
     );
-    const location = anonymousIndexLocation(root);
+    const location = workspaceIndexLocation(root);
     try {
-      if (!readCollectionInfo(location.home, ANONYMOUS_COLLECTION_NAME)) {
+      if (!readWorkspaceManifest(location.home)) {
         return false;
       }
 
       return await withHomeWriteLock(location.home, "index.drop", async () => {
-        const registry = new CollectionRegistry(location.home, undefined);
-        try {
-          return registry.remove(ANONYMOUS_COLLECTION_NAME);
-        } finally {
-          registry.close();
-        }
+        resetWorkspaceIndexStorage(location);
+        return true;
       });
     } finally {
       daemonWritePermit?.release();
@@ -393,19 +367,24 @@ class ZvecGrepService implements ZvecGrep {
       root,
       this.options.daemonInstanceToken,
     );
-    const location = anonymousIndexLocation(root);
+    const location = workspaceIndexLocation(root);
     try {
       await withHomeWriteLock(location.home, "index.disable", async () => {
-        const registry = new CollectionRegistry(location.home, undefined);
-        try {
-          registry.disableIndex(
-            ANONYMOUS_COLLECTION_NAME,
-            [root],
-            location.collectionPath,
-          );
-        } finally {
-          registry.close();
-        }
+        const existing = readWorkspaceManifest(location.home);
+        const now = Date.now();
+        writeWorkspaceManifest(location.home, {
+          manifestVersion: CURRENT_MANIFEST_VERSION,
+          id: existing?.id ?? randomUUID(),
+          name: existing?.name ?? workspaceDisplayName(root),
+          path: location.home,
+          rootPaths: existing?.rootPaths ?? validateRootPaths([root]),
+          indexPolicy: "disabled",
+          embedding: null,
+          indexVersion: null,
+          createdTime: existing?.createdTime ?? now,
+          updatedTime: now,
+          embeddingRuntime: existing?.embeddingRuntime ?? {},
+        });
       });
 
       return this.info({ root });
@@ -433,99 +412,82 @@ class ZvecGrepService implements ZvecGrep {
   ): Promise<ZvecGrepContextResult> {
     const request = normalizeContextRequest(options);
 
-    if (options.collection) {
-      if (options.autoUpdate !== false) {
-        await this.refreshNamedCollectionForContext(
-          options.collection,
-          options,
-          timings,
-        );
-      }
-      return this.contextFromNamedCollection(request, options, timings);
-    }
-
     const startRoot = resolveZvecGrepRoot(options.root ?? this.root);
     if (options.rg) {
       return this.contextFromRg(startRoot, request, options, timings);
     }
 
-    assertNearestAnonymousHomeUnlocked(startRoot, "context");
-    const nearest = findNearestAnonymousCollection(startRoot);
+    assertNearestWorkspaceHomeUnlocked(startRoot, "context");
+    const nearest = findNearestWorkspaceCollection(startRoot);
     if (nearest) {
       const { location, info } = nearest;
       if (info.indexPolicy === "disabled") {
-        throw anonymousIndexDisabledError(location.root);
+        throw workspaceIndexDisabledError(location.root);
       }
 
-      if (!isCollectionIndexed(info)) {
-        throw anonymousIndexMissingError(
+      if (!isCollectionIndexed(info) || !hasWorkspaceIndex(location)) {
+        throw workspaceIndexMissingError(
           location.root,
           info.indexPolicy ?? "enabled",
         );
       }
 
       if (options.autoUpdate !== false) {
-        await this.refreshAnonymousIndexForContext(location, options, timings);
+        await this.refreshWorkspaceIndexForContext(location, options, timings);
       }
 
       return await withHomeReadLock(location.home, "context", () =>
-        this.contextFromAnonymousIndex(location, request, options, timings),
+        this.contextFromWorkspaceIndex(location, request, options, timings),
       );
     }
 
-    throw anonymousIndexMissingError(startRoot, "undecided");
+    throw workspaceIndexMissingError(startRoot, "undecided");
   }
 
   async info(options: ZvecGrepInfoOptions = {}): Promise<ZvecGrepInfoResult> {
     this.ensureOpen();
     const startRoot = resolveZvecGrepRoot(options.root ?? this.root);
-    assertNearestAnonymousHomeUnlocked(startRoot, "info");
-    const nearest = findNearestAnonymousCollection(startRoot);
+    assertNearestWorkspaceHomeUnlocked(startRoot, "info");
+    const nearest = findNearestWorkspaceCollection(startRoot);
 
     if (!nearest) {
-      const location = anonymousIndexLocation(startRoot);
+      const location = workspaceIndexLocation(startRoot);
 
       return {
         root: startRoot,
         indexed: false,
         indexPolicy: "undecided",
         home: location.home,
-        indexPath: location.collectionPath,
+        indexPath: location.indexPath,
         source: "unindexed",
         suggestion: "zg index or zg query --rg",
       };
     }
 
     return await withHomeReadLock(nearest.location.home, "info", async () => {
-      const registry = new CollectionRegistry(
-        nearest.location.home,
-        undefined,
-        true,
-      );
-      try {
-        const collection = registry.get(ANONYMOUS_COLLECTION_NAME);
-        const indexed =
-          collection !== null &&
-          collection.indexPolicy !== "disabled" &&
-          isCollectionIndexed(collection);
+      const collection = readWorkspaceManifest(nearest.location.home);
+      const indexed =
+        collection !== null &&
+        collection.indexPolicy !== "disabled" &&
+        isCollectionIndexed(collection) &&
+        hasWorkspaceIndex(nearest.location);
 
-        return {
-          root: nearest.location.root,
-          indexed,
-          indexPolicy: collection?.indexPolicy ?? "undecided",
-          home: nearest.location.home,
-          indexPath: nearest.location.collectionPath,
-          source: indexed ? "index" : "unindexed",
-          collection: collection ?? undefined,
-          status:
-            indexed && options.includeStatus !== false
-              ? await registry.status(ANONYMOUS_COLLECTION_NAME)
-              : null,
-          suggestion: anonymousInfoSuggestion(collection),
-        };
-      } finally {
-        registry.close();
-      }
+      return {
+        root: nearest.location.root,
+        indexed,
+        indexPolicy: collection?.indexPolicy ?? "undecided",
+        home: nearest.location.home,
+        indexPath: nearest.location.indexPath,
+        source: indexed ? "index" : "unindexed",
+        collection: collection
+          ? collectionInfoFromWorkspaceManifest(collection)
+          : undefined,
+        status:
+          indexed && options.includeStatus !== false
+            ? await collectionStatus(collection, nearest.location)
+            : null,
+        suggestion: workspaceInfoSuggestion(collection),
+      };
     });
   }
 
@@ -548,218 +510,40 @@ class ZvecGrepService implements ZvecGrep {
     this.closed = true;
   }
 
-  private async listCollections(): Promise<CollectionInfo[]> {
-    this.ensureOpen();
-    return await withHomeReadLock(
-      serviceHome(this.options),
-      "collections.list",
-      async () => {
-        const registry = this.createRegistry(true);
-        try {
-          return registry.list();
-        } finally {
-          registry.close();
-        }
-      },
-    );
-  }
-
-  private async collectionInfo(name: string): Promise<CollectionInfo | null> {
-    this.ensureOpen();
-    return await withHomeReadLock(
-      serviceHome(this.options),
-      "collections.info",
-      async () => {
-        const registry = this.createRegistry(true);
-        try {
-          return registry.get(name);
-        } finally {
-          registry.close();
-        }
-      },
-    );
-  }
-
-  private async collectionStatus(name: string) {
-    this.ensureOpen();
-    return await withHomeReadLock(
-      serviceHome(this.options),
-      "collections.status",
-      async () => {
-        const registry = this.createRegistry(true);
-        try {
-          return await registry.status(name);
-        } finally {
-          registry.close();
-        }
-      },
-    );
-  }
-
-  private async indexCollection(
-    name: string,
-    paths?: string | RootPath | readonly (string | RootPath)[],
-    options: ZvecGrepCollectionIndexOptions = {},
-    persistRuntime = true,
-  ): Promise<IndexResult> {
-    this.ensureOpen();
-    const home = serviceHome(this.options);
-    return await this.withEmbeddingModelOperation(() =>
-      withHomeWriteLock(
-        home,
-        options.rebuild ? "collections.index.rebuild" : "collections.index",
-        async () => {
-          const existing = readCollectionInfo(home, name);
-          const existingRuntime = readCollectionEmbeddingRuntime(home, name);
-          const embeddingModel = this.embeddingModelForIndex(
-            existing,
-            "collections.index",
-            existingRuntime,
-          );
-          const effectiveRuntime = effectiveEmbeddingRuntime(
-            this.options,
-            embeddingModel,
-            runtimeForModelProvider(existing, embeddingModel, existingRuntime),
-          );
-          if (!options.rebuild) {
-            assertCollectionEndpointMatchesCurrentRuntime(
-              existing,
-              existingRuntime,
-              effectiveRuntime,
-              "zg collections index <name> --endpoint <url> --rebuild",
-            );
-          }
-          const registry = this.createRegistry(false, embeddingModel);
-          try {
-            const requestedRootPaths =
-              paths === undefined
-                ? undefined
-                : Array.isArray(paths)
-                  ? paths
-                  : [paths];
-            const rootPaths = resolveIndexRootPaths(
-              existing,
-              requestedRootPaths,
-              this.root,
-              {
-                resetPaths: options.resetPaths === true,
-                includePaths: options.includePaths,
-                excludePaths: options.excludePaths,
-                globs: options.globs,
-                insensitiveGlobs: options.insensitiveGlobs,
-                fileTypes: options.fileTypes,
-                excludedFileTypes: options.excludedFileTypes,
-                hidden: options.hidden,
-                noIgnore: options.noIgnore,
-                ignoreFiles: options.ignoreFiles,
-                maxDepth: options.maxDepth,
-                maxFileSizeBytes: options.maxFileSizeBytes,
-                follow: options.follow,
-              },
-            );
-
-            if (options.rebuild) {
-              registry.remove(name);
-            }
-
-            const existingAfterRebuild = registry.get(name);
-            if (isCollectionIndexed(existingAfterRebuild)) {
-              assertCollectionEmbeddingMatchesCurrentModel(
-                existingAfterRebuild,
-                embeddingModel,
-                "zg collections index <name> --rebuild",
-              );
-            }
-            registry.prepareIndex(name, rootPaths);
-
-            try {
-              const result = await registry.open(name).index({
-                embeddingConcurrency: options.embeddingConcurrency,
-                onProgress: options.onProgress,
-              });
-              if (persistRuntime) {
-                registry.updateEmbeddingRuntime(
-                  name,
-                  embeddingRuntimeAfterSuccessfulIndex(
-                    existing,
-                    existingRuntime,
-                    embeddingModel,
-                    effectiveRuntime,
-                    this.options,
-                  ),
-                );
-              }
-              return result;
-            } catch (error) {
-              if (registry.get(name)) {
-                registry.updateEmbeddingRuntime(name, existingRuntime);
-              }
-              throw error;
-            }
-          } finally {
-            registry.close();
-          }
-        },
-      ),
-    );
-  }
-
-  private async removeCollection(name: string): Promise<boolean> {
-    this.ensureOpen();
-    return await withHomeWriteLock(
-      serviceHome(this.options),
-      "collections.remove",
-      async () => {
-        const registry = this.createRegistry(false);
-        try {
-          return registry.remove(name);
-        } finally {
-          registry.close();
-        }
-      },
-    );
-  }
-
-  private async contextFromAnonymousIndex(
-    location: AnonymousIndexLocation,
+  private async contextFromWorkspaceIndex(
+    location: WorkspaceIndexLocation,
     request: NormalizedContextRequest,
     options: ZvecGrepContextOptions,
     timings: TimingCollector,
   ): Promise<ZvecGrepContextResult> {
-    const registry = new CollectionRegistry(location.home, undefined, true);
-    try {
-      const info = registry.get(ANONYMOUS_COLLECTION_NAME);
-      if (!info) {
-        throw new EngineError("Collection not found", {
-          code: "ZVEC_GREP.ENGINE.COLLECTION.NOT_FOUND",
-        });
-      }
+    const info = readWorkspaceManifest(location.home);
+    if (!info) {
+      throw new EngineError("Workspace index manifest not found", {
+        code: "ZVEC_GREP.ENGINE.MANIFEST.NOT_FOUND",
+      });
+    }
 
-      const collection = this.openCollectionForSearch(
-        info,
+    const collection = this.openCollectionForSearch(
+      info,
+      request,
+      location,
+      info.embeddingRuntime,
+    );
+    try {
+      return await this.contextFromCollection({
+        root: location.root,
         request,
-        location.home,
-        registry.getEmbeddingRuntime(ANONYMOUS_COLLECTION_NAME),
-      );
-      try {
-        return await this.contextFromCollection({
-          root: location.root,
-          request,
-          collection,
-          anonymous: true,
-          options,
-          timings,
-        });
-      } finally {
-        collection.close();
-      }
+        collection,
+        options,
+        timings,
+      });
     } finally {
-      registry.close();
+      collection.close();
     }
   }
 
-  private async refreshAnonymousIndexForContext(
-    location: AnonymousIndexLocation,
+  private async refreshWorkspaceIndexForContext(
+    location: WorkspaceIndexLocation,
     options: ZvecGrepContextOptions,
     timings: TimingCollector,
   ): Promise<void> {
@@ -770,17 +554,11 @@ class ZvecGrepService implements ZvecGrep {
     try {
       const needsRefresh = await timings.time("status_scan", () =>
         withHomeReadLock(location.home, "context.status", async () => {
-          const registry = new CollectionRegistry(
-            location.home,
-            undefined,
-            true,
-          );
-          try {
-            const status = await registry.status(ANONYMOUS_COLLECTION_NAME);
-            return indexStatusNeedsRefresh(status);
-          } finally {
-            registry.close();
-          }
+          const manifest = readWorkspaceManifest(location.home);
+          const status = manifest
+            ? await collectionStatus(manifest, location)
+            : null;
+          return indexStatusNeedsRefresh(status);
         }),
       );
 
@@ -790,27 +568,20 @@ class ZvecGrepService implements ZvecGrep {
 
       await timings.time("auto_update", () =>
         withHomeWriteLock(location.home, "context.refresh", async () => {
-          const existing = readCollectionInfo(
-            location.home,
-            ANONYMOUS_COLLECTION_NAME,
-          );
+          const existing = readWorkspaceManifest(location.home);
           if (!existing) {
             return;
           }
 
           const stillNeedsRefresh = await timings.time(
             "refresh_status_scan",
-            () =>
-              collectionNeedsRefresh(location.home, ANONYMOUS_COLLECTION_NAME),
+            () => collectionNeedsRefresh(location),
           );
           if (!stillNeedsRefresh) {
             return;
           }
 
-          const workspaceRuntime = readCollectionEmbeddingRuntime(
-            location.home,
-            ANONYMOUS_COLLECTION_NAME,
-          );
+          const workspaceRuntime = existing.embeddingRuntime;
           const embeddingModel = this.embeddingModelForIndex(
             existing,
             "context.refresh",
@@ -832,20 +603,20 @@ class ZvecGrepService implements ZvecGrep {
             "zg index --rebuild",
           );
 
-          const registry = new CollectionRegistry(
-            location.home,
+          const collection = new Collection(
+            existing,
             embeddingModel,
+            false,
+            location.filesPath,
           );
           try {
-            const result = await registry
-              .open(ANONYMOUS_COLLECTION_NAME)
-              .index({
-                embeddingConcurrency: options.embeddingConcurrency,
-                onProgress: options.onAutoUpdateProgress,
-              });
+            const result = await collection.index({
+              embeddingConcurrency: options.embeddingConcurrency,
+              onProgress: options.onAutoUpdateProgress,
+            });
             timings.addEntries(result.timings, "auto_update_");
           } finally {
-            registry.close();
+            collection.close();
           }
         }),
       );
@@ -854,86 +625,10 @@ class ZvecGrepService implements ZvecGrep {
     }
   }
 
-  private async refreshNamedCollectionForContext(
-    collectionName: string,
-    options: ZvecGrepContextOptions,
-    timings: TimingCollector,
-  ): Promise<void> {
-    const status = await timings.time("status_scan", () =>
-      this.collectionStatus(collectionName),
-    );
-    if (!indexStatusNeedsRefresh(status)) return;
-
-    const result = await timings.time("auto_update", () =>
-      this.indexCollection(
-        collectionName,
-        undefined,
-        {
-          embeddingConcurrency: options.embeddingConcurrency,
-          onProgress: options.onAutoUpdateProgress,
-        },
-        false,
-      ),
-    );
-    timings.addEntries(result.timings, "auto_update_");
-  }
-
-  private async contextFromNamedCollection(
-    request: NormalizedContextRequest,
-    options: ZvecGrepContextOptions,
-    timings: TimingCollector,
-  ): Promise<ZvecGrepContextResult> {
-    const collectionName = options.collection!;
-    return await withHomeReadLock(
-      serviceHome(this.options),
-      "collection.context",
-      async () => {
-        const registry = this.createRegistry(true, undefined);
-        try {
-          const info = registry.get(collectionName);
-          if (!info) {
-            throw new EngineError("Collection not found", {
-              code: "ZVEC_GREP.ENGINE.COLLECTION.NOT_FOUND",
-              context: errorDetails([collectionDetail(collectionName)]),
-            });
-          }
-
-          const collection = this.openCollectionForSearch(
-            info,
-            request,
-            registry.home,
-            registry.getEmbeddingRuntime(collectionName),
-          );
-          const root =
-            collection.info.rootPaths[0]?.absolutePath ??
-            resolveZvecGrepRoot(options.root ?? this.root);
-
-          try {
-            return await this.contextFromCollection({
-              root,
-              request,
-              collection,
-              anonymous: false,
-              options: {
-                ...options,
-              },
-              timings,
-            });
-          } finally {
-            collection.close();
-          }
-        } finally {
-          registry.close();
-        }
-      },
-    );
-  }
-
   private async contextFromCollection(input: {
     root: string;
     request: NormalizedContextRequest;
     collection: Collection;
-    anonymous: boolean;
     options: ZvecGrepContextOptions;
     timings: TimingCollector;
   }): Promise<ZvecGrepContextResult> {
@@ -953,7 +648,6 @@ class ZvecGrepService implements ZvecGrep {
           root,
           request,
           collection,
-          anonymous: true,
           options: { ...options, autoUpdate: false },
           timings,
         }),
@@ -1025,17 +719,10 @@ class ZvecGrepService implements ZvecGrep {
     };
   }
 
-  private createRegistry(
-    readOnly: boolean,
-    embeddingModel: EmbeddingModel | undefined = this.embeddingModel,
-  ): CollectionRegistry {
-    return new CollectionRegistry(this.options.home, embeddingModel, readOnly);
-  }
-
   private openCollectionForSearch(
     info: CollectionInfo,
     request: NormalizedContextRequest,
-    registryHome: string,
+    location: WorkspaceIndexLocation,
     workspaceRuntime: EmbeddingRuntimeConfig,
   ): Collection {
     return new Collection(
@@ -1047,7 +734,7 @@ class ZvecGrepService implements ZvecGrep {
         info,
       ),
       true,
-      join(registryHome, "files.zvec"),
+      location.filesPath,
     );
   }
 
@@ -1257,7 +944,6 @@ async function contextFromOpenCollection(input: {
   root: string;
   request: NormalizedContextRequest;
   collection: Collection;
-  anonymous: boolean;
   options: ZvecGrepContextOptions;
   timings: TimingCollector;
 }): Promise<ZvecGrepContextResult> {
@@ -1300,7 +986,6 @@ async function contextFromOpenCollection(input: {
       id: input.collection.info.id,
       name: input.collection.info.name,
       path: input.collection.info.path,
-      anonymous: input.anonymous,
     },
     items,
     diagnostics: {
@@ -1340,16 +1025,11 @@ async function withHomeWriteLock<T>(
 }
 
 async function collectionNeedsRefresh(
-  home: string,
-  collectionName: string,
+  location: WorkspaceIndexLocation,
 ): Promise<boolean> {
-  const registry = new CollectionRegistry(home, undefined, true);
-  try {
-    const status = await registry.status(collectionName);
-    return indexStatusNeedsRefresh(status);
-  } finally {
-    registry.close();
-  }
+  const manifest = readWorkspaceManifest(location.home);
+  const status = manifest ? await collectionStatus(manifest, location) : null;
+  return indexStatusNeedsRefresh(status);
 }
 
 function acquireHomeLock(
@@ -1364,14 +1044,14 @@ function assertHomeUnlocked(home: string, operation: string): void {
   assertNoWriteLock(homeLockPath(home), operation);
 }
 
-function assertNearestAnonymousHomeUnlocked(
+function assertNearestWorkspaceHomeUnlocked(
   start: string,
   operation: string,
 ): void {
   let current = resolve(start);
 
   while (true) {
-    assertHomeUnlocked(anonymousHome(current), operation);
+    assertHomeUnlocked(workspaceHome(current), operation);
 
     const parent = dirname(current);
     if (parent === current) {
@@ -1384,10 +1064,6 @@ function assertNearestAnonymousHomeUnlocked(
 
 function homeLockPath(home: string): string {
   return join(home, "locks", "home");
-}
-
-function serviceHome(options: CreateZvecGrepOptions): string {
-  return options.home ?? defaultHome();
 }
 
 function rgEmptyReason(
@@ -1419,33 +1095,21 @@ function withContextTimings(
   };
 }
 
-type AnonymousCollectionRecord = {
-  location: AnonymousIndexLocation;
-  info: CollectionInfo;
+type WorkspaceCollectionRecord = {
+  location: WorkspaceIndexLocation;
+  info: WorkspaceManifest;
 };
 
-function findNearestAnonymousCollection(
+function findNearestWorkspaceCollection(
   start: string,
-): AnonymousCollectionRecord | null {
-  let current = resolve(start);
-
-  while (true) {
-    const location = anonymousIndexLocation(current);
-    const info = readCollectionInfo(location.home, ANONYMOUS_COLLECTION_NAME);
-    if (info) {
-      return { location, info };
-    }
-
-    const parent = dirname(current);
-    if (parent === current) {
-      return null;
-    }
-
-    current = parent;
-  }
+): WorkspaceCollectionRecord | null {
+  const location = findNearestWorkspace(start);
+  if (!location) return null;
+  const info = readWorkspaceManifest(location.home);
+  return info ? { location, info } : null;
 }
 
-function anonymousInfoSuggestion(
+function workspaceInfoSuggestion(
   collection: CollectionInfo | null,
 ): string | undefined {
   if (!collection) {
@@ -1463,50 +1127,44 @@ function anonymousInfoSuggestion(
   return undefined;
 }
 
-function anonymousIndexMissingError(
+function workspaceIndexMissingError(
   root: string,
   policy: "undecided" | "enabled",
 ): EngineError {
-  return new EngineError(
-    "No anonymous zvec-grep index found for this workspace",
-    {
-      code: "ZVEC_GREP.ENGINE.SERVICE.ANONYMOUS_INDEX_NOT_FOUND",
-      context: errorDetails([
-        detail("root", root),
-        detail("policy", policy),
-        detail(
-          "hint",
-          policy === "undecided"
-            ? "Ask the user whether to build an index with zg index, or use zg query --rg for no-index search."
-            : "Run zg index to build the enabled workspace index, or use zg query --rg for no-index search.",
-        ),
-        detail(
-          "agent_prompt",
-          policy === "undecided"
-            ? "Ask the user whether this workspace should be indexed. If yes, run zg index --embedding <model> with appropriate -g/--glob and -t/--type filters; otherwise use zg query --rg for immediate no-index search."
-            : "This workspace is marked index-enabled but has no built index. Ask before running zg index if an embedding model or cost is involved; otherwise use zg query --rg for immediate no-index search.",
-        ),
-      ]),
-    },
-  );
+  return new EngineError("No zvec-grep index found for this workspace", {
+    code: "ZVEC_GREP.ENGINE.SERVICE.WORKSPACE_INDEX_NOT_FOUND",
+    context: errorDetails([
+      detail("root", root),
+      detail("policy", policy),
+      detail(
+        "hint",
+        policy === "undecided"
+          ? "Ask the user whether to build an index with zg index, or use zg query --rg for no-index search."
+          : "Run zg index to build the enabled workspace index, or use zg query --rg for no-index search.",
+      ),
+      detail(
+        "agent_prompt",
+        policy === "undecided"
+          ? "Ask the user whether this workspace should be indexed. If yes, run zg index --embedding <model> with appropriate -g/--glob and -t/--type filters; otherwise use zg query --rg for immediate no-index search."
+          : "This workspace is marked index-enabled but has no built index. Ask before running zg index if an embedding model or cost is involved; otherwise use zg query --rg for immediate no-index search.",
+      ),
+    ]),
+  });
 }
 
-function anonymousIndexDisabledError(root: string): EngineError {
-  return new EngineError(
-    "Anonymous zvec-grep index is disabled for this workspace",
-    {
-      code: "ZVEC_GREP.ENGINE.SERVICE.ANONYMOUS_INDEX_DISABLED",
-      context: errorDetails([
-        detail("root", root),
-        detail("policy", "disabled"),
-        detail(
-          "hint",
-          "Use zg query --rg for no-index search. Run zg index only if the user explicitly decides to index this workspace.",
-        ),
-        detail("agent_action", "do_not_build_index"),
-      ]),
-    },
-  );
+function workspaceIndexDisabledError(root: string): EngineError {
+  return new EngineError("The zvec-grep index is disabled for this workspace", {
+    code: "ZVEC_GREP.ENGINE.SERVICE.WORKSPACE_INDEX_DISABLED",
+    context: errorDetails([
+      detail("root", root),
+      detail("policy", "disabled"),
+      detail(
+        "hint",
+        "Use zg query --rg for no-index search. Run zg index only if the user explicitly decides to index this workspace.",
+      ),
+      detail("agent_action", "do_not_build_index"),
+    ]),
+  });
 }
 
 function resolveIndexRootPaths(
@@ -1657,24 +1315,61 @@ function applyRootPathOverrides(
   };
 }
 
-function readCollectionInfo(home: string, name: string): CollectionInfo | null {
-  const registry = new CollectionRegistry(home, undefined, true);
-  try {
-    return registry.get(name);
-  } finally {
-    registry.close();
-  }
+function prepareWorkspaceManifest(
+  location: WorkspaceIndexLocation,
+  existing: WorkspaceManifest | null,
+  rootPaths: readonly (string | RootPath)[],
+  embeddingModel: EmbeddingModel,
+  embeddingRuntime: EmbeddingRuntimeConfig,
+): WorkspaceManifest {
+  const now = Date.now();
+  return {
+    manifestVersion: CURRENT_MANIFEST_VERSION,
+    id: existing?.id ?? randomUUID(),
+    name: existing?.name ?? workspaceDisplayName(location.root),
+    path: location.home,
+    rootPaths: validateRootPaths(rootPaths),
+    indexPolicy: "enabled",
+    embedding: currentEmbeddingSchema(embeddingModel),
+    indexVersion: CURRENT_INDEX_VERSION,
+    createdTime: existing?.createdTime ?? now,
+    updatedTime: now,
+    embeddingRuntime,
+  };
 }
 
-function readCollectionEmbeddingRuntime(
-  home: string,
-  name: string,
-): EmbeddingRuntimeConfig {
-  const registry = new CollectionRegistry(home, undefined, true);
+function currentEmbeddingSchema(
+  embeddingModel: EmbeddingModel,
+): CollectionEmbeddingSchema {
+  return {
+    provider: embeddingModel.info.provider,
+    model: embeddingModel.info.name,
+    dimension: embeddingModel.info.dimension,
+    metric: embeddingModel.info.metric,
+  };
+}
+
+function workspaceDisplayName(root: string): string {
+  return basename(normalizePath(root)) || "workspace";
+}
+
+async function collectionStatus(
+  info: CollectionInfo,
+  location: WorkspaceIndexLocation,
+) {
+  if (
+    info.indexPolicy === "disabled" ||
+    !isCollectionIndexed(info) ||
+    !hasWorkspaceIndex(location)
+  ) {
+    return null;
+  }
+
+  const collection = new Collection(info, undefined, true, location.filesPath);
   try {
-    return registry.getEmbeddingRuntime(name);
+    return await collection.status();
   } finally {
-    registry.close();
+    collection.close();
   }
 }
 

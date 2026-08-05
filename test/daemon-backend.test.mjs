@@ -576,7 +576,6 @@ test("wait_for_fresh consumes a running watch job without a full reconciliation"
       return {
         ...created,
         root: created.root,
-        collections: created.collections,
         index: (indexOptions) => created.index(indexOptions),
         disableIndex: (infoOptions) => created.disableIndex(infoOptions),
         info: (infoOptions) => created.info(infoOptions),
@@ -833,7 +832,6 @@ test("known watcher changes do not clear unknown initial drift", async () => {
       return {
         ...created,
         root: created.root,
-        collections: created.collections,
         index: async (indexOptions) => {
           scopes.push(indexOptions.changedPaths ? "paths" : "full");
           return created.index(indexOptions);
@@ -912,7 +910,6 @@ test("unknown drift during a manual job survives until a full follow-up", async 
       return {
         ...created,
         root: created.root,
-        collections: created.collections,
         index: async (indexOptions) => {
           scopes.push(indexOptions.changedPaths ? "paths" : "full");
           const result = await created.index(indexOptions);
@@ -999,7 +996,6 @@ test("unknown drift after a full proof is preserved for a follow-up", async () =
       return {
         ...created,
         root: created.root,
-        collections: created.collections,
         index: async (indexOptions) => {
           scopes.push(indexOptions.changedPaths ? "paths" : "full");
           return created.index(indexOptions);
@@ -1087,7 +1083,6 @@ test("wait_for_fresh does not replace a failed path update with a full scan", as
       return {
         ...created,
         root: created.root,
-        collections: created.collections,
         index: async (indexOptions) => {
           scopes.push(indexOptions.changedPaths ? "paths" : "full");
           if (indexOptions.changedPaths) {
@@ -1294,7 +1289,6 @@ test("watch changes use the path-level index pipeline and advance revisions", as
       return {
         ...created,
         root: created.root,
-        collections: created.collections,
         index: async (indexOptions) => {
           if (indexOptions.changedPaths) {
             indexedPathBatches.push([...indexOptions.changedPaths]);

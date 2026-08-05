@@ -265,8 +265,6 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--prefer-symbol") {
       options.preferSymbol = true;
-    } else if (arg === "--collection") {
-      options.collection = readOptionValue(args, ++index, arg);
     } else if (arg === "--home") {
       options.home = readOptionValue(args, ++index, arg);
     } else if (arg === "--embedding") {
@@ -592,7 +590,6 @@ function parseCommand(args: readonly string[]): {
     first === "query" ||
     first === "index" ||
     first === "status" ||
-    first === "collections" ||
     first === "install" ||
     first === "uninstall" ||
     first === "config" ||
@@ -635,12 +632,7 @@ function validateCliShape(
     throw new Error("--capability and --scope can only be used with zg auth");
   }
 
-  if (
-    options.allowRemote &&
-    command !== "query" &&
-    command !== "index" &&
-    command !== "collections"
-  ) {
+  if (options.allowRemote && command !== "query" && command !== "index") {
     throw new Error(
       "--allow-remote can only be used with query or index commands",
     );
@@ -660,7 +652,6 @@ function validateCliShape(
     [options.symbolTypes?.length, "--symbol-type"],
     [options.modifiedAfter, "--modified-after"],
     [options.modifiedBefore, "--modified-before"],
-    [options.collection, "--collection"],
     [options.rgCompatibilityOptions?.length, "ripgrep options"],
   ]);
   if (command !== "query" && queryOnly) {
@@ -673,12 +664,7 @@ function validateCliShape(
     [options.fileTypes?.length, "--type"],
     [options.excludedFileTypes?.length, "--type-not"],
   ]);
-  if (
-    sharedSelection &&
-    command !== "query" &&
-    command !== "index" &&
-    command !== "collections"
-  ) {
+  if (sharedSelection && command !== "query" && command !== "index") {
     throw new Error(
       `${sharedSelection} can only be used with query or index commands`,
     );
@@ -695,7 +681,6 @@ function validateCliShape(
   if (
     discoveryOption &&
     command !== "index" &&
-    command !== "collections" &&
     !(command === "query" && options.rg)
   ) {
     throw new Error(
@@ -712,7 +697,6 @@ function validateCliShape(
       [options.installMcpToolTimeoutSeconds, "--mcp-tool-timeout"],
       [options.installMcpTokenEnv, "--mcp-token-env"],
       [options.yes, "--yes"],
-      [options.collection, "--collection"],
       [options.rg, "--rg"],
       [options.home, "--home"],
       [options.embedding, "--embedding"],
@@ -788,10 +772,6 @@ function validateCliShape(
   if (options.rg && options.fuse) {
     throw new Error("--rg cannot be combined with --fuse");
   }
-  if (options.rg && options.collection) {
-    throw new Error("--rg cannot be combined with --collection");
-  }
-
   if (options.forceDirect && options.mode !== "direct") {
     throw new Error("--force-direct requires --mode direct");
   }
@@ -906,15 +886,11 @@ function validateCliShape(
   if (options.drop && command !== "index") {
     throw new Error("--drop can only be used with zg index");
   }
-  if (options.rebuild && command !== "index" && command !== "collections") {
-    throw new Error(
-      "--rebuild can only be used with zg index or zg collections index",
-    );
+  if (options.rebuild && command !== "index") {
+    throw new Error("--rebuild can only be used with zg index");
   }
-  if (options.resetPaths && command !== "index" && command !== "collections") {
-    throw new Error(
-      "--reset-paths can only be used with zg index or zg collections index",
-    );
+  if (options.resetPaths && command !== "index") {
+    throw new Error("--reset-paths can only be used with zg index");
   }
   if (
     options.drop &&

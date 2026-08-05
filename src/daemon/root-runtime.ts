@@ -1,5 +1,5 @@
-import type { AnonymousReadSession } from "../engine/service/zvec-grep.js";
-import { openAnonymousReadSession } from "../engine/service/zvec-grep.js";
+import type { WorkspaceReadSession } from "../engine/service/zvec-grep.js";
+import { openWorkspaceReadSession } from "../engine/service/zvec-grep.js";
 import type {
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
@@ -20,11 +20,11 @@ export type RootRuntimeOptions = {
   readCollectionIdleTtlMs?: number;
   openSession?: (
     lease: ModelLease,
-  ) => AnonymousReadSession | Promise<AnonymousReadSession>;
+  ) => WorkspaceReadSession | Promise<WorkspaceReadSession>;
   onActivity?: () => void;
 };
 
-type LeasedReadSession = AnonymousReadSession & {
+type LeasedReadSession = WorkspaceReadSession & {
   readonly modelKey: string;
 };
 
@@ -341,11 +341,11 @@ export class RootRuntime {
     request: EmbeddingModelLoadRequest,
   ): Promise<LeasedReadSession> {
     const lease = await this.options.modelPool.acquire(request);
-    let session: AnonymousReadSession;
+    let session: WorkspaceReadSession;
     try {
       session = this.options.openSession
         ? await this.options.openSession(lease)
-        : openAnonymousReadSession(this.options.canonicalRoot, lease.model);
+        : openWorkspaceReadSession(this.options.canonicalRoot, lease.model);
     } catch (error) {
       lease.release();
       throw error;

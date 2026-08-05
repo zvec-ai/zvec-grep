@@ -25,7 +25,6 @@ export type CliOptions = {
   installMcpToolTimeoutSeconds?: number;
   installMcpTokenEnv?: string;
   yes?: boolean;
-  collection?: string;
   rg?: boolean;
   rgCompatibilityOptions?: string[];
   rgOptions?: CliRgOptions;
@@ -72,7 +71,6 @@ export type CliCommand =
   | "query"
   | "index"
   | "status"
-  | "collections"
   | "install"
   | "uninstall"
   | "config"

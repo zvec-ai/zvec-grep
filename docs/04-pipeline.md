@@ -28,10 +28,14 @@ zg index /absolute/path/to/your-repository \
   --embedding local/potion-code-16m-v2
 ```
 
-An anonymous workspace index is stored under `<root>/.zvec-grep/`. `.git` and
+The workspace index is stored under `<root>/.zvec-grep/`. `.git` and
 `.zvec-grep` are always excluded. Common dependency, build, generated, cache,
 and log directories are excluded by default, as are files ignored by the
 repository's ignore rules.
+
+The main workspace files are `manifest.json`, `files.zvec`, and `index.zvec`.
+The manifest stores index metadata and the workspace Embedding runtime settings,
+including an API key when one was explicitly persisted for that workspace.
 
 Scope large repositories early:
 
@@ -175,21 +179,3 @@ zg query --human "plugin lifecycle" --limit 5
 
 Use `--debug` for query diagnostics and `--trace` for per-hit indexed search
 trace information.
-
-## Named collections
-
-Anonymous indexes are the normal repository workflow. Named collections are an
-advanced, Direct-mode feature for managing an index independently of the
-nearest workspace:
-
-```bash
-zg collections
-zg collections index shared-docs /absolute/path/to/docs \
-  --embedding local/embeddinggemma-300m
-zg collections info shared-docs
-zg query --collection shared-docs "release process"
-zg collections remove shared-docs
-```
-
-Collections accept the same model, file-discovery, rebuild, and concurrency
-options as `zg index`.

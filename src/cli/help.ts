@@ -21,7 +21,6 @@ Commands:
   query          Search indexed context or run managed ripgrep
   index          Build, rebuild, or drop the workspace index
   status         Show workspace and index status
-  collections    Manage named collections
   config         Configure provider credentials and embedding model defaults
   auth           Manage Workspace Remote Embedding authorization
   server         Start, stop, inspect, or run the shared MCP server
@@ -136,15 +135,6 @@ stored paths, refresh status, and suggested next action.
 
 --check-ready preserves the normal output and exits non-zero unless the
 Workspace index is ready.`;
-    case "collections":
-      return `Usage:
-  zg collections
-  zg collections info <name>
-  zg collections index <name> [root] [options]
-  zg collections remove <name>
-
-Named collections support the same embedding, file-selection, discovery,
-rebuild, and embedding-concurrency options as zg index.`;
     case "config":
       return `Usage:
   zg config provider set <provider> --api-key <key>

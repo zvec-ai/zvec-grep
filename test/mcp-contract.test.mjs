@@ -79,7 +79,7 @@ function createBackend() {
       source: "index",
       persistent: {
         home: `${input.root}/.zvec-grep`,
-        index_path: `${input.root}/.zvec-grep/index`,
+        index_path: `${input.root}/.zvec-grep/index.zvec`,
         files: {
           stored: 1,
           indexed: 1,

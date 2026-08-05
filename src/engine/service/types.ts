@@ -90,7 +90,6 @@ export type ZvecGrepContextOptions = {
   /** Fuse every query group into one ranked search plan. */
   fuse?: boolean;
   root?: string;
-  collection?: string;
   limit?: number;
   autoUpdate?: boolean;
   onAutoUpdateProgress?: (progress: IndexProgress) => void;
@@ -166,7 +165,6 @@ export type ZvecGrepContextCollection = {
   id: string;
   name: string;
   path: string;
-  anonymous: boolean;
 };
 
 export type ZvecGrepRgDiagnostics = {
@@ -218,40 +216,8 @@ export type ZvecGrepContextResult = {
   diagnostics: ZvecGrepContextDiagnostics;
 };
 
-export type ZvecGrepCollectionIndexOptions = {
-  rebuild?: boolean;
-  resetPaths?: boolean;
-  includePaths?: readonly string[];
-  excludePaths?: readonly string[];
-  globs?: readonly string[];
-  insensitiveGlobs?: readonly string[];
-  fileTypes?: readonly string[];
-  excludedFileTypes?: readonly string[];
-  hidden?: boolean;
-  noIgnore?: boolean;
-  ignoreFiles?: readonly string[];
-  maxDepth?: number;
-  maxFileSizeBytes?: number;
-  follow?: boolean;
-  embeddingConcurrency?: number;
-  onProgress?: (progress: IndexProgress) => void;
-};
-
-export type ZvecGrepCollections = {
-  list(): Promise<CollectionInfo[]>;
-  info(name: string): Promise<CollectionInfo | null>;
-  status(name: string): Promise<CollectionIndexStatus | null>;
-  index(
-    name: string,
-    paths?: string | RootPath | readonly (string | RootPath)[],
-    options?: ZvecGrepCollectionIndexOptions,
-  ): Promise<IndexResult>;
-  remove(name: string): Promise<boolean>;
-};
-
 export type ZvecGrep = {
   readonly root: string;
-  readonly collections: ZvecGrepCollections;
   index(options?: ZvecGrepIndexOptions): Promise<IndexResult>;
   dropIndex(options?: ZvecGrepInfoOptions): Promise<boolean>;
   disableIndex(options?: ZvecGrepInfoOptions): Promise<ZvecGrepInfoResult>;

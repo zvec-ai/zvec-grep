@@ -1,79 +1,75 @@
 import { existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { workspaceManifestPath } from "../manifest.js";
 
 export const ZVEC_GREP_DIR = ".zvec-grep";
-export const ANONYMOUS_COLLECTION_NAME = "__anonymous__";
-export const ANONYMOUS_COLLECTION_DIR = "index";
+export const FILES_ZVEC = "files.zvec";
+export const ENTITIES_ZVEC = "index.zvec";
 
-const COLLECTIONS_ZVEC = "collections.zvec";
-const FILES_ZVEC = "files.zvec";
-const ENTITIES_ZVEC = "index.zvec";
-
-export type AnonymousIndexLocation = {
+export type WorkspaceIndexLocation = {
   root: string;
   home: string;
-  collectionName: typeof ANONYMOUS_COLLECTION_NAME;
-  collectionPath: string;
+  manifestPath: string;
+  filesPath: string;
+  indexPath: string;
 };
 
 export function resolveZvecGrepRoot(root: string | undefined): string {
   return resolve(root ?? process.cwd());
 }
 
-export function anonymousHome(root: string): string {
+export function workspaceHome(root: string): string {
   return join(resolve(root), ZVEC_GREP_DIR);
 }
 
-export function anonymousCollectionPath(root: string): string {
-  return join(anonymousHome(root), ANONYMOUS_COLLECTION_DIR);
-}
-
-export function anonymousIndexLocation(root: string): AnonymousIndexLocation {
+export function workspaceIndexLocation(root: string): WorkspaceIndexLocation {
   const resolvedRoot = resolve(root);
+  const home = workspaceHome(resolvedRoot);
 
   return {
     root: resolvedRoot,
-    home: anonymousHome(resolvedRoot),
-    collectionName: ANONYMOUS_COLLECTION_NAME,
-    collectionPath: anonymousCollectionPath(resolvedRoot),
+    home,
+    manifestPath: workspaceManifestPath(home),
+    filesPath: join(home, FILES_ZVEC),
+    indexPath: join(home, ENTITIES_ZVEC),
   };
 }
 
-export function resetAnonymousIndexStorage(
-  location: AnonymousIndexLocation,
+export function resetWorkspaceIndexStorage(
+  location: WorkspaceIndexLocation,
 ): void {
-  if (dirname(location.collectionPath) !== location.home) {
-    throw new Error("Anonymous index path must be inside its workspace home");
-  }
   for (const target of [
-    join(location.home, COLLECTIONS_ZVEC),
-    join(location.home, FILES_ZVEC),
-    location.collectionPath,
+    location.manifestPath,
+    location.filesPath,
+    location.indexPath,
   ]) {
+    if (dirname(target) !== location.home) {
+      throw new Error("Workspace index data must be inside its workspace home");
+    }
     rmSync(target, { recursive: true, force: true });
   }
 }
 
-export function findNearestAnonymousIndex(
+export function findNearestWorkspaceIndex(
   start: string,
-): AnonymousIndexLocation | null {
-  return findNearestAnonymousLocation(start, hasAnonymousIndex);
+): WorkspaceIndexLocation | null {
+  return findNearestWorkspaceLocation(start, hasWorkspaceIndex);
 }
 
-export function findNearestAnonymousWorkspace(
+export function findNearestWorkspace(
   start: string,
-): AnonymousIndexLocation | null {
-  return findNearestAnonymousLocation(start, hasAnonymousMetadata);
+): WorkspaceIndexLocation | null {
+  return findNearestWorkspaceLocation(start, hasWorkspaceManifest);
 }
 
-function findNearestAnonymousLocation(
+function findNearestWorkspaceLocation(
   start: string,
-  predicate: (location: AnonymousIndexLocation) => boolean,
-): AnonymousIndexLocation | null {
+  predicate: (location: WorkspaceIndexLocation) => boolean,
+): WorkspaceIndexLocation | null {
   let current = resolve(start);
 
   while (true) {
-    const location = anonymousIndexLocation(current);
+    const location = workspaceIndexLocation(current);
     if (predicate(location)) {
       return location;
     }
@@ -87,15 +83,16 @@ function findNearestAnonymousLocation(
   }
 }
 
-export function hasAnonymousMetadata(
-  location: AnonymousIndexLocation,
+export function hasWorkspaceManifest(
+  location: WorkspaceIndexLocation,
 ): boolean {
-  return existsSync(join(location.home, COLLECTIONS_ZVEC));
+  return existsSync(location.manifestPath);
 }
 
-export function hasAnonymousIndex(location: AnonymousIndexLocation): boolean {
+export function hasWorkspaceIndex(location: WorkspaceIndexLocation): boolean {
   return (
-    existsSync(join(location.home, COLLECTIONS_ZVEC)) &&
-    existsSync(join(location.collectionPath, ENTITIES_ZVEC))
+    hasWorkspaceManifest(location) &&
+    existsSync(location.filesPath) &&
+    existsSync(location.indexPath)
   );
 }

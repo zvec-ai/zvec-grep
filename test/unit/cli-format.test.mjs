@@ -11,14 +11,11 @@ import {
 import { printDebug } from "../../dist/cli/format/debug.js";
 import { createIndexProgressReporter } from "../../dist/cli/format/progress.js";
 import {
-  printAnonymousInfo,
-  printCollectionInfo,
-  printCollectionList,
-  printCollectionRemoveResult,
   printIndexPathFilterTip,
   printIndexResult,
   printRemoteEmbeddingAuthorizationStatus,
   printServerIndexInfo,
+  printWorkspaceInfo,
 } from "../../dist/cli/format/status.js";
 import { EngineError } from "../../dist/engine/errors/index.js";
 
@@ -119,7 +116,6 @@ function contextResult(overrides = {}) {
       id: "collection-1",
       name: "docs",
       path: "/tmp/index",
-      anonymous: false,
     },
     items: [
       {
@@ -521,7 +517,7 @@ test("debug formatter reports every diagnostic and trace availability state", as
   assert.match(noTrace.errors.join("\n"), /reason=no-hit-trace/);
 });
 
-test("status formatters cover collections, anonymous states, failures, filters, and color", async () => {
+test("status formatters cover workspace states, failures, filters, and color", async () => {
   const failedFile = {
     id: "failed",
     collectionId: "collection-1",
@@ -542,11 +538,20 @@ test("status formatters cover collections, anonymous states, failures, filters, 
   const stale = status({ failedFiles: [failedFile] });
   const info = collection();
   const output = await captureConsole(() => {
-    printCollectionList([info], { color: "never" });
-    printCollectionInfo(info, stale, { color: "never" });
-    printCollectionInfo(collection({ embedding: null }), null, {
-      color: "always",
-    });
+    printWorkspaceInfo(
+      {
+        root: "/repo",
+        indexed: true,
+        indexPolicy: "enabled",
+        source: "index",
+        home: "/repo/.zvec-grep",
+        indexPath: "/repo/.zvec-grep/index.zvec",
+        collection: info,
+        status: stale,
+        suggestion: "zg index",
+      },
+      { color: "never" },
+    );
     printIndexResult(
       "Indexed",
       {
@@ -588,8 +593,6 @@ test("status formatters cover collections, anonymous states, failures, filters, 
     );
     printIndexPathFilterTip({ color: "never" });
     printIndexPathFilterTip({ color: "never", includePaths: [] });
-    printCollectionRemoveResult("docs", true, { color: "never" });
-    printCollectionRemoveResult("missing", false, { color: "never" });
     printServerIndexInfo(
       {
         root: "/repo",
@@ -598,7 +601,7 @@ test("status formatters cover collections, anonymous states, failures, filters, 
         source: "index",
         persistent: {
           home: "/repo/.zvec-grep",
-          index_path: "/repo/.zvec-grep/index",
+          index_path: "/repo/.zvec-grep/index.zvec",
           collection: {
             root_paths: [
               {
@@ -646,7 +649,7 @@ test("status formatters cover collections, anonymous states, failures, filters, 
         source: "unindexed",
         persistent: {
           home: "/failed-repo/.zvec-grep",
-          index_path: "/failed-repo/.zvec-grep/index",
+          index_path: "/failed-repo/.zvec-grep/index.zvec",
         },
         runtime: {
           job_state: "failed",
@@ -659,7 +662,7 @@ test("status formatters cover collections, anonymous states, failures, filters, 
       { color: "never" },
     );
   });
-  assert.match(output.logs.join("\n"), /failed_reasons/);
+  assert.match(output.logs.join("\n"), /Problem\s+fail\.ts/);
   assert.match(output.logs.join("\n"), /Truncated\s+4 fragments/);
   assert.match(output.logs.join("\n"), /1m 5s/);
   assert.match(output.logs.join("\n"), /ignore-file=\.rgignore/);
@@ -714,19 +717,19 @@ test("status formatters cover collections, anonymous states, failures, filters, 
       }),
     },
   ]) {
-    const anonymous = {
+    const workspace = {
       root: "/repo",
       indexed: stateInfo.indexed,
       indexPolicy: stateInfo.indexPolicy,
       source: stateInfo.indexed ? "index" : "unindexed",
       home: "/repo/.zvec-grep",
-      indexPath: "/repo/.zvec-grep/index",
+      indexPath: "/repo/.zvec-grep/index.zvec",
       collection: stateInfo.collection,
       status: stateInfo.status,
       suggestion: "zg index",
     };
     const rendered = await captureConsole(() =>
-      printAnonymousInfo(anonymous, { color: "never" }),
+      printWorkspaceInfo(workspace, { color: "never" }),
     );
     assert.match(rendered.logs.join("\n"), /Workspace index/);
   }
@@ -737,14 +740,14 @@ test("workspace status uses a status-first grouped layout", async () => {
   process.env.TERM = "xterm-256color";
   try {
     const output = await captureConsole(() =>
-      printAnonymousInfo(
+      printWorkspaceInfo(
         {
           root: "/repo",
           indexed: true,
           indexPolicy: "enabled",
           source: "index",
           home: "/repo/.zvec-grep",
-          indexPath: "/repo/.zvec-grep/index",
+          indexPath: "/repo/.zvec-grep/index.zvec",
           collection: collection({
             rootPaths: [{ absolutePath: "/repo", recursive: true }],
           }),
@@ -778,7 +781,7 @@ test("workspace status uses a status-first grouped layout", async () => {
       "  Embedding   qwen/text-embedding-v4",
       "              16 dimensions · cosine",
       "",
-      `  Storage     ${path.join(".zvec-grep", "index")}`,
+      `  Storage     ${path.join(".zvec-grep", "index.zvec")}`,
     ]);
 
     const colored = await captureConsole(() =>
@@ -790,7 +793,7 @@ test("workspace status uses a status-first grouped layout", async () => {
           source: "index",
           persistent: {
             home: "/repo/.zvec-grep",
-            index_path: "/repo/.zvec-grep/index",
+            index_path: "/repo/.zvec-grep/index.zvec",
             collection: {
               root_paths: [{ absolute_path: "/repo", recursive: true }],
               embedding: {
@@ -844,7 +847,7 @@ test("server workspace status reports changed files as stale", async () => {
         source: "index",
         persistent: {
           home: "/repo/.zvec-grep",
-          index_path: "/repo/.zvec-grep/index",
+          index_path: "/repo/.zvec-grep/index.zvec",
           collection: {
             root_paths: [{ absolute_path: "/repo", recursive: true }],
             embedding: {
@@ -886,14 +889,14 @@ test("server workspace status reports changed files as stale", async () => {
 
 test("direct workspace status excludes changed files from coverage", async () => {
   const output = await captureConsole(() =>
-    printAnonymousInfo(
+    printWorkspaceInfo(
       {
         root: "/repo",
         indexed: true,
         indexPolicy: "enabled",
         source: "index",
         home: "/repo/.zvec-grep",
-        indexPath: "/repo/.zvec-grep/index",
+        indexPath: "/repo/.zvec-grep/index.zvec",
         collection: collection({
           rootPaths: [{ absolutePath: "/repo", recursive: true }],
         }),
@@ -931,7 +934,7 @@ test("server updating coverage uses the full configured scope", async () => {
         source: "index",
         persistent: {
           home: "/repo/.zvec-grep",
-          index_path: "/repo/.zvec-grep/index",
+          index_path: "/repo/.zvec-grep/index.zvec",
           files: {
             stored: 1011,
             scanned: 1000,
@@ -1044,7 +1047,7 @@ test("error formatter renders engine context, causes, plain values, and color", 
   const engineError = new EngineError("Index failed", {
     code: "ZVEC_GREP.ENGINE.TEST.FAILURE",
     context:
-      "collection=__anonymous__ file=src/a.ts\nstage=embedding\nplain detail",
+      "collection=workspace file=src/a.ts\nstage=embedding\nplain detail",
     cause: new Error("network unavailable"),
   });
   const output = await captureConsole(() => {
@@ -1057,7 +1060,7 @@ test("error formatter renders engine context, causes, plain values, and color", 
   const text = output.errors.join("\n");
   assert.match(text, /Code:/);
   assert.match(text, /file: src\/a\.ts/);
-  assert.doesNotMatch(text, /__anonymous__/);
+  assert.match(text, /collection: workspace/);
   assert.match(text, /network unavailable/);
   assert.match(text, /string cause/);
   assert.match(text, /plain value/);

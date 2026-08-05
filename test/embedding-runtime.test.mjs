@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CollectionRegistry } from "../dist/engine/collection/index.js";
+import { readWorkspaceManifest } from "../dist/engine/manifest.js";
 import { updateGlobalConfig } from "../dist/engine/config.js";
 import { createZvecGrep } from "../dist/index.js";
 import {
@@ -33,6 +33,11 @@ test("workspace runtime persists explicit key and endpoint but search overrides 
     endpoint,
   });
   await withPermit(root, endpoint, () => service.index());
+  const publicInfo = await service.info({ includeStatus: false });
+  assert.ok(publicInfo.collection);
+  assert.equal("embeddingRuntime" in publicInfo.collection, false);
+  assert.equal("manifestVersion" in publicInfo.collection, false);
+  assert.doesNotMatch(JSON.stringify(publicInfo), /workspace-key/);
   await service.close();
 
   assert.deepEqual(readRuntime(root), {
@@ -121,16 +126,7 @@ test("inherited provider keys are not copied into workspace metadata", async (t)
 });
 
 function readRuntime(root) {
-  const registry = new CollectionRegistry(
-    join(root, ".zvec-grep"),
-    undefined,
-    true,
-  );
-  try {
-    return registry.getEmbeddingRuntime("__anonymous__");
-  } finally {
-    registry.close();
-  }
+  return readWorkspaceManifest(join(root, ".zvec-grep")).embeddingRuntime;
 }
 
 async function withPermit(root, endpoint, operation) {

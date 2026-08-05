@@ -309,7 +309,7 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     () => parseArgs(["query", "--check-ready", "query"]),
     /zg status or zg server status/,
   );
-  assert.equal(parseArgs(["collections"]).command, "collections");
+  assert.throws(() => parseArgs(["collections"]), /Unknown command/);
   assert.deepEqual(
     parseArgs([
       "auth",
@@ -349,8 +349,6 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     "--preview=full",
     "--refresh=off",
     "--prefer-symbol",
-    "--collection",
-    "docs",
     "--home",
     "/tmp/home",
     "--hybrid",
@@ -487,10 +485,9 @@ test("CLI shape validation rejects every incompatible command family", () => {
     [["serve"], /removed/i],
     [["serve", "--mcp", "--fts", "query"], /removed/i],
     [["query", "--mcp", "query"], /Unknown option/],
-    [["status", "--collection", "docs"], /only be used with zg query/],
+    [["query", "--collection", "docs", "query"], /Unknown option/],
     [["index", "--fts", "query"], /only be used with zg query/],
     [["status", "--rg", "query"], /only be used with zg query/],
-    [["collections", "--preview", "short"], /only be used with zg query/],
     [["index", "--refresh", "off"], /only be used with zg query/],
     [["query", "--rg", "query", "--fts", "query"], /cannot be combined/],
     [["query", "--rg", "query", "--hybrid", "query"], /cannot be combined/],

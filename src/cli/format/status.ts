@@ -207,61 +207,7 @@ export function printRemoteEmbeddingAuthorizationStatus(
   }
 }
 
-export function printCollectionList(
-  collections: readonly CollectionInfo[],
-  options: CliOptions,
-): void {
-  const theme = createStatusTheme(options);
-  for (const collection of collections) {
-    const roots = collection.rootPaths.map(formatRootPath).join(", ");
-    console.log(`${theme.accent(collection.name)}\t${theme.path(roots)}`);
-  }
-}
-
-export function printCollectionInfo(
-  info: CollectionInfo,
-  status: CollectionIndexStatus | null,
-  options: CliOptions,
-): void {
-  const theme = createStatusTheme(options);
-
-  printField(theme, "name", theme.accent(info.name));
-  printField(theme, "id", info.id);
-  printField(theme, "path", theme.path(info.path));
-  printField(theme, "policy", info.indexPolicy ?? "enabled");
-  if (info.embedding) {
-    printField(
-      theme,
-      "embedding",
-      `${info.embedding.provider}/${info.embedding.model}`,
-    );
-  } else {
-    printField(theme, "embedding", theme.warning("none"));
-  }
-  printField(
-    theme,
-    "roots",
-    theme.path(info.rootPaths.map(formatRootPath).join(", ")),
-  );
-
-  if (status) {
-    printIndexStatus(theme, status);
-    if (statusNeedsRefresh(status)) {
-      printField(
-        theme,
-        "suggestion",
-        theme.accent(`zg collections index ${shellArg(info.name)}`),
-      );
-    }
-    printFailedFilesNote(
-      theme,
-      status,
-      `zg collections index ${shellArg(info.name)}`,
-    );
-  }
-}
-
-export function printAnonymousInfo(
+export function printWorkspaceInfo(
   info: ZvecGrepInfoResult,
   options: CliOptions,
 ): WorkspaceIndexState {
@@ -271,7 +217,7 @@ export function printAnonymousInfo(
   const suggestion =
     status && statusNeedsRefresh(status) ? "zg index" : info.suggestion;
 
-  const state = anonymousState(info);
+  const state = workspaceState(info);
   printWorkspaceIndexStatus(theme, {
     root: info.root,
     indexPath: info.indexPath,
@@ -630,7 +576,7 @@ function formatCount(value: number): string {
   return value.toLocaleString("en-US");
 }
 
-function anonymousState(
+function workspaceState(
   info: ZvecGrepInfoResult,
 ): "ready" | "stale" | "failed" | "disabled" | "unindexed" | "undecided" {
   if (info.indexPolicy === "disabled") {
@@ -712,73 +658,6 @@ export function printIndexPathFilterTip(options: CliOptions): void {
   );
 }
 
-export function printCollectionRemoveResult(
-  name: string,
-  removed: boolean,
-  options: CliOptions,
-): void {
-  const theme = createStatusTheme(options);
-  console.log(
-    removed
-      ? `${theme.success("Removed")} collection ${theme.accent(name)}`
-      : `${theme.warning("Collection not found")}: ${theme.accent(name)}`,
-  );
-}
-
-function printIndexStatus(
-  theme: StatusTheme,
-  status: CollectionIndexStatus,
-): void {
-  printField(
-    theme,
-    "files",
-    `${status.filesIndexed}/${status.filesScanned} indexed`,
-  );
-  printField(theme, "entities", String(status.entitiesIndexed ?? 0));
-  printField(
-    theme,
-    "truncated_fragments",
-    String(status.fragmentsTruncated ?? 0),
-  );
-  printField(
-    theme,
-    "fresh",
-    statusNeedsRefresh(status) ? theme.warning("no") : theme.success("yes"),
-  );
-  printField(theme, "changed", changedCount(theme, status));
-  printField(
-    theme,
-    "pending",
-    status.filesPending > 0
-      ? theme.warning(String(status.filesPending))
-      : theme.success(String(status.filesPending)),
-  );
-  printField(theme, "failed", failedCount(theme, status.filesFailed));
-}
-
-function printFailedFilesNote(
-  theme: StatusTheme,
-  status: CollectionIndexStatus,
-  retryCommand: string,
-): void {
-  if (status.filesFailed === 0) {
-    return;
-  }
-
-  printField(
-    theme,
-    "note",
-    theme.warning(
-      `retry ${retryCommand}; if failures persist, fix failed files or embedding configuration`,
-    ),
-  );
-
-  const reasons = summarizeFailedFileReasons(status.failedFiles, retryCommand);
-  if (reasons) {
-    printField(theme, "failed_reasons", theme.danger(reasons));
-  }
-}
-
 function summarizeFailedFileReasons(
   files: CollectionIndexStatus["failedFiles"],
   retryCommand: string,
@@ -823,16 +702,6 @@ function clipReason(reason: string): string {
   return compact.length > maxLength
     ? `${compact.slice(0, maxLength - 3)}...`
     : compact;
-}
-
-function changedCount(
-  theme: StatusTheme,
-  status: CollectionIndexStatus,
-): string {
-  const count = status.filesAdded + status.filesModified + status.filesDeleted;
-  const value = `${status.filesAdded} added, ${status.filesModified} modified, ${status.filesDeleted} deleted`;
-
-  return count > 0 ? theme.warning(value) : theme.success(value);
 }
 
 function printQueryFilters(theme: StatusTheme, options: CliOptions): void {
@@ -949,12 +818,4 @@ function formatTimeFilter(value: number): string {
 
 function identity(value: string): string {
   return value;
-}
-
-function shellArg(value: string): string {
-  if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) {
-    return value;
-  }
-
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }

@@ -9,8 +9,8 @@ import {
   resolveEmbeddingRuntimeOptions,
   type EmbeddingRuntimeConfig,
 } from "../engine/config.js";
-import { CollectionRegistry } from "../engine/collection/index.js";
-import { anonymousIndexLocation } from "../engine/service/root.js";
+import { readWorkspaceManifest } from "../engine/manifest.js";
+import { workspaceIndexLocation } from "../engine/service/root.js";
 import type {
   EmbeddingModel,
   EmbeddingModelInfo,
@@ -1256,13 +1256,8 @@ function readWorkspaceEmbeddingRuntime(
   info: ZvecGrepInfoResult,
 ): EmbeddingRuntimeConfig {
   if (!info.collection) return {};
-  const location = anonymousIndexLocation(info.root);
-  const registry = new CollectionRegistry(location.home, undefined, true);
-  try {
-    return registry.getEmbeddingRuntime(info.collection.name);
-  } finally {
-    registry.close();
-  }
+  const location = workspaceIndexLocation(info.root);
+  return readWorkspaceManifest(location.home)?.embeddingRuntime ?? {};
 }
 
 function nonEmptyEnvironmentValue(

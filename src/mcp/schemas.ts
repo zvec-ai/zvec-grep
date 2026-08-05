@@ -346,7 +346,6 @@ const searchResultSchema = z.object({
       id: z.string(),
       name: z.string(),
       path: z.string(),
-      anonymous: z.boolean(),
     })
     .optional(),
   diagnostics: z.object({

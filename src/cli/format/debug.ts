@@ -10,7 +10,7 @@ export function printDebug(
 
   if (result.collection) {
     console.error(
-      `collection=${result.collection.name} anonymous=${result.collection.anonymous} path=${result.collection.path}`,
+      `collection=${result.collection.name} path=${result.collection.path}`,
     );
   }
 

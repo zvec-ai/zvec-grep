@@ -2,8 +2,6 @@ export { createZvecGrep } from "./engine/service/index.js";
 export type {
   CreateZvecGrepOptions,
   ZvecGrep,
-  ZvecGrepCollectionIndexOptions,
-  ZvecGrepCollections,
   ZvecGrepContent,
   ZvecGrepContextCollection,
   ZvecGrepContextContainer,

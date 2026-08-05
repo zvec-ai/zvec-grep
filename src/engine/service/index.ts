@@ -2,17 +2,15 @@ export {
   createEmbeddingModelForIdentity,
   createZvecGrep,
   embeddingModelPoolKeyForIdentity,
-  openAnonymousReadSession,
+  openWorkspaceReadSession,
 } from "./zvec-grep.js";
 export type {
-  AnonymousReadSession,
+  WorkspaceReadSession,
   EmbeddingModelIdentity,
 } from "./zvec-grep.js";
 export type {
   CreateZvecGrepOptions,
   ZvecGrep,
-  ZvecGrepCollectionIndexOptions,
-  ZvecGrepCollections,
   ZvecGrepContent,
   ZvecGrepContextCollection,
   ZvecGrepContextContainer,

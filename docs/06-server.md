@@ -38,8 +38,7 @@ Use Direct mode when:
 
 - a command is an isolated one-off operation;
 - a CI job should not leave a daemon running;
-- you want foreground failures and resource lifetime tied to one process;
-- you are using named collections, which are currently Direct-only.
+- you want foreground failures and resource lifetime tied to one process.
 
 Managed `zg query --rg` does not need an index or loaded Embedding model. It
 runs locally regardless of whether a Server is available.

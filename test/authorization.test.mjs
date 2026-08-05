@@ -169,7 +169,7 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
     source: "index",
     collection: {
       id: "collection",
-      name: "__anonymous__",
+      name: "workspace",
       path: join(root, ".zvec-grep", "index"),
       rootPaths: [{ absolutePath: root, recursive: true }],
       embedding: schema,
