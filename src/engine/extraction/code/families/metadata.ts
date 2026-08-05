@@ -1,5 +1,5 @@
 import type { CodeEntityModifier } from "../../../types.js";
-import type { TSNode } from "../../tree-sitter/nodes.js";
+import type { TSNode } from "../tree-sitter/nodes.js";
 
 const COMMENT_TYPES = new Set([
   "comment",

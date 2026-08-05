@@ -57,7 +57,7 @@ export default tseslint.config(
   },
   {
     files: ["src/**/*.ts"],
-    ignores: ["src/engine/models/**/*.ts"],
+    ignores: ["src/engine/extraction/**/*.ts", "src/engine/models/**/*.ts"],
     rules: {
       "no-restricted-imports": [
         "error",
@@ -67,6 +67,11 @@ export default tseslint.config(
               regex: "(^|/)models/(?!index\\.js$)",
               message:
                 "Import the models module through models/index.ts outside src/engine/models.",
+            },
+            {
+              regex: "(^|/)extraction/(?!index\\.js$)",
+              message:
+                "Import the extraction module through extraction/index.ts outside src/engine/extraction.",
             },
           ],
         },

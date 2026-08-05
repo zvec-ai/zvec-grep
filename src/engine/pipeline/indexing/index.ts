@@ -24,8 +24,8 @@ import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
-  createDefaultExtractorRegistry,
-  type ExtractorRegistry,
+  extract,
+  type ChunkOptions,
   type Source,
 } from "../../extraction/index.js";
 import {
@@ -644,7 +644,7 @@ async function indexFiles(
   );
   const embeddingTiming = new ConcurrentTiming(timings, "index_embedding");
   const runningEmbeddings = new Set<Promise<void>>();
-  const extractorRegistry = createIndexExtractorRegistry(ctx);
+  const chunkOptions = indexChunkOptions(ctx);
   const reportEmbeddingProgress = (
     currentStats: IndexStats,
     detail: string,
@@ -694,7 +694,7 @@ async function indexFiles(
       throwIfIndexCancelled(ctx);
       onProgress(stats, `reading ${file.relativePath}`);
       const prepared = await timings.time("index_prepare", () =>
-        prepareFile(file, ctx, extractorRegistry),
+        prepareFile(file, ctx, chunkOptions),
       );
       throwIfIndexCancelled(ctx);
 
@@ -760,12 +760,12 @@ async function indexFiles(
 async function prepareFile(
   file: FileInfo,
   ctx: IndexContext,
-  extractorRegistry: ExtractorRegistry,
+  chunkOptions: ChunkOptions,
 ): Promise<PreparedFile | FailedPreparedFile> {
   try {
     throwIfIndexCancelled(ctx);
     const source = await readSource(file);
-    const extracted = await extractorRegistry.extract(source);
+    const extracted = await extract(source, chunkOptions);
     throwIfIndexCancelled(ctx);
     const fragments = extracted.filter((fragment) =>
       ctx.embeddingModel.info.inputKinds.includes(fragment.content.kind),
@@ -783,18 +783,16 @@ async function prepareFile(
   }
 }
 
-function createIndexExtractorRegistry(ctx: IndexContext): ExtractorRegistry {
+function indexChunkOptions(ctx: IndexContext): ChunkOptions {
   const maxInputTokens = ctx.embeddingModel.info.limits.maxInputTokens;
   if (maxInputTokens === undefined) {
-    return createDefaultExtractorRegistry();
+    return {};
   }
   const maxChunkChars = Math.floor(
     maxInputTokens * APPROXIMATE_CHARS_PER_TOKEN,
   );
   const chunkOverlapChars = Math.floor(maxChunkChars * CHUNK_OVERLAP_RATIO);
-  const chunkOptions = { maxChunkChars, chunkOverlapChars };
-
-  return createDefaultExtractorRegistry(chunkOptions);
+  return { maxChunkChars, chunkOverlapChars };
 }
 
 async function embedAndCommitBatch(

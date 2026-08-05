@@ -1,5 +1,5 @@
 import type { CodeEntityModifier, CodeSymbolType } from "../../types.js";
-import type { TSNode } from "../tree-sitter/nodes.js";
+import type { TSNode } from "./tree-sitter/nodes.js";
 import { C_ADAPTER } from "./languages/c.js";
 import { CPP_ADAPTER } from "./languages/cpp.js";
 import { GO_ADAPTER } from "./languages/go.js";

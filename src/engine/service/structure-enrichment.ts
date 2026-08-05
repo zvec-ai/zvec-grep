@@ -1,8 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { relative } from "node:path";
-import { CodeExtractor } from "../extraction/code/extractor.js";
-import type { Extractor } from "../extraction/index.js";
-import { MarkdownExtractor } from "../extraction/markdown/extractor.js";
+import { extract } from "../extraction/index.js";
 import type { EntityFragment, FileInfo, Range } from "../types.js";
 import type {
   ZvecGrepStructureEnrichmentDiagnostics,
@@ -31,18 +29,10 @@ export async function enrichLexicalItemsWithStructure(
   const matchedFiles = uniqueLexicalFilePaths(items);
   const selectedFiles = new Set(matchedFiles.slice(0, fileLimit));
   const fragmentsByFile = new Map<string, EntityFragment[] | null>();
-  const extractors: readonly Extractor[] = [
-    new CodeExtractor(),
-    new MarkdownExtractor(),
-  ];
   let parsedFiles = 0;
 
   for (const absolutePath of selectedFiles) {
-    const fragments = await parseStructuralFragments(
-      root,
-      absolutePath,
-      extractors,
-    );
+    const fragments = await parseStructuralFragments(root, absolutePath);
     fragmentsByFile.set(absolutePath, fragments);
     if (fragments !== null) {
       parsedFiles++;
@@ -128,7 +118,6 @@ function uniqueLexicalFilePaths(
 async function parseStructuralFragments(
   root: string,
   absolutePath: string,
-  extractors: readonly Extractor[],
 ): Promise<EntityFragment[] | null> {
   try {
     const file = await fileInfoForStructure(root, absolutePath);
@@ -142,13 +131,18 @@ async function parseStructuralFragments(
       file,
       text,
     } as const;
-    const extractor = extractors.find((candidate) =>
-      candidate.supports(source),
-    );
-    return extractor ? await extractor.extract(source) : null;
+    const fragments = await extract(source);
+    const structuralFragments = fragments.filter(isStructuralFragment);
+    return structuralFragments.length > 0 ? structuralFragments : null;
   } catch {
     return null;
   }
+}
+
+function isStructuralFragment(fragment: EntityFragment): boolean {
+  return (
+    fragment.metadata?.kind === "code" || fragment.metadata?.kind === "markdown"
+  );
 }
 
 async function fileInfoForStructure(

@@ -7,78 +7,40 @@ import type {
   TextRange,
 } from "../../types.js";
 import { makeEntityId } from "../ids.js";
-import type { ChunkOptions, Extractor } from "../index.js";
 import { validateSourceFile, type Source, type TextSource } from "../source.js";
-import { hasGrammar } from "../tree-sitter/grammar.js";
-import type { TSNode } from "../tree-sitter/nodes.js";
-import { withParser } from "../tree-sitter/parser.js";
+import { hasGrammar } from "./tree-sitter/grammar.js";
+import type { TSNode } from "./tree-sitter/nodes.js";
+import { withParser } from "./tree-sitter/parser.js";
+import type { ChunkOptions } from "../types.js";
+import { extractPlainTextFragments } from "../text/extractor.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
 
-export class CodeExtractor implements Extractor {
-  private readonly maxChunkChars: number;
-  private readonly chunkOverlapChars: number;
-
-  constructor(options: ChunkOptions = {}) {
-    const maxChunkChars = options.maxChunkChars ?? DEFAULT_CODE_CHUNK_CHARS;
-    const chunkOverlapChars =
-      options.chunkOverlapChars ?? DEFAULT_CODE_CHUNK_OVERLAP_CHARS;
-
-    if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
-      throw new EngineError(
-        "Code extractor requires a positive integer chunk size",
-        {
-          code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_SIZE",
-          context: `maxChunkChars=${maxChunkChars}`,
-        },
-      );
-    }
-
-    if (
-      !Number.isInteger(chunkOverlapChars) ||
-      chunkOverlapChars < 0 ||
-      chunkOverlapChars >= maxChunkChars
-    ) {
-      throw new EngineError(
-        "Code extractor requires overlap to be smaller than chunk size",
-        {
-          code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_OVERLAP",
-          context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
-        },
-      );
-    }
-
-    this.maxChunkChars = maxChunkChars;
-    this.chunkOverlapChars = chunkOverlapChars;
-  }
-
-  supports(source: Source): boolean {
-    return (
-      source.kind === "text" &&
-      source.file.kind === "code" &&
-      (isScriptBlockFormat(source.file.format) ||
-        (hasGrammar(source.file.format) &&
-          resolveAdapter(source.file.format) !== null))
-    );
-  }
-
-  async extract(source: Source): Promise<EntityFragment[]> {
-    if (!this.supports(source) || source.kind !== "text") {
+export class CodeExtractor {
+  async extract(
+    source: Source,
+    options: ChunkOptions = {},
+  ): Promise<EntityFragment[]> {
+    if (source.kind !== "text" || source.file.kind !== "code") {
       return [];
     }
 
     validateSourceFile(source);
+    const chunkOptions = resolveCodeChunkOptions(options);
 
     if (isScriptBlockFormat(source.file.format)) {
-      return this.extractScriptBlocks(source);
+      const fragments = await this.extractScriptBlocks(source, chunkOptions);
+      return fragments.length > 0
+        ? fragments
+        : this.fallback(source, chunkOptions);
     }
 
     const adapter = resolveAdapter(source.file.format);
-    if (!adapter) {
-      return [];
+    if (!hasGrammar(source.file.format) || !adapter) {
+      return this.fallback(source, chunkOptions);
     }
 
     const extracted = await withParser(
@@ -95,8 +57,8 @@ export class CodeExtractor implements Extractor {
             source,
             adapter,
             entity,
-            this.maxChunkChars,
-            this.chunkOverlapChars,
+            chunkOptions.maxChunkChars,
+            chunkOptions.chunkOverlapChars,
           );
           const majorId =
             fragments[0]?.group === ""
@@ -123,14 +85,26 @@ export class CodeExtractor implements Extractor {
     );
 
     if (!extracted || extracted.length === 0) {
-      return [];
+      return this.fallback(source, chunkOptions);
     }
 
     return extracted;
   }
 
+  private fallback(
+    source: TextSource,
+    options: Required<ChunkOptions>,
+  ): EntityFragment[] {
+    return extractPlainTextFragments(
+      source,
+      options.maxChunkChars,
+      options.chunkOverlapChars,
+    );
+  }
+
   private async extractScriptBlocks(
     source: TextSource,
+    options: Required<ChunkOptions>,
   ): Promise<EntityFragment[]> {
     const fragments: EntityFragment[] = [];
 
@@ -139,11 +113,14 @@ export class CodeExtractor implements Extractor {
         ...source.file,
         format: block.format,
       };
-      const blockFragments = await this.extract({
-        kind: "text",
-        file: blockFile,
-        text: block.text,
-      });
+      const blockFragments = await this.extract(
+        {
+          kind: "text",
+          file: blockFile,
+          text: block.text,
+        },
+        options,
+      );
 
       fragments.push(
         ...remapScriptBlockFragments(
@@ -158,6 +135,40 @@ export class CodeExtractor implements Extractor {
 
     return fragments;
   }
+}
+
+function resolveCodeChunkOptions(
+  options: ChunkOptions,
+): Required<ChunkOptions> {
+  const maxChunkChars = options.maxChunkChars ?? DEFAULT_CODE_CHUNK_CHARS;
+  const chunkOverlapChars =
+    options.chunkOverlapChars ?? DEFAULT_CODE_CHUNK_OVERLAP_CHARS;
+
+  if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
+    throw new EngineError(
+      "Code extractor requires a positive integer chunk size",
+      {
+        code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_SIZE",
+        context: `maxChunkChars=${maxChunkChars}`,
+      },
+    );
+  }
+
+  if (
+    !Number.isInteger(chunkOverlapChars) ||
+    chunkOverlapChars < 0 ||
+    chunkOverlapChars >= maxChunkChars
+  ) {
+    throw new EngineError(
+      "Code extractor requires overlap to be smaller than chunk size",
+      {
+        code: "ZVEC_GREP.ENGINE.EXTRACTORS.CODE_INVALID_CHUNK_OVERLAP",
+        context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
+      },
+    );
+  }
+
+  return { maxChunkChars, chunkOverlapChars };
 }
 
 type CodeEntity = {

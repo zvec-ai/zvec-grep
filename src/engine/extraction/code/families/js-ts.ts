@@ -1,5 +1,5 @@
 import type { CodeSymbolType } from "../../../types.js";
-import type { TSNode } from "../../tree-sitter/nodes.js";
+import type { TSNode } from "../tree-sitter/nodes.js";
 import {
   closestAncestor,
   extractCommonModifiers,

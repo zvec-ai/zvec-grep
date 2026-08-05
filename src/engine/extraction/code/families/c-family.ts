@@ -1,5 +1,5 @@
 import type { CodeSymbolType } from "../../../types.js";
-import { findIdentifierLeaf, type TSNode } from "../../tree-sitter/nodes.js";
+import { findIdentifierLeaf, type TSNode } from "../tree-sitter/nodes.js";
 import type { LanguageAdapter } from "../adapter.js";
 import {
   extractCommonModifiers,

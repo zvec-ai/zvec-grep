@@ -5,8 +5,9 @@ import type {
   TextRange,
 } from "../../types.js";
 import { makeEntityId } from "../ids.js";
-import type { ChunkOptions, Extractor } from "../index.js";
 import { validateSourceFile, type Source, type TextSource } from "../source.js";
+import { extractPlainTextFragments } from "../text/extractor.js";
+import type { ChunkOptions } from "../types.js";
 
 const DEFAULT_MARKDOWN_CHUNK_CHARS = 3600;
 const DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS = 540;
@@ -29,58 +30,22 @@ type MarkdownWindow = {
   range: TextRange;
 };
 
-export class MarkdownExtractor implements Extractor {
-  private readonly maxChunkChars: number;
-  private readonly chunkOverlapChars: number;
-
-  constructor(options: ChunkOptions = {}) {
-    const maxChunkChars = options.maxChunkChars ?? DEFAULT_MARKDOWN_CHUNK_CHARS;
-    const chunkOverlapChars =
-      options.chunkOverlapChars ?? DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS;
-
-    if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
-      throw new EngineError(
-        "Markdown extractor requires a positive integer chunk size",
-        {
-          code: "ZVEC_GREP.ENGINE.EXTRACTORS.MARKDOWN_INVALID_CHUNK_SIZE",
-          context: `maxChunkChars=${maxChunkChars}`,
-        },
-      );
-    }
-
-    if (
-      !Number.isInteger(chunkOverlapChars) ||
-      chunkOverlapChars < 0 ||
-      chunkOverlapChars >= maxChunkChars
-    ) {
-      throw new EngineError(
-        "Markdown extractor requires overlap to be smaller than chunk size",
-        {
-          code: "ZVEC_GREP.ENGINE.EXTRACTORS.MARKDOWN_INVALID_CHUNK_OVERLAP",
-          context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
-        },
-      );
-    }
-
-    this.maxChunkChars = maxChunkChars;
-    this.chunkOverlapChars = chunkOverlapChars;
-  }
-
-  supports(source: Source): boolean {
-    return source.kind === "text" && source.file.format === "markdown";
-  }
-
-  async extract(source: Source): Promise<EntityFragment[]> {
-    if (!this.supports(source) || source.kind !== "text") {
+export class MarkdownExtractor {
+  async extract(
+    source: Source,
+    options: ChunkOptions = {},
+  ): Promise<EntityFragment[]> {
+    if (source.kind !== "text" || source.file.format !== "markdown") {
       return [];
     }
 
     validateSourceFile(source);
+    const chunkOptions = resolveMarkdownChunkOptions(options);
 
     const lines = source.text.split("\n");
     const headings = scanHeadings(lines);
     if (headings.length === 0) {
-      return [];
+      return this.fallback(source, chunkOptions);
     }
 
     const lineOffsets = computeLineOffsets(lines);
@@ -95,8 +60,8 @@ export class MarkdownExtractor implements Extractor {
         lineOffsets,
         fenceLines,
         section,
-        maxChars: this.maxChunkChars,
-        overlapChars: this.chunkOverlapChars,
+        maxChars: chunkOptions.maxChunkChars,
+        overlapChars: chunkOptions.chunkOverlapChars,
       });
 
       if (windows.length > 1) {
@@ -147,8 +112,55 @@ export class MarkdownExtractor implements Extractor {
       }
     }
 
-    return fragments;
+    return fragments.length > 0
+      ? fragments
+      : this.fallback(source, chunkOptions);
   }
+
+  private fallback(
+    source: TextSource,
+    options: Required<ChunkOptions>,
+  ): EntityFragment[] {
+    return extractPlainTextFragments(
+      source,
+      options.maxChunkChars,
+      options.chunkOverlapChars,
+    );
+  }
+}
+
+function resolveMarkdownChunkOptions(
+  options: ChunkOptions,
+): Required<ChunkOptions> {
+  const maxChunkChars = options.maxChunkChars ?? DEFAULT_MARKDOWN_CHUNK_CHARS;
+  const chunkOverlapChars =
+    options.chunkOverlapChars ?? DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS;
+
+  if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
+    throw new EngineError(
+      "Markdown extractor requires a positive integer chunk size",
+      {
+        code: "ZVEC_GREP.ENGINE.EXTRACTORS.MARKDOWN_INVALID_CHUNK_SIZE",
+        context: `maxChunkChars=${maxChunkChars}`,
+      },
+    );
+  }
+
+  if (
+    !Number.isInteger(chunkOverlapChars) ||
+    chunkOverlapChars < 0 ||
+    chunkOverlapChars >= maxChunkChars
+  ) {
+    throw new EngineError(
+      "Markdown extractor requires overlap to be smaller than chunk size",
+      {
+        code: "ZVEC_GREP.ENGINE.EXTRACTORS.MARKDOWN_INVALID_CHUNK_OVERLAP",
+        context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
+      },
+    );
+  }
+
+  return { maxChunkChars, chunkOverlapChars };
 }
 
 function markdownWindowToFragment(

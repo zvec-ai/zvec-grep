@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CodeExtractor } from "../../dist/engine/extraction/code/extractor.js";
+import { ImageExtractor } from "../../dist/engine/extraction/image/extractor.js";
 import { MarkdownExtractor } from "../../dist/engine/extraction/markdown/extractor.js";
-import {
-  ExtractorRegistry,
-  ImageExtractor,
-  TextExtractor,
-  extractFragments,
-} from "../../dist/engine/extraction/index.js";
+import { extract } from "../../dist/engine/extraction/index.js";
+import { TextExtractor } from "../../dist/engine/extraction/text/extractor.js";
 
 function file(overrides = {}) {
   return {
@@ -29,43 +26,39 @@ function textSource(text, overrides = {}) {
 }
 
 test("text extractor validates options, sources, chunks, and overlap", async () => {
-  assert.throws(() => new TextExtractor({ maxChunkChars: 0 }), /chunk size/);
-  assert.throws(
-    () => new TextExtractor({ maxChunkChars: 10, chunkOverlapChars: 10 }),
-    /overlap/,
+  const extractor = new TextExtractor();
+  await assert.rejects(
+    extractor.extract(textSource("value"), { maxChunkChars: 0 }),
+    /chunk size/,
   );
-  assert.throws(
-    () => new TextExtractor({ maxChunkChars: 10, chunkOverlapChars: -1 }),
-    /overlap/,
-  );
-
-  const extractor = new TextExtractor({
-    maxChunkChars: 18,
-    chunkOverlapChars: 6,
-  });
-  assert.equal(extractor.supports(textSource("hello")), true);
-  assert.equal(
-    extractor.supports({
-      kind: "image",
-      data: new Uint8Array([1]),
-      format: "png",
-      file: file({ kind: "image", format: "png" }),
+  await assert.rejects(
+    extractor.extract(textSource("value"), {
+      maxChunkChars: 10,
+      chunkOverlapChars: 10,
     }),
-    false,
+    /overlap/,
+  );
+  await assert.rejects(
+    extractor.extract(textSource("value"), {
+      maxChunkChars: 10,
+      chunkOverlapChars: -1,
+    }),
+    /overlap/,
   );
 
   const chunks = await extractor.extract(
     textSource("alpha beta\ngamma delta\nepsilon zeta\n"),
+    { maxChunkChars: 18, chunkOverlapChars: 6 },
   );
   assert.ok(chunks.length >= 2);
   assert.equal(chunks[0].id.length, 64);
   assert.equal(chunks[0].range.kind, "text");
   assert.equal(chunks[0].range.startLine, 1);
 
-  const longLine = await new TextExtractor({
-    maxChunkChars: 10,
-    chunkOverlapChars: 0,
-  }).extract(textSource("sentence, with punctuation and-more"));
+  const longLine = await extractor.extract(
+    textSource("sentence, with punctuation and-more"),
+    { maxChunkChars: 10, chunkOverlapChars: 0 },
+  );
   assert.ok(longLine.length >= 3);
   assert.equal(
     longLine.every((item) => item.content.text.length <= 10),
@@ -96,7 +89,27 @@ test("text extractor validates options, sources, chunks, and overlap", async () 
   );
 });
 
-test("image extractor validates data and registry fallback behavior", async () => {
+test("global extraction keeps concurrent chunk options isolated", async () => {
+  const source = textSource(
+    Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"),
+  );
+  const [smallChunks, largeChunks] = await Promise.all([
+    extract(source, { maxChunkChars: 24, chunkOverlapChars: 0 }),
+    extract(source, { maxChunkChars: 240, chunkOverlapChars: 0 }),
+  ]);
+
+  assert.ok(smallChunks.length > largeChunks.length);
+  assert.equal(
+    smallChunks.every((fragment) => fragment.content.text.length <= 24),
+    true,
+  );
+  assert.equal(
+    largeChunks.every((fragment) => fragment.content.text.length <= 240),
+    true,
+  );
+});
+
+test("image extractor validates data", async () => {
   const source = {
     kind: "image",
     data: new Uint8Array([1, 2, 3]),
@@ -104,7 +117,6 @@ test("image extractor validates data and registry fallback behavior", async () =
     file: file({ kind: "image", format: "png" }),
   };
   const extractor = new ImageExtractor();
-  assert.equal(extractor.supports(source), true);
   const [fragment] = await extractor.extract(source);
   assert.equal(fragment.range.kind, "file");
   assert.equal(fragment.content.data, source.data);
@@ -114,51 +126,32 @@ test("image extractor validates data and registry fallback behavior", async () =
     /non-empty image data/,
   );
   await assert.rejects(extractor.extract(textSource("text")), /non-image/);
-  assert.throws(() => new ExtractorRegistry([]), /at least one extractor/);
-
-  const empty = { supports: () => true, extract: async () => [] };
-  const success = {
-    supports: () => true,
-    extract: async () => [
-      {
-        id: "custom",
-        fileId: "file-1",
-        range: { kind: "file" },
-        content: { kind: "text", text: "custom" },
-      },
-    ],
-  };
-  const registry = new ExtractorRegistry([empty, success]);
-  assert.equal(registry.resolve(textSource("value")), empty);
-  assert.equal((await registry.extract(textSource("value")))[0].id, "custom");
-  assert.deepEqual(
-    await new ExtractorRegistry([empty]).extract(textSource("value")),
-    [],
-  );
-  const unsupported = new ExtractorRegistry([
-    { supports: () => false, extract: async () => [] },
-  ]);
-  assert.throws(() => unsupported.resolve(textSource("value")), /supports/);
-  await assert.rejects(unsupported.extract(textSource("value")), /supports/);
 });
 
 test("markdown extractor handles heading styles, fences, hierarchy, and windows", async () => {
-  assert.throws(
-    () => new MarkdownExtractor({ maxChunkChars: 0 }),
+  const extractor = new MarkdownExtractor();
+  const optionSource = textSource("# Heading", {
+    kind: "text",
+    format: "markdown",
+  });
+  await assert.rejects(
+    extractor.extract(optionSource, { maxChunkChars: 0 }),
     /chunk size/,
   );
-  assert.throws(
-    () => new MarkdownExtractor({ maxChunkChars: 10, chunkOverlapChars: 10 }),
+  await assert.rejects(
+    extractor.extract(optionSource, {
+      maxChunkChars: 10,
+      chunkOverlapChars: 10,
+    }),
     /overlap/,
   );
-  assert.throws(
-    () => new MarkdownExtractor({ maxChunkChars: 10, chunkOverlapChars: -1 }),
+  await assert.rejects(
+    extractor.extract(optionSource, {
+      maxChunkChars: 10,
+      chunkOverlapChars: -1,
+    }),
     /overlap/,
   );
-  const extractor = new MarkdownExtractor({
-    maxChunkChars: 48,
-    chunkOverlapChars: 8,
-  });
   const source = textSource(
     [
       "preface",
@@ -177,8 +170,10 @@ test("markdown extractor handles heading styles, fences, hierarchy, and windows"
     ].join("\n"),
     { kind: "text", format: "markdown", relativePath: "README.md" },
   );
-  assert.equal(extractor.supports(source), true);
-  const fragments = await extractor.extract(source);
+  const fragments = await extractor.extract(source, {
+    maxChunkChars: 48,
+    chunkOverlapChars: 8,
+  });
   assert.ok(fragments.length >= 4);
   assert.ok(fragments.some((item) => item.metadata?.heading === "Parent"));
   assert.ok(
@@ -199,24 +194,31 @@ test("markdown extractor handles heading styles, fences, hierarchy, and windows"
   );
 
   assert.deepEqual(await extractor.extract(textSource("plain text")), []);
-  assert.deepEqual(
-    await extractor.extract(
-      textSource("plain markdown", { kind: "text", format: "markdown" }),
-    ),
-    [],
+  const plainMarkdown = await extractor.extract(
+    textSource("plain markdown", { kind: "text", format: "markdown" }),
   );
+  assert.equal(plainMarkdown.length, 1);
+  assert.equal(plainMarkdown[0].content.text, "plain markdown");
+  assert.equal(plainMarkdown[0].metadata, undefined);
 });
 
 test("code extractor parses TypeScript and script blocks", async () => {
-  assert.throws(() => new CodeExtractor({ maxChunkChars: 0 }), /chunk size/);
-  assert.throws(
-    () => new CodeExtractor({ maxChunkChars: 20, chunkOverlapChars: 20 }),
+  const extractor = new CodeExtractor();
+  const optionSource = textSource("export const value = 1;", {
+    kind: "code",
+    format: "typescript",
+  });
+  await assert.rejects(
+    extractor.extract(optionSource, { maxChunkChars: 0 }),
+    /chunk size/,
+  );
+  await assert.rejects(
+    extractor.extract(optionSource, {
+      maxChunkChars: 20,
+      chunkOverlapChars: 20,
+    }),
     /overlap/,
   );
-  const extractor = new CodeExtractor({
-    maxChunkChars: 120,
-    chunkOverlapChars: 20,
-  });
   const typescript = textSource(
     [
       "/** Computes a value. */",
@@ -228,8 +230,10 @@ test("code extractor parses TypeScript and script blocks", async () => {
     ].join("\n"),
     { kind: "code", format: "typescript", relativePath: "fixture.ts" },
   );
-  assert.equal(extractor.supports(typescript), true);
-  const fragments = await extractor.extract(typescript);
+  const fragments = await extractor.extract(typescript, {
+    maxChunkChars: 120,
+    chunkOverlapChars: 20,
+  });
   assert.ok(fragments.length >= 2);
   assert.ok(
     fragments.some((item) => item.metadata?.symbolName === "computeValue"),
@@ -251,31 +255,42 @@ test("code extractor parses TypeScript and script blocks", async () => {
   assert.ok(
     scriptFragments.some((item) => item.metadata?.symbolName === "insideBlock"),
   );
-  assert.deepEqual(
-    await extractor.extract(
-      textSource("value", { kind: "code", format: "unknown" }),
-    ),
-    [],
+  const unknownCode = await extractor.extract(
+    textSource("value", { kind: "code", format: "unknown" }),
   );
+  assert.equal(unknownCode.length, 1);
+  assert.equal(unknownCode[0].content.text, "value");
+  assert.equal(unknownCode[0].metadata, undefined);
 
-  const defaults = await extractFragments(typescript);
+  const plainCode = await extractor.extract(
+    textSource("// no declarations", {
+      kind: "code",
+      format: "typescript",
+      relativePath: "plain.ts",
+    }),
+  );
+  assert.equal(plainCode.length, 1);
+  assert.equal(plainCode[0].content.text, "// no declarations");
+  assert.equal(plainCode[0].metadata, undefined);
+
+  const defaults = await extract(typescript);
   assert.ok(defaults.length > 0);
 });
 
 test("code extractor applies character limits to oversized single lines", async () => {
   const maxChunkChars = 48;
-  const extractor = new CodeExtractor({
-    maxChunkChars,
-    chunkOverlapChars: 6,
-  });
+  const extractor = new CodeExtractor();
   const source = textSource(
     `export function f() { return "${"value".repeat(40)}"; }`,
     { kind: "code", format: "typescript", relativePath: "fixture.ts" },
   );
 
-  const fragments = (await extractor.extract(source)).filter(
-    (fragment) => fragment.metadata?.symbolName === "f",
-  );
+  const fragments = (
+    await extractor.extract(source, {
+      maxChunkChars,
+      chunkOverlapChars: 6,
+    })
+  ).filter((fragment) => fragment.metadata?.symbolName === "f");
   assert.ok(fragments.length > 2);
 
   for (const fragment of fragments) {
@@ -290,10 +305,7 @@ test("code extractor applies character limits to oversized single lines", async 
 });
 
 test("code extractor supports the bundled language grammar and adapter matrix", async () => {
-  const extractor = new CodeExtractor({
-    maxChunkChars: 500,
-    chunkOverlapChars: 50,
-  });
+  const extractor = new CodeExtractor();
   const fixtures = [
     ["c", "int add(int a, int b) { return a + b; }", "add"],
     ["cpp", "class Widget { public: int value() { return 1; } };", "Widget"],
@@ -322,8 +334,10 @@ test("code extractor supports the bundled language grammar and adapter matrix", 
       format,
       relativePath: `fixture.${format}`,
     });
-    assert.equal(extractor.supports(source), true, format);
-    const fragments = await extractor.extract(source);
+    const fragments = await extractor.extract(source, {
+      maxChunkChars: 500,
+      chunkOverlapChars: 50,
+    });
     assert.ok(fragments.length > 0, format);
     assert.ok(
       fragments.some((item) => item.metadata?.symbolName === expectedName),
