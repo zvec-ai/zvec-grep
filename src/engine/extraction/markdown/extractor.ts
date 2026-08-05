@@ -1,15 +1,12 @@
+import { EngineError } from "../../errors/index.js";
 import type {
   EntityFragment,
   MarkdownEntityMetadata,
   TextRange,
 } from "../../types.js";
 import { makeEntityId } from "../ids.js";
-import type { Extractor, Source, TextSource } from "../index.js";
-
-export type MarkdownExtractorOptions = {
-  maxChunkChars?: number;
-  chunkOverlapChars?: number;
-};
+import type { ChunkOptions, Extractor } from "../index.js";
+import { validateSourceFile, type Source, type TextSource } from "../source.js";
 
 const DEFAULT_MARKDOWN_CHUNK_CHARS = 3600;
 const DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS = 540;
@@ -36,10 +33,37 @@ export class MarkdownExtractor implements Extractor {
   private readonly maxChunkChars: number;
   private readonly chunkOverlapChars: number;
 
-  constructor(options: MarkdownExtractorOptions = {}) {
-    this.maxChunkChars = options.maxChunkChars ?? DEFAULT_MARKDOWN_CHUNK_CHARS;
-    this.chunkOverlapChars =
+  constructor(options: ChunkOptions = {}) {
+    const maxChunkChars = options.maxChunkChars ?? DEFAULT_MARKDOWN_CHUNK_CHARS;
+    const chunkOverlapChars =
       options.chunkOverlapChars ?? DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS;
+
+    if (!Number.isInteger(maxChunkChars) || maxChunkChars <= 0) {
+      throw new EngineError(
+        "Markdown extractor requires a positive integer chunk size",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.MARKDOWN_INVALID_CHUNK_SIZE",
+          context: `maxChunkChars=${maxChunkChars}`,
+        },
+      );
+    }
+
+    if (
+      !Number.isInteger(chunkOverlapChars) ||
+      chunkOverlapChars < 0 ||
+      chunkOverlapChars >= maxChunkChars
+    ) {
+      throw new EngineError(
+        "Markdown extractor requires overlap to be smaller than chunk size",
+        {
+          code: "ZVEC_GREP.ENGINE.EXTRACTORS.MARKDOWN_INVALID_CHUNK_OVERLAP",
+          context: `maxChunkChars=${maxChunkChars} chunkOverlapChars=${chunkOverlapChars}`,
+        },
+      );
+    }
+
+    this.maxChunkChars = maxChunkChars;
+    this.chunkOverlapChars = chunkOverlapChars;
   }
 
   supports(source: Source): boolean {
@@ -50,6 +74,8 @@ export class MarkdownExtractor implements Extractor {
     if (!this.supports(source) || source.kind !== "text") {
       return [];
     }
+
+    validateSourceFile(source);
 
     const lines = source.text.split("\n");
     const headings = scanHeadings(lines);

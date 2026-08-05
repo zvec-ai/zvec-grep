@@ -1,40 +1,18 @@
 import { EngineError } from "../errors/index.js";
-import type {
-  EntityFragment,
-  FileInfo,
-  ImageFormat,
-  TextRange,
-} from "../types.js";
+import type { EntityFragment, TextRange } from "../types.js";
 import { makeEntityId } from "./ids.js";
-import { CodeExtractor, type CodeExtractorOptions } from "./code/extractor.js";
+import { CodeExtractor } from "./code/extractor.js";
 import { MarkdownExtractor } from "./markdown/extractor.js";
+import { validateSourceFile, type Source } from "./source.js";
 
-export type SourceKind = "text" | "image";
-
-type SourceBase = {
-  kind: SourceKind;
-  file: FileInfo;
-};
-
-export type TextSource = SourceBase & {
-  kind: "text";
-  text: string;
-};
-
-export type ImageSource = SourceBase & {
-  kind: "image";
-  data: Uint8Array;
-  format: ImageFormat;
-};
-
-export type Source = TextSource | ImageSource;
+export type { ImageSource, Source, SourceKind, TextSource } from "./source.js";
 
 export interface Extractor {
   supports(source: Source): boolean;
   extract(source: Source): Promise<EntityFragment[]>;
 }
 
-export type TextExtractorOptions = {
+export type ChunkOptions = {
   maxChunkChars?: number;
   chunkOverlapChars?: number;
 };
@@ -47,7 +25,7 @@ export class TextExtractor implements Extractor {
   private readonly maxChunkChars: number;
   private readonly chunkOverlapChars: number;
 
-  constructor(options: TextExtractorOptions = {}) {
+  constructor(options: ChunkOptions = {}) {
     const maxChunkChars = options.maxChunkChars ?? DEFAULT_TEXT_CHUNK_CHARS;
     const chunkOverlapChars =
       options.chunkOverlapChars ?? DEFAULT_TEXT_CHUNK_OVERLAP_CHARS;
@@ -151,17 +129,13 @@ export class ImageExtractor implements Extractor {
   }
 }
 
-export type DefaultExtractorOptions = {
-  code?: CodeExtractorOptions;
-};
-
 function createDefaultExtractors(
-  options: DefaultExtractorOptions = {},
+  options: ChunkOptions = {},
 ): readonly Extractor[] {
   return [
-    new CodeExtractor(options.code),
-    new MarkdownExtractor(),
-    new TextExtractor(),
+    new CodeExtractor(options),
+    new MarkdownExtractor(options),
+    new TextExtractor(options),
     new ImageExtractor(),
   ];
 }
@@ -228,7 +202,7 @@ export class ExtractorRegistry {
 }
 
 export function createDefaultExtractorRegistry(
-  options: DefaultExtractorOptions = {},
+  options: ChunkOptions = {},
 ): ExtractorRegistry {
   return new ExtractorRegistry(createDefaultExtractors(options));
 }
@@ -407,33 +381,4 @@ function findLineCut(line: string, maxChars: number): number {
   }
 
   return bestPosition > 0 ? bestPosition : maxChars;
-}
-
-function validateSourceFile(source: Source): void {
-  if (source.file.id.trim().length === 0) {
-    throw new EngineError("Extractor source requires a non-empty file id", {
-      code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_FILE_ID",
-      context: `sourceKind=${source.kind}`,
-    });
-  }
-
-  if (source.file.absolutePath.trim().length === 0) {
-    throw new EngineError(
-      "Extractor source requires a non-empty absolute file path",
-      {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_ABSOLUTE_FILE_PATH",
-        context: `fileId=${source.file.id} sourceKind=${source.kind}`,
-      },
-    );
-  }
-
-  if (source.file.relativePath.trim().length === 0) {
-    throw new EngineError(
-      "Extractor source requires a non-empty relative file path",
-      {
-        code: "ZVEC_GREP.ENGINE.EXTRACTORS.EMPTY_RELATIVE_FILE_PATH",
-        context: `fileId=${source.file.id} sourceKind=${source.kind}`,
-      },
-    );
-  }
 }

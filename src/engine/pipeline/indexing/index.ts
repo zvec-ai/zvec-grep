@@ -34,8 +34,8 @@ import {
   scanRootPaths,
 } from "./scanner/index.js";
 
-const APPROXIMATE_CODE_CHARS_PER_TOKEN = 2;
-const CODE_CHUNK_OVERLAP_RATIO = 0.15;
+const APPROXIMATE_CHARS_PER_TOKEN = 2;
+const CHUNK_OVERLAP_RATIO = 0.15;
 
 export type IndexContext = {
   collection: CollectionInfo;
@@ -789,15 +789,12 @@ function createIndexExtractorRegistry(ctx: IndexContext): ExtractorRegistry {
     return createDefaultExtractorRegistry();
   }
   const maxChunkChars = Math.floor(
-    maxInputTokens * APPROXIMATE_CODE_CHARS_PER_TOKEN,
+    maxInputTokens * APPROXIMATE_CHARS_PER_TOKEN,
   );
+  const chunkOverlapChars = Math.floor(maxChunkChars * CHUNK_OVERLAP_RATIO);
+  const chunkOptions = { maxChunkChars, chunkOverlapChars };
 
-  return createDefaultExtractorRegistry({
-    code: {
-      maxChunkChars,
-      chunkOverlapChars: Math.floor(maxChunkChars * CODE_CHUNK_OVERLAP_RATIO),
-    },
-  });
+  return createDefaultExtractorRegistry(chunkOptions);
 }
 
 async function embedAndCommitBatch(

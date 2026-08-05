@@ -184,7 +184,7 @@ test("changedPaths indexes and deletes only the affected paths", async () => {
   }
 });
 
-test("indexing approximates code chunk characters from the model input limit", async () => {
+test("indexing applies the model input limit to code, markdown, and text chunks", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-token-chunks-"),
   );
@@ -198,6 +198,11 @@ test("indexing approximates code chunk characters from the model input limit", a
   assert.ok(oversized.length > 120 * 2);
   await writeFile(join(root, "near-limit.ts"), nearLimit);
   await writeFile(oversizedPath, oversized);
+  await writeFile(join(root, "oversized.txt"), "t".repeat(520));
+  await writeFile(
+    join(root, "oversized.md"),
+    `# Heading\n${"m".repeat(520)}\n`,
+  );
   const model = new InputLimitedEmbeddingModel();
   let service = await createZvecGrep({ root, embeddingModel: model });
 
@@ -213,6 +218,21 @@ test("indexing approximates code chunk characters from the model input limit", a
       model.embeddedTexts.filter((text) =>
         text.includes("symbol: function oversized"),
       ).length > 2,
+    );
+    const textChunks = model.embeddedTexts.filter((text) => /^t+$/.test(text));
+    assert.ok(textChunks.length > 2);
+    assert.equal(
+      textChunks.every((text) => text.length <= 120 * 2),
+      true,
+    );
+    const markdownChunks = model.embeddedTexts.flatMap((text) => {
+      const body = text.match(/\n(m+)$/)?.[1];
+      return body ? [body] : [];
+    });
+    assert.ok(markdownChunks.length > 2);
+    assert.equal(
+      markdownChunks.every((text) => text.length <= 120 * 2),
+      true,
     );
     const truncatedFragmentCount = model.embeddedTexts.filter((text) =>
       text.includes("symbol: function oversized"),

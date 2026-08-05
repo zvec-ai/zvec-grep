@@ -143,6 +143,18 @@ test("image extractor validates data and registry fallback behavior", async () =
 });
 
 test("markdown extractor handles heading styles, fences, hierarchy, and windows", async () => {
+  assert.throws(
+    () => new MarkdownExtractor({ maxChunkChars: 0 }),
+    /chunk size/,
+  );
+  assert.throws(
+    () => new MarkdownExtractor({ maxChunkChars: 10, chunkOverlapChars: 10 }),
+    /overlap/,
+  );
+  assert.throws(
+    () => new MarkdownExtractor({ maxChunkChars: 10, chunkOverlapChars: -1 }),
+    /overlap/,
+  );
   const extractor = new MarkdownExtractor({
     maxChunkChars: 48,
     chunkOverlapChars: 8,
@@ -181,6 +193,11 @@ test("markdown extractor handles heading styles, fences, hierarchy, and windows"
   );
   assert.ok(fragments.some((item) => item.group));
 
+  await assert.rejects(
+    extractor.extract({ ...source, file: { ...source.file, id: "" } }),
+    /non-empty file id/,
+  );
+
   assert.deepEqual(await extractor.extract(textSource("plain text")), []);
   assert.deepEqual(
     await extractor.extract(
@@ -218,6 +235,13 @@ test("code extractor parses TypeScript and script blocks", async () => {
     fragments.some((item) => item.metadata?.symbolName === "computeValue"),
   );
   assert.ok(fragments.some((item) => item.metadata?.symbolName === "handler"));
+  await assert.rejects(
+    extractor.extract({
+      ...typescript,
+      file: { ...typescript.file, relativePath: "" },
+    }),
+    /relative file path/,
+  );
 
   const vue = textSource(
     '<template><div /></template>\n<script setup lang="ts">\nexport const insideBlock = () => 1;\n</script>',

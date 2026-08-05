@@ -7,17 +7,13 @@ import type {
   TextRange,
 } from "../../types.js";
 import { makeEntityId } from "../ids.js";
-import type { Extractor, Source, TextSource } from "../index.js";
+import type { ChunkOptions, Extractor } from "../index.js";
+import { validateSourceFile, type Source, type TextSource } from "../source.js";
 import { hasGrammar } from "../tree-sitter/grammar.js";
 import type { TSNode } from "../tree-sitter/nodes.js";
 import { withParser } from "../tree-sitter/parser.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
-
-export type CodeExtractorOptions = {
-  maxChunkChars?: number;
-  chunkOverlapChars?: number;
-};
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
@@ -26,7 +22,7 @@ export class CodeExtractor implements Extractor {
   private readonly maxChunkChars: number;
   private readonly chunkOverlapChars: number;
 
-  constructor(options: CodeExtractorOptions = {}) {
+  constructor(options: ChunkOptions = {}) {
     const maxChunkChars = options.maxChunkChars ?? DEFAULT_CODE_CHUNK_CHARS;
     const chunkOverlapChars =
       options.chunkOverlapChars ?? DEFAULT_CODE_CHUNK_OVERLAP_CHARS;
@@ -73,6 +69,8 @@ export class CodeExtractor implements Extractor {
     if (!this.supports(source) || source.kind !== "text") {
       return [];
     }
+
+    validateSourceFile(source);
 
     if (isScriptBlockFormat(source.file.format)) {
       return this.extractScriptBlocks(source);
