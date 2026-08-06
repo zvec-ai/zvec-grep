@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CodeExtractor } from "../../dist/engine/extraction/code/extractor.js";
-import { ImageExtractor } from "../../dist/engine/extraction/image/extractor.js";
-import { MarkdownExtractor } from "../../dist/engine/extraction/markdown/extractor.js";
-import { extract } from "../../dist/engine/extraction/index.js";
-import { TextExtractor } from "../../dist/engine/extraction/text/extractor.js";
+import { CodeExtractor } from "../../../dist/engine/extraction/code/extractor.js";
+import { ImageExtractor } from "../../../dist/engine/extraction/image/extractor.js";
+import { MarkdownExtractor } from "../../../dist/engine/extraction/markdown/extractor.js";
+import { extract } from "../../../dist/engine/extraction/index.js";
+import { TextExtractor } from "../../../dist/engine/extraction/text/extractor.js";
 
 function file(overrides = {}) {
   return {
@@ -107,6 +107,47 @@ test("global extraction keeps concurrent chunk options isolated", async () => {
     largeChunks.every((fragment) => fragment.content.text.length <= 240),
     true,
   );
+});
+
+test("global extraction routes code, markdown, text, and image sources", async () => {
+  const [code, markdown, text, image] = await Promise.all([
+    extract(
+      textSource("export function routed() { return true; }", {
+        kind: "code",
+        format: "typescript",
+        relativePath: "fixture.ts",
+      }),
+    ),
+    extract(
+      textSource("# Routed\nBody", {
+        kind: "text",
+        format: "markdown",
+        relativePath: "README.md",
+      }),
+    ),
+    extract(
+      textSource('{"routed":true}', {
+        kind: "data",
+        format: "json",
+        relativePath: "fixture.json",
+      }),
+    ),
+    extract({
+      kind: "image",
+      data: new Uint8Array([1, 2, 3]),
+      format: "png",
+      file: file({ kind: "image", format: "png", relativePath: "fixture.png" }),
+    }),
+  ]);
+
+  assert.equal(code[0].metadata.kind, "code");
+  assert.equal(code[0].metadata.symbolName, "routed");
+  assert.equal(markdown[0].metadata.kind, "markdown");
+  assert.equal(markdown[0].metadata.heading, "Routed");
+  assert.equal(text[0].metadata, undefined);
+  assert.equal(text[0].content.text, '{"routed":true}');
+  assert.equal(image[0].content.kind, "image");
+  assert.equal(image[0].content.format, "png");
 });
 
 test("image extractor validates data", async () => {

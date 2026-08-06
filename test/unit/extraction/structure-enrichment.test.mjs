@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { enrichLexicalItemsWithStructure } from "../../dist/engine/service/structure-enrichment.js";
-import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
+import { enrichLexicalItemsWithStructure } from "../../../dist/engine/service/structure-enrichment.js";
+import { createTemporaryDirectory } from "../../helpers/fixtures.mjs";
 
 function lexicalItem(root, relativePath, line, content) {
   return {
