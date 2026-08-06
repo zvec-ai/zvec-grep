@@ -10,13 +10,8 @@ import {
   type ZvecGrep,
   type ZvecGrepInfoResult,
 } from "../index.js";
-import {
-  globalConfigPath,
-  updateGlobalConfig,
-} from "../engine/config.js";
-import {
-  listEmbeddingModels,
-} from "../engine/models/index.js";
+import { globalConfigPath, updateGlobalConfig } from "../engine/config.js";
+import { listEmbeddingModels } from "../engine/models/index.js";
 import { DaemonClient } from "../client/daemon-client.js";
 import {
   resolveDirectSearchPolicy,
@@ -28,9 +23,7 @@ import {
   routeByMode,
 } from "../client/mode-router.js";
 import { serverStatus } from "../daemon/server-controller.js";
-import {
-  findNearestWorkspace,
-} from "../engine/service/root.js";
+import { findNearestWorkspace } from "../engine/service/root.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
   contextWarningLines,
@@ -856,4 +849,3 @@ function indexRootPath(path: string, options: CliOptions): RootPath {
     follow: options.follow,
   };
 }
-

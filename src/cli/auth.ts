@@ -320,6 +320,8 @@ export function assertRequestedEndpointCompatible(
   );
 }
 
-
 export { withRemoteEmbeddingOperationPermit };
-export type { RemoteEmbeddingAuthorizationPlan, RemoteEmbeddingOperationPermit };
+export type {
+  RemoteEmbeddingAuthorizationPlan,
+  RemoteEmbeddingOperationPermit,
+};

@@ -1142,4 +1142,3 @@ Before using broad file reads or a sub-agent for conceptual repository discovery
 Do not launch a sub-agent solely to locate code. Stop discovery when the evidence covers all components requested by the question.
 ${ZVEC_GREP_AGENTS_END}`;
 }
-
