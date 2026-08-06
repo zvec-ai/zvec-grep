@@ -16,7 +16,7 @@ import type {
   EmbeddingModelInfo,
 } from "../engine/models/index.js";
 import type {
-  CollectionEmbeddingSchema,
+  WorkspaceIndexEmbeddingSchema,
   IndexProgress,
 } from "../engine/types.js";
 import {
@@ -178,7 +178,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       }
       throw error;
     }
-    let schema: CollectionEmbeddingSchema;
+    let schema: WorkspaceIndexEmbeddingSchema;
     let modelInfo: EmbeddingModelInfo;
     try {
       schema = embeddingSchema(lease.model);
@@ -1312,7 +1312,7 @@ function assertDropOnlyInput(input: ZvecGrepIndexInput): void {
   }
 }
 
-function embeddingSchema(model: EmbeddingModel): CollectionEmbeddingSchema {
+function embeddingSchema(model: EmbeddingModel): WorkspaceIndexEmbeddingSchema {
   return {
     provider: model.info.provider,
     model: model.info.name,

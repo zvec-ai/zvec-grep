@@ -9,7 +9,6 @@ import { TextExtractor } from "../../../dist/engine/extraction/text/extractor.js
 function file(overrides = {}) {
   return {
     id: "file-1",
-    collectionId: "collection-1",
     absolutePath: "/repo/fixture.txt",
     relativePath: "fixture.txt",
     rootPath: "/repo",

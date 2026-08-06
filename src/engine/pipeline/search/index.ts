@@ -1,17 +1,17 @@
 import {
-  collectionDetail,
+  workspaceIndexDetail,
   detail,
   EngineError,
   errorDetails,
 } from "../../errors.js";
 import type { EmbeddingModel } from "../../models/index.js";
 import type {
-  CollectionStorage,
+  WorkspaceIndexStorage,
   StorageSearchFilter,
   StorageSearchHit,
 } from "../../storage/index.js";
 import type {
-  CollectionInfo,
+  WorkspaceIndexInfo,
   Entity,
   EntityFragment,
   EntitySearchDiagnosis,
@@ -42,8 +42,8 @@ import {
 } from "../../utils/file-selection.js";
 
 type SearchContext = {
-  collection: CollectionInfo;
-  storage: CollectionStorage;
+  workspaceIndex: WorkspaceIndexInfo;
+  storage: WorkspaceIndexStorage;
   embeddingModel?: EmbeddingModel;
 };
 
@@ -84,7 +84,7 @@ type RecallRoute = ResolvedSearchPlanRoute & {
   vectorRouteId?: string;
 };
 
-export async function searchPlanCollection(
+export async function searchWorkspaceIndex(
   plan: SearchPlan,
   ctx: SearchContext,
 ): Promise<SearchPlanResult> {
@@ -165,8 +165,6 @@ export async function searchPlanCollection(
       : undefined;
 
     return {
-      collectionId: ctx.collection.id,
-      collectionName: ctx.collection.name,
       plan: normalized,
       hits,
       trackedHit,
@@ -190,7 +188,7 @@ export async function diagnoseEntitySearch(
     throw new Error(`Entity not found: ${entityId}`);
   }
 
-  const search = await searchPlanCollection(
+  const search = await searchWorkspaceIndex(
     {
       routes: [
         { mode: "fts", query },
@@ -340,7 +338,7 @@ function requireEmbeddingModel(
     throw new EngineError("Search operation requires an embedding model", {
       code: "ZVEC_GREP.ENGINE.SEARCH.EMBEDDING_MODEL_REQUIRED",
       context: errorDetails([
-        collectionDetail(ctx.collection.name),
+        workspaceIndexDetail(ctx.workspaceIndex.name),
         detail("operation", operation),
       ]),
     });
@@ -465,7 +463,7 @@ function addRecallHits(
   candidates: Map<string, Candidate>,
   hits: readonly StorageSearchHit[],
   route: ResolvedSearchPlanRoute,
-  storage: CollectionStorage,
+  storage: WorkspaceIndexStorage,
   options: { startIndex?: number } = {},
 ): void {
   const startIndex = Math.max(0, options.startIndex ?? 0);
@@ -523,7 +521,7 @@ function collectAdaptiveRecall(input: {
   preferSymbol: boolean;
   vectorByRoute: ReadonlyMap<string, readonly number[]>;
   limit: number;
-  storage: CollectionStorage;
+  storage: WorkspaceIndexStorage;
   candidates: Map<string, Candidate>;
 }): number {
   const routes = buildRecallRoutes(
@@ -605,7 +603,7 @@ function collectRecallPass(input: {
   vectorByRoute: ReadonlyMap<string, readonly number[]>;
   depth: number;
   previousDepth: number;
-  storage: CollectionStorage;
+  storage: WorkspaceIndexStorage;
   candidates: Map<string, Candidate>;
 }): boolean {
   let saturated = false;
@@ -626,7 +624,7 @@ function recallRouteHits(
   input: {
     vectorByRoute: ReadonlyMap<string, readonly number[]>;
     depth: number;
-    storage: CollectionStorage;
+    storage: WorkspaceIndexStorage;
   },
 ): StorageSearchHit[] {
   if (route.mode === "fts") {
@@ -645,7 +643,7 @@ function recallTargetCandidateCount(limit: number): number {
 
 function resolveHitEntity(
   hit: StorageSearchHit,
-  storage: CollectionStorage,
+  storage: WorkspaceIndexStorage,
 ): { entity: Entity; file: FileInfo } | null {
   if (!hit.fragment.group || hit.fragment.group === hit.fragment.id) {
     return {
@@ -764,7 +762,7 @@ function forceTrackEntity(input: {
   vectorByRoute: ReadonlyMap<string, readonly number[]>;
   recallDepth: number;
   filter?: StorageSearchFilter;
-  storage: CollectionStorage;
+  storage: WorkspaceIndexStorage;
   candidates: Map<string, Candidate>;
 }): void {
   const tracked = input.storage.getEntity(input.entityId);
@@ -867,7 +865,7 @@ function forceTrackFtsRoute(
     targetFileId: string;
     recallDepth: number;
     filter?: StorageSearchFilter;
-    storage: CollectionStorage;
+    storage: WorkspaceIndexStorage;
   },
   route: ResolvedSearchPlanRoute,
 ): void {
@@ -914,7 +912,7 @@ function forceTrackVectorRoute(
     vectorByRoute: ReadonlyMap<string, readonly number[]>;
     recallDepth: number;
     filter?: StorageSearchFilter;
-    storage: CollectionStorage;
+    storage: WorkspaceIndexStorage;
   },
   route: ResolvedSearchPlanRoute,
 ): void {
@@ -973,7 +971,7 @@ function searchTrackedEntityFts(
     targetFileId: string;
     recallDepth: number;
     filter?: StorageSearchFilter;
-    storage: CollectionStorage;
+    storage: WorkspaceIndexStorage;
   },
   route: ResolvedSearchPlanRoute,
 ): StorageSearchHit | undefined {
@@ -1001,7 +999,7 @@ function searchTrackedEntityVector(
     targetFileId: string;
     recallDepth: number;
     filter?: StorageSearchFilter;
-    storage: CollectionStorage;
+    storage: WorkspaceIndexStorage;
   },
   vector: readonly number[],
 ): StorageSearchHit | undefined {
@@ -1035,7 +1033,7 @@ function restrictFilterToFile(
 
 function searchPlanToStorageFilter(
   plan: SearchPlan,
-  storage: CollectionStorage,
+  storage: WorkspaceIndexStorage,
   fileTypePatterns: FileTypePatterns,
 ): StorageSearchFilter | undefined {
   const fileIds = resolveFilteredFileIds(

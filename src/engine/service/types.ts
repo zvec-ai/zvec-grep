@@ -1,9 +1,9 @@
 import type { EmbeddingModel } from "../models/index.js";
 import type {
   CodeSymbolType,
-  CollectionIndexPolicy,
-  CollectionIndexStatus,
-  CollectionInfo,
+  WorkspaceIndexPolicy,
+  WorkspaceIndexStatus,
+  WorkspaceIndexInfo,
   Content,
   EntityMetadata,
   IndexProgress,
@@ -69,12 +69,12 @@ export type ZvecGrepInfoOptions = {
 export type ZvecGrepInfoResult = {
   root: string;
   indexed: boolean;
-  indexPolicy: CollectionIndexPolicy | "undecided";
+  indexPolicy: WorkspaceIndexPolicy | "undecided";
   home: string;
   indexPath: string;
   source: "index" | "unindexed";
-  collection?: CollectionInfo;
-  status?: CollectionIndexStatus | null;
+  collection?: WorkspaceIndexInfo;
+  status?: WorkspaceIndexStatus | null;
   suggestion?: string;
 };
 

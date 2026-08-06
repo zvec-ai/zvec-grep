@@ -3,14 +3,13 @@ import test from "node:test";
 import {
   diagnoseEntitySearch,
   diagnoseFileSearch,
-  searchPlanCollection,
+  searchWorkspaceIndex,
 } from "../../dist/engine/pipeline/search/index.js";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
 
 function file(id, relativePath, lastModifiedTime = 100) {
   return {
     id,
-    collectionId: "collection-1",
     absolutePath: `/repo/${relativePath}`,
     relativePath,
     rootPath: "/repo",
@@ -144,7 +143,7 @@ function createFixture() {
     calls,
     storage,
     context: {
-      collection: {
+      workspaceIndex: {
         id: "collection-1",
         name: "docs",
         path: "/tmp/index",
@@ -160,41 +159,41 @@ function createFixture() {
 
 test("search plan rejects malformed routes, filters, time ranges, and missing models", async () => {
   const { context } = createFixture();
-  await assert.rejects(searchPlanCollection({ routes: [] }, context), /route/);
+  await assert.rejects(searchWorkspaceIndex({ routes: [] }, context), /route/);
   await assert.rejects(
-    searchPlanCollection(
+    searchWorkspaceIndex(
       { routes: [{ mode: "unsupported", query: "value" }] },
       context,
     ),
     /unsupported mode/,
   );
   await assert.rejects(
-    searchPlanCollection({ routes: [{ mode: "fts", query: " " }] }, context),
+    searchWorkspaceIndex({ routes: [{ mode: "fts", query: " " }] }, context),
     /non-empty query/,
   );
   await assert.rejects(
-    searchPlanCollection(
+    searchWorkspaceIndex(
       { routes: [{ mode: "fts", query: "value" }], includePaths: "src" },
       context,
     ),
     /must be arrays/,
   );
   await assert.rejects(
-    searchPlanCollection(
+    searchWorkspaceIndex(
       { routes: [{ mode: "fts", query: "value" }], excludePaths: [1] },
       context,
     ),
     /contain strings/,
   );
   await assert.rejects(
-    searchPlanCollection(
+    searchWorkspaceIndex(
       { routes: [{ mode: "fts", query: "value" }], modifiedAfter: -1 },
       context,
     ),
     /non-negative/,
   );
   await assert.rejects(
-    searchPlanCollection(
+    searchWorkspaceIndex(
       {
         routes: [{ mode: "fts", query: "value" }],
         modifiedAfter: 20,
@@ -205,7 +204,7 @@ test("search plan rejects malformed routes, filters, time ranges, and missing mo
     /must not be later/,
   );
   await assert.rejects(
-    searchPlanCollection(
+    searchWorkspaceIndex(
       { routes: [{ mode: "vector", query: "value" }] },
       { ...context, embeddingModel: undefined },
     ),
@@ -215,7 +214,7 @@ test("search plan rejects malformed routes, filters, time ranges, and missing mo
 
 test("hybrid search filters, deduplicates, fuses, traces, prefers symbols, and tracks hidden hits", async () => {
   const fixture = createFixture();
-  const result = await searchPlanCollection(
+  const result = await searchWorkspaceIndex(
     {
       routes: [
         { mode: "fts", query: "find Namespace::AlphaSymbol" },
@@ -262,7 +261,7 @@ test("hybrid search filters, deduplicates, fuses, traces, prefers symbols, and t
 
 test("search plans short-circuit empty path filters and force-track no-file reasons", async () => {
   const fixture = createFixture();
-  const result = await searchPlanCollection(
+  const result = await searchWorkspaceIndex(
     {
       routes: [
         { mode: "fts", query: "nothing" },
@@ -286,7 +285,7 @@ test("search plans short-circuit empty path filters and force-track no-file reas
 
 test("indexed rg-style globs match nested basenames and honor later overrides", async () => {
   const fixture = createFixture();
-  const result = await searchPlanCollection(
+  const result = await searchWorkspaceIndex(
     {
       routes: [{ mode: "fts", query: "symbol" }],
       globs: ["!*.ts", "a.ts"],

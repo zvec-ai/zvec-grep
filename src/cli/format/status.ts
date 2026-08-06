@@ -1,8 +1,8 @@
 import { homedir } from "node:os";
 import { isAbsolute, relative, sep } from "node:path";
 import type {
-  CollectionIndexStatus,
-  CollectionInfo,
+  WorkspaceIndexStatus,
+  WorkspaceIndexInfo,
   IndexResult,
   ZvecGrepInfoResult,
 } from "../../index.js";
@@ -36,14 +36,14 @@ export type WorkspaceIndexState =
   | "unindexed"
   | "undecided";
 
-type WorkspaceRootPath = CollectionInfo["rootPaths"][number];
+type WorkspaceRootPath = WorkspaceIndexInfo["rootPaths"][number];
 
 type WorkspaceStatusView = {
   root: string;
   indexPath: string;
   policy: "enabled" | "disabled" | "undecided";
   state: WorkspaceIndexState;
-  embedding?: CollectionInfo["embedding"];
+  embedding?: WorkspaceIndexInfo["embedding"];
   roots?: readonly WorkspaceRootPath[];
   files?: {
     indexed: number;
@@ -606,7 +606,7 @@ export function printIndexResult(
   label: string,
   result: IndexResult,
   options: CliOptions,
-  rootPaths?: CollectionInfo["rootPaths"],
+  rootPaths?: WorkspaceIndexInfo["rootPaths"],
 ): void {
   const theme = createStatusTheme(options);
 
@@ -659,7 +659,7 @@ export function printIndexPathFilterTip(options: CliOptions): void {
 }
 
 function summarizeFailedFileReasons(
-  files: CollectionIndexStatus["failedFiles"],
+  files: WorkspaceIndexStatus["failedFiles"],
   retryCommand: string,
 ): string | undefined {
   const withReasons = files.filter((file) => file.indexStatus?.error);
@@ -759,7 +759,7 @@ function createStatusTheme(options: CliOptions): StatusTheme {
   };
 }
 
-function formatRootPath(root: CollectionInfo["rootPaths"][number]): string {
+function formatRootPath(root: WorkspaceIndexInfo["rootPaths"][number]): string {
   const filters = [
     root.include && root.include.length > 0
       ? `include=${root.include.join("|")}`

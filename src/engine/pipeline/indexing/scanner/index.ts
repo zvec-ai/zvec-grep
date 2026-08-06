@@ -162,7 +162,7 @@ export type ScanOptions = {
 };
 
 export async function scanRootPaths(
-  collectionId: string,
+  workspaceIndexId: string,
   rootPaths: readonly RootPath[],
   options: ScanOptions = {},
 ): Promise<ScanResult> {
@@ -171,14 +171,14 @@ export async function scanRootPaths(
 
   for (const rootPath of validatedRootPaths) {
     throwIfAborted(options.signal);
-    await scanRootPath(collectionId, rootPath, files, options.signal);
+    await scanRootPath(workspaceIndexId, rootPath, files, options.signal);
   }
 
   return { files };
 }
 
 export async function scanFilePath(
-  collectionId: string,
+  workspaceIndexId: string,
   rootPaths: readonly RootPath[],
   absolutePath: string,
   options: ScanOptions = {},
@@ -219,7 +219,7 @@ export async function scanFilePath(
     ) {
       continue;
     }
-    const file = await readFileInfo(collectionId, root, absolutePath);
+    const file = await readFileInfo(workspaceIndexId, root, absolutePath);
     if (file) {
       files.push(file);
     }
@@ -228,7 +228,7 @@ export async function scanFilePath(
 }
 
 export async function scanDirectoryPath(
-  collectionId: string,
+  workspaceIndexId: string,
   rootPaths: readonly RootPath[],
   absolutePath: string,
   options: ScanOptions = {},
@@ -280,7 +280,7 @@ export async function scanDirectoryPath(
     );
     const depth = relativePath.split("/").filter(Boolean).length;
     await walk(
-      collectionId,
+      workspaceIndexId,
       root,
       absolutePath,
       files,
@@ -403,7 +403,7 @@ function dedupeFiles(files: readonly FileInfo[]): FileInfo[] {
 }
 
 async function scanRootPath(
-  collectionId: string,
+  workspaceIndexId: string,
   rootPath: RootPath,
   files: FileInfo[],
   signal?: AbortSignal,
@@ -423,7 +423,7 @@ async function scanRootPath(
   if (info.isFile()) {
     const relativePath = basename(root.absolutePath);
     const file = matchesFileSelection(relativePath, root, fileTypes)
-      ? await readFileInfo(collectionId, root, root.absolutePath)
+      ? await readFileInfo(workspaceIndexId, root, root.absolutePath)
       : null;
     if (file) {
       files.push(file);
@@ -443,7 +443,7 @@ async function scanRootPath(
     () => root.absolutePath,
   );
   await walk(
-    collectionId,
+    workspaceIndexId,
     root,
     root.absolutePath,
     files,
@@ -459,7 +459,7 @@ async function scanRootPath(
 }
 
 async function walk(
-  collectionId: string,
+  workspaceIndexId: string,
   rootPath: RootPath,
   currentPath: string,
   files: FileInfo[],
@@ -535,7 +535,7 @@ async function walk(
       }
       visitedDirectories.add(realDirectory);
       await walk(
-        collectionId,
+        workspaceIndexId,
         rootPath,
         absolutePath,
         files,
@@ -580,7 +580,7 @@ async function walk(
       continue;
     }
 
-    const file = await readFileInfo(collectionId, rootPath, absolutePath);
+    const file = await readFileInfo(workspaceIndexId, rootPath, absolutePath);
     throwIfAborted(signal);
     if (file) {
       files.push(file);
@@ -960,7 +960,7 @@ function escapeRegExp(value: string): string {
 }
 
 async function readFileInfo(
-  collectionId: string,
+  workspaceIndexId: string,
   rootPath: RootPath,
   absolutePath: string,
 ): Promise<FileInfo | null> {
@@ -985,8 +985,7 @@ async function readFileInfo(
   }
 
   return {
-    id: makeFileId(collectionId, absolutePath),
-    collectionId,
+    id: makeFileId(workspaceIndexId, absolutePath),
     absolutePath,
     relativePath:
       toDisplayPath(relative(rootPath.absolutePath, absolutePath)) ||
@@ -1043,6 +1042,6 @@ function isSuspiciousControlByte(value: number): boolean {
   );
 }
 
-function makeFileId(collectionId: string, absolutePath: string): string {
-  return sha256Text(`${collectionId}\0${normalizePath(absolutePath)}`);
+function makeFileId(workspaceIndexId: string, absolutePath: string): string {
+  return sha256Text(`${workspaceIndexId}\0${normalizePath(absolutePath)}`);
 }

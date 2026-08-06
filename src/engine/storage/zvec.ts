@@ -19,7 +19,7 @@ import { EngineError } from "../errors.js";
 import type {
   CodeEntityModifier,
   CodeSymbolType,
-  CollectionEmbeddingSchema,
+  WorkspaceIndexEmbeddingSchema,
   Content,
   Entity,
   EntityFragment,
@@ -31,7 +31,7 @@ import type {
 import { normalizePath } from "../utils/path.js";
 import type {
   FileIndexDiagnostics,
-  CollectionStorage,
+  WorkspaceIndexStorage,
   StorageSearchFilter,
   StorageSearchHit,
   StoredEntity,
@@ -56,7 +56,7 @@ const ZVEC_OPEN_RETRY_MAX_DELAY_MS = 1000;
 
 let zvecInitialized = false;
 
-export class ZvecCollectionStorage implements CollectionStorage {
+export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   private readonly collection: ZVecCollection;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
@@ -65,9 +65,8 @@ export class ZvecCollectionStorage implements CollectionStorage {
 
   constructor(
     private readonly collectionPath: string,
-    private readonly embedding: CollectionEmbeddingSchema,
+    private readonly embedding: WorkspaceIndexEmbeddingSchema,
     fileStorePath: string,
-    collectionId: string,
     private readonly readOnly = false,
   ) {
     initializeZvec();
@@ -76,7 +75,7 @@ export class ZvecCollectionStorage implements CollectionStorage {
     }
 
     this.files = new ZvecFileMetaStore(fileStorePath, readOnly);
-    for (const file of this.files.list(collectionId)) {
+    for (const file of this.files.list()) {
       this.rememberFile(file);
     }
 
@@ -473,12 +472,8 @@ class ZvecFileMetaStore {
     }
   }
 
-  list(collectionId: string): FileRecord[] {
-    const docs = queryFileMetadataDocs(
-      this.collection,
-      collectionId,
-      ZVEC_MAX_QUERY_TOPK,
-    );
+  list(): FileRecord[] {
+    const docs = queryFileMetadataDocs(this.collection, ZVEC_MAX_QUERY_TOPK);
 
     return docs
       .map((doc) => docToFileRecord(doc))
@@ -505,15 +500,6 @@ class ZvecFileMetaStore {
     this.needsOptimize = true;
   }
 
-  deleteCollection(collectionId: string): void {
-    this.assertWritable("deleteCollection");
-    const status = this.collection.deleteByFilterSync(
-      `collection_id = ${quoteFilterString(collectionId)}`,
-    );
-    assertZvecStatus(status, "file metadata collection delete", collectionId);
-    this.needsOptimize = true;
-  }
-
   close(): void {
     if (this.needsOptimize) {
       this.collection.optimizeSync();
@@ -535,7 +521,6 @@ class ZvecFileMetaStore {
 
 export function queryFileMetadataDocs(
   collection: Pick<ZVecCollection, "querySync" | "stats">,
-  collectionId: string,
   maxTopk = ZVEC_MAX_QUERY_TOPK,
 ): ZVecDoc[] {
   if (!Number.isInteger(maxTopk) || maxTopk < 1) {
@@ -545,30 +530,27 @@ export function queryFileMetadataDocs(
     });
   }
 
-  const collectionFilter = `collection_id = ${quoteFilterString(collectionId)}`;
   if (collection.stats.docCount <= maxTopk) {
     return collection.querySync({
-      filter: collectionFilter,
       topk: Math.max(collection.stats.docCount, 1),
       includeVector: false,
     });
   }
 
   return FILE_ID_HEX_ALPHABET.split("").flatMap((prefix) =>
-    queryFileMetadataPartition(collection, collectionFilter, prefix, maxTopk),
+    queryFileMetadataPartition(collection, prefix, maxTopk),
   );
 }
 
 function queryFileMetadataPartition(
   collection: Pick<ZVecCollection, "querySync">,
-  collectionFilter: string,
   prefix: string,
   maxTopk: number,
 ): ZVecDoc[] {
   const lower = quoteFilterString(prefix);
   const upper = quoteFilterString(`${prefix}g`);
   const docs = collection.querySync({
-    filter: `${collectionFilter} AND file_id >= ${lower} AND file_id < ${upper}`,
+    filter: `file_id >= ${lower} AND file_id < ${upper}`,
     topk: maxTopk,
     includeVector: false,
   });
@@ -585,12 +567,7 @@ function queryFileMetadataPartition(
   }
 
   return FILE_ID_HEX_ALPHABET.split("").flatMap((suffix) =>
-    queryFileMetadataPartition(
-      collection,
-      collectionFilter,
-      `${prefix}${suffix}`,
-      maxTopk,
-    ),
+    queryFileMetadataPartition(collection, `${prefix}${suffix}`, maxTopk),
   );
 }
 
@@ -599,7 +576,6 @@ function createFilesSchema(): ZVecCollectionSchema {
     name: "zvec_grep_files",
     fields: [
       indexedStringField("file_id"),
-      indexedStringField("collection_id"),
       indexedStringField("absolute_path"),
       stringField("relative_path"),
       stringField("root_path"),
@@ -650,7 +626,6 @@ function createFilesSchema(): ZVecCollectionSchema {
 function fileRecordToDoc(file: FileRecord): ZVecDocInput {
   const fields: Record<string, string | number | boolean> = {
     file_id: file.id,
-    collection_id: file.collectionId,
     absolute_path: normalizePath(file.absolutePath),
     relative_path: file.relativePath,
     root_path: file.rootPath,
@@ -705,7 +680,6 @@ function docToFileRecord(doc: ZVecDoc): FileRecord {
 
   return {
     id: readStringField(doc, "file_id"),
-    collectionId: readStringField(doc, "collection_id"),
     absolutePath: normalizePath(readStringField(doc, "absolute_path")),
     relativePath: readStringField(doc, "relative_path"),
     rootPath: readStringField(doc, "root_path"),
@@ -896,7 +870,7 @@ function sleepSync(ms: number): void {
 }
 
 function createSchema(
-  embedding: CollectionEmbeddingSchema,
+  embedding: WorkspaceIndexEmbeddingSchema,
 ): ZVecCollectionSchema {
   return new ZVecCollectionSchema({
     name: "zvec_grep_entities",
@@ -1156,7 +1130,7 @@ function parseRange(value: string): Range {
 function docsToHits(
   docs: readonly ZVecDoc[],
   path: "fts" | "vector",
-  storage: ZvecCollectionStorage,
+  storage: ZvecWorkspaceIndexStorage,
 ): StorageSearchHit[] {
   const hits: StorageSearchHit[] = [];
 

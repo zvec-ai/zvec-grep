@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { EmbeddingRuntimeConfig } from "./config.js";
 import { EngineError } from "./errors.js";
-import type { CollectionInfo } from "./types.js";
+import type { WorkspaceIndexInfo } from "./types.js";
 import { readJsonFileSync, writeJsonFileSync } from "./utils/json.js";
 
 export const WORKSPACE_MANIFEST_FILE = "manifest.json";
@@ -10,7 +10,7 @@ export const CURRENT_MANIFEST_VERSION = 1;
 const WORKSPACE_DIRECTORY_MODE = 0o700;
 const WORKSPACE_MANIFEST_MODE = 0o600;
 
-export type WorkspaceManifest = CollectionInfo & {
+export type WorkspaceManifest = WorkspaceIndexInfo & {
   manifestVersion: typeof CURRENT_MANIFEST_VERSION;
   embeddingRuntime: EmbeddingRuntimeConfig;
 };
@@ -46,9 +46,9 @@ export function writeWorkspaceManifest(
   });
 }
 
-export function collectionInfoFromWorkspaceManifest(
+export function workspaceIndexInfoFromManifest(
   manifest: WorkspaceManifest,
-): CollectionInfo {
+): WorkspaceIndexInfo {
   return {
     id: manifest.id,
     name: manifest.name,

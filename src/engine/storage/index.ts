@@ -33,7 +33,7 @@ export type FileIndexDiagnostics = {
   truncatedFragmentCount?: number;
 };
 
-export interface CollectionStorage {
+export interface WorkspaceIndexStorage {
   getFileById(fileId: string): FileInfo | null;
   getFileByPath(absolutePath: string): FileInfo | null;
   listFilesByPathPrefix(absolutePath: string): FileInfo[];
@@ -68,4 +68,4 @@ export interface CollectionStorage {
   close(): void;
 }
 
-export { ZvecCollectionStorage } from "./zvec.js";
+export { ZvecWorkspaceIndexStorage } from "./zvec.js";

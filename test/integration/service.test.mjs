@@ -150,7 +150,7 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
   await assert.rejects(
     service.info(),
     (error) =>
-      error.code === "ZVEC_GREP.ENGINE.COLLECTION.INDEX_VERSION_MISMATCH" &&
+      error.code === "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH" &&
       error.context.includes("zg index --rebuild"),
   );
 

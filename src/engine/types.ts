@@ -62,7 +62,6 @@ export type RootPath = {
 
 export type FileInfo = {
   id: string;
-  collectionId: string;
   absolutePath: string;
   relativePath: string;
   rootPath: string;
@@ -175,27 +174,27 @@ export type EntityFragment = {
 };
 
 // -----------------------------------------------------------------------------
-// Collection types
+// Workspace index types
 // -----------------------------------------------------------------------------
 
 export const CURRENT_INDEX_VERSION = 1;
 
-export type CollectionEmbeddingSchema = {
+export type WorkspaceIndexEmbeddingSchema = {
   provider: string;
   model: string;
   dimension: number;
   metric: string;
 };
 
-export type CollectionIndexPolicy = "enabled" | "disabled";
+export type WorkspaceIndexPolicy = "enabled" | "disabled";
 
-export type CollectionInfo = {
+export type WorkspaceIndexInfo = {
   id: string;
   name: string;
   path: string;
   rootPaths: readonly RootPath[];
-  indexPolicy?: CollectionIndexPolicy;
-  embedding?: CollectionEmbeddingSchema | null;
+  indexPolicy?: WorkspaceIndexPolicy;
+  embedding?: WorkspaceIndexEmbeddingSchema | null;
   indexVersion?: number | null;
   createdTime: number;
   updatedTime: number;
@@ -238,8 +237,6 @@ export type TimingEntry = {
 };
 
 export type IndexResult = {
-  collectionId: string;
-  collectionName: string;
   filesScanned: number;
   filesAdded: number;
   filesModified: number;
@@ -252,9 +249,7 @@ export type IndexResult = {
   timings?: readonly TimingEntry[];
 };
 
-export type CollectionIndexStatus = {
-  collectionId: string;
-  collectionName: string;
+export type WorkspaceIndexStatus = {
   filesScanned: number;
   filesStored: number;
   filesIndexed: number;
@@ -366,8 +361,6 @@ export type ResolvedSearchPlan = Omit<SearchPlan, "routes"> & {
 };
 
 export type SearchPlanResult = {
-  collectionId: string;
-  collectionName: string;
   plan: ResolvedSearchPlan;
   hits: SearchHit[];
   trackedHit?: SearchHit;
@@ -377,17 +370,6 @@ export type SearchPlanResult = {
 // -----------------------------------------------------------------------------
 // Diagnostics
 // -----------------------------------------------------------------------------
-
-export type FileDiagnosis = {
-  collectionId: string;
-  collectionName: string;
-  absolutePath: string;
-  belongsToCollection: boolean;
-  matchedRootPath?: string;
-  file?: FileInfo;
-  entityCount: number;
-  reason?: string;
-};
 
 export type EntitySearchDiagnosis = {
   query: string;

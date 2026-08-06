@@ -52,8 +52,6 @@ async function captureConsole(callback) {
 
 function status(overrides = {}) {
   return {
-    collectionId: "collection-1",
-    collectionName: "docs",
     filesScanned: 4,
     filesStored: 3,
     filesIndexed: 2,
@@ -520,7 +518,6 @@ test("debug formatter reports every diagnostic and trace availability state", as
 test("status formatters cover workspace states, failures, filters, and color", async () => {
   const failedFile = {
     id: "failed",
-    collectionId: "collection-1",
     absolutePath: "/repo/fail.ts",
     relativePath: "fail.ts",
     rootPath: "/repo",
@@ -555,8 +552,6 @@ test("status formatters cover workspace states, failures, filters, and color", a
     printIndexResult(
       "Indexed",
       {
-        collectionId: "collection-1",
-        collectionName: "docs",
         filesScanned: 4,
         filesAdded: 1,
         filesModified: 1,
@@ -577,8 +572,6 @@ test("status formatters cover workspace states, failures, filters, and color", a
     printIndexResult(
       "Quick",
       {
-        collectionId: "collection-1",
-        collectionName: "docs",
         filesScanned: 0,
         filesAdded: 0,
         filesModified: 0,

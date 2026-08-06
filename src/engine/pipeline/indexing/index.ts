@@ -1,16 +1,16 @@
 import { lstat, readFile } from "node:fs/promises";
 import {
-  collectionDetail,
+  workspaceIndexDetail,
   detail,
   EngineError,
   errorDetails,
   isEngineError,
 } from "../../errors.js";
 import type { EmbeddingModel, EmbeddingResult } from "../../models/index.js";
-import type { CollectionStorage } from "../../storage/index.js";
+import type { WorkspaceIndexStorage } from "../../storage/index.js";
 import type {
-  CollectionIndexStatus,
-  CollectionInfo,
+  WorkspaceIndexStatus,
+  WorkspaceIndexInfo,
   Content,
   EntityMetadata,
   EntityFragment,
@@ -38,8 +38,8 @@ const APPROXIMATE_CHARS_PER_TOKEN = 2;
 const CHUNK_OVERLAP_RATIO = 0.15;
 
 export type IndexContext = {
-  collection: CollectionInfo;
-  storage: CollectionStorage;
+  workspaceIndex: WorkspaceIndexInfo;
+  storage: WorkspaceIndexStorage;
   embeddingModel: EmbeddingModel;
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
@@ -128,37 +128,40 @@ type EmbeddingConcurrencyPolicy = {
   adaptive: boolean;
 };
 
-export async function indexCollection(ctx: IndexContext): Promise<IndexResult> {
+export async function indexWorkspace(ctx: IndexContext): Promise<IndexResult> {
   try {
-    return await indexCollectionUnchecked(ctx);
+    return await indexWorkspaceUnchecked(ctx);
   } catch (error) {
-    throw toEngineError(error, "Indexing collection failed", {
-      code: "ZVEC_GREP.ENGINE.INDEXING.COLLECTION_FAILED",
-      context: collectionContext(ctx.collection),
+    throw toEngineError(error, "Indexing workspace failed", {
+      code: "ZVEC_GREP.ENGINE.INDEXING.WORKSPACE_FAILED",
+      context: workspaceIndexContext(ctx.workspaceIndex),
     });
   }
 }
 
-export async function indexCollectionPaths(
+export async function indexWorkspacePaths(
   ctx: IndexContext,
   changedPaths: readonly string[],
 ): Promise<IndexResult> {
   try {
-    return await indexCollectionPathsUnchecked(ctx, changedPaths);
+    return await indexWorkspacePathsUnchecked(ctx, changedPaths);
   } catch (error) {
     throw toEngineError(error, "Indexing changed paths failed", {
-      code: "ZVEC_GREP.ENGINE.INDEXING.COLLECTION_FAILED",
-      context: collectionContext(ctx.collection),
+      code: "ZVEC_GREP.ENGINE.INDEXING.WORKSPACE_FAILED",
+      context: workspaceIndexContext(ctx.workspaceIndex),
     });
   }
 }
 
-export async function getCollectionIndexStatus(
-  collection: CollectionInfo,
+export async function getWorkspaceIndexStatus(
+  workspaceIndex: WorkspaceIndexInfo,
   storedFiles: readonly FileInfo[],
-): Promise<CollectionIndexStatus> {
+): Promise<WorkspaceIndexStatus> {
   try {
-    const scan = await scanRootPaths(collection.id, collection.rootPaths);
+    const scan = await scanRootPaths(
+      workspaceIndex.id,
+      workspaceIndex.rootPaths,
+    );
     const diff = await computeDiffFromFiles(scan.files, storedFiles);
     const pendingFiles = storedFiles.filter(
       (file) => file.indexStatus?.indexedTime === null,
@@ -181,8 +184,6 @@ export async function getCollectionIndexStatus(
     );
 
     return {
-      collectionId: collection.id,
-      collectionName: collection.name,
       filesScanned: scan.files.length,
       filesStored: storedFiles.length,
       filesIndexed: indexedFiles.length,
@@ -201,14 +202,14 @@ export async function getCollectionIndexStatus(
       deletedFiles: diff.deleted,
     };
   } catch (error) {
-    throw toEngineError(error, "Inspecting collection index status failed", {
+    throw toEngineError(error, "Inspecting workspace index status failed", {
       code: "ZVEC_GREP.ENGINE.INDEXING.STATUS_FAILED",
-      context: collectionContext(collection),
+      context: workspaceIndexContext(workspaceIndex),
     });
   }
 }
 
-async function indexCollectionUnchecked(
+async function indexWorkspaceUnchecked(
   ctx: IndexContext,
 ): Promise<IndexResult> {
   const start = Date.now();
@@ -258,7 +259,7 @@ async function indexCollectionUnchecked(
       {
         code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
         context: errorDetails([
-          collectionDetail(ctx.collection.name),
+          workspaceIndexDetail(ctx.workspaceIndex.name),
           detail("filesFailed", result.filesFailed),
           detail("filesScanned", result.filesScanned),
           detail(
@@ -284,7 +285,7 @@ async function indexCollectionUnchecked(
   return result;
 }
 
-async function indexCollectionPathsUnchecked(
+async function indexWorkspacePathsUnchecked(
   ctx: IndexContext,
   changedPaths: readonly string[],
 ): Promise<IndexResult> {
@@ -323,7 +324,7 @@ async function indexCollectionPathsUnchecked(
       `Indexing completed with ${result.filesFailed} failed files`,
       {
         code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
-        context: collectionContext(ctx.collection),
+        context: workspaceIndexContext(ctx.workspaceIndex),
       },
     );
   }
@@ -346,14 +347,14 @@ async function runPathIndexPass(
       const info = await lstat(path).catch(() => null);
       const scan = info?.isDirectory()
         ? await scanDirectoryPath(
-            ctx.collection.id,
-            ctx.collection.rootPaths,
+            ctx.workspaceIndex.id,
+            ctx.workspaceIndex.rootPaths,
             path,
             { signal: ctx.signal },
           )
         : await scanFilePath(
-            ctx.collection.id,
-            ctx.collection.rootPaths,
+            ctx.workspaceIndex.id,
+            ctx.workspaceIndex.rootPaths,
             path,
             {
               signal: ctx.signal,
@@ -383,7 +384,7 @@ async function runIndexPass(
 ): Promise<IndexPassResult> {
   reportScanning(report, scanningDetail, progressBase);
   const scan = await timings.time("index_scan", () =>
-    scanRootPaths(ctx.collection.id, ctx.collection.rootPaths, {
+    scanRootPaths(ctx.workspaceIndex.id, ctx.workspaceIndex.rootPaths, {
       signal: ctx.signal,
     }),
   );
@@ -533,8 +534,6 @@ function buildIndexResult(
   const finalPass = passes[passes.length - 1];
 
   return {
-    collectionId: ctx.collection.id,
-    collectionName: ctx.collection.name,
     filesScanned: finalPass.filesScanned,
     filesAdded:
       firstPass.diff.added.length +
@@ -565,7 +564,7 @@ async function optimizeStorage(ctx: IndexContext): Promise<void> {
   } catch (error) {
     throw toEngineError(error, "Indexing failed to finalize storage", {
       code: "ZVEC_GREP.ENGINE.INDEXING.OPTIMIZE_FAILED",
-      context: collectionContext(ctx.collection),
+      context: workspaceIndexContext(ctx.workspaceIndex),
     });
   }
 }
@@ -955,7 +954,7 @@ function indexCancellationError(ctx: IndexContext): Error {
     ? ctx.signal.reason
     : new EngineError("Indexing was cancelled.", {
         code: "ZVEC_GREP.ENGINE.INDEXING.CANCELLED",
-        context: collectionContext(ctx.collection),
+        context: workspaceIndexContext(ctx.workspaceIndex),
       });
 }
 
@@ -1621,11 +1620,11 @@ function toEngineError(
   });
 }
 
-function collectionContext(collection: CollectionInfo): string {
+function workspaceIndexContext(workspaceIndex: WorkspaceIndexInfo): string {
   return (
     errorDetails([
-      detail("collection_id", collection.id),
-      collectionDetail(collection.name),
+      detail("workspace_index_id", workspaceIndex.id),
+      workspaceIndexDetail(workspaceIndex.name),
     ]) ?? ""
   );
 }

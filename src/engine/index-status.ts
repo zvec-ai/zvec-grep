@@ -1,4 +1,4 @@
-import type { CollectionIndexStatus, IndexProgress } from "./types.js";
+import type { WorkspaceIndexStatus, IndexProgress } from "./types.js";
 
 export type IndexCompletion = {
   completed: number;
@@ -6,7 +6,7 @@ export type IndexCompletion = {
 };
 
 export function indexStatusNeedsRefresh(
-  status: CollectionIndexStatus | null | undefined,
+  status: WorkspaceIndexStatus | null | undefined,
 ): boolean {
   return Boolean(
     status &&
@@ -19,7 +19,7 @@ export function indexStatusNeedsRefresh(
 }
 
 export function indexCompletionFromStatus(
-  status: CollectionIndexStatus | null | undefined,
+  status: WorkspaceIndexStatus | null | undefined,
 ): IndexCompletion | undefined {
   if (!status) return undefined;
   return {

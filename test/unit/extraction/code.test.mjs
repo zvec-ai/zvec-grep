@@ -8,7 +8,6 @@ function codeSource(format, text, relativePath = `fixture.${format}`) {
     text,
     file: {
       id: `file-${format}`,
-      collectionId: "collection-1",
       absolutePath: `/repo/${relativePath}`,
       relativePath,
       rootPath: "/repo",

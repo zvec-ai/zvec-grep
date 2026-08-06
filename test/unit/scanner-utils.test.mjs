@@ -166,7 +166,6 @@ test("scanner applies ignore files, hidden and generated directories, size, bina
     "src/nested/child.ts",
     "vendor/keep.ts",
   ]);
-  assert.equal(result.files[0].collectionId, "collection");
   assert.equal(result.files[0].id.length, 64);
 
   const single = await scanRootPaths("collection", [

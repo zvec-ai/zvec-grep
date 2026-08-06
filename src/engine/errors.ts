@@ -43,8 +43,8 @@ export function detail(key: string, value: ErrorDetailValue): ErrorDetailEntry {
   return value === null || value === undefined ? null : [key, value];
 }
 
-export function collectionDetail(name: string): ErrorDetailEntry {
-  return detail("collection", name);
+export function workspaceIndexDetail(name: string): ErrorDetailEntry {
+  return detail("workspaceIndex", name);
 }
 
 function formatDetailEntry(entry: ErrorDetailEntry): string | null {

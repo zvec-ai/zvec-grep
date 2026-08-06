@@ -25,7 +25,7 @@ export function validateRootPaths(
       const right = domains[rightIndex];
 
       if (scanDomainsOverlap(left, right)) {
-        throw new EngineError("Collection root paths overlap", {
+        throw new EngineError("Workspace index root paths overlap", {
           code: "ZVEC_GREP.ENGINE.SCANNER.OVERLAPPING_ROOT_PATHS",
           context: `left=${left.root.absolutePath} right=${right.root.absolutePath}`,
         });
@@ -110,7 +110,7 @@ function rootPathToScanDomain(root: RootPath): RootScanDomain {
   try {
     info = statSync(root.absolutePath, { throwIfNoEntry: false });
   } catch (cause) {
-    throw new EngineError("Collection root path could not be inspected", {
+    throw new EngineError("Workspace index root path could not be inspected", {
       code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_STAT_FAILED",
       context: `rootPath=${root.absolutePath}`,
       cause,
@@ -118,7 +118,7 @@ function rootPathToScanDomain(root: RootPath): RootScanDomain {
   }
 
   if (!info) {
-    throw new EngineError("Collection root path does not exist", {
+    throw new EngineError("Workspace index root path does not exist", {
       code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_MISSING",
       context: `rootPath=${root.absolutePath}`,
     });
@@ -127,10 +127,13 @@ function rootPathToScanDomain(root: RootPath): RootScanDomain {
   const kind = info.isFile() ? "file" : info.isDirectory() ? "directory" : null;
 
   if (!kind) {
-    throw new EngineError("Collection root path must be a file or directory", {
-      code: "ZVEC_GREP.ENGINE.SCANNER.UNSUPPORTED_ROOT_PATH",
-      context: `rootPath=${root.absolutePath}`,
-    });
+    throw new EngineError(
+      "Workspace index root path must be a file or directory",
+      {
+        code: "ZVEC_GREP.ENGINE.SCANNER.UNSUPPORTED_ROOT_PATH",
+        context: `rootPath=${root.absolutePath}`,
+      },
+    );
   }
 
   let realPath: string;
@@ -138,7 +141,7 @@ function rootPathToScanDomain(root: RootPath): RootScanDomain {
   try {
     realPath = normalizePath(realpathSync(root.absolutePath));
   } catch (cause) {
-    throw new EngineError("Collection root path could not be resolved", {
+    throw new EngineError("Workspace index root path could not be resolved", {
       code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_REALPATH_FAILED",
       context: `rootPath=${root.absolutePath}`,
       cause,

@@ -9,9 +9,9 @@ import {
   type ResolvedEmbeddingRuntimeConfig,
   type ZvecGrepGlobalConfig,
 } from "../config.js";
-import { Collection, isCollectionIndexed } from "../collection/index.js";
+import { isWorkspaceIndexed, WorkspaceIndex } from "./workspace-index.js";
 import {
-  collectionDetail,
+  workspaceIndexDetail,
   detail,
   EngineError,
   errorDetails,
@@ -24,8 +24,8 @@ import {
   type EmbeddingModelInfo,
 } from "../models/index.js";
 import type {
-  CollectionEmbeddingSchema,
-  CollectionInfo,
+  WorkspaceIndexEmbeddingSchema,
+  WorkspaceIndexInfo,
   Content,
   FileInfo,
   IndexResult,
@@ -37,7 +37,7 @@ import type {
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
 import {
-  collectionInfoFromWorkspaceManifest,
+  workspaceIndexInfoFromManifest,
   CURRENT_MANIFEST_VERSION,
   readWorkspaceManifest,
   type WorkspaceManifest,
@@ -114,14 +114,14 @@ export function openWorkspaceReadSession(
   if (info.indexPolicy === "disabled") {
     throw workspaceIndexDisabledError(location.root);
   }
-  if (!isCollectionIndexed(info) || !hasWorkspaceIndex(location)) {
+  if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location)) {
     throw workspaceIndexMissingError(
       location.root,
       info.indexPolicy ?? "enabled",
     );
   }
 
-  const collection = new Collection(
+  const workspaceIndex = new WorkspaceIndex(
     info,
     embeddingModel,
     true,
@@ -141,10 +141,10 @@ export function openWorkspaceReadSession(
       const request = normalizeContextRequest(options);
       const result = await timings.time("total", () =>
         withHomeReadLock(location.home, "daemon.context", () =>
-          contextFromOpenCollection({
+          contextFromOpenWorkspaceIndex({
             root: location.root,
             request,
-            collection,
+            workspaceIndex,
             options: { ...options, autoUpdate: false },
             timings,
           }),
@@ -156,7 +156,7 @@ export function openWorkspaceReadSession(
       if (closed) {
         return;
       }
-      collection.close();
+      workspaceIndex.close();
       closed = true;
     },
   };
@@ -231,7 +231,7 @@ class ZvecGrepService implements ZvecGrep {
               ),
             );
             if (!options.rebuild) {
-              assertCollectionEndpointMatchesCurrentRuntime(
+              assertWorkspaceEndpointMatchesCurrentRuntime(
                 existing,
                 existingRuntime,
                 effectiveRuntime,
@@ -258,13 +258,13 @@ class ZvecGrepService implements ZvecGrep {
                 follow: options.follow,
               },
             );
-            if (options.rebuild || !isCollectionIndexed(existing)) {
+            if (options.rebuild || !isWorkspaceIndexed(existing)) {
               resetWorkspaceIndexStorage(location);
             }
 
             const existingAfterRebuild = options.rebuild ? null : existing;
-            if (isCollectionIndexed(existingAfterRebuild)) {
-              assertCollectionEmbeddingMatchesCurrentModel(
+            if (isWorkspaceIndexed(existingAfterRebuild)) {
+              assertWorkspaceEmbeddingMatchesCurrentModel(
                 existingAfterRebuild,
                 embeddingModel,
                 "zg index --rebuild",
@@ -278,7 +278,7 @@ class ZvecGrepService implements ZvecGrep {
               embeddingModel,
               existingRuntime,
             );
-            const collection = new Collection(
+            const workspaceIndex = new WorkspaceIndex(
               manifest,
               embeddingModel,
               false,
@@ -289,14 +289,14 @@ class ZvecGrepService implements ZvecGrep {
             try {
               const releaseWriterContext = options.onWriterContext?.(
                 (contextOptions) =>
-                  this.contextFromWriterCollection(
+                  this.contextFromWriterWorkspaceIndex(
                     root,
-                    collection,
+                    workspaceIndex,
                     contextOptions,
                   ),
               );
               try {
-                const result = await collection.index({
+                const result = await workspaceIndex.index({
                   rebuild: false,
                   embeddingConcurrency: options.embeddingConcurrency,
                   onProgress: options.onProgress,
@@ -326,7 +326,7 @@ class ZvecGrepService implements ZvecGrep {
                 await releaseWriterContext?.();
               }
             } finally {
-              collection.close();
+              workspaceIndex.close();
             }
           },
         ),
@@ -425,7 +425,7 @@ class ZvecGrepService implements ZvecGrep {
         throw workspaceIndexDisabledError(location.root);
       }
 
-      if (!isCollectionIndexed(info) || !hasWorkspaceIndex(location)) {
+      if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location)) {
         throw workspaceIndexMissingError(
           location.root,
           info.indexPolicy ?? "enabled",
@@ -469,7 +469,7 @@ class ZvecGrepService implements ZvecGrep {
       const indexed =
         collection !== null &&
         collection.indexPolicy !== "disabled" &&
-        isCollectionIndexed(collection) &&
+        isWorkspaceIndexed(collection) &&
         hasWorkspaceIndex(nearest.location);
 
       return {
@@ -480,11 +480,11 @@ class ZvecGrepService implements ZvecGrep {
         indexPath: nearest.location.indexPath,
         source: indexed ? "index" : "unindexed",
         collection: collection
-          ? collectionInfoFromWorkspaceManifest(collection)
+          ? workspaceIndexInfoFromManifest(collection)
           : undefined,
         status:
           indexed && options.includeStatus !== false
-            ? await collectionStatus(collection, nearest.location)
+            ? await workspaceIndexStatus(collection, nearest.location)
             : null,
         suggestion: workspaceInfoSuggestion(collection),
       };
@@ -523,22 +523,22 @@ class ZvecGrepService implements ZvecGrep {
       });
     }
 
-    const collection = this.openCollectionForSearch(
+    const workspaceIndex = this.openWorkspaceIndexForSearch(
       info,
       request,
       location,
       info.embeddingRuntime,
     );
     try {
-      return await this.contextFromCollection({
+      return await contextFromOpenWorkspaceIndex({
         root: location.root,
         request,
-        collection,
+        workspaceIndex,
         options,
         timings,
       });
     } finally {
-      collection.close();
+      workspaceIndex.close();
     }
   }
 
@@ -556,7 +556,7 @@ class ZvecGrepService implements ZvecGrep {
         withHomeReadLock(location.home, "context.status", async () => {
           const manifest = readWorkspaceManifest(location.home);
           const status = manifest
-            ? await collectionStatus(manifest, location)
+            ? await workspaceIndexStatus(manifest, location)
             : null;
           return indexStatusNeedsRefresh(status);
         }),
@@ -575,7 +575,7 @@ class ZvecGrepService implements ZvecGrep {
 
           const stillNeedsRefresh = await timings.time(
             "refresh_status_scan",
-            () => collectionNeedsRefresh(location),
+            () => workspaceIndexNeedsRefresh(location),
           );
           if (!stillNeedsRefresh) {
             return;
@@ -587,7 +587,7 @@ class ZvecGrepService implements ZvecGrep {
             "context.refresh",
             workspaceRuntime,
           );
-          assertCollectionEndpointMatchesCurrentRuntime(
+          assertWorkspaceEndpointMatchesCurrentRuntime(
             existing,
             workspaceRuntime,
             effectiveEmbeddingRuntime(
@@ -597,26 +597,26 @@ class ZvecGrepService implements ZvecGrep {
             ),
             "zg index --endpoint <url> --rebuild",
           );
-          assertCollectionEmbeddingMatchesCurrentModel(
+          assertWorkspaceEmbeddingMatchesCurrentModel(
             existing,
             embeddingModel,
             "zg index --rebuild",
           );
 
-          const collection = new Collection(
+          const workspaceIndex = new WorkspaceIndex(
             existing,
             embeddingModel,
             false,
             location.filesPath,
           );
           try {
-            const result = await collection.index({
+            const result = await workspaceIndex.index({
               embeddingConcurrency: options.embeddingConcurrency,
               onProgress: options.onAutoUpdateProgress,
             });
             timings.addEntries(result.timings, "auto_update_");
           } finally {
-            collection.close();
+            workspaceIndex.close();
           }
         }),
       );
@@ -625,29 +625,19 @@ class ZvecGrepService implements ZvecGrep {
     }
   }
 
-  private async contextFromCollection(input: {
-    root: string;
-    request: NormalizedContextRequest;
-    collection: Collection;
-    options: ZvecGrepContextOptions;
-    timings: TimingCollector;
-  }): Promise<ZvecGrepContextResult> {
-    return contextFromOpenCollection(input);
-  }
-
-  private async contextFromWriterCollection(
+  private async contextFromWriterWorkspaceIndex(
     root: string,
-    collection: Collection,
+    workspaceIndex: WorkspaceIndex,
     options: ZvecGrepContextOptions,
   ): Promise<ZvecGrepContextResult> {
     return await this.withEmbeddingModelOperation(async () => {
       const timings = new TimingCollector();
       const request = normalizeContextRequest(options);
       const result = await timings.time("total", () =>
-        contextFromOpenCollection({
+        contextFromOpenWorkspaceIndex({
           root,
           request,
-          collection,
+          workspaceIndex,
           options: { ...options, autoUpdate: false },
           timings,
         }),
@@ -719,13 +709,13 @@ class ZvecGrepService implements ZvecGrep {
     };
   }
 
-  private openCollectionForSearch(
-    info: CollectionInfo,
+  private openWorkspaceIndexForSearch(
+    info: WorkspaceIndexInfo,
     request: NormalizedContextRequest,
     location: WorkspaceIndexLocation,
     workspaceRuntime: EmbeddingRuntimeConfig,
-  ): Collection {
-    return new Collection(
+  ): WorkspaceIndex {
+    return new WorkspaceIndex(
       info,
       this.embeddingModelForSearch(
         indexedEmbeddingSchema(info),
@@ -739,10 +729,10 @@ class ZvecGrepService implements ZvecGrep {
   }
 
   private embeddingModelForSearch(
-    schema: CollectionEmbeddingSchema,
+    schema: WorkspaceIndexEmbeddingSchema,
     request: NormalizedContextRequest,
     workspaceRuntime: EmbeddingRuntimeConfig,
-    info: CollectionInfo,
+    info: WorkspaceIndexInfo,
   ): EmbeddingModel | undefined {
     if (!request.routes.some((route) => route.mode === "vector")) {
       return undefined;
@@ -772,12 +762,12 @@ class ZvecGrepService implements ZvecGrep {
   }
 
   private embeddingModelForIndex(
-    existing: CollectionInfo | null,
+    existing: WorkspaceIndexInfo | null,
     operation: string,
     workspaceRuntime: EmbeddingRuntimeConfig = {},
   ): EmbeddingModel {
     if (
-      isCollectionIndexed(existing) &&
+      isWorkspaceIndexed(existing) &&
       !this.embeddingModel &&
       !this.options.embedding
     ) {
@@ -796,7 +786,7 @@ class ZvecGrepService implements ZvecGrep {
       ? parseEmbeddingModelReference(reference)
       : undefined;
     const selectedWorkspaceRuntime =
-      isCollectionIndexed(existing) &&
+      isWorkspaceIndexed(existing) &&
       referenceIdentity &&
       existing.embedding.provider !== referenceIdentity.provider
         ? {}
@@ -815,7 +805,7 @@ class ZvecGrepService implements ZvecGrep {
   }
 
   private recoverEmbeddingModel(
-    schema: CollectionEmbeddingSchema,
+    schema: WorkspaceIndexEmbeddingSchema,
     workspaceRuntime: EmbeddingRuntimeConfig = {},
   ): EmbeddingModel {
     const config = readGlobalConfig();
@@ -940,10 +930,10 @@ class ZvecGrepService implements ZvecGrep {
   }
 }
 
-async function contextFromOpenCollection(input: {
+async function contextFromOpenWorkspaceIndex(input: {
   root: string;
   request: NormalizedContextRequest;
-  collection: Collection;
+  workspaceIndex: WorkspaceIndex;
   options: ZvecGrepContextOptions;
   timings: TimingCollector;
 }): Promise<ZvecGrepContextResult> {
@@ -954,7 +944,7 @@ async function contextFromOpenCollection(input: {
   const limit = contextGroupLimit(input.options.limit, groups.length);
 
   for (const group of groups) {
-    const search = await input.collection.searchPlan({
+    const search = await input.workspaceIndex.searchPlan({
       routes: group.routes,
       limit,
       trace: input.options.trace,
@@ -983,9 +973,9 @@ async function contextFromOpenCollection(input: {
     source: "index",
     coverage: "ranked_sample",
     collection: {
-      id: input.collection.info.id,
-      name: input.collection.info.name,
-      path: input.collection.info.path,
+      id: input.workspaceIndex.info.id,
+      name: input.workspaceIndex.info.name,
+      path: input.workspaceIndex.info.path,
     },
     items,
     diagnostics: {
@@ -1024,11 +1014,13 @@ async function withHomeWriteLock<T>(
   }
 }
 
-async function collectionNeedsRefresh(
+async function workspaceIndexNeedsRefresh(
   location: WorkspaceIndexLocation,
 ): Promise<boolean> {
   const manifest = readWorkspaceManifest(location.home);
-  const status = manifest ? await collectionStatus(manifest, location) : null;
+  const status = manifest
+    ? await workspaceIndexStatus(manifest, location)
+    : null;
   return indexStatusNeedsRefresh(status);
 }
 
@@ -1095,14 +1087,14 @@ function withContextTimings(
   };
 }
 
-type WorkspaceCollectionRecord = {
+type WorkspaceIndexRecord = {
   location: WorkspaceIndexLocation;
   info: WorkspaceManifest;
 };
 
 function findNearestWorkspaceCollection(
   start: string,
-): WorkspaceCollectionRecord | null {
+): WorkspaceIndexRecord | null {
   const location = findNearestWorkspace(start);
   if (!location) return null;
   const info = readWorkspaceManifest(location.home);
@@ -1110,7 +1102,7 @@ function findNearestWorkspaceCollection(
 }
 
 function workspaceInfoSuggestion(
-  collection: CollectionInfo | null,
+  collection: WorkspaceIndexInfo | null,
 ): string | undefined {
   if (!collection) {
     return "zg index or zg query --rg";
@@ -1120,7 +1112,7 @@ function workspaceInfoSuggestion(
     return "zg query --rg";
   }
 
-  if (!isCollectionIndexed(collection)) {
+  if (!isWorkspaceIndexed(collection)) {
     return "zg index";
   }
 
@@ -1168,7 +1160,7 @@ function workspaceIndexDisabledError(root: string): EngineError {
 }
 
 function resolveIndexRootPaths(
-  existing: CollectionInfo | null,
+  existing: WorkspaceIndexInfo | null,
   requested: readonly (string | RootPath)[] | undefined,
   fallbackRoot: string,
   options: {
@@ -1340,7 +1332,7 @@ function prepareWorkspaceManifest(
 
 function currentEmbeddingSchema(
   embeddingModel: EmbeddingModel,
-): CollectionEmbeddingSchema {
+): WorkspaceIndexEmbeddingSchema {
   return {
     provider: embeddingModel.info.provider,
     model: embeddingModel.info.name,
@@ -1353,37 +1345,42 @@ function workspaceDisplayName(root: string): string {
   return basename(normalizePath(root)) || "workspace";
 }
 
-async function collectionStatus(
-  info: CollectionInfo,
+async function workspaceIndexStatus(
+  info: WorkspaceIndexInfo,
   location: WorkspaceIndexLocation,
 ) {
   if (
     info.indexPolicy === "disabled" ||
-    !isCollectionIndexed(info) ||
+    !isWorkspaceIndexed(info) ||
     !hasWorkspaceIndex(location)
   ) {
     return null;
   }
 
-  const collection = new Collection(info, undefined, true, location.filesPath);
+  const workspaceIndex = new WorkspaceIndex(
+    info,
+    undefined,
+    true,
+    location.filesPath,
+  );
   try {
-    return await collection.status();
+    return await workspaceIndex.status();
   } finally {
-    collection.close();
+    workspaceIndex.close();
   }
 }
 
 function indexedEmbeddingSchema(
-  info: CollectionInfo,
-): CollectionEmbeddingSchema {
-  if (isCollectionIndexed(info)) {
+  info: WorkspaceIndexInfo,
+): WorkspaceIndexEmbeddingSchema {
+  if (isWorkspaceIndexed(info)) {
     return info.embedding;
   }
 
   throw new EngineError("zvec-grep index has not been built", {
     code: "ZVEC_GREP.ENGINE.SERVICE.INDEX_MISSING",
     context: errorDetails([
-      collectionDetail(info.name),
+      workspaceIndexDetail(info.name),
       detail("hint", "Run zg index to build this index."),
     ]),
   });
@@ -1521,25 +1518,25 @@ function effectiveEmbeddingRuntime(
 }
 
 function runtimeForModelProvider(
-  existing: CollectionInfo | null,
+  existing: WorkspaceIndexInfo | null,
   model: EmbeddingModel,
   workspaceRuntime: EmbeddingRuntimeConfig,
 ): EmbeddingRuntimeConfig {
-  return isCollectionIndexed(existing) &&
+  return isWorkspaceIndexed(existing) &&
     existing.embedding.provider !== model.info.provider
     ? {}
     : workspaceRuntime;
 }
 
 function embeddingRuntimeAfterSuccessfulIndex(
-  existing: CollectionInfo | null,
+  existing: WorkspaceIndexInfo | null,
   existingRuntime: EmbeddingRuntimeConfig,
   model: EmbeddingModel,
   effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
   explicit: CreateZvecGrepOptions,
 ): EmbeddingRuntimeConfig {
   const sameProvider =
-    isCollectionIndexed(existing) &&
+    isWorkspaceIndexed(existing) &&
     existing.embedding.provider === model.info.provider;
   const apiKey =
     model.info.provider === "local"
@@ -1558,14 +1555,14 @@ function embeddingRuntimeAfterSuccessfulIndex(
   };
 }
 
-function assertCollectionEndpointMatchesCurrentRuntime(
-  info: CollectionInfo | null,
+function assertWorkspaceEndpointMatchesCurrentRuntime(
+  info: WorkspaceIndexInfo | null,
   workspaceRuntime: EmbeddingRuntimeConfig,
   effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
   rebuildCommand: string,
 ): void {
   if (
-    !isCollectionIndexed(info) ||
+    !isWorkspaceIndexed(info) ||
     workspaceRuntime.endpoint === effectiveRuntime.endpoint
   ) {
     return;
@@ -1575,7 +1572,7 @@ function assertCollectionEndpointMatchesCurrentRuntime(
     {
       code: "ZVEC_GREP.ENGINE.SERVICE.EMBEDDING_ENDPOINT_CHANGE_REQUIRES_REBUILD",
       context: errorDetails([
-        collectionDetail(info.name),
+        workspaceIndexDetail(info.name),
         detail(
           "hint",
           `Run "${rebuildCommand}" to rebuild this index with the requested endpoint.`,
@@ -1586,7 +1583,7 @@ function assertCollectionEndpointMatchesCurrentRuntime(
 }
 
 function assertSearchEndpointMatchesWorkspace(
-  info: CollectionInfo,
+  info: WorkspaceIndexInfo,
   workspaceRuntime: EmbeddingRuntimeConfig,
   effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
 ): void {
@@ -1598,7 +1595,7 @@ function assertSearchEndpointMatchesWorkspace(
     {
       code: "ZVEC_GREP.ENGINE.SERVICE.SEARCH_ENDPOINT_CHANGE_REQUIRES_REBUILD",
       context: errorDetails([
-        collectionDetail(info.name),
+        workspaceIndexDetail(info.name),
         detail(
           "hint",
           'Run "zg index --endpoint <url> --rebuild" before searching with this endpoint.',
@@ -1615,12 +1612,12 @@ function nonEmptyEnvironmentValue(
   return normalized ? normalized : undefined;
 }
 
-function assertCollectionEmbeddingMatchesCurrentModel(
-  info: CollectionInfo | null,
+function assertWorkspaceEmbeddingMatchesCurrentModel(
+  info: WorkspaceIndexInfo | null,
   model: EmbeddingModel,
   rebuildCommand: string,
 ): void {
-  if (!isCollectionIndexed(info)) {
+  if (!isWorkspaceIndexed(info)) {
     return;
   }
 
@@ -1640,7 +1637,7 @@ function assertCollectionEmbeddingMatchesCurrentModel(
     {
       code: "ZVEC_GREP.ENGINE.SERVICE.EMBEDDING_SCHEMA_CHANGE_REQUIRES_REBUILD",
       context: errorDetails([
-        collectionDetail(info.name),
+        workspaceIndexDetail(info.name),
         detail("existing", `${expected.provider}/${expected.model}`),
         detail("requested", model.info.reference),
         detail(

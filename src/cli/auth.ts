@@ -30,7 +30,7 @@ import {
   type RemoteEmbeddingAuthorizationPlan,
   type RemoteEmbeddingOperationPermit,
 } from "../authorization/index.js";
-import type { CollectionEmbeddingSchema } from "../engine/types.js";
+import type { WorkspaceIndexEmbeddingSchema } from "../engine/types.js";
 import { printRemoteEmbeddingAuthorizationStatus } from "./format/status.js";
 import { createServiceOptions } from "./commands.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
@@ -190,8 +190,8 @@ export async function authorizeCliPlan(
 
 export function resolveAuthorizationSchema(
   reference: string | undefined,
-  existing: CollectionEmbeddingSchema | null | undefined,
-): Pick<CollectionEmbeddingSchema, "provider" | "model"> | undefined {
+  existing: WorkspaceIndexEmbeddingSchema | null | undefined,
+): Pick<WorkspaceIndexEmbeddingSchema, "provider" | "model"> | undefined {
   if (!reference) return existing ?? undefined;
   const separator = reference.indexOf("/");
   if (separator <= 0 || separator === reference.length - 1) {
@@ -206,7 +206,7 @@ export function resolveAuthorizationSchema(
 }
 
 export async function embeddingModelInfo(
-  schema: Pick<CollectionEmbeddingSchema, "provider" | "model">,
+  schema: Pick<WorkspaceIndexEmbeddingSchema, "provider" | "model">,
   options: CreateZvecGrepOptions,
   workspaceRuntime: EmbeddingRuntimeConfig = {},
 ): Promise<EmbeddingModelInfo> {
@@ -223,8 +223,9 @@ export async function embeddingModelInfo(
 }
 
 export function assertEmbeddingModelCompatible(
-  existing: CollectionEmbeddingSchema | null | undefined,
-  requested: Pick<CollectionEmbeddingSchema, "provider" | "model"> | undefined,
+  existing: WorkspaceIndexEmbeddingSchema | null | undefined,
+  requested:
+    Pick<WorkspaceIndexEmbeddingSchema, "provider" | "model"> | undefined,
   rebuild: boolean,
 ): void {
   if (!existing || !requested || rebuild) return;
@@ -246,7 +247,7 @@ export function assertEmbeddingModelCompatible(
 
 export function configuredEmbeddingReference(
   options: CliOptions,
-  existing?: CollectionEmbeddingSchema | null,
+  existing?: WorkspaceIndexEmbeddingSchema | null,
 ): string | undefined {
   return (
     options.embedding ??

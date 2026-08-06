@@ -18,7 +18,7 @@ type StructureEnrichmentResult = {
   diagnostics: ZvecGrepStructureEnrichmentDiagnostics;
 };
 
-const STRUCTURE_ENRICH_COLLECTION_ID = "__rg_structure__";
+const STRUCTURE_ENRICH_FILE_ID_NAMESPACE = "__rg_structure__";
 const STRUCTURE_ENRICH_MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024;
 
 export async function enrichLexicalItemsWithStructure(
@@ -166,7 +166,6 @@ async function fileInfoForStructure(
 
   return {
     id: makeStructureFileId(absolutePath),
-    collectionId: STRUCTURE_ENRICH_COLLECTION_ID,
     absolutePath: normalizePath(absolutePath),
     relativePath: toDisplayPath(relative(root, absolutePath) || "."),
     rootPath: root,
@@ -259,6 +258,6 @@ function fragmentSpecificityScore(fragment: EntityFragment): number {
 
 function makeStructureFileId(absolutePath: string): string {
   return sha256Text(
-    `${STRUCTURE_ENRICH_COLLECTION_ID}\0${normalizePath(absolutePath)}`,
+    `${STRUCTURE_ENRICH_FILE_ID_NAMESPACE}\0${normalizePath(absolutePath)}`,
   );
 }
