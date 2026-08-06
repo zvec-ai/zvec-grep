@@ -67,6 +67,42 @@ File-type filters narrow the result after glob rules. For example,
 `-g "docs/**" -t ts` selects TypeScript files inside `docs`, not every file in
 that directory.
 
+### Supported formats and extraction
+
+The scanner assigns each admitted file to one extraction path. Structure-aware
+extractors preserve useful code symbols or Markdown sections. When structure is
+not available, zg falls back to plain-text chunks so the file can still
+participate in indexed search.
+
+| Files | Formats | Extractor | Indexed representation |
+| --- | --- | --- | --- |
+| Structure-aware code | C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`), Go, Java, JavaScript/JSX, TypeScript/TSX, Python, Rust | `CodeExtractor` | Symbols, signatures, breadcrumbs, and surrounding source |
+| Component scripts | `.vue`, `.svelte` | `CodeExtractor` | JavaScript or TypeScript `<script>` blocks; plain-text fallback when no structure is found |
+| Other recognized code | Ruby, PHP, Swift, Kotlin, C#, Scala, shell, SQL, CSS/SCSS/Less, `Dockerfile`, `Makefile` | `CodeExtractor` | Plain-text chunks until a structural grammar is available |
+| Markdown | `.md`, `.mdx` | `MarkdownExtractor` | Heading sections and breadcrumbs; plain-text fallback for documents without headings |
+| Text documents | `.txt`, `.rst`, `.html`, `.htm`, `.xml` | `TextExtractor` | Plain-text chunks |
+| Text data | `.csv`, `.json`, `.jsonc`, `.toml`, `.yaml`, `.yml` | `TextExtractor` | Plain-text chunks |
+| Other non-binary files | Unrecognized extensions that pass binary detection | `TextExtractor` | Plain-text chunks |
+| Raster images | `.gif`, `.jpeg`, `.jpg`, `.png`, `.webp` | `ImageExtractor` | Image content when explicitly included and the selected Embedding model accepts images |
+
+Raster images are excluded by the default discovery rules and must be selected
+explicitly. A text-only Embedding model cannot add image fragments to its
+vector index.
+
+The following binary formats are currently skipped before extraction:
+
+- documents: `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`;
+- archives: `.zip`, `.tar`, `.gz`, `.bz2`, `.xz`, `.7z`, `.rar`;
+- executables and compiled artifacts: `.exe`, `.dll`, `.dylib`, `.so`, `.a`,
+  `.o`, `.obj`, `.wasm`, `.class`, `.jar`;
+- media and databases: `.mp3`, `.mp4`, `.mov`, `.avi`, `.mkv`, `.db`,
+  `.sqlite`.
+
+Empty files, files above the configured size limit, and files detected as
+binary are also skipped. Skipped files do not become extraction failures and
+are not included in the current `filesScanned` count, so the index summary does
+not list each skipped path or reason.
+
 <a id="indexing"></a>
 
 ## 2. Build and maintain the index
