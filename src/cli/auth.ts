@@ -62,8 +62,11 @@ export async function runAuth(parsed: ParsedArgs): Promise<void> {
   try {
     const info = await service.info({ root });
     const schema = resolveAuthorizationSchema(
-      configuredEmbeddingReference(parsed.options, info.collection?.embedding),
-      info.collection?.embedding,
+      configuredEmbeddingReference(
+        parsed.options,
+        info.workspaceIndex?.embedding,
+      ),
+      info.workspaceIndex?.embedding,
     );
     if (!schema) {
       throw new Error(
@@ -85,9 +88,9 @@ export async function runAuth(parsed: ParsedArgs): Promise<void> {
       );
     }
     const target = await createRemoteEmbeddingTarget({
-      roots: info.collection?.rootPaths.map((item) => item.absolutePath) ?? [
-        root,
-      ],
+      roots: info.workspaceIndex?.rootPaths.map(
+        (item) => item.absolutePath,
+      ) ?? [root],
       provider: modelInfo.provider,
       model: modelInfo.name,
       endpoint,
@@ -296,8 +299,8 @@ export function unsupportedRemoteEmbeddingProvider(
 export function workspaceRuntimeFromInfo(
   info: ZvecGrepInfoResult,
 ): EmbeddingRuntimeConfig {
-  const collection = info.collection;
-  if (!collection) return {};
+  const workspaceIndex = info.workspaceIndex;
+  if (!workspaceIndex) return {};
   const location = workspaceIndexLocation(info.root);
   return readWorkspaceManifest(location.home)?.embeddingRuntime ?? {};
 }
@@ -310,7 +313,7 @@ export function assertRequestedEndpointCompatible(
 ): void {
   if (
     rebuild ||
-    !info.collection?.embedding ||
+    !info.workspaceIndex?.embedding ||
     requestedEndpoint === undefined ||
     workspaceRuntime.endpoint === requestedEndpoint
   ) {

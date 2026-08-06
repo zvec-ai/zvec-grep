@@ -152,7 +152,7 @@ test("scanner applies ignore files, hidden and generated directories, size, bina
   await writeFile(join(root, "binary.unknown"), Buffer.from([0, 1, 2, 0, 3]));
   await writeFile(join(root, "large.txt"), "x".repeat(1024 * 1024 + 1));
 
-  const result = await scanRootPaths("collection", [
+  const result = await scanRootPaths("workspace-index", [
     {
       absolutePath: root,
       recursive: true,
@@ -168,14 +168,14 @@ test("scanner applies ignore files, hidden and generated directories, size, bina
   ]);
   assert.equal(result.files[0].id.length, 64);
 
-  const single = await scanRootPaths("collection", [
+  const single = await scanRootPaths("workspace-index", [
     { absolutePath: join(root, "src", "main.ts"), recursive: false },
   ]);
   assert.equal(single.files.length, 1);
   assert.equal(single.files[0].absolutePath, join(root, "src", "main.ts"));
   assert.equal(single.files[0].relativePath, "main.ts");
 
-  const implicit = await scanRootPaths("collection", [root]);
+  const implicit = await scanRootPaths("workspace-index", [root]);
   assert.equal(
     implicit.files.some((item) => item.relativePath === "src/nested/child.ts"),
     false,
@@ -227,13 +227,13 @@ test("scanner excludes general low-signal content and permits explicit includes"
     await writeFile(join(root, path), content);
   }
 
-  const result = await scanRootPaths("collection", [root]);
+  const result = await scanRootPaths("workspace-index", [root]);
   assert.deepEqual(
     result.files.map((file) => file.relativePath).sort(),
     Object.keys(retainedFiles).sort(),
   );
 
-  const explicitlyIncluded = await scanRootPaths("collection", [
+  const explicitlyIncluded = await scanRootPaths("workspace-index", [
     {
       absolutePath: root,
       recursive: true,
@@ -273,7 +273,7 @@ test("scanner applies rg-style globs, types, discovery controls, and safe symlin
     await symlink(join(root, "root.ts"), join(root, "linked.ts"));
   }
 
-  const result = await scanRootPaths("collection", [
+  const result = await scanRootPaths("workspace-index", [
     {
       absolutePath: root,
       recursive: true,
@@ -294,7 +294,7 @@ test("scanner applies rg-style globs, types, discovery controls, and safe symlin
     "src/child.ts",
   ]);
 
-  const rootOnly = await scanRootPaths("collection", [
+  const rootOnly = await scanRootPaths("workspace-index", [
     {
       absolutePath: root,
       recursive: true,
@@ -309,7 +309,7 @@ test("scanner applies rg-style globs, types, discovery controls, and safe symlin
     ["root.ts"],
   );
 
-  const depthZero = await scanRootPaths("collection", [
+  const depthZero = await scanRootPaths("workspace-index", [
     {
       absolutePath: root,
       recursive: true,

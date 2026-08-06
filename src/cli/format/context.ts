@@ -933,7 +933,7 @@ function entitySummary(item: ZvecGrepContextItem): string {
 }
 
 function contextLabel(result: ZvecGrepContextResult): string {
-  if (result.collection) {
+  if (result.workspaceIndex) {
     return `${result.root} workspace index`;
   }
 

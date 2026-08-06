@@ -73,7 +73,7 @@ export type ZvecGrepInfoResult = {
   home: string;
   indexPath: string;
   source: "index" | "unindexed";
-  collection?: WorkspaceIndexInfo;
+  workspaceIndex?: WorkspaceIndexInfo;
   status?: WorkspaceIndexStatus | null;
   suggestion?: string;
 };
@@ -161,7 +161,7 @@ export type ZvecGrepContextItem = {
   trace?: SearchHitTrace;
 };
 
-export type ZvecGrepContextCollection = {
+export type ZvecGrepContextWorkspaceIndex = {
   id: string;
   name: string;
   path: string;
@@ -211,7 +211,7 @@ export type ZvecGrepContextResult = {
   root: string;
   source: ZvecGrepContextSource;
   coverage: ZvecGrepContextCoverage;
-  collection?: ZvecGrepContextCollection;
+  workspaceIndex?: ZvecGrepContextWorkspaceIndex;
   items: ZvecGrepContextItem[];
   diagnostics: ZvecGrepContextDiagnostics;
 };

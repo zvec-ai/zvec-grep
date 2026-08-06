@@ -85,7 +85,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
         });
       },
     },
-    readCollectionIdleTtlMs: 60_000,
+    readSessionIdleTtlMs: 60_000,
   });
   const server = new DaemonHttpServer({
     host: "127.0.0.1",

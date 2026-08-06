@@ -167,8 +167,8 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
     home: join(root, ".zvec-grep"),
     indexPath: join(root, ".zvec-grep", "index"),
     source: "index",
-    collection: {
-      id: "collection",
+    workspaceIndex: {
+      id: "workspace-index",
       name: "workspace",
       path: join(root, ".zvec-grep", "index"),
       rootPaths: [{ absolutePath: root, recursive: true }],

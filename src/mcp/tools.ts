@@ -91,7 +91,7 @@ export type ZvecGrepIndexStatusResult = {
   persistent: {
     home: string;
     index_path: string;
-    collection?: {
+    workspace_index?: {
       id: string;
       name: string;
       path: string;

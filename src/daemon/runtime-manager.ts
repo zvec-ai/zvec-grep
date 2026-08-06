@@ -17,7 +17,7 @@ import { RootLeaseManager } from "./root-lease.js";
 export type RuntimeManagerOptions = {
   modelPool: EmbeddingModelPool;
   serviceOptions?: CreateZvecGrepOptions;
-  readCollectionIdleTtlMs?: number;
+  readSessionIdleTtlMs?: number;
   runtimeIdleTtlMs?: number;
   onRuntimeEvicted?: (canonicalRoot: string) => void | Promise<void>;
   rootLeaseManager?: RootLeaseManager;
@@ -84,7 +84,7 @@ export class RuntimeManager {
       this.options.serviceOptions,
       false,
     );
-    if (!info.indexed || !info.collection?.embedding) {
+    if (!info.indexed || !info.workspaceIndex?.embedding) {
       throw new DaemonError(
         "INDEX_MISSING",
         `Indexed search requires a built zvec-grep index for ${info.root}. Use native grep or rg for exhaustive literal or regex search, or call zvec_grep_index only when persistent indexing is authorized.`,
@@ -94,8 +94,8 @@ export class RuntimeManager {
     this.aliases.set(canonicalRequestedRoot, canonicalRoot);
     return this.getOrCreate(canonicalRoot, {
       model: {
-        provider: info.collection.embedding.provider,
-        name: info.collection.embedding.model,
+        provider: info.workspaceIndex.embedding.provider,
+        name: info.workspaceIndex.embedding.model,
       },
     });
   }
@@ -238,7 +238,7 @@ export class RuntimeManager {
         modelPool: this.options.modelPool,
         modelLoadRequest,
         rootLease,
-        readCollectionIdleTtlMs: this.options.readCollectionIdleTtlMs,
+        readSessionIdleTtlMs: this.options.readSessionIdleTtlMs,
         onActivity: () => this.touchRuntime(canonicalRoot),
       });
     }

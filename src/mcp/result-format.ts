@@ -59,7 +59,7 @@ export function simplifyContextResult(
     root: result.root,
     source: result.source,
     coverage: result.coverage,
-    collection: result.collection,
+    workspaceIndex: result.workspaceIndex,
     diagnostics: result.diagnostics,
     items: result.items.map((item) => ({
       kind: item.kind,

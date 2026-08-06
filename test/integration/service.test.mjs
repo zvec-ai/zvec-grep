@@ -156,7 +156,7 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
 
   await service.index({ rebuild: true });
   const rebuilt = await service.info();
-  assert.equal(rebuilt.collection?.indexVersion, CURRENT_INDEX_VERSION);
+  assert.equal(rebuilt.workspaceIndex?.indexVersion, CURRENT_INDEX_VERSION);
   await assert.rejects(access(filesMarker), { code: "ENOENT" });
   await assert.rejects(access(indexMarker), { code: "ENOENT" });
   assert.equal(await readFile(authorizationPath, "utf8"), "preserve");

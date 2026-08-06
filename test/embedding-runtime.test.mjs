@@ -34,9 +34,9 @@ test("workspace runtime persists explicit key and endpoint but search overrides 
   });
   await withPermit(root, endpoint, () => service.index());
   const publicInfo = await service.info({ includeStatus: false });
-  assert.ok(publicInfo.collection);
-  assert.equal("embeddingRuntime" in publicInfo.collection, false);
-  assert.equal("manifestVersion" in publicInfo.collection, false);
+  assert.ok(publicInfo.workspaceIndex);
+  assert.equal("embeddingRuntime" in publicInfo.workspaceIndex, false);
+  assert.equal("manifestVersion" in publicInfo.workspaceIndex, false);
   assert.doesNotMatch(JSON.stringify(publicInfo), /workspace-key/);
   await service.close();
 

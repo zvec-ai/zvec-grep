@@ -33,19 +33,19 @@ test("path scanners rebuild gitignore rules and stay inside the requested subtre
   const rootPaths = [{ absolutePath: root, recursive: true }];
   try {
     const ignored = await scanFilePath(
-      "collection",
+      "workspace-index",
       rootPaths,
       join(src, "ignored.ts"),
     );
     assert.equal(ignored.files.length, 0);
-    const subtree = await scanDirectoryPath("collection", rootPaths, src);
+    const subtree = await scanDirectoryPath("workspace-index", rootPaths, src);
     assert.deepEqual(
       subtree.files.map((file) => file.relativePath),
       ["src/kept.ts"],
     );
     await writeFile(join(root, ".gitignore"), "");
     const included = await scanFilePath(
-      "collection",
+      "workspace-index",
       rootPaths,
       join(src, "ignored.ts"),
     );
@@ -77,14 +77,19 @@ test("path scanners do not follow symlinks outside the indexed root", async (t) 
   const rootPaths = [{ absolutePath: root, recursive: true }];
   try {
     assert.equal(
-      (await scanFilePath("collection", rootPaths, join(root, "linked.ts")))
-        .files.length,
+      (
+        await scanFilePath(
+          "workspace-index",
+          rootPaths,
+          join(root, "linked.ts"),
+        )
+      ).files.length,
       0,
     );
     assert.equal(
       (
         await scanDirectoryPath(
-          "collection",
+          "workspace-index",
           rootPaths,
           join(root, "linked-directory"),
         )
@@ -117,7 +122,7 @@ test("path scanners follow configured symlinks during incremental updates", asyn
   const rootPaths = [{ absolutePath: root, recursive: true, follow: true }];
   try {
     const file = await scanFilePath(
-      "collection",
+      "workspace-index",
       rootPaths,
       join(root, "linked.ts"),
     );
@@ -126,7 +131,7 @@ test("path scanners follow configured symlinks during incremental updates", asyn
       ["linked.ts"],
     );
     const directory = await scanDirectoryPath(
-      "collection",
+      "workspace-index",
       rootPaths,
       join(root, "linked-directory"),
     );

@@ -56,7 +56,7 @@ export async function planRemoteSearchAuthorization(input: {
   runtimeNeedsReconciliation?: boolean;
   store?: RemoteEmbeddingAuthorizationStore;
 }): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
-  const schema = input.info.collection?.embedding;
+  const schema = input.info.workspaceIndex?.embedding;
   if (!input.info.indexed || !schema || schema.provider !== "qwen") {
     return undefined;
   }
@@ -128,6 +128,6 @@ export function indexStatusIsFresh(info: ZvecGrepInfoResult): boolean {
 
 function workspaceRoots(info: ZvecGrepInfoResult): string[] {
   const roots =
-    info.collection?.rootPaths.map((root) => root.absolutePath) ?? [];
+    info.workspaceIndex?.rootPaths.map((root) => root.absolutePath) ?? [];
   return roots.length > 0 ? roots : [info.root];
 }

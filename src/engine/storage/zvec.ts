@@ -64,14 +64,14 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   private needsOptimize = false;
 
   constructor(
-    private readonly collectionPath: string,
+    private readonly workspaceIndexPath: string,
     private readonly embedding: WorkspaceIndexEmbeddingSchema,
     fileStorePath: string,
     private readonly readOnly = false,
   ) {
     initializeZvec();
     if (!readOnly) {
-      mkdirSync(collectionPath, { recursive: true });
+      mkdirSync(workspaceIndexPath, { recursive: true });
     }
 
     this.files = new ZvecFileMetaStore(fileStorePath, readOnly);
@@ -79,7 +79,7 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       this.rememberFile(file);
     }
 
-    const zvecPath = join(collectionPath, ZVEC_PATH);
+    const zvecPath = join(workspaceIndexPath, ZVEC_PATH);
     if (existsSync(zvecPath)) {
       this.collection = openZvecCollection(zvecPath, readOnly, "open", () =>
         ZVecOpen(zvecPath, { readOnly }),

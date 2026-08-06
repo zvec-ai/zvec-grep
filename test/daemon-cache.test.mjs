@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EmbeddingModelPool } from "../dist/daemon/model-pool.js";
-import { ReadCollectionCache } from "../dist/daemon/read-collection-cache.js";
+import { WorkspaceReadSessionCache } from "../dist/daemon/workspace-read-session-cache.js";
 import { RootRuntime } from "../dist/daemon/root-runtime.js";
 import { createZvecGrep } from "../dist/index.js";
 
-test("read collection cache opens once, serializes operations and waits for readers before close", async () => {
+test("workspace read session cache opens once, serializes operations and waits for readers before close", async () => {
   let opens = 0;
   let closes = 0;
   let activeOperations = 0;
@@ -18,7 +18,7 @@ test("read collection cache opens once, serializes operations and waits for read
   const firstStarted = new Promise((resolve) => {
     markFirstStarted = resolve;
   });
-  const cache = new ReadCollectionCache({
+  const cache = new WorkspaceReadSessionCache({
     open: async () => {
       opens += 1;
       return {
@@ -157,7 +157,7 @@ test("service does not dispose a borrowed embedding model", async () => {
   assert.equal(disposals, 0);
 });
 
-test("root runtime releases model leases when the read collection closes", async () => {
+test("root runtime releases model leases when the read session closes", async () => {
   let sessionCloses = 0;
   let modelDisposals = 0;
   const pool = new EmbeddingModelPool({
@@ -173,7 +173,7 @@ test("root runtime releases model leases when the read collection closes", async
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
     modelLoadRequest: modelLoadRequest("model-a"),
-    readCollectionIdleTtlMs: 0,
+    readSessionIdleTtlMs: 0,
     openSession: async () => ({
       root: "/tmp/repo",
       context: async () => emptyContextResult(),
@@ -209,7 +209,7 @@ test("root runtime replaces a cached session when the embedding model changes", 
     canonicalRoot: "/tmp/repo",
     modelPool: pool,
     modelLoadRequest: modelLoadRequest("model-a"),
-    readCollectionIdleTtlMs: 60_000,
+    readSessionIdleTtlMs: 60_000,
     openSession: async () => ({
       root: "/tmp/repo",
       context: async () => emptyContextResult(),
@@ -326,7 +326,7 @@ test("root runtime releases its daemon lease when read cache close fails", async
         releases += 1;
       },
     },
-    readCollectionIdleTtlMs: 60_000,
+    readSessionIdleTtlMs: 60_000,
     openSession: async () => ({
       root: "/tmp/repo",
       context: async () => emptyContextResult(),

@@ -310,12 +310,12 @@ async function runDirectIndex(
     const schema = resolveAuthorizationSchema(
       configuredEmbeddingReference(
         parsed.options,
-        infoBefore.collection?.embedding,
+        infoBefore.workspaceIndex?.embedding,
       ),
-      infoBefore.collection?.embedding,
+      infoBefore.workspaceIndex?.embedding,
     );
     assertEmbeddingModelCompatible(
-      infoBefore.collection?.embedding,
+      infoBefore.workspaceIndex?.embedding,
       schema,
       parsed.options.rebuild === true,
     );
@@ -370,7 +370,7 @@ async function runDirectIndex(
       "Workspace index",
       result,
       parsed.options,
-      info.collection?.rootPaths,
+      info.workspaceIndex?.rootPaths,
     );
   } catch (error) {
     progress.finish();
@@ -593,7 +593,7 @@ async function runDirectQuery(
       },
     );
     const info = await directQueryInfo(zvecGrep);
-    const schema = info.collection?.embedding;
+    const schema = info.workspaceIndex?.embedding;
     const workspaceRuntime = workspaceRuntimeFromInfo(info);
     const modelInfo =
       !commandOptions.rg && schema?.provider === "qwen"

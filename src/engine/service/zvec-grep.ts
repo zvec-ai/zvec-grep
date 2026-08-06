@@ -105,7 +105,7 @@ export function openWorkspaceReadSession(
 ): WorkspaceReadSession {
   const start = resolveZvecGrepRoot(startRoot);
   assertNearestWorkspaceHomeUnlocked(start, "daemon.context.open");
-  const nearest = findNearestWorkspaceCollection(start);
+  const nearest = findNearestWorkspaceIndex(start);
   if (!nearest) {
     throw workspaceIndexMissingError(start, "undecided");
   }
@@ -418,7 +418,7 @@ class ZvecGrepService implements ZvecGrep {
     }
 
     assertNearestWorkspaceHomeUnlocked(startRoot, "context");
-    const nearest = findNearestWorkspaceCollection(startRoot);
+    const nearest = findNearestWorkspaceIndex(startRoot);
     if (nearest) {
       const { location, info } = nearest;
       if (info.indexPolicy === "disabled") {
@@ -448,7 +448,7 @@ class ZvecGrepService implements ZvecGrep {
     this.ensureOpen();
     const startRoot = resolveZvecGrepRoot(options.root ?? this.root);
     assertNearestWorkspaceHomeUnlocked(startRoot, "info");
-    const nearest = findNearestWorkspaceCollection(startRoot);
+    const nearest = findNearestWorkspaceIndex(startRoot);
 
     if (!nearest) {
       const location = workspaceIndexLocation(startRoot);
@@ -465,28 +465,28 @@ class ZvecGrepService implements ZvecGrep {
     }
 
     return await withHomeReadLock(nearest.location.home, "info", async () => {
-      const collection = readWorkspaceManifest(nearest.location.home);
+      const workspaceIndex = readWorkspaceManifest(nearest.location.home);
       const indexed =
-        collection !== null &&
-        collection.indexPolicy !== "disabled" &&
-        isWorkspaceIndexed(collection) &&
+        workspaceIndex !== null &&
+        workspaceIndex.indexPolicy !== "disabled" &&
+        isWorkspaceIndexed(workspaceIndex) &&
         hasWorkspaceIndex(nearest.location);
 
       return {
         root: nearest.location.root,
         indexed,
-        indexPolicy: collection?.indexPolicy ?? "undecided",
+        indexPolicy: workspaceIndex?.indexPolicy ?? "undecided",
         home: nearest.location.home,
         indexPath: nearest.location.indexPath,
         source: indexed ? "index" : "unindexed",
-        collection: collection
-          ? workspaceIndexInfoFromManifest(collection)
+        workspaceIndex: workspaceIndex
+          ? workspaceIndexInfoFromManifest(workspaceIndex)
           : undefined,
         status:
           indexed && options.includeStatus !== false
-            ? await workspaceIndexStatus(collection, nearest.location)
+            ? await workspaceIndexStatus(workspaceIndex, nearest.location)
             : null,
-        suggestion: workspaceInfoSuggestion(collection),
+        suggestion: workspaceInfoSuggestion(workspaceIndex),
       };
     });
   }
@@ -972,7 +972,7 @@ async function contextFromOpenWorkspaceIndex(input: {
     root: input.root,
     source: "index",
     coverage: "ranked_sample",
-    collection: {
+    workspaceIndex: {
       id: input.workspaceIndex.info.id,
       name: input.workspaceIndex.info.name,
       path: input.workspaceIndex.info.path,
@@ -1092,9 +1092,7 @@ type WorkspaceIndexRecord = {
   info: WorkspaceManifest;
 };
 
-function findNearestWorkspaceCollection(
-  start: string,
-): WorkspaceIndexRecord | null {
+function findNearestWorkspaceIndex(start: string): WorkspaceIndexRecord | null {
   const location = findNearestWorkspace(start);
   if (!location) return null;
   const info = readWorkspaceManifest(location.home);
@@ -1102,17 +1100,17 @@ function findNearestWorkspaceCollection(
 }
 
 function workspaceInfoSuggestion(
-  collection: WorkspaceIndexInfo | null,
+  workspaceIndex: WorkspaceIndexInfo | null,
 ): string | undefined {
-  if (!collection) {
+  if (!workspaceIndex) {
     return "zg index or zg query --rg";
   }
 
-  if (collection.indexPolicy === "disabled") {
+  if (workspaceIndex.indexPolicy === "disabled") {
     return "zg query --rg";
   }
 
-  if (!isWorkspaceIndexed(collection)) {
+  if (!isWorkspaceIndexed(workspaceIndex)) {
     return "zg index";
   }
 

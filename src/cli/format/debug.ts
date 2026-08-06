@@ -8,9 +8,9 @@ export function printDebug(
     `source=${result.source} coverage=${result.coverage} items=${result.items.length}`,
   );
 
-  if (result.collection) {
+  if (result.workspaceIndex) {
     console.error(
-      `collection=${result.collection.name} path=${result.collection.path}`,
+      `workspace_index=${result.workspaceIndex.name} path=${result.workspaceIndex.path}`,
     );
   }
 

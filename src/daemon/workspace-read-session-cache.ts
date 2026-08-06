@@ -2,13 +2,13 @@ export type ClosableReadHandle = {
   close(): void | Promise<void>;
 };
 
-export type ReadCollectionCacheOptions<T extends ClosableReadHandle> = {
+export type WorkspaceReadSessionCacheOptions<T extends ClosableReadHandle> = {
   open: () => T | Promise<T>;
   idleTtlMs?: number;
   serializeOperations?: boolean;
 };
 
-export class ReadCollectionCache<T extends ClosableReadHandle> {
+export class WorkspaceReadSessionCache<T extends ClosableReadHandle> {
   private handle?: T;
   private openPromise?: Promise<T>;
   private activeReaders = 0;
@@ -19,11 +19,11 @@ export class ReadCollectionCache<T extends ClosableReadHandle> {
   private closeResolve?: () => void;
   private closed = false;
 
-  constructor(private readonly options: ReadCollectionCacheOptions<T>) {}
+  constructor(private readonly options: WorkspaceReadSessionCacheOptions<T>) {}
 
   async withRead<R>(operation: (handle: T) => Promise<R>): Promise<R> {
     if (this.closed) {
-      throw new Error("Read collection cache is closed.");
+      throw new Error("Workspace read session cache is closed.");
     }
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);

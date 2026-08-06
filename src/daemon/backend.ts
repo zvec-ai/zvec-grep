@@ -85,7 +85,7 @@ export type DaemonBackendOptions = {
   serviceOptions?: CreateZvecGrepOptions;
   modelPoolOptions?: EmbeddingModelPoolOptions;
   schedulerOptions?: JobSchedulerOptions;
-  readCollectionIdleTtlMs?: number;
+  readSessionIdleTtlMs?: number;
   runtimeIdleTtlMs?: number;
   createService?: typeof createZvecGrep;
   watchManagerFactory?: (options: WatchManagerOptions) => WatchManager;
@@ -131,7 +131,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     this.runtimeManager = new RuntimeManager({
       modelPool: this.modelPool,
       serviceOptions: options.serviceOptions,
-      readCollectionIdleTtlMs: options.readCollectionIdleTtlMs,
+      readSessionIdleTtlMs: options.readSessionIdleTtlMs,
       runtimeIdleTtlMs: options.runtimeIdleTtlMs,
       onRuntimeEvicted: async (root) => {
         this.statusCache.delete(root);
@@ -186,7 +186,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     } finally {
       lease.release();
     }
-    const existing = info.collection?.embedding;
+    const existing = info.workspaceIndex?.embedding;
     if (
       existing &&
       input.embedding &&
@@ -240,7 +240,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       }
     }
     const canonicalRoot = await resolveRequestedRoot(info.root, false);
-    const schema = info.collection?.embedding;
+    const schema = info.workspaceIndex?.embedding;
     if (!info.indexed || !schema || schema.provider !== "qwen") {
       return undefined;
     }
@@ -774,7 +774,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       includeFinalStatus,
     );
     if (includeFinalStatus) this.statusCache.set(runtime.canonicalRoot, after);
-    if (!after.collection?.embedding) {
+    if (!after.workspaceIndex?.embedding) {
       throw new DaemonError(
         "INDEX_MISSING",
         "Index completed without an embedding schema.",
@@ -964,7 +964,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     if (knownProvider && knownProvider !== "qwen") return { allowed: true };
     const root = runtime.canonicalRoot;
     const info = await inspectRoot(root, this.options.serviceOptions);
-    const schema = info.collection?.embedding;
+    const schema = info.workspaceIndex?.embedding;
     if (!schema || schema.provider !== "qwen") return { allowed: true };
     const modelInfo = await this.loadEmbeddingModelInfo(
       this.searchModelLoadRequest(info, {}),
@@ -1087,10 +1087,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     info: ZvecGrepInfoResult,
     input: ZvecGrepIndexInput,
   ): EmbeddingModelLoadRequest["model"] {
-    if (info.collection?.embedding && !input.embedding) {
+    if (info.workspaceIndex?.embedding && !input.embedding) {
       return {
-        provider: info.collection.embedding.provider,
-        name: info.collection.embedding.model,
+        provider: info.workspaceIndex.embedding.provider,
+        name: info.workspaceIndex.embedding.model,
       };
     }
     const reference =
@@ -1119,13 +1119,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   ): EmbeddingModelLoadRequest {
     const model = this.indexModel(info, input as ZvecGrepIndexInput);
     const workspaceRuntime =
-      info.collection?.embedding?.provider === model.provider
+      info.workspaceIndex?.embedding?.provider === model.provider
         ? this.readWorkspaceEmbeddingRuntime(info)
         : {};
     const runtime = this.resolveModelRuntime(model, workspaceRuntime, input);
     if (
       input.rebuild !== true &&
-      info.collection?.embedding &&
+      info.workspaceIndex?.embedding &&
       workspaceRuntime.endpoint !== runtime.endpoint
     ) {
       throw new DaemonError(
@@ -1140,7 +1140,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     info: ZvecGrepInfoResult,
     overrides: Pick<NormalizedSearchInput, "apiKey" | "device">,
   ): EmbeddingModelLoadRequest {
-    const schema = info.collection?.embedding;
+    const schema = info.workspaceIndex?.embedding;
     if (!info.indexed || !schema) {
       throw new DaemonError(
         "INDEX_MISSING",
@@ -1255,7 +1255,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
 function readWorkspaceEmbeddingRuntime(
   info: ZvecGrepInfoResult,
 ): EmbeddingRuntimeConfig {
-  if (!info.collection) return {};
+  if (!info.workspaceIndex) return {};
   const location = workspaceIndexLocation(info.root);
   return readWorkspaceManifest(location.home)?.embeddingRuntime ?? {};
 }
@@ -1349,12 +1349,12 @@ function persistentStatus(
   return {
     home: info.home,
     index_path: info.indexPath,
-    collection: info.collection
+    workspace_index: info.workspaceIndex
       ? {
-          id: info.collection.id,
-          name: info.collection.name,
-          path: info.collection.path,
-          root_paths: info.collection.rootPaths.map((rootPath) => ({
+          id: info.workspaceIndex.id,
+          name: info.workspaceIndex.name,
+          path: info.workspaceIndex.path,
+          root_paths: info.workspaceIndex.rootPaths.map((rootPath) => ({
             absolute_path: rootPath.absolutePath,
             recursive: rootPath.recursive,
             include: rootPath.include ? [...rootPath.include] : undefined,
@@ -1378,10 +1378,10 @@ function persistentStatus(
             max_file_size_bytes: rootPath.maxFileSizeBytes,
             follow: rootPath.follow,
           })),
-          embedding: info.collection.embedding,
-          index_version: info.collection.indexVersion,
-          created_time: info.collection.createdTime,
-          updated_time: info.collection.updatedTime,
+          embedding: info.workspaceIndex.embedding,
+          index_version: info.workspaceIndex.indexVersion,
+          created_time: info.workspaceIndex.createdTime,
+          updated_time: info.workspaceIndex.updatedTime,
         }
       : undefined,
     files: info.status

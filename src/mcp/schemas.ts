@@ -341,7 +341,7 @@ const searchResultSchema = z.object({
     "lexical_exhaustive",
     "lexical_truncated",
   ]),
-  collection: z
+  workspaceIndex: z
     .object({
       id: z.string(),
       name: z.string(),
@@ -428,7 +428,7 @@ export const zvecGrepIndexStatusOutputSchema = z.object({
   persistent: z.object({
     home: z.string(),
     index_path: z.string(),
-    collection: z
+    workspace_index: z
       .object({
         id: z.string(),
         name: z.string(),

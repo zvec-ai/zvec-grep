@@ -3,7 +3,7 @@ export type {
   CreateZvecGrepOptions,
   ZvecGrep,
   ZvecGrepContent,
-  ZvecGrepContextCollection,
+  ZvecGrepContextWorkspaceIndex,
   ZvecGrepContextContainer,
   ZvecGrepContextCoverage,
   ZvecGrepContextDiagnostics,

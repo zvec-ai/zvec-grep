@@ -144,7 +144,7 @@ function createFixture() {
     storage,
     context: {
       workspaceIndex: {
-        id: "collection-1",
+        id: "workspace-index-1",
         name: "docs",
         path: "/tmp/index",
         rootPaths: [{ absolutePath: "/repo", recursive: true }],

@@ -91,7 +91,7 @@ type ServerIndexInfo = {
   persistent: {
     home: string;
     index_path: string;
-    collection?: {
+    workspace_index?: {
       root_paths: ServerRootPath[];
       embedding?: {
         provider: string;
@@ -223,8 +223,8 @@ export function printWorkspaceInfo(
     indexPath: info.indexPath,
     policy: info.indexPolicy,
     state,
-    embedding: info.collection?.embedding,
-    roots: info.collection?.rootPaths,
+    embedding: info.workspaceIndex?.embedding,
+    roots: info.workspaceIndex?.rootPaths,
     files: status
       ? {
           indexed: completion?.completed ?? 0,
@@ -256,8 +256,9 @@ export function printServerIndexInfo(
 ): WorkspaceIndexState {
   const theme = createStatusTheme(options);
   const state = serverIndexState(info);
-  const embedding = info.persistent.collection?.embedding;
-  const roots = info.persistent.collection?.root_paths.map(mapServerRootPath);
+  const embedding = info.persistent.workspace_index?.embedding;
+  const roots =
+    info.persistent.workspace_index?.root_paths.map(mapServerRootPath);
   const files = info.persistent.files;
   const completion = info.runtime?.completion;
 
@@ -583,7 +584,7 @@ function workspaceState(
     return "disabled";
   }
 
-  if (!info.collection) {
+  if (!info.workspaceIndex) {
     return "undecided";
   }
 

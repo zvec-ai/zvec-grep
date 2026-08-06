@@ -9,7 +9,7 @@ import type {
   EmbeddingModelPool,
   ModelLease,
 } from "./model-pool.js";
-import { ReadCollectionCache } from "./read-collection-cache.js";
+import { WorkspaceReadSessionCache } from "./workspace-read-session-cache.js";
 import type { RootLease } from "./root-lease.js";
 
 export type RootRuntimeOptions = {
@@ -17,7 +17,7 @@ export type RootRuntimeOptions = {
   modelPool: EmbeddingModelPool;
   modelLoadRequest?: EmbeddingModelLoadRequest;
   rootLease?: RootLease;
-  readCollectionIdleTtlMs?: number;
+  readSessionIdleTtlMs?: number;
   openSession?: (
     lease: ModelLease,
   ) => WorkspaceReadSession | Promise<WorkspaceReadSession>;
@@ -30,7 +30,7 @@ type LeasedReadSession = WorkspaceReadSession & {
 
 type ReadGeneration = {
   key: string;
-  cache: ReadCollectionCache<LeasedReadSession>;
+  cache: WorkspaceReadSessionCache<LeasedReadSession>;
 };
 
 export class RootRuntime {
@@ -133,9 +133,9 @@ export class RootRuntime {
         await this.generation?.cache.close();
         this.generation = {
           key: desiredKey,
-          cache: new ReadCollectionCache({
+          cache: new WorkspaceReadSessionCache({
             open: () => this.openLeasedSession(request),
-            idleTtlMs: this.options.readCollectionIdleTtlMs,
+            idleTtlMs: this.options.readSessionIdleTtlMs,
             serializeOperations: true,
           }),
         };
@@ -294,7 +294,7 @@ export class RootRuntime {
   }
 
   snapshot(): {
-    readCollectionOpen: boolean;
+    readSessionOpen: boolean;
     activeReaders: number;
     activeOperations: number;
     writerPending: boolean;
@@ -306,7 +306,7 @@ export class RootRuntime {
   } {
     const read = this.generation?.cache.snapshot();
     return {
-      readCollectionOpen: read?.open ?? false,
+      readSessionOpen: read?.open ?? false,
       activeReaders: read?.activeReaders ?? 0,
       activeOperations: this.activeOperations,
       writerPending: this.writerPending,
