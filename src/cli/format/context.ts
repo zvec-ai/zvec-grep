@@ -134,7 +134,11 @@ function agentRgContextLines(
       if (block.kind === "symbol" && !isRedundantDeclarationBlock(block)) {
         lines.push(...agentRgSymbolBlockLines(block, highlighter));
       } else {
-        lines.push(...block.items.flatMap((item) => agentRgFileSourceLines(item, highlighter)));
+        lines.push(
+          ...block.items.flatMap((item) =>
+            agentRgFileSourceLines(item, highlighter),
+          ),
+        );
       }
     }
   }
@@ -146,7 +150,11 @@ function agentRgSymbolBlockLines(
   block: Extract<AgentRgBlock, { kind: "symbol" }>,
   highlighter: (value: string) => string,
 ): string[] {
-  const sourceLines = agentRgSymbolSourceLines(block.items, "    ", highlighter);
+  const sourceLines = agentRgSymbolSourceLines(
+    block.items,
+    "    ",
+    highlighter,
+  );
   const header = `  ${rangeLabel(block.range)} [${block.label}]`;
   if (block.items.length === 1 && sourceLines.length === 1) {
     return [`${header} ${sourceLines[0]!.trimStart()}`];
