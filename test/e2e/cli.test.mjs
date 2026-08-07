@@ -15,6 +15,7 @@ test("direct and server indexes report aggregate local model download progress",
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-grep-local-download-progress-",
+    { cleanup: false },
   );
   const root = join(temporaryDirectory, "repo");
   const home = join(temporaryDirectory, "home");
@@ -70,6 +71,7 @@ test("direct and server indexes report aggregate local model download progress",
       cwd: root,
       env: serverEnv,
     }).catch(() => undefined);
+    await removeTemporaryDirectory(temporaryDirectory);
   });
   await runCli(
     ["server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
