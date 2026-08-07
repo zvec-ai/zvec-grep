@@ -48,7 +48,7 @@ import { validateRootPaths } from "../pipeline/indexing/root-paths.js";
 import {
   findNearestWorkspace,
   hasWorkspaceIndex,
-  resetWorkspaceIndexStorage,
+  resetWorkspaceIndex,
   resolveZvecGrepRoot,
   workspaceHome,
   workspaceIndexLocation,
@@ -122,12 +122,10 @@ export function openWorkspaceReadSession(
     );
   }
 
-  const workspaceIndex = new WorkspaceIndex(
-    info,
+  const workspaceIndex = new WorkspaceIndex(info, {
+    mode: "read",
     embeddingModel,
-    true,
-    location.filesPath,
-  );
+  });
   let closed = false;
 
   return {
@@ -260,7 +258,7 @@ class ZvecGrepService implements ZvecGrep {
               },
             );
             if (options.rebuild || !isWorkspaceIndexed(existing)) {
-              resetWorkspaceIndexStorage(location);
+              resetWorkspaceIndex(location);
             }
 
             const existingAfterRebuild = options.rebuild ? null : existing;
@@ -279,12 +277,10 @@ class ZvecGrepService implements ZvecGrep {
               embeddingModel,
               existingRuntime,
             );
-            const workspaceIndex = new WorkspaceIndex(
-              manifest,
+            const workspaceIndex = new WorkspaceIndex(manifest, {
+              mode: "write",
               embeddingModel,
-              false,
-              location.filesPath,
-            );
+            });
             writeWorkspaceManifest(location.home, manifest);
 
             try {
@@ -351,7 +347,7 @@ class ZvecGrepService implements ZvecGrep {
       }
 
       return await withHomeWriteLock(location.home, "index.drop", async () => {
-        resetWorkspaceIndexStorage(location);
+        resetWorkspaceIndex(location);
         return true;
       });
     } finally {
@@ -527,7 +523,6 @@ class ZvecGrepService implements ZvecGrep {
     const workspaceIndex = this.openWorkspaceIndexForSearch(
       info,
       request,
-      location,
       info.embeddingRuntime,
     );
     try {
@@ -604,12 +599,10 @@ class ZvecGrepService implements ZvecGrep {
             "zg index --rebuild",
           );
 
-          const workspaceIndex = new WorkspaceIndex(
-            existing,
+          const workspaceIndex = new WorkspaceIndex(existing, {
+            mode: "write",
             embeddingModel,
-            false,
-            location.filesPath,
-          );
+          });
           try {
             const result = await workspaceIndex.index({
               embeddingConcurrency: options.embeddingConcurrency,
@@ -713,20 +706,17 @@ class ZvecGrepService implements ZvecGrep {
   private openWorkspaceIndexForSearch(
     info: WorkspaceIndexInfo,
     request: NormalizedContextRequest,
-    location: WorkspaceIndexLocation,
     workspaceRuntime: EmbeddingRuntimeConfig,
   ): WorkspaceIndex {
-    return new WorkspaceIndex(
-      info,
-      this.embeddingModelForSearch(
+    return new WorkspaceIndex(info, {
+      mode: "read",
+      embeddingModel: this.embeddingModelForSearch(
         indexedEmbeddingSchema(info),
         request,
         workspaceRuntime,
         info,
       ),
-      true,
-      location.filesPath,
-    );
+    });
   }
 
   private embeddingModelForSearch(
@@ -1371,12 +1361,7 @@ async function workspaceIndexStatus(
     return null;
   }
 
-  const workspaceIndex = new WorkspaceIndex(
-    info,
-    undefined,
-    true,
-    location.filesPath,
-  );
+  const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
   try {
     return await workspaceIndex.status();
   } finally {

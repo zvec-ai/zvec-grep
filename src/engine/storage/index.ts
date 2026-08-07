@@ -3,38 +3,50 @@ import type {
   Entity,
   EntityFragment,
   FileInfo,
+  WorkspaceIndexEmbeddingSchema,
 } from "../types.js";
 
-export type StoredEntity = {
+type StoredEntity = {
   entity: Entity;
   file: FileInfo;
 };
 
-export type StoredEntityFragment = {
+type IndexedFragment = {
   fragment: EntityFragment;
-  file: FileInfo;
+  vector: readonly number[];
 };
 
-export type StorageSearchPath = "fts" | "vector";
+type FileIndexDiagnostics = {
+  truncatedFragmentCount?: number;
+};
 
-export type StorageSearchFilter = {
+type StorageSearchFilter = {
   fileIds?: readonly string[];
   groupIds?: readonly string[];
   symbolNames?: readonly string[];
   symbolTypes?: readonly CodeSymbolType[];
 };
 
-export type StorageSearchHit = StoredEntityFragment & {
-  path: StorageSearchPath;
+type StorageSearchHit = {
+  fragment: EntityFragment;
+  file: FileInfo;
+  path: "fts" | "vector";
   score: number;
 };
 
-export type FileIndexDiagnostics = {
-  truncatedFragmentCount?: number;
-};
+export type WorkspaceIndexStorageOptions =
+  | {
+      storagePath: string;
+      readOnly: true;
+    }
+  | {
+      storagePath: string;
+      readOnly: false;
+      embedding: WorkspaceIndexEmbeddingSchema;
+    };
 
 export interface WorkspaceIndexStorage {
-  getFileById(fileId: string): FileInfo | null;
+  readonly readOnly: boolean;
   getFileByPath(absolutePath: string): FileInfo | null;
   listFilesByPathPrefix(absolutePath: string): FileInfo[];
   listFiles(): FileInfo[];
@@ -42,18 +54,7 @@ export interface WorkspaceIndexStorage {
     fileId: string,
     options?: { limit?: number; offset?: number },
   ): StoredEntity[];
-  getEntity(
-    entityId: string,
-    options?: { includeVector?: boolean },
-  ): (StoredEntity & { vector?: number[] }) | null;
-  upsertFile(
-    file: FileInfo,
-    fragments: readonly EntityFragment[],
-    vectors: readonly number[][],
-    diagnostics?: FileIndexDiagnostics,
-  ): void;
-  markFileFailed(file: FileInfo, error: string): void;
-  deleteFile(fileId: string): void;
+  getEntity(entityId: string): StoredEntity | null;
   searchFts(
     query: string,
     limit: number,
@@ -64,8 +65,19 @@ export interface WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[];
-  optimize(): Promise<void>;
+  replaceFile(
+    file: FileInfo,
+    entries: readonly IndexedFragment[],
+    diagnostics?: FileIndexDiagnostics,
+  ): void;
+  markFileFailed(file: FileInfo, error: string): void;
+  deleteFile(fileId: string): void;
+  finalizeWrites(): Promise<void>;
   close(): void;
 }
 
-export { ZvecWorkspaceIndexStorage } from "./zvec.js";
+export { createWorkspaceIndexStorage } from "./zvec.js";
+export {
+  deleteWorkspaceIndexStorage,
+  hasWorkspaceIndexStorage,
+} from "./layout.js";

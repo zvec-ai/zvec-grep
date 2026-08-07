@@ -11,7 +11,6 @@ import {
   type ZVecDoc,
   type ZVecDocInput,
   type ZVecStatus,
-  type ZVecVector,
 } from "@zvec/zvec";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
@@ -30,21 +29,45 @@ import type {
 } from "../types.js";
 import { normalizePath } from "../utils/path.js";
 import type {
-  FileIndexDiagnostics,
   WorkspaceIndexStorage,
-  StorageSearchFilter,
-  StorageSearchHit,
-  StoredEntity,
-  StoredEntityFragment,
+  WorkspaceIndexStorageOptions,
 } from "./index.js";
+import { resolveWorkspaceIndexStoragePaths } from "./layout.js";
 
 type FileRecord = FileInfo & {
   entityIds: string[];
 };
 
+type StoredEntity = {
+  entity: Entity;
+  file: FileInfo;
+};
+
+type IndexedFragment = {
+  fragment: EntityFragment;
+  vector: readonly number[];
+};
+
+type FileIndexDiagnostics = {
+  truncatedFragmentCount?: number;
+};
+
+type StorageSearchFilter = {
+  fileIds?: readonly string[];
+  groupIds?: readonly string[];
+  symbolNames?: readonly string[];
+  symbolTypes?: readonly CodeSymbolType[];
+};
+
+type StorageSearchHit = {
+  fragment: EntityFragment;
+  file: FileInfo;
+  path: "fts" | "vector";
+  score: number;
+};
+
 const ENTITY_VECTOR_FIELD = "embedding";
 const ENTITY_TEXT_FIELD = "text";
-const ZVEC_PATH = "index.zvec";
 const ZVEC_LOCK_FILE = "LOCK";
 const NO_MATCH_FILTER = "file_id = '__zvec_grep_no_match__'";
 const ZVEC_UPSERT_BATCH_SIZE = 1024;
@@ -56,30 +79,40 @@ const ZVEC_OPEN_RETRY_MAX_DELAY_MS = 1000;
 
 let zvecInitialized = false;
 
-export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
+export function createWorkspaceIndexStorage(
+  options: WorkspaceIndexStorageOptions,
+): WorkspaceIndexStorage {
+  return new ZvecWorkspaceIndexStorage(options);
+}
+
+type StoredEntityFragment = {
+  fragment: EntityFragment;
+  file: FileInfo;
+};
+
+class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
+  readonly readOnly: boolean;
   private readonly collection: ZVecCollection;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
   private readonly filesByAbsolutePath = new Map<string, FileRecord>();
   private needsOptimize = false;
 
-  constructor(
-    private readonly workspaceIndexPath: string,
-    private readonly embedding: WorkspaceIndexEmbeddingSchema,
-    fileStorePath: string,
-    private readonly readOnly = false,
-  ) {
+  constructor(options: WorkspaceIndexStorageOptions) {
+    const paths = resolveWorkspaceIndexStoragePaths(options.storagePath);
+    const { readOnly } = options;
+    this.readOnly = readOnly;
     initializeZvec();
     if (!readOnly) {
-      mkdirSync(workspaceIndexPath, { recursive: true });
+      mkdirSync(paths.storagePath, { recursive: true });
     }
 
-    this.files = new ZvecFileMetaStore(fileStorePath, readOnly);
+    this.files = new ZvecFileMetaStore(paths.filesPath, readOnly);
     for (const file of this.files.list()) {
       this.rememberFile(file);
     }
 
-    const zvecPath = join(workspaceIndexPath, ZVEC_PATH);
+    const zvecPath = paths.indexPath;
     if (existsSync(zvecPath)) {
       this.collection = openZvecCollection(zvecPath, readOnly, "open", () =>
         ZVecOpen(zvecPath, { readOnly }),
@@ -91,15 +124,9 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       });
     } else {
       this.collection = openZvecCollection(zvecPath, readOnly, "create", () =>
-        ZVecCreateAndOpen(zvecPath, createSchema(embedding)),
+        ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
       );
     }
-  }
-
-  getFileById(fileId: string): FileInfo | null {
-    const file = this.filesById.get(fileId);
-
-    return file ? fileRecordToInfo(file) : null;
   }
 
   getFileByPath(absolutePath: string): FileInfo | null {
@@ -136,11 +163,8 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     return this.fetchStoredEntities(ids);
   }
 
-  getEntity(
-    entityId: string,
-    options: { includeVector?: boolean } = {},
-  ): (StoredEntity & { vector?: number[] }) | null {
-    const fragment = this.getFragment(entityId, options);
+  getEntity(entityId: string): StoredEntity | null {
+    const fragment = this.getFragment(entityId);
 
     if (!fragment) {
       return null;
@@ -150,23 +174,19 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       fragment.fragment.group &&
       fragment.fragment.group !== fragment.fragment.id
     ) {
-      return this.getEntity(fragment.fragment.group, options);
+      return this.getEntity(fragment.fragment.group);
     }
 
-    const entity = fragmentToEntity(fragment.fragment);
-
-    return fragment.vector
-      ? { file: fragment.file, entity, vector: fragment.vector }
-      : { file: fragment.file, entity };
+    return {
+      file: fragment.file,
+      entity: fragmentToEntity(fragment.fragment),
+    };
   }
 
-  private getFragment(
-    fragmentId: string,
-    options: { includeVector?: boolean } = {},
-  ): (StoredEntityFragment & { vector?: number[] }) | null {
+  private getFragment(fragmentId: string): StoredEntityFragment | null {
     const docs = this.collection.fetchSync({
       ids: fragmentId,
-      includeVector: options.includeVector ?? false,
+      includeVector: false,
     });
     const doc = docs[fragmentId];
 
@@ -174,34 +194,16 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       return null;
     }
 
-    const stored = this.docToStoredFragment(doc);
-    if (!stored) {
-      return null;
-    }
-
-    const vector = options.includeVector
-      ? readVector(doc.vectors[ENTITY_VECTOR_FIELD])
-      : undefined;
-
-    return vector ? { ...stored, vector } : stored;
+    return this.docToStoredFragment(doc);
   }
 
-  upsertFile(
+  replaceFile(
     file: FileInfo,
-    fragments: readonly EntityFragment[],
-    vectors: readonly number[][],
+    entries: readonly IndexedFragment[],
     diagnostics: FileIndexDiagnostics = {},
   ): void {
-    if (fragments.length !== vectors.length) {
-      throw new EngineError(
-        "Storage received mismatched entity/vector counts",
-        {
-          code: "ZVEC_GREP.ENGINE.STORAGE.ENTITY_VECTOR_COUNT_MISMATCH",
-          context: `fileId=${file.id} fragmentCount=${fragments.length} vectorCount=${vectors.length}`,
-        },
-      );
-    }
-
+    this.assertWritable("replaceFile");
+    const fragments = entries.map(({ fragment }) => fragment);
     validateFragmentGroups(file.id, fragments);
     this.markFileDirty(file);
     this.deleteFileDocuments(file.id);
@@ -219,11 +221,11 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       entityIds,
     };
 
-    if (fragments.length > 0) {
-      const docs = fragments.map((fragment, index): ZVecDocInput => ({
+    if (entries.length > 0) {
+      const docs = entries.map(({ fragment, vector }, index): ZVecDocInput => ({
         id: fragment.id,
         vectors: {
-          [ENTITY_VECTOR_FIELD]: vectors[index],
+          [ENTITY_VECTOR_FIELD]: [...vector],
         },
         fields: fragmentToFields(indexedFile, fragment, index),
       }));
@@ -253,6 +255,7 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   }
 
   markFileFailed(file: FileInfo, error: string): void {
+    this.assertWritable("markFileFailed");
     this.deleteFileDocuments(file.id);
 
     this.rememberFile({
@@ -269,6 +272,7 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   }
 
   deleteFile(fileId: string): void {
+    this.assertWritable("deleteFile");
     const existing = this.filesById.get(fileId);
 
     this.deleteFileDocuments(fileId);
@@ -314,7 +318,8 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     return docsToHits(docs, "vector", this);
   }
 
-  async optimize(): Promise<void> {
+  async finalizeWrites(): Promise<void> {
+    this.assertWritable("finalizeWrites");
     if (this.needsOptimize) {
       await this.collection.optimize();
       this.needsOptimize = false;
@@ -425,6 +430,15 @@ export class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
 
   private persistFile(file: FileRecord): void {
     this.files.upsertFile(file);
+  }
+
+  private assertWritable(operation: string): void {
+    if (this.readOnly) {
+      throw new EngineError("Cannot update read-only workspace index storage", {
+        code: "ZVEC_GREP.ENGINE.STORAGE.READ_ONLY",
+        context: `operation=${operation}`,
+      });
+    }
   }
 }
 
@@ -1248,22 +1262,6 @@ function readNullableNumberFieldFromFields(
   }
 
   return null;
-}
-
-function readVector(vector: ZVecVector | undefined): number[] | undefined {
-  if (!vector) {
-    return undefined;
-  }
-
-  if (Array.isArray(vector)) {
-    return vector;
-  }
-
-  if (ArrayBuffer.isView(vector)) {
-    return [...(vector as Float32Array | Int8Array)];
-  }
-
-  return undefined;
 }
 
 function parseStringArray(value: string): string[] {

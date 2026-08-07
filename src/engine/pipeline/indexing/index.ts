@@ -564,7 +564,7 @@ function buildIndexResult(
 
 async function optimizeStorage(ctx: IndexContext): Promise<void> {
   try {
-    await ctx.storage.optimize();
+    await ctx.storage.finalizeWrites();
   } catch (error) {
     throw toEngineError(error, "Indexing failed to finalize storage", {
       code: "ZVEC_GREP.ENGINE.INDEXING.OPTIMIZE_FAILED",
@@ -940,9 +940,25 @@ function commitFile(
 ): boolean {
   try {
     throwIfIndexCancelled(ctx);
-    ctx.storage.upsertFile(file.file, file.fragments, vectors, {
-      truncatedFragmentCount,
-    });
+    if (file.fragments.length !== vectors.length) {
+      throw new EngineError(
+        "Embedding returned mismatched entity/vector counts",
+        {
+          code: "ZVEC_GREP.ENGINE.STORAGE.ENTITY_VECTOR_COUNT_MISMATCH",
+          context: `fileId=${file.file.id} fragmentCount=${file.fragments.length} vectorCount=${vectors.length}`,
+        },
+      );
+    }
+    ctx.storage.replaceFile(
+      file.file,
+      file.fragments.map((fragment, index) => ({
+        fragment,
+        vector: vectors[index],
+      })),
+      {
+        truncatedFragmentCount,
+      },
+    );
     stats.filesIndexed++;
     stats.entitiesCreated += countPublicEntities(file.fragments);
     return true;

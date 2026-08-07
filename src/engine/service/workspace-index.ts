@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import {
   workspaceIndexDetail,
   detail,
@@ -12,8 +11,10 @@ import {
   indexWorkspacePaths,
 } from "../pipeline/indexing/index.js";
 import { searchWorkspaceIndex } from "../pipeline/search/index.js";
-import type { WorkspaceIndexStorage } from "../storage/index.js";
-import { ZvecWorkspaceIndexStorage } from "../storage/zvec.js";
+import {
+  createWorkspaceIndexStorage,
+  type WorkspaceIndexStorage,
+} from "../storage/index.js";
 import type {
   WorkspaceIndexEmbeddingSchema,
   WorkspaceIndexStatus,
@@ -25,31 +26,40 @@ import type {
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
 
-const FILES_ZVEC = "files.zvec";
+export type WorkspaceIndexOptions = {
+  mode: "read" | "write";
+  embeddingModel?: EmbeddingModel;
+};
 
 export class WorkspaceIndex {
   private readonly storage: WorkspaceIndexStorage;
   private readonly embedding: WorkspaceIndexEmbeddingSchema;
+  private readonly embeddingModel?: EmbeddingModel;
   private closed = false;
 
   constructor(
     readonly info: WorkspaceIndexInfo,
-    private readonly embeddingModel?: EmbeddingModel,
-    private readonly readOnly = false,
-    private readonly fileStorePath = join(info.path, FILES_ZVEC),
+    options: WorkspaceIndexOptions,
   ) {
+    this.embeddingModel = options.embeddingModel;
     this.embedding = requireWorkspaceIndexEmbedding(info, "open");
     this.validateIndexVersion();
     if (this.embeddingModel) {
       this.validateEmbeddingSchema(this.embeddingModel);
     }
 
-    this.storage = new ZvecWorkspaceIndexStorage(
-      info.path,
-      this.embedding,
-      this.fileStorePath,
-      readOnly,
-    );
+    if (options.mode === "write") {
+      this.storage = createWorkspaceIndexStorage({
+        storagePath: info.path,
+        readOnly: false,
+        embedding: this.embedding,
+      });
+    } else {
+      this.storage = createWorkspaceIndexStorage({
+        storagePath: info.path,
+        readOnly: true,
+      });
+    }
   }
 
   get name(): string {
@@ -57,7 +67,7 @@ export class WorkspaceIndex {
   }
 
   index(options: IndexOptions = {}): Promise<IndexResult> {
-    if (this.readOnly) {
+    if (this.storage.readOnly) {
       throw new EngineError("Cannot update a read-only workspace index", {
         code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.READ_ONLY",
         context: workspaceIndexOperationDetails(this.name, "index"),

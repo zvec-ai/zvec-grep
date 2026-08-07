@@ -5,11 +5,7 @@ import {
   errorDetails,
 } from "../../errors.js";
 import type { EmbeddingModel } from "../../models/index.js";
-import type {
-  WorkspaceIndexStorage,
-  StorageSearchFilter,
-  StorageSearchHit,
-} from "../../storage/index.js";
+import type { WorkspaceIndexStorage } from "../../storage/index.js";
 import type {
   WorkspaceIndexInfo,
   Entity,
@@ -46,6 +42,12 @@ type SearchContext = {
   storage: WorkspaceIndexStorage;
   embeddingModel?: EmbeddingModel;
 };
+
+type StorageSearchFilter = NonNullable<
+  Parameters<WorkspaceIndexStorage["searchFts"]>[2]
+>;
+
+type StorageSearchHit = ReturnType<WorkspaceIndexStorage["searchFts"]>[number];
 
 type Candidate = {
   id: string;

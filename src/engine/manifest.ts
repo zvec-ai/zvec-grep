@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { EmbeddingRuntimeConfig } from "./config.js";
 import { EngineError } from "./errors.js";
@@ -44,6 +45,10 @@ export function writeWorkspaceManifest(
     directoryMode: WORKSPACE_DIRECTORY_MODE,
     fileMode: WORKSPACE_MANIFEST_MODE,
   });
+}
+
+export function deleteWorkspaceManifest(home: string): void {
+  rmSync(workspaceManifestPath(home), { force: true });
 }
 
 export function workspaceIndexInfoFromManifest(
