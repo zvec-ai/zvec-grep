@@ -268,10 +268,7 @@ export function requireEmbeddingModelCatalogEntry(reference: string) {
   throw new Error(
     [
       `Unsupported embedding model: ${reference}`,
-      "Supported embedding models:",
-      ...[...listEmbeddingModels()]
-        .sort((left, right) => left.provider.localeCompare(right.provider))
-        .map((model) => `  ${model.reference}`),
+      "Run `zg help models` to list supported models.",
     ].join("\n"),
   );
 }

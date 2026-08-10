@@ -1,3 +1,17 @@
+import {
+  COMPONENT_CODE_FORMATS,
+  STRUCTURED_CODE_FORMATS,
+} from "../engine/code-formats.js";
+import {
+  listKnownBinaryExtensionGroups,
+  listRecognizedFileTypes,
+  type RecognizedFileType,
+} from "../engine/file-type.js";
+import { resolveMaxFileSizeBytes } from "../engine/file-size-policy.js";
+import { listEmbeddingModels } from "../engine/models/index.js";
+
+type EmbeddingCatalogEntry = ReturnType<typeof listEmbeddingModels>[number];
+
 export function printHelp(version: string, topic?: string): void {
   if (!topic) {
     console.log(mainHelp(version));
@@ -83,6 +97,7 @@ Examples:
 Environment:
 ${formatEnvironmentVariables(MAIN_ENVIRONMENT_VARIABLES)}
 
+Run zg help models or zg help file-types for supported indexing capabilities.
 Run zg help environment for all variables, scopes, aliases, and precedence.
 Run zg help <command> or zg <command> --help for command-specific help.
 Use zg -h/--help for this page and zg -v/--version for the version.`;
@@ -302,7 +317,13 @@ Removes zvec-grep-managed MCP configuration, trust, and guidance.`;
   zg --help
 
 Topics:
+  models                             Supported embedding models
+  file-types                         Supported file types and structural parsing
   environment, env                   Environment variables and precedence`;
+    case "models":
+      return modelsHelp();
+    case "file-types":
+      return fileTypesHelp();
     case "environment":
     case "env":
       return environmentHelp();
@@ -315,6 +336,160 @@ Topics:
     default:
       return undefined;
   }
+}
+
+function modelsHelp(): string {
+  const models = listEmbeddingModels().sort((left, right) => {
+    const leftRuntime = left.provider === "local" ? 0 : 1;
+    const rightRuntime = right.provider === "local" ? 0 : 1;
+    return (
+      leftRuntime - rightRuntime ||
+      left.reference.localeCompare(right.reference)
+    );
+  });
+
+  return `Usage:
+  zg help models
+
+Supported embedding models:
+${formatEmbeddingModels(models)}
+
+Local models are downloaded to the model cache on first use. Remote models
+require provider credentials plus --allow-remote or a Workspace authorization.
+Only qwen/qwen3-vl-embedding accepts image input.
+
+Existing indexes keep their stored model. See zg help environment for
+new-index model selection and runtime precedence.`;
+}
+
+function fileTypesHelp(): string {
+  const types = listRecognizedFileTypes();
+  const structuredFormats: ReadonlySet<string> = new Set(
+    STRUCTURED_CODE_FORMATS,
+  );
+  const componentFormats: ReadonlySet<string> = new Set(COMPONENT_CODE_FORMATS);
+  const codeTypes = types.filter((type) => type.kind === "code");
+  const structuredCode = codeTypes.filter((type) =>
+    structuredFormats.has(type.format),
+  );
+  const componentCode = codeTypes.filter((type) =>
+    componentFormats.has(type.format),
+  );
+  const plainCode = codeTypes.filter(
+    (type) =>
+      !structuredFormats.has(type.format) && !componentFormats.has(type.format),
+  );
+  const documentsAndData = types.filter(
+    (type) => type.kind === "text" || type.kind === "data",
+  );
+  const images = types.filter((type) => type.kind === "image");
+  const skipped = listKnownBinaryExtensionGroups().map((group) => [
+    group.label,
+    group.extensions.join(", "),
+  ]);
+  const sizeLimits = (
+    [
+      ["Code", "code"],
+      ["Text", "text"],
+      ["Data", "data"],
+      ["Image", "image"],
+    ] as const
+  ).map(([label, kind]) => [
+    label,
+    `${resolveMaxFileSizeBytes(kind) / (1024 * 1024)} MiB`,
+  ]);
+
+  return `Usage:
+  zg help file-types
+
+Structured code (symbols and scopes):
+${formatFileTypeTable(structuredCode)}
+
+Component code (JavaScript and TypeScript script blocks):
+${formatFileTypeTable(componentCode)}
+
+Other code (plain-text chunks):
+${formatFileTypeTable(plainCode)}
+
+Documents and data:
+${formatFileTypeTable(documentsAndData)}
+  Markdown preserves heading structure; other formats use text chunks.
+
+Images (multimodal embedding required):
+${formatFileTypeTable(images)}
+  Images are ignored by default and must be explicitly selected.
+
+Other text:
+  Unknown non-binary extensions and extensionless files use text chunks.
+
+Skipped binary types:
+${formatTable(["GROUP", "EXTENSIONS"], skipped)}
+  Files detected as binary by content are also skipped.
+
+Indexing rules:
+  Default size limits:
+${formatTable(["KIND", "MAX SIZE"], sizeLimits)}
+  Empty files are skipped. Use --max-filesize to override the size limit.
+  Common dependencies, build output, generated files, and lock files are
+  ignored by default. .git and .zvec-grep are always skipped.`;
+}
+
+function formatEmbeddingModels(
+  models: readonly EmbeddingCatalogEntry[],
+): string {
+  const rows = models.map((model) => {
+    const runtime = model.provider === "local" ? "local" : "remote";
+    const input =
+      "kind" in model && model.kind === "multimodal" ? "text,image" : "text";
+    const inputLimit =
+      "maxInputTokens" in model ? model.maxInputTokens : model.contextSize;
+    return [
+      model.reference,
+      runtime,
+      input,
+      String(model.dimension),
+      String(inputLimit),
+      model.backend,
+    ];
+  });
+  return formatTable(
+    ["MODEL", "RUNTIME", "INPUT", "DIMS", "TOKENS", "BACKEND"],
+    rows,
+    new Set([3, 4]),
+  );
+}
+
+function formatFileTypeTable(types: readonly RecognizedFileType[]): string {
+  const rows = [...types]
+    .sort((left, right) => left.format.localeCompare(right.format))
+    .map((type) => [type.format, type.patterns.join(", ")]);
+  return formatTable(["TYPE", "FILES"], rows);
+}
+
+function formatTable(
+  header: readonly string[],
+  rows: readonly (readonly string[])[],
+  rightAlignedColumns: ReadonlySet<number> = new Set(),
+): string {
+  const widths = header.map((label, index) =>
+    Math.max(label.length, ...rows.map((row) => row[index]!.length)),
+  );
+  const separator = widths.map((width) => "-".repeat(width));
+
+  return [header, separator, ...rows]
+    .map(
+      (row) =>
+        `  ${row
+          .map((value, index) =>
+            index === row.length - 1
+              ? value
+              : rightAlignedColumns.has(index)
+                ? value.padStart(widths[index]!)
+                : value.padEnd(widths[index]!),
+          )
+          .join("  ")}`,
+    )
+    .join("\n");
 }
 
 function environmentHelp(): string {

@@ -12,6 +12,8 @@ installed CLI for version-specific help:
 ```bash
 zg help
 zg help query
+zg help models
+zg help file-types
 zg help environment
 zg <command> --help
 ```

@@ -23,7 +23,7 @@ export function resolveEmbeddingReference(
     !getEmbeddingModelCatalogEntry(environmentReference)
   ) {
     throw new EngineError(
-      `Invalid ZVEC_GREP_EMBEDDING: unsupported model ${environmentReference}`,
+      `Invalid ZVEC_GREP_EMBEDDING: unsupported model ${environmentReference}. Run \`zg help models\` to list supported models.`,
       {
         code: "ZVEC_GREP.ENGINE.CONFIG.EMBEDDING_ENVIRONMENT_INVALID",
         context: "source=ZVEC_GREP_EMBEDDING",

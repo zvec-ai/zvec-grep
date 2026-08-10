@@ -822,6 +822,7 @@ test("status formatters cover workspace states, failures, filters, and color", a
   assert.match(output.logs.join("\n"), /1m 5s/);
   assert.match(output.logs.join("\n"), /ignore-file=\.rgignore/);
   assert.match(output.logs.join("\n"), /Default indexing skips/);
+  assert.match(output.logs.join("\n"), /zg help file-types/);
   assert.match(
     output.logs.join("\n"),
     new RegExp(

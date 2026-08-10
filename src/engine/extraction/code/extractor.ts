@@ -1,4 +1,5 @@
 import { EngineError } from "../../errors.js";
+import { COMPONENT_CODE_FORMATS } from "../../code-formats.js";
 import type {
   CodeEntityMetadata,
   CodeEntityModifier,
@@ -18,6 +19,9 @@ import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
+const COMPONENT_CODE_FORMAT_SET: ReadonlySet<string> = new Set(
+  COMPONENT_CODE_FORMATS,
+);
 
 export class CodeExtractor {
   async extract(
@@ -946,7 +950,7 @@ function truncateInline(value: string, maxChars: number): string {
 }
 
 function isScriptBlockFormat(format: string): boolean {
-  return format === "vue" || format === "svelte";
+  return COMPONENT_CODE_FORMAT_SET.has(format);
 }
 
 function findScriptBlocks(text: string): ScriptBlock[] {

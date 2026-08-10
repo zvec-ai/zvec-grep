@@ -172,8 +172,7 @@ test("config model set rejects missing and incompatible settings", async () => {
     ]),
     (error) => {
       assert.match(error.stderr, /Unsupported embedding model/);
-      assert.match(error.stderr, /local\/embeddinggemma-300m/);
-      assert.match(error.stderr, /qwen\/text-embedding-v4/);
+      assert.match(error.stderr, /zg help models/);
       return true;
     },
   );

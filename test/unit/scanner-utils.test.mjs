@@ -10,7 +10,11 @@ import {
 import { hostname } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { detectFileType } from "../../dist/engine/file-type.js";
+import {
+  detectFileType,
+  listKnownBinaryExtensionGroups,
+  listRecognizedFileTypes,
+} from "../../dist/engine/file-type.js";
 import { resolveMaxFileSizeBytes } from "../../dist/engine/file-size-policy.js";
 import {
   fileBelongsToRootPath,
@@ -67,6 +71,22 @@ test("file detection covers special, code, data, text, image, binary, and unknow
     kind: "text",
     format: "text",
   });
+  assert.deepEqual(
+    listRecognizedFileTypes().find(
+      (type) => type.kind === "code" && type.format === "typescript",
+    ),
+    { kind: "code", format: "typescript", patterns: [".ts"] },
+  );
+  assert.deepEqual(
+    listRecognizedFileTypes().find((type) => type.format === "dockerfile"),
+    { kind: "code", format: "dockerfile", patterns: ["Dockerfile"] },
+  );
+  assert.ok(
+    listKnownBinaryExtensionGroups().some(
+      (group) =>
+        group.label === "Documents" && group.extensions.includes(".pdf"),
+    ),
+  );
 });
 
 test("file-size policy uses type-aware defaults and honors explicit overrides", () => {

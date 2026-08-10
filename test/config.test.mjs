@@ -213,6 +213,13 @@ test("embedding reference resolver validates only a selected environment model",
       }),
     /Invalid ZVEC_GREP_EMBEDDING: unsupported model unknown\/model/,
   );
+  assert.throws(
+    () =>
+      resolveEmbeddingReference({
+        environment: { ZVEC_GREP_EMBEDDING: "unknown/model" },
+      }),
+    /zg help models/,
+  );
   assert.equal(
     resolveEmbeddingReference({
       existing: "local/embeddinggemma-300m",

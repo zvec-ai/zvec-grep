@@ -39,6 +39,7 @@ import {
   printIndexPathFilterTip,
   printIndexResult,
   printIndexScanDiagnostics,
+  printNoIndexableFilesTip,
   printServerIndexInfo,
 } from "./format/status.js";
 import {
@@ -220,12 +221,13 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
     mode,
     serverAvailable: () => daemonIsReady(parsed.options.home),
     server: async () => {
+      const client = daemonClient(parsed.options);
       const progress = createIndexProgressReporter({
         color: parsed.options.color,
       });
       let result: Record<string, unknown>;
       try {
-        result = await daemonClient(parsed.options).callTool(
+        result = await client.callTool(
           "zvec_grep_index",
           {
             root: rootPath.absolutePath,
@@ -272,6 +274,17 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
       }
       if (result.state === "failed") {
         throw new Error(serverIndexFailureMessage(result));
+      }
+      if (result.state === "succeeded") {
+        const status = (await client
+          .callTool("zvec_grep_index_status", {
+            root: rootPath.absolutePath,
+          })
+          .catch(() => undefined)) as
+          Parameters<typeof printServerIndexInfo>[0] | undefined;
+        if (status?.persistent.files?.scanned === 0) {
+          printNoIndexableFilesTip(parsed.options);
+        }
       }
     },
     direct: () => runDirectIndex(parsed, rootPath, explicitRoot),

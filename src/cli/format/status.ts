@@ -641,6 +641,9 @@ export function printIndexResult(
   if (options.debug) {
     printIndexScanDiagnostics(result.scanDiagnostics);
   }
+  if (result.filesScanned === 0) {
+    printNoIndexableFilesTip(options);
+  }
 }
 
 export function printIndexScanDiagnostics(
@@ -671,6 +674,17 @@ export function printIndexScanDiagnostics(
     ];
     console.error(`skipped_file ${details.join(" ")}`);
   }
+}
+
+export function printNoIndexableFilesTip(options: CliOptions): void {
+  const theme = createStatusTheme(options);
+  printField(
+    theme,
+    "tip",
+    theme.warning(
+      "No indexable files were found. Run `zg help file-types` to review supported file types and indexing rules.",
+    ),
+  );
 }
 
 export function printIndexPathFilterTip(options: CliOptions): void {

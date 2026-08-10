@@ -1,4 +1,5 @@
 import type { CodeEntityModifier, CodeSymbolType } from "../../types.js";
+import type { StructuredCodeFormat } from "../../code-formats.js";
 import type { TSNode } from "./tree-sitter/nodes.js";
 import { C_ADAPTER } from "./languages/c.js";
 import { CPP_ADAPTER } from "./languages/cpp.js";
@@ -32,7 +33,7 @@ export type LanguageAdapter = {
   extractModifiers?(node: TSNode): readonly CodeEntityModifier[];
 };
 
-const ADAPTERS: Record<string, LanguageAdapter> = {
+const ADAPTERS = {
   c: C_ADAPTER,
   cpp: CPP_ADAPTER,
   go: GO_ADAPTER,
@@ -43,8 +44,8 @@ const ADAPTERS: Record<string, LanguageAdapter> = {
   rust: RUST_ADAPTER,
   tsx: TYPESCRIPT_ADAPTER,
   typescript: TYPESCRIPT_ADAPTER,
-};
+} satisfies Record<StructuredCodeFormat, LanguageAdapter>;
 
 export function resolveAdapter(format: string): LanguageAdapter | null {
-  return ADAPTERS[format] ?? null;
+  return format in ADAPTERS ? ADAPTERS[format as StructuredCodeFormat] : null;
 }

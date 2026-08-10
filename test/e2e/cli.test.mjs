@@ -498,11 +498,59 @@ test("auth grant uses the environment model before the global default", async (t
   assert.doesNotMatch(granted.stdout, /qwen\/text-embedding-v4/);
 });
 
+test("direct index points an empty workspace to file type help", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-empty-index-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  await mkdir(root, { recursive: true });
+
+  const indexed = await runCli(
+    ["index", "--mode", "direct", "--embedding", "local/potion-base-8m", root],
+    {
+      cwd: root,
+      env: {
+        HOME: home,
+        USERPROFILE: home,
+        NO_COLOR: "1",
+        ZVEC_GREP_HOME: home,
+      },
+    },
+  );
+
+  assert.match(indexed.stdout, /0 scanned/);
+  assert.match(indexed.stdout, /zg help file-types/);
+});
+
 test("CLI exposes stable help, version, and failure behavior", async (t) => {
   const help = await runCli(["help"]);
   assert.match(help.stdout, /Usage:/);
+  assert.match(help.stdout, /zg help models or zg help file-types/);
   assert.match(help.stdout, /zg help environment/);
   assert.match(help.stdout, /ZVEC_GREP_MODE/);
+  const helpTopics = await runCli(["help", "help"]);
+  assert.match(helpTopics.stdout, /models\s+Supported embedding models/);
+  assert.match(helpTopics.stdout, /file-types\s+Supported file types/);
+  const modelsHelp = await runCli(["help", "models"]);
+  assert.match(modelsHelp.stdout, /local\/potion-code-16m-v2/);
+  assert.match(modelsHelp.stdout, /qwen\/qwen3-vl-embedding/);
+  assert.match(modelsHelp.stdout, /Local models are downloaded/);
+  assert.match(modelsHelp.stdout, /Workspace authorization/);
+  const fileTypesHelp = await runCli(["help", "file-types"]);
+  assert.match(fileTypesHelp.stdout, /Structured code \(symbols and scopes\)/);
+  assert.match(fileTypesHelp.stdout, /typescript\s+\.ts/);
+  assert.match(fileTypesHelp.stdout, /Other code \(plain-text chunks\)/);
+  assert.match(fileTypesHelp.stdout, /dockerfile\s+Dockerfile/);
+  assert.match(fileTypesHelp.stdout, /Documents and data/);
+  assert.match(
+    fileTypesHelp.stdout,
+    /Images \(multimodal embedding required\)/,
+  );
+  assert.match(fileTypesHelp.stdout, /\.pdf/);
+  assert.match(fileTypesHelp.stdout, /Code\s+1 MiB/);
+  assert.match(fileTypesHelp.stdout, /Text\s+256 MiB/);
   const indexHelp = await runCli(["index", "-h"]);
   assert.match(indexHelp.stdout, /qwen\/text-embedding-v4/);
   assert.doesNotMatch(indexHelp.stdout, /qwen3\.7-text-embedding/);
@@ -550,8 +598,7 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
     (error) => {
       assert.equal(error.code, 1);
       assert.match(error.stderr, /Unsupported embedding model: unknown\/model/);
-      assert.match(error.stderr, /local\/embeddinggemma-300m/);
-      assert.match(error.stderr, /qwen\/text-embedding-v4/);
+      assert.match(error.stderr, /zg help models/);
       return true;
     },
   );
@@ -560,7 +607,7 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
     "zvec-grep-invalid-embedding-environment-",
   );
   await assert.rejects(
-    runCli(["index", invalidEnvironmentRoot], {
+    runCli(["index", invalidEnvironmentRoot, "--mode", "direct"], {
       cwd: invalidEnvironmentRoot,
       env: { ZVEC_GREP_EMBEDDING: "unknown/model" },
     }),
@@ -569,6 +616,7 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
         error.stderr,
         /Invalid ZVEC_GREP_EMBEDDING: unsupported model unknown\/model/,
       );
+      assert.match(error.stderr, /zg help models/);
       return true;
     },
   );

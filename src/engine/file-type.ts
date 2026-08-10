@@ -63,51 +63,109 @@ const IMAGE_FORMATS: Record<string, ImageFormat> = {
   ".webp": "webp",
 };
 
-const BINARY_EXTENSIONS = new Set([
-  ".zip",
-  ".tar",
-  ".gz",
-  ".bz2",
-  ".xz",
-  ".7z",
-  ".rar",
-  ".exe",
-  ".dll",
-  ".dylib",
-  ".so",
-  ".a",
-  ".o",
-  ".obj",
-  ".wasm",
-  ".class",
-  ".jar",
-  ".pdf",
-  ".doc",
-  ".docx",
-  ".ppt",
-  ".pptx",
-  ".xls",
-  ".xlsx",
-  ".mp3",
-  ".mp4",
-  ".mov",
-  ".avi",
-  ".mkv",
-  ".db",
-  ".sqlite",
-]);
+const NAMED_FILE_FORMATS: Record<
+  string,
+  { kind: FileKind; format: FileFormat }
+> = {
+  Dockerfile: { kind: "code", format: "dockerfile" },
+  Makefile: { kind: "code", format: "makefile" },
+};
+
+const FILE_FORMATS_BY_KIND = {
+  code: CODE_FORMATS,
+  data: DATA_FORMATS,
+  text: TEXT_FORMATS,
+  image: IMAGE_FORMATS,
+} satisfies Record<FileKind, Record<string, string>>;
+
+const BINARY_EXTENSION_GROUPS = [
+  {
+    label: "Archives",
+    extensions: [".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar"],
+  },
+  {
+    label: "Compiled",
+    extensions: [
+      ".exe",
+      ".dll",
+      ".dylib",
+      ".so",
+      ".a",
+      ".o",
+      ".obj",
+      ".wasm",
+      ".class",
+      ".jar",
+    ],
+  },
+  {
+    label: "Documents",
+    extensions: [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"],
+  },
+  {
+    label: "Media",
+    extensions: [".mp3", ".mp4", ".mov", ".avi", ".mkv"],
+  },
+  { label: "Databases", extensions: [".db", ".sqlite"] },
+] as const;
+
+const BINARY_EXTENSIONS = new Set<string>(
+  BINARY_EXTENSION_GROUPS.flatMap((group) => group.extensions),
+);
+
+export type RecognizedFileType = {
+  kind: FileKind;
+  format: FileFormat;
+  patterns: string[];
+};
+
+export function listRecognizedFileTypes(): RecognizedFileType[] {
+  const recognized = new Map<string, RecognizedFileType>();
+  const append = (
+    kind: FileKind,
+    format: FileFormat,
+    pattern: string,
+  ): void => {
+    const key = `${kind}:${format}`;
+    const existing = recognized.get(key);
+    if (existing) {
+      existing.patterns.push(pattern);
+      return;
+    }
+    recognized.set(key, { kind, format, patterns: [pattern] });
+  };
+
+  for (const kind of Object.keys(FILE_FORMATS_BY_KIND) as FileKind[]) {
+    for (const [extension, format] of Object.entries(
+      FILE_FORMATS_BY_KIND[kind],
+    )) {
+      append(kind, format, extension);
+    }
+  }
+  for (const [name, type] of Object.entries(NAMED_FILE_FORMATS)) {
+    append(type.kind, type.format, name);
+  }
+
+  return [...recognized.values()];
+}
+
+export function listKnownBinaryExtensionGroups(): {
+  label: string;
+  extensions: string[];
+}[] {
+  return BINARY_EXTENSION_GROUPS.map((group) => ({
+    label: group.label,
+    extensions: [...group.extensions],
+  }));
+}
 
 export function detectFileType(
   path: string,
 ): { kind: FileKind; format: FileFormat } | null {
   const name = basename(path);
-
-  if (name === "Dockerfile") {
-    return { kind: "code", format: "dockerfile" };
-  }
-
-  if (name === "Makefile") {
-    return { kind: "code", format: "makefile" };
+  const namedType = NAMED_FILE_FORMATS[name];
+  if (namedType) {
+    return { ...namedType };
   }
 
   const extension = extname(name).toLowerCase();
