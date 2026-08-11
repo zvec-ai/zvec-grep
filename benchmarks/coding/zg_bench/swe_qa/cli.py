@@ -10,14 +10,16 @@ from typing import Sequence
 
 from . import SweQaError
 from .collect import collect_pair
-from .judge import judge_pairs
+from .judge import aggregate_reports, judge_pairs
 from .validation import validate_assets
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m zg_bench.swe_qa",
-        description="Validate, collect, and judge the manual SWE-QA-Bench subset.",
+        description=(
+            "Validate, collect, judge, and aggregate the manual SWE-QA-Bench subset."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -37,6 +39,12 @@ def _parser() -> argparse.ArgumentParser:
     judge.add_argument("--output-dir", type=Path, required=True)
     judge.add_argument("--expected", nargs="+", action="append", required=True)
     judge.add_argument("--attempts", type=int, default=3)
+
+    aggregate = commands.add_parser(
+        "aggregate", help="combine already judged per-task reports"
+    )
+    aggregate.add_argument("--reports-root", type=Path, required=True)
+    aggregate.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -78,6 +86,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(
                     {
                         "gate_passed": report["gate"]["passed"],
+                        "report": str(args.output_dir / "report.json"),
+                    }
+                )
+            )
+        elif args.command == "aggregate":
+            report = aggregate_reports(
+                reports_root=args.reports_root,
+                output_dir=args.output_dir,
+            )
+            print(
+                json.dumps(
+                    {
+                        "gate_passed": report["gate"]["passed"],
+                        "cases": len(report["cases"]),
                         "report": str(args.output_dir / "report.json"),
                     }
                 )

@@ -61,7 +61,7 @@ jobs:
           --dry-run
 
   run-pair:
-    name: Pair / ${{ matrix.task }}
+    name: Pair + judge / ${{ matrix.task }}
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -114,6 +114,17 @@ jobs:
             --runs-dir "$runs_dir" \
             --task "$TASK_NAME" \
             --output "$RUNNER_TEMP/pair-${TASK_NAME}.json"
+      - name: Judge this pair and write its independent report
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          TASK_NAME: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          uv run --project benchmarks/coding python -m zg_bench.swe_qa judge \
+            --pairs-root "$RUNNER_TEMP/pair-${TASK_NAME}.json" \
+            --references benchmarks/coding/zg_bench/swe_qa/data/references.json \
+            --output-dir "$RUNNER_TEMP/swe-qa-task-report/${TASK_NAME}" \
+            --expected "$TASK_NAME"
       - name: Reject secret leakage in artifacts
         id: secret-scan
         if: always()
@@ -129,6 +140,7 @@ jobs:
           roots = [
               Path(os.environ["RUNNER_TEMP"]) / "swe-qa-runs" / os.environ["TASK_NAME"],
               Path(os.environ["RUNNER_TEMP"]) / f"pair-{os.environ['TASK_NAME']}.json",
+              Path(os.environ["RUNNER_TEMP"]) / "swe-qa-task-report" / os.environ["TASK_NAME"],
           ]
           if secret:
               for root in roots:
@@ -147,13 +159,24 @@ jobs:
             ${{ runner.temp }}/swe-qa-runs/${{ matrix.task }}/
           if-no-files-found: warn
           retention-days: 30
+      - name: Upload independent task report
+        if: always() && steps.secret-scan.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: swe-qa-task-report-${{ matrix.task }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/swe-qa-task-report/${{ matrix.task }}/
+          if-no-files-found: warn
+          retention-days: 90
 
-  judge-report:
-    name: GLM-5.2 self-judge and report
+  aggregate-report:
+    name: Aggregate completed task reports
     needs: [validate, run-pair]
-    if: always() && needs.validate.result == 'success'
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.run-pair.result == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -163,45 +186,48 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install locked judge environment
+      - name: Install locked report environment
         run: |
           python -m pip install --disable-pip-version-check uv==0.9.17
           uv sync --project benchmarks/coding --frozen
-      - name: Download all pair artifacts
+      - name: Download this attempt's independent task reports
         uses: actions/download-artifact@v8
         with:
-          pattern: swe-qa-pair-*-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pairs
-          merge-multiple: true
-      - name: Judge answers and write the four-metric summary
+          pattern: swe-qa-task-report-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-reports
+      - name: Detect a full-scope attempt
+        id: report-set
         env:
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           SCOPE: ${{ inputs.scope || 'smoke' }}
         run: |
           set -euo pipefail
-          if [[ -z "${GLM_API_KEY:-}" ]]; then
-            echo "GLM_API_KEY Actions secret is not configured" >&2
-            exit 2
-          fi
           if [[ "$SCOPE" == "gate-5" ]]; then
-            expected=(reflex-6 sqlfluff-2 sympy-38 streamlink-14 pylint-25)
+            expected_count=5
           else
-            expected=(reflex-6)
+            expected_count=1
           fi
-          expected_args=()
-          for task in "${expected[@]}"; do
-            expected_args+=(--expected "$task")
-          done
-          uv run --project benchmarks/coding python -m zg_bench.swe_qa judge \
-            --pairs-root "$RUNNER_TEMP/pairs" \
-            --references benchmarks/coding/zg_bench/swe_qa/data/references.json \
-            --output-dir "$RUNNER_TEMP/swe-qa-report" \
-            "${expected_args[@]}"
+          actual_count="$(find "$RUNNER_TEMP/task-reports" -type f -name report.json | wc -l | tr -d ' ')"
+          if [[ "$actual_count" == "$expected_count" ]]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "## SWE-QA Aggregate"
+            echo
+            echo "This was a partial job rerun. Its independent task report is available on the corresponding matrix job; the cross-task Aggregate was intentionally skipped to avoid mixing workflow attempts."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Combine reports without re-judging
+        if: steps.report-set.outputs.complete == 'true'
+        run: >-
+          uv run --project benchmarks/coding python -m zg_bench.swe_qa aggregate
+          --reports-root "$RUNNER_TEMP/task-reports"
+          --output-dir "$RUNNER_TEMP/swe-qa-aggregate-report"
       - name: Upload aggregate report
-        if: always()
+        if: steps.report-set.outputs.complete == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: swe-qa-report-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/swe-qa-report/
+          name: swe-qa-aggregate-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/swe-qa-aggregate-report/
           if-no-files-found: warn
           retention-days: 90

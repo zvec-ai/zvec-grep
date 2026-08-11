@@ -21,15 +21,17 @@
 ```mermaid
 flowchart LR
     D["workflow_dispatch<br/>smoke / gate-5"] --> V["无密钥预检<br/>selection + tests + dry-run"]
-    V --> P1["同一 runner 上<br/>baseline → zvec-grep"]
-    V --> P2["其余 case pair<br/>gate-5 时 max-parallel=2"]
-    P1 --> A["pair artifact<br/>answer + trajectory + metrics"]
-    P2 --> A
-    A --> J["独立 GLM-5.2 self-judge"]
-    J --> R["Job Summary<br/>4 个指标 + 完整性门禁"]
+    V --> P1["case 1 同一 runner<br/>baseline → zvec-grep → Judge"]
+    V --> P2["其余 case 独立执行<br/>gate-5 时 max-parallel=2"]
+    P1 --> R1["case 1 独立报告<br/>Job Summary + artifact"]
+    P2 --> RN["每个 case 独立报告<br/>Job Summary + artifact"]
+    R1 --> A["无模型调用的 Aggregate"]
+    RN --> A
 ```
 
-矩阵维度是 case，不是 profile。每个 case 的 baseline 和 zvec-grep 在同一台 GitHub-hosted Ubuntu runner 上顺序运行，使用同一题目镜像、仓库 commit、OpenCode 版本和 GLM-5.2 endpoint。这样保留严格的成对比较；任一侧失败都不会被当成 0 分或从聚合中静默剔除。
+矩阵维度是 case，不是 profile。每个 case 的 baseline 和 zvec-grep 在同一台 GitHub-hosted Ubuntu runner 上顺序运行，随后立即对这一对答案执行 Judge，并生成该 case 自己的 Job Summary 与报告 artifact。所有成功的单任务报告最后由一个不调用模型的 job 合并。这样保留严格的成对比较；任一侧失败都不会被当成 0 分或从聚合中静默剔除。
+
+单任务报告和原始 pair 证据都使用 `task + run_id + run_attempt` 的唯一名称，因此历史结果不会因重跑而丢失。Aggregate 只读取同一 attempt 的单任务报告，并且不会重复调用 Judge：首次完整运行或 **Re-run all jobs** 会生成 Aggregate；只重跑一个 matrix job 时，该任务仍生成完整独立报告，而 Aggregate 正常跳过，避免混合不同 attempt 的结果。
 
 ## 模型与检索配置
 
@@ -39,11 +41,11 @@ flowchart LR
 - zvec-grep embedding：`local/potion-code-16m-v2`。本地模型不需要 embedding key，也不会创建远端 embedding 授权。
 - baseline 不安装或暴露 zvec-grep；zvec-grep profile 使用当前 checkout `npm pack` 的产物。
 
-`.opencode/opencode.json` 只引用 `{env:GLM_API_KEY}`。真实值只保存为仓库 Actions Secret `GLM_API_KEY`，仅注入模型执行或 Judge step，不进入命令参数、Git 或 artifact。上传 artifact 前还会做精确 secret 内容扫描。
+`.opencode/opencode.json` 只引用 `{env:GLM_API_KEY}`。真实值只保存为仓库 Actions Secret `GLM_API_KEY`，仅注入模型执行或 Judge step，不进入命令参数、Git 或 artifact。上传 pair 和单任务报告前还会做精确 secret 内容扫描。
 
 ## Judge 与四项指标
 
-Judge 按 SWE-QA 的五个维度分别打 `1–20` 分：correctness、completeness、relevance、clarity、coherence，总分范围 `5–100`。reference answer 只在独立 Judge job 中读取，Agent 容器不可见。
+Judge 按 SWE-QA 的五个维度分别打 `1–20` 分：correctness、completeness、relevance、clarity、coherence，总分范围 `5–100`。reference answer 只在 Agent 执行结束后的 Judge step 中读取，Agent 容器不可见。每个 case 的 Judge 结果会立即写入自己的 Job Summary；Aggregate 只合并这些已经完成的结果，不会重评。
 
 Job Summary 对每个 case 和 Aggregate 展示：
 
@@ -61,8 +63,10 @@ input_token、toolcall 和 time 同时给出 baseline/zvec-grep 及降低比例�
 - `smoke`：只跑 `reflex-6` 的 1 个 pair；
 - `gate-5`：跑 5 个 pair，即 10 次 Agent 执行，再逐答案 Judge；
 - `fail-fast: false`，便于一次收集所有 case 的失败证据；
-- Agent 每侧最多 30 分钟，pair job 最多 120 分钟，Judge/report 最多 30 分钟；
-- 付费 workflow 不自动取消；原始证据保留 30 天，聚合报告保留 90 天。
+- Agent 每侧最多 30 分钟，包含 Judge 的单任务 job 最多 120 分钟，纯聚合 job 最多 15 分钟；
+- 付费 workflow 不自动取消；原始证据保留 30 天，单任务和聚合报告保留 90 天。
+
+需要重跑某一个 case 时，在 Actions 页面选择对应的 `Pair + judge / <task>` job。该 job 会同时重做 pair、Judge 和独立报告；后续 Aggregate 将这次执行识别为 partial rerun 并正常跳过，因此不会再报“缺少其他任务的 Judge 报告”。如需新的跨任务 Aggregate，使用 **Re-run all jobs**。
 
 至少积累 5 次独立 shadow run 后再冻结数值阈值。届时建议把质量（Judge delta/绝对下限）和效率（token/toolcall）设为相互独立的门禁，避免节省资源抵消明显质量退化。
 

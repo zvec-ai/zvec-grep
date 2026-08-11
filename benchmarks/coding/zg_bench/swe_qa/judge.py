@@ -41,7 +41,10 @@ def _load_references(path: Path) -> dict[str, dict[str, Any]]:
         task_id = record.get("task_id")
         question = record.get("question")
         answer = record.get("reference_answer")
-        if not all(isinstance(value, str) and value.strip() for value in (task_id, question, answer)):
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (task_id, question, answer)
+        ):
             raise SweQaError(f"references[{index}] has missing judge input")
         if task_id in result:
             raise SweQaError(f"duplicate reference for {task_id}")
@@ -187,7 +190,11 @@ def _parse_scores(content: str) -> dict[str, int]:
     scores: dict[str, int] = {}
     for key in SCORE_KEYS:
         score = value.get(key)
-        if isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 20:
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, int)
+            or not 1 <= score <= 20
+        ):
             raise SweQaError(f"judge response has invalid {key} score")
         scores[key] = score
     return scores
@@ -228,9 +235,7 @@ def _judge_candidate(
     candidate: str,
     attempts: int,
 ) -> dict[str, Any]:
-    prompt = _judge_prompt(
-        question=question, reference=reference, candidate=candidate
-    )
+    prompt = _judge_prompt(question=question, reference=reference, candidate=candidate)
     last_failure = "unknown"
     for attempt in range(1, attempts + 1):
         started = time.monotonic()
@@ -265,7 +270,9 @@ def _judge_candidate(
     raise SweQaError(f"judge failed after {attempts} attempts: {last_failure}")
 
 
-def _reduction(baseline: float | int | None, candidate: float | int | None) -> float | None:
+def _reduction(
+    baseline: float | int | None, candidate: float | int | None
+) -> float | None:
     if baseline is None or candidate is None or baseline == 0:
         return None
     return (float(baseline) - float(candidate)) / float(baseline) * 100.0
@@ -285,9 +292,7 @@ def _comparison(
         "time_reduction_pct": _reduction(
             baseline["agent_wall_seconds"], zvec["agent_wall_seconds"]
         ),
-        "cost_reduction_pct": _reduction(
-            baseline["cost_usd"], zvec["cost_usd"]
-        ),
+        "cost_reduction_pct": _reduction(baseline["cost_usd"], zvec["cost_usd"]),
     }
 
 
@@ -447,6 +452,211 @@ def _render_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _write_report(report: dict[str, Any], output_dir: Path) -> None:
+    markdown = _render_report(report)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (output_dir / "report.md").write_text(markdown, encoding="utf-8")
+    except OSError as error:
+        raise SweQaError(f"could not write SWE-QA report: {error}") from error
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
+    if summary_path:
+        try:
+            with Path(summary_path).open("a", encoding="utf-8") as summary:
+                summary.write(markdown)
+                if not markdown.endswith("\n"):
+                    summary.write("\n")
+        except OSError as error:
+            raise SweQaError(
+                f"could not append GitHub step summary: {error}"
+            ) from error
+
+
+def _report_paths(reports_root: Path, output_dir: Path) -> list[Path]:
+    output_report = (output_dir / "report.json").resolve()
+    if reports_root.is_file():
+        paths = [reports_root]
+    elif reports_root.is_dir():
+        paths = sorted(
+            path
+            for path in reports_root.rglob("report.json")
+            if path.is_file() and path.resolve() != output_report
+        )
+    else:
+        raise SweQaError(f"reports root does not exist: {reports_root}")
+    if not paths:
+        raise SweQaError(
+            f"no per-task report.json files found under reports root: {reports_root}"
+        )
+    return paths
+
+
+def _valid_number(value: Any, *, allow_none: bool = False) -> bool:
+    if value is None:
+        return allow_none
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
+
+
+def _validate_task_report(report: dict[str, Any], path: Path) -> dict[str, Any]:
+    prefix = f"invalid per-task report {path}"
+    if report.get("schema_version") != 1:
+        raise SweQaError(f"{prefix}: unsupported schema_version")
+    if report.get("benchmark") != "peng-weihan/SWE-QA-Bench":
+        raise SweQaError(f"{prefix}: unexpected benchmark")
+
+    judge = report.get("judge")
+    if not isinstance(judge, dict) or (
+        judge.get("label") != SELF_JUDGE_LABEL
+        or judge.get("model") != "glm-5.2"
+        or judge.get("self_judge") is not True
+        or judge.get("temperature") != 0
+        or judge.get("rubric") != list(SCORE_KEYS)
+    ):
+        raise SweQaError(f"{prefix}: incompatible judge metadata")
+    usage = judge.get("usage")
+    if not isinstance(usage, dict):
+        raise SweQaError(f"{prefix}: missing judge usage")
+    for key in ("calls", "input_tokens", "output_tokens"):
+        value = usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SweQaError(f"{prefix}: invalid judge usage {key}")
+    cost = usage.get("cost_usd")
+    if not _valid_number(cost, allow_none=True) or (
+        cost is not None and float(cost) < 0
+    ):
+        raise SweQaError(f"{prefix}: invalid judge usage cost_usd")
+
+    gate = report.get("gate")
+    if not isinstance(gate, dict) or gate.get("passed") is not True:
+        raise SweQaError(f"{prefix}: judge gate did not pass")
+    if gate.get("report_only") is not True:
+        raise SweQaError(f"{prefix}: source is not report-only")
+
+    cases = report.get("cases")
+    if not isinstance(cases, list) or len(cases) != 1:
+        raise SweQaError(f"{prefix}: expected exactly one judged case")
+    case = cases[0]
+    if not isinstance(case, dict):
+        raise SweQaError(f"{prefix}: case must be an object")
+    task_id = case.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise SweQaError(f"{prefix}: case has no task_id")
+
+    profiles = case.get("profiles")
+    if not isinstance(profiles, dict):
+        raise SweQaError(f"{prefix}: case has no profiles")
+    for profile_name in PROFILE_NAMES:
+        profile = profiles.get(profile_name)
+        if not isinstance(profile, dict):
+            raise SweQaError(f"{prefix}: case has no {profile_name} profile")
+        judged = profile.get("judge")
+        total = judged.get("total") if isinstance(judged, dict) else None
+        if (
+            isinstance(total, bool)
+            or not isinstance(total, int)
+            or not 5 <= total <= 100
+        ):
+            raise SweQaError(f"{prefix}: invalid {profile_name} judge total")
+        metrics = profile.get("metrics")
+        if not isinstance(metrics, dict):
+            raise SweQaError(f"{prefix}: invalid {profile_name} metrics")
+        for key in ("input_tokens", "output_tokens", "tool_calls"):
+            value = metrics.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise SweQaError(f"{prefix}: invalid {profile_name} {key}")
+        wall = metrics.get("agent_wall_seconds")
+        if not _valid_number(wall) or float(wall) <= 0:
+            raise SweQaError(f"{prefix}: invalid {profile_name} agent_wall_seconds")
+        profile_cost = metrics.get("cost_usd")
+        if not _valid_number(profile_cost, allow_none=True) or (
+            profile_cost is not None and float(profile_cost) < 0
+        ):
+            raise SweQaError(f"{prefix}: invalid {profile_name} cost_usd")
+
+    comparison = case.get("comparison")
+    comparison_keys = (
+        "judge_delta",
+        "input_token_reduction_pct",
+        "toolcall_reduction_pct",
+        "time_reduction_pct",
+        "cost_reduction_pct",
+    )
+    if not isinstance(comparison, dict) or any(
+        not _valid_number(comparison.get(key), allow_none=key != "judge_delta")
+        for key in comparison_keys
+    ):
+        raise SweQaError(f"{prefix}: invalid case comparison")
+    return case
+
+
+def _combined_judge(reports: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    first = reports[0]["judge"]
+    metadata_keys = ("label", "model", "self_judge", "temperature", "rubric")
+    metadata = {key: first[key] for key in metadata_keys}
+    for report in reports[1:]:
+        judge = report["judge"]
+        if any(judge.get(key) != metadata[key] for key in metadata_keys):
+            raise SweQaError("per-task reports use incompatible judge metadata")
+
+    usages = [report["judge"]["usage"] for report in reports]
+    metadata["usage"] = {
+        "calls": sum(usage["calls"] for usage in usages),
+        "input_tokens": sum(usage["input_tokens"] for usage in usages),
+        "output_tokens": sum(usage["output_tokens"] for usage in usages),
+        "cost_usd": _sum_or_none([usage["cost_usd"] for usage in usages]),
+    }
+    return metadata
+
+
+def aggregate_reports(*, reports_root: Path, output_dir: Path) -> dict[str, Any]:
+    """Combine successful one-task reports without making any model calls."""
+    source_reports: list[dict[str, Any]] = []
+    cases: list[dict[str, Any]] = []
+    task_sources: dict[str, Path] = {}
+    for path in _report_paths(reports_root, output_dir):
+        source = _load_object(path, label="per-task report")
+        case = _validate_task_report(source, path)
+        task_id = case["task_id"]
+        if task_id in task_sources:
+            raise SweQaError(
+                f"duplicate task report for {task_id}: "
+                f"{task_sources[task_id]} and {path}"
+            )
+        task_sources[task_id] = path
+        source_reports.append(source)
+        cases.append(case)
+
+    cases.sort(key=lambda case: case["task_id"])
+    task_ids = [case["task_id"] for case in cases]
+    report = {
+        "schema_version": 1,
+        "benchmark": "peng-weihan/SWE-QA-Bench",
+        "judge": _combined_judge(source_reports),
+        "gate": {
+            "kind": "completion-only",
+            "report_only": True,
+            "numeric_thresholds": False,
+            "expected_tasks": task_ids,
+            "valid_pairs": len(cases),
+            "successful_judgements": len(cases) * len(PROFILE_NAMES),
+            "passed": True,
+        },
+        "cases": cases,
+        "aggregate": _aggregate(cases),
+    }
+    _write_report(report, output_dir)
+    return report
+
+
 def _default_completion() -> Completion:
     try:
         import litellm
@@ -479,9 +689,7 @@ def judge_pairs(
     api_key = os.environ.get("GLM_API_KEY", "").strip()
     if not api_key:
         raise SweQaError("GLM_API_KEY is required for the self-judge")
-    api_base = os.environ.get(
-        "GLM_BASE_URL", OPENCODE_CUSTOM_GLM_BASE_URL
-    ).strip()
+    api_base = os.environ.get("GLM_BASE_URL", OPENCODE_CUSTOM_GLM_BASE_URL).strip()
     if not api_base:
         raise SweQaError("GLM_BASE_URL must not be empty")
     completion_fn = completion_fn or _default_completion()
@@ -571,20 +779,5 @@ def judge_pairs(
         "cases": cases,
         "aggregate": _aggregate(cases),
     }
-    markdown = _render_report(report)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "report.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    (output_dir / "report.md").write_text(markdown, encoding="utf-8")
-
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
-    if summary_path:
-        try:
-            with Path(summary_path).open("a", encoding="utf-8") as summary:
-                summary.write(markdown)
-                if not markdown.endswith("\n"):
-                    summary.write("\n")
-        except OSError as error:
-            raise SweQaError(f"could not append GitHub step summary: {error}") from error
+    _write_report(report, output_dir)
     return report

@@ -9,8 +9,9 @@ from typing import Any
 from unittest.mock import patch
 
 from zg_bench.swe_qa import SELF_JUDGE_LABEL, SweQaError
+from zg_bench.swe_qa.cli import main as swe_qa_main
 from zg_bench.swe_qa.collect import collect_pair
-from zg_bench.swe_qa.judge import _aggregate, judge_pairs
+from zg_bench.swe_qa.judge import _aggregate, aggregate_reports, judge_pairs
 from zg_bench.swe_qa.validation import validate_assets
 
 CODING_DIR = Path(__file__).resolve().parents[1]
@@ -22,6 +23,80 @@ DATASET_PATH = CODING_DIR / "datasets" / "swe-qa-bench-manual"
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def _judged_task_report(task_id: str, index: int = 0) -> dict[str, Any]:
+    scale = index + 1
+    baseline_total = 50 + index
+    zvec_total = 60 + index
+    case = {
+        "task_id": task_id,
+        "role": "smoke" if index == 0 else "what",
+        "category": "smoke" if index == 0 else "what",
+        "profiles": {
+            "baseline": {
+                "judge": {"total": baseline_total},
+                "metrics": {
+                    "input_tokens": 100 * scale,
+                    "output_tokens": 20 * scale,
+                    "tool_calls": 10 * scale,
+                    "agent_wall_seconds": 20.0 * scale,
+                    "cost_usd": 0.2 * scale,
+                },
+            },
+            "zvec-grep": {
+                "judge": {"total": zvec_total},
+                "metrics": {
+                    "input_tokens": 50 * scale,
+                    "output_tokens": 15 * scale,
+                    "tool_calls": 4 * scale,
+                    "agent_wall_seconds": 10.0 * scale,
+                    "cost_usd": 0.1 * scale,
+                },
+            },
+        },
+        "comparison": {
+            "judge_delta": zvec_total - baseline_total,
+            "input_token_reduction_pct": 50.0,
+            "toolcall_reduction_pct": 60.0,
+            "time_reduction_pct": 50.0,
+            "cost_reduction_pct": 50.0,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "benchmark": "peng-weihan/SWE-QA-Bench",
+        "judge": {
+            "label": SELF_JUDGE_LABEL,
+            "model": "glm-5.2",
+            "self_judge": True,
+            "temperature": 0,
+            "rubric": [
+                "correctness",
+                "completeness",
+                "relevance",
+                "clarity",
+                "coherence",
+            ],
+            "usage": {
+                "calls": 2,
+                "input_tokens": 1000 + index,
+                "output_tokens": 100 + index,
+                "cost_usd": 0.02 * scale,
+            },
+        },
+        "gate": {
+            "kind": "completion-only",
+            "report_only": True,
+            "numeric_thresholds": False,
+            "expected_tasks": [task_id],
+            "valid_pairs": 1,
+            "successful_judgements": 2,
+            "passed": True,
+        },
+        "cases": [case],
+        "aggregate": _aggregate([case]),
+    }
 
 
 def _write_harbor_job(
@@ -125,17 +200,13 @@ class CollectTests(unittest.TestCase):
             )
             output = root / "pairs" / "reflex-6" / "pair.json"
 
-            pair = collect_pair(
-                runs_dir=root, task="reflex:6", output=output
-            )
+            pair = collect_pair(runs_dir=root, task="reflex:6", output=output)
 
             self.assertTrue(pair["valid"])
             self.assertEqual(pair["task_id"], "reflex:6")
             self.assertEqual(pair["profiles"]["baseline"]["input_tokens"], 120)
             self.assertEqual(pair["profiles"]["baseline"]["tool_calls"], 3)
-            self.assertEqual(
-                pair["profiles"]["baseline"]["agent_wall_seconds"], 10.0
-            )
+            self.assertEqual(pair["profiles"]["baseline"]["agent_wall_seconds"], 10.0)
             self.assertIsNone(pair["profiles"]["zvec-grep"]["cost_usd"])
             self.assertEqual(json.loads(output.read_text()), pair)
 
@@ -354,9 +425,7 @@ class JudgeTests(unittest.TestCase):
         aggregate = _aggregate(cases)
 
         self.assertEqual(aggregate["comparison"]["judge_delta"], 5.0)
-        self.assertEqual(
-            aggregate["comparison"]["input_token_reduction_pct"], 45.0
-        )
+        self.assertEqual(aggregate["comparison"]["input_token_reduction_pct"], 45.0)
         self.assertEqual(aggregate["comparison"]["toolcall_reduction_pct"], 45.0)
         self.assertEqual(aggregate["comparison"]["time_reduction_pct"], 45.0)
         self.assertEqual(aggregate["comparison"]["cost_reduction_pct"], 45.0)
@@ -390,6 +459,129 @@ class JudgeTests(unittest.TestCase):
                         attempts=1,
                     )
             self.assertFalse(called)
+
+
+class AggregateReportTests(unittest.TestCase):
+    def test_cli_aggregates_single_report_without_glm_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports_root = root / "reports"
+            output_dir = reports_root / "combined"
+            _write_json(
+                reports_root / "reflex-6" / "report.json",
+                _judged_task_report("reflex:6"),
+            )
+
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch("builtins.print") as print_mock,
+            ):
+                exit_code = swe_qa_main(
+                    [
+                        "aggregate",
+                        "--reports-root",
+                        str(reports_root),
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(print_mock.call_count, 1)
+            report = json.loads((output_dir / "report.json").read_text())
+            self.assertEqual(
+                [case["task_id"] for case in report["cases"]], ["reflex:6"]
+            )
+            self.assertEqual(report["gate"]["expected_tasks"], ["reflex:6"])
+            self.assertEqual(report["gate"]["successful_judgements"], 2)
+            self.assertEqual(report["judge"]["usage"]["calls"], 2)
+            self.assertIn("| reflex:6 |", (output_dir / "report.md").read_text())
+
+            # A retry may scan a root that already contains its own prior output.
+            # The aggregate output is excluded instead of becoming a source report.
+            with patch.dict("os.environ", {}, clear=True):
+                retried = aggregate_reports(
+                    reports_root=reports_root,
+                    output_dir=output_dir,
+                )
+            self.assertEqual(len(retried["cases"]), 1)
+
+    def test_aggregates_five_present_reports(self) -> None:
+        tasks = [
+            "sympy:38",
+            "reflex:6",
+            "streamlink:14",
+            "sqlfluff:2",
+            "pylint:25",
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports_root = root / "reports"
+            for index, task_id in enumerate(tasks):
+                _write_json(
+                    reports_root / f"artifact-{index}" / "report.json",
+                    _judged_task_report(task_id, index),
+                )
+
+            with patch.dict("os.environ", {}, clear=True):
+                report = aggregate_reports(
+                    reports_root=reports_root,
+                    output_dir=root / "combined",
+                )
+
+            expected_tasks = sorted(tasks)
+            self.assertEqual(
+                [case["task_id"] for case in report["cases"]], expected_tasks
+            )
+            self.assertEqual(report["gate"]["expected_tasks"], expected_tasks)
+            self.assertEqual(report["gate"]["valid_pairs"], 5)
+            self.assertEqual(report["gate"]["successful_judgements"], 10)
+            self.assertEqual(report["judge"]["usage"]["calls"], 10)
+            self.assertEqual(
+                report["judge"]["usage"]["input_tokens"],
+                sum(1000 + index for index in range(5)),
+            )
+            self.assertEqual(
+                report["aggregate"]["profiles"]["baseline"]["input_tokens"],
+                1500,
+            )
+            self.assertEqual(
+                report["aggregate"]["comparison"]["input_token_reduction_pct"],
+                50.0,
+            )
+            markdown = (root / "combined" / "report.md").read_text()
+            for task_id in tasks:
+                self.assertIn(f"| {task_id} |", markdown)
+            self.assertIn("| **Aggregate** |", markdown)
+
+    def test_aggregate_rejects_zero_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports_root = root / "reports"
+            reports_root.mkdir()
+
+            with self.assertRaisesRegex(
+                SweQaError, "no per-task report.json files found"
+            ):
+                aggregate_reports(
+                    reports_root=reports_root,
+                    output_dir=root / "combined",
+                )
+
+    def test_aggregate_rejects_duplicate_task_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = _judged_task_report("reflex:6")
+            _write_json(root / "reports" / "one" / "report.json", source)
+            _write_json(root / "reports" / "two" / "report.json", source)
+
+            with self.assertRaisesRegex(
+                SweQaError, "duplicate task report for reflex:6"
+            ):
+                aggregate_reports(
+                    reports_root=root / "reports",
+                    output_dir=root / "combined",
+                )
 
 
 class ValidationTests(unittest.TestCase):
