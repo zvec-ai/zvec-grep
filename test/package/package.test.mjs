@@ -98,6 +98,11 @@ test("npm package contains and exposes the supported public surface", async (t) 
     ".bin",
     process.platform === "win32" ? "zg.cmd" : "zg",
   );
+  assert.match(
+    await readFile(cli, "utf8"),
+    /--liftoff-only/,
+    "installed zg launcher must enable Liftoff at Node startup",
+  );
   if (process.platform !== "win32") {
     const installedCli = await stat(
       join(

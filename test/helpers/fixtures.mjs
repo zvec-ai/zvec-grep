@@ -30,7 +30,7 @@ export async function removeTemporaryDirectory(directory) {
 }
 
 export async function runCli(args, options = {}) {
-  return execFileAsync(process.execPath, [cliPath, ...args], {
+  return execFileAsync(process.execPath, ["--liftoff-only", cliPath, ...args], {
     cwd: options.cwd,
     env: {
       ...process.env,

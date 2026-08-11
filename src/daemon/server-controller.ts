@@ -3,7 +3,6 @@ import { spawn } from "node:child_process";
 import { open, readFile, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { LIFTOFF_ONLY_FLAG } from "../cli/runtime.js";
 import { daemonHome, resolveClientToken } from "./config.js";
 import { processIsAlive } from "../engine/utils/daemon-lease.js";
 import {
@@ -12,6 +11,8 @@ import {
   resolveMcpToolset,
   type McpToolset,
 } from "../mcp/toolset.js";
+
+const LIFTOFF_ONLY_FLAG = "--liftoff-only";
 
 export type DaemonInstanceRecord = {
   pid: number;

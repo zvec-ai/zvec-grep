@@ -330,6 +330,7 @@ test(
     const child = spawn(
       process.execPath,
       [
+        "--liftoff-only",
         cliPath,
         "server",
         "run",

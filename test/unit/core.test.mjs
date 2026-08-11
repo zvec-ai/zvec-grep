@@ -11,11 +11,6 @@ import {
 } from "../../dist/cli/args.js";
 import { colorModeFromArgs } from "../../dist/cli/errors.js";
 import {
-  commandNeedsLiftoffOnly,
-  liftoffOnlyEnabled,
-  liftoffOnlyNodeArgs,
-} from "../../dist/cli/runtime.js";
-import {
   createHighlighter,
   shouldUseColor,
 } from "../../dist/cli/format/highlight.js";
@@ -138,32 +133,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(rg.options.rgOptions?.beforeContext, 2);
   assert.equal(rg.options.rgOptions?.afterContext, 2);
   assert.deepEqual(rg.options.globs, ["*.ts"]);
-});
-
-test("CLI enables Liftoff before commands that can parse source files", () => {
-  assert.equal(commandNeedsLiftoffOnly(parseArgs(["index"])), true);
-  assert.equal(
-    commandNeedsLiftoffOnly(parseArgs(["index", "--drop", "--yes"])),
-    false,
-  );
-  assert.equal(commandNeedsLiftoffOnly(parseArgs(["query", "symbol"])), true);
-  assert.equal(
-    commandNeedsLiftoffOnly(parseArgs(["query", "--rg", "symbol"])),
-    false,
-  );
-  assert.equal(commandNeedsLiftoffOnly(parseArgs(["server", "run"])), true);
-  assert.equal(commandNeedsLiftoffOnly(parseArgs(["server", "on"])), false);
-  assert.equal(commandNeedsLiftoffOnly(parseArgs(["status"])), false);
-  assert.equal(liftoffOnlyEnabled(["--trace-warnings"]), false);
-  assert.equal(liftoffOnlyEnabled(["--liftoff-only"]), true);
-  assert.deepEqual(
-    liftoffOnlyNodeArgs(
-      "/tmp/zg.js",
-      ["index", "/tmp/repo"],
-      ["--trace-warnings"],
-    ),
-    ["--liftoff-only", "--trace-warnings", "/tmp/zg.js", "index", "/tmp/repo"],
-  );
 });
 
 test("CLI parsers reject invalid values and normalize supported values", () => {
