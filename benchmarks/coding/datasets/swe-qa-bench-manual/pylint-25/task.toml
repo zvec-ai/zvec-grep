@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "pylint:25"
+source_index = 25
+index_base = 0
+role = "category"
+category = "why"
+question_type = "why"
+question_hash = "b4b1e1f3d005542fa8e10172c2e02305d5f3cc1fe4a768063887d3adaf2968f6"
+repository = "pylint-dev/pylint"
+repository_commit = "44740e5e5cdd2b80321a4f0ed4254213d058b9f6"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

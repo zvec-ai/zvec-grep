@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "benchmark": "peng-weihan/SWE-QA-Bench",
+  "benchmark_revision": "c13deac7a0d99b0ca2e593e004c4739475785b08",
+  "index_base": 0,
+  "visibility": "judge-only",
+  "references": [
+    {
+      "task_id": "reflex:6",
+      "source_file": "Benchmark/reflex.jsonl",
+      "source_index": 6,
+      "role": "smoke",
+      "category": "smoke",
+      "repository": "reflex-dev/reflex",
+      "repository_commit": "fe0f946dc0c240c6c1e513318c21db407e191c78",
+      "question_hash": "407e64429f98aed767e195179f8aa4076050601ba35a36d1c22b6170a5aa83be",
+      "question": "What is the role of the computation function returned by the derived state variable class's computation function accessor in the framework's dependency tracking for state recomputation?",
+      "reference_answer": "The `ComputedVar.fget` function serves three key roles: 1) Dependency discovery - DependencyTracker analyzes its bytecode to identify accessed state variables via `LOAD_ATTR` operations, building a dependency map. 2) Value computation - Called by `__get__` to compute values directly (no cache) or populate cache when stale. 3) Recomputation trigger - Invoked when `needs_update` detects dependency changes, ensuring state consistency. This enables automatic reactive computed properties without manual dependency specification."
+    },
+    {
+      "task_id": "sqlfluff:2",
+      "source_file": "Benchmark/sqlfluff.jsonl",
+      "source_index": 2,
+      "role": "category",
+      "category": "what",
+      "repository": "sqlfluff/sqlfluff",
+      "repository_commit": "db9801b7eb7fd014e765117f63ee1b0675fa9f87",
+      "question_hash": "4db621649f73d0f58b0fc4c18536bc2185b725fd933a76d5ed603babd41edb9d",
+      "question": "What is the architectural role of the functional-style wrapper classes that convert rule context segments into tuple-based collections with query methods in decoupling the layout rule that enforces select target line placement from direct parse tree structure access?",
+      "reference_answer": "The functional-style wrapper classes (FunctionalContext and Segments) serve to decouple Rule_LT09 from direct parse tree structure access by providing a higher-level, functional API that abstracts away the underlying BaseSegment implementation details.\n\n**Architectural Role:**\n\n1. **FunctionalContext** (`src/sqlfluff/utils/functional/context.py`): This wrapper class converts the RuleContext's parse tree elements (BaseSegment objects) into Segments objects. It provides properties like `segment`, `parent_stack`, `siblings_pre`, `siblings_post`, and `raw_segments` that all return Segments instances instead of raw BaseSegment tuples. This abstraction allows rules to work with a consistent functional interface rather than directly accessing `context.segment`, `context.parent_stack`, etc.\n\n2. **Segments** (`src/sqlfluff/utils/functional/segments.py`): This tuple-based class encapsulates BaseSegment objects and provides functional-style query methods such as:\n   - `children(predicate)` - Get child segments with optional filtering\n   - `select(select_if, loop_while, start_seg, stop_seg)` - Range/subset selection\n   - `first(predicate)`, `last(predicate)` - Find first/last matching segment\n   - `any(predicate)`, `all(predicate)` - Boolean queries\n   - `reversed()` - Reverse iteration\n   - `recursive_crawl(*seg_type)` - Recursive traversal\n\n**Decoupling Mechanism:**\n\nIn Rule_LT09 (`src/sqlfluff/rules/layout/LT09.py`), these abstractions are used extensively:\n- Line 90: `select_clause = FunctionalContext(context).segment` - Gets a Segments wrapper instead of raw BaseSegment\n- Line 91-93: `select_clause.children(sp.is_type(\"select_clause_element\")).children(sp.is_type(\"wildcard_expression\"))` - Uses functional chaining instead of direct tree traversal\n- Line 110: `children = FunctionalContext(context).segment.children()` - Functional API for getting children\n- Line 111: `select_targets = children.select(sp.is_type(\"select_clause_element\"))` - Functional selection instead of manual filtering\n- Line 143: `siblings_post = FunctionalContext(context).siblings_post` - Functional access to siblings\n\nThis decoupling means Rule_LT09 primarily uses functional methods (`children()`, `select()`, `first()`) rather than directly accessing `segment.segments` tuples or calling `segment.get_child()` methods, making the code more declarative and less dependent on the internal parse tree structure.\n\n**Evidence from the Codebase:**\n\nThe documentation (`docs/source/reference/internals/functional.rst`) states: \"These newer modules provide a higher-level API for rules working with segments and slices. Rules that need to navigate or search the parse tree may benefit from using these.\" The functional API is designed to eventually replace direct parse tree access, with 17+ rules using it as of December 2021.\n\nHowever, Rule_LT09 still contains some direct parse tree accesses (lines 201, 203, 205, 207, 342, 348) where the functional API doesn't provide sufficient coverage, indicating the abstraction is not yet complete for all use cases."
+    },
+    {
+      "task_id": "sympy:38",
+      "source_file": "Benchmark/sympy.jsonl",
+      "source_index": 38,
+      "role": "category",
+      "category": "where",
+      "repository": "sympy/sympy",
+      "repository_commit": "3c817ed8ab551d71e36907ce869afe5e4ca789ff",
+      "question_hash": "ef3d65caf1ba3d0a223b3acd3286d053466268d62694afcdcb27db56b3ab8520",
+      "question": "Where does the data flow from the deprecated matrix entry method through the matrix determinant class method to the determinant computation module?",
+      "reference_answer": "The data flows through the following path:\n\n1. **Starting point**: The deprecated `minorEntry` method (defined in `MatrixDeprecated` class in `sympy/matrices/matrices.py` at line 675) simply calls `self.minor(i, j, method=method)`, passing through to the `minor` method.\n\n2. **Matrix determinant class method**: The `minor` method (defined in `MatrixDeterminant` class in `sympy/matrices/matrices.py` at line 87-88) calls `_minor(self, i, j, method=method)`, which is imported from the determinant module.\n\n3. **Determinant computation module**: The `_minor` function (defined in `sympy/matrices/determinant.py` at lines 970-1004) performs the actual minor computation by:\n   - Calling `M.minor_submatrix(i, j)` to obtain the submatrix\n   - Then calling `.det(method=method)` on that submatrix\n\n4. **Index transformations in `minor_submatrix`**: The `_minor_submatrix` function (lines 1007-1046 in `determinant.py`) performs the following transformations to matrix indices:\n   - **Negative index normalization**: If `i < 0`, it adds `M.rows` to `i`; if `j < 0`, it adds `M.cols` to `j` (lines 1034-1037)\n   - **Exclusion list creation**: Creates lists of all row indices except `i` and all column indices except `j` (lines 1043-1044): `rows = [a for a in range(M.rows) if a != i]` and `cols = [a for a in range(M.cols) if a != j]`\n   - **Submatrix extraction**: Calls `M.extract(rows, cols)` to extract the submatrix (line 1046)\n\n5. **Additional index normalization in `extract`**: The `extract` method (in `sympy/matrices/matrixbase.py` at lines 468-528) further normalizes indices using the `a2idx` function (line 525-526), which:\n   - Converts negative indices to positive by adding the dimension size\n   - Validates that indices are within the valid range\n\n6. **Final computation**: The extracted submatrix then has its determinant computed using the specified method (bareiss, berkowitz, bird, laplace, or lu) via the `.det(method=method)` call.\n\nThe intermediate transformations ensure that negative indices are properly normalized and that the correct rows and columns are excluded before the submatrix is extracted and its determinant is computed."
+    },
+    {
+      "task_id": "streamlink:14",
+      "source_file": "Benchmark/streamlink.jsonl",
+      "source_index": 14,
+      "role": "category",
+      "category": "how",
+      "repository": "streamlink/streamlink",
+      "repository_commit": "ab1f36560005253ca6a290a614730bf18a29a7f9",
+      "question_hash": "bc48cab74d625cd7abfab73dbd9290eca9490c4f251c73e414e5428cf204b220",
+      "question": "How does the stream retrieval method implement multi-stage validation schema composition for extracting and processing embedded media delivery platform metadata?",
+      "reference_answer": "The _get_streams method implements multi-stage validation through nested validate.Schema compositions: first extracting author and iframe_url via HTML parsing with XPath expressions and regex pattern matching, then processing the iframe response using JSON schema validation with regex extraction, string transformation, and structured data validation that handles both success and error response formats while ensuring proper type checking and fallback handling."
+    },
+    {
+      "task_id": "pylint:25",
+      "source_file": "Benchmark/pylint.jsonl",
+      "source_index": 25,
+      "role": "category",
+      "category": "why",
+      "repository": "pylint-dev/pylint",
+      "repository_commit": "44740e5e5cdd2b80321a4f0ed4254213d058b9f6",
+      "question_hash": "b4b1e1f3d005542fa8e10172c2e02305d5f3cc1fe4a768063887d3adaf2968f6",
+      "question": "Why does the assignment name processing method defer frame node visitation until the local variable type attribute is accessed rather than visiting frames upfront?",
+      "reference_answer": "The assignment name processing method defers frame node visitation until the local variable type attribute is accessed to avoid double parsing when multiple `Linker` instances visit the same project and to only visit frames that are actually needed.\n\nIn `pylint/pyreverse/inspector.py`, the `visit_assignname` method (lines 190-218) implements lazy evaluation. When it needs to access `frame.locals_type` (line 206), it checks if the frame has been visited using `hasattr(frame, \"locals_type\")`. If not, it visits the frame lazily by calling the appropriate visit method (`visit_classdef`, `visit_functiondef`, or `visit_module`) at that point (lines 210-215).\n\nThe comment on lines 195-196 explains: \"avoid double parsing done by different Linkers.visit running over the same project\". This means:\n\n1. **Preventing duplicate work**: Multiple `Linker` instances may visit the same project. The visit methods (`visit_module`, `visit_classdef`, `visit_functiondef`) all check `if hasattr(node, \"locals_type\"): return` (lines 144, 158, 184) to skip already-visited frames. By deferring visitation until `locals_type` is accessed, frames are only visited once, even across multiple linker instances.\n\n2. **On-demand processing**: Not all frames may need their `locals_type` populated. By deferring until access, only frames that are actually referenced through assignment names are visited, avoiding unnecessary work.\n\n3. **Efficiency**: Eagerly visiting all frames during initial traversal would process every module, class, and function upfront, even if their type information is never needed. The deferred approach processes frames only when their type mapping is actually required.\n\nThe alternative (eager visiting) would visit all frames during the initial traversal in `visit_project` or `LocalsVisitor.visit`, but this would be less efficient and could cause duplicate processing when multiple linkers operate on the same project."
+    }
+  ]
+}

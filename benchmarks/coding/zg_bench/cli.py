@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="tool profile to check (default: all)",
     )
     doctor.add_argument(
+        "--embedding-model",
+        default=ZVEC_GREP_EMBEDDING,
+        help="zvec-grep embedding model",
+    )
+    doctor.add_argument(
         "--zvec-grep-package",
         default=ZVEC_GREP_PACKAGE,
         help="zvec-grep npm spec, version, local directory, or .tgz",
@@ -107,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "suite",
         help="built-in suite name or YAML path; use 'zg-bench list suites'",
+    )
+    run.add_argument(
+        "--embedding-model",
+        default=ZVEC_GREP_EMBEDDING,
+        help="zvec-grep embedding model",
     )
     run.add_argument("--agent", required=True, help="benchmark agent name")
     run.add_argument("--model", required=True, help="model identifier for the agent")
@@ -164,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             profiles=profiles,
             zvec_grep_package=args.zvec_grep_package,
+            embedding_model=args.embedding_model,
         )
 
     if args.command == "list":
@@ -245,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                     zvec_grep_package=zvec_grep_package_install_spec(
                         args.zvec_grep_package
                     ),
+                    embedding_model=args.embedding_model,
                 ),
             )
             for profile, job_name in run_specs
@@ -256,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 profiles=profiles,
                 zvec_grep_package=args.zvec_grep_package,
+                embedding_model=args.embedding_model,
             )
             if print_report(checks) != 0:
                 raise SystemExit(
@@ -269,9 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Suite:   {suite.name}")
     print(f"Tier:    {suite.tier}")
     print(f"Profile: {args.profile}")
-    if "zvec-grep" in profiles and ZVEC_GREP_EMBEDDING.startswith("qwen/"):
+    if "zvec-grep" in profiles and args.embedding_model.startswith("qwen/"):
         print(
-            f"Embedding: {ZVEC_GREP_EMBEDDING} "
+            f"Embedding: {args.embedding_model} "
             "(remote; Workspace authorization granted during setup)"
         )
     if suite.tasks is None:
@@ -295,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.agent,
                     profile,
                     zvec_grep_package=args.zvec_grep_package,
+                    embedding_model=args.embedding_model,
                 )
             command = build_harbor_command(
                 suite,
@@ -314,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
                     if prepared_cache is not None
                     else None
                 ),
+                embedding_model=args.embedding_model,
             )
             profile_return_code = execute(
                 command,

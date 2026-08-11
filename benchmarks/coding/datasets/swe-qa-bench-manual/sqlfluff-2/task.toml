@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "sqlfluff:2"
+source_index = 2
+index_base = 0
+role = "category"
+category = "what"
+question_type = "what"
+question_hash = "4db621649f73d0f58b0fc4c18536bc2185b725fd933a76d5ed603babd41edb9d"
+repository = "sqlfluff/sqlfluff"
+repository_commit = "db9801b7eb7fd014e765117f63ee1b0675fa9f87"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

@@ -88,6 +88,15 @@ class LocalPackageTests(unittest.TestCase):
                 f"local-{digest[:16]}",
                 overlay["volumes"]["agent-setup-cache"]["name"],
             )
+            self.assertIn(
+                "local-potion-code-16m-v2",
+                runner.setup_cache_volume_name(
+                    "opencode",
+                    "zvec-grep",
+                    zvec_grep_package_sha256=digest,
+                    embedding_model="local/potion-code-16m-v2",
+                ),
+            )
             self.assertEqual(
                 prepared.zvec_grep_package,
                 runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET,
@@ -127,6 +136,66 @@ class LocalPackageTests(unittest.TestCase):
 
 
 class RunValidationTests(unittest.TestCase):
+    def test_custom_glm_uses_openai_compatible_provider(self) -> None:
+        suite = runner.load_suite("swebench-verified", tier="smoke")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="zvec-grep",
+            agent="opencode",
+            model="custom-openai/glm-5.2",
+            embedding_model="local/potion-code-16m-v2",
+            job_name="custom-glm-test",
+        )
+
+        self.assertEqual(
+            command[command.index("--model") + 1],
+            "custom-openai/glm-5.2",
+        )
+        self.assertIn(
+            "embedding_model=local/potion-code-16m-v2",
+            command,
+        )
+        config_argument = next(
+            value for value in command if value.startswith("opencode_config=")
+        )
+        config = json.loads(config_argument.removeprefix("opencode_config="))
+        provider = config["provider"]["custom-openai"]
+        self.assertEqual(
+            provider["options"]["apiKey"],
+            "{env:OPENAI_API_KEY}",
+        )
+        self.assertNotIn("GLM_API_KEY", json.dumps(config))
+        self.assertIn("mcp", config)
+
+    def test_custom_glm_environment_normalizes_and_scrubs_source_key(self) -> None:
+        with patch.dict(
+            runner.os.environ,
+            {"GLM_API_KEY": "glm-secret", "UNRELATED": "kept"},
+            clear=True,
+        ):
+            environment = runner.execution_environment(
+                agent="opencode",
+                model="custom-openai/glm-5.2",
+            )
+
+        self.assertEqual(environment["OPENAI_API_KEY"], "glm-secret")
+        self.assertNotIn("GLM_API_KEY", environment)
+        self.assertEqual(environment["UNRELATED"], "kept")
+
+    def test_local_embedding_does_not_require_embedding_key(self) -> None:
+        with patch.dict(
+            runner.os.environ,
+            {"GLM_API_KEY": "glm-secret"},
+            clear=True,
+        ):
+            runner.validate_profile_credentials(
+                ("baseline", "zvec-grep"),
+                agent="opencode",
+                model="custom-openai/glm-5.2",
+                embedding_model="local/potion-code-16m-v2",
+            )
+
     def test_qwen_code_model_is_supported(self) -> None:
         support = runner.resolve_agent_model("qwen-coder", "qwen3.7-max")
 
@@ -299,6 +368,23 @@ class RunValidationTests(unittest.TestCase):
 
 
 class SuiteTierTests(unittest.TestCase):
+    def test_local_swe_qa_suite_uses_harbor_path(self) -> None:
+        suite = runner.load_suite("swe-qa-bench-manual", tier="ci")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="custom-openai/glm-5.2",
+            job_name="local-suite-test",
+        )
+
+        self.assertIsNone(suite.dataset)
+        self.assertIsNotNone(suite.path)
+        self.assertEqual(len(suite.tasks or ()), 5)
+        self.assertIn("--path", command)
+        self.assertNotIn("--dataset", command)
+
     def test_full_tier_runs_all_dataset_tasks(self) -> None:
         suite = runner.load_suite("swebench-verified", tier="full")
 

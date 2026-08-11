@@ -50,6 +50,7 @@ def collect_checks(
     model: str | None = None,
     profiles: Sequence[Profile] = (),
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> list[Check]:
     version = sys.version_info
     python_ok = (3, 12) <= version[:2] < (3, 14)
@@ -127,6 +128,7 @@ def collect_checks(
                 model=model,
                 profiles=profiles,
                 zvec_grep_package=zvec_grep_package,
+                embedding_model=embedding_model,
             )
         )
     return checks
@@ -138,13 +140,19 @@ def _collect_run_checks(
     model: str,
     profiles: Sequence[Profile],
     zvec_grep_package: str,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> list[Check]:
     checks: list[Check] = []
     profile_label = ", ".join(profiles) or "none"
     checks.append(Check("Run profiles", bool(profiles), profile_label))
 
     try:
-        validate_profile_credentials(profiles, agent=agent, model=model)
+        validate_profile_credentials(
+            profiles,
+            agent=agent,
+            model=model,
+            embedding_model=embedding_model,
+        )
     except ValueError as error:
         checks.append(Check("Credentials", False, str(error)))
     else:
@@ -170,12 +178,12 @@ def _collect_run_checks(
             )
         )
 
-    if ZVEC_GREP_EMBEDDING.startswith("qwen/"):
+    if embedding_model.startswith("qwen/"):
         checks.append(
             Check(
                 "Remote Embedding",
                 True,
-                f"{ZVEC_GREP_EMBEDDING}; source content is sent remotely "
+                f"{embedding_model}; source content is sent remotely "
                 "with a Workspace grant created during setup",
             )
         )
@@ -289,6 +297,7 @@ def run_doctor(
     model: str | None = None,
     profiles: Sequence[Profile] = (),
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> int:
     return print_report(
         collect_checks(
@@ -296,5 +305,6 @@ def run_doctor(
             model=model,
             profiles=profiles,
             zvec_grep_package=zvec_grep_package,
+            embedding_model=embedding_model,
         )
     )

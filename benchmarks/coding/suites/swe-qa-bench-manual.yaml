@@ -1,0 +1,13 @@
+name: swe-qa-bench-manual
+path: ../datasets/swe-qa-bench-manual
+tiers:
+  smoke:
+    tasks:
+      - reflex-6
+  ci:
+    tasks:
+      - reflex-6
+      - sqlfluff-2
+      - sympy-38
+      - streamlink-14
+      - pylint-25

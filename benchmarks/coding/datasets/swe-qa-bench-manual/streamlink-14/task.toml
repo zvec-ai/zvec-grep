@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "streamlink:14"
+source_index = 14
+index_base = 0
+role = "category"
+category = "how"
+question_type = "how"
+question_hash = "bc48cab74d625cd7abfab73dbd9290eca9490c4f251c73e414e5428cf204b220"
+repository = "streamlink/streamlink"
+repository_commit = "ab1f36560005253ca6a290a614730bf18a29a7f9"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

@@ -21,6 +21,9 @@ from .settings import (
     OPENCODE_ALIYUN_GLM_MODEL_ID,
     OPENCODE_ALIYUN_QWEN_MODEL,
     OPENCODE_ALIYUN_QWEN_MODEL_ID,
+    OPENCODE_CUSTOM_GLM_BASE_URL,
+    OPENCODE_CUSTOM_GLM_MODEL,
+    OPENCODE_CUSTOM_GLM_MODEL_ID,
     OPENCODE_DASHSCOPE_BASE_URL,
     OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
     OPENCODE_VERSION,
@@ -81,9 +84,10 @@ class SuiteConfigError(ValueError):
 @dataclass(frozen=True)
 class BenchmarkSuite:
     name: str
-    dataset: str
+    dataset: str | None
     tier: Tier
     tasks: tuple[str, ...] | None
+    path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -126,11 +130,16 @@ _OPENCODE_QWEN_MODEL_SUPPORT = AgentModelSupport(
     OPENCODE_ALIYUN_QWEN_MODEL,
     aliases=(f"dashscope/{OPENCODE_ALIYUN_QWEN_MODEL}",),
 )
+_OPENCODE_CUSTOM_GLM_MODEL_SUPPORT = AgentModelSupport(
+    _OPENCODE_AGENT,
+    OPENCODE_CUSTOM_GLM_MODEL,
+)
 AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
     # Codex owns its model catalog and receives the selected model unchanged.
     _CODEX_MODEL_SUPPORT,
     _QWEN_CODE_MODEL_SUPPORT,
     _OPENCODE_GLM_MODEL_SUPPORT,
+    _OPENCODE_CUSTOM_GLM_MODEL_SUPPORT,
     _OPENCODE_QWEN_MODEL_SUPPORT,
 )
 
@@ -189,9 +198,21 @@ def load_suite(
 
     root = _require_mapping(raw, "suite definition")
     name = _require_nonempty_string(root.get("name"), "name")
-    dataset = _require_nonempty_string(root.get("dataset"), "dataset")
-    if "@" not in dataset or dataset.endswith("@latest"):
-        raise SuiteConfigError("dataset must use a pinned Harbor revision")
+    raw_dataset = root.get("dataset")
+    raw_path = root.get("path")
+    if (raw_dataset is None) == (raw_path is None):
+        raise SuiteConfigError("define exactly one of dataset or path")
+    dataset: str | None = None
+    local_path: Path | None = None
+    if raw_dataset is not None:
+        dataset = _require_nonempty_string(raw_dataset, "dataset")
+        if "@" not in dataset or dataset.endswith("@latest"):
+            raise SuiteConfigError("dataset must use a pinned Harbor revision")
+    else:
+        path_value = _require_nonempty_string(raw_path, "path")
+        local_path = (path.parent / path_value).resolve()
+        if not local_path.is_dir():
+            raise SuiteConfigError(f"local Harbor dataset not found: {local_path}")
 
     tiers = _require_mapping(root.get("tiers"), "tiers")
     if tier not in TIERS:
@@ -237,7 +258,13 @@ def load_suite(
     if path.parent == SUITES_DIR and name != path.stem:
         raise SuiteConfigError(f"suite name {name!r} must match filename {path.stem!r}")
 
-    return BenchmarkSuite(name=name, dataset=dataset, tier=tier, tasks=tasks)
+    return BenchmarkSuite(
+        name=name,
+        dataset=dataset,
+        path=local_path,
+        tier=tier,
+        tasks=tasks,
+    )
 
 
 def new_run_id() -> str:
@@ -297,6 +324,10 @@ def _is_opencode_aliyun_qwen_model(agent: str, model: str) -> bool:
     return _OPENCODE_QWEN_MODEL_SUPPORT.matches(agent, model)
 
 
+def _is_opencode_custom_glm_model(agent: str, model: str) -> bool:
+    return _OPENCODE_CUSTOM_GLM_MODEL_SUPPORT.matches(agent, model)
+
+
 def _opencode_dashscope_model_id(agent: str, model: str) -> str | None:
     if _is_opencode_aliyun_glm_model(agent, model):
         return OPENCODE_ALIYUN_GLM_MODEL_ID
@@ -314,7 +345,11 @@ def _first_nonempty_env(names: Sequence[str]) -> tuple[str, str] | None:
 
 
 def validate_profile_credentials(
-    profiles: Sequence[Profile], *, agent: str, model: str
+    profiles: Sequence[Profile],
+    *,
+    agent: str,
+    model: str,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> None:
     resolve_agent_model(agent, model)
     if _is_qwen_code_dashscope_model(agent, model):
@@ -333,7 +368,14 @@ def validate_profile_credentials(
                 f"export one of: {accepted}"
             )
 
-    if "zvec-grep" not in profiles or not ZVEC_GREP_EMBEDDING.startswith("qwen/"):
+    if _is_opencode_custom_glm_model(agent, model):
+        if _first_nonempty_env(("GLM_API_KEY", "OPENAI_API_KEY")) is None:
+            raise ValueError(
+                f"{model} requires an API key; export GLM_API_KEY or "
+                "OPENAI_API_KEY"
+            )
+
+    if "zvec-grep" not in profiles or not embedding_model.startswith("qwen/"):
         return
     if _first_nonempty_env(ZVEC_GREP_API_KEY_ENV_VARS) is not None:
         return
@@ -407,6 +449,15 @@ def execution_environment(*, agent: str, model: str) -> dict[str, str]:
             _, api_key = credential
             environment["OPENAI_API_KEY"] = api_key
         environment["OPENAI_BASE_URL"] = OPENCODE_DASHSCOPE_BASE_URL
+    if _is_opencode_custom_glm_model(agent, model):
+        credential = _first_nonempty_env(("GLM_API_KEY", "OPENAI_API_KEY"))
+        if credential is not None:
+            _, api_key = credential
+            environment["OPENAI_API_KEY"] = api_key
+        environment["OPENAI_BASE_URL"] = OPENCODE_CUSTOM_GLM_BASE_URL
+        # Harbor only needs the normalized OpenAI variable. Avoid forwarding
+        # the provider-specific source variable to every subprocess as well.
+        environment.pop("GLM_API_KEY", None)
     return environment
 
 
@@ -451,6 +502,7 @@ def setup_cache_volume_name(
     *,
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     zvec_grep_package_sha256: str | None = None,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> str:
     identity = f"{agent}-{_agent_version(agent)}-{profile}-linux-x64"
     if profile == "zvec-grep":
@@ -459,7 +511,10 @@ def setup_cache_volume_name(
             if zvec_grep_package_sha256 is not None
             else zvec_grep_package
         )
-        identity += f"-{package_identity}-{ZVEC_GREP_BINDING_PACKAGE}"
+        identity += (
+            f"-{package_identity}-{ZVEC_GREP_BINDING_PACKAGE}"
+            f"-{embedding_model}"
+        )
     return f"zg-bench-{_cache_slug(identity)}"
 
 
@@ -564,6 +619,7 @@ def prepare_setup_cache(
     profile: Profile,
     *,
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> PreparedSetupCache:
     """Create the profile-isolated Docker volume and its Compose overlay."""
     prepared_package = PreparedZvecGrepPackage(install_spec=zvec_grep_package)
@@ -575,6 +631,7 @@ def prepare_setup_cache(
         profile,
         zvec_grep_package=prepared_package.install_spec,
         zvec_grep_package_sha256=prepared_package.sha256,
+        embedding_model=embedding_model,
     )
     SETUP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     service_volumes: list[dict[str, Any]] = [
@@ -650,6 +707,7 @@ def build_harbor_command(
     harbor_executable: str = "harbor",
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     zvec_grep_package_sha256: str | None = None,
+    embedding_model: str = ZVEC_GREP_EMBEDDING,
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
@@ -707,6 +765,41 @@ def build_harbor_command(
                 "opencode_config="
                 + json.dumps(opencode_config, separators=(",", ":"))
             )
+        elif _is_opencode_custom_glm_model(agent, model):
+            harbor_model = OPENCODE_CUSTOM_GLM_MODEL
+            opencode_config = {
+                "$schema": "https://opencode.ai/config.json",
+                "provider": {
+                    "custom-openai": {
+                        "npm": OPENCODE_OPENAI_COMPATIBLE_PACKAGE,
+                        "name": "Custom OpenAI Compatible",
+                        "options": {
+                            "apiKey": "{env:OPENAI_API_KEY}",
+                            "baseURL": OPENCODE_CUSTOM_GLM_BASE_URL,
+                        },
+                        "models": {
+                            OPENCODE_CUSTOM_GLM_MODEL_ID: {
+                                "name": "GLM 5.2",
+                            }
+                        },
+                    }
+                },
+                "model": OPENCODE_CUSTOM_GLM_MODEL,
+            }
+            if profile == "zvec-grep":
+                opencode_config["mcp"] = {
+                    "zvec_grep": {
+                        "type": "remote",
+                        "url": "http://127.0.0.1:7999/mcp",
+                        "enabled": True,
+                        "timeout": 600_000,
+                        "oauth": False,
+                    }
+                }
+            agent_kwargs.append(
+                "opencode_config="
+                + json.dumps(opencode_config, separators=(",", ":"))
+            )
 
     if profile == "zvec-grep":
         if agent not in _ZVEC_AGENT_IMPORT_PATHS:
@@ -720,7 +813,7 @@ def build_harbor_command(
             [
                 f"zvec_grep_package={zvec_grep_package}",
                 f"zvec_binding_package={ZVEC_GREP_BINDING_PACKAGE}",
-                f"embedding_model={ZVEC_GREP_EMBEDDING}",
+                f"embedding_model={embedding_model}",
             ]
         )
         if zvec_grep_package_sha256 is not None:
@@ -736,11 +829,15 @@ def build_harbor_command(
                 )
             skills.append(str(ZVEC_GREP_SKILL_DIR.resolve()))
 
+    source_args = (
+        ["--dataset", suite.dataset]
+        if suite.dataset is not None
+        else ["--path", str(suite.path)]
+    )
     command = [
         harbor_executable,
         "run",
-        "--dataset",
-        suite.dataset,
+        *source_args,
         "--agent",
         harbor_agent,
         "--model",
@@ -774,7 +871,10 @@ def build_harbor_command(
 
     for agent_kwarg in agent_kwargs:
         command.extend(["--agent-kwarg", agent_kwarg])
-    if _opencode_dashscope_model_id(agent, model) is not None:
+    if (
+        _opencode_dashscope_model_id(agent, model) is not None
+        or _is_opencode_custom_glm_model(agent, model)
+    ):
         command.extend(
             ["--agent-env", "OPENAI_API_KEY=${OPENAI_API_KEY}"]
         )

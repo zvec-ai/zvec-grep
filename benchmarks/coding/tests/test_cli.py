@@ -72,7 +72,8 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(error.exception.code, 2)
         self.assertIn(
-            "supported models: aliyun-glm-5.2, qwen3.7-max",
+            "supported models: aliyun-glm-5.2, custom-openai/glm-5.2, "
+            "qwen3.7-max",
             stderr.getvalue(),
         )
 

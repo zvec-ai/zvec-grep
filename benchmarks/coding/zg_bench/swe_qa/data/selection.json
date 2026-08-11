@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "benchmark": "peng-weihan/SWE-QA-Bench",
+  "benchmark_revision": "c13deac7a0d99b0ca2e593e004c4739475785b08",
+  "index_base": 0,
+  "dataset_path": "benchmarks/coding/datasets/swe-qa-bench-manual",
+  "gate": {
+    "required_tasks": 5,
+    "smoke_task": "reflex:6",
+    "category_tasks": ["sqlfluff:2", "sympy:38", "streamlink:14", "pylint:25"]
+  },
+  "tasks": [
+    {
+      "order": 1,
+      "task_id": "reflex:6",
+      "task_slug": "reflex-6",
+      "source_file": "Benchmark/reflex.jsonl",
+      "source_index": 6,
+      "role": "smoke",
+      "category": "smoke",
+      "question_type": "what",
+      "repository": "reflex-dev/reflex",
+      "repository_url": "https://github.com/reflex-dev/reflex.git",
+      "repository_commit": "fe0f946dc0c240c6c1e513318c21db407e191c78",
+      "question_hash": "407e64429f98aed767e195179f8aa4076050601ba35a36d1c22b6170a5aa83be",
+      "question": "What is the role of the computation function returned by the derived state variable class's computation function accessor in the framework's dependency tracking for state recomputation?"
+    },
+    {
+      "order": 2,
+      "task_id": "sqlfluff:2",
+      "task_slug": "sqlfluff-2",
+      "source_file": "Benchmark/sqlfluff.jsonl",
+      "source_index": 2,
+      "role": "category",
+      "category": "what",
+      "question_type": "what",
+      "repository": "sqlfluff/sqlfluff",
+      "repository_url": "https://github.com/sqlfluff/sqlfluff.git",
+      "repository_commit": "db9801b7eb7fd014e765117f63ee1b0675fa9f87",
+      "question_hash": "4db621649f73d0f58b0fc4c18536bc2185b725fd933a76d5ed603babd41edb9d",
+      "question": "What is the architectural role of the functional-style wrapper classes that convert rule context segments into tuple-based collections with query methods in decoupling the layout rule that enforces select target line placement from direct parse tree structure access?"
+    },
+    {
+      "order": 3,
+      "task_id": "sympy:38",
+      "task_slug": "sympy-38",
+      "source_file": "Benchmark/sympy.jsonl",
+      "source_index": 38,
+      "role": "category",
+      "category": "where",
+      "question_type": "where",
+      "repository": "sympy/sympy",
+      "repository_url": "https://github.com/sympy/sympy.git",
+      "repository_commit": "3c817ed8ab551d71e36907ce869afe5e4ca789ff",
+      "question_hash": "ef3d65caf1ba3d0a223b3acd3286d053466268d62694afcdcb27db56b3ab8520",
+      "question": "Where does the data flow from the deprecated matrix entry method through the matrix determinant class method to the determinant computation module?"
+    },
+    {
+      "order": 4,
+      "task_id": "streamlink:14",
+      "task_slug": "streamlink-14",
+      "source_file": "Benchmark/streamlink.jsonl",
+      "source_index": 14,
+      "role": "category",
+      "category": "how",
+      "question_type": "how",
+      "repository": "streamlink/streamlink",
+      "repository_url": "https://github.com/streamlink/streamlink.git",
+      "repository_commit": "ab1f36560005253ca6a290a614730bf18a29a7f9",
+      "question_hash": "bc48cab74d625cd7abfab73dbd9290eca9490c4f251c73e414e5428cf204b220",
+      "question": "How does the stream retrieval method implement multi-stage validation schema composition for extracting and processing embedded media delivery platform metadata?"
+    },
+    {
+      "order": 5,
+      "task_id": "pylint:25",
+      "task_slug": "pylint-25",
+      "source_file": "Benchmark/pylint.jsonl",
+      "source_index": 25,
+      "role": "category",
+      "category": "why",
+      "question_type": "why",
+      "repository": "pylint-dev/pylint",
+      "repository_url": "https://github.com/pylint-dev/pylint.git",
+      "repository_commit": "44740e5e5cdd2b80321a4f0ed4254213d058b9f6",
+      "question_hash": "b4b1e1f3d005542fa8e10172c2e02305d5f3cc1fe4a768063887d3adaf2968f6",
+      "question": "Why does the assignment name processing method defer frame node visitation until the local variable type attribute is accessed rather than visiting frames upfront?"
+    }
+  ]
+}

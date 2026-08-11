@@ -54,7 +54,11 @@ class ZvecGrepMixin:
             raise ValueError("zvec_grep_package_sha256 must be a SHA-256 digest")
 
         resolved_extra_env = dict(extra_env or {})
-        api_key_source = self._resolve_api_key_source(resolved_extra_env)
+        api_key_source = (
+            None
+            if embedding_model.startswith("local/")
+            else self._resolve_api_key_source(resolved_extra_env)
+        )
         if embedding_model.startswith("qwen/") and api_key_source is None:
             accepted = ", ".join(ZVEC_GREP_API_KEY_ENV_VARS)
             raise ValueError(
