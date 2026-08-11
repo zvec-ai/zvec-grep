@@ -1,11 +1,6 @@
 name: SWE-QA Bench (manual)
 
 on:
-  # Temporary branch-only trigger used to validate this new workflow before it
-  # exists on the default branch. Removed after the landing smoke passes.
-  push:
-    branches:
-      - codex/swe-qa-bench-manual-ci
   workflow_dispatch:
     inputs:
       scope:
@@ -76,7 +71,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        task: ${{ fromJSON((github.event_name == 'push' || inputs.scope == 'gate-5') && '["reflex-6","sqlfluff-2","sympy-38","streamlink-14","pylint-25"]' || '["reflex-6"]') }}
+        task: ${{ fromJSON(inputs.scope == 'gate-5' && '["reflex-6","sqlfluff-2","sympy-38","streamlink-14","pylint-25"]' || '["reflex-6"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -181,7 +176,7 @@ jobs:
       - name: Judge answers and write the five-metric summary
         env:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          SCOPE: ${{ github.event_name == 'push' && 'gate-5' || inputs.scope || 'smoke' }}
+          SCOPE: ${{ inputs.scope || 'smoke' }}
         run: |
           set -euo pipefail
           if [[ -z "${GLM_API_KEY:-}" ]]; then
