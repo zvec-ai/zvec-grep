@@ -1,4 +1,4 @@
-"""Collect one baseline/zvec-grep pair from completed Harbor 0.18 jobs."""
+"""Collect baseline/zvec-grep trials from completed Harbor 0.18 jobs."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def _job_dirs(runs_dir: Path, profile: str) -> list[Path]:
     )
 
 
-def _completed_job(job_dir: Path) -> dict[str, Any]:
+def _completed_job(job_dir: Path, *, expected_trials: int) -> dict[str, Any]:
     result = _load_json(job_dir / "result.json", label="Harbor job result")
     if not result.get("finished_at"):
         raise SweQaError(f"Harbor job did not finish: {job_dir.name}")
@@ -74,6 +74,11 @@ def _completed_job(job_dir: Path) -> dict[str, Any]:
     stats = result.get("stats")
     if not isinstance(total, int) or total < 1 or not isinstance(stats, dict):
         raise SweQaError(f"Harbor job result is incomplete: {job_dir.name}")
+    if total != expected_trials:
+        raise SweQaError(
+            f"expected exactly {expected_trials} Harbor trial(s) in "
+            f"{job_dir.name}, found {total}"
+        )
     completed = stats.get("n_completed_trials")
     errors = stats.get("n_errored_trials")
     if completed != total or errors not in (0, None):
@@ -83,7 +88,9 @@ def _completed_job(job_dir: Path) -> dict[str, Any]:
     return result
 
 
-def _select_trial(job_dir: Path, task: str) -> tuple[Path, dict[str, Any]]:
+def _select_trials(
+    job_dir: Path, task: str, *, expected_trials: int
+) -> list[tuple[Path, dict[str, Any]]]:
     matches: list[tuple[Path, dict[str, Any]]] = []
     for trajectory_path in sorted(job_dir.glob("*/agent/trajectory.json")):
         trial_dir = trajectory_path.parent.parent
@@ -93,12 +100,32 @@ def _select_trial(job_dir: Path, task: str) -> tuple[Path, dict[str, Any]]:
         result = _load_json(result_path, label="Harbor trial result")
         if _matches_task(result, task):
             matches.append((trial_dir, result))
-    if len(matches) != 1:
+
+    def execution_order(
+        item: tuple[Path, dict[str, Any]],
+    ) -> tuple[datetime, str]:
+        trial_dir, result = item
+        timing = result.get("agent_execution")
+        if not isinstance(timing, dict):
+            raise SweQaError(
+                f"trial is missing agent execution timing: {trial_dir.name}"
+            )
+        started = _parse_time(
+            timing.get("started_at"),
+            label=f"trial agent start time for {trial_dir.name}",
+        )
+        trial_name = str(result.get("trial_name") or trial_dir.name)
+        return started, trial_name
+
+    matches.sort(
+        key=execution_order
+    )
+    if len(matches) != expected_trials:
         raise SweQaError(
-            f"expected exactly one completed trial for {task!r} in "
+            f"expected exactly {expected_trials} completed trial(s) for {task!r} in "
             f"{job_dir.name}, found {len(matches)}"
         )
-    return matches[0]
+    return matches
 
 
 def _number(
@@ -173,7 +200,12 @@ def _trajectory_metrics(trajectory: dict[str, Any]) -> dict[str, Any]:
 
 
 def _profile_result(
-    *, profile: str, job_dir: Path, trial_dir: Path, result: dict[str, Any]
+    *,
+    profile: str,
+    job_dir: Path,
+    trial_dir: Path,
+    result: dict[str, Any],
+    trial_index: int,
 ) -> dict[str, Any]:
     if result.get("exception_info") is not None:
         raise SweQaError(
@@ -242,6 +274,7 @@ def _profile_result(
             model_name = raw_model["name"]
 
     return {
+        "trial_index": trial_index,
         "profile": profile,
         "job_name": job_dir.name,
         "trial_name": str(result.get("trial_name") or trial_dir.name),
@@ -255,27 +288,41 @@ def _profile_result(
     }
 
 
-def collect_pair(*, runs_dir: Path, task: str, output: Path) -> dict[str, Any]:
-    """Collect and validate both Harbor profiles for one task."""
+def collect_pair(
+    *,
+    runs_dir: Path,
+    task: str,
+    output: Path,
+    expected_trials: int = 1,
+) -> dict[str, Any]:
+    """Collect and validate the expected trials for both task profiles."""
     task = task.strip()
     if not task:
         raise SweQaError("task must not be empty")
     if not runs_dir.is_dir():
         raise SweQaError(f"runs directory does not exist: {runs_dir}")
+    if isinstance(expected_trials, bool) or not isinstance(expected_trials, int):
+        raise SweQaError("expected_trials must be an integer")
+    if expected_trials < 1:
+        raise SweQaError("expected_trials must be positive")
 
     profiles: dict[str, Any] = {}
     for profile in PROFILES:
         job_dirs = _job_dirs(runs_dir, profile)
-        matching_jobs: list[tuple[Path, Path, dict[str, Any]]] = []
+        matching_jobs: list[
+            tuple[Path, list[tuple[Path, dict[str, Any]]]]
+        ] = []
         errors: list[SweQaError] = []
         for job_dir in job_dirs:
             try:
-                _completed_job(job_dir)
-                trial_dir, result = _select_trial(job_dir, task)
+                _completed_job(job_dir, expected_trials=expected_trials)
+                trials = _select_trials(
+                    job_dir, task, expected_trials=expected_trials
+                )
             except SweQaError as error:
                 errors.append(error)
                 continue
-            matching_jobs.append((job_dir, trial_dir, result))
+            matching_jobs.append((job_dir, trials))
         if len(matching_jobs) != 1:
             if not matching_jobs and len(job_dirs) == 1 and errors:
                 raise errors[0]
@@ -283,19 +330,31 @@ def collect_pair(*, runs_dir: Path, task: str, output: Path) -> dict[str, Any]:
                 f"expected exactly one *-{profile} Harbor job for {task!r}, "
                 f"found {len(matching_jobs)}"
             )
-        job_dir, trial_dir, result = matching_jobs[0]
-        profiles[profile] = _profile_result(
-            profile=profile,
-            job_dir=job_dir,
-            trial_dir=trial_dir,
-            result=result,
-        )
+        job_dir, trials = matching_jobs[0]
+        trial_results = [
+            _profile_result(
+                profile=profile,
+                job_dir=job_dir,
+                trial_dir=trial_dir,
+                result=result,
+                trial_index=index,
+            )
+            for index, (trial_dir, result) in enumerate(trials, start=1)
+        ]
+        profiles[profile] = {
+            "profile": profile,
+            "job_name": job_dir.name,
+            "trial_count": len(trial_results),
+            "trials": trial_results,
+        }
 
     pair = {
-        "schema_version": 1,
+        "schema_version": 2,
         "task_id": task,
         "task_slug": _task_slug(task),
         "valid": True,
+        "expected_trials": expected_trials,
+        "actual_trials": expected_trials,
         "profiles": profiles,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,9 @@ on:
 
 permissions: {}
 
+env:
+  SWE_QA_TRIALS_PER_PROFILE: "3"
+
 concurrency:
   group: swe-qa-bench-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
@@ -55,6 +58,7 @@ jobs:
           --agent opencode
           --model custom-openai/glm-5.2
           --profile all
+          --n-attempts "$SWE_QA_TRIALS_PER_PROFILE"
           --embedding-model local/potion-code-16m-v2
           --zvec-grep-package "$GITHUB_WORKSPACE"
           --job-name preflight
@@ -64,7 +68,7 @@ jobs:
     name: Pair + judge / ${{ matrix.task }}
     needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     strategy:
@@ -106,6 +110,7 @@ jobs:
             --agent opencode \
             --model custom-openai/glm-5.2 \
             --profile all \
+            --n-attempts "$SWE_QA_TRIALS_PER_PROFILE" \
             --embedding-model local/potion-code-16m-v2 \
             --zvec-grep-package "$GITHUB_WORKSPACE" \
             --jobs-dir "$runs_dir" \
@@ -113,6 +118,7 @@ jobs:
           uv run --project benchmarks/coding python -m zg_bench.swe_qa collect \
             --runs-dir "$runs_dir" \
             --task "$TASK_NAME" \
+            --expected-trials "$SWE_QA_TRIALS_PER_PROFILE" \
             --output "$RUNNER_TEMP/pair-${TASK_NAME}.json"
       - name: Judge this pair and write its independent report
         env:

@@ -32,6 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--runs-dir", type=Path, required=True)
     collect.add_argument("--task", required=True)
     collect.add_argument("--output", type=Path, required=True)
+    collect.add_argument("--expected-trials", type=int, default=1)
 
     judge = commands.add_parser("judge", help="judge pairs and render the report")
     judge.add_argument("--pairs-root", type=Path, required=True)
@@ -63,12 +64,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runs_dir=args.runs_dir,
                 task=args.task,
                 output=args.output,
+                expected_trials=args.expected_trials,
             )
             print(
                 json.dumps(
                     {
                         "valid": True,
                         "task_id": pair["task_id"],
+                        "expected_trials": pair["expected_trials"],
+                        "actual_trials": pair["actual_trials"],
                         "output": str(args.output),
                     }
                 )

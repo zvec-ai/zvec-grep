@@ -704,6 +704,7 @@ def build_harbor_command(
     model: str,
     jobs_dir: Path = DEFAULT_RUNS_DIR,
     job_name: str,
+    n_attempts: int = 1,
     harbor_executable: str = "harbor",
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     zvec_grep_package_sha256: str | None = None,
@@ -711,6 +712,12 @@ def build_harbor_command(
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
+    if (
+        isinstance(n_attempts, bool)
+        or not isinstance(n_attempts, int)
+        or n_attempts < 1
+    ):
+        raise ValueError("n_attempts must be a positive integer")
     resolve_agent_model(agent, model)
 
     harbor_agent = agent
@@ -845,7 +852,7 @@ def build_harbor_command(
         "--env",
         "docker",
         "--n-attempts",
-        "1",
+        str(n_attempts),
         "--n-concurrent",
         "1",
         "--agent-setup-timeout-multiplier",

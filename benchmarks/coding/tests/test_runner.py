@@ -136,6 +136,33 @@ class LocalPackageTests(unittest.TestCase):
 
 
 class RunValidationTests(unittest.TestCase):
+    def test_harbor_command_forwards_independent_trial_count(self) -> None:
+        suite = runner.load_suite("swe-qa-bench-manual", tier="ci")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="custom-openai/glm-5.2",
+            job_name="three-trials",
+            n_attempts=3,
+        )
+
+        self.assertEqual(command[command.index("--n-attempts") + 1], "3")
+
+    def test_harbor_command_rejects_non_positive_trial_count(self) -> None:
+        suite = runner.load_suite("swe-qa-bench-manual", tier="ci")
+
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            runner.build_harbor_command(
+                suite,
+                profile="baseline",
+                agent="opencode",
+                model="custom-openai/glm-5.2",
+                job_name="invalid-trials",
+                n_attempts=0,
+            )
+
     def test_custom_glm_uses_openai_compatible_provider(self) -> None:
         suite = runner.load_suite("swebench-verified", tier="smoke")
 
