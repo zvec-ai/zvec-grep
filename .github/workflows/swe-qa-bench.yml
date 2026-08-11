@@ -195,7 +195,7 @@ jobs:
         with:
           pattern: swe-qa-task-report-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/task-reports
-      - name: Detect a full-scope attempt
+      - name: Detect report scope and show partial task reports
         id: report-set
         env:
           SCOPE: ${{ inputs.scope || 'smoke' }}
@@ -206,16 +206,48 @@ jobs:
           else
             expected_count=1
           fi
-          actual_count="$(find "$RUNNER_TEMP/task-reports" -type f -name report.json | wc -l | tr -d ' ')"
+
+          report_root="$RUNNER_TEMP/task-reports"
+          mapfile -d '' -t json_reports < <(
+            find "$report_root" -type f -name report.json -print0 | LC_ALL=C sort -z
+          )
+          actual_count="${#json_reports[@]}"
+          if (( actual_count == 0 )); then
+            echo "::error::No independent task reports were downloaded for this attempt."
+            exit 1
+          fi
+
           if [[ "$actual_count" == "$expected_count" ]]; then
             echo "complete=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          mapfile -d '' -t markdown_reports < <(
+            find "$report_root" -type f -name report.md -print0 | LC_ALL=C sort -z
+          )
+          if (( ${#markdown_reports[@]} != actual_count )); then
+            echo "::error::Expected one report.md for each downloaded report.json."
+            exit 1
+          fi
+
           echo "complete=false" >> "$GITHUB_OUTPUT"
           {
             echo "## SWE-QA Aggregate"
             echo
-            echo "This was a partial job rerun. Its independent task report is available on the corresponding matrix job; the cross-task Aggregate was intentionally skipped to avoid mixing workflow attempts."
+            echo "**Partial rerun:** attempt ${GITHUB_RUN_ATTEMPT} contains ${actual_count} of ${expected_count} task reports. The cross-task Aggregate was intentionally skipped to avoid mixing workflow attempts, and no partial Aggregate artifact was generated."
+            echo
+            echo "The independent task report(s) produced by this attempt are shown below. Any Aggregate row inside an embedded report covers that task only."
+
+            shown=0
+            for report in "${markdown_reports[@]}"; do
+              if (( shown > 0 )); then
+                echo
+                echo "---"
+              fi
+              shown=$((shown + 1))
+              echo
+              sed '1s/^# /### /' "$report"
+            done
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Combine reports without re-judging
         if: steps.report-set.outputs.complete == 'true'

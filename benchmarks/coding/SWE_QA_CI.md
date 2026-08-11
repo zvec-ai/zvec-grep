@@ -31,7 +31,7 @@ flowchart LR
 
 矩阵维度是 case，不是 profile。每个 case 的 baseline 和 zvec-grep 在同一台 GitHub-hosted Ubuntu runner 上顺序运行，随后立即对这一对答案执行 Judge，并生成该 case 自己的 Job Summary 与报告 artifact。所有成功的单任务报告最后由一个不调用模型的 job 合并。这样保留严格的成对比较；任一侧失败都不会被当成 0 分或从聚合中静默剔除。
 
-单任务报告和原始 pair 证据都使用 `task + run_id + run_attempt` 的唯一名称，因此历史结果不会因重跑而丢失。Aggregate 只读取同一 attempt 的单任务报告，并且不会重复调用 Judge：首次完整运行或 **Re-run all jobs** 会生成 Aggregate；只重跑一个 matrix job 时，该任务仍生成完整独立报告，而 Aggregate 正常跳过，避免混合不同 attempt 的结果。
+单任务报告和原始 pair 证据都使用 `task + run_id + run_attempt` 的唯一名称，因此历史结果不会因重跑而丢失。Aggregate 只读取同一 attempt 的单任务报告，并且不会重复调用 Judge：首次完整运行或 **Re-run all jobs** 会生成 Aggregate；只重跑一个 matrix job 时，该任务仍生成完整独立报告，Aggregate 不构造跨任务汇总，但会在自己的 Job Summary 中直接嵌入当前 attempt 的单任务指标表，并明确标记为 partial rerun。这样既避免混合不同 attempt，也不需要跳转到 matrix job 才能查看结果。
 
 ## 模型与检索配置
 
@@ -66,7 +66,7 @@ input_token、toolcall 和 time 同时给出 baseline/zvec-grep 及降低比例�
 - Agent 每侧最多 30 分钟，包含 Judge 的单任务 job 最多 120 分钟，纯聚合 job 最多 15 分钟；
 - 付费 workflow 不自动取消；原始证据保留 30 天，单任务和聚合报告保留 90 天。
 
-需要重跑某一个 case 时，在 Actions 页面选择对应的 `Pair + judge / <task>` job。该 job 会同时重做 pair、Judge 和独立报告；后续 Aggregate 将这次执行识别为 partial rerun 并正常跳过，因此不会再报“缺少其他任务的 Judge 报告”。如需新的跨任务 Aggregate，使用 **Re-run all jobs**。
+需要重跑某一个 case 时，在 Actions 页面选择对应的 `Pair + judge / <task>` job。该 job 会同时重做 pair、Judge 和独立报告；后续 Aggregate 将这次执行识别为 partial rerun，在 Aggregate Job Summary 中直接展示本次任务的指标表，同时跳过跨任务合并，因此不会再报“缺少其他任务的 Judge 报告”。partial rerun 不上传 Aggregate artifact；如需新的跨任务 Aggregate，使用 **Re-run all jobs**。
 
 至少积累 5 次独立 shadow run 后再冻结数值阈值。届时建议把质量（Judge delta/绝对下限）和效率（token/toolcall）设为相互独立的门禁，避免节省资源抵消明显质量退化。
 
