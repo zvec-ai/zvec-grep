@@ -33,7 +33,9 @@ from .settings import (
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
     ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_INDEX_SEED_ENV,
     ZVEC_GREP_PACKAGE,
+    resolve_zvec_grep_index_seed_dir,
 )
 
 BENCHMARKS_DIR = Path(__file__).resolve().parents[1]
@@ -641,6 +643,18 @@ def prepare_setup_cache(
             "target": _SETUP_CACHE_TARGET,
         }
     ]
+    if profile == "zvec-grep" and embedding_model.startswith("local/"):
+        index_seed_path = resolve_zvec_grep_index_seed_dir(
+            os.environ.get(ZVEC_GREP_INDEX_SEED_ENV)
+        )
+    else:
+        index_seed_path = None
+    if index_seed_path is not None:
+        index_seed_path.mkdir(parents=True, exist_ok=True)
+        if not index_seed_path.is_dir():
+            raise RuntimeError(
+                f"zvec-grep index seed path is not a directory: {index_seed_path}"
+            )
     if prepared_package.bind_source is not None:
         service_volumes.append(
             {

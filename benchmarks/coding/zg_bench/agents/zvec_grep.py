@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import posixpath
 import re
 import shlex
+import shutil
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -18,7 +20,10 @@ from ..settings import (
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
     ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_INDEX_SEED_ENV,
+    ZVEC_GREP_INDEX_SEED_FORMAT_VERSION,
     ZVEC_GREP_PACKAGE,
+    resolve_zvec_grep_index_seed_dir,
 )
 
 _SETUP_METADATA_FILENAME = "zvec-grep-setup.json"
@@ -86,6 +91,15 @@ class ZvecGrepMixin:
         self._zvec_grep_package_sha256 = zvec_grep_package_sha256
         self._api_key_source = api_key_source
         self._embedding_api_key = api_key
+        self._index_seed_root = (
+            resolve_zvec_grep_index_seed_dir(
+                os.environ.get(ZVEC_GREP_INDEX_SEED_ENV)
+            )
+            if embedding_model.startswith("local/")
+            else None
+        )
+        if self._index_seed_root is not None:
+            self._index_seed_root.mkdir(parents=True, exist_ok=True)
 
     async def setup(self, environment: BaseEnvironment) -> None:
         await super().setup(environment)
@@ -150,27 +164,89 @@ class ZvecGrepMixin:
                     authorization_result.stderr
                 )
 
-            index_started = time.monotonic()
-            index_result = await self.exec_as_agent(
+            seed_identity = await self._index_seed_identity(
                 environment,
-                command=self._index_command(self._embedding_model),
-                cwd=workdir,
+                workdir,
+                zvec_grep_version=zvec_grep_version,
             )
-            metadata["index_duration_seconds"] = round(
-                time.monotonic() - index_started, 3
-            )
-            metadata["index_stdout"] = self._bounded_output(index_result.stdout)
-            metadata["index_stderr"] = self._bounded_output(index_result.stderr)
+            metadata["index_seed_available"] = seed_identity is not None
+            seed_key = None
+            cache_hit = False
+            status_result = None
+            if seed_identity is not None:
+                seed_key = self._index_seed_key(seed_identity)
+                metadata["index_seed_key"] = seed_key
+                metadata["index_seed_identity"] = seed_identity
+                restore_started = time.monotonic()
+                restored = await self._restore_index_seed(
+                    environment,
+                    workdir,
+                    seed_key=seed_key,
+                )
+                metadata["index_seed_restore_duration_seconds"] = round(
+                    time.monotonic() - restore_started, 3
+                )
+                metadata["index_seed_restored"] = restored
+                if restored:
+                    status_result, cache_hit = await self._restored_index_is_ready(
+                        environment,
+                        workdir,
+                        supports_ready_check=supports_ready_check,
+                    )
+                    if not cache_hit:
+                        await self.exec_as_agent(
+                            environment,
+                            command="rm -rf -- .zvec-grep",
+                            cwd=workdir,
+                        )
 
-            status_result = await self.exec_as_agent(
-                environment,
-                command=(
-                    "zg status --check-ready"
-                    if supports_ready_check
-                    else "zg status"
-                ),
-                cwd=workdir,
-            )
+            metadata["index_cache_hit"] = cache_hit
+            if cache_hit:
+                metadata["index_duration_seconds"] = 0.0
+                metadata["index_stdout"] = ""
+                metadata["index_stderr"] = ""
+            else:
+                index_started = time.monotonic()
+                index_result = await self.exec_as_agent(
+                    environment,
+                    command=self._index_command(self._embedding_model),
+                    cwd=workdir,
+                )
+                metadata["index_duration_seconds"] = round(
+                    time.monotonic() - index_started, 3
+                )
+                metadata["index_stdout"] = self._bounded_output(index_result.stdout)
+                metadata["index_stderr"] = self._bounded_output(index_result.stderr)
+
+                status_result = await self.exec_as_agent(
+                    environment,
+                    command=(
+                        "zg status --check-ready"
+                        if supports_ready_check
+                        else "zg status"
+                    ),
+                    cwd=workdir,
+                )
+                if not supports_ready_check and not self._index_is_ready(
+                    status_result.stdout or ""
+                ):
+                    raise RuntimeError(
+                        "zvec-grep index setup completed but zg status did not "
+                        "report state ready"
+                    )
+                if seed_identity is not None and seed_key is not None:
+                    save_started = time.monotonic()
+                    metadata["index_seed_saved"] = await self._save_index_seed(
+                        environment,
+                        workdir,
+                        seed_key=seed_key,
+                        identity=seed_identity,
+                    )
+                    metadata["index_seed_save_duration_seconds"] = round(
+                        time.monotonic() - save_started, 3
+                    )
+
+            assert status_result is not None
             metadata["index_status"] = self._bounded_output(status_result.stdout)
             metadata["index_status_stderr"] = self._bounded_output(
                 status_result.stderr
@@ -200,6 +276,207 @@ class ZvecGrepMixin:
             metadata["finished_at"] = datetime.now(UTC).isoformat()
             metadata["total_duration_seconds"] = round(time.monotonic() - started, 3)
             self._write_setup_metadata(metadata)
+
+    async def _index_seed_identity(
+        self,
+        environment: BaseEnvironment,
+        workdir: str,
+        *,
+        zvec_grep_version: str,
+    ) -> dict[str, Any] | None:
+        """Return a safe identity only for a clean repo and local embedding."""
+        if (
+            not self._embedding_model.startswith("local/")
+            or self._index_seed_root is None
+        ):
+            return None
+
+        result = await self.exec_as_agent(
+            environment,
+            command=(
+                "if git rev-parse --verify HEAD >/dev/null 2>&1 && "
+                '[ -z "$(git status --porcelain --untracked-files=normal)" ]; '
+                "then printf 'ZG_INDEX_SEED_AVAILABLE=1\\n"
+                'ZG_INDEX_REPO_COMMIT=%s\\n\' "$(git rev-parse HEAD)"; '
+                "else printf 'ZG_INDEX_SEED_AVAILABLE=0\\n'; fi"
+            ),
+            cwd=workdir,
+        )
+        if (
+            self._parse_install_value(result.stdout, marker="ZG_INDEX_SEED_AVAILABLE")
+            != "1"
+        ):
+            return None
+        repo_commit = self._parse_install_value(
+            result.stdout, marker="ZG_INDEX_REPO_COMMIT"
+        )
+        if re.fullmatch(r"[0-9a-fA-F]{40,64}", repo_commit) is None:
+            return None
+
+        package_identity = (
+            self._zvec_grep_package_sha256
+            if self._zvec_grep_package_sha256 is not None
+            else self._zvec_grep_package
+        )
+        return {
+            "format_version": ZVEC_GREP_INDEX_SEED_FORMAT_VERSION,
+            "repo_commit": repo_commit.lower(),
+            "zvec_grep_version": zvec_grep_version,
+            "zvec_grep_package": package_identity,
+            "binding_package": self._zvec_binding_package,
+            "embedding_model": self._embedding_model,
+            "platform": "linux/amd64",
+            "workdir": workdir,
+        }
+
+    @staticmethod
+    def _index_seed_key(identity: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            identity,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _restore_index_seed(
+        self,
+        environment: BaseEnvironment,
+        workdir: str,
+        *,
+        seed_key: str,
+    ) -> bool:
+        seed_dir = self._index_seed_dir(seed_key)
+        if seed_dir is None or not self._index_seed_is_valid(seed_dir, seed_key):
+            return False
+
+        target_dir = posixpath.join(workdir, ".zvec-grep")
+        await self.exec_as_agent(
+            environment,
+            command="rm -rf -- .zvec-grep && mkdir -p .zvec-grep",
+            cwd=workdir,
+        )
+        try:
+            await environment.upload_dir(seed_dir / "workspace", target_dir)
+            if environment.default_user is not None:
+                user = shlex.quote(str(environment.default_user))
+                await self.exec_as_root(
+                    environment,
+                    command=f"chown -R {user} {shlex.quote(target_dir)}",
+                )
+        except Exception:
+            await self.exec_as_agent(
+                environment,
+                command="rm -rf -- .zvec-grep",
+                cwd=workdir,
+            )
+            return False
+        return True
+
+    async def _restored_index_is_ready(
+        self,
+        environment: BaseEnvironment,
+        workdir: str,
+        *,
+        supports_ready_check: bool,
+    ) -> tuple[Any, bool]:
+        if supports_ready_check:
+            result = await self.exec_as_agent(
+                environment,
+                command=(
+                    "if zg status --check-ready; then ready=1; else ready=0; fi; "
+                    "printf 'ZG_INDEX_SEED_READY=%s\\n' \"$ready\""
+                ),
+                cwd=workdir,
+            )
+            ready = (
+                self._parse_install_value(result.stdout, marker="ZG_INDEX_SEED_READY")
+                == "1"
+            )
+            return result, ready
+
+        result = await self.exec_as_agent(
+            environment,
+            command="zg status",
+            cwd=workdir,
+        )
+        return result, self._index_is_ready(result.stdout or "")
+
+    async def _save_index_seed(
+        self,
+        environment: BaseEnvironment,
+        workdir: str,
+        *,
+        seed_key: str,
+        identity: dict[str, Any],
+    ) -> bool:
+        seed_dir = self._index_seed_dir(seed_key)
+        if seed_dir is None:
+            return False
+        temporary_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{seed_key}.tmp-",
+                dir=self._index_seed_root,
+            )
+        )
+        try:
+            workspace_dir = temporary_dir / "workspace"
+            workspace_dir.mkdir()
+            await environment.download_dir(
+                posixpath.join(workdir, ".zvec-grep"),
+                workspace_dir,
+            )
+            (temporary_dir / "complete").write_text(
+                seed_key + "\n",
+                encoding="utf-8",
+            )
+            (temporary_dir / "identity.json").write_text(
+                json.dumps(identity, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if not self._index_seed_is_valid(temporary_dir, seed_key):
+                return False
+            if seed_dir.is_symlink() or seed_dir.is_file():
+                seed_dir.unlink()
+            elif seed_dir.exists():
+                shutil.rmtree(seed_dir)
+            temporary_dir.replace(seed_dir)
+            return True
+        except Exception:
+            return False
+        finally:
+            if temporary_dir.exists():
+                shutil.rmtree(temporary_dir, ignore_errors=True)
+
+    def _index_seed_dir(self, seed_key: str) -> Path | None:
+        if self._index_seed_root is None:
+            return None
+        if re.fullmatch(r"[0-9a-f]{64}", seed_key) is None:
+            raise ValueError("zvec-grep index seed key must be a SHA-256 digest")
+        seed_dir = self._index_seed_root / seed_key
+        if seed_dir.parent != self._index_seed_root:
+            raise ValueError("zvec-grep index seed escaped its cache directory")
+        return seed_dir
+
+    @classmethod
+    def _index_seed_is_valid(cls, seed_dir: Path, seed_key: str) -> bool:
+        if seed_dir.is_symlink() or not seed_dir.is_dir():
+            return False
+        workspace_dir = seed_dir / "workspace"
+        identity_path = seed_dir / "identity.json"
+        try:
+            if (seed_dir / "complete").read_text(encoding="utf-8").strip() != seed_key:
+                return False
+            identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(identity, dict) or cls._index_seed_key(identity) != seed_key:
+            return False
+        if workspace_dir.is_symlink() or not workspace_dir.is_dir():
+            return False
+        return all(
+            not path.is_symlink() and (path.is_file() or path.is_dir())
+            for path in workspace_dir.rglob("*")
+        )
 
     async def _setup_mcp(
         self,

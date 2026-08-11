@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -15,8 +16,36 @@ from . import SELF_JUDGE_LABEL, SweQaError
 SCORE_KEYS = ("correctness", "completeness", "relevance", "clarity", "coherence")
 JUDGE_MODEL = "openai/glm-5.2"
 PROFILE_NAMES = ("baseline", "zvec-grep")
+DEFAULT_JUDGE_CONCURRENCY = 3
+MAX_JUDGE_CONCURRENCY = 8
+JUDGE_CONCURRENCY_ENV = "SWE_QA_JUDGE_CONCURRENCY"
 
 Completion = Callable[..., Any]
+
+
+def _judge_concurrency(value: int | None = None) -> int:
+    raw_value: Any = value
+    if raw_value is None:
+        configured = os.environ.get(JUDGE_CONCURRENCY_ENV)
+        raw_value = DEFAULT_JUDGE_CONCURRENCY if configured is None else configured
+    if isinstance(raw_value, str):
+        try:
+            raw_value = int(raw_value.strip())
+        except ValueError as error:
+            raise SweQaError(
+                f"{JUDGE_CONCURRENCY_ENV} must be an integer between 1 and "
+                f"{MAX_JUDGE_CONCURRENCY}"
+            ) from error
+    if (
+        isinstance(raw_value, bool)
+        or not isinstance(raw_value, int)
+        or not 1 <= raw_value <= MAX_JUDGE_CONCURRENCY
+    ):
+        raise SweQaError(
+            f"{JUDGE_CONCURRENCY_ENV} must be an integer between 1 and "
+            f"{MAX_JUDGE_CONCURRENCY}"
+        )
+    return raw_value
 
 
 def _load_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -341,6 +370,65 @@ def _judge_candidate(
         if attempt < attempts:
             time.sleep(min(float(attempt), 2.0))
     raise SweQaError(f"judge failed after {attempts} attempts: {last_failure}")
+
+
+def _judge_task_trials(
+    *,
+    pair: dict[str, Any],
+    reference: dict[str, Any],
+    completion_fn: Completion,
+    api_key: str,
+    api_base: str,
+    attempts: int,
+    concurrency: int,
+) -> dict[str, list[dict[str, Any]]]:
+    work_items = [
+        (profile_name, trial)
+        for profile_name in PROFILE_NAMES
+        for trial in pair["profiles"][profile_name]["trials"]
+    ]
+    futures: list[Future[dict[str, Any]]] = []
+    with ThreadPoolExecutor(
+        max_workers=concurrency,
+        thread_name_prefix="swe-qa-judge",
+    ) as executor:
+        for _, trial in work_items:
+            futures.append(
+                executor.submit(
+                    _judge_candidate,
+                    completion_fn=completion_fn,
+                    api_key=api_key,
+                    api_base=api_base,
+                    question=str(reference["question"]),
+                    reference=str(reference["reference_answer"]),
+                    candidate=str(trial["answer"]),
+                    attempts=attempts,
+                )
+            )
+        try:
+            judged = [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
+
+    results = {profile_name: [] for profile_name in PROFILE_NAMES}
+    for (profile_name, trial), judge_result in zip(work_items, judged, strict=True):
+        results[profile_name].append(
+            {
+                "trial_index": trial["trial_index"],
+                "trial_name": trial.get("trial_name"),
+                "judge": judge_result,
+                "metrics": {
+                    "input_tokens": trial["input_tokens"],
+                    "output_tokens": trial["output_tokens"],
+                    "tool_calls": trial["tool_calls"],
+                    "agent_wall_seconds": trial["agent_wall_seconds"],
+                    "cost_usd": trial["cost_usd"],
+                },
+            }
+        )
+    return results
 
 
 def _reduction(
@@ -911,10 +999,12 @@ def judge_pairs(
     expected: Sequence[str],
     completion_fn: Completion | None = None,
     attempts: int = 3,
+    concurrency: int | None = None,
 ) -> dict[str, Any]:
     """Apply the same-model judge and emit JSON/Markdown reports."""
     if attempts < 1 or attempts > 5:
         raise SweQaError("judge attempts must be between 1 and 5")
+    concurrency = _judge_concurrency(concurrency)
     pairs = _load_pairs(pairs_root, expected)
     references = _load_references(references_path)
     missing_references = [task for task in expected if task not in references]
@@ -942,21 +1032,20 @@ def judge_pairs(
     for task in expected:
         pair = pairs[task]
         reference = references[task]
+        judged_trials = _judge_task_trials(
+            pair=pair,
+            reference=reference,
+            completion_fn=completion_fn,
+            api_key=api_key,
+            api_base=api_base,
+            attempts=attempts,
+            concurrency=concurrency,
+        )
         profile_results: dict[str, dict[str, Any]] = {}
         for profile_name in PROFILE_NAMES:
-            profile = pair["profiles"][profile_name]
-            trial_results: list[dict[str, Any]] = []
-            for trial in profile["trials"]:
-                judged = _judge_candidate(
-                    completion_fn=completion_fn,
-                    api_key=api_key,
-                    api_base=api_base,
-                    question=str(reference["question"]),
-                    reference=str(reference["reference_answer"]),
-                    candidate=str(trial["answer"]),
-                    attempts=attempts,
-                )
-                usage = judged["usage"]
+            trial_results = judged_trials[profile_name]
+            for trial_result in trial_results:
+                usage = trial_result["judge"]["usage"]
                 judge_usage["calls"] += 1
                 if usage["input_tokens"] is not None:
                     judge_usage["input_tokens"] += usage["input_tokens"]
@@ -966,20 +1055,6 @@ def judge_pairs(
                     judge_usage["cost_complete"] = False
                 else:
                     judge_usage["cost_usd"] += usage["cost_usd"]
-                trial_results.append(
-                    {
-                        "trial_index": trial["trial_index"],
-                        "trial_name": trial.get("trial_name"),
-                        "judge": judged,
-                        "metrics": {
-                            "input_tokens": trial["input_tokens"],
-                            "output_tokens": trial["output_tokens"],
-                            "tool_calls": trial["tool_calls"],
-                            "agent_wall_seconds": trial["agent_wall_seconds"],
-                            "cost_usd": trial["cost_usd"],
-                        },
-                    }
-                )
             profile_results[profile_name] = _summarize_profile(trial_results)
         baseline_trials = profile_results["baseline"]["trials"]
         zvec_trials = profile_results["zvec-grep"]["trials"]

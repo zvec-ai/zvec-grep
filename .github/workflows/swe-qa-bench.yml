@@ -73,7 +73,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 5
       matrix:
         task: ${{ fromJSON(inputs.scope == 'gate-5' && '["reflex-6","sqlfluff-2","sympy-38","streamlink-14","pylint-25"]' || '["reflex-6"]') }}
     steps:
@@ -87,6 +87,12 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+      - name: Restore this task's zvec index seed
+        id: zvec-index-seed-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/swe-qa-index-seed
+          key: swe-qa-zvec-index-seed-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-bench-${{ hashFiles('benchmarks/coding/zg_bench/swe_qa/data/selection.json', 'benchmarks/coding/zg_bench/swe_qa/data/references.json', format('benchmarks/coding/datasets/swe-qa-bench-manual/{0}/environment/Dockerfile', matrix.task)) }}-npm-${{ hashFiles('package-lock.json') }}-zvec-${{ hashFiles('src/**', 'package.json', 'tsconfig.json', 'eslint.config.js', 'README.md', 'README_CN.md', 'LICENSE', 'docs/**', '.opencode/opencode.json', 'benchmarks/coding/pyproject.toml', 'benchmarks/coding/uv.lock', 'benchmarks/coding/suites/swe-qa-bench-manual.yaml', 'benchmarks/coding/zg_bench/agents/zvec_grep.py', 'benchmarks/coding/zg_bench/runner.py', 'benchmarks/coding/zg_bench/settings.py', 'benchmarks/coding/skills/zvec-grep/**') }}
       - name: Install locked dependencies
         run: |
           python -m pip install --disable-pip-version-check uv==0.9.17
@@ -96,6 +102,7 @@ jobs:
         env:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           TASK_NAME: ${{ matrix.task }}
+          ZG_BENCH_INDEX_SEED_DIR: ${{ runner.temp }}/swe-qa-index-seed
         run: |
           set -euo pipefail
           if [[ -z "${GLM_API_KEY:-}" ]]; then
@@ -137,22 +144,35 @@ jobs:
         env:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           TASK_NAME: ${{ matrix.task }}
+          ZG_BENCH_INDEX_SEED_DIR: ${{ runner.temp }}/swe-qa-index-seed
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
+
+          def contains_secret(path: Path, secret: bytes) -> bool:
+              overlap = max(len(secret) - 1, 0)
+              tail = b""
+              with path.open("rb") as source:
+                  while chunk := source.read(1024 * 1024):
+                      window = tail + chunk
+                      if secret in window:
+                          return True
+                      tail = window[-overlap:] if overlap else b""
+              return False
 
           secret = os.environ.get("GLM_API_KEY", "").encode()
           roots = [
               Path(os.environ["RUNNER_TEMP"]) / "swe-qa-runs" / os.environ["TASK_NAME"],
               Path(os.environ["RUNNER_TEMP"]) / f"pair-{os.environ['TASK_NAME']}.json",
               Path(os.environ["RUNNER_TEMP"]) / "swe-qa-task-report" / os.environ["TASK_NAME"],
+              Path(os.environ["ZG_BENCH_INDEX_SEED_DIR"]),
           ]
           if secret:
               for root in roots:
                   files = [root] if root.is_file() else root.rglob("*") if root.exists() else []
                   for path in files:
-                      if path.is_file() and secret in path.read_bytes():
+                      if path.is_file() and contains_secret(path, secret):
                           raise SystemExit(f"secret material detected in artifact: {path}")
           PY
       - name: Upload paired Harbor evidence
@@ -173,6 +193,12 @@ jobs:
           path: ${{ runner.temp }}/swe-qa-task-report/${{ matrix.task }}/
           if-no-files-found: warn
           retention-days: 90
+      - name: Save this task's populated zvec index seed
+        if: success() && steps.zvec-index-seed-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/swe-qa-index-seed
+          key: ${{ steps.zvec-index-seed-restore.outputs.cache-primary-key }}
 
   aggregate-report:
     name: Aggregate completed task reports

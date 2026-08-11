@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 CODEX_VERSION = "0.144.4"
 QWEN_CODE_VERSION = "0.19.10"
 OPENCODE_VERSION = "1.18.4"
@@ -24,11 +27,35 @@ OPENCODE_OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible"
 ZVEC_GREP_PACKAGE = "@zvec/zvec-grep@0.1.6-alpha.3"
 ZVEC_GREP_BINDING_PACKAGE = "@zvec/bindings-linux-x64@0.5.0"
 ZVEC_GREP_EMBEDDING = "qwen/text-embedding-v4"
+ZVEC_GREP_INDEX_SEED_ENV = "ZG_BENCH_INDEX_SEED_DIR"
+ZVEC_GREP_INDEX_SEED_FORMAT_VERSION = 1
 ZVEC_GREP_API_KEY_ENV_VARS = (
     "ZVEC_GREP_API_KEY",
     "DASHSCOPE_API_KEY",
     "QWEN_API_KEY",
 )
+
+
+def resolve_zvec_grep_index_seed_dir(value: str | None) -> Path | None:
+    """Resolve a host-only seed directory while rejecting broad targets."""
+    if value is None or not value.strip():
+        return None
+    candidate = Path(value).expanduser().resolve()
+    forbidden = {
+        Path("/"),
+        Path.home().resolve(),
+        Path.cwd().resolve(),
+    }
+    github_workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
+    if github_workspace:
+        forbidden.add(Path(github_workspace).expanduser().resolve())
+    if candidate in forbidden:
+        raise ValueError(
+            "zvec-grep index seed directory must be a dedicated cache directory, "
+            f"not {candidate}"
+        )
+    return candidate
+
 
 # Agent installation can approach Harbor's default six-minute setup timeout on
 # a fresh container. The zvec-grep profile also installs the tool and builds an

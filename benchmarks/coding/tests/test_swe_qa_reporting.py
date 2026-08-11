@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,12 @@ from unittest.mock import patch
 from zg_bench.swe_qa import SELF_JUDGE_LABEL, SweQaError
 from zg_bench.swe_qa.cli import main as swe_qa_main
 from zg_bench.swe_qa.collect import collect_pair
-from zg_bench.swe_qa.judge import _aggregate, aggregate_reports, judge_pairs
+from zg_bench.swe_qa.judge import (
+    MAX_JUDGE_CONCURRENCY,
+    _aggregate,
+    aggregate_reports,
+    judge_pairs,
+)
 from zg_bench.swe_qa.validation import validate_assets
 
 CODING_DIR = Path(__file__).resolve().parents[1]
@@ -630,6 +636,162 @@ class JudgeTests(unittest.TestCase):
             serialized = (output_dir / "report.json").read_text()
             self.assertNotIn("judge-only reference", serialized)
             self.assertNotIn("test-secret", serialized)
+
+    def test_default_and_environment_judge_concurrency_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pairs_root, references = self._write_pair_and_reference(root)
+
+            for configured, expected_workers in ((None, 3), ("2", 2)):
+                with self.subTest(configured=configured):
+                    barrier = threading.Barrier(expected_workers)
+                    lock = threading.Lock()
+                    active = 0
+                    max_active = 0
+
+                    def fake_completion(**kwargs: Any) -> dict[str, Any]:
+                        nonlocal active, max_active
+                        with lock:
+                            active += 1
+                            max_active = max(max_active, active)
+                        try:
+                            barrier.wait(timeout=2)
+                            content = json.dumps(
+                                {
+                                    key: 10
+                                    for key in (
+                                        "correctness",
+                                        "completeness",
+                                        "relevance",
+                                        "clarity",
+                                        "coherence",
+                                    )
+                                }
+                            )
+                            return {
+                                "choices": [{"message": {"content": content}}],
+                                "usage": {
+                                    "prompt_tokens": 50,
+                                    "completion_tokens": 5,
+                                },
+                                "_hidden_params": {"response_cost": 0.01},
+                            }
+                        finally:
+                            with lock:
+                                active -= 1
+
+                    environment = {"GLM_API_KEY": "test-secret"}
+                    if configured is not None:
+                        environment["SWE_QA_JUDGE_CONCURRENCY"] = configured
+                    with patch.dict("os.environ", environment, clear=True):
+                        report = judge_pairs(
+                            pairs_root=pairs_root,
+                            references_path=references,
+                            output_dir=root / f"report-{expected_workers}",
+                            expected=["reflex-6"],
+                            completion_fn=fake_completion,
+                            attempts=1,
+                        )
+
+                    self.assertEqual(max_active, expected_workers)
+                    self.assertEqual(report["judge"]["usage"]["calls"], 6)
+                    for profile_name in ("baseline", "zvec-grep"):
+                        self.assertEqual(
+                            [
+                                trial["trial_index"]
+                                for trial in report["cases"][0]["profiles"][
+                                    profile_name
+                                ]["trials"]
+                            ],
+                            [1, 2, 3],
+                        )
+
+    def test_invalid_judge_concurrency_fails_before_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pairs_root, references = self._write_pair_and_reference(root)
+
+            for configured in (
+                "",
+                "0",
+                "-1",
+                "1.5",
+                "many",
+                str(MAX_JUDGE_CONCURRENCY + 1),
+            ):
+                with self.subTest(configured=configured):
+                    called = False
+
+                    def fake_completion(**kwargs: Any) -> dict[str, Any]:
+                        nonlocal called
+                        called = True
+                        return {}
+
+                    with patch.dict(
+                        "os.environ",
+                        {
+                            "GLM_API_KEY": "test-secret",
+                            "SWE_QA_JUDGE_CONCURRENCY": configured,
+                        },
+                        clear=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            SweQaError,
+                            "must be an integer between 1 and "
+                            f"{MAX_JUDGE_CONCURRENCY}",
+                        ):
+                            judge_pairs(
+                                pairs_root=pairs_root,
+                                references_path=references,
+                                output_dir=root / "invalid-report",
+                                expected=["reflex-6"],
+                                completion_fn=fake_completion,
+                                attempts=1,
+                            )
+                    self.assertFalse(called)
+
+    def test_concurrent_failures_report_first_trial_in_output_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pairs_root, references = self._write_pair_and_reference(root)
+            later_failure_finished = threading.Event()
+
+            def fake_completion(**kwargs: Any) -> dict[str, Any]:
+                prompt_text = kwargs["messages"][0]["content"]
+                if "Candidate answer:\nbaseline candidate 1" in prompt_text:
+                    if not later_failure_finished.wait(timeout=2):
+                        raise TimeoutError("later failure did not run")
+                    raise LookupError("first trial failed later")
+                if "Candidate answer:\nbaseline candidate 2" in prompt_text:
+                    later_failure_finished.set()
+                    raise ValueError("second trial failed first")
+                content = json.dumps(
+                    {
+                        key: 10
+                        for key in (
+                            "correctness",
+                            "completeness",
+                            "relevance",
+                            "clarity",
+                            "coherence",
+                        )
+                    }
+                )
+                return {"choices": [{"message": {"content": content}}]}
+
+            with patch.dict("os.environ", {"GLM_API_KEY": "test-secret"}, clear=True):
+                with self.assertRaisesRegex(
+                    SweQaError, r"transport error \(LookupError\)"
+                ):
+                    judge_pairs(
+                        pairs_root=pairs_root,
+                        references_path=references,
+                        output_dir=root / "report",
+                        expected=["reflex-6"],
+                        completion_fn=fake_completion,
+                        attempts=1,
+                    )
+            self.assertFalse((root / "report" / "report.json").exists())
 
     def test_aggregate_averages_per_case_reductions_without_weighting(self) -> None:
         def case(

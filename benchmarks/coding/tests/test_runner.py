@@ -66,6 +66,10 @@ class LocalPackageTests(unittest.TestCase):
                     return_value=(package, digest),
                 ),
                 patch.object(runner.subprocess, "run", return_value=inspected),
+                patch.dict(
+                    runner.os.environ,
+                    {runner.ZVEC_GREP_INDEX_SEED_ENV: ""},
+                ),
             ):
                 prepared = runner.prepare_setup_cache(
                     "opencode",
@@ -102,6 +106,99 @@ class LocalPackageTests(unittest.TestCase):
                 runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET,
             )
             self.assertEqual(prepared.zvec_grep_package_sha256, digest)
+
+    def test_index_seed_mount_is_disabled_for_baseline_and_remote_embedding(
+        self,
+    ) -> None:
+        inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "agent-setup"
+            seed_dir = Path(temp_dir) / "index-seed"
+
+            with (
+                patch.object(runner, "SETUP_CACHE_DIR", cache_dir),
+                patch.object(runner.subprocess, "run", return_value=inspected),
+                patch.dict(
+                    runner.os.environ,
+                    {runner.ZVEC_GREP_INDEX_SEED_ENV: str(seed_dir)},
+                ),
+            ):
+                baseline = runner.prepare_setup_cache(
+                    "opencode",
+                    "baseline",
+                    embedding_model="local/potion-code-16m-v2",
+                )
+                baseline_overlay = json.loads(baseline.compose_path.read_text())
+                remote = runner.prepare_setup_cache(
+                    "opencode",
+                    "zvec-grep",
+                    embedding_model="qwen/text-embedding-v4",
+                )
+                remote_overlay = json.loads(remote.compose_path.read_text())
+
+            for overlay in (baseline_overlay, remote_overlay):
+                self.assertNotIn(str(seed_dir.resolve()), json.dumps(overlay))
+            self.assertFalse(seed_dir.exists())
+
+    def test_local_zvec_profile_creates_host_seed_without_mounting_it(
+        self,
+    ) -> None:
+        inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "agent-setup"
+            seed_dir = Path(temp_dir) / "nested" / "index-seed"
+
+            with (
+                patch.object(runner, "SETUP_CACHE_DIR", cache_dir),
+                patch.object(runner.subprocess, "run", return_value=inspected),
+                patch.dict(
+                    runner.os.environ,
+                    {runner.ZVEC_GREP_INDEX_SEED_ENV: str(seed_dir)},
+                ),
+            ):
+                prepared = runner.prepare_setup_cache(
+                    "opencode",
+                    "zvec-grep",
+                    embedding_model="local/potion-code-16m-v2",
+                )
+
+            overlay = json.loads(prepared.compose_path.read_text())
+            self.assertTrue(seed_dir.is_dir())
+            self.assertEqual(
+                overlay["services"]["main"]["volumes"],
+                [
+                    {
+                        "type": "volume",
+                        "source": "agent-setup-cache",
+                        "target": runner._SETUP_CACHE_TARGET,
+                    }
+                ],
+            )
+            self.assertNotIn(str(seed_dir.resolve()), json.dumps(overlay))
+
+    def test_index_seed_rejects_broad_host_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            github_workspace = Path(temp_dir) / "github-workspace"
+            github_workspace.mkdir()
+
+            with patch.dict(
+                runner.os.environ,
+                {"GITHUB_WORKSPACE": str(github_workspace)},
+            ):
+                forbidden = (
+                    Path("/"),
+                    Path.home(),
+                    Path.cwd(),
+                    github_workspace,
+                )
+                for path in forbidden:
+                    with self.subTest(path=path), self.assertRaisesRegex(
+                        ValueError,
+                        "dedicated cache directory",
+                    ):
+                        runner.resolve_zvec_grep_index_seed_dir(str(path))
 
     def test_version_shorthand_selects_published_npm_package(self) -> None:
         prepared = runner.prepare_zvec_grep_package("0.1.5")
