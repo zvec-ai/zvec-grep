@@ -12,6 +12,8 @@
 | `streamlink-14` | `streamlink:14` | Gate | How | `streamlink/streamlink` |
 | `pylint-25` | `pylint:25` | Gate | Why | `pylint-dev/pylint` |
 
+截图候选中没有 Why 类型题；为满足“1 smoke + What/Where/How/Why”这一硬约束，前四题取自截图，Why 题从同一官方 benchmark 补充为 `pylint:25`。
+
 `selection.json` 同时锁定完整 question、question SHA-256、目标仓库完整 commit SHA 和题型。`validate` 在任何模型调用前验证这些字段、Harbor instruction 与 reference 的一致性，并检查 reference answer 没有进入 Harbor dataset。
 
 ## 执行拓扑
@@ -61,7 +63,7 @@ token、toolcall、time 和 cost 同时给出 baseline/zvec-grep 及降低比例
 - `gate-5`：跑 5 个 pair，即 10 次 Agent 执行，再逐答案 Judge；
 - `fail-fast: false`，便于一次收集所有 case 的失败证据；
 - Agent 每侧最多 30 分钟，pair job 最多 120 分钟，Judge/report 最多 30 分钟；
-- 付费 workflow 不自动取消；原始证据保留 30 天，聚合报告保留 180 天。
+- 付费 workflow 不自动取消；原始证据保留 30 天，聚合报告保留 90 天。
 
 至少积累 5 次独立 shadow run 后再冻结数值阈值。届时建议把质量（Judge delta/绝对下限）和效率（token/toolcall）设为相互独立的门禁，避免节省资源抵消明显质量退化。
 
