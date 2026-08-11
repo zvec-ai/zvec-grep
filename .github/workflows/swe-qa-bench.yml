@@ -76,7 +76,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        task: ${{ fromJSON(inputs.scope == 'gate-5' && '["reflex-6","sqlfluff-2","sympy-38","streamlink-14","pylint-25"]' || '["reflex-6"]') }}
+        task: ${{ fromJSON((github.event_name == 'push' || inputs.scope == 'gate-5') && '["reflex-6","sqlfluff-2","sympy-38","streamlink-14","pylint-25"]' || '["reflex-6"]') }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -144,7 +144,7 @@ jobs:
           PY
       - name: Upload paired Harbor evidence
         if: always() && steps.secret-scan.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: swe-qa-pair-${{ matrix.task }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -173,7 +173,7 @@ jobs:
           python -m pip install --disable-pip-version-check uv==0.9.17
           uv sync --project benchmarks/coding --frozen
       - name: Download all pair artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: swe-qa-pair-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pairs
@@ -181,7 +181,7 @@ jobs:
       - name: Judge answers and write the five-metric summary
         env:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          SCOPE: ${{ inputs.scope || 'smoke' }}
+          SCOPE: ${{ github.event_name == 'push' && 'gate-5' || inputs.scope || 'smoke' }}
         run: |
           set -euo pipefail
           if [[ -z "${GLM_API_KEY:-}" ]]; then
@@ -204,9 +204,9 @@ jobs:
             "${expected_args[@]}"
       - name: Upload aggregate report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: swe-qa-report-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/swe-qa-report/
           if-no-files-found: warn
-          retention-days: 180
+          retention-days: 90
