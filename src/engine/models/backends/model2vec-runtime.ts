@@ -29,8 +29,6 @@ export type StaticEmbeddingTable = {
 
 export type Model2VecWorkerData = {
   tokenizerSource: string;
-  modelCacheDir: string;
-  revision: string;
   maxInputTokens: number;
   normalize: boolean;
   tableBuffer: SharedArrayBuffer;
@@ -40,6 +38,12 @@ export type Model2VecWorkerData = {
 };
 
 export type Model2VecWorkerRequest = {
+  id: number;
+  tokenIds: ArrayBuffer;
+  offsets: ArrayBuffer;
+};
+
+export type Model2VecTokenizerWorkerRequest = {
   id: number;
   texts: string[];
 };
@@ -65,6 +69,31 @@ export type Model2VecWorkerResponse =
       error: SerializedWorkerError;
     };
 
+export type Model2VecTokenizerWorkerResponse =
+  | { type: "ready" }
+  | {
+      type: "tokenized";
+      id: number;
+      tokenIds: ArrayBuffer;
+      offsets: ArrayBuffer;
+      truncated: number[];
+    }
+  | {
+      type: "error";
+      id: number;
+      error: SerializedWorkerError;
+    };
+
+export type TokenizedModel2VecTexts = {
+  tokenLists: number[][];
+  truncated: number[];
+};
+
+export type PackedModel2VecTokenLists = {
+  tokenIds: Int32Array;
+  offsets: Uint32Array;
+};
+
 export async function embedModel2VecTexts(
   texts: readonly string[],
   tokenizer: TokenizerLike,
@@ -72,6 +101,23 @@ export async function embedModel2VecTexts(
   maxInputTokens: number,
   normalize: boolean,
 ): Promise<EmbeddingResult> {
+  const tokenized = await tokenizeModel2VecTexts(
+    texts,
+    tokenizer,
+    maxInputTokens,
+  );
+
+  return {
+    vectors: embedModel2VecTokenLists(tokenized.tokenLists, table, normalize),
+    truncated: tokenized.truncated,
+  };
+}
+
+export async function tokenizeModel2VecTexts(
+  texts: readonly string[],
+  tokenizer: TokenizerLike,
+  maxInputTokens: number,
+): Promise<TokenizedModel2VecTexts> {
   const truncatedInputIndexes: number[] = [];
   const tokenLists = await Promise.all(
     texts.map(async (text, index) => {
@@ -97,14 +143,59 @@ export async function embedModel2VecTexts(
   );
 
   return {
-    vectors: embedStaticTokenLists(
-      tokenLists,
-      table,
-      table.dimension,
-      normalize,
-    ),
+    tokenLists,
     truncated: truncatedInputIndexes.sort((left, right) => left - right),
   };
+}
+
+export function packModel2VecTokenLists(
+  tokenLists: readonly (readonly number[])[],
+): PackedModel2VecTokenLists {
+  const totalTokenCount = tokenLists.reduce(
+    (total, tokenIds) => total + tokenIds.length,
+    0,
+  );
+  const tokenIds = new Int32Array(totalTokenCount);
+  const offsets = new Uint32Array(tokenLists.length + 1);
+  let offset = 0;
+  for (const [index, list] of tokenLists.entries()) {
+    tokenIds.set(list, offset);
+    offset += list.length;
+    offsets[index + 1] = offset;
+  }
+  return { tokenIds, offsets };
+}
+
+export function embedPackedModel2VecTokenLists(
+  packed: PackedModel2VecTokenLists,
+  table: StaticEmbeddingTable,
+  normalize: boolean,
+): number[][] {
+  validatePackedTokenLists(packed);
+  const vectors: number[][] = [];
+  for (let index = 0; index + 1 < packed.offsets.length; index++) {
+    vectors.push(
+      embedStaticTokenList(
+        packed.tokenIds.subarray(
+          packed.offsets[index],
+          packed.offsets[index + 1],
+        ),
+        table,
+        normalize,
+      ),
+    );
+  }
+  return vectors;
+}
+
+export function embedModel2VecTokenLists(
+  tokenLists: readonly (readonly number[])[],
+  table: StaticEmbeddingTable,
+  normalize: boolean,
+): number[][] {
+  return tokenLists.map((tokenIds) =>
+    embedStaticTokenList(tokenIds, table, normalize),
+  );
 }
 
 export function sharedStaticEmbeddingTable(
@@ -145,45 +236,58 @@ export function staticEmbeddingTableFromWorkerData(
   };
 }
 
-function embedStaticTokenLists(
-  tokenLists: readonly number[][],
+function embedStaticTokenList(
+  tokenIds: ArrayLike<number>,
   table: StaticEmbeddingTable,
-  dimension: number,
   normalize: boolean,
-): number[][] {
+): number[] {
+  const dimension = table.dimension;
   const halfValues = table.dtype === "F16" ? halfFloatValues() : null;
-  return tokenLists.map((tokenIds) => {
-    const vector = Array.from({ length: dimension }, () => 0);
-    if (tokenIds.length === 0) {
-      return vector;
-    }
-
-    for (const tokenId of tokenIds) {
-      if (!Number.isInteger(tokenId) || tokenId < 0 || tokenId >= table.rows) {
-        throw new Error(
-          `Tokenizer returned out-of-range token id: id=${tokenId} rows=${table.rows}`,
-        );
-      }
-      const start = tokenId * dimension;
-      for (let column = 0; column < dimension; column++) {
-        const value = table.data[start + column];
-        vector[column] += halfValues ? halfValues[value] : value;
-      }
-    }
-
-    let squaredNorm = 0;
-    for (let column = 0; column < dimension; column++) {
-      vector[column] /= tokenIds.length;
-      squaredNorm += vector[column] * vector[column];
-    }
-    if (normalize && squaredNorm > 0) {
-      const inverseNorm = 1 / Math.sqrt(squaredNorm);
-      for (let column = 0; column < dimension; column++) {
-        vector[column] *= inverseNorm;
-      }
-    }
+  const vector = Array.from({ length: dimension }, () => 0);
+  if (tokenIds.length === 0) {
     return vector;
-  });
+  }
+
+  for (let index = 0; index < tokenIds.length; index++) {
+    const tokenId = tokenIds[index];
+    if (!Number.isInteger(tokenId) || tokenId < 0 || tokenId >= table.rows) {
+      throw new Error(
+        `Tokenizer returned out-of-range token id: id=${tokenId} rows=${table.rows}`,
+      );
+    }
+    const start = tokenId * dimension;
+    for (let column = 0; column < dimension; column++) {
+      const value = table.data[start + column];
+      vector[column] += halfValues ? halfValues[value] : value;
+    }
+  }
+
+  let squaredNorm = 0;
+  for (let column = 0; column < dimension; column++) {
+    vector[column] /= tokenIds.length;
+    squaredNorm += vector[column] * vector[column];
+  }
+  if (normalize && squaredNorm > 0) {
+    const inverseNorm = 1 / Math.sqrt(squaredNorm);
+    for (let column = 0; column < dimension; column++) {
+      vector[column] *= inverseNorm;
+    }
+  }
+  return vector;
+}
+
+function validatePackedTokenLists(packed: PackedModel2VecTokenLists): void {
+  if (packed.offsets.length === 0 || packed.offsets[0] !== 0) {
+    throw new Error("Model2Vec token offsets must start at zero");
+  }
+  for (let index = 1; index < packed.offsets.length; index++) {
+    if (packed.offsets[index] < packed.offsets[index - 1]) {
+      throw new Error("Model2Vec token offsets must be ordered");
+    }
+  }
+  if (packed.offsets[packed.offsets.length - 1] !== packed.tokenIds.length) {
+    throw new Error("Model2Vec token offsets do not match the token buffer");
+  }
 }
 
 let cachedHalfFloatValues: Float32Array | null = null;

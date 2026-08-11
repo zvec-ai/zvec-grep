@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { parseArgs } from "./args.js";
-import { runParsedCommand } from "./commands.js";
 import { colorModeFromArgs, printError } from "./errors.js";
 import { printHelp } from "./help.js";
+import { restartWithLiftoffOnlyIfNeeded } from "./runtime.js";
 import { readPackageVersion } from "./version.js";
 
 const PACKAGE_VERSION = readPackageVersion();
@@ -29,6 +29,11 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (await restartWithLiftoffOnlyIfNeeded(parsed, args)) {
+      return;
+    }
+
+    const { runParsedCommand } = await import("./commands.js");
     await runParsedCommand(parsed);
     process.exitCode = 0;
   } catch (error) {

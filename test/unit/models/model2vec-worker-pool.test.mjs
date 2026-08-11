@@ -6,8 +6,6 @@ function createPool(maxWorkers = 2) {
   return new Model2VecWorkerPool(
     {
       tokenizerSource: "/unused",
-      modelCacheDir: "/unused",
-      revision: "unused",
       maxInputTokens: 8,
       normalize: true,
       tableBuffer: new SharedArrayBuffer(8),
@@ -16,7 +14,13 @@ function createPool(maxWorkers = 2) {
       rows: 1,
     },
     maxWorkers,
-    new URL("../../fixtures/model2vec-worker.mjs", import.meta.url),
+    {
+      compute: new URL("../../fixtures/model2vec-worker.mjs", import.meta.url),
+      tokenizer: new URL(
+        "../../fixtures/model2vec-tokenizer-worker.mjs",
+        import.meta.url,
+      ),
+    },
   );
 }
 
@@ -57,8 +61,6 @@ test("Model2Vec worker pool reports worker startup failures", async () => {
   const pool = new Model2VecWorkerPool(
     {
       tokenizerSource: "/unused",
-      modelCacheDir: "/unused",
-      revision: "unused",
       maxInputTokens: 8,
       normalize: true,
       tableBuffer: new SharedArrayBuffer(8),
@@ -67,7 +69,13 @@ test("Model2Vec worker pool reports worker startup failures", async () => {
       rows: 1,
     },
     1,
-    new URL("../../fixtures/missing-worker.mjs", import.meta.url),
+    {
+      compute: new URL("../../fixtures/missing-worker.mjs", import.meta.url),
+      tokenizer: new URL(
+        "../../fixtures/model2vec-tokenizer-worker.mjs",
+        import.meta.url,
+      ),
+    },
   );
   await assert.rejects(pool.start(), /Cannot find module/);
   await pool.dispose();

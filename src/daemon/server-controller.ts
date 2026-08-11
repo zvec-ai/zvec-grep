@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { open, readFile, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { LIFTOFF_ONLY_FLAG } from "../cli/runtime.js";
 import { daemonHome, resolveClientToken } from "./config.js";
 import { processIsAlive } from "../engine/utils/daemon-lease.js";
 import {
@@ -195,7 +196,7 @@ export async function startServer(options: {
       `zvec-grep server process ${current.pid} is running but not ready`,
     );
   }
-  const args = [options.cliPath, "server", "run"];
+  const args = [LIFTOFF_ONLY_FLAG, options.cliPath, "server", "run"];
   args.push("--mcp-toolset", requestedToolset);
   if (options.listen) args.push("--listen", options.listen);
   if (options.tokenFile) args.push("--token-file", options.tokenFile);

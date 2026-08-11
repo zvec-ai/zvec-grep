@@ -21,6 +21,7 @@ import {
   createModelDownloadProgressReporter,
   type ModelDownloadProgressReporter,
 } from "../download-progress.js";
+import { loadModel2VecTokenizer } from "./model2vec-tokenizer.js";
 import { Model2VecWorkerPool } from "./model2vec-worker-pool.js";
 import {
   embedModel2VecTexts,
@@ -56,12 +57,8 @@ type Model2VecDependencies = {
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
 
 const defaultDependencies: Model2VecDependencies = {
-  async loadTokenizer(repo, options) {
-    const { AutoTokenizer } = await import("@huggingface/transformers");
-    return (await AutoTokenizer.from_pretrained(
-      repo,
-      options,
-    )) as unknown as TokenizerLike;
+  async loadTokenizer(source) {
+    return await loadModel2VecTokenizer(source);
   },
   async loadSafetensors(path, tensorName, dimension) {
     return await readStaticEmbeddingTable(path, tensorName, dimension);
@@ -220,8 +217,6 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
       const sharedTable = sharedStaticEmbeddingTable(staticTable);
       const workerPool = new Model2VecWorkerPool({
         tokenizerSource,
-        modelCacheDir: this.modelCacheDir,
-        revision: this.entry.revision,
         maxInputTokens: this.entry.maxInputTokens,
         normalize: this.entry.normalize,
         tableBuffer: sharedTable.data.buffer as SharedArrayBuffer,

@@ -2,6 +2,7 @@ import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import type { EmbeddingResult } from "../embeddings.js";
 import type {
+  Model2VecTokenizerWorkerResponse,
   Model2VecWorkerData,
   Model2VecWorkerRequest,
   Model2VecWorkerResponse,
@@ -11,6 +12,9 @@ import type {
 type WorkerJob = {
   id: number;
   texts: string[];
+  tokenIds?: ArrayBuffer;
+  offsets?: ArrayBuffer;
+  truncated: number[];
   signal?: AbortSignal;
   resolve: (result: EmbeddingResult) => void;
   reject: (error: unknown) => void;
@@ -18,7 +22,7 @@ type WorkerJob = {
   abort?: () => void;
 };
 
-type WorkerSlot = {
+type ComputeWorkerSlot = {
   worker: Worker;
   ready: boolean;
   closed: boolean;
@@ -28,29 +32,51 @@ type WorkerSlot = {
   readyPromise: Promise<void>;
 };
 
+type TokenizerWorkerSlot = {
+  worker: Worker;
+  ready: boolean;
+  closed: boolean;
+  pending: number;
+  resolveReady: () => void;
+  rejectReady: (error: unknown) => void;
+  readyPromise: Promise<void>;
+};
+
+type Model2VecWorkerUrls = {
+  compute?: URL;
+  tokenizer?: URL;
+};
+
 export class Model2VecWorkerPool {
   private disposed = false;
   private nextJobId = 1;
   private readonly maxWorkers: number;
-  private readonly queue: WorkerJob[] = [];
-  private readonly slots: WorkerSlot[] = [];
+  private readonly computeQueue: WorkerJob[] = [];
+  private readonly jobs = new Map<number, WorkerJob>();
+  private readonly computeSlots: ComputeWorkerSlot[] = [];
+  private tokenizerSlot?: TokenizerWorkerSlot;
+  private readonly computeWorkerUrl: URL;
+  private readonly tokenizerWorkerUrl: URL;
 
   constructor(
     private readonly data: Model2VecWorkerData,
     maxWorkers = availableParallelism(),
-    private readonly workerUrl = new URL(
-      "./model2vec-worker.js",
-      import.meta.url,
-    ),
+    workerUrls: Model2VecWorkerUrls = {},
   ) {
     this.maxWorkers = Math.max(1, Math.floor(maxWorkers));
+    this.computeWorkerUrl =
+      workerUrls.compute ?? new URL("./model2vec-worker.js", import.meta.url);
+    this.tokenizerWorkerUrl =
+      workerUrls.tokenizer ??
+      new URL("./model2vec-tokenizer-worker.js", import.meta.url);
   }
 
   async start(): Promise<void> {
     this.ensureNotDisposed();
-    if (this.slots.length === 0) {
-      await this.spawnWorker().readyPromise;
-    }
+    const tokenizer = this.tokenizerSlot ?? this.spawnTokenizerWorker();
+    const compute =
+      this.computeSlots[0] ?? this.spawnComputeWorker(undefined, false);
+    await Promise.all([tokenizer.readyPromise, compute.readyPromise]);
   }
 
   async run(
@@ -59,11 +85,16 @@ export class Model2VecWorkerPool {
   ): Promise<EmbeddingResult> {
     this.ensureNotDisposed();
     throwIfAborted(signal);
+    const tokenizer = this.tokenizerSlot;
+    if (!tokenizer?.ready || tokenizer.closed) {
+      throw new Error("Model2Vec tokenizer worker pool is not ready");
+    }
 
     return await new Promise<EmbeddingResult>((resolve, reject) => {
       const job: WorkerJob = {
         id: this.nextJobId++,
         texts: [...texts],
+        truncated: [],
         signal,
         resolve,
         reject,
@@ -74,25 +105,19 @@ export class Model2VecWorkerPool {
           return;
         }
         job.settled = true;
-        const queuedIndex = this.queue.indexOf(job);
+        this.jobs.delete(job.id);
+        const queuedIndex = this.computeQueue.indexOf(job);
         if (queuedIndex >= 0) {
-          this.queue.splice(queuedIndex, 1);
+          this.computeQueue.splice(queuedIndex, 1);
         }
         reject(abortError(signal));
       };
       signal?.addEventListener("abort", job.abort, { once: true });
-
-      const idle = this.slots.find(
-        (slot) => slot.ready && !slot.closed && !slot.job,
-      );
-      if (idle) {
-        this.dispatch(idle, job);
-      } else if (this.slots.length < this.maxWorkers) {
-        const slot = this.spawnWorker(job);
-        void slot.readyPromise.catch(() => undefined);
-      } else {
-        this.queue.push(job);
-      }
+      this.jobs.set(job.id, job);
+      tokenizer.pending++;
+      tokenizer.worker.ref();
+      tokenizer.worker.postMessage({ id: job.id, texts: job.texts });
+      job.texts = [];
     });
   }
 
@@ -102,29 +127,121 @@ export class Model2VecWorkerPool {
     }
     this.disposed = true;
     const error = new Error("Model2Vec worker pool is disposed");
-    for (const job of this.queue.splice(0)) {
+    for (const job of this.jobs.values()) {
       this.rejectJob(job, error);
     }
-    for (const slot of this.slots) {
-      if (slot.job) {
-        this.rejectJob(slot.job, error);
-        slot.job = undefined;
-      }
-      slot.closed = true;
+    this.jobs.clear();
+    this.computeQueue.length = 0;
+
+    const workers: Worker[] = [];
+    if (this.tokenizerSlot) {
+      this.tokenizerSlot.closed = true;
+      workers.push(this.tokenizerSlot.worker);
     }
-    await Promise.allSettled(this.slots.map((slot) => slot.worker.terminate()));
-    this.slots.length = 0;
+    for (const slot of this.computeSlots) {
+      slot.closed = true;
+      workers.push(slot.worker);
+    }
+    await Promise.allSettled(workers.map((worker) => worker.terminate()));
+    this.tokenizerSlot = undefined;
+    this.computeSlots.length = 0;
   }
 
-  private spawnWorker(job?: WorkerJob): WorkerSlot {
-    const worker = new Worker(this.workerUrl, { workerData: this.data });
+  private spawnTokenizerWorker(): TokenizerWorkerSlot {
+    const worker = new Worker(this.tokenizerWorkerUrl, {
+      workerData: this.data,
+    });
     let resolveReady!: () => void;
     let rejectReady!: (error: unknown) => void;
     const readyPromise = new Promise<void>((resolve, reject) => {
       resolveReady = resolve;
       rejectReady = reject;
     });
-    const slot: WorkerSlot = {
+    const slot: TokenizerWorkerSlot = {
+      worker,
+      ready: false,
+      closed: false,
+      pending: 0,
+      resolveReady,
+      rejectReady,
+      readyPromise,
+    };
+    this.tokenizerSlot = slot;
+    worker.on("message", (response: Model2VecTokenizerWorkerResponse) => {
+      this.handleTokenizerMessage(slot, response);
+    });
+    worker.on("error", (error) => {
+      this.failTokenizer(slot, error);
+    });
+    worker.on("exit", (code) => {
+      if (!slot.closed) {
+        this.failTokenizer(
+          slot,
+          new Error(
+            `Model2Vec tokenizer worker exited unexpectedly with code ${code}`,
+          ),
+        );
+      }
+    });
+    return slot;
+  }
+
+  private handleTokenizerMessage(
+    slot: TokenizerWorkerSlot,
+    response: Model2VecTokenizerWorkerResponse,
+  ): void {
+    if (slot.closed) {
+      return;
+    }
+    if (response.type === "ready") {
+      slot.ready = true;
+      slot.resolveReady();
+      slot.worker.unref();
+      return;
+    }
+
+    slot.pending = Math.max(0, slot.pending - 1);
+    if (slot.pending === 0) {
+      slot.worker.unref();
+    }
+    const job = this.jobs.get(response.id);
+    if (!job || job.settled) {
+      return;
+    }
+    if (response.type === "error") {
+      this.jobs.delete(job.id);
+      this.rejectJob(job, workerError(response.error));
+      return;
+    }
+
+    job.tokenIds = response.tokenIds;
+    job.offsets = response.offsets;
+    job.truncated = response.truncated;
+    const idle = this.computeSlots.find(
+      (compute) => compute.ready && !compute.closed && !compute.job,
+    );
+    if (idle) {
+      this.dispatchCompute(idle, job);
+    } else if (this.computeSlots.length < this.maxWorkers) {
+      const compute = this.spawnComputeWorker(job);
+      void compute.readyPromise.catch(() => undefined);
+    } else {
+      this.computeQueue.push(job);
+    }
+  }
+
+  private spawnComputeWorker(
+    job?: WorkerJob,
+    handleReadyFailure = true,
+  ): ComputeWorkerSlot {
+    const worker = new Worker(this.computeWorkerUrl, { workerData: this.data });
+    let resolveReady!: () => void;
+    let rejectReady!: (error: unknown) => void;
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    const slot: ComputeWorkerSlot = {
       worker,
       ready: false,
       closed: false,
@@ -133,26 +250,31 @@ export class Model2VecWorkerPool {
       rejectReady,
       readyPromise,
     };
-    this.slots.push(slot);
+    this.computeSlots.push(slot);
     worker.on("message", (response: Model2VecWorkerResponse) => {
-      this.handleMessage(slot, response);
+      this.handleComputeMessage(slot, response);
     });
     worker.on("error", (error) => {
-      this.failSlot(slot, error);
+      this.failCompute(slot, error);
     });
     worker.on("exit", (code) => {
       if (!slot.closed) {
-        this.failSlot(
+        this.failCompute(
           slot,
-          new Error(`Model2Vec worker exited unexpectedly with code ${code}`),
+          new Error(
+            `Model2Vec compute worker exited unexpectedly with code ${code}`,
+          ),
         );
       }
     });
+    if (handleReadyFailure) {
+      void readyPromise.catch(() => undefined);
+    }
     return slot;
   }
 
-  private handleMessage(
-    slot: WorkerSlot,
+  private handleComputeMessage(
+    slot: ComputeWorkerSlot,
     response: Model2VecWorkerResponse,
   ): void {
     if (slot.closed) {
@@ -162,87 +284,104 @@ export class Model2VecWorkerPool {
       slot.ready = true;
       slot.resolveReady();
       if (slot.job) {
-        this.postJob(slot, slot.job);
+        this.postComputeJob(slot, slot.job);
       } else {
         slot.worker.unref();
-        this.drain();
+        this.drainCompute();
       }
       return;
     }
 
     const job = slot.job;
     if (!job || response.id !== job.id) {
-      this.failSlot(
+      this.failCompute(
         slot,
-        new Error("Model2Vec worker response is out of order"),
+        new Error("Model2Vec compute worker response is out of order"),
       );
       return;
     }
     slot.job = undefined;
     slot.worker.unref();
+    this.jobs.delete(job.id);
     if (response.type === "error") {
       this.rejectJob(job, workerError(response.error));
     } else {
       try {
-        this.resolveJob(
-          job,
-          workerEmbeddingResult(response, this.data.dimension),
-        );
+        const result = workerEmbeddingResult(response, this.data.dimension);
+        result.truncated = job.truncated;
+        this.resolveJob(job, result);
       } catch (error) {
         this.rejectJob(job, error);
-        this.failSlot(slot, error);
+        this.failCompute(slot, error);
         return;
       }
     }
-    this.drain();
+    this.drainCompute();
   }
 
-  private dispatch(slot: WorkerSlot, job: WorkerJob): void {
+  private dispatchCompute(slot: ComputeWorkerSlot, job: WorkerJob): void {
     slot.worker.ref();
     slot.job = job;
-    this.postJob(slot, job);
+    this.postComputeJob(slot, job);
   }
 
-  private postJob(slot: WorkerSlot, job: WorkerJob): void {
+  private postComputeJob(slot: ComputeWorkerSlot, job: WorkerJob): void {
     if (job.settled) {
       slot.job = undefined;
       slot.worker.unref();
-      this.drain();
+      this.drainCompute();
       return;
     }
-    slot.worker.postMessage({
+    if (!job.tokenIds || !job.offsets) {
+      this.jobs.delete(job.id);
+      this.rejectJob(
+        job,
+        new Error("Model2Vec tokenization result is missing"),
+      );
+      slot.job = undefined;
+      slot.worker.unref();
+      this.drainCompute();
+      return;
+    }
+    const request: Model2VecWorkerRequest = {
       id: job.id,
-      texts: job.texts,
-    } satisfies Model2VecWorkerRequest);
+      tokenIds: job.tokenIds,
+      offsets: job.offsets,
+    };
+    slot.worker.postMessage(request, [job.tokenIds, job.offsets]);
+    job.tokenIds = undefined;
+    job.offsets = undefined;
   }
 
-  private drain(): void {
+  private drainCompute(): void {
     if (this.disposed) {
       return;
     }
-    for (const slot of this.slots) {
+    for (const slot of this.computeSlots) {
       if (!slot.ready || slot.closed || slot.job) {
         continue;
       }
-      const job = this.nextQueuedJob();
+      const job = this.nextComputeJob();
       if (!job) {
         return;
       }
-      this.dispatch(slot, job);
+      this.dispatchCompute(slot, job);
     }
-    while (this.queue.length > 0 && this.slots.length < this.maxWorkers) {
-      const job = this.nextQueuedJob();
+    while (
+      this.computeQueue.length > 0 &&
+      this.computeSlots.length < this.maxWorkers
+    ) {
+      const job = this.nextComputeJob();
       if (!job) {
         return;
       }
-      const slot = this.spawnWorker(job);
-      void slot.readyPromise.catch(() => undefined);
+      this.spawnComputeWorker(job);
     }
   }
 
-  private nextQueuedJob(): WorkerJob | undefined {
-    while (this.queue.length > 0) {
-      const job = this.queue.shift();
+  private nextComputeJob(): WorkerJob | undefined {
+    while (this.computeQueue.length > 0) {
+      const job = this.computeQueue.shift();
       if (job && !job.settled) {
         return job;
       }
@@ -250,22 +389,37 @@ export class Model2VecWorkerPool {
     return undefined;
   }
 
-  private failSlot(slot: WorkerSlot, error: unknown): void {
+  private failTokenizer(slot: TokenizerWorkerSlot, error: unknown): void {
+    if (slot.closed) {
+      return;
+    }
+    slot.closed = true;
+    slot.rejectReady(error);
+    for (const job of this.jobs.values()) {
+      this.rejectJob(job, error);
+    }
+    this.jobs.clear();
+    this.computeQueue.length = 0;
+    void slot.worker.terminate().catch(() => undefined);
+  }
+
+  private failCompute(slot: ComputeWorkerSlot, error: unknown): void {
     if (slot.closed) {
       return;
     }
     slot.closed = true;
     slot.rejectReady(error);
     if (slot.job) {
+      this.jobs.delete(slot.job.id);
       this.rejectJob(slot.job, error);
       slot.job = undefined;
     }
-    const index = this.slots.indexOf(slot);
+    const index = this.computeSlots.indexOf(slot);
     if (index >= 0) {
-      this.slots.splice(index, 1);
+      this.computeSlots.splice(index, 1);
     }
     void slot.worker.terminate().catch(() => undefined);
-    this.drain();
+    this.drainCompute();
   }
 
   private resolveJob(job: WorkerJob, result: EmbeddingResult): void {
