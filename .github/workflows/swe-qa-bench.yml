@@ -1,6 +1,11 @@
 name: SWE-QA Bench (manual)
 
 on:
+  # Temporary branch-only trigger used to validate this new workflow before it
+  # exists on the default branch. Removed after the landing smoke passes.
+  push:
+    branches:
+      - codex/swe-qa-bench-manual-ci
   workflow_dispatch:
     inputs:
       scope:
