@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: Run the smoke pair or all five gate pairs
+        description: Run the smoke pair or all twenty benchmark pairs
         required: true
         default: smoke
         type: choice
         options:
           - smoke
-          - gate-5
+          - gate-20
 
 permissions: {}
 
@@ -26,6 +26,10 @@ jobs:
     name: Validate locked selection
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      task-matrix: ${{ steps.task-matrix.outputs.tasks }}
+      task-count: ${{ steps.task-matrix.outputs.count }}
+      task_ids_json: ${{ steps.task-matrix.outputs.task_ids_json }}
     permissions:
       contents: read
     steps:
@@ -45,6 +49,43 @@ jobs:
           --selection benchmarks/coding/zg_bench/swe_qa/data/selection.json
           --references benchmarks/coding/zg_bench/swe_qa/data/references.json
           --dataset benchmarks/coding/datasets/swe-qa-bench-manual
+      - name: Build this run's task matrix from the locked selection
+        id: task-matrix
+        env:
+          SCOPE: ${{ inputs.scope || 'smoke' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          selection = json.loads(
+              Path(
+                  "benchmarks/coding/zg_bench/swe_qa/data/selection.json"
+              ).read_text(encoding="utf-8")
+          )
+          tasks = selection["tasks"]
+          scope = os.environ["SCOPE"]
+          if scope == "smoke":
+              smoke_task = selection["gate"]["smoke_task"]
+              selected = [
+                  task for task in tasks if task["task_id"] == smoke_task
+              ]
+          elif scope == "gate-20":
+              selected = tasks
+          else:
+              raise SystemExit(f"unsupported SWE-QA scope: {scope}")
+          if not selected:
+              raise SystemExit(f"SWE-QA scope {scope} selected no tasks")
+          slugs = [task["task_slug"] for task in selected]
+          task_ids = [task["task_id"] for task in selected]
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"tasks={json.dumps(slugs, separators=(',', ':'))}\n")
+              output.write(f"count={len(slugs)}\n")
+              output.write(
+                  f"task_ids_json={json.dumps(task_ids, separators=(',', ':'))}\n"
+              )
+          PY
       - name: Run benchmark unit tests
         run: >-
           uv run --project benchmarks/coding python -m unittest discover
@@ -75,7 +116,7 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        task: ${{ fromJSON(inputs.scope == 'gate-5' && '["reflex-6","sqlfluff-2","sympy-38","streamlink-14","pylint-25"]' || '["reflex-6"]') }}
+        task: ${{ fromJSON(needs.validate.outputs.task-matrix) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -230,13 +271,13 @@ jobs:
       - name: Detect report scope and show partial task reports
         id: report-set
         env:
-          SCOPE: ${{ inputs.scope || 'smoke' }}
+          EXPECTED_COUNT: ${{ needs.validate.outputs.task-count }}
         run: |
           set -euo pipefail
-          if [[ "$SCOPE" == "gate-5" ]]; then
-            expected_count=5
-          else
-            expected_count=1
+          expected_count="$EXPECTED_COUNT"
+          if [[ ! "$expected_count" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid expected report count: $expected_count"
+            exit 1
           fi
 
           report_root="$RUNNER_TEMP/task-reports"
@@ -283,10 +324,21 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Combine reports without re-judging
         if: steps.report-set.outputs.complete == 'true'
-        run: >-
-          uv run --project benchmarks/coding python -m zg_bench.swe_qa aggregate
-          --reports-root "$RUNNER_TEMP/task-reports"
-          --output-dir "$RUNNER_TEMP/swe-qa-aggregate-report"
+        env:
+          EXPECTED_TASKS_JSON: ${{ needs.validate.outputs.task_ids_json }}
+        run: |
+          set -euo pipefail
+          mapfile -t expected_tasks < <(
+            python -c 'import json, os; print(*json.loads(os.environ["EXPECTED_TASKS_JSON"]), sep="\n")'
+          )
+          if (( ${#expected_tasks[@]} == 0 )); then
+            echo "::error::Locked selection produced no expected task IDs."
+            exit 1
+          fi
+          uv run --project benchmarks/coding python -m zg_bench.swe_qa aggregate \
+            --reports-root "$RUNNER_TEMP/task-reports" \
+            --output-dir "$RUNNER_TEMP/swe-qa-aggregate-report" \
+            --expected "${expected_tasks[@]}"
       - name: Upload aggregate report
         if: steps.report-set.outputs.complete == 'true'
         uses: actions/upload-artifact@v7

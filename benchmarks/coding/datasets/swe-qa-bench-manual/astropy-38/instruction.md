@@ -1,0 +1,1 @@
+Where in the control flow of the Simple Imaging Polynomial distortion correction method does the transformation of input coordinates pass through intermediate shifted values before polynomial distortion application?

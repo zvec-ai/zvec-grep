@@ -1,0 +1,1 @@
+How should the migration system architecture handle the exception hierarchy to prevent irreversible operations from being executed, and what design pattern enables safe delegation of rollback decisions across multiple migration components?

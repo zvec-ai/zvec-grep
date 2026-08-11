@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "xarray:32"
+source_index = 32
+index_base = 0
+role = "category"
+category = "why"
+question_type = "why"
+question_hash = "3131c6f8efc05a9ff8d703da758970b9422a163245f632e4b2d74aeb0fb56735"
+repository = "pydata/xarray"
+repository_commit = "40119bf35c53fc222934894d842cfc07b2e264bf"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

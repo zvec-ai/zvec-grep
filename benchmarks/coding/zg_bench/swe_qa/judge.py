@@ -941,7 +941,12 @@ def _combined_judge(reports: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return metadata
 
 
-def aggregate_reports(*, reports_root: Path, output_dir: Path) -> dict[str, Any]:
+def aggregate_reports(
+    *,
+    reports_root: Path,
+    output_dir: Path,
+    expected: Sequence[str] | None = None,
+) -> dict[str, Any]:
     """Combine successful one-task reports without making any model calls."""
     source_reports: list[dict[str, Any]] = []
     cases: list[dict[str, Any]] = []
@@ -959,7 +964,31 @@ def aggregate_reports(*, reports_root: Path, output_dir: Path) -> dict[str, Any]
         source_reports.append(source)
         cases.append(case)
 
-    cases.sort(key=lambda case: case["task_id"])
+    if expected is not None:
+        expected_tasks = list(expected)
+        if (
+            not expected_tasks
+            or any(
+                not isinstance(task, str) or not task.strip() for task in expected_tasks
+            )
+            or len(set(expected_tasks)) != len(expected_tasks)
+        ):
+            raise SweQaError("expected aggregate tasks must be non-empty and unique")
+        missing = [task for task in expected_tasks if task not in task_sources]
+        unexpected = sorted(set(task_sources) - set(expected_tasks))
+        if missing or unexpected:
+            raise SweQaError(
+                "aggregate report task mismatch "
+                f"(missing={missing}, unexpected={unexpected})"
+            )
+        cases_by_task = {case["task_id"]: case for case in cases}
+        reports_by_task = {
+            report["cases"][0]["task_id"]: report for report in source_reports
+        }
+        cases = [cases_by_task[task] for task in expected_tasks]
+        source_reports = [reports_by_task[task] for task in expected_tasks]
+    else:
+        cases.sort(key=lambda case: case["task_id"])
     task_ids = [case["task_id"] for case in cases]
     successful_judgements = sum(_case_judgement_count(case) for case in cases)
     report = {

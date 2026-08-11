@@ -46,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     aggregate.add_argument("--reports-root", type=Path, required=True)
     aggregate.add_argument("--output-dir", type=Path, required=True)
+    aggregate.add_argument("--expected", nargs="+", action="append")
     return parser
 
 
@@ -95,9 +96,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         elif args.command == "aggregate":
+            expected = (
+                None
+                if args.expected is None
+                else [task for group in args.expected for task in group]
+            )
             report = aggregate_reports(
                 reports_root=args.reports_root,
                 output_dir=args.output_dir,
+                expected=expected,
             )
             print(
                 json.dumps(

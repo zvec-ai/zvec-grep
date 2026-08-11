@@ -6,12 +6,16 @@ import hashlib
 import json
 import re
 import tomllib
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from . import SweQaError
 
 FULL_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+EXPECTED_TASK_COUNT = 20
+EXPECTED_CATEGORIES = ("what", "where", "how", "why")
+EXPECTED_TASKS_PER_CATEGORY = 5
 
 
 def _object(path: Path, *, label: str) -> dict[str, Any]:
@@ -57,7 +61,7 @@ def _instruction_matches(raw: str, question: str) -> bool:
 def validate_assets(
     *, selection_path: Path, references_path: Path, dataset_path: Path
 ) -> dict[str, Any]:
-    """Validate the five-task lock, judge references, and Harbor dataset."""
+    """Validate the twenty-task lock, judge references, and Harbor dataset."""
     selection = _object(selection_path, label="selection")
     references = _object(references_path, label="references")
     tasks = _records(selection, "tasks", label="selection")
@@ -70,11 +74,16 @@ def validate_assets(
         raise SweQaError("selection index_base must be 0")
     if references.get("visibility") != "judge-only":
         raise SweQaError("references visibility must be judge-only")
-    if len(tasks) != 5:
-        raise SweQaError(f"selection must contain exactly 5 tasks, found {len(tasks)}")
+    if len(tasks) != EXPECTED_TASK_COUNT:
+        raise SweQaError(
+            "selection must contain exactly "
+            f"{EXPECTED_TASK_COUNT} tasks, found {len(tasks)}"
+        )
     gate = selection.get("gate")
-    if not isinstance(gate, dict) or gate.get("required_tasks") != 5:
-        raise SweQaError("selection gate.required_tasks must equal 5")
+    if not isinstance(gate, dict) or gate.get("required_tasks") != EXPECTED_TASK_COUNT:
+        raise SweQaError(
+            f"selection gate.required_tasks must equal {EXPECTED_TASK_COUNT}"
+        )
 
     ids: set[str] = set()
     slugs: set[str] = set()
@@ -83,6 +92,8 @@ def validate_assets(
         label = f"selection.tasks[{index}]"
         task_id = _text(task, "task_id", label=label)
         slug = _text(task, "task_slug", label=label)
+        source_file = _text(task, "source_file", label=label)
+        source_index = task.get("source_index")
         question = _text(task, "question", label=label)
         question_hash = _text(task, "question_hash", label=label)
         commit = _text(task, "repository_commit", label=label)
@@ -93,6 +104,15 @@ def validate_assets(
         ids.add(task_id)
         slugs.add(slug)
         selected[task_id] = task
+        if slug != task_id.replace(":", "-"):
+            raise SweQaError(f"non-canonical task_slug for {task_id}")
+        if (
+            isinstance(source_index, bool)
+            or not isinstance(source_index, int)
+            or source_index < 0
+            or task_id != f"{Path(source_file).stem}:{source_index}"
+        ):
+            raise SweQaError(f"source index does not match task_id for {task_id}")
         actual_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()
         if question_hash != actual_hash:
             raise SweQaError(f"question SHA256 mismatch for {task_id}")
@@ -101,15 +121,34 @@ def validate_assets(
 
     smoke = [task for task in tasks if task.get("role") == "smoke"]
     categories = [task for task in tasks if task.get("role") == "category"]
-    if len(smoke) != 1 or len(categories) != 4:
-        raise SweQaError("selection must contain 1 smoke and 4 category tasks")
-    if {task.get("category") for task in categories} != {
-        "what",
-        "where",
-        "how",
-        "why",
-    }:
-        raise SweQaError("category tasks must cover what, where, how, and why")
+    if len(smoke) != 1 or len(categories) != EXPECTED_TASK_COUNT - 1:
+        raise SweQaError("selection must contain 1 smoke and 19 category tasks")
+    smoke_task_id = str(smoke[0]["task_id"])
+    if gate.get("smoke_task") != smoke_task_id:
+        raise SweQaError("selection gate.smoke_task does not match the smoke task")
+    expected_category_tasks = [
+        str(task["task_id"]) for task in tasks if task.get("role") == "category"
+    ]
+    if gate.get("category_tasks") != expected_category_tasks:
+        raise SweQaError(
+            "selection gate.category_tasks must list all non-smoke tasks in order"
+        )
+
+    category_counts: Counter[str] = Counter()
+    for task in tasks:
+        category = task.get("category")
+        if category not in EXPECTED_CATEGORIES:
+            raise SweQaError(f"invalid question category for {task.get('task_id')}")
+        if task.get("question_type") != category:
+            raise SweQaError(
+                f"question_type does not match category for {task.get('task_id')}"
+            )
+        category_counts[str(category)] += 1
+    expected_counts = {
+        category: EXPECTED_TASKS_PER_CATEGORY for category in EXPECTED_CATEGORIES
+    }
+    if dict(category_counts) != expected_counts:
+        raise SweQaError("selection must contain 5 tasks in each question category")
 
     if not dataset_path.is_dir():
         raise SweQaError(f"Harbor dataset does not exist: {dataset_path}")
@@ -125,15 +164,6 @@ def validate_assets(
             f"Harbor dataset task mismatch (missing={missing}, extra={extra})"
         )
 
-    metadata_keys = (
-        "task_id",
-        "question_hash",
-        "repository",
-        "repository_commit",
-        "role",
-        "category",
-        "question_type",
-    )
     for task_id, task in selected.items():
         task_dir = dataset_path / str(task["task_slug"])
         instruction_path = task_dir / "instruction.md"
@@ -147,8 +177,21 @@ def validate_assets(
             raise SweQaError(f"Harbor instruction does not match selection for {task_id}")
 
         metadata = _load_metadata(task_dir / "task.toml")
-        for key in metadata_keys:
-            if metadata.get(key) != task.get(key):
+        expected_metadata = {
+            "benchmark": selection["benchmark"],
+            "benchmark_revision": selection["benchmark_revision"],
+            "index_base": selection["index_base"],
+            "task_id": task["task_id"],
+            "source_index": task["source_index"],
+            "question_hash": task["question_hash"],
+            "repository": task["repository"],
+            "repository_commit": task["repository_commit"],
+            "role": task["role"],
+            "category": task["category"],
+            "question_type": task["question_type"],
+        }
+        for key, expected_value in expected_metadata.items():
+            if metadata.get(key) != expected_value:
                 raise SweQaError(f"Harbor metadata {key} mismatch for {task_id}")
         dockerfile = task_dir / "environment" / "Dockerfile"
         try:
@@ -172,6 +215,8 @@ def validate_assets(
         for key in (
             "question",
             "question_hash",
+            "source_file",
+            "source_index",
             "repository",
             "repository_commit",
             "role",

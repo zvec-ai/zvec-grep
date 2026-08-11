@@ -24,6 +24,28 @@ CODING_DIR = Path(__file__).resolve().parents[1]
 SELECTION_PATH = CODING_DIR / "zg_bench" / "swe_qa" / "data" / "selection.json"
 REFERENCES_PATH = CODING_DIR / "zg_bench" / "swe_qa" / "data" / "references.json"
 DATASET_PATH = CODING_DIR / "datasets" / "swe-qa-bench-manual"
+EXPECTED_TASK_IDS = (
+    "reflex:6",
+    "sqlfluff:2",
+    "conan:1",
+    "pylint:10",
+    "pylint:9",
+    "sympy:38",
+    "conan:39",
+    "xarray:46",
+    "astropy:38",
+    "matplotlib:37",
+    "streamlink:14",
+    "conan:19",
+    "django:21",
+    "pylint:14",
+    "requests:16",
+    "django:32",
+    "xarray:32",
+    "streamlink:43",
+    "sympy:26",
+    "conan:27",
+)
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -33,8 +55,9 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 
 def _judged_task_report(task_id: str, index: int = 0) -> dict[str, Any]:
     scale = index + 1
-    baseline_score = 10 + index
-    zvec_score = 12 + index
+    baseline_score = 10 + index % 5
+    zvec_score = 12 + index % 5
+    category = ("what", "where", "how", "why")[min(index // 5, 3)]
     baseline_total = baseline_score * 5
     zvec_total = zvec_score * 5
 
@@ -114,8 +137,8 @@ def _judged_task_report(task_id: str, index: int = 0) -> dict[str, Any]:
     }
     case = {
         "task_id": task_id,
-        "role": "smoke" if index == 0 else "what",
-        "category": "smoke" if index == 0 else "what",
+        "role": "smoke" if index == 0 else "category",
+        "category": category,
         "trial_count": 3,
         "profiles": {
             "baseline": profile_result(
@@ -958,6 +981,8 @@ class AggregateReportTests(unittest.TestCase):
                         str(reports_root),
                         "--output-dir",
                         str(output_dir),
+                        "--expected",
+                        "reflex:6",
                     ]
                 )
 
@@ -981,14 +1006,8 @@ class AggregateReportTests(unittest.TestCase):
                 )
             self.assertEqual(len(retried["cases"]), 1)
 
-    def test_aggregates_five_present_reports(self) -> None:
-        tasks = [
-            "sympy:38",
-            "reflex:6",
-            "streamlink:14",
-            "sqlfluff:2",
-            "pylint:25",
-        ]
+    def test_aggregates_twenty_present_reports(self) -> None:
+        tasks = list(EXPECTED_TASK_IDS)
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             reports_root = root / "reports"
@@ -1002,23 +1021,21 @@ class AggregateReportTests(unittest.TestCase):
                 report = aggregate_reports(
                     reports_root=reports_root,
                     output_dir=root / "combined",
+                    expected=tasks,
                 )
 
-            expected_tasks = sorted(tasks)
-            self.assertEqual(
-                [case["task_id"] for case in report["cases"]], expected_tasks
-            )
-            self.assertEqual(report["gate"]["expected_tasks"], expected_tasks)
-            self.assertEqual(report["gate"]["valid_pairs"], 5)
-            self.assertEqual(report["gate"]["successful_judgements"], 30)
-            self.assertEqual(report["judge"]["usage"]["calls"], 30)
+            self.assertEqual([case["task_id"] for case in report["cases"]], tasks)
+            self.assertEqual(report["gate"]["expected_tasks"], tasks)
+            self.assertEqual(report["gate"]["valid_pairs"], 20)
+            self.assertEqual(report["gate"]["successful_judgements"], 120)
+            self.assertEqual(report["judge"]["usage"]["calls"], 120)
             self.assertEqual(
                 report["judge"]["usage"]["input_tokens"],
-                sum(300 * (index + 1) for index in range(5)),
+                sum(300 * (index + 1) for index in range(20)),
             )
             self.assertEqual(
                 report["aggregate"]["profiles"]["baseline"]["input_tokens"],
-                1500,
+                21000,
             )
             self.assertEqual(
                 report["aggregate"]["comparison"]["input_token_reduction_pct"],
@@ -1028,6 +1045,22 @@ class AggregateReportTests(unittest.TestCase):
             for task_id in tasks:
                 self.assertIn(f"| {task_id} |", markdown)
             self.assertIn("| **Aggregate** |", markdown)
+
+    def test_aggregate_rejects_missing_expected_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports_root = root / "reports"
+            _write_json(
+                reports_root / "reflex-6" / "report.json",
+                _judged_task_report("reflex:6"),
+            )
+
+            with self.assertRaisesRegex(SweQaError, "aggregate report task mismatch"):
+                aggregate_reports(
+                    reports_root=reports_root,
+                    output_dir=root / "combined",
+                    expected=["reflex:6", "sqlfluff:2"],
+                )
 
     def test_aggregate_rejects_zero_reports(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1068,7 +1101,8 @@ class ValidationTests(unittest.TestCase):
         )
 
         self.assertTrue(result["valid"])
-        self.assertEqual(result["task_count"], 5)
+        self.assertEqual(result["task_count"], 20)
+        self.assertEqual(tuple(result["task_ids"]), EXPECTED_TASK_IDS)
         self.assertTrue(result["references_are_judge_only"])
 
     def test_reference_answer_leak_in_dataset_is_rejected(self) -> None:
@@ -1094,6 +1128,49 @@ class ValidationTests(unittest.TestCase):
             _write_json(selection_path, selection)
 
             with self.assertRaisesRegex(SweQaError, "SHA256 mismatch"):
+                validate_assets(
+                    selection_path=selection_path,
+                    references_path=REFERENCES_PATH,
+                    dataset_path=DATASET_PATH,
+                )
+
+    def test_source_index_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            selection = json.loads(SELECTION_PATH.read_text())
+            selection["tasks"][0]["source_index"] = 7
+            selection_path = Path(temp_dir) / "selection.json"
+            _write_json(selection_path, selection)
+
+            with self.assertRaisesRegex(SweQaError, "source index"):
+                validate_assets(
+                    selection_path=selection_path,
+                    references_path=REFERENCES_PATH,
+                    dataset_path=DATASET_PATH,
+                )
+
+    def test_category_distribution_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            selection = json.loads(SELECTION_PATH.read_text())
+            selection["tasks"][4]["category"] = "where"
+            selection["tasks"][4]["question_type"] = "where"
+            selection_path = Path(temp_dir) / "selection.json"
+            _write_json(selection_path, selection)
+
+            with self.assertRaisesRegex(SweQaError, "5 tasks in each"):
+                validate_assets(
+                    selection_path=selection_path,
+                    references_path=REFERENCES_PATH,
+                    dataset_path=DATASET_PATH,
+                )
+
+    def test_gate_category_task_list_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            selection = json.loads(SELECTION_PATH.read_text())
+            selection["gate"]["category_tasks"].pop()
+            selection_path = Path(temp_dir) / "selection.json"
+            _write_json(selection_path, selection)
+
+            with self.assertRaisesRegex(SweQaError, "all non-smoke tasks"):
                 validate_assets(
                     selection_path=selection_path,
                     references_path=REFERENCES_PATH,

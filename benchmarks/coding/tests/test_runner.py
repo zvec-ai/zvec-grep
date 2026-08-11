@@ -505,7 +505,18 @@ class SuiteTierTests(unittest.TestCase):
 
         self.assertIsNone(suite.dataset)
         self.assertIsNotNone(suite.path)
-        self.assertEqual(len(suite.tasks or ()), 5)
+        selection_path = (
+            Path(__file__).resolve().parents[1]
+            / "zg_bench"
+            / "swe_qa"
+            / "data"
+            / "selection.json"
+        )
+        selected_slugs = [
+            task["task_slug"]
+            for task in json.loads(selection_path.read_text())["tasks"]
+        ]
+        self.assertEqual(list(suite.tasks or ()), selected_slugs)
         self.assertIn("--path", command)
         self.assertNotIn("--dataset", command)
 

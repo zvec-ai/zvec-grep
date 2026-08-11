@@ -3,15 +3,15 @@ version = "1.0"
 [metadata]
 benchmark = "peng-weihan/SWE-QA-Bench"
 benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
-task_id = "pylint:25"
-source_index = 25
+task_id = "django:32"
+source_index = 32
 index_base = 0
 role = "category"
 category = "why"
 question_type = "why"
-question_hash = "b4b1e1f3d005542fa8e10172c2e02305d5f3cc1fe4a768063887d3adaf2968f6"
-repository = "pylint-dev/pylint"
-repository_commit = "44740e5e5cdd2b80321a4f0ed4254213d058b9f6"
+question_hash = "507a46dcc4f740e6fe3c22186ea393228aeded3ac2ca6eed5d83a103304c1038"
+repository = "django/django"
+repository_commit = "14fc2e97036fc9d7acb55ada4f16f1aa3bdc5ec7"
 
 [verifier]
 timeout_sec = 60.0
