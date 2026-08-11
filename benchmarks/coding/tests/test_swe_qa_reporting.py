@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from zg_bench.swe_qa import SELF_JUDGE_LABEL, SweQaError
 from zg_bench.swe_qa.collect import collect_pair
-from zg_bench.swe_qa.judge import judge_pairs
+from zg_bench.swe_qa.judge import _aggregate, judge_pairs
 from zg_bench.swe_qa.validation import validate_assets
 
 CODING_DIR = Path(__file__).resolve().parents[1]
@@ -269,11 +269,104 @@ class JudgeTests(unittest.TestCase):
             markdown = (output_dir / "report.md").read_text()
             self.assertIn("Aggregate", markdown)
             self.assertIn("input_token", markdown)
-            self.assertIn("N/A", markdown)
+            self.assertIn("equal-weight arithmetic mean", markdown)
+            self.assertIn("not a ratio of totals", markdown)
+            self.assertNotIn("cost", markdown.lower())
+            self.assertNotIn("$", markdown)
             self.assertEqual(summary.read_text(), markdown)
             serialized = (output_dir / "report.json").read_text()
             self.assertNotIn("judge-only reference", serialized)
             self.assertNotIn("test-secret", serialized)
+
+    def test_aggregate_averages_per_case_reductions_without_weighting(self) -> None:
+        def case(
+            *,
+            baseline: dict[str, int | float],
+            zvec: dict[str, int | float],
+            judge_baseline: int,
+            judge_zvec: int,
+            reductions: dict[str, float | None],
+        ) -> dict[str, Any]:
+            return {
+                "profiles": {
+                    "baseline": {
+                        "judge": {"total": judge_baseline},
+                        "metrics": baseline,
+                    },
+                    "zvec-grep": {
+                        "judge": {"total": judge_zvec},
+                        "metrics": zvec,
+                    },
+                },
+                "comparison": {
+                    "judge_delta": judge_zvec - judge_baseline,
+                    **reductions,
+                },
+            }
+
+        cases = [
+            case(
+                baseline={
+                    "input_tokens": 100,
+                    "tool_calls": 10,
+                    "agent_wall_seconds": 10.0,
+                    "cost_usd": 1.0,
+                },
+                zvec={
+                    "input_tokens": 10,
+                    "tool_calls": 1,
+                    "agent_wall_seconds": 1.0,
+                    "cost_usd": 0.1,
+                },
+                judge_baseline=50,
+                judge_zvec=70,
+                reductions={
+                    "input_token_reduction_pct": 90.0,
+                    "toolcall_reduction_pct": 90.0,
+                    "time_reduction_pct": 90.0,
+                    "cost_reduction_pct": 90.0,
+                },
+            ),
+            case(
+                baseline={
+                    "input_tokens": 900,
+                    "tool_calls": 90,
+                    "agent_wall_seconds": 90.0,
+                    "cost_usd": 9.0,
+                },
+                zvec={
+                    "input_tokens": 900,
+                    "tool_calls": 90,
+                    "agent_wall_seconds": 90.0,
+                    "cost_usd": 9.0,
+                },
+                judge_baseline=80,
+                judge_zvec=70,
+                reductions={
+                    "input_token_reduction_pct": 0.0,
+                    "toolcall_reduction_pct": 0.0,
+                    "time_reduction_pct": 0.0,
+                    "cost_reduction_pct": 0.0,
+                },
+            ),
+        ]
+
+        aggregate = _aggregate(cases)
+
+        self.assertEqual(aggregate["comparison"]["judge_delta"], 5.0)
+        self.assertEqual(
+            aggregate["comparison"]["input_token_reduction_pct"], 45.0
+        )
+        self.assertEqual(aggregate["comparison"]["toolcall_reduction_pct"], 45.0)
+        self.assertEqual(aggregate["comparison"]["time_reduction_pct"], 45.0)
+        self.assertEqual(aggregate["comparison"]["cost_reduction_pct"], 45.0)
+        totals_ratio = (1000 - 910) / 1000 * 100
+        self.assertNotEqual(
+            aggregate["comparison"]["input_token_reduction_pct"], totals_ratio
+        )
+
+        cases[1]["comparison"]["cost_reduction_pct"] = None
+        self.assertIsNone(_aggregate(cases)["comparison"]["cost_reduction_pct"])
 
     def test_missing_expected_pair_fails_before_model_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

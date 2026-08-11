@@ -173,7 +173,7 @@ jobs:
           pattern: swe-qa-pair-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pairs
           merge-multiple: true
-      - name: Judge answers and write the five-metric summary
+      - name: Judge answers and write the four-metric summary
         env:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           SCOPE: ${{ inputs.scope || 'smoke' }}

@@ -26,7 +26,7 @@ flowchart LR
     P1 --> A["pair artifact<br/>answer + trajectory + metrics"]
     P2 --> A
     A --> J["独立 GLM-5.2 self-judge"]
-    J --> R["Job Summary<br/>5 个指标 + 完整性门禁"]
+    J --> R["Job Summary<br/>4 个指标 + 完整性门禁"]
 ```
 
 矩阵维度是 case，不是 profile。每个 case 的 baseline 和 zvec-grep 在同一台 GitHub-hosted Ubuntu runner 上顺序运行，使用同一题目镜像、仓库 commit、OpenCode 版本和 GLM-5.2 endpoint。这样保留严格的成对比较；任一侧失败都不会被当成 0 分或从聚合中静默剔除。
@@ -41,7 +41,7 @@ flowchart LR
 
 `.opencode/opencode.json` 只引用 `{env:GLM_API_KEY}`。真实值只保存为仓库 Actions Secret `GLM_API_KEY`，仅注入模型执行或 Judge step，不进入命令参数、Git 或 artifact。上传 artifact 前还会做精确 secret 内容扫描。
 
-## Judge 与五项指标
+## Judge 与四项指标
 
 Judge 按 SWE-QA 的五个维度分别打 `1–20` 分：correctness、completeness、relevance、clarity、coherence，总分范围 `5–100`。reference answer 只在独立 Judge job 中读取，Agent 容器不可见。
 
@@ -50,10 +50,9 @@ Job Summary 对每个 case 和 Aggregate 展示：
 1. `Judge`：baseline、zvec-grep、差值；
 2. `input_token`：Agent 输入 token，Judge token 单独记录、不混入；
 3. `toolcall`：Agent trajectory 的工具调用数；
-4. `time`：Agent execution wall time，索引 setup 仍保留在原始证据中；
-5. `cost`：OpenCode/provider 回传的 Agent 美元成本。若 endpoint 不回传真实价格，显示 `N/A`，不把未知成本伪装成 0。
+4. `time`：Agent execution wall time，索引 setup 仍保留在原始证据中。
 
-token、toolcall、time 和 cost 同时给出 baseline/zvec-grep 及降低比例。Judge 原始结构化结果、pair JSON、Harbor result、日志与 ATIF trajectory 均作为 artifact 保存。
+input_token、toolcall 和 time 同时给出 baseline/zvec-grep 及降低比例。Aggregate 的第三个值是逐题 delta/reduction 的算术平均，不是先汇总 baseline/zvec-grep 再计算比例；这样每个 case 权重相同，不会被大体量 case 主导。Judge 原始结构化结果、pair JSON、Harbor result、日志与 ATIF trajectory 均作为 artifact 保存。
 
 ## 当前门禁语义
 

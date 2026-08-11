@@ -297,6 +297,12 @@ def _sum_or_none(values: Sequence[int | float | None]) -> int | float | None:
     return sum(value for value in values if value is not None)
 
 
+def _mean_or_none(values: Sequence[int | float | None]) -> float | None:
+    if not values or any(value is None for value in values):
+        return None
+    return sum(float(value) for value in values if value is not None) / len(values)
+
+
 def _aggregate(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     count = len(cases)
     profiles: dict[str, dict[str, Any]] = {}
@@ -313,15 +319,18 @@ def _aggregate(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 [row["metrics"]["cost_usd"] for row in profile_rows]
             ),
         }
-    return {
-        "profiles": profiles,
-        "comparison": _comparison(
-            profiles["baseline"],
-            profiles["zvec-grep"],
-            profiles["baseline"]["judge"],
-            profiles["zvec-grep"]["judge"],
-        ),
+    comparison_keys = (
+        "judge_delta",
+        "input_token_reduction_pct",
+        "toolcall_reduction_pct",
+        "time_reduction_pct",
+        "cost_reduction_pct",
+    )
+    comparison = {
+        key: _mean_or_none([case["comparison"][key] for case in cases])
+        for key in comparison_keys
     }
+    return {"profiles": profiles, "comparison": comparison}
 
 
 def _fmt_number(value: int | float, *, decimals: int = 0) -> str:
@@ -342,16 +351,11 @@ def _metric_cell(
     reduction: float | None,
     *,
     decimals: int = 0,
-    currency: bool = False,
 ) -> str:
     if baseline is None or zvec is None:
         return "N/A"
-    if currency:
-        left = f"${float(baseline):.6f}"
-        right = f"${float(zvec):.6f}"
-    else:
-        left = _fmt_number(baseline, decimals=decimals)
-        right = _fmt_number(zvec, decimals=decimals)
+    left = _fmt_number(baseline, decimals=decimals)
+    right = _fmt_number(zvec, decimals=decimals)
     return f"{left} / {right} / {_fmt_delta(reduction, suffix='%')}"
 
 
@@ -365,8 +369,10 @@ def _render_report(report: dict[str, Any]) -> str:
         "",
         "All cells use `baseline / zvec-grep / delta-or-reduction`. Positive reduction means zvec-grep used less.",
         "",
-        "| Case | Judge self-judge | input_token | toolcall | time (s) | cost (USD) |",
-        "|---|---:|---:|---:|---:|---:|",
+        "In the Aggregate row, baseline and zvec-grep are raw totals (Judge is the per-case mean), while the third value is the equal-weight arithmetic mean of the per-case deltas or reductions, not a ratio of totals.",
+        "",
+        "| Case | Judge self-judge | input_token | toolcall | time (s) |",
+        "|---|---:|---:|---:|---:|",
     ]
     for case in report["cases"]:
         baseline = case["profiles"]["baseline"]
@@ -397,12 +403,6 @@ def _render_report(report: dict[str, Any]) -> str:
                         zvec["metrics"]["agent_wall_seconds"],
                         comparison["time_reduction_pct"],
                         decimals=2,
-                    ),
-                    _metric_cell(
-                        baseline["metrics"]["cost_usd"],
-                        zvec["metrics"]["cost_usd"],
-                        comparison["cost_reduction_pct"],
-                        currency=True,
                     ),
                 )
             )
@@ -439,23 +439,11 @@ def _render_report(report: dict[str, Any]) -> str:
                     comparison["time_reduction_pct"],
                     decimals=2,
                 ),
-                _metric_cell(
-                    baseline["cost_usd"],
-                    zvec["cost_usd"],
-                    comparison["cost_reduction_pct"],
-                    currency=True,
-                ),
             )
         )
         + " |"
     )
-    lines.extend(
-        (
-            "",
-            "Agent cost is provider-reported and excludes judge usage. `N/A` means the provider did not report cost for every candidate.",
-            "",
-        )
-    )
+    lines.append("")
     return "\n".join(lines)
 
 
