@@ -1,6 +1,6 @@
-# SWE-QA-Bench 手工 CI 设计
+# SWE-QA-Bench CI 设计
 
-本流程接入的是 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench)，不是 SWE-QA-Pro。题目锁定在上游 commit `c13deac7a0d99b0ca2e593e004c4739475785b08`，只允许通过 GitHub `workflow_dispatch` 人工触发，不参与 PR 或分支保护。
+本流程接入的是 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench)，不是 SWE-QA-Pro。题目锁定在上游 commit `c13deac7a0d99b0ca2e593e004c4739475785b08`。20 题 **All-Full** 只允许通过 GitHub `workflow_dispatch` 人工触发；同仓 pull request 和合并完成后推送到 `main` 时自动运行 5 题精选集。fork/Dependabot PR 仍执行不需要凭证的 validation，但跳过需要 `GLM_API_KEY` 的 benchmark job，因此不会向不受信任代码暴露 Secret。
 
 ## 固定任务集
 
@@ -31,22 +31,32 @@
 
 `selection.json` 同时锁定完整 question、question SHA-256、目标仓库完整 commit SHA 和题型。`validate` 在任何模型调用前验证这些字段、Harbor instruction 与 reference 的一致性，并检查 reference answer 没有进入 Harbor dataset。workflow 的 matrix、Aggregate 期望报告数和精确 task ID 集合均从通过校验的 selection 动态生成，YAML 不再维护第二份任务列表。
 
+### 自动精选集
+
+`selection.json` 的 `gate.auto_tasks` 按顺序锁定 `reflex:6`（Smoke）、`pylint:9`（What）、`matplotlib:37`（Where）、`streamlink:14`（How）和 `xarray:32`（Why）。validation 要求它正好包含 1 个 smoke，以及依次覆盖 What、Where、How、Why 的 4 个 category task，防止自动矩阵与设计意外漂移。
+
+这 4 个分类代表题来自本轮 All-Full 结果中各题型在 profile-mean 口径下表现较好的样本，同时保留原 smoke 作为快速链路检查：`reflex:6` 的 Judge 为 `+0.33`，input/tool/time 分别改善约 `20.01% / 38.52% / 12.71%`；`pylint:9` 为 `+42.33` 和约 `40.24% / 34.28% / 40.46%`；`matplotlib:37` 为 `+3.33` 和约 `20.88% / 29.28% / 41.82%`；`streamlink:14` 为 `+11.33` 和约 `7.22% / 27.83% / 40.43%`；`xarray:32` 为 `+1.33`，tool/time 改善约 `6.81% / 6.33%`，但 input 约回退 `16.29%`，有意保留一个不完全偏向效率胜出的样本。精选依据用于控制自动 CI 成本并覆盖四种问题类型；workflow 始终采用 completion-only 门禁，不把这些数值设为合并阈值。
+
 ## 执行拓扑
 
 ```mermaid
 flowchart LR
-    D["workflow_dispatch<br/>smoke / gate-20"] --> V["无密钥预检<br/>selection + tests + dry-run"]
-    V --> P1["case 1 同一 runner<br/>baseline ×3 → zvec-grep ×3 → Judge ×6"]
-    V --> P2["其余 19 个 case 各运行 3 组 pair<br/>gate-20 时 max-parallel=5"]
+    D["workflow_dispatch<br/>smoke / all-full"] --> V["无密钥预检<br/>selection + tests + dry-run"]
+    E["同仓 PR / 合并后 push main<br/>auto 5题"] --> V
+    F["fork / Dependabot PR"] --> V
+    V --> C{"允许读取 GLM Secret?"}
+    C -->|"否"| S["validation-only"]
+    C -->|"是"| P1["case 1 同一 runner<br/>baseline ×3 → zvec-grep ×3 → Judge ×6"]
+    C -->|"是"| P2["其余 case 各运行 3 组 pair<br/>max-parallel=5"]
     P1 --> R1["case 1 独立报告<br/>Job Summary + artifact"]
     P2 --> RN["每个 case 独立报告<br/>Job Summary + artifact"]
     R1 --> A["无模型调用的 Aggregate"]
     RN --> A
 ```
 
-矩阵维度是 case，不是 profile。每个 case 的 baseline 和 zvec-grep 在同一台 GitHub-hosted Ubuntu runner 上各执行 3 个独立 Harbor trial（`--n-attempts 3`，`--n-concurrent 1`），随后对 6 个答案分别执行 Judge，并生成该 case 自己的 Job Summary 与报告 artifact。单任务表中的 baseline/zvec-grep 原始指标是各自 3 次 trial 的算术平均；两侧 trial 分别按实际启动时间恢复第 1/2/3 轮，第三个 delta/reduction 值是这 3 组同轮比较值的等权平均，不依赖 Harbor 的随机 trial 名。所有成功的单任务报告最后由一个不调用模型的 job 合并。这样既保留重复实验的波动证据，也不会把失败 trial 当成 0 分或静默剔除。
+矩阵维度是 case，不是 profile。每个 case 的 baseline 和 zvec-grep 在同一台 GitHub-hosted Ubuntu runner 上各执行 3 个独立 Harbor trial（`--n-attempts 3`，`--n-concurrent 1`），随后对 6 个答案分别执行 Judge，并生成该 case 自己的 Job Summary 与报告 artifact。单任务表中的 baseline/zvec-grep 原始指标是各自 3 次 trial 的算术平均，第三个 delta/reduction 直接由表中展示的这两个 profile mean 计算。两侧 trial 仍按实际启动时间恢复第 1/2/3 轮，同轮 comparison 仅作为诊断证据，不参与单任务或 Aggregate 主指标。所有成功的单任务报告最后由一个不调用模型的 job 合并。这样既保留重复实验的波动证据，也不会把失败 trial 当成 0 分或静默剔除。
 
-`gate-20` 的 20 个 case 以 `max-parallel: 5` 分批占用 runner。每个 matrix task 在 Harbor 启动前从 Actions cache 恢复自己的 zvec index seed 到 `$RUNNER_TEMP/swe-qa-index-seed`，并通过 `ZG_BENCH_INDEX_SEED_DIR` 交给 benchmark/Harbor。cache miss 时，第 1 个 zvec-grep trial 冷建 seed，后两个 trial 从 seed 独立初始化；cache hit 时直接使用此前成功 workflow 保存的同任务 seed。seed 只表示可复用的初始索引快照，不共享 Agent 会话或可写运行状态，因此 3 个 trial 仍分别拥有独立的模型调用、trajectory、指标和 Judge 结果。host seed 不会 bind mount 到受评容器；Harbor 的可信 setup 代码只在模型 Agent 启动前通过 `upload_dir`/`download_dir` 传输快照，所以 Agent 无法回写 seed 或污染后续 trial。
+All-Full 的 20 个 case 以 `max-parallel: 5` 分批占用 runner；自动精选的 5 个 case 可在一个 wave 内完成。每个 matrix task 在 Harbor 启动前从 Actions cache 恢复自己的 zvec index seed 到 `$RUNNER_TEMP/swe-qa-index-seed`，并通过 `ZG_BENCH_INDEX_SEED_DIR` 交给 benchmark/Harbor。cache miss 时，第 1 个 zvec-grep trial 冷建 seed，后两个 trial 从 seed 独立初始化；cache hit 时直接使用此前成功 workflow 保存的同任务 seed。seed 只表示可复用的初始索引快照，不共享 Agent 会话或可写运行状态，因此 3 个 trial 仍分别拥有独立的模型调用、trajectory、指标和 Judge 结果。host seed 不会 bind mount 到受评容器；Harbor 的可信 setup 代码只在模型 Agent 启动前通过 `upload_dir`/`download_dir` 传输快照，所以 Agent 无法回写 seed 或污染后续 trial。
 
 缓存严格按 runner OS/arch 和 task 隔离。key 还分别包含锁定的 `selection.json`、`references.json`、该 task 的 dataset Dockerfile、`package-lock.json`，以及 zvec-grep TypeScript 源码、构建配置、benchmark adapter/依赖锁和 skill 的哈希；不使用 fallback `restore-keys`，任一输入变化都会冷建新 seed。key 不包含 API key 等凭证，seed 目录也会和报告 artifact 一起接受精确 secret 扫描；只有 cache miss 且 matrix task 完整成功时才保存。
 
@@ -73,15 +83,16 @@ Job Summary 对每个 case 和 Aggregate 展示：
 3. `toolcall`：Agent trajectory 的工具调用数；
 4. `time`：Agent execution wall time，索引 setup 仍保留在原始证据中。
 
-input_token、toolcall 和 time 同时给出 baseline/zvec-grep 的 3-trial 均值及降低比例。单任务第三个值先对 3 组 trial 的 delta/reduction 取均值；跨任务 Aggregate 再对各 case 的 delta/reduction 等权平均，而不是由总量反推比例。Judge 原始结构化结果、pair JSON、Harbor result、日志与 ATIF trajectory 均作为 artifact 保存。
+input_token、toolcall 和 time 同时给出 baseline/zvec-grep 的 3-trial 均值及降低比例。单任务第三个值由展示的 baseline 与 zvec-grep profile means 直接计算；跨任务 Aggregate 再对各 case 的 comparison 等权平均，而不是先加总所有任务的数据再反推比例。逐 trial comparison 只用于诊断。Judge 原始结构化结果、pair JSON、Harbor result、日志与 ATIF trajectory 均作为 artifact 保存。
 
 ## 当前门禁语义
 
-当前是影子运行（report-only），没有数值质量或效率阈值，也不会成为代码审核卡点。唯一硬门禁是运行完整性：所选 scope 的每个 case 都必须生成有效的 baseline/zvec-grep pair、非空答案和可解析 Judge 结果。
+当前是影子运行（report-only），没有数值质量或效率阈值。自动 workflow 可以作为运行完整性检查，但分数本身不会阻止合并；唯一硬门禁是所选 scope 的每个 case 都必须生成有效的 baseline/zvec-grep pair、非空答案和可解析 Judge 结果。
 
 - `smoke`：只跑 `reflex-6`，即 3 次 baseline + 3 次 zvec-grep，共 6 次 Agent 执行和 6 次 Judge；
-- `gate-20`：每个 case 各跑 3 组 pair，共 120 次 Agent 执行和 120 次 Judge；
-- `gate-20` 的 20 个 case 允许 `max-parallel: 5` 分批运行，但每个 case 内仍以 `--n-concurrent 1` 顺序运行；
+- 自动精选：5 个 case 各跑 3 组 pair，共 30 次 Agent 执行和 30 次 Judge，相比 All-Full 减少 75%；
+- `all-full`：20 个 case 各跑 3 组 pair，共 120 次 Agent 执行和 120 次 Judge；历史 API 调用中的 `gate-20` 仍作为隐藏同义值兼容；
+- 所有 scope 都允许 `max-parallel: 5`，但每个 case 内仍以 `--n-concurrent 1` 顺序运行；
 - `fail-fast: false`，便于一次收集所有 case 的失败证据；
 - 每个 Agent trial 最多 30 分钟，包含 6 个 trial 与 Judge 的单任务 job 最多 240 分钟，纯聚合 job 最多 15 分钟；
 - 付费 workflow 不自动取消；原始证据保留 30 天，单任务和聚合报告保留 90 天。
@@ -92,7 +103,7 @@ input_token、toolcall 和 time 同时给出 baseline/zvec-grep 的 3-trial 均�
 
 ## 触发方式
 
-在 GitHub Actions 中选择 **SWE-QA Bench (manual)**，点击 **Run workflow**，选择 `smoke` 或 `gate-20`。CLI 等价命令为：
+同仓 pull request 或合并完成后的 push 到 `main` 会自动选择 `gate.auto_tasks` 的 5 题；fork/Dependabot PR 只运行 validation 并跳过 Secret-backed benchmark。merge queue 不在候选合并 ref 上运行需要 Secret 的 benchmark，避免不受信任候选代码接触 `GLM_API_KEY`。手工运行时，在 GitHub Actions 中选择 **SWE-QA Bench**，点击 **Run workflow**，选择 `smoke` 或 `all-full`。CLI 等价命令为：
 
 ```bash
 uv run --project benchmarks/coding zg-bench run \

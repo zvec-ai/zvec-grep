@@ -7,6 +7,13 @@
   "gate": {
     "required_tasks": 20,
     "smoke_task": "reflex:6",
+    "auto_tasks": [
+      "reflex:6",
+      "pylint:9",
+      "matplotlib:37",
+      "streamlink:14",
+      "xarray:32"
+    ],
     "category_tasks": [
       "sqlfluff:2",
       "conan:1",

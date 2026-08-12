@@ -16,6 +16,13 @@ from . import SELF_JUDGE_LABEL, SweQaError
 SCORE_KEYS = ("correctness", "completeness", "relevance", "clarity", "coherence")
 JUDGE_MODEL = "openai/glm-5.2"
 PROFILE_NAMES = ("baseline", "zvec-grep")
+COMPARISON_KEYS = (
+    "judge_delta",
+    "input_token_reduction_pct",
+    "toolcall_reduction_pct",
+    "time_reduction_pct",
+    "cost_reduction_pct",
+)
 DEFAULT_JUDGE_CONCURRENCY = 3
 MAX_JUDGE_CONCURRENCY = 8
 JUDGE_CONCURRENCY_ENV = "SWE_QA_JUDGE_CONCURRENCY"
@@ -472,6 +479,15 @@ def _mean_or_none(values: Sequence[int | float | None]) -> float | None:
     return sum(float(value) for value in values if value is not None) / len(values)
 
 
+def _mean_available(
+    values: Sequence[int | float | None],
+) -> tuple[float | None, int]:
+    available = [float(value) for value in values if value is not None]
+    if not available:
+        return None, 0
+    return sum(available) / len(available), len(available)
+
+
 def _summarize_profile(trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
     count = len(trials)
     scores = {
@@ -524,15 +540,22 @@ def _paired_comparison(
 ) -> dict[str, Any]:
     if len(baseline_trials) != len(zvec_trials):
         raise SweQaError("profile trial counts do not match")
+    baseline_by_index = {trial["trial_index"]: trial for trial in baseline_trials}
+    zvec_by_index = {trial["trial_index"]: trial for trial in zvec_trials}
+    if (
+        len(baseline_by_index) != len(baseline_trials)
+        or len(zvec_by_index) != len(zvec_trials)
+        or set(baseline_by_index) != set(zvec_by_index)
+    ):
+        raise SweQaError("profile trial_index values do not match")
+
     trial_rows: list[dict[str, Any]] = []
-    for baseline, zvec in zip(baseline_trials, zvec_trials, strict=True):
-        baseline_index = baseline["trial_index"]
-        zvec_index = zvec["trial_index"]
-        if baseline_index != zvec_index:
-            raise SweQaError("profile trial_index values do not match")
+    for trial_index in sorted(baseline_by_index):
+        baseline = baseline_by_index[trial_index]
+        zvec = zvec_by_index[trial_index]
         trial_rows.append(
             {
-                "trial_index": baseline_index,
+                "trial_index": trial_index,
                 **_comparison(
                     baseline["metrics"],
                     zvec["metrics"],
@@ -541,20 +564,39 @@ def _paired_comparison(
                 ),
             }
         )
-    comparison_keys = (
-        "judge_delta",
-        "input_token_reduction_pct",
-        "toolcall_reduction_pct",
-        "time_reduction_pct",
-        "cost_reduction_pct",
-    )
     return {
         **{
             key: _mean_or_none([row[key] for row in trial_rows])
-            for key in comparison_keys
+            for key in COMPARISON_KEYS
         },
         "trials": trial_rows,
     }
+
+
+def _case_comparison(case: dict[str, Any]) -> dict[str, Any]:
+    """Compare the baseline/zvec profile means displayed for one task."""
+    profiles = case["profiles"]
+    baseline = profiles["baseline"]
+    zvec = profiles["zvec-grep"]
+    comparison = _comparison(
+        baseline["metrics"],
+        zvec["metrics"],
+        baseline["judge"]["total"],
+        zvec["judge"]["total"],
+    )
+
+    baseline_trials = profiles["baseline"].get("trials")
+    zvec_trials = profiles["zvec-grep"].get("trials")
+    if baseline_trials is None and zvec_trials is None:
+        return comparison
+    if not isinstance(baseline_trials, list) or not isinstance(zvec_trials, list):
+        raise SweQaError("profile trial evidence does not match")
+    # Keep paired trial comparisons as diagnostic evidence only. The task-level
+    # values above are calculated from the displayed profile means.
+    comparison["trials"] = _paired_comparison(
+        baseline_trials, zvec_trials
+    )["trials"]
+    return comparison
 
 
 def _aggregate(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -573,18 +615,20 @@ def _aggregate(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 [row["metrics"]["cost_usd"] for row in profile_rows]
             ),
         }
-    comparison_keys = (
-        "judge_delta",
-        "input_token_reduction_pct",
-        "toolcall_reduction_pct",
-        "time_reduction_pct",
-        "cost_reduction_pct",
-    )
-    comparison = {
-        key: _mean_or_none([case["comparison"][key] for case in cases])
-        for key in comparison_keys
+    task_comparisons = [_case_comparison(case) for case in cases]
+    comparison: dict[str, float | None] = {}
+    comparison_samples: dict[str, int] = {}
+    for key in COMPARISON_KEYS:
+        value, sample_count = _mean_available(
+            [task_comparison[key] for task_comparison in task_comparisons]
+        )
+        comparison[key] = value
+        comparison_samples[key] = sample_count
+    return {
+        "profiles": profiles,
+        "comparison": comparison,
+        "comparison_samples": comparison_samples,
     }
-    return {"profiles": profiles, "comparison": comparison}
 
 
 def _fmt_number(value: int | float, *, decimals: int = 2) -> str:
@@ -613,7 +657,7 @@ def _metric_cell(
 
 def _render_report(report: dict[str, Any]) -> str:
     lines = [
-        "# SWE-QA-Bench manual CI report",
+        "# SWE-QA-Bench CI report",
         "",
         f"Judge: **{SELF_JUDGE_LABEL}** (GLM-5.2 self-judge).",
         "",
@@ -621,9 +665,9 @@ def _render_report(report: dict[str, Any]) -> str:
         "",
         "All cells use `baseline / zvec-grep / delta-or-reduction`. Positive reduction means zvec-grep used less.",
         "",
-        "Each case's baseline and zvec-grep values are arithmetic means across that profile's trials. Its third value is the equal-weight arithmetic mean of deltas or reductions after pairing sorted `trial_index` values; it is not a ratio of profile means.",
+        "Each task's baseline and zvec-grep values are arithmetic means across that profile's trials. Its third value is calculated directly from those two displayed profile means.",
         "",
-        "In the Aggregate row, baseline and zvec-grep efficiency values are sums of the per-case trial means (Judge is the equal-weight per-case mean), while the third value is the equal-weight arithmetic mean of the per-case deltas or reductions, not a ratio of totals.",
+        "In the Aggregate row, baseline and zvec-grep efficiency values are sums of the per-task profile means (Judge is the equal-weight task mean), while the third value is the equal-weight arithmetic mean of task comparisons, not a ratio of totals. A task whose baseline denominator is zero has an N/A reduction and is excluded only from that Aggregate metric.",
         "",
         "| Case | Judge self-judge | input_token | toolcall | time (s) |",
         "|---|---:|---:|---:|---:|",
@@ -702,6 +746,19 @@ def _render_report(report: dict[str, Any]) -> str:
         + " |"
     )
     lines.append("")
+    samples = aggregate.get("comparison_samples")
+    if isinstance(samples, dict):
+        task_count = len(report["cases"])
+        lines.extend(
+            (
+                "Aggregate comparison sample counts: "
+                f"Judge n={samples.get('judge_delta', 0)}/{task_count}, "
+                f"input_token n={samples.get('input_token_reduction_pct', 0)}/{task_count}, "
+                f"toolcall n={samples.get('toolcall_reduction_pct', 0)}/{task_count}, "
+                f"time n={samples.get('time_reduction_pct', 0)}/{task_count}.",
+                "",
+            )
+        )
     return "\n".join(lines)
 
 
@@ -907,18 +964,14 @@ def _validate_task_report(report: dict[str, Any], path: Path) -> dict[str, Any]:
         raise SweQaError(f"{prefix}: gate count does not match trial evidence")
 
     comparison = case.get("comparison")
-    comparison_keys = (
-        "judge_delta",
-        "input_token_reduction_pct",
-        "toolcall_reduction_pct",
-        "time_reduction_pct",
-        "cost_reduction_pct",
-    )
     if not isinstance(comparison, dict) or any(
         not _valid_number(comparison.get(key), allow_none=key != "judge_delta")
-        for key in comparison_keys
+        for key in COMPARISON_KEYS
     ):
         raise SweQaError(f"{prefix}: invalid case comparison")
+    # Recompute instead of trusting a potentially stale task summary produced
+    # with a different trial-to-task comparison rule.
+    case["comparison"] = _case_comparison(case)
     return case
 
 
@@ -1085,21 +1138,15 @@ def judge_pairs(
                 else:
                     judge_usage["cost_usd"] += usage["cost_usd"]
             profile_results[profile_name] = _summarize_profile(trial_results)
-        baseline_trials = profile_results["baseline"]["trials"]
-        zvec_trials = profile_results["zvec-grep"]["trials"]
-        cases.append(
-            {
-                "task_id": str(reference["task_id"]),
-                "role": reference.get("role"),
-                "category": reference.get("category"),
-                "trial_count": pair["actual_trials"],
-                "profiles": profile_results,
-                "comparison": _paired_comparison(
-                    baseline_trials,
-                    zvec_trials,
-                ),
-            }
-        )
+        case = {
+            "task_id": str(reference["task_id"]),
+            "role": reference.get("role"),
+            "category": reference.get("category"),
+            "trial_count": pair["actual_trials"],
+            "profiles": profile_results,
+        }
+        case["comparison"] = _case_comparison(case)
+        cases.append(case)
 
     if not judge_usage.pop("cost_complete"):
         judge_usage["cost_usd"] = None

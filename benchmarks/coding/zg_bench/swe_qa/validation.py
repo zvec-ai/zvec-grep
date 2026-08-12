@@ -16,6 +16,7 @@ FULL_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 EXPECTED_TASK_COUNT = 20
 EXPECTED_CATEGORIES = ("what", "where", "how", "why")
 EXPECTED_TASKS_PER_CATEGORY = 5
+EXPECTED_AUTO_TASK_COUNT = 1 + len(EXPECTED_CATEGORIES)
 
 
 def _object(path: Path, *, label: str) -> dict[str, Any]:
@@ -123,16 +124,6 @@ def validate_assets(
     categories = [task for task in tasks if task.get("role") == "category"]
     if len(smoke) != 1 or len(categories) != EXPECTED_TASK_COUNT - 1:
         raise SweQaError("selection must contain 1 smoke and 19 category tasks")
-    smoke_task_id = str(smoke[0]["task_id"])
-    if gate.get("smoke_task") != smoke_task_id:
-        raise SweQaError("selection gate.smoke_task does not match the smoke task")
-    expected_category_tasks = [
-        str(task["task_id"]) for task in tasks if task.get("role") == "category"
-    ]
-    if gate.get("category_tasks") != expected_category_tasks:
-        raise SweQaError(
-            "selection gate.category_tasks must list all non-smoke tasks in order"
-        )
 
     category_counts: Counter[str] = Counter()
     for task in tasks:
@@ -149,6 +140,50 @@ def validate_assets(
     }
     if dict(category_counts) != expected_counts:
         raise SweQaError("selection must contain 5 tasks in each question category")
+
+    smoke_task_id = str(smoke[0]["task_id"])
+    if gate.get("smoke_task") != smoke_task_id:
+        raise SweQaError("selection gate.smoke_task does not match the smoke task")
+    auto_tasks = gate.get("auto_tasks")
+    if not isinstance(auto_tasks, list) or any(
+        not isinstance(task_id, str) or not task_id for task_id in auto_tasks
+    ):
+        raise SweQaError("selection gate.auto_tasks must be an array of task IDs")
+    if len(auto_tasks) != EXPECTED_AUTO_TASK_COUNT:
+        raise SweQaError(
+            "selection gate.auto_tasks must contain exactly "
+            f"{EXPECTED_AUTO_TASK_COUNT} tasks"
+        )
+    if len(set(auto_tasks)) != len(auto_tasks):
+        raise SweQaError("selection gate.auto_tasks must not contain duplicates")
+    unknown_auto_tasks = sorted(set(auto_tasks) - ids)
+    if unknown_auto_tasks:
+        raise SweQaError(
+            "selection gate.auto_tasks contains unknown task IDs: "
+            f"{unknown_auto_tasks}"
+        )
+    if auto_tasks[0] != smoke_task_id:
+        raise SweQaError(
+            "selection gate.auto_tasks must start with the configured smoke task"
+        )
+    auto_category_tasks = [selected[task_id] for task_id in auto_tasks[1:]]
+    if any(task.get("role") != "category" for task in auto_category_tasks):
+        raise SweQaError(
+            "selection gate.auto_tasks entries after smoke must be category tasks"
+        )
+    auto_categories = [str(task.get("category")) for task in auto_category_tasks]
+    if tuple(auto_categories) != EXPECTED_CATEGORIES:
+        raise SweQaError(
+            "selection gate.auto_tasks must contain smoke followed by one category "
+            "task in what/where/how/why order"
+        )
+    expected_category_tasks = [
+        str(task["task_id"]) for task in tasks if task.get("role") == "category"
+    ]
+    if gate.get("category_tasks") != expected_category_tasks:
+        raise SweQaError(
+            "selection gate.category_tasks must list all non-smoke tasks in order"
+        )
 
     if not dataset_path.is_dir():
         raise SweQaError(f"Harbor dataset does not exist: {dataset_path}")
@@ -247,6 +282,8 @@ def validate_assets(
         "valid": True,
         "task_count": len(tasks),
         "task_ids": [str(task["task_id"]) for task in tasks],
+        "auto_task_count": len(auto_tasks),
+        "auto_task_ids": auto_tasks,
         "dataset_files_scanned": len(dataset_files),
         "references_are_judge_only": True,
     }

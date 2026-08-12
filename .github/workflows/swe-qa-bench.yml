@@ -1,16 +1,22 @@
-name: SWE-QA Bench (manual)
+name: SWE-QA Bench
 
 on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       scope:
-        description: Run the smoke pair or all twenty benchmark pairs
+        description: Run the smoke pair or the 20-task All-Full benchmark
         required: true
         default: smoke
         type: choice
         options:
           - smoke
-          - gate-20
+          - all-full
 
 permissions: {}
 
@@ -52,7 +58,7 @@ jobs:
       - name: Build this run's task matrix from the locked selection
         id: task-matrix
         env:
-          SCOPE: ${{ inputs.scope || 'smoke' }}
+          SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'auto' }}
         run: |
           python - <<'PY'
           import json
@@ -65,20 +71,28 @@ jobs:
               ).read_text(encoding="utf-8")
           )
           tasks = selection["tasks"]
+          tasks_by_id = {task["task_id"]: task for task in tasks}
           scope = os.environ["SCOPE"]
           if scope == "smoke":
-              smoke_task = selection["gate"]["smoke_task"]
-              selected = [
-                  task for task in tasks if task["task_id"] == smoke_task
-              ]
-          elif scope == "gate-20":
-              selected = tasks
+              task_ids = [selection["gate"]["smoke_task"]]
+          elif scope == "auto":
+              task_ids = selection["gate"]["auto_tasks"]
+          elif scope in {"all-full", "gate-20"}:
+              # gate-20 remains accepted for legacy API/CLI dispatches.
+              task_ids = [task["task_id"] for task in tasks]
           else:
               raise SystemExit(f"unsupported SWE-QA scope: {scope}")
-          if not selected:
+          if not task_ids:
               raise SystemExit(f"SWE-QA scope {scope} selected no tasks")
+          if len(task_ids) != len(set(task_ids)):
+              raise SystemExit(f"SWE-QA scope {scope} selected duplicate tasks")
+          missing = sorted(set(task_ids) - tasks_by_id.keys())
+          if missing:
+              raise SystemExit(
+                  f"SWE-QA scope {scope} selected unknown tasks: {missing}"
+              )
+          selected = [tasks_by_id[task_id] for task_id in task_ids]
           slugs = [task["task_slug"] for task in selected]
-          task_ids = [task["task_id"] for task in selected]
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"tasks={json.dumps(slugs, separators=(',', ':'))}\n")
               output.write(f"count={len(slugs)}\n")
@@ -108,6 +122,12 @@ jobs:
   run-pair:
     name: Pair + judge / ${{ matrix.task }}
     needs: validate
+    if: >-
+      github.event_name != 'pull_request' ||
+      (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.actor != 'dependabot[bot]'
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     permissions:

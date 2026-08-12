@@ -194,6 +194,64 @@ def _judged_task_report(task_id: str, index: int = 0) -> dict[str, Any]:
     }
 
 
+def _set_report_trial_metrics(
+    report: dict[str, Any],
+    *,
+    baseline: list[tuple[int, int, float, float | None]],
+    zvec: list[tuple[int, int, float, float | None]],
+) -> None:
+    case = report["cases"][0]
+    for profile_name, rows in (("baseline", baseline), ("zvec-grep", zvec)):
+        profile = case["profiles"][profile_name]
+        for trial, (input_tokens, tool_calls, wall_seconds, cost_usd) in zip(
+            profile["trials"], rows, strict=True
+        ):
+            trial["metrics"].update(
+                {
+                    "input_tokens": input_tokens,
+                    "tool_calls": tool_calls,
+                    "agent_wall_seconds": wall_seconds,
+                    "cost_usd": cost_usd,
+                }
+            )
+        profile["metrics"].update(
+            {
+                "input_tokens": sum(row[0] for row in rows) / len(rows),
+                "tool_calls": sum(row[1] for row in rows) / len(rows),
+                "agent_wall_seconds": sum(row[2] for row in rows) / len(rows),
+                "cost_usd": (
+                    None
+                    if any(row[3] is None for row in rows)
+                    else sum(float(row[3]) for row in rows if row[3] is not None)
+                    / len(rows)
+                ),
+            }
+        )
+
+    baseline_summary = case["profiles"]["baseline"]
+    zvec_summary = case["profiles"]["zvec-grep"]
+
+    def reduction(key: str) -> float | None:
+        baseline_value = baseline_summary["metrics"][key]
+        zvec_value = zvec_summary["metrics"][key]
+        if baseline_value is None or zvec_value is None or baseline_value == 0:
+            return None
+        return (baseline_value - zvec_value) / baseline_value * 100
+
+    # Keep the serialized task summary aligned with its displayed profile means.
+    # Individual tests may overwrite it to simulate a stale source artifact.
+    case["comparison"] = {
+        "judge_delta": (
+            zvec_summary["judge"]["total"]
+            - baseline_summary["judge"]["total"]
+        ),
+        "input_token_reduction_pct": reduction("input_tokens"),
+        "toolcall_reduction_pct": reduction("tool_calls"),
+        "time_reduction_pct": reduction("agent_wall_seconds"),
+        "cost_reduction_pct": reduction("cost_usd"),
+    }
+
+
 def _write_harbor_job(
     root: Path,
     *,
@@ -635,22 +693,28 @@ class JudgeTests(unittest.TestCase):
                 [trial["trial_index"] for trial in comparison["trials"]],
                 [1, 2, 3],
             )
-            self.assertAlmostEqual(
-                comparison["input_token_reduction_pct"], 140 / 3
-            )
-            self.assertAlmostEqual(
-                comparison["toolcall_reduction_pct"], 140 / 3
-            )
-            self.assertAlmostEqual(comparison["time_reduction_pct"], 140 / 3)
             profile_mean_ratio = (1100 / 3 - 320) / (1100 / 3) * 100
-            self.assertNotAlmostEqual(
+            self.assertAlmostEqual(
                 comparison["input_token_reduction_pct"], profile_mean_ratio
+            )
+            self.assertAlmostEqual(
+                comparison["toolcall_reduction_pct"], profile_mean_ratio
+            )
+            self.assertAlmostEqual(
+                comparison["time_reduction_pct"], (120 - 101) / 120 * 100
+            )
+            self.assertEqual(
+                [
+                    trial["input_token_reduction_pct"]
+                    for trial in comparison["trials"]
+                ],
+                [90.0, 0.0, 50.0],
             )
             markdown = (output_dir / "report.md").read_text()
             self.assertIn("Aggregate", markdown)
             self.assertIn("input_token", markdown)
             self.assertIn("60.00 / 80.00 / +20.00", markdown)
-            self.assertIn("366.67 / 320.00 / +46.67%", markdown)
+            self.assertIn("366.67 / 320.00 / +12.73%", markdown)
             self.assertIn("equal-weight arithmetic mean", markdown)
             self.assertIn("not a ratio of totals", markdown)
             self.assertNotIn("cost", markdown.lower())
@@ -816,7 +880,7 @@ class JudgeTests(unittest.TestCase):
                     )
             self.assertFalse((root / "report" / "report.json").exists())
 
-    def test_aggregate_averages_per_case_reductions_without_weighting(self) -> None:
+    def test_aggregate_averages_task_comparisons_without_total_weighting(self) -> None:
         def case(
             *,
             baseline: dict[str, int | float],
@@ -901,8 +965,18 @@ class JudgeTests(unittest.TestCase):
             aggregate["comparison"]["input_token_reduction_pct"], totals_ratio
         )
 
-        cases[1]["comparison"]["cost_reduction_pct"] = None
-        self.assertIsNone(_aggregate(cases)["comparison"]["cost_reduction_pct"])
+        cases[1]["profiles"]["baseline"]["metrics"]["cost_usd"] = None
+        aggregate = _aggregate(cases)
+        self.assertEqual(aggregate["comparison"]["cost_reduction_pct"], 90.0)
+        self.assertEqual(
+            aggregate["comparison_samples"]["cost_reduction_pct"], 1
+        )
+        cases[0]["profiles"]["baseline"]["metrics"]["cost_usd"] = None
+        aggregate = _aggregate(cases)
+        self.assertIsNone(aggregate["comparison"]["cost_reduction_pct"])
+        self.assertEqual(
+            aggregate["comparison_samples"]["cost_reduction_pct"], 0
+        )
 
     def test_missing_expected_pair_fails_before_model_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1005,6 +1079,163 @@ class AggregateReportTests(unittest.TestCase):
                     output_dir=output_dir,
                 )
             self.assertEqual(len(retried["cases"]), 1)
+
+    def test_offline_aggregate_uses_task_means_then_equal_weights_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports_root = root / "reports"
+            first = _judged_task_report("reflex:6")
+            _set_report_trial_metrics(
+                first,
+                baseline=[
+                    (100, 10, 10.0, 1.0),
+                    (900, 90, 90.0, 9.0),
+                    (100, 10, 20.0, 2.0),
+                ],
+                zvec=[
+                    (10, 1, 1.0, 0.1),
+                    (900, 90, 90.0, 9.0),
+                    (50, 5, 10.0, 1.0),
+                ],
+            )
+            first["cases"][0]["comparison"][
+                "input_token_reduction_pct"
+            ] = 140 / 3
+            # Pair by trial_index, not incidental array order in the artifact.
+            first["cases"][0]["profiles"]["zvec-grep"]["trials"].reverse()
+
+            second = _judged_task_report("sqlfluff:2", 1)
+            _set_report_trial_metrics(
+                second,
+                baseline=[
+                    (1000, 100, 100.0, 10.0),
+                    (1000, 100, 100.0, 10.0),
+                    (1000, 100, 100.0, 10.0),
+                ],
+                zvec=[
+                    (500, 50, 50.0, 5.0),
+                    (500, 50, 50.0, 5.0),
+                    (500, 50, 50.0, 5.0),
+                ],
+            )
+            _write_json(reports_root / "first" / "report.json", first)
+            _write_json(reports_root / "second" / "report.json", second)
+
+            report = aggregate_reports(
+                reports_root=reports_root,
+                output_dir=root / "combined",
+                expected=["reflex:6", "sqlfluff:2"],
+            )
+
+            first_comparison = report["cases"][0]["comparison"]
+            self.assertAlmostEqual(
+                first_comparison["input_token_reduction_pct"],
+                (1100 - 960) / 1100 * 100,
+            )
+            self.assertEqual(
+                [row["trial_index"] for row in first_comparison["trials"]],
+                [1, 2, 3],
+            )
+            self.assertEqual(
+                [
+                    row["input_token_reduction_pct"]
+                    for row in first_comparison["trials"]
+                ],
+                [90.0, 0.0, 50.0],
+            )
+
+            aggregate = report["aggregate"]
+            self.assertAlmostEqual(
+                aggregate["comparison"]["input_token_reduction_pct"],
+                ((1100 - 960) / 1100 * 100 + 50) / 2,
+            )
+            self.assertEqual(
+                aggregate["comparison_samples"][
+                    "input_token_reduction_pct"
+                ],
+                2,
+            )
+            self.assertAlmostEqual(
+                aggregate["profiles"]["baseline"]["input_tokens"],
+                1100 / 3 + 1000,
+            )
+            self.assertEqual(
+                aggregate["profiles"]["zvec-grep"]["input_tokens"], 820.0
+            )
+            grand_totals_ratio = (
+                aggregate["profiles"]["baseline"]["input_tokens"]
+                - aggregate["profiles"]["zvec-grep"]["input_tokens"]
+            ) / aggregate["profiles"]["baseline"]["input_tokens"] * 100
+            self.assertAlmostEqual(grand_totals_ratio, 40.0)
+            self.assertNotAlmostEqual(
+                aggregate["comparison"]["input_token_reduction_pct"],
+                grand_totals_ratio,
+            )
+            markdown = (root / "combined" / "report.md").read_text()
+            self.assertIn("1,366.67 / 820.00 / +31.36%", markdown)
+
+    def test_na_task_is_excluded_from_only_that_aggregate_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = _judged_task_report("reflex:6")
+            _set_report_trial_metrics(
+                source,
+                baseline=[
+                    (100, 0, 10.0, 0.0),
+                    (100, 0, 10.0, 1.0),
+                    (100, 0, 10.0, None),
+                ],
+                zvec=[
+                    (50, 1, 5.0, 0.1),
+                    (50, 1, 5.0, 0.5),
+                    (50, 1, 5.0, None),
+                ],
+            )
+            _write_json(root / "reports" / "source" / "report.json", source)
+            _write_json(
+                root / "reports" / "valid" / "report.json",
+                _judged_task_report("sqlfluff:2", 1),
+            )
+
+            report = aggregate_reports(
+                reports_root=root / "reports",
+                output_dir=root / "combined",
+                expected=["reflex:6", "sqlfluff:2"],
+            )
+
+            comparison = report["cases"][0]["comparison"]
+            self.assertIsNone(
+                comparison["trials"][0]["toolcall_reduction_pct"]
+            )
+            self.assertIsNone(comparison["toolcall_reduction_pct"])
+            self.assertIsNone(comparison["cost_reduction_pct"])
+            self.assertEqual(
+                report["aggregate"]["comparison"]["toolcall_reduction_pct"],
+                60.0,
+            )
+            self.assertEqual(
+                report["aggregate"]["comparison"]["cost_reduction_pct"],
+                50.0,
+            )
+            self.assertEqual(
+                report["aggregate"]["profiles"]["baseline"]["tool_calls"],
+                20.0,
+            )
+            self.assertEqual(
+                report["aggregate"]["comparison_samples"][
+                    "toolcall_reduction_pct"
+                ],
+                1,
+            )
+            self.assertEqual(
+                report["aggregate"]["comparison_samples"][
+                    "cost_reduction_pct"
+                ],
+                1,
+            )
+            markdown = (root / "combined" / "report.md").read_text()
+            self.assertIn("0.00 / 1.00 / N/A", markdown)
+            self.assertIn("toolcall n=1/2", markdown)
 
     def test_aggregates_twenty_present_reports(self) -> None:
         tasks = list(EXPECTED_TASK_IDS)
