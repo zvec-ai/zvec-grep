@@ -45,6 +45,7 @@
     "test:e2e": "npm run build && npm run test:run:e2e",
     "test:integration": "npm run build && npm run test:run:root && npm run test:run:integration",
     "test:package": "npm run build && node --test --test-concurrency=1 test/package/*.test.mjs",
+    "test:smoke:local-model": "node --test --test-concurrency=1 test/smoke/local-model-package.test.mjs",
     "test:run:e2e": "node --test --test-concurrency=1 test/e2e/*.test.mjs",
     "test:run:integration": "node --test --test-concurrency=1 test/integration/*.test.mjs",
     "test:run:root": "node --test --test-concurrency=1 test/*.test.mjs",

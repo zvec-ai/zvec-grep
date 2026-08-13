@@ -11,9 +11,10 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  package-candidate:
+    name: Build release candidate
     runs-on: ubuntu-latest
-
+    timeout-minutes: 35
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -24,7 +25,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
@@ -32,7 +33,92 @@ jobs:
       - name: Run release checks
         run: npm run check
 
+      - name: Build the release tarball
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --json --pack-destination "$RUNNER_TEMP/package"
+
+      - name: Upload the release candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/package/
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-local-models:
+    name: Verify ${{ matrix.model }} (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: package-candidate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24, 26]
+        model:
+          - local/potion-code-16m-v2
+          - local/all-minilm-l6-v2
+          - local/embeddinggemma-300m
+        exclude:
+          - node: 22
+            model: local/all-minilm-l6-v2
+          - node: 22
+            model: local/embeddinggemma-300m
+          - node: 26
+            model: local/all-minilm-l6-v2
+          - node: 26
+            model: local/embeddinggemma-300m
+    steps:
+      - name: Checkout smoke tests
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Download the release candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/package
+
+      - name: Restore the real model cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/zvec-grep-model-cache
+          key: >-
+            release-model-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.model }}-${{ hashFiles('src/engine/models/catalog.ts', 'package-lock.json') }}
+
+      - name: Run the packed package with the real local model
+        env:
+          ZVEC_GREP_PACKAGE_TARBALL: ${{ runner.temp }}/package
+          ZVEC_GREP_MODEL_CACHE: ${{ runner.temp }}/zvec-grep-model-cache
+          ZVEC_GREP_SMOKE_MODEL: ${{ matrix.model }}
+        run: npm run test:smoke:local-model
+
+  publish:
+    name: Publish verified candidate
+    needs: verify-local-models
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Download the verified release candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/package
+
       - name: Publish package
-        run: npm publish
+        run: npm publish "$RUNNER_TEMP/package"/*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
