@@ -181,16 +181,20 @@ jobs:
       - run: npm run test:package
 
   local-model-smoke:
-    name: local model smoke (${{ matrix.os }})
+    name: local model smoke (${{ matrix.model }}, ${{ matrix.os }})
     needs: package-candidate
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        model:
+          - local/potion-code-16m-v2
+          - local/all-minilm-l6-v2
+          - local/embeddinggemma-300m
     steps:
       - uses: actions/checkout@v6
         with:
@@ -208,12 +212,12 @@ jobs:
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
           key: >-
-            local-model-v1-${{ runner.os }}-${{ runner.arch }}-potion-code-16m-v2-${{ hashFiles('src/engine/models/catalog.ts', 'package-lock.json') }}
-      - name: Run the packed package with real Potion embeddings
+            local-model-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.model }}-${{ hashFiles('src/engine/models/catalog.ts', 'package-lock.json') }}
+      - name: Run the packed package with real local embeddings
         env:
           ZVEC_GREP_PACKAGE_TARBALL: ${{ runner.temp }}/package
           ZVEC_GREP_MODEL_CACHE: ${{ runner.temp }}/zvec-grep-model-cache
-          ZVEC_GREP_SMOKE_MODEL: local/potion-code-16m-v2
+          ZVEC_GREP_SMOKE_MODEL: ${{ matrix.model }}
         run: npm run test:smoke:local-model
 
   isolated-install:
