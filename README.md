@@ -172,7 +172,7 @@ zg is evaluated in two complementary retrieval settings:
 Both zg profiles use Qwen3.7 Text Embedding.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-retrieval-scenarios-v2.png" alt="zg benchmark comparison across coding and general text retrieval: Agent quality is preserved while input tokens, tool calls, and time decrease" width="1200" />
+  <img src="./.github/assets/benchmark-retrieval-scenarios-v3.png" alt="zg benchmark comparison across coding and general text retrieval: Agent quality is preserved while input tokens, tool calls, and time decrease" width="1200" />
 </p>
 
 Agent task effectiveness—as measured by Judge and accuracy—did not decline in

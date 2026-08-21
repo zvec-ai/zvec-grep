@@ -166,7 +166,7 @@ zg 在两个互补的检索场景中进行评测：
 两个 zg Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-retrieval-scenarios-v2.png" alt="zg 在 Coding 和通用文本检索场景中的测试对比：保持 Agent 任务效果，同时降低输入 Token、工具调用和耗时" width="1200" />
+  <img src="./.github/assets/benchmark-retrieval-scenarios-v3.png" alt="zg 在 Coding 和通用文本检索场景中的测试对比：保持 Agent 任务效果，同时降低输入 Token、工具调用和耗时" width="1200" />
 </p>
 
 两种场景中，由 Judge 和 Accuracy 衡量的 Agent 最终任务效果均未下降。代码
