@@ -147,21 +147,14 @@ among tasks whose mean Judge score did not decline.
 | **`matplotlib/matplotlib`** | Where<br>Data / Control-flow | Where does the `FontInfo` NamedTuple propagate font metrics and glyph data through the mathematical text rendering pipeline, and what control flow determines whether the `postscript_name` or the `FT2Font` object is used at different stages of character rendering? |
 | **`django/django`** | Why<br>Design rationale | Why does the User model's unique constraint on the username field interact with Django's ORM transaction handling, and what cascading effects would occur if this constraint were removed on an existing database with formset-based bulk operations? |
 
-Values below show **Baseline → zg**, followed by the **change**, and are means
-over three runs per profile.
+<p align="center">
+  <img src="./.github/assets/benchmark-repository-top3.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
+</p>
 
-| Repository | Judge&nbsp;/100&nbsp;↑ | Input&nbsp;tokens&nbsp;↓ | Tool&nbsp;calls&nbsp;↓ | Time&nbsp;↓ |
-| --- | ---: | ---: | ---: | ---: |
-| `pylint-dev/pylint` | 61.33 → 77.00<br>**+15.67 pp** | 1,379,349 → 239,010<br>**−82.7%** | 54.67 → 9.00<br>**−83.5%** | 286.3s → 69.5s<br>**−75.7%** |
-| `matplotlib/matplotlib` | 83.33 → 86.00<br>**+2.67 pp** | 787,247 → 367,421<br>**−53.3%** | 30.33 → 13.00<br>**−57.1%** | 218.8s → 104.1s<br>**−52.4%** |
-| `django/django` | 85.00 → 87.33<br>**+2.33 pp** | 758,941 → 416,109<br>**−45.2%** | 42.00 → 12.67<br>**−69.8%** | 195.8s → 118.6s<br>**−39.4%** |
-
-Across these three tasks, zg raised the mean Judge score by **6.89 points**
-while reducing input tokens by **65.0%**, tool calls by **72.7%**, time by
-**58.3%**. The tasks span architecture, cross-file data flow, and design
+The highlighted cases span architecture, cross-file data flow, and design
 rationale—the retrieval-heavy situations where locating the right evidence is
 often the dominant cost. This is a post-hoc highlight, not an unbiased estimate
-of overall performance; `pylint:10` also had unusually high Baseline Judge
+of overall performance; the pylint case also had unusually high Baseline Judge
 variance.
 
 ### 2. SWE-QA-Bench — 20 repository tasks

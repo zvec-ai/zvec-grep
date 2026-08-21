@@ -143,20 +143,13 @@ SWE-QA-Bench 任务。
 | **`matplotlib/matplotlib`** | Where<br>数据 / 控制流 | `FontInfo` NamedTuple 在数学文本渲染 Pipeline 中如何传递字体度量和字形数据？控制流如何决定在字符渲染的不同阶段使用 `postscript_name` 还是 `FT2Font` 对象？ |
 | **`django/django`** | Why<br>设计原理 | User 模型中 username 字段的唯一约束为什么会与 Django ORM 事务处理产生关联？如果在已有数据库中移除该约束，会对基于 formset 的批量操作产生哪些级联影响？ |
 
-下表数值按 **Baseline → zg** 展示，随后给出**变化量**；每个 Profile
-均为三次运行的平均值。
+<p align="center">
+  <img src="./.github/assets/benchmark-repository-top3.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
+</p>
 
-| 仓库 | Judge&nbsp;/100&nbsp;↑ | 输入&nbsp;Token&nbsp;↓ | 工具调用&nbsp;↓ | 时间&nbsp;↓ |
-| --- | ---: | ---: | ---: | ---: |
-| `pylint-dev/pylint` | 61.33 → 77.00<br>**+15.67 pp** | 1,379,349 → 239,010<br>**−82.7%** | 54.67 → 9.00<br>**−83.5%** | 286.3s → 69.5s<br>**−75.7%** |
-| `matplotlib/matplotlib` | 83.33 → 86.00<br>**+2.67 pp** | 787,247 → 367,421<br>**−53.3%** | 30.33 → 13.00<br>**−57.1%** | 218.8s → 104.1s<br>**−52.4%** |
-| `django/django` | 85.00 → 87.33<br>**+2.33 pp** | 758,941 → 416,109<br>**−45.2%** | 42.00 → 12.67<br>**−69.8%** | 195.8s → 118.6s<br>**−39.4%** |
-
-在这三个任务上，zg 将平均 Judge 提高 **6.89 分**，同时将输入 Token、
-工具调用和时间分别降低 **65.0%**、**72.7%** 和 **58.3%**。三个任务覆盖
-架构、跨文件数据流和设计原理，都是“定位正确证据”占主要成本的检索密集场景。
-该列表是事后挑选的突出样例，不代表无偏总体估计；其中 `pylint:10` 的
-Baseline Judge 波动也明显较大。
+三个样例覆盖架构、跨文件数据流和设计原理，都是“定位正确证据”占主要成本的
+检索密集场景。该图是事后挑选的突出样例，不代表无偏总体估计；其中 pylint
+样例的 Baseline Judge 波动也明显较大。
 
 ### 2. SWE-QA-Bench — 20 个代码库任务
 
