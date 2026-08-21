@@ -162,35 +162,26 @@ variance.
 
 </details>
 
-### 2. SWE-QA-Bench — 20 repository tasks
+### 2. Code and general retrieval benchmarks
 
-The published [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) study covers
-20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions,
-and 11 repositories. It uses Claude Code with Claude Opus 5, Qwen3.7 Text
-Embedding for the zg profile, and three runs per task and profile.
+zg is evaluated in two complementary retrieval settings:
 
-<p align="center">
-  <img src="./.github/assets/benchmark-swe-qa-20-v2.png" alt="SWE-QA-Bench comparison across 20 repository tasks: Judge score, input tokens, tool calls, wall time, and cost" width="1200" />
-</p>
+- **Code retrieval — [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md):** 20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions, and 11 repositories. The study uses Claude Code with Claude Opus 5 and three runs per task and profile.
+- **General retrieval — [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md):** 80 deep-research cases over a fixed 100,195-document corpus. The study uses Codex `gpt-5.6-sol` at medium reasoning effort and two trials per case and profile.
 
-Across 20 tasks × 3 runs, zg improved mean judged quality while substantially
-reducing every measured resource. The task set was curated for
-retrieval-intensive scenarios and should not be interpreted as a uniform
-sample of all 720 SWE-QA-Bench questions.
-
-### 3. BrowseComp-Plus — 80 deep-research cases
-
-The [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) study evaluates
-multi-document evidence retrieval over a fixed 100,195-document corpus. The
-80-case study uses Codex `gpt-5.6-sol` at medium reasoning effort, Qwen3.7 Text
-Embedding for the zg profile, and two trials per case.
+Both zg profiles use Qwen3.7 Text Embedding.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-browsecomp-plus-80-v2.png" alt="BrowseComp-Plus comparison across 80 deep-research cases: accuracy, input tokens, tool calls, and wall time" width="1200" />
+  <img src="./.github/assets/benchmark-retrieval-scenarios-v1.png" alt="zg benchmark comparison across code retrieval and general retrieval: Agent quality is preserved while input tokens, tool calls, time, and cost decrease" width="1200" />
 </p>
 
-zg preserved **90.00% accuracy** while reducing the amount of context and
-search work required to assemble evidence across documents.
+Agent task effectiveness—as measured by Judge and accuracy—did not decline in
+either setting. For code retrieval, mean Judge moved from 80.42 to 81.92 while
+tokens fell 47.3%, tool calls 58.6%, time 37.5%, and cost 38.3%. For general
+retrieval, accuracy held at 90.00% while tokens fell 41.7%, tool calls 37.3%,
+and time 30.0%. The code task set was curated for retrieval-intensive scenarios
+and should not be interpreted as a uniform sample of all 720 SWE-QA-Bench
+questions.
 
 See the [benchmark documentation](./benchmarks/README.md) for full results and
 reproduction details.
