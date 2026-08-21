@@ -142,7 +142,7 @@ These are the three SWE-QA-Bench tasks with the largest input-token reductions
 among tasks whose mean Judge score did not decline.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-repository-top3.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
+  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
 </p>
 
 The highlighted cases span architecture, cross-file data flow, and design

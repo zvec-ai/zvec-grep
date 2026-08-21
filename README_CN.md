@@ -138,7 +138,7 @@ zg 通过**缩小有效搜索空间**，帮助 Agent 更快找到相关证据 �
 SWE-QA-Bench 任务。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-repository-top3.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
+  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
 </p>
 
 三个样例覆盖架构、跨文件数据流和设计原理，都是“定位正确证据”占主要成本的
