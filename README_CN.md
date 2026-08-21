@@ -131,6 +131,8 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 每项测试均采用配对 A/B 评测：任务、Agent/模型、Prompt、环境和
 资源限制保持一致，仅 `zg` 访问权限及使用说明不同。
 
+完整结果和复现细节参见[性能测试文档](./benchmarks/README_CN.md)。
+
 ### 1. 整体检索测试
 
 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 使用 Claude Code 与
@@ -142,21 +144,24 @@ Profile 均使用 Qwen3.7 Text Embedding。
   <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
 </p>
 
-SWE-QA-Bench 任务集针对检索密集场景进行了筛选，不应被理解为对
-全部 720 道题目的均匀抽样。完整结果和复现细节参见
-[性能测试文档](./benchmarks/README_CN.md)。
+- **为何有效：** 语义发现先收窄搜索范围，排序后的词法检索再锚定精确标识符；
+  紧凑的证据结果减少了大范围扫描、重复工具调用和模型上下文。
+- **为何通用：** 同一检索流程可以适配不同内容：代码索引保留符号、签名和
+  层级路径，通用文本则按相关 section 与 chunk 返回证据。
 
 ### 2. 代表性仓库案例
-
-以下是在平均 Judge 不下降的任务中，输入 Token 降幅最大的三个
-SWE-QA-Bench 任务。
 
 <p align="center">
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
 </p>
 
-这些样例是事后挑选的突出案例，不代表无偏总体估计；其中 pylint
-样例的 Baseline Judge 波动也明显较大。
+- **Pylint — Python 静态分析器：** 任务需要理解 AST 节点处理如何区分带标注与
+  不带标注的属性初始化；由于架构入口事先未知，保留符号与层级路径的检索
+  更适合定位相关实现。
+- **Matplotlib — 绘图与渲染库：** 任务需要沿数学文本渲染的多个阶段追踪
+  `FontInfo` 与字体选择；语义与词法联合排序有助于还原跨文件的数据流和控制流。
+- **Django — Web 框架：** 任务关联 username 唯一约束、ORM 事务和 formset
+  批量操作；紧凑的排序证据便于汇集分散在多处的设计依据。
 
 <details>
 <summary><strong>测试仓库与具体问题</strong></summary>

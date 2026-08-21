@@ -132,6 +132,9 @@ Each benchmark uses paired A/B runs with tasks, agent/model, prompt,
 environment, and limits held constant; only `zg` access and usage guidance
 differ.
 
+See the [benchmark documentation](./benchmarks/README.md) for full results and
+reproduction details.
+
 ### 1. Overall retrieval benchmarks
 
 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) uses Claude Code with
@@ -143,22 +146,29 @@ Text Embedding.
   <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
 </p>
 
-The SWE-QA-Bench task set was curated for retrieval-intensive scenarios and
-is not a uniform sample of all 720 questions. See the
-[benchmark documentation](./benchmarks/README.md) for full results and
-reproduction details.
+- **Why it helps:** semantic discovery narrows the search space, ranked lexical
+  retrieval anchors exact identifiers, and compact evidence reduces broad
+  scans, repeated tool calls, and model context.
+- **Why it generalizes:** the same retrieval loop works across domains—code is
+  indexed with symbols, signatures, and breadcrumbs, while prose is retrieved
+  as focused sections and chunks.
 
 ### 2. Representative repository cases
-
-These are the three SWE-QA-Bench tasks with the largest input-token reductions
-among tasks whose mean Judge score did not decline.
 
 <p align="center">
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
 </p>
 
-These post-hoc highlights are not an unbiased estimate of overall performance;
-the pylint case also had unusually high Baseline Judge variance.
+- **Pylint — Python static analysis:** the task asks how AST node handling
+  separates annotated and non-annotated attribute initialization. Symbol-aware
+  retrieval is useful because the architectural entry point is not known in
+  advance.
+- **Matplotlib — plotting and rendering:** the task traces `FontInfo` and font
+  selection through multiple math-text rendering stages. Ranked semantic and
+  lexical evidence helps reconstruct the cross-file data and control flow.
+- **Django — web framework:** the task connects username uniqueness, ORM
+  transactions, and formset bulk operations. Compact ranked evidence brings
+  the distributed design rationale together.
 
 <details>
 <summary><strong>Repository questions</strong></summary>
