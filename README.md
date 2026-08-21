@@ -169,11 +169,9 @@ The published [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) study covers
 and 11 repositories. It uses Claude Code with Claude Opus 5, Qwen3.7 Text
 Embedding for the zg profile, and three runs per task and profile.
 
-| Profile | Judge&nbsp;/100&nbsp;↑ | Avg.&nbsp;input&nbsp;tokens&nbsp;↓ | Avg.&nbsp;tool&nbsp;calls&nbsp;↓ | Avg.&nbsp;time&nbsp;↓ | Avg.&nbsp;cost&nbsp;↓ |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Baseline | 80.42 | 558,651 | 23.42 | 127.5s | $0.905 |
-| Baseline + zg | 81.92 | 294,262 | 9.70 | 79.7s | $0.558 |
-| **Change** | **+1.50 pp** | **−47.3%** | **−58.6%** | **−37.5%** | **−38.3%** |
+<p align="center">
+  <img src="./.github/assets/benchmark-swe-qa-20-v1.png" alt="SWE-QA-Bench comparison across 20 repository tasks: Judge score, input tokens, tool calls, wall time, and cost" width="1200" />
+</p>
 
 Across 20 tasks × 3 runs, zg improved mean judged quality while substantially
 reducing every measured resource. The task set was curated for
@@ -187,11 +185,9 @@ multi-document evidence retrieval over a fixed 100,195-document corpus. The
 80-case study uses Codex `gpt-5.6-sol` at medium reasoning effort, Qwen3.7 Text
 Embedding for the zg profile, and two trials per case.
 
-| Profile | Accuracy&nbsp;↑ | Avg.&nbsp;input&nbsp;tokens&nbsp;↓ | Avg.&nbsp;tool&nbsp;calls&nbsp;↓ | Avg.&nbsp;time&nbsp;↓ |
-| --- | ---: | ---: | ---: | ---: |
-| Baseline | 90.00% | 2.04M | 22.70 | 284.8s |
-| Baseline + zg | 90.00% | 1.19M | 14.24 | 199.3s |
-| **Change** | **0.00 pp** | **−41.7%** | **−37.3%** | **−30.0%** |
+<p align="center">
+  <img src="./.github/assets/benchmark-browsecomp-plus-80-v1.png" alt="BrowseComp-Plus comparison across 80 deep-research cases: accuracy, input tokens, tool calls, and wall time" width="1200" />
+</p>
 
 zg preserved **90.00% accuracy** while reducing the amount of context and
 search work required to assemble evidence across documents.

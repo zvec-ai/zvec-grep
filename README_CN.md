@@ -163,11 +163,9 @@ What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的 
 检索密集任务。测试使用 Claude Code 与 Claude Opus 5，zg Profile 使用
 Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
 
-| Profile | Judge&nbsp;/100&nbsp;↑ | 平均输入&nbsp;Token&nbsp;↓ | 平均工具调用&nbsp;↓ | 平均时间&nbsp;↓ | 平均成本&nbsp;↓ |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Baseline | 80.42 | 558,651 | 23.42 | 127.5s | $0.905 |
-| Baseline + zg | 81.92 | 294,262 | 9.70 | 79.7s | $0.558 |
-| **变化** | **+1.50 pp** | **−47.3%** | **−58.6%** | **−37.5%** | **−38.3%** |
+<p align="center">
+  <img src="./.github/assets/benchmark-swe-qa-20-v1.png" alt="20 个代码库任务上的 SWE-QA-Bench 对比：Judge、输入 Token、工具调用、耗时和成本" width="1200" />
+</p>
 
 在 20 个任务 × 3 次运行中，zg 在提高平均评审质量的同时，显著降低了所有
 测量到的资源消耗。这组任务针对检索密集场景进行了筛选，不应被理解为对全部
@@ -180,11 +178,9 @@ Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
 `gpt-5.6-sol`、medium 推理强度，zg Profile 使用 Qwen3.7 Text Embedding，
 每个样例运行两次。
 
-| Profile | 准确率&nbsp;↑ | 平均输入&nbsp;Token&nbsp;↓ | 平均工具调用&nbsp;↓ | 平均时间&nbsp;↓ |
-| --- | ---: | ---: | ---: | ---: |
-| Baseline | 90.00% | 2.04M | 22.70 | 284.8s |
-| Baseline + zg | 90.00% | 1.19M | 14.24 | 199.3s |
-| **变化** | **0.00 pp** | **−41.7%** | **−37.3%** | **−30.0%** |
+<p align="center">
+  <img src="./.github/assets/benchmark-browsecomp-plus-80-v1.png" alt="80 个深度研究样例上的 BrowseComp-Plus 对比：准确率、输入 Token、工具调用和耗时" width="1200" />
+</p>
 
 zg 在保持 **90.00% 准确率**的同时，减少了跨文档组装证据所需的上下文和
 搜索工作量。
