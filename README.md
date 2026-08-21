@@ -156,7 +156,7 @@ Text Embedding.
 ### 2. Representative repository cases
 
 <p align="center">
-  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
+  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="980" />
 </p>
 
 - **Pylint — Python static analysis:** the task asks how AST node handling

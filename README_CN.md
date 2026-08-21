@@ -152,7 +152,7 @@ Profile 均使用 Qwen3.7 Text Embedding。
 ### 2. 代表性仓库案例
 
 <p align="center">
-  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
+  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
 </p>
 
 - **Pylint — Python 静态分析器：** 任务需要理解 AST 节点处理如何区分带标注与
