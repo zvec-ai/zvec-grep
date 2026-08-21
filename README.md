@@ -162,24 +162,24 @@ variance.
 
 </details>
 
-### 2. Code and general retrieval benchmarks
+### 2. Coding and general text retrieval benchmarks
 
 zg is evaluated in two complementary retrieval settings:
 
-- **Code retrieval — [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md):** 20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions, and 11 repositories. The study uses Claude Code with Claude Opus 5 and three runs per task and profile.
-- **General retrieval — [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md):** 80 deep-research cases over a fixed 100,195-document corpus. The study uses Codex `gpt-5.6-sol` at medium reasoning effort and two trials per case and profile.
+- **Coding / repository retrieval — [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md):** 20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions, and 11 repositories. The study uses Claude Code with Claude Opus 5 and three runs per task and profile.
+- **General text retrieval — [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md):** 80 deep-research cases over a fixed 100,195-document corpus. The study uses Codex `gpt-5.6-sol` at medium reasoning effort and two trials per case and profile.
 
 Both zg profiles use Qwen3.7 Text Embedding.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-retrieval-scenarios-v1.png" alt="zg benchmark comparison across code retrieval and general retrieval: Agent quality is preserved while input tokens, tool calls, time, and cost decrease" width="1200" />
+  <img src="./.github/assets/benchmark-retrieval-scenarios-v2.png" alt="zg benchmark comparison across coding and general text retrieval: Agent quality is preserved while input tokens, tool calls, and time decrease" width="1200" />
 </p>
 
 Agent task effectiveness—as measured by Judge and accuracy—did not decline in
 either setting. For code retrieval, mean Judge moved from 80.42 to 81.92 while
-tokens fell 47.3%, tool calls 58.6%, time 37.5%, and cost 38.3%. For general
-retrieval, accuracy held at 90.00% while tokens fell 41.7%, tool calls 37.3%,
-and time 30.0%. The code task set was curated for retrieval-intensive scenarios
+tokens fell 47.3%, tool calls 58.6%, and time 37.5%. For general text retrieval,
+accuracy held at 90.00% while tokens fell 41.7%, tool calls 37.3%, and time
+30.0%. The code task set was curated for retrieval-intensive scenarios
 and should not be interpreted as a uniform sample of all 720 SWE-QA-Bench
 questions.
 
