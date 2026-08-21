@@ -48,6 +48,15 @@ export function contextText(result: ZvecGrepContextResult): string {
     lines.push(item.content);
   }
 
+  if (result.relationships && result.relationships.length > 0) {
+    lines.push("", "relationships:");
+    for (const relation of result.relationships) {
+      lines.push(
+        `- ${relation.srcLabel} --${relation.kind}--> ${relation.dstLabel}`,
+      );
+    }
+  }
+
   return lines.join("\n");
 }
 
@@ -61,6 +70,7 @@ export function simplifyContextResult(
     coverage: result.coverage,
     workspaceIndex: result.workspaceIndex,
     diagnostics: result.diagnostics,
+    relationships: result.relationships,
     items: result.items.map((item) => ({
       kind: item.kind,
       rank: item.rank,

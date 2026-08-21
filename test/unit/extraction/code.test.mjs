@@ -72,6 +72,7 @@ test("code extractor preserves TypeScript metadata, scope, and source ranges", a
     scope: null,
     nodeType: "function_declaration",
     signature: "async function add(value: number): Promise<number>",
+    arity: 1,
     doc: "Adds one.",
     modifiers: ["async"],
   });
@@ -83,6 +84,7 @@ test("code extractor preserves TypeScript metadata, scope, and source ranges", a
     scope: "Box",
     nodeType: "method_definition",
     signature: "static create()",
+    arity: 0,
     doc: null,
     modifiers: ["static"],
   });
@@ -142,6 +144,7 @@ test("code extractor preserves language-specific symbols and scopes", async () =
     scope: null,
     nodeType: "type_definition",
     signature: "typedef struct Widget { int value; } Widget",
+    arity: null,
     doc: null,
     modifiers: [],
   });
@@ -153,6 +156,7 @@ test("code extractor preserves language-specific symbols and scopes", async () =
     scope: "Widget",
     nodeType: "method_declaration",
     signature: "func (w *Widget) Value() int",
+    arity: 0,
     doc: null,
     modifiers: ["exported"],
   });
@@ -165,6 +169,7 @@ test("code extractor preserves language-specific symbols and scopes", async () =
     scope: "Service",
     nodeType: "decorated_definition",
     signature: "async def fetch(value: str) -> str:",
+    arity: 1,
     doc: null,
     modifiers: ["async", "static"],
   });

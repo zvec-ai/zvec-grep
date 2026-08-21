@@ -34,9 +34,12 @@ import type {
   SearchHit,
   SearchPlan,
   SearchPlanResult,
+  Range,
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
+import { exploreGraph, queryGraphNeighborhood } from "../graph/index.js";
+import type { StoredEntity } from "../storage/index.js";
 import {
   workspaceIndexInfoFromManifest,
   CURRENT_MANIFEST_VERSION,
@@ -69,6 +72,11 @@ import type {
   ZvecGrepContextItem,
   ZvecGrepContextOptions,
   ZvecGrepContextResult,
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
+  ZvecGrepGraphEntity,
   ZvecGrepInfoOptions,
   ZvecGrepInfoResult,
   ZvecGrepIndexOptions,
@@ -97,6 +105,15 @@ export async function createZvecGrep(
 export type WorkspaceReadSession = {
   readonly root: string;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  close(): Promise<void>;
+};
+
+export type WorkspaceGraphReadSession = {
+  readonly root: string;
+  explore(options: ZvecGrepExploreOptions): Promise<ZvecGrepExploreResult>;
+  graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult>;
   close(): Promise<void>;
 };
 
@@ -161,6 +178,57 @@ export function openWorkspaceReadSession(
   };
 }
 
+export function openWorkspaceGraphReadSession(
+  startRoot: string,
+): WorkspaceGraphReadSession {
+  const start = resolveZvecGrepRoot(startRoot);
+  assertNearestWorkspaceHomeUnlocked(start, "daemon.graph.open");
+  const nearest = findNearestWorkspaceIndex(start);
+  if (!nearest) throw workspaceIndexMissingError(start, "undecided");
+  const { location, info } = nearest;
+  if (info.indexPolicy === "disabled") {
+    throw workspaceIndexDisabledError(location.root);
+  }
+  if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location)) {
+    throw workspaceIndexMissingError(
+      location.root,
+      info.indexPolicy ?? "enabled",
+    );
+  }
+
+  // Graph reads need the persisted entity store and SQLite only. Do not pass
+  // an embedding model or involve the daemon model pool.
+  const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
+  let closed = false;
+  return {
+    root: location.root,
+    async explore(options) {
+      assertReadSessionOpen(closed);
+      return await withHomeReadLock(location.home, "daemon.explore", () =>
+        exploreOpenWorkspaceIndex(location.root, workspaceIndex, options),
+      );
+    },
+    async graphNeighborhood(options) {
+      assertReadSessionOpen(closed);
+      return await withHomeReadLock(
+        location.home,
+        "daemon.graph-neighborhood",
+        () =>
+          graphNeighborhoodOpenWorkspaceIndex(
+            location.root,
+            workspaceIndex,
+            options,
+          ),
+      );
+    },
+    async close() {
+      if (closed) return;
+      workspaceIndex.close();
+      closed = true;
+    },
+  };
+}
+
 export function createEmbeddingModelForIdentity(
   identity: EmbeddingModelIdentity,
   options: CreateZvecGrepOptions = {},
@@ -214,6 +282,9 @@ class ZvecGrepService implements ZvecGrep {
           options.rebuild ? "index.rebuild" : "index",
           async () => {
             const existing = readWorkspaceManifest(location.home);
+            if (!options.rebuild) {
+              assertWorkspaceIndexVersionMatchesCurrent(existing);
+            }
             const existingRuntime = existing?.embeddingRuntime ?? {};
             const embeddingModel = this.embeddingModelForIndex(
               existing,
@@ -402,6 +473,57 @@ class ZvecGrepService implements ZvecGrep {
         this.contextWithTimings(options, timings),
       );
       return withContextTimings(result, timings);
+    });
+  }
+
+  async explore(
+    options: ZvecGrepExploreOptions,
+  ): Promise<ZvecGrepExploreResult> {
+    this.ensureOpen();
+    return await this.withGraphWorkspace(
+      options.root ?? this.root,
+      "explore",
+      (root, workspaceIndex) =>
+        exploreOpenWorkspaceIndex(root, workspaceIndex, options),
+    );
+  }
+
+  async graphNeighborhood(
+    options: ZvecGrepGraphNeighborhoodOptions,
+  ): Promise<ZvecGrepGraphNeighborhoodResult> {
+    this.ensureOpen();
+    return await this.withGraphWorkspace(
+      options.root ?? this.root,
+      "graph-neighborhood",
+      (root, workspaceIndex) =>
+        graphNeighborhoodOpenWorkspaceIndex(root, workspaceIndex, options),
+    );
+  }
+
+  private async withGraphWorkspace<T>(
+    startRoot: string,
+    operation: string,
+    fn: (root: string, workspaceIndex: WorkspaceIndex) => T | Promise<T>,
+  ): Promise<T> {
+    const start = resolveZvecGrepRoot(startRoot);
+    assertNearestWorkspaceHomeUnlocked(start, operation);
+    const nearest = findNearestWorkspaceIndex(start);
+    if (!nearest) throw workspaceIndexMissingError(start, "undecided");
+    const { location, info } = nearest;
+    if (info.indexPolicy === "disabled")
+      throw workspaceIndexDisabledError(location.root);
+    if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location))
+      throw workspaceIndexMissingError(
+        location.root,
+        info.indexPolicy ?? "enabled",
+      );
+    return await withHomeReadLock(location.home, operation, async () => {
+      const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
+      try {
+        return await fn(location.root, workspaceIndex);
+      } finally {
+        workspaceIndex.close();
+      }
     });
   }
 
@@ -927,6 +1049,174 @@ class ZvecGrepService implements ZvecGrep {
   }
 }
 
+function assertReadSessionOpen(closed: boolean): void {
+  if (closed) {
+    throw new EngineError("Workspace read session is already closed", {
+      code: "ZVEC_GREP.ENGINE.SERVICE.READ_SESSION_CLOSED",
+    });
+  }
+}
+
+async function exploreOpenWorkspaceIndex(
+  root: string,
+  workspaceIndex: WorkspaceIndex,
+  options: ZvecGrepExploreOptions,
+): Promise<ZvecGrepExploreResult> {
+  const result = exploreGraph(workspaceIndex.graph, workspaceIndex, options);
+  return {
+    root,
+    available: result.available,
+    unavailableReason: result.available
+      ? undefined
+      : workspaceIndex.graph.unavailableReason,
+    query: result.query,
+    roots: result.roots.map(mapExploreNode),
+    nodes: result.nodes.map(mapExploreNode),
+    edges: result.edges.map((edge) => ({ ...edge })),
+    edgesTruncated: result.edgesTruncated,
+    callPaths: result.callPaths.map((path) => ({
+      ...path,
+      nodes: [...path.nodes],
+    })),
+    blastRadius: result.blastRadius.map((item) => ({
+      rootId: item.rootId,
+      dependents: item.dependents.map((ref) => ({
+        id: ref.id,
+        entity: mapGraphEntity(ref.entity),
+      })),
+      tests: item.tests.map((ref) => ({
+        id: ref.id,
+        entity: mapGraphEntity(ref.entity),
+      })),
+    })),
+    changeSurface: result.changeSurface.map((item) => ({
+      ...item,
+      entity: mapGraphEntity(item.entity)!,
+    })),
+    dynamicBoundaries: result.dynamicBoundaries.map((boundary) => ({
+      sourceId: boundary.sourceId,
+      target: {
+        raw: boundary.target.raw,
+        member: boundary.target.member,
+        receiver: boundary.target.receiver
+          ? { ...boundary.target.receiver }
+          : undefined,
+        hints: boundary.target.hints
+          ? {
+              ...boundary.target.hints,
+              candidateTypes: boundary.target.hints.candidateTypes
+                ? [...boundary.target.hints.candidateTypes]
+                : undefined,
+              genericBounds: boundary.target.hints.genericBounds
+                ? [...boundary.target.hints.genericBounds]
+                : undefined,
+            }
+          : undefined,
+      },
+      reason: boundary.reason,
+      candidates: [...boundary.candidates],
+      candidatesTruncated: boundary.candidatesTruncated,
+      candidateDetails: boundary.candidateDetails.map((candidate) => ({
+        ...candidate,
+      })),
+    })),
+    dynamicBoundariesTruncated: result.dynamicBoundariesTruncated,
+    files: result.files.map((bundle) => ({
+      file: mapGraphFile(bundle.file),
+      score: bundle.score,
+      isCentral: bundle.isCentral,
+      isChangeSurface: bundle.isChangeSurface,
+      symbols: bundle.symbols.map((symbol) => ({
+        ...symbol,
+        range: copyRange(symbol.range),
+      })),
+      text: bundle.text,
+    })),
+    emptyReason: result.emptyReason,
+  };
+}
+
+async function graphNeighborhoodOpenWorkspaceIndex(
+  root: string,
+  workspaceIndex: WorkspaceIndex,
+  options: ZvecGrepGraphNeighborhoodOptions,
+): Promise<ZvecGrepGraphNeighborhoodResult> {
+  const result = queryGraphNeighborhood(
+    workspaceIndex.graph,
+    workspaceIndex,
+    options,
+  );
+  return {
+    root,
+    available: result.available,
+    unavailableReason: result.available
+      ? undefined
+      : workspaceIndex.graph.unavailableReason,
+    direction: result.direction,
+    query: result.query,
+    depth: result.depth,
+    limit: result.limit,
+    seeds: result.seeds.map((seed) => ({
+      id: seed.id,
+      entity: mapGraphEntity(seed.entity)!,
+    })),
+    ambiguous: result.ambiguous,
+    seed: result.seed
+      ? { id: result.seed.id, entity: mapGraphEntity(result.seed.entity)! }
+      : undefined,
+    neighbors: result.neighbors.map((neighbor) => ({
+      id: neighbor.id,
+      kind: neighbor.kind,
+      count: neighbor.count,
+      entity: mapGraphEntity(neighbor.entity),
+    })),
+  };
+}
+
+function mapExploreNode(node: {
+  id: string;
+  kind?: string;
+  isRoot: boolean;
+  entity: Parameters<typeof mapGraphEntity>[0];
+}): ZvecGrepExploreResult["nodes"][number] {
+  return {
+    id: node.id,
+    kind: node.kind,
+    isRoot: node.isRoot,
+    entity: mapGraphEntity(node.entity),
+  };
+}
+
+function mapGraphEntity(
+  stored: StoredEntity | null,
+): ZvecGrepGraphEntity | null {
+  if (!stored) return null;
+  const metadata = stored.entity.metadata;
+  return {
+    entityId: stored.entity.id,
+    name:
+      metadata?.kind === "code"
+        ? (metadata.symbolName ?? undefined)
+        : (metadata?.heading ?? undefined),
+    kind: metadata?.kind === "code" ? metadata.symbolType : metadata?.kind,
+    file: mapGraphFile(stored.file),
+    range: copyRange(stored.entity.range),
+  };
+}
+
+function mapGraphFile(file: FileInfo): ZvecGrepGraphEntity["file"] {
+  return {
+    id: file.id,
+    absolutePath: file.absolutePath,
+    relativePath: file.relativePath,
+    rootPath: file.rootPath,
+  };
+}
+
+function copyRange(range: Range): Range {
+  return structuredClone(range);
+}
+
 async function contextFromOpenWorkspaceIndex(input: {
   root: string;
   request: NormalizedContextRequest;
@@ -977,6 +1267,11 @@ async function contextFromOpenWorkspaceIndex(input: {
     groups.filter((group) => group.role === "primary").map((group) => group.id),
   );
 
+  const graphExpand = mergeGraphExpandDiagnostics(
+    searches.map((search) => search.graphExpand),
+  );
+  const relationships = mergeSearchRelationships(searches);
+
   return {
     query: input.request.displayQuery,
     root: input.root,
@@ -994,6 +1289,7 @@ async function contextFromOpenWorkspaceIndex(input: {
       role: group.role,
       items: groupItems[index] ?? [],
     })),
+    ...(relationships.length > 0 ? { relationships } : {}),
     diagnostics: {
       emptyReason: items.length === 0 ? "no_matches" : undefined,
       index: {
@@ -1004,8 +1300,66 @@ async function contextFromOpenWorkspaceIndex(input: {
           role: group.role,
         })),
         routes: searches.flatMap((search) => search.plan.routes),
+        ...(graphExpand ? { graphExpand } : {}),
       },
     },
+  };
+}
+
+function mergeSearchRelationships(
+  searches: readonly SearchPlanResult[],
+): SearchPlanResult["relationships"] {
+  const seen = new Set<string>();
+  const merged: SearchPlanResult["relationships"] = [];
+  for (const relationship of searches.flatMap(
+    (search) => search.relationships,
+  )) {
+    const key = `${relationship.scope}\0${relationship.srcId}\0${relationship.dstId}\0${relationship.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(relationship);
+    if (merged.length >= 20) break;
+  }
+  return merged;
+}
+
+function mergeGraphExpandDiagnostics(
+  parts: readonly (
+    | {
+        available: boolean;
+        unavailableReason?: string;
+        seeds: number;
+        neighborsAdded: number;
+      }
+    | undefined
+  )[],
+):
+  | {
+      available: boolean;
+      unavailableReason?: string;
+      seeds: number;
+      neighborsAdded: number;
+    }
+  | undefined {
+  const present = parts.filter(
+    (
+      part,
+    ): part is {
+      available: boolean;
+      unavailableReason?: string;
+      seeds: number;
+      neighborsAdded: number;
+    } => part !== undefined,
+  );
+  if (present.length === 0) {
+    return undefined;
+  }
+  return {
+    available: present.some((part) => part.available),
+    unavailableReason: present.find((part) => part.unavailableReason)
+      ?.unavailableReason,
+    seeds: present.reduce((sum, part) => sum + part.seeds, 0),
+    neighborsAdded: present.reduce((sum, part) => sum + part.neighborsAdded, 0),
   };
 }
 
@@ -1347,6 +1701,25 @@ function prepareWorkspaceManifest(
     updatedTime: now,
     embeddingRuntime,
   };
+}
+
+function assertWorkspaceIndexVersionMatchesCurrent(
+  existing: WorkspaceManifest | null,
+): void {
+  if (!isWorkspaceIndexed(existing)) return;
+  if (existing.indexVersion === CURRENT_INDEX_VERSION) return;
+  throw new EngineError("Workspace index version is not supported", {
+    code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH",
+    context: errorDetails([
+      workspaceIndexDetail(existing.name),
+      detail("expected", CURRENT_INDEX_VERSION),
+      detail("actual", existing.indexVersion),
+      detail(
+        "hint",
+        'Incremental indexing cannot upgrade persisted data; run "zg index --rebuild".',
+      ),
+    ]),
+  });
 }
 
 function currentEmbeddingSchema(

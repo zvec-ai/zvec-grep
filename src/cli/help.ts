@@ -71,6 +71,10 @@ Usage:
 
 Commands:
   query          Search indexed context or run managed ripgrep
+  explore        Build a code-graph context pack for a symbol/query
+  callers        List callers of a symbol (code graph)
+  callees        List callees of a symbol (code graph)
+  impact         List reverse dependents (calls/refs) of a symbol
   index          Build, rebuild, or drop the workspace index
   status         Show workspace and index status
   config         Configure provider credentials and embedding model defaults
@@ -83,6 +87,9 @@ Commands:
 
 Examples:
   zg query "where authentication is validated"
+  zg explore AuthService
+  zg callers validateToken --depth 2
+  zg impact formatDate
   zg query --fts "AuthService"
   zg query --rg -F "AuthService" src
   zg index --embedding local/potion-code-16m-v2
@@ -116,6 +123,9 @@ Search routes:
   --vector <query>                  Add a semantic/vector query
   --fuse                            Fuse all query groups into one ranked list
   --rg                              Run exhaustive managed ripgrep
+
+Indexed query also expands call-graph neighbors of top hits when a code graph
+is available (built during zg index). Neighbors appear as matchedBy=graph.
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
@@ -160,6 +170,35 @@ ${formatEnvironmentVariables([
 ])}
 
 See zg help environment for precedence and Server-mode scope.`;
+    case "explore":
+      return `Usage:
+  zg explore <symbol-or-query> [options]
+
+Builds a CodeGraph-style context pack from the workspace code graph:
+seed symbols → type hierarchy → deep neighborhood → RWR file ranking →
+zvec entity-content assembly (grouped by file).
+
+Uses the nearest workspace index from the current directory.
+
+Options:
+  --limit <n>                       Max seed symbols (default 8)
+  --depth <n>                       Traversal depth (default 3)
+  --max-files <n>                   Max files in the pack (default 8)
+  --seed-id <id>                    Disambiguate when multiple symbols match`;
+    case "callers":
+    case "callees":
+    case "impact":
+      return `Usage:
+  zg ${topic} <symbol> [options]
+
+Query the workspace code graph for ${topic} of a symbol.
+Requires a built index (zg index). Neighbors are resolved by exact symbol name.
+Uses the nearest workspace index from the current directory.
+
+Options:
+  --depth <n>                       Traversal depth (default 1)
+  --limit <n>                       Max neighbors (default 20)
+  --seed-id <id>                    Disambiguate when multiple symbols match`;
     case "index":
       return `Usage:
   zg index [root] [options]

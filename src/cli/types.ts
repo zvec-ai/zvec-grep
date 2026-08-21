@@ -69,10 +69,20 @@ export type CliOptions = {
   modifiedBefore?: number;
   symbolTypes?: CodeSymbolType[];
   embeddingConcurrency?: number;
+  /** Graph neighborhood / explore traversal depth. */
+  depth?: number;
+  /** Explore: max files in assembled context. */
+  maxFiles?: number;
+  /** Explore / neighborhood: disambiguate seed entity id. */
+  seedId?: string;
 };
 
 export type CliCommand =
   | "query"
+  | "explore"
+  | "callers"
+  | "callees"
+  | "impact"
   | "index"
   | "status"
   | "install"

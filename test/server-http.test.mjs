@@ -161,6 +161,10 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   t.after(async () => publicClient.close());
   const publicTools = await publicClient.listTools();
   assert.deepEqual(publicTools.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_callees",
+    "zvec_grep_callers",
+    "zvec_grep_explore",
+    "zvec_grep_impact",
     "zvec_grep_search",
   ]);
   await assert.rejects(
@@ -185,7 +189,13 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.equal(modernPublicTools.cacheScope, "private");
   assert.deepEqual(
     modernPublicTools.tools.map((tool) => tool.name).toSorted(),
-    ["zvec_grep_search"],
+    [
+      "zvec_grep_callees",
+      "zvec_grep_callers",
+      "zvec_grep_explore",
+      "zvec_grep_impact",
+      "zvec_grep_search",
+    ],
   );
 
   const legacyAdmin = await fetch(adminMcpUrl, {
@@ -216,6 +226,10 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
 
   const listed = await clients[0].listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_callees",
+    "zvec_grep_callers",
+    "zvec_grep_explore",
+    "zvec_grep_impact",
     "zvec_grep_index",
     "zvec_grep_index_drop",
     "zvec_grep_index_status",
@@ -473,6 +487,10 @@ test("full MCP toolset restores all tools on the public endpoint", async (t) => 
 
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
+    "zvec_grep_callees",
+    "zvec_grep_callers",
+    "zvec_grep_explore",
+    "zvec_grep_impact",
     "zvec_grep_index",
     "zvec_grep_index_drop",
     "zvec_grep_index_status",

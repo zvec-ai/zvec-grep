@@ -30,6 +30,10 @@ import {
   contextWarningLines,
   printCliContextResult,
 } from "./format/context.js";
+import {
+  printExploreResult,
+  printNeighborhoodResult,
+} from "./format/explore.js";
 import { printDebug } from "./format/debug.js";
 import { createIndexProgressReporter } from "./format/progress.js";
 import {
@@ -75,6 +79,14 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   switch (parsed.command) {
     case "query":
       await runQuery(parsed);
+      return;
+    case "explore":
+      await runExplore(parsed);
+      return;
+    case "callers":
+    case "callees":
+    case "impact":
+      await runGraphNeighborhood(parsed);
       return;
     case "index":
       await runIndex(parsed);
@@ -564,6 +576,87 @@ async function runStatus(parsed: ParsedArgs): Promise<void> {
   if (parsed.options.checkReady && state !== "ready") {
     throw new Error(`Workspace index is not ready (state: ${state})`);
   }
+}
+
+async function runExplore(parsed: ParsedArgs): Promise<void> {
+  const query = parsed.positionals[0]!;
+  const root = resolve(process.cwd());
+  const input = {
+    root,
+    query,
+    seedId: parsed.options.seedId,
+    searchLimit: parsed.options.limit,
+    traversalDepth: parsed.options.depth,
+    maxFiles: parsed.options.maxFiles,
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      console.log(
+        await daemonClient(parsed.options).callTextTool("zvec_grep_explore", {
+          root,
+          query,
+          seedId: input.seedId,
+          limit: input.searchLimit,
+          depth: input.traversalDepth,
+          maxFiles: input.maxFiles,
+        }),
+      );
+    },
+    direct: async () => {
+      const service = await createZvecGrep(
+        createServiceOptions(parsed.options, root),
+      );
+      try {
+        printExploreResult(await service.explore(input));
+      } finally {
+        await service.close();
+      }
+    },
+  });
+}
+
+async function runGraphNeighborhood(parsed: ParsedArgs): Promise<void> {
+  const direction = parsed.command;
+  if (
+    direction !== "callers" &&
+    direction !== "callees" &&
+    direction !== "impact"
+  ) {
+    throw new Error(`unexpected graph command: ${parsed.command}`);
+  }
+  const root = resolve(process.cwd());
+  const input = {
+    root,
+    direction,
+    query: parsed.positionals[0]!,
+    depth: parsed.options.depth,
+    limit: parsed.options.limit,
+    seedId: parsed.options.seedId,
+  };
+  await routeByMode({
+    mode: resolveClientMode(parsed.options.mode),
+    serverAvailable: () => daemonIsReady(parsed.options.home),
+    server: async () => {
+      console.log(
+        await daemonClient(parsed.options).callTextTool(
+          `zvec_grep_${direction}`,
+          input,
+        ),
+      );
+    },
+    direct: async () => {
+      const service = await createZvecGrep(
+        createServiceOptions(parsed.options, root),
+      );
+      try {
+        printNeighborhoodResult(await service.graphNeighborhood(input));
+      } finally {
+        await service.close();
+      }
+    },
+  });
 }
 
 async function runQuery(parsed: ParsedArgs): Promise<void> {

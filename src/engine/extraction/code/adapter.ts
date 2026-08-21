@@ -9,6 +9,11 @@ import { JAVASCRIPT_ADAPTER } from "./languages/javascript.js";
 import { PYTHON_ADAPTER } from "./languages/python.js";
 import { RUST_ADAPTER } from "./languages/rust.js";
 import { TYPESCRIPT_ADAPTER } from "./languages/typescript.js";
+import { extractCallableArity } from "./callable-shape.js";
+import {
+  extractCallResolutionFacts,
+  type CallResolutionFact,
+} from "./call-resolution-facts.js";
 
 export type LanguageAdapter = {
   format: string;
@@ -29,22 +34,35 @@ export type LanguageAdapter = {
     breadcrumb: readonly string[],
   ): CodeSymbolType | undefined;
   extractSignature?(node: TSNode): string | undefined;
+  extractArity?(node: TSNode): number | undefined;
+  extractCallResolutionFacts?(
+    node: TSNode,
+  ): ReadonlyMap<string, CallResolutionFact>;
   extractDoc?(node: TSNode): string | undefined;
   extractModifiers?(node: TSNode): readonly CodeEntityModifier[];
 };
 
 const ADAPTERS = {
-  c: C_ADAPTER,
-  cpp: CPP_ADAPTER,
-  go: GO_ADAPTER,
-  java: JAVA_ADAPTER,
-  javascript: JAVASCRIPT_ADAPTER,
-  jsx: JAVASCRIPT_ADAPTER,
-  python: PYTHON_ADAPTER,
-  rust: RUST_ADAPTER,
-  tsx: TYPESCRIPT_ADAPTER,
-  typescript: TYPESCRIPT_ADAPTER,
+  c: withCallableShape(C_ADAPTER),
+  cpp: withCallableShape(CPP_ADAPTER),
+  go: withCallableShape(GO_ADAPTER),
+  java: withCallableShape(JAVA_ADAPTER),
+  javascript: withCallableShape(JAVASCRIPT_ADAPTER),
+  jsx: withCallableShape(JAVASCRIPT_ADAPTER),
+  python: withCallableShape(PYTHON_ADAPTER),
+  rust: withCallableShape(RUST_ADAPTER),
+  tsx: withCallableShape(TYPESCRIPT_ADAPTER),
+  typescript: withCallableShape(TYPESCRIPT_ADAPTER),
 } satisfies Record<StructuredCodeFormat, LanguageAdapter>;
+
+function withCallableShape(adapter: LanguageAdapter): LanguageAdapter {
+  return {
+    ...adapter,
+    extractArity: (node) => extractCallableArity(node, adapter.format),
+    extractCallResolutionFacts: (node) =>
+      extractCallResolutionFacts(node, adapter),
+  };
+}
 
 export function resolveAdapter(format: string): LanguageAdapter | null {
   return format in ADAPTERS ? ADAPTERS[format as StructuredCodeFormat] : null;

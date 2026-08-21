@@ -58,7 +58,7 @@ export function extractCommonModifiers(node: TSNode): CodeEntityModifier[] {
   }
 
   for (const token of signature.matchAll(
-    /\b(public|private|protected|internal|static|async|pub)\b/g,
+    /\b(public|private|protected|internal|static|abstract|async|pub)\b/g,
   )) {
     modifiers.add(normalizeModifier(token[1]));
   }

@@ -903,6 +903,11 @@ function createSchema(
       indexedStringField("symbol_name", true),
       stringField("symbol_scope", true),
       stringField("symbol_signature", true),
+      {
+        name: "symbol_arity",
+        dataType: ZVecDataType.INT32,
+        nullable: true,
+      },
       stringField("symbol_doc", true),
       stringField("symbol_modifiers", true),
       stringField("node_type", true),
@@ -1029,6 +1034,7 @@ function metadataToFields(
         symbol_name: metadata.symbolName,
         symbol_scope: metadata.scope,
         symbol_signature: metadata.signature,
+        symbol_arity: metadata.arity,
         symbol_doc: metadata.doc,
         symbol_modifiers:
           metadata.modifiers.length > 0 ? metadata.modifiers.join(" ") : null,
@@ -1104,6 +1110,7 @@ function parseMetadata(
       scope: readNullableStringFieldFromFields(fields, "symbol_scope"),
       nodeType: readNullableStringFieldFromFields(fields, "node_type"),
       signature: readNullableStringFieldFromFields(fields, "symbol_signature"),
+      arity: readNullableNumberFieldFromFields(fields, "symbol_arity"),
       doc: readNullableStringFieldFromFields(fields, "symbol_doc"),
       modifiers: readCodeModifiers(
         readNullableStringFieldFromFields(fields, "symbol_modifiers"),
@@ -1134,6 +1141,7 @@ function readCodeModifiers(value: string | null): CodeEntityModifier[] {
       (item): item is CodeEntityModifier =>
         item === "exported" ||
         item === "async" ||
+        item === "abstract" ||
         item === "static" ||
         item === "public" ||
         item === "private" ||

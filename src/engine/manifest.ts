@@ -1,9 +1,9 @@
 import { rmSync } from "node:fs";
-import { join } from "node:path";
 import type { EmbeddingRuntimeConfig } from "./config.js";
 import { EngineError } from "./errors.js";
 import type { WorkspaceIndexInfo } from "./types.js";
 import { readJsonFileSync, writeJsonFileSync } from "./utils/json.js";
+import { resolveWorkspaceIndexLayout } from "./storage/index.js";
 
 export const WORKSPACE_MANIFEST_FILE = "manifest.json";
 export const CURRENT_MANIFEST_VERSION = 1;
@@ -17,7 +17,7 @@ export type WorkspaceManifest = WorkspaceIndexInfo & {
 };
 
 export function workspaceManifestPath(home: string): string {
-  return join(home, WORKSPACE_MANIFEST_FILE);
+  return resolveWorkspaceIndexLayout(home).manifestPath;
 }
 
 export function readWorkspaceManifest(home: string): WorkspaceManifest | null {

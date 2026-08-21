@@ -314,6 +314,22 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
   );
   assert.equal(parseArgs(["index", "--drop", "--yes"]).options.drop, true);
   assert.equal(parseArgs(["status"]).command, "status");
+  assert.equal(parseArgs(["explore", "AuthService"]).command, "explore");
+  assert.deepEqual(
+    parseArgs(["explore", "AuthService", "--depth", "2", "--max-files", "5"])
+      .options,
+    { depth: 2, maxFiles: 5 },
+  );
+  assert.equal(
+    parseArgs(["callers", "foo", "--limit", "10"]).options.limit,
+    10,
+  );
+  assert.equal(parseArgs(["impact", "bar", "--depth", "3"]).command, "impact");
+  assert.throws(() => parseArgs(["explore"]), /exactly one query/);
+  assert.throws(
+    () => parseArgs(["index", "--max-files", "3"]),
+    /explore\/callers\/callees\/impact/,
+  );
   assert.equal(parseArgs(["status", "--check-ready"]).options.checkReady, true);
   assert.equal(
     parseArgs(["server", "status", "--check-ready"]).options.checkReady,

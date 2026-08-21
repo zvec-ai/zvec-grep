@@ -147,6 +147,7 @@ export type CodeSymbolType =
 export type CodeEntityModifier =
   | "exported"
   | "async"
+  | "abstract"
   | "static"
   | "public"
   | "private"
@@ -160,6 +161,7 @@ export type CodeEntityMetadata = {
   scope: string | null;
   nodeType: string | null;
   signature: string | null;
+  arity?: number | null;
   doc: string | null;
   modifiers: readonly CodeEntityModifier[];
 };
@@ -194,7 +196,7 @@ export type EntityFragment = {
 // Workspace index types
 // -----------------------------------------------------------------------------
 
-export const CURRENT_INDEX_VERSION = 1;
+export const CURRENT_INDEX_VERSION = 2;
 
 export type WorkspaceIndexEmbeddingSchema = {
   provider: string;
@@ -295,10 +297,19 @@ export type WorkspaceIndexStatus = {
 // Search types
 // -----------------------------------------------------------------------------
 
-export type SearchMatchedBy = "fts" | "vector" | "fts+vector";
+export type SearchMatchedBy = "fts" | "vector" | "fts+vector" | "graph";
+
+export type SearchGraphRelation = {
+  srcId: string;
+  dstId: string;
+  srcLabel: string;
+  dstLabel: string;
+  kind: "CALLS" | "REFS" | "INHERITS" | "CONTAINS" | "IMPORTS" | "INSTANTIATES";
+  scope: "symbol" | "file";
+};
 
 export type SearchRecallTrace = {
-  path: "fts" | "vector";
+  path: "fts" | "vector" | "graph";
   routeId?: string;
   query?: string;
   found: boolean;
@@ -331,7 +342,7 @@ export type SearchHitEvidence = {
   content: Content;
   metadata?: EntityMetadata;
   isEntity: boolean;
-  path: "fts" | "vector";
+  path: "fts" | "vector" | "graph";
   routeId?: string;
   query?: string;
   rank?: number;
@@ -383,10 +394,19 @@ export type ResolvedSearchPlan = Omit<SearchPlan, "routes"> & {
   routes: readonly ResolvedSearchPlanRoute[];
 };
 
+export type SearchGraphExpandDiagnostics = {
+  available: boolean;
+  unavailableReason?: string;
+  seeds: number;
+  neighborsAdded: number;
+};
+
 export type SearchPlanResult = {
   plan: ResolvedSearchPlan;
   hits: SearchHit[];
+  relationships: SearchGraphRelation[];
   trackedHit?: SearchHit;
+  graphExpand?: SearchGraphExpandDiagnostics;
   timings?: readonly TimingEntry[];
 };
 

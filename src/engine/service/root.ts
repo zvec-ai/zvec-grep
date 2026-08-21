@@ -1,8 +1,8 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { deleteWorkspaceManifest, workspaceManifestPath } from "../manifest.js";
+import { workspaceManifestPath } from "../manifest.js";
 import {
-  deleteWorkspaceIndexStorage,
+  deleteWorkspaceIndexArtifacts,
   hasWorkspaceIndexStorage,
 } from "../storage/index.js";
 import { workspaceIndexPath } from "../storage/layout.js";
@@ -40,8 +40,7 @@ export function workspaceIndexLocation(root: string): WorkspaceIndexLocation {
 }
 
 export function resetWorkspaceIndex(location: WorkspaceIndexLocation): void {
-  deleteWorkspaceManifest(location.home);
-  deleteWorkspaceIndexStorage(location.home);
+  deleteWorkspaceIndexArtifacts(location.home);
 }
 
 export function findNearestWorkspaceIndex(

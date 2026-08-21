@@ -200,6 +200,15 @@ function agentContextLines(
     }
   }
 
+  if (result.relationships && result.relationships.length > 0) {
+    lines.push("", "relationships:");
+    for (const relation of result.relationships) {
+      lines.push(
+        `- ${relation.srcLabel} --${relation.kind}--> ${relation.dstLabel}`,
+      );
+    }
+  }
+
   return lines;
 }
 
@@ -530,6 +539,13 @@ export function printHumanContextResult(
   printHumanField(theme, "Coverage", theme.status(result.coverage));
   printHumanField(theme, "Files", String(groups.length));
   printHumanField(theme, "Hits", String(result.items.length));
+  if (result.relationships && result.relationships.length > 0) {
+    printHumanField(
+      theme,
+      "Relationships",
+      String(result.relationships.length),
+    );
+  }
 
   if (groups.length === 0) {
     printHumanField(

@@ -324,7 +324,7 @@ test("service optionally fuses independent query groups into one result list", a
   );
 });
 
-test("workspace rebuild recreates unsupported index metadata", async (t) => {
+test("v1 workspace requires rebuild and cannot be pseudo-upgraded incrementally", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-grep-version-rebuild-",
@@ -348,7 +348,7 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   await writeFile(
     manifestPath,
-    `${JSON.stringify({ ...manifest, indexVersion: 999 }, null, 2)}\n`,
+    `${JSON.stringify({ ...manifest, indexVersion: 1 }, null, 2)}\n`,
   );
 
   const filesMarker = join(workspaceHome, "files.zvec", "legacy-marker");
@@ -368,6 +368,17 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
       error.code === "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH" &&
       error.context.includes("zg index --rebuild"),
   );
+
+  await assert.rejects(
+    service.index(),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH" &&
+      error.context.includes("zg index --rebuild"),
+  );
+  const unchangedManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  assert.equal(unchangedManifest.indexVersion, 1);
+  assert.equal(await readFile(filesMarker, "utf8"), "legacy");
+  assert.equal(await readFile(indexMarker, "utf8"), "legacy");
 
   await service.index({ rebuild: true });
   const rebuilt = await service.info();

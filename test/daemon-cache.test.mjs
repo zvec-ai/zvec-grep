@@ -193,6 +193,68 @@ test("root runtime releases model leases when the read session closes", async ()
   await pool.close();
 });
 
+test("root runtime graph reads use a model-free session cache", async () => {
+  let modelLoads = 0;
+  let graphOpens = 0;
+  let graphCloses = 0;
+  const pool = new EmbeddingModelPool({
+    createModel: () => {
+      modelLoads += 1;
+      throw new Error("embedding model must not load");
+    },
+  });
+  const runtime = new RootRuntime({
+    canonicalRoot: "/tmp/repo",
+    modelPool: pool,
+    readSessionIdleTtlMs: 60_000,
+    openGraphSession: async () => {
+      graphOpens += 1;
+      return {
+        root: "/tmp/repo",
+        explore: async (options) => ({
+          root: "/tmp/repo",
+          available: true,
+          query: options.query,
+          roots: [],
+          nodes: [],
+          edges: [],
+          callPaths: [],
+          blastRadius: [],
+          changeSurface: [],
+          files: [],
+          emptyReason: "no_seeds",
+        }),
+        graphNeighborhood: async (options) => ({
+          root: "/tmp/repo",
+          available: true,
+          direction: options.direction,
+          query: options.query,
+          depth: options.depth ?? 1,
+          limit: options.limit ?? 20,
+          seeds: [],
+          neighbors: [],
+        }),
+        close: async () => {
+          graphCloses += 1;
+        },
+      };
+    },
+  });
+
+  await runtime.explore({ query: "login" });
+  await runtime.graphNeighborhood({
+    direction: "callers",
+    query: "login",
+  });
+
+  assert.equal(modelLoads, 0);
+  assert.deepEqual(pool.snapshot(), { loaded: 0, activeLeases: 0 });
+  assert.equal(graphOpens, 1);
+  await runtime.close();
+  assert.equal(graphCloses, 1);
+  await pool.close();
+});
+
 test("root runtime replaces a cached session when the embedding model changes", async () => {
   let modelLoads = 0;
   let sessionCloses = 0;

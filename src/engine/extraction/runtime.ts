@@ -1,5 +1,12 @@
 import type { Content, EntityFragment } from "../types.js";
 import { CodeExtractor } from "./code/extractor.js";
+import type {
+  EntityOwnership,
+  FunctionCallSites,
+  SymbolRefSites,
+  TypeInheritanceSites,
+} from "./code/extractor.js";
+import type { ImportSpec } from "./code/import-sites.js";
 import { ImageExtractor } from "./image/extractor.js";
 import { MarkdownExtractor } from "./markdown/extractor.js";
 import type { Source } from "./source.js";
@@ -49,6 +56,41 @@ export async function extractForIndexing(
   return (await extractors[routeSource(source)].extract(source, options)).map(
     (fragment) => ({ fragment }),
   );
+}
+
+export type PreparedCodeAnalysis = {
+  fragments: IndexingExtractionFragment[];
+  imports: readonly ImportSpec[];
+  calls: readonly FunctionCallSites[];
+  refs: readonly SymbolRefSites[];
+  inheritance: readonly TypeInheritanceSites[];
+  ownership: readonly EntityOwnership[];
+};
+
+export async function analyzeForIndexing(
+  source: Source,
+  options: ChunkOptions = {},
+): Promise<PreparedCodeAnalysis> {
+  if (routeSource(source) !== "code") {
+    return {
+      fragments: await extractForIndexing(source, options),
+      imports: [],
+      calls: [],
+      refs: [],
+      inheritance: [],
+      ownership: [],
+    };
+  }
+  const analysis = await extractors.code.analyzeForIndexing(source, options);
+  return {
+    ...analysis,
+    fragments: analysis.fragments.map(({ fragment, embeddingText }) => ({
+      fragment,
+      ...(embeddingText === undefined
+        ? {}
+        : { embeddingSource: { kind: "text" as const, text: embeddingText } }),
+    })),
+  };
 }
 
 function routeSource(source: Source): ExtractorRoute {

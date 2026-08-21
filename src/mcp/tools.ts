@@ -15,7 +15,17 @@ import type {
   IndexProgress,
   ZvecGrepContextResult,
 } from "../index.js";
+import type {
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
+} from "../engine/service/types.js";
 import { formatAgentContextResult } from "../cli/format/context.js";
+import {
+  formatExploreResult,
+  formatNeighborhoodResult,
+} from "../presentation/graph.js";
 import {
   formatRemoteEmbeddingAuthorizationPrompt,
   remoteEmbeddingDisclosureData,
@@ -37,6 +47,8 @@ import {
   zvecGrepSearchOutputSchema,
   zvecGrepServerStatusInputSchema,
   zvecGrepServerStatusOutputSchema,
+  zvecGrepExploreInputSchema,
+  zvecGrepGraphNeighborhoodInputSchema,
   type ZvecGrepIndexRequest,
   type ZvecGrepIndexDropInput,
   type ZvecGrepIndexStatusInput,
@@ -200,6 +212,12 @@ export interface ZvecGrepDaemonBackend {
     input: NormalizedSearchInput,
     options?: { authorization?: RemoteEmbeddingOperationPermit },
   ): Promise<ZvecGrepSearchResult>;
+  explore(
+    input: ZvecGrepExploreOptions & { root: string },
+  ): Promise<ZvecGrepExploreResult>;
+  graphNeighborhood(
+    input: ZvecGrepGraphNeighborhoodOptions & { root: string },
+  ): Promise<ZvecGrepGraphNeighborhoodResult>;
   planIndexAuthorization?(
     input: ZvecGrepIndexRequest,
   ): Promise<RemoteEmbeddingAuthorizationPlan | undefined>;
@@ -224,6 +242,8 @@ function searchRoutingRules(exactTool: string, focusedTools: string): string[] {
   return [
     `Use ${exactTool} first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.`,
     "Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.",
+    "Use zvec_grep_explore when you already have a symbol/name and need a multi-file call/type-neighborhood context pack assembled from the graph.",
+    "Use zvec_grep_callers, zvec_grep_callees, or zvec_grep_impact for focused graph neighborhood questions about one symbol.",
     `When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use ${focusedTools} for focused verification.`,
     "For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.",
     "Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.",
@@ -509,6 +529,61 @@ export function registerZvecGrepTools(
         },
       ),
   );
+
+  server.registerTool(
+    "zvec_grep_explore",
+    {
+      title: "Explore code-graph context",
+      description:
+        "Build a multi-file context pack from the workspace code graph for a symbol or short query: hierarchy + deep neighborhood + ranked file assembly of indexed entity source.",
+      inputSchema: zvecGrepExploreInputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => {
+      const result = await backend.explore({
+        query: input.query,
+        seedId: input.seedId,
+        searchLimit: input.limit,
+        traversalDepth: input.depth,
+        maxFiles: input.maxFiles,
+        root: input.root,
+      });
+      return textToolResult(formatExploreResult(result));
+    },
+  );
+
+  for (const direction of ["callers", "callees", "impact"] as const) {
+    server.registerTool(
+      `zvec_grep_${direction}`,
+      {
+        title: `Code-graph ${direction}`,
+        description: `List ${direction} of a symbol from the workspace code graph.`,
+        inputSchema: zvecGrepGraphNeighborhoodInputSchema,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async (input) => {
+        const result = await backend.graphNeighborhood({
+          direction,
+          query: input.query,
+          seedId: input.seedId,
+          depth: input.depth,
+          limit: input.limit,
+          root: input.root,
+        });
+        return textToolResult(formatNeighborhoodResult(result));
+      },
+    );
+  }
 
   if (full) {
     server.registerTool(

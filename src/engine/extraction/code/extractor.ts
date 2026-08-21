@@ -16,7 +16,22 @@ import type { ChunkOptions } from "../types.js";
 import { extractPlainTextFragments } from "../text/extractor.js";
 import { chunkOptionsForMetadata } from "../vector-content.js";
 import { resolveAdapter, type LanguageAdapter } from "./adapter.js";
+import {
+  collectCallSites,
+  extractCallName,
+  isCallNode,
+  type CallSite,
+} from "./call-sites.js";
 import { hasJavascriptTypescriptFunctionValue } from "./families/js-ts.js";
+import {
+  collectInheritanceSites as collectInheritanceSitesFromNode,
+  type InheritanceSite,
+} from "./inheritance-sites.js";
+import {
+  collectRefSites as collectRefSitesFromNode,
+  type RefSite,
+} from "./ref-sites.js";
+import { collectImportSpecsFromNode, type ImportSpec } from "./import-sites.js";
 
 const DEFAULT_CODE_CHUNK_CHARS = 3600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 540;
@@ -38,8 +53,15 @@ export class CodeExtractor {
     source: Source,
     options: ChunkOptions = {},
   ): Promise<PreparedCodeFragment[]> {
+    return (await this.analyzeForIndexing(source, options)).fragments;
+  }
+
+  async analyzeForIndexing(
+    source: Source,
+    options: ChunkOptions = {},
+  ): Promise<PreparedCodeAnalysis> {
     if (source.kind !== "text" || source.file.kind !== "code") {
-      return [];
+      return emptyPreparedCodeAnalysis();
     }
 
     validateSourceFile(source);
@@ -47,14 +69,21 @@ export class CodeExtractor {
 
     if (isScriptBlockFormat(source.file.format)) {
       const fragments = await this.extractScriptBlocks(source, chunkOptions);
-      return fragments.length > 0
-        ? fragments
-        : this.fallback(source, chunkOptions);
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments:
+          fragments.length > 0
+            ? fragments
+            : this.fallback(source, chunkOptions),
+      };
     }
 
     const adapter = resolveAdapter(source.file.format);
     if (!hasGrammar(source.file.format) || !adapter) {
-      return this.fallback(source, chunkOptions);
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments: this.fallback(source, chunkOptions),
+      };
     }
 
     const extracted = await withParser(
@@ -62,7 +91,7 @@ export class CodeExtractor {
       source.file.format,
       (tree) => {
         const collected: CodeEntity[] = [];
-        walkCodeNode(tree.rootNode, adapter, [], collected);
+        walkCodeNode(tree.rootNode, adapter, [], undefined, collected);
 
         const output: PreparedCodeFragment[] = [];
         let entityIdIndex = 0;
@@ -78,7 +107,6 @@ export class CodeExtractor {
             fragments[0]?.group === ""
               ? makeEntityId(source.file.id, entityIdIndex)
               : null;
-
           for (const item of fragments) {
             const id = makeEntityId(source.file.id, entityIdIndex);
             const { embeddingText, ...fragment } = item;
@@ -98,12 +126,25 @@ export class CodeExtractor {
           appendEntity(entity);
         }
 
-        return output;
+        return {
+          fragments: output,
+          imports: collectImportSpecsFromNode(
+            tree.rootNode,
+            source.file.format,
+          ),
+          calls: callsFromEntities(collected, adapter),
+          refs: refsFromEntities(collected, adapter, source.file.format),
+          inheritance: inheritanceFromEntities(collected, source.file.format),
+          ownership: ownershipFromEntities(collected),
+        };
       },
     );
 
-    if (!extracted || extracted.length === 0) {
-      return this.fallback(source, chunkOptions);
+    if (!extracted || extracted.fragments.length === 0) {
+      return {
+        ...emptyPreparedCodeAnalysis(),
+        fragments: this.fallback(source, chunkOptions),
+      };
     }
 
     return extracted;
@@ -191,10 +232,12 @@ function resolveCodeChunkOptions(
 
 type CodeEntity = {
   node: TSNode;
+  ownerStartOffset?: number;
   name?: string;
   symbolType: CodeSymbolType;
   breadcrumb: readonly string[];
   signature?: string;
+  arity?: number;
   doc?: string;
   modifiers: readonly CodeEntityModifier[];
 };
@@ -214,6 +257,97 @@ export type PreparedCodeFragment = {
   embeddingText?: string;
 };
 
+export type PreparedCodeAnalysis = {
+  fragments: PreparedCodeFragment[];
+  imports: readonly ImportSpec[];
+  calls: readonly FunctionCallSites[];
+  refs: readonly SymbolRefSites[];
+  inheritance: readonly TypeInheritanceSites[];
+  ownership: readonly EntityOwnership[];
+};
+
+export type EntityOwnership = {
+  parentStartOffset: number;
+  childStartOffset: number;
+};
+
+function emptyPreparedCodeAnalysis(): PreparedCodeAnalysis {
+  return {
+    fragments: [],
+    imports: [],
+    calls: [],
+    refs: [],
+    inheritance: [],
+    ownership: [],
+  };
+}
+
+function callsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+): FunctionCallSites[] {
+  return entities
+    .filter((entity) => entity.symbolType === "function")
+    .map((entity) => ({
+      name: entity.name,
+      symbolType: entity.symbolType,
+      startOffset: entity.node.startIndex,
+      startLine: entity.node.startPosition.row + 1,
+      sites: collectCallSites(entity.node, adapter),
+    }));
+}
+
+function inheritanceFromEntities(
+  entities: readonly CodeEntity[],
+  language: string,
+): TypeInheritanceSites[] {
+  return entities.flatMap((entity) => {
+    if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
+      return [];
+    }
+    const sites = collectInheritanceSitesFromNode(entity.node, language);
+    return sites.length === 0
+      ? []
+      : [
+          {
+            name: entity.name,
+            symbolType: entity.symbolType,
+            startOffset: entity.node.startIndex,
+            startLine: entity.node.startPosition.row + 1,
+            sites,
+          },
+        ];
+  });
+}
+
+function refsFromEntities(
+  entities: readonly CodeEntity[],
+  adapter: LanguageAdapter,
+  language: string,
+): SymbolRefSites[] {
+  return entities.flatMap((entity) => {
+    if (
+      entity.symbolType !== "function" &&
+      entity.symbolType !== "class" &&
+      entity.symbolType !== "interface"
+    ) {
+      return [];
+    }
+    const sites = collectRefSitesFromNode(entity.node, adapter, language);
+    return sites.length === 0
+      ? []
+      : [
+          {
+            name: entity.name,
+            symbolType: entity.symbolType,
+            startOffset: entity.node.startIndex,
+            startLine: entity.node.startPosition.row + 1,
+            sites,
+          },
+        ];
+  });
+}
+
 type ScriptBlock = {
   text: string;
   format: "javascript" | "jsx" | "typescript" | "tsx";
@@ -225,6 +359,7 @@ function walkCodeNode(
   node: TSNode,
   adapter: LanguageAdapter,
   breadcrumb: readonly string[],
+  ownerStartOffset: number | undefined,
   out: CodeEntity[],
 ): void {
   for (const child of node.children) {
@@ -250,10 +385,12 @@ function walkCodeNode(
 
         out.push({
           node: entity,
+          ...(ownerStartOffset === undefined ? {} : { ownerStartOffset }),
           name,
           symbolType,
           breadcrumb: entityBreadcrumb,
           signature: adapter.extractSignature?.(entity),
+          arity: adapter.extractArity?.(entity),
           doc: adapter.extractDoc?.(entity),
           modifiers: adapter.extractModifiers?.(entity) ?? [],
         });
@@ -263,19 +400,42 @@ function walkCodeNode(
     if (isScope) {
       const name = adapter.extractName(child);
       const scopeNode = adapter.enterScopeNode?.(child) ?? child;
+      const indexedScope = isEntity
+        ? (
+            adapter.resolveEntities?.(child) ?? [
+              adapter.resolveEntity ? adapter.resolveEntity(child) : child,
+            ]
+          ).find((entity) => sameNode(entity, scopeNode))
+        : undefined;
       walkCodeNode(
         scopeNode,
         adapter,
         name ? [...breadcrumb, name] : breadcrumb,
+        indexedScope?.startIndex ?? ownerStartOffset,
         out,
       );
       continue;
     }
 
     if (!isEntity) {
-      walkCodeNode(child, adapter, breadcrumb, out);
+      walkCodeNode(child, adapter, breadcrumb, ownerStartOffset, out);
     }
   }
+}
+
+function ownershipFromEntities(
+  entities: readonly CodeEntity[],
+): EntityOwnership[] {
+  return entities.flatMap((entity) =>
+    entity.ownerStartOffset === undefined
+      ? []
+      : [
+          {
+            parentStartOffset: entity.ownerStartOffset,
+            childStartOffset: entity.node.startIndex,
+          },
+        ],
+  );
 }
 
 function codeEntityToSearchFragments(
@@ -824,49 +984,167 @@ function collectFunctionCallNames(node: TSNode): string[] {
   return calls;
 }
 
-function isCallNode(node: TSNode): boolean {
-  return (
-    node.type === "call" ||
-    node.type === "call_expression" ||
-    node.type === "function_call_expression" ||
-    node.type === "method_invocation" ||
-    node.type === "object_creation_expression" ||
-    node.type === "new_expression"
+/**
+ * Collect call sites per indexed function entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after the tree is freed.
+ */
+export async function collectFunctionCallSites(
+  source: TextSource,
+): Promise<readonly FunctionCallSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
+  }
+
+  const collected = await withParser(
+    source.text,
+    source.file.format,
+    (tree) => {
+      const entities: CodeEntity[] = [];
+      walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
+      const out: FunctionCallSites[] = [];
+      for (const entity of entities) {
+        if (entity.symbolType !== "function") {
+          continue;
+        }
+        out.push({
+          name: entity.name,
+          symbolType: entity.symbolType,
+          startOffset: entity.node.startIndex,
+          startLine: entity.node.startPosition.row + 1,
+          sites: collectCallSites(entity.node, adapter),
+        });
+      }
+      return out;
+    },
   );
+
+  return collected ?? [];
 }
 
-function extractCallName(node: TSNode): string | undefined {
-  const target =
-    node.childForFieldName("function") ??
-    node.childForFieldName("name") ??
-    node.childForFieldName("constructor") ??
-    node.childForFieldName("type") ??
-    node.namedChildren[0];
-
-  if (!target) {
-    return undefined;
+/**
+ * Collect extends/implements sites per indexed type entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after free.
+ */
+export async function collectTypeInheritanceSites(
+  source: TextSource,
+): Promise<readonly TypeInheritanceSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
   }
 
-  return normalizeCallName(target.text);
+  const language = source.file.format;
+  const collected = await withParser(source.text, language, (tree) => {
+    const entities: CodeEntity[] = [];
+    walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
+    const out: TypeInheritanceSites[] = [];
+    for (const entity of entities) {
+      if (entity.symbolType !== "class" && entity.symbolType !== "interface") {
+        continue;
+      }
+      const sites = collectInheritanceSitesFromNode(entity.node, language);
+      if (sites.length === 0) {
+        continue;
+      }
+      out.push({
+        name: entity.name,
+        symbolType: entity.symbolType,
+        startOffset: entity.node.startIndex,
+        startLine: entity.node.startPosition.row + 1,
+        sites,
+      });
+    }
+    return out;
+  });
+
+  return collected ?? [];
 }
 
-function normalizeCallName(value: string): string | undefined {
-  const cleaned = value
-    .replace(/\s+/g, " ")
-    .replace(/^new\s+/, "")
-    .trim();
+export type FunctionCallSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly CallSite[];
+};
 
-  if (
-    cleaned.length === 0 ||
-    cleaned.length > OUTLINE_MAX_LINE_CHARS ||
-    /[\n\r]/.test(cleaned) ||
-    !/[A-Za-z_$][A-Za-z0-9_$]*/.test(cleaned)
-  ) {
-    return undefined;
+export type TypeInheritanceSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly InheritanceSite[];
+};
+
+/**
+ * Collect type / member / decorator refs per indexed symbol entity.
+ * Must finish inside withParser — SyntaxNode handles are invalid after free.
+ */
+export async function collectSymbolRefSites(
+  source: TextSource,
+): Promise<readonly SymbolRefSites[]> {
+  if (source.file.kind !== "code") {
+    return [];
+  }
+  if (isScriptBlockFormat(source.file.format)) {
+    return [];
+  }
+  const adapter = resolveAdapter(source.file.format);
+  if (!adapter || !hasGrammar(source.file.format)) {
+    return [];
   }
 
-  return cleaned;
+  const language = source.file.format;
+  const collected = await withParser(source.text, language, (tree) => {
+    const entities: CodeEntity[] = [];
+    walkCodeNode(tree.rootNode, adapter, [], undefined, entities);
+    const out: SymbolRefSites[] = [];
+    for (const entity of entities) {
+      if (
+        entity.symbolType !== "function" &&
+        entity.symbolType !== "class" &&
+        entity.symbolType !== "interface"
+      ) {
+        continue;
+      }
+      const sites = collectRefSitesFromNode(entity.node, adapter, language);
+      if (sites.length === 0) {
+        continue;
+      }
+      out.push({
+        name: entity.name,
+        symbolType: entity.symbolType,
+        startOffset: entity.node.startIndex,
+        startLine: entity.node.startPosition.row + 1,
+        sites,
+      });
+    }
+    return out;
+  });
+
+  return collected ?? [];
 }
+
+export type SymbolRefSites = {
+  name?: string;
+  symbolType: CodeSymbolType;
+  startOffset: number;
+  startLine: number;
+  sites: readonly RefSite[];
+};
 
 function sameNode(left: TSNode, right: TSNode): boolean {
   return (
@@ -894,6 +1172,7 @@ function codeEntityMetadata(entity: CodeEntity): CodeEntityMetadata {
     scope: entity.breadcrumb.length > 0 ? entity.breadcrumb.join("::") : null,
     nodeType: entity.node.type,
     signature: entity.signature ?? null,
+    arity: entity.arity ?? null,
     doc: entity.doc ?? null,
     modifiers: entity.modifiers,
   };

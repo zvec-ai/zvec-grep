@@ -293,6 +293,18 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
         readOptionValue(args, ++index, arg),
         arg,
       );
+    } else if (arg === "--depth") {
+      options.depth = parsePositiveInteger(
+        readOptionValue(args, ++index, arg),
+        arg,
+      );
+    } else if (arg === "--max-files") {
+      options.maxFiles = parsePositiveInteger(
+        readOptionValue(args, ++index, arg),
+        arg,
+      );
+    } else if (arg === "--seed-id") {
+      options.seedId = readOptionValue(args, ++index, arg);
     } else if (arg === "--embedding-concurrency") {
       options.embeddingConcurrency = parsePositiveInteger(
         readOptionValue(args, ++index, arg),
@@ -599,6 +611,10 @@ function parseCommand(args: readonly string[]): {
 
   if (
     first === "query" ||
+    first === "explore" ||
+    first === "callers" ||
+    first === "callees" ||
+    first === "impact" ||
     first === "index" ||
     first === "status" ||
     first === "install" ||
@@ -648,6 +664,12 @@ function validateCliShape(
       "--allow-remote can only be used with query or index commands",
     );
   }
+  const graphCommand =
+    command === "explore" ||
+    command === "callers" ||
+    command === "callees" ||
+    command === "impact";
+
   const queryOnly = firstEnabledOption([
     [options.rg, "--rg"],
     [options.hybridQueries?.length, "--hybrid"],
@@ -656,7 +678,7 @@ function validateCliShape(
     [options.trace, "--trace"],
     [options.human, "--human"],
     [options.preview, "--preview"],
-    [options.limit, "--limit"],
+    [graphCommand ? undefined : options.limit, "--limit"],
     [options.refresh, "--refresh"],
     [options.preferSymbol, "--prefer-symbol"],
     [options.symbolTypes?.length, "--symbol-type"],
@@ -669,6 +691,23 @@ function validateCliShape(
   }
   if (options.debug && command !== "query" && command !== "index") {
     throw new Error("--debug can only be used with zg query or zg index");
+  }
+
+  const graphOnly = firstEnabledOption([
+    [options.depth, "--depth"],
+    [options.maxFiles, "--max-files"],
+    [options.seedId, "--seed-id"],
+  ]);
+  if (graphOnly && !graphCommand) {
+    throw new Error(
+      `${graphOnly} can only be used with explore/callers/callees/impact`,
+    );
+  }
+  if (options.maxFiles !== undefined && command !== "explore") {
+    throw new Error("--max-files can only be used with zg explore");
+  }
+  if (graphCommand && positionals.length !== 1) {
+    throw new Error(`zg ${command} requires exactly one query`);
   }
 
   const sharedSelection = firstEnabledOption([

@@ -1,6 +1,10 @@
 import { createZvecGrep } from "../engine/service/index.js";
 import type {
   CreateZvecGrepOptions,
+  ZvecGrepExploreOptions,
+  ZvecGrepExploreResult,
+  ZvecGrepGraphNeighborhoodOptions,
+  ZvecGrepGraphNeighborhoodResult,
   ZvecGrepInfoResult,
 } from "../engine/service/types.js";
 import { isEngineError } from "../engine/errors.js";
@@ -583,6 +587,34 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       return response;
     } finally {
       releaseRuntimeActivity();
+    }
+  }
+
+  async explore(
+    input: ZvecGrepExploreOptions & { root: string },
+  ): Promise<ZvecGrepExploreResult> {
+    const requestedRoot = await resolveRequestedRoot(input.root, false);
+    this.assertRootNotDropping(requestedRoot);
+    const runtime = await this.runtimeManager.activate(requestedRoot);
+    const release = runtime.beginActivity();
+    try {
+      return await runtime.explore(input);
+    } finally {
+      release();
+    }
+  }
+
+  async graphNeighborhood(
+    input: ZvecGrepGraphNeighborhoodOptions & { root: string },
+  ): Promise<ZvecGrepGraphNeighborhoodResult> {
+    const requestedRoot = await resolveRequestedRoot(input.root, false);
+    this.assertRootNotDropping(requestedRoot);
+    const runtime = await this.runtimeManager.activate(requestedRoot);
+    const release = runtime.beginActivity();
+    try {
+      return await runtime.graphNeighborhood(input);
+    } finally {
+      release();
     }
   }
 

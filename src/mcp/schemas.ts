@@ -355,7 +355,7 @@ const contextItemSchema = z.object({
   contentRole: z.enum(["source", "outline"]).optional(),
   status: z.enum(["fresh", "possibly_stale"]),
   score: z.number().optional(),
-  matchedBy: z.enum(["fts", "vector", "fts+vector", "lexical"]),
+  matchedBy: z.enum(["fts", "vector", "fts+vector", "graph", "lexical"]),
   metadata: z.unknown().optional(),
   entityId: z.string().optional(),
   container: z
@@ -403,6 +403,18 @@ const searchResultSchema = z.object({
       name: z.string(),
       path: z.string(),
     })
+    .optional(),
+  relationships: z
+    .array(
+      z.object({
+        srcId: z.string(),
+        dstId: z.string(),
+        srcLabel: z.string(),
+        dstLabel: z.string(),
+        kind: z.enum(["CALLS", "REFS", "INHERITS", "CONTAINS", "IMPORTS"]),
+        scope: z.enum(["symbol", "file"]),
+      }),
+    )
     .optional(),
   diagnostics: z.object({
     emptyReason: z
@@ -598,6 +610,65 @@ export const zvecGrepServerStatusOutputSchema = z.object({
     active_leases: z.number().int().nonnegative(),
   }),
 });
+
+export const zvecGrepExploreInputSchema = {
+  root: absoluteRootSchema,
+  query: boundedString(
+    "Symbol name or short query used to seed the code-graph explore pack.",
+  ),
+  seedId: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe("Disambiguate when multiple symbols match the query."),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .max(32)
+    .optional()
+    .describe("Max seed symbols (default 8)."),
+  depth: z
+    .number()
+    .int()
+    .positive()
+    .max(8)
+    .optional()
+    .describe("Graph traversal depth (default 3)."),
+  maxFiles: z
+    .number()
+    .int()
+    .positive()
+    .max(32)
+    .optional()
+    .describe("Max files in the assembled context pack (default 8)."),
+};
+
+export const zvecGrepGraphNeighborhoodInputSchema = {
+  root: absoluteRootSchema,
+  query: boundedString("Exact symbol name or entity id."),
+  seedId: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe("Disambiguate when multiple symbols match the query."),
+  depth: z
+    .number()
+    .int()
+    .positive()
+    .max(10)
+    .optional()
+    .describe("Traversal depth (default 1)."),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .max(200)
+    .optional()
+    .describe("Max neighbors (default 20)."),
+};
 
 export type ZvecGrepIndexInput = z.infer<typeof zvecGrepIndexInputSchema>;
 export type ZvecGrepIndexRequest = ZvecGrepIndexInput & {

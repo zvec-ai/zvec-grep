@@ -6,6 +6,8 @@ import {
   errorDetails,
   isEngineError,
 } from "../../errors.js";
+import type { FileGraphInput, GraphStorage } from "../../graph/index.js";
+import { extractFileGraph, fileGraphFromFragments } from "../../graph/index.js";
 import type {
   EmbeddingModel,
   EmbeddingModelProgress,
@@ -28,7 +30,7 @@ import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
-  extractForIndexing,
+  analyzeForIndexing,
   type Source,
   vectorContentForFragment,
 } from "../../extraction/index.js";
@@ -42,6 +44,7 @@ import { indexChunkOptions } from "./input-budget.js";
 export type IndexContext = {
   workspaceIndex: WorkspaceIndexInfo;
   storage: WorkspaceIndexStorage;
+  graph?: GraphStorage;
   embeddingModel: EmbeddingModel;
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
@@ -64,6 +67,7 @@ type PreparedFragment = {
 type PreparedFile = {
   file: FileInfo;
   fragments: PreparedFragment[];
+  graph?: FileGraphInput;
 };
 
 type FailedPreparedFile = {
@@ -461,6 +465,9 @@ async function runDiffPass(
     for (const file of diff.deleted) {
       throwIfIndexCancelled(ctx);
       try {
+        if (ctx.graph?.available) {
+          ctx.graph.deleteFileGraph(file.id);
+        }
         ctx.storage.deleteFile(file.id);
       } catch (error) {
         throw toEngineError(
@@ -636,6 +643,10 @@ function mergeScanDiagnostics(
 async function optimizeStorage(ctx: IndexContext): Promise<void> {
   try {
     await ctx.storage.finalizeWrites();
+    if (ctx.graph?.available) {
+      await ctx.graph.resolvePending({ files: ctx.storage.listFiles() });
+      await ctx.graph.checkpoint();
+    }
   } catch (error) {
     throw toEngineError(error, "Indexing failed to finalize storage", {
       code: "ZVEC_GREP.ENGINE.INDEXING.OPTIMIZE_FAILED",
@@ -841,7 +852,8 @@ async function prepareFile(
       ctx.embeddingModel.info.limits.maxInputTokens,
       source.kind === "text" ? source.text : undefined,
     );
-    const extracted = await extractForIndexing(source, chunkOptions);
+    const analysis = await analyzeForIndexing(source, chunkOptions);
+    const extracted = analysis.fragments;
     throwIfIndexCancelled(ctx);
     const fragments = extracted
       .filter(({ fragment }) =>
@@ -856,7 +868,16 @@ async function prepareFile(
         ),
       }));
 
-    return { file, fragments };
+    let graph: FileGraphInput | undefined;
+    if (ctx.graph?.available && source.kind === "text") {
+      graph = await extractFileGraph(
+        source,
+        fragments.map(({ fragment }) => fragment),
+        analysis,
+      );
+    }
+
+    return { file, fragments, graph };
   } catch (error) {
     if (indexIsCancelled(ctx)) {
       throw indexCancellationError(ctx);
@@ -1029,6 +1050,20 @@ function commitFile(
         truncatedFragmentCount,
       },
     );
+    if (ctx.graph?.available) {
+      const graphInput =
+        file.graph ??
+        fileGraphFromFragments(
+          file.file.id,
+          file.fragments.map(({ fragment }) => fragment),
+        );
+      ctx.graph.upsertFileGraph(
+        file.file.id,
+        graphInput.nodes,
+        graphInput.edges,
+        graphInput.refs,
+      );
+    }
     stats.filesIndexed++;
     stats.entitiesCreated += countPublicEntities(
       file.fragments.map(({ fragment }) => fragment),
@@ -1682,6 +1717,9 @@ function markFileFailed(
   const reason = fileFailureReason(stage, error);
 
   try {
+    if (ctx.graph?.available) {
+      ctx.graph.deleteFileGraph(file.id);
+    }
     ctx.storage.markFileFailed(file, reason);
     return reason;
   } catch (markError) {

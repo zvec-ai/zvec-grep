@@ -49,6 +49,10 @@ terminal, or let your agent use it for you.
   verify with exact text or regex when needed.
 - **Multi-format search** — search source code, documents, and structured data
   while preserving useful structure and source locations.
+- **Graph-aware code exploration** — follow calls, references, inheritance, and
+  instantiation paths; ambiguous interface, trait, and virtual dispatch stays
+  visible as ranked dynamic candidates instead of being presented as a false
+  exact edge.
 - **Less searching, less context** — ranked, source-linked results surface the
   right evidence with fewer tool calls, fewer tokens, and less noise.
 - **Local by default** — files, indexes, and local models stay on your machine;
@@ -160,6 +164,7 @@ reproduction details.
 | [Server and execution modes](./docs/06-server.md) | Choose between one-off commands and a long-running local server. |
 | [Embedding models](./docs/07-embedding.md) | Pick the right model for speed, search quality, privacy, and your hardware. |
 | [Roadmap](./docs/08-roadmap.md) | See what is coming next and help shape zg's priorities. |
+| [Graph](./docs/09-graph.md) | Understand graph indexing, relationship-aware search, dynamic dispatch, and Explore output. |
 
 <a id="community"></a>
 

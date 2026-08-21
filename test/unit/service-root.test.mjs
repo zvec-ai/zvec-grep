@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { workspaceIndexLocation } from "../../dist/engine/service/root.js";
+import {
+  resetWorkspaceIndex,
+  workspaceIndexLocation,
+} from "../../dist/engine/service/root.js";
 
 test("workspace index locations resolve an existing index symlink", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "zvec-grep-root-"));
@@ -27,5 +37,27 @@ test("workspace index locations resolve an existing index symlink", async () => 
     });
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("resetWorkspaceIndex removes vector, manifest, and graph data", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "zvec-grep-reset-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const location = workspaceIndexLocation(root);
+  await mkdir(join(location.home, "code-graph"), { recursive: true });
+  await writeFile(location.manifestPath, "{}");
+  await writeFile(location.indexPath, "index");
+  await writeFile(join(location.home, "files.zvec"), "files");
+  await writeFile(join(location.home, "code-graph", "graph.sqlite"), "graph");
+
+  resetWorkspaceIndex(location);
+
+  for (const path of [
+    location.manifestPath,
+    location.indexPath,
+    join(location.home, "files.zvec"),
+    join(location.home, "code-graph"),
+  ]) {
+    await assert.rejects(access(path), { code: "ENOENT" });
   }
 });
