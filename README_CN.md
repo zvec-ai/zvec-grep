@@ -132,14 +132,56 @@ zg 通过**缩小有效搜索空间**，帮助 Agent 更快找到相关证据 �
 
 每项测试均采用**受控、可复现的配对 A/B 评测**：同一个 Agent 在完全相同的模型、Prompt、环境和资源限制下执行同一组预先固定的任务；**实验组仅额外提供 `zg` 工具及其使用说明**。
 
-<img src="./.github/assets/benchmark-comparison-cn-v2.svg" alt="SWE-QA-Bench 和 BrowseComp-Plus 中 Baseline 与 zvec-grep 的配对对比" width="900" />
+### 1. 三个突出代码库任务
 
-| 测试 | 回答质量&nbsp;↑ | 平均输入&nbsp;Token&nbsp;↓ | 平均工具调用&nbsp;↓ | 平均&nbsp;Agent&nbsp;耗时&nbsp;↓ |
+以下是在平均 Judge 不下降的任务中，输入 Token 降幅最大的三个
+SWE-QA-Bench 任务。数值按 **Baseline → zg（变化）** 展示，每个 Profile
+均为三次运行的平均值。
+
+| 任务 | 仓库 | 类型 | 任务主题 | Judge&nbsp;/100&nbsp;↑ | 输入&nbsp;Token&nbsp;↓ | 工具调用&nbsp;↓ | 时间&nbsp;↓ | 成本&nbsp;↓ |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `pylint:10` | `pylint-dev/pylint` | What · 架构探索 | 通过 AST 节点类型区分带类型标注和不带类型标注的实例属性初始化 | 61.33 → 77.00<br>**+15.67 pp** | 1,379,349 → 239,010<br>**−82.7%** | 54.67 → 9.00<br>**−83.5%** | 286.3s → 69.5s<br>**−75.7%** | $1.894 → $0.544<br>**−71.3%** |
+| `matplotlib:37` | `matplotlib/matplotlib` | Where · 数据 / 控制流 | 追踪 `FontInfo` 在数学文本渲染中的流向，以及 `postscript_name` / `FT2Font` 分支 | 83.33 → 86.00<br>**+2.67 pp** | 787,247 → 367,421<br>**−53.3%** | 30.33 → 13.00<br>**−57.1%** | 218.8s → 104.1s<br>**−52.4%** | $1.272 → $0.727<br>**−42.9%** |
+| `django:32` | `django/django` | Why · 设计原理 | 解释用户名唯一约束、ORM 事务，以及移除约束对 formset 批量操作的级联影响 | 85.00 → 87.33<br>**+2.33 pp** | 758,941 → 416,109<br>**−45.2%** | 42.00 → 12.67<br>**−69.8%** | 195.8s → 118.6s<br>**−39.4%** | $1.577 → $0.689<br>**−56.3%** |
+
+在这三个任务上，zg 将平均 Judge 提高 **6.89 分**，同时将输入 Token、
+工具调用、时间和成本分别降低 **65.0%**、**72.7%**、**58.3%** 和
+**58.7%**。三个任务覆盖架构、跨文件数据流和设计原理，都是“定位正确证据”
+占主要成本的检索密集场景。该列表是事后挑选的突出样例，不代表无偏总体估计；
+其中 `pylint:10` 的 Baseline Judge 波动也明显较大。
+
+### 2. SWE-QA-Bench — 20 个代码库任务
+
+已发布的 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 测试覆盖
+What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的 20 个
+检索密集任务。测试使用 Claude Code 与 Claude Opus 5，zg Profile 使用
+Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
+
+| Profile | Judge&nbsp;/100&nbsp;↑ | 平均输入&nbsp;Token&nbsp;↓ | 平均工具调用&nbsp;↓ | 平均时间&nbsp;↓ | 平均成本&nbsp;↓ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 80.42 | 558,651 | 23.42 | 127.5s | $0.905 |
+| Baseline + zg | 81.92 | 294,262 | 9.70 | 79.7s | $0.558 |
+| **变化** | **+1.50 pp** | **−47.3%** | **−58.6%** | **−37.5%** | **−38.3%** |
+
+在 20 个任务 × 3 次运行中，zg 在提高平均评审质量的同时，显著降低了所有
+测量到的资源消耗。这组任务针对检索密集场景进行了筛选，不应被理解为对全部
+720 道 SWE-QA-Bench 题目的均匀抽样。
+
+### 3. BrowseComp-Plus — 80 个深度研究样例
+
+[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md) 在固定的
+100,195 文档语料库上评估多文档证据检索。80 个样例的测试使用 Codex
+`gpt-5.6-sol`、medium 推理强度，zg Profile 使用 Qwen3.7 Text Embedding，
+每个样例运行两次。
+
+| Profile | 准确率&nbsp;↑ | 平均输入&nbsp;Token&nbsp;↓ | 平均工具调用&nbsp;↓ | 平均时间&nbsp;↓ |
 | --- | ---: | ---: | ---: | ---: |
-| [**SWE-QA-Bench**](./benchmarks/swe-qa-bench/README_CN.md)<br>20 个任务 · 代码库 QA | 评审得分<br>80.42&nbsp;→&nbsp;81.92 | 558,651&nbsp;→&nbsp;294,262 | 23.42&nbsp;→&nbsp;9.70 | 127.5s&nbsp;→&nbsp;79.7s |
-| [**BrowseComp-Plus**](./benchmarks/browse-comp-plus/README_CN.md)<br>80 个样例 · 深度研究 QA | 准确率<br>90.00%&nbsp;→&nbsp;90.00% | 2.04M&nbsp;→&nbsp;1.19M | 22.70&nbsp;→&nbsp;14.24 | 284.8s&nbsp;→&nbsp;199.3s |
+| Baseline | 90.00% | 2.04M | 22.70 | 284.8s |
+| Baseline + zg | 90.00% | 1.19M | 14.24 | 199.3s |
+| **变化** | **0.00 pp** | **−41.7%** | **−37.3%** | **−30.0%** |
 
-表中数值均按 **Baseline → zg** 展示。
+zg 在保持 **90.00% 准确率**的同时，减少了跨文档组装证据所需的上下文和
+搜索工作量。
 
 完整结果和复现细节参见[性能测试文档](./benchmarks/README_CN.md)。
 

@@ -136,14 +136,59 @@ Each benchmark follows a **controlled, reproducible paired A/B protocol**: the
 same agent runs the same pinned tasks with identical model, prompt, environment,
 and limits; **only `zg` access and usage guidance differ**.
 
-<img src="./.github/assets/benchmark-comparison-v2.svg" alt="Paired baseline and zvec-grep comparison for SWE-QA-Bench and BrowseComp-Plus" width="900" />
+### 1. Three standout repository tasks
 
-| Benchmark | Answer&nbsp;quality&nbsp;↑ | Avg.&nbsp;input&nbsp;tokens&nbsp;↓ | Avg.&nbsp;tool&nbsp;calls&nbsp;↓ | Avg.&nbsp;agent&nbsp;time&nbsp;↓ |
+These are the three SWE-QA-Bench tasks with the largest input-token reductions
+among tasks whose mean Judge score did not decline. Values show
+**Baseline → zg (change)** and are means over three runs per profile.
+
+| Task | Repository | Category | Task focus | Judge&nbsp;/100&nbsp;↑ | Input&nbsp;tokens&nbsp;↓ | Tool&nbsp;calls&nbsp;↓ | Time&nbsp;↓ | Cost&nbsp;↓ |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `pylint:10` | `pylint-dev/pylint` | What · Architecture exploration | Distinguish typed and untyped instance-attribute initialization through AST node separation | 61.33 → 77.00<br>**+15.67 pp** | 1,379,349 → 239,010<br>**−82.7%** | 54.67 → 9.00<br>**−83.5%** | 286.3s → 69.5s<br>**−75.7%** | $1.894 → $0.544<br>**−71.3%** |
+| `matplotlib:37` | `matplotlib/matplotlib` | Where · Data / Control-flow | Trace `FontInfo` through math-text rendering and the `postscript_name` / `FT2Font` branch | 83.33 → 86.00<br>**+2.67 pp** | 787,247 → 367,421<br>**−53.3%** | 30.33 → 13.00<br>**−57.1%** | 218.8s → 104.1s<br>**−52.4%** | $1.272 → $0.727<br>**−42.9%** |
+| `django:32` | `django/django` | Why · Design rationale | Explain username uniqueness, ORM transactions, and cascading effects on formset bulk operations | 85.00 → 87.33<br>**+2.33 pp** | 758,941 → 416,109<br>**−45.2%** | 42.00 → 12.67<br>**−69.8%** | 195.8s → 118.6s<br>**−39.4%** | $1.577 → $0.689<br>**−56.3%** |
+
+Across these three tasks, zg raised the mean Judge score by **6.89 points**
+while reducing input tokens by **65.0%**, tool calls by **72.7%**, time by
+**58.3%**, and cost by **58.7%**. The tasks span architecture, cross-file data
+flow, and design rationale—the retrieval-heavy situations where locating the
+right evidence is often the dominant cost. This is a post-hoc highlight, not an
+unbiased estimate of overall performance; `pylint:10` also had unusually high
+Baseline Judge variance.
+
+### 2. SWE-QA-Bench — 20 repository tasks
+
+The published [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) study covers
+20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions,
+and 11 repositories. It uses Claude Code with Claude Opus 5, Qwen3.7 Text
+Embedding for the zg profile, and three runs per task and profile.
+
+| Profile | Judge&nbsp;/100&nbsp;↑ | Avg.&nbsp;input&nbsp;tokens&nbsp;↓ | Avg.&nbsp;tool&nbsp;calls&nbsp;↓ | Avg.&nbsp;time&nbsp;↓ | Avg.&nbsp;cost&nbsp;↓ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline | 80.42 | 558,651 | 23.42 | 127.5s | $0.905 |
+| Baseline + zg | 81.92 | 294,262 | 9.70 | 79.7s | $0.558 |
+| **Change** | **+1.50 pp** | **−47.3%** | **−58.6%** | **−37.5%** | **−38.3%** |
+
+Across 20 tasks × 3 runs, zg improved mean judged quality while substantially
+reducing every measured resource. The task set was curated for
+retrieval-intensive scenarios and should not be interpreted as a uniform
+sample of all 720 SWE-QA-Bench questions.
+
+### 3. BrowseComp-Plus — 80 deep-research cases
+
+The [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) study evaluates
+multi-document evidence retrieval over a fixed 100,195-document corpus. The
+80-case study uses Codex `gpt-5.6-sol` at medium reasoning effort, Qwen3.7 Text
+Embedding for the zg profile, and two trials per case.
+
+| Profile | Accuracy&nbsp;↑ | Avg.&nbsp;input&nbsp;tokens&nbsp;↓ | Avg.&nbsp;tool&nbsp;calls&nbsp;↓ | Avg.&nbsp;time&nbsp;↓ |
 | --- | ---: | ---: | ---: | ---: |
-| [**SWE-QA-Bench**](./benchmarks/swe-qa-bench/README.md)<br>20 tasks · Codebase QA | Judge Score<br>80.42&nbsp;→&nbsp;81.92 | 558,651&nbsp;→&nbsp;294,262 | 23.42&nbsp;→&nbsp;9.70 | 127.5s&nbsp;→&nbsp;79.7s |
-| [**BrowseComp-Plus**](./benchmarks/browse-comp-plus/README.md)<br>80 cases · Deep-research QA | Accuracy<br>90.00%&nbsp;→&nbsp;90.00% | 2.04M&nbsp;→&nbsp;1.19M | 22.70&nbsp;→&nbsp;14.24 | 284.8s&nbsp;→&nbsp;199.3s |
+| Baseline | 90.00% | 2.04M | 22.70 | 284.8s |
+| Baseline + zg | 90.00% | 1.19M | 14.24 | 199.3s |
+| **Change** | **0.00 pp** | **−41.7%** | **−37.3%** | **−30.0%** |
 
-Values show **Baseline → zg**.
+zg preserved **90.00% accuracy** while reducing the amount of context and
+search work required to assemble evidence across documents.
 
 See the [benchmark documentation](./benchmarks/README.md) for full results and
 reproduction details.
