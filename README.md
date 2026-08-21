@@ -136,7 +136,37 @@ Each benchmark follows a **controlled, reproducible paired A/B protocol**: the
 same agent runs the same pinned tasks with identical model, prompt, environment,
 and limits; **only `zg` access and usage guidance differ**.
 
-### 1. Representative coding cases
+### 1. Overall retrieval benchmarks
+
+zg is evaluated in two complementary retrieval settings:
+
+- **Coding:** [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) covers 20
+  retrieval-intensive tasks across What, Where, How, and Why, 8 intentions, and
+  11 repositories. It uses Claude Code with Claude Opus 5 and three runs per
+  task and profile.
+- **General text retrieval:**
+  [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) covers 80
+  deep-research cases over a fixed 100,195-document corpus. It uses Codex
+  `gpt-5.6-sol` at medium reasoning effort and two trials per case and profile.
+
+Both zg profiles use Qwen3.7 Text Embedding.
+
+<p align="center">
+  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v1.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
+</p>
+
+Across both studies, answer quality was preserved or improved while retrieval
+work fell substantially. In Coding, Judge increased from 80.42 to 81.92 while
+input tokens, tool calls, and time fell 47.3%, 58.6%, and 37.5%. In general
+text retrieval, accuracy held at 90.00% while the same metrics fell 41.7%,
+37.3%, and 30.0%.
+
+The SWE-QA-Bench task set was curated for retrieval-intensive scenarios and
+should not be interpreted as a uniform sample of all 720 questions. See the
+[benchmark documentation](./benchmarks/README.md) for full results and
+reproduction details.
+
+### 2. Representative repository cases
 
 These are the three SWE-QA-Bench tasks with the largest input-token reductions
 among tasks whose mean Judge score did not decline.
@@ -161,39 +191,6 @@ variance.
 | **`django/django`** | Why<br>Design rationale | Why does the User model's unique constraint on the username field interact with Django's ORM transaction handling, and what cascading effects would occur if this constraint were removed on an existing database with formset-based bulk operations? |
 
 </details>
-
-### 2. Coding — repository code retrieval
-
-The published [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) study covers
-20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions,
-and 11 repositories. It uses Claude Code with Claude Opus 5, Qwen3.7 Text
-Embedding for the zg profile, and three runs per task and profile.
-
-<p align="center">
-  <img src="./.github/assets/benchmark-coding-swe-qa-indexed-v1.png" alt="Coding benchmark on SWE-QA-Bench: normalized Baseline and zg comparison for Judge score, input tokens, tool calls, and time" width="1200" />
-</p>
-
-Across 20 tasks × 3 runs, mean Judge did not decline while input tokens fell
-47.3%, tool calls 58.6%, and time 37.5%. The task set was curated for
-retrieval-intensive scenarios and should not be interpreted as a uniform
-sample of all 720 SWE-QA-Bench questions.
-
-### 3. General text retrieval
-
-The [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) study evaluates
-multi-document evidence retrieval over a fixed 100,195-document corpus. The
-80-case study uses Codex `gpt-5.6-sol` at medium reasoning effort, Qwen3.7 Text
-Embedding for the zg profile, and two trials per case and profile.
-
-<p align="center">
-  <img src="./.github/assets/benchmark-text-browsecomp-indexed-v1.png" alt="General text retrieval benchmark on BrowseComp-Plus: normalized Baseline and zg comparison for accuracy, input tokens, tool calls, and time" width="1200" />
-</p>
-
-Across 80 cases × 2 trials, accuracy held at 90.00% while input tokens fell
-41.7%, tool calls 37.3%, and time 30.0%.
-
-See the [benchmark documentation](./benchmarks/README.md) for full results and
-reproduction details.
 
 ## 📚 Documentation
 

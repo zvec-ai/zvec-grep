@@ -132,7 +132,36 @@ zg 通过**缩小有效搜索空间**，帮助 Agent 更快找到相关证据 �
 
 每项测试均采用**受控、可复现的配对 A/B 评测**：同一个 Agent 在完全相同的模型、Prompt、环境和资源限制下执行同一组预先固定的任务；**实验组仅额外提供 `zg` 工具及其使用说明**。
 
-### 1. 代表性 Coding 案例
+### 1. 整体检索测试
+
+zg 在两种互补的检索场景中进行了评测：
+
+- **Coding：** [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 覆盖
+  What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的
+  20 个检索密集任务。测试使用 Claude Code 与 Claude Opus 5，
+  每个任务和 Profile 各运行三次。
+- **通用文本检索：**
+  [BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md) 覆盖固定
+  100,195 文档语料库上的 80 个深度研究样例。测试使用 Codex
+  `gpt-5.6-sol` 与 medium 推理强度，每个样例和 Profile
+  各运行两次。
+
+两项测试中的 zg Profile 均使用 Qwen3.7 Text Embedding。
+
+<p align="center">
+  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v1.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
+</p>
+
+两项测试中，zg 均在保持或提升答案质量的同时显著降低检索开销。
+Coding 场景的 Judge 从 80.42 提升到 81.92，Token、工具调用和耗时分别
+下降 47.3%、58.6% 和 37.5%；通用文本检索的准确率保持 90.00%，三项
+开销分别下降 41.7%、37.3% 和 30.0%。
+
+SWE-QA-Bench 任务集针对检索密集场景进行了筛选，不应被理解为对
+全部 720 道题目的均匀抽样。完整结果和复现细节参见
+[性能测试文档](./benchmarks/README_CN.md)。
+
+### 2. 代表性仓库案例
 
 以下是在平均 Judge 不下降的任务中，输入 Token 降幅最大的三个
 SWE-QA-Bench 任务。
@@ -155,37 +184,6 @@ SWE-QA-Bench 任务。
 | **`django/django`** | Why<br>设计原理 | User 模型中 username 字段的唯一约束为什么会与 Django ORM 事务处理产生关联？如果在已有数据库中移除该约束，会对基于 formset 的批量操作产生哪些级联影响？ |
 
 </details>
-
-### 2. Coding — 代码库检索
-
-已发布的 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 测试覆盖
-What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的 20 个
-检索密集任务。测试使用 Claude Code 与 Claude Opus 5，zg Profile 使用
-Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
-
-<p align="center">
-  <img src="./.github/assets/benchmark-coding-swe-qa-indexed-v1.png" alt="Coding 场景中的 SWE-QA-Bench 测试：Judge、输入 Token、工具调用和耗时的 Baseline 与 zg 归一化对比" width="1200" />
-</p>
-
-在 20 个任务 × 3 次运行中，平均 Judge 没有下降，同时 Token、工具调用和
-耗时分别下降 47.3%、58.6% 和 37.5%。这组任务针对检索密集场景进行了
-筛选，不应被理解为对全部 720 道 SWE-QA-Bench 题目的均匀抽样。
-
-### 3. 通用文本检索
-
-[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md) 在固定的
-100,195 文档语料库上评估多文档证据检索。80 个样例的测试使用 Codex
-`gpt-5.6-sol` 与 medium 推理强度，zg Profile 使用 Qwen3.7 Text Embedding，
-每个样例和 Profile 各运行两次。
-
-<p align="center">
-  <img src="./.github/assets/benchmark-text-browsecomp-indexed-v1.png" alt="通用文本检索场景中的 BrowseComp-Plus 测试：准确率、输入 Token、工具调用和耗时的 Baseline 与 zg 归一化对比" width="1200" />
-</p>
-
-在 80 个样例 × 2 次运行中，准确率保持 90.00%，同时 Token、工具调用和
-耗时分别下降 41.7%、37.3% 和 30.0%。
-
-完整结果和复现细节参见[性能测试文档](./benchmarks/README_CN.md)。
 
 ## 📚 文档
 
