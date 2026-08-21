@@ -129,7 +129,7 @@ zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 ## 📊 Benchmarks
 
 Each benchmark uses paired A/B runs with tasks, agent/model, prompt,
-environment, and limits held constant; only `zg` access and usage guidance
+environment, and limits held constant; only zg access and usage guidance
 differ.
 
 See the [benchmark documentation](./benchmarks/README.md) for full results and
@@ -138,9 +138,10 @@ reproduction details.
 ### 1. Cross-Domain Agent Benchmark
 
 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) uses Claude Code with
-Claude Opus 5; [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) uses
-Codex `gpt-5.6-sol` at medium reasoning effort. Both zg profiles use Qwen3.7
-Text Embedding.
+Claude Opus 5 at high reasoning effort;
+[BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) uses Codex
+gpt-5.6-sol at medium reasoning effort. Both zg profiles use Qwen3.7 Text
+Embedding.
 
 <p align="center">
   <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />

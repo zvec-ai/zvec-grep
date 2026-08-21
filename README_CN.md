@@ -129,15 +129,16 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 ## 📊 性能测试
 
 每项测试均采用配对 A/B 评测：任务、Agent/模型、Prompt、环境和
-资源限制保持一致，仅 `zg` 访问权限及使用说明不同。
+资源限制保持一致，仅 zg 访问权限及使用说明不同。
 
 完整结果和复现细节参见[性能测试文档](./benchmarks/README_CN.md)。
 
 ### 1. 跨领域 Agent Benchmark
 
 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 使用 Claude Code 与
-Claude Opus 5；[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md)
-使用 Codex `gpt-5.6-sol` 与 medium 推理强度。两项测试中的 zg
+Claude Opus 5（high 推理强度）；
+[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md) 使用 Codex
+gpt-5.6-sol 与 medium 推理强度。两项测试中的 zg
 Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
