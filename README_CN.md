@@ -164,7 +164,7 @@ What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的 
 Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-swe-qa-20-v1.png" alt="20 个代码库任务上的 SWE-QA-Bench 对比：Judge、输入 Token、工具调用、耗时和成本" width="1200" />
+  <img src="./.github/assets/benchmark-swe-qa-20-v2.png" alt="20 个代码库任务上的 SWE-QA-Bench 对比：Judge、输入 Token、工具调用、耗时和成本" width="1200" />
 </p>
 
 在 20 个任务 × 3 次运行中，zg 在提高平均评审质量的同时，显著降低了所有
@@ -179,7 +179,7 @@ Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
 每个样例运行两次。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-browsecomp-plus-80-v1.png" alt="80 个深度研究样例上的 BrowseComp-Plus 对比：准确率、输入 Token、工具调用和耗时" width="1200" />
+  <img src="./.github/assets/benchmark-browsecomp-plus-80-v2.png" alt="80 个深度研究样例上的 BrowseComp-Plus 对比：准确率、输入 Token、工具调用和耗时" width="1200" />
 </p>
 
 zg 在保持 **90.00% 准确率**的同时，减少了跨文档组装证据所需的上下文和
