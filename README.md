@@ -136,7 +136,7 @@ Each benchmark follows a **controlled, reproducible paired A/B protocol**: the
 same agent runs the same pinned tasks with identical model, prompt, environment,
 and limits; **only `zg` access and usage guidance differ**.
 
-### 1. Three standout repository tasks
+### 1. Representative coding cases
 
 These are the three SWE-QA-Bench tasks with the largest input-token reductions
 among tasks whose mean Judge score did not decline.
