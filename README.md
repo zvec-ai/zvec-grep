@@ -135,7 +135,7 @@ differ.
 See the [benchmark documentation](./benchmarks/README.md) for full results and
 reproduction details.
 
-### 1. Overall retrieval benchmarks
+### 1. Cross-Domain Agent Benchmark
 
 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) uses Claude Code with
 Claude Opus 5; [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) uses
@@ -153,7 +153,7 @@ Text Embedding.
   indexed with symbols, signatures, and breadcrumbs, while prose is retrieved
   as focused sections and chunks.
 
-### 2. Representative repository cases
+### 2. Real-World Case Studies
 
 <p align="center">
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="980" />

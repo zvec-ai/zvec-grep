@@ -133,7 +133,7 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 
 完整结果和复现细节参见[性能测试文档](./benchmarks/README_CN.md)。
 
-### 1. 整体检索测试
+### 1. 跨领域 Agent Benchmark
 
 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 使用 Claude Code 与
 Claude Opus 5；[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md)
@@ -149,7 +149,7 @@ Profile 均使用 Qwen3.7 Text Embedding。
 - **为何通用：** 同一检索流程可以适配不同内容：代码索引保留符号、签名和
   层级路径，通用文本则按相关 section 与 chunk 返回证据。
 
-### 2. 代表性仓库案例
+### 2. 真实案例分析
 
 <p align="center">
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
