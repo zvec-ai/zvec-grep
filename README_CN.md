@@ -156,25 +156,34 @@ SWE-QA-Bench 任务。
 
 </details>
 
-### 2. Coding 场景与通用文本检索测试
+### 2. Coding — 代码库检索
 
-zg 在两个互补的检索场景中进行评测：
-
-- **Coding / 代码库检索 — [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md)：**覆盖 What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的 20 个检索密集任务。测试使用 Claude Code 与 Claude Opus 5，每个任务和 Profile 各运行三次。
-- **通用文本检索 — [BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md)：**在固定的 100,195 文档语料库上评估 80 个深度研究样例。测试使用 Codex `gpt-5.6-sol` 与 medium 推理强度，每个样例和 Profile 各运行两次。
-
-两个 zg Profile 均使用 Qwen3.7 Text Embedding。
+已发布的 [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 测试覆盖
+What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的 20 个
+检索密集任务。测试使用 Claude Code 与 Claude Opus 5，zg Profile 使用
+Qwen3.7 Text Embedding，每个任务和 Profile 各运行三次。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-retrieval-scenarios-v3.png" alt="zg 在 Coding 和通用文本检索场景中的测试对比：保持 Agent 任务效果，同时降低输入 Token、工具调用和耗时" width="1200" />
+  <img src="./.github/assets/benchmark-coding-swe-qa-indexed-v1.png" alt="Coding 场景中的 SWE-QA-Bench 测试：Judge、输入 Token、工具调用和耗时的 Baseline 与 zg 归一化对比" width="1200" />
 </p>
 
-两种场景中，由 Judge 和 Accuracy 衡量的 Agent 最终任务效果均未下降。代码
-检索场景的平均 Judge 从 80.42 变为 81.92，同时 Token、工具调用、耗时和
-分别下降 47.3%、58.6% 和 37.5%；通用文本检索场景保持 90.00% 准确率，
-同时 Token、工具调用和耗时分别下降 41.7%、37.3% 和 30.0%。代码任务集
-针对检索密集场景进行了筛选，不应被理解为对全部 720 道 SWE-QA-Bench
-题目的均匀抽样。
+在 20 个任务 × 3 次运行中，平均 Judge 没有下降，同时 Token、工具调用和
+耗时分别下降 47.3%、58.6% 和 37.5%。这组任务针对检索密集场景进行了
+筛选，不应被理解为对全部 720 道 SWE-QA-Bench 题目的均匀抽样。
+
+### 3. 通用文本检索
+
+[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md) 在固定的
+100,195 文档语料库上评估多文档证据检索。80 个样例的测试使用 Codex
+`gpt-5.6-sol` 与 medium 推理强度，zg Profile 使用 Qwen3.7 Text Embedding，
+每个样例和 Profile 各运行两次。
+
+<p align="center">
+  <img src="./.github/assets/benchmark-text-browsecomp-indexed-v1.png" alt="通用文本检索场景中的 BrowseComp-Plus 测试：准确率、输入 Token、工具调用和耗时的 Baseline 与 zg 归一化对比" width="1200" />
+</p>
+
+在 80 个样例 × 2 次运行中，准确率保持 90.00%，同时 Token、工具调用和
+耗时分别下降 41.7%、37.3% 和 30.0%。
 
 完整结果和复现细节参见[性能测试文档](./benchmarks/README_CN.md)。
 

@@ -162,26 +162,35 @@ variance.
 
 </details>
 
-### 2. Coding and general text retrieval benchmarks
+### 2. Coding — repository code retrieval
 
-zg is evaluated in two complementary retrieval settings:
-
-- **Coding / repository retrieval — [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md):** 20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions, and 11 repositories. The study uses Claude Code with Claude Opus 5 and three runs per task and profile.
-- **General text retrieval — [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md):** 80 deep-research cases over a fixed 100,195-document corpus. The study uses Codex `gpt-5.6-sol` at medium reasoning effort and two trials per case and profile.
-
-Both zg profiles use Qwen3.7 Text Embedding.
+The published [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) study covers
+20 retrieval-intensive tasks across What, Where, How, and Why, 8 intentions,
+and 11 repositories. It uses Claude Code with Claude Opus 5, Qwen3.7 Text
+Embedding for the zg profile, and three runs per task and profile.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-retrieval-scenarios-v3.png" alt="zg benchmark comparison across coding and general text retrieval: Agent quality is preserved while input tokens, tool calls, and time decrease" width="1200" />
+  <img src="./.github/assets/benchmark-coding-swe-qa-indexed-v1.png" alt="Coding benchmark on SWE-QA-Bench: normalized Baseline and zg comparison for Judge score, input tokens, tool calls, and time" width="1200" />
 </p>
 
-Agent task effectiveness—as measured by Judge and accuracy—did not decline in
-either setting. For code retrieval, mean Judge moved from 80.42 to 81.92 while
-tokens fell 47.3%, tool calls 58.6%, and time 37.5%. For general text retrieval,
-accuracy held at 90.00% while tokens fell 41.7%, tool calls 37.3%, and time
-30.0%. The code task set was curated for retrieval-intensive scenarios
-and should not be interpreted as a uniform sample of all 720 SWE-QA-Bench
-questions.
+Across 20 tasks × 3 runs, mean Judge did not decline while input tokens fell
+47.3%, tool calls 58.6%, and time 37.5%. The task set was curated for
+retrieval-intensive scenarios and should not be interpreted as a uniform
+sample of all 720 SWE-QA-Bench questions.
+
+### 3. General text retrieval
+
+The [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) study evaluates
+multi-document evidence retrieval over a fixed 100,195-document corpus. The
+80-case study uses Codex `gpt-5.6-sol` at medium reasoning effort, Qwen3.7 Text
+Embedding for the zg profile, and two trials per case and profile.
+
+<p align="center">
+  <img src="./.github/assets/benchmark-text-browsecomp-indexed-v1.png" alt="General text retrieval benchmark on BrowseComp-Plus: normalized Baseline and zg comparison for accuracy, input tokens, tool calls, and time" width="1200" />
+</p>
+
+Across 80 cases × 2 trials, accuracy held at 90.00% while input tokens fell
+41.7%, tool calls 37.3%, and time 30.0%.
 
 See the [benchmark documentation](./benchmarks/README.md) for full results and
 reproduction details.
