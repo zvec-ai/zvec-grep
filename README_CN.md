@@ -149,7 +149,7 @@ zg 在两种互补的检索场景中进行了评测：
 两项测试中的 zg Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v1.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
+  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
 </p>
 
 两项测试中，zg 均在保持或提升答案质量的同时显著降低检索开销。

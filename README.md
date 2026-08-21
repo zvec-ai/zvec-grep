@@ -152,7 +152,7 @@ zg is evaluated in two complementary retrieval settings:
 Both zg profiles use Qwen3.7 Text Embedding.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v1.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
+  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
 </p>
 
 Across both studies, answer quality was preserved or improved while retrieval
