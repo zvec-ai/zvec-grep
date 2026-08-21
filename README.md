@@ -128,41 +128,23 @@ zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 
 ## 📊 Benchmarks
 
-zg helps agents find relevant evidence faster by **narrowing the effective
-search space** — using **fewer tokens, tool calls, and less time** while
-preserving answer quality.
-
-Each benchmark follows a **controlled, reproducible paired A/B protocol**: the
-same agent runs the same pinned tasks with identical model, prompt, environment,
-and limits; **only `zg` access and usage guidance differ**.
+Each benchmark uses paired A/B runs with tasks, agent/model, prompt,
+environment, and limits held constant; only `zg` access and usage guidance
+differ.
 
 ### 1. Overall retrieval benchmarks
 
-zg is evaluated in two complementary retrieval settings:
-
-- **Coding:** [SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) covers 20
-  retrieval-intensive tasks across What, Where, How, and Why, 8 intentions, and
-  11 repositories. It uses Claude Code with Claude Opus 5 and three runs per
-  task and profile.
-- **General text retrieval:**
-  [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) covers 80
-  deep-research cases over a fixed 100,195-document corpus. It uses Codex
-  `gpt-5.6-sol` at medium reasoning effort and two trials per case and profile.
-
-Both zg profiles use Qwen3.7 Text Embedding.
+[SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) uses Claude Code with
+Claude Opus 5; [BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) uses
+Codex `gpt-5.6-sol` at medium reasoning effort. Both zg profiles use Qwen3.7
+Text Embedding.
 
 <p align="center">
   <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
 </p>
 
-Across both studies, answer quality was preserved or improved while retrieval
-work fell substantially. In Coding, Judge increased from 80.42 to 81.92 while
-input tokens, tool calls, and time fell 47.3%, 58.6%, and 37.5%. In general
-text retrieval, accuracy held at 90.00% while the same metrics fell 41.7%,
-37.3%, and 30.0%.
-
 The SWE-QA-Bench task set was curated for retrieval-intensive scenarios and
-should not be interpreted as a uniform sample of all 720 questions. See the
+is not a uniform sample of all 720 questions. See the
 [benchmark documentation](./benchmarks/README.md) for full results and
 reproduction details.
 
@@ -175,11 +157,8 @@ among tasks whose mean Judge score did not decline.
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
 </p>
 
-The highlighted cases span architecture, cross-file data flow, and design
-rationale—the retrieval-heavy situations where locating the right evidence is
-often the dominant cost. This is a post-hoc highlight, not an unbiased estimate
-of overall performance; the pylint case also had unusually high Baseline Judge
-variance.
+These post-hoc highlights are not an unbiased estimate of overall performance;
+the pylint case also had unusually high Baseline Judge variance.
 
 <details>
 <summary><strong>Repository questions</strong></summary>

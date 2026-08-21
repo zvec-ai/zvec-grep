@@ -128,34 +128,19 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 
 ## 📊 性能测试
 
-zg 通过**缩小有效搜索空间**，帮助 Agent 更快找到相关证据 —— 在保持回答质量的同时，使用**更少的 Token、工具调用和时间**。
-
-每项测试均采用**受控、可复现的配对 A/B 评测**：同一个 Agent 在完全相同的模型、Prompt、环境和资源限制下执行同一组预先固定的任务；**实验组仅额外提供 `zg` 工具及其使用说明**。
+每项测试均采用配对 A/B 评测：任务、Agent/模型、Prompt、环境和
+资源限制保持一致，仅 `zg` 访问权限及使用说明不同。
 
 ### 1. 整体检索测试
 
-zg 在两种互补的检索场景中进行了评测：
-
-- **Coding：** [SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 覆盖
-  What、Where、How、Why 四个顶层类别、8 种意图和 11 个仓库中的
-  20 个检索密集任务。测试使用 Claude Code 与 Claude Opus 5，
-  每个任务和 Profile 各运行三次。
-- **通用文本检索：**
-  [BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md) 覆盖固定
-  100,195 文档语料库上的 80 个深度研究样例。测试使用 Codex
-  `gpt-5.6-sol` 与 medium 推理强度，每个样例和 Profile
-  各运行两次。
-
-两项测试中的 zg Profile 均使用 Qwen3.7 Text Embedding。
+[SWE-QA-Bench](./benchmarks/swe-qa-bench/README_CN.md) 使用 Claude Code 与
+Claude Opus 5；[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md)
+使用 Codex `gpt-5.6-sol` 与 medium 推理强度。两项测试中的 zg
+Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
   <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
 </p>
-
-两项测试中，zg 均在保持或提升答案质量的同时显著降低检索开销。
-Coding 场景的 Judge 从 80.42 提升到 81.92，Token、工具调用和耗时分别
-下降 47.3%、58.6% 和 37.5%；通用文本检索的准确率保持 90.00%，三项
-开销分别下降 41.7%、37.3% 和 30.0%。
 
 SWE-QA-Bench 任务集针对检索密集场景进行了筛选，不应被理解为对
 全部 720 道题目的均匀抽样。完整结果和复现细节参见
@@ -170,8 +155,7 @@ SWE-QA-Bench 任务。
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
 </p>
 
-三个样例覆盖架构、跨文件数据流和设计原理，都是“定位正确证据”占主要成本的
-检索密集场景。该图是事后挑选的突出样例，不代表无偏总体估计；其中 pylint
+这些样例是事后挑选的突出案例，不代表无偏总体估计；其中 pylint
 样例的 Baseline Judge 波动也明显较大。
 
 <details>
