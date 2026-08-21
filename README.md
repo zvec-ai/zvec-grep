@@ -153,12 +153,6 @@ Text Embedding.
   indexed with symbols, signatures, and breadcrumbs, while prose is retrieved
   as focused sections and chunks.
 
-zg is best suited to questions whose evidence is scattered across files or
-modules—especially call-chain, data-flow, and architectural reasoning when the
-target location is unknown. Because the agent decides whether and how to use
-the tool, model capability and sampling variability can affect the result;
-averages over repeated runs are more representative than a single run.
-
 ### 2. Representative repository cases
 
 <p align="center">
@@ -186,6 +180,11 @@ averages over repeated runs are more representative than a single run.
 | **`django/django`** | Why<br>Design rationale | Why does the User model's unique constraint on the username field interact with Django's ORM transaction handling, and what cascading effects would occur if this constraint were removed on an existing database with formset-based bulk operations? |
 
 </details>
+
+> zg works best when evidence spans files or modules and the target location is
+> unknown, especially for call-chain, data-flow, and architectural questions.
+> Since agents decide when and how to use it, results vary by model and run;
+> repeated-run averages are more reliable.
 
 ## 📚 Documentation
 
