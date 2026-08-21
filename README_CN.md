@@ -137,12 +137,6 @@ zg 通过**缩小有效搜索空间**，帮助 Agent 更快找到相关证据 �
 以下是在平均 Judge 不下降的任务中，输入 Token 降幅最大的三个
 SWE-QA-Bench 任务。
 
-| 仓库 | 问题类型 | 具体问题 |
-| --- | --- | --- |
-| **`pylint-dev/pylint`** | What<br>架构探索 | 使用 AST 节点类型区分带类型标注和不带类型标注的实例属性初始化时，采用了什么架构模式？ |
-| **`matplotlib/matplotlib`** | Where<br>数据 / 控制流 | `FontInfo` NamedTuple 在数学文本渲染 Pipeline 中如何传递字体度量和字形数据？控制流如何决定在字符渲染的不同阶段使用 `postscript_name` 还是 `FT2Font` 对象？ |
-| **`django/django`** | Why<br>设计原理 | User 模型中 username 字段的唯一约束为什么会与 Django ORM 事务处理产生关联？如果在已有数据库中移除该约束，会对基于 formset 的批量操作产生哪些级联影响？ |
-
 <p align="center">
   <img src="./.github/assets/benchmark-repository-top3.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="1200" />
 </p>
@@ -150,6 +144,17 @@ SWE-QA-Bench 任务。
 三个样例覆盖架构、跨文件数据流和设计原理，都是“定位正确证据”占主要成本的
 检索密集场景。该图是事后挑选的突出样例，不代表无偏总体估计；其中 pylint
 样例的 Baseline Judge 波动也明显较大。
+
+<details>
+<summary><strong>测试仓库与具体问题</strong></summary>
+
+| 仓库 | 问题类型 | 具体问题 |
+| --- | --- | --- |
+| **`pylint-dev/pylint`** | What<br>架构探索 | 使用 AST 节点类型区分带类型标注和不带类型标注的实例属性初始化时，采用了什么架构模式？ |
+| **`matplotlib/matplotlib`** | Where<br>数据 / 控制流 | `FontInfo` NamedTuple 在数学文本渲染 Pipeline 中如何传递字体度量和字形数据？控制流如何决定在字符渲染的不同阶段使用 `postscript_name` 还是 `FT2Font` 对象？ |
+| **`django/django`** | Why<br>设计原理 | User 模型中 username 字段的唯一约束为什么会与 Django ORM 事务处理产生关联？如果在已有数据库中移除该约束，会对基于 formset 的批量操作产生哪些级联影响？ |
+
+</details>
 
 ### 2. SWE-QA-Bench — 20 个代码库任务
 

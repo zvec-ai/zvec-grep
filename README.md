@@ -141,12 +141,6 @@ and limits; **only `zg` access and usage guidance differ**.
 These are the three SWE-QA-Bench tasks with the largest input-token reductions
 among tasks whose mean Judge score did not decline.
 
-| Repository | Question type | Question |
-| --- | --- | --- |
-| **`pylint-dev/pylint`** | What<br>Architecture exploration | What is the architectural pattern that distinguishes type-annotated from non-annotated instance attribute initialization using AST node type separation? |
-| **`matplotlib/matplotlib`** | Where<br>Data / Control-flow | Where does the `FontInfo` NamedTuple propagate font metrics and glyph data through the mathematical text rendering pipeline, and what control flow determines whether the `postscript_name` or the `FT2Font` object is used at different stages of character rendering? |
-| **`django/django`** | Why<br>Design rationale | Why does the User model's unique constraint on the username field interact with Django's ORM transaction handling, and what cascading effects would occur if this constraint were removed on an existing database with formset-based bulk operations? |
-
 <p align="center">
   <img src="./.github/assets/benchmark-repository-top3.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="1200" />
 </p>
@@ -156,6 +150,17 @@ rationale—the retrieval-heavy situations where locating the right evidence is
 often the dominant cost. This is a post-hoc highlight, not an unbiased estimate
 of overall performance; the pylint case also had unusually high Baseline Judge
 variance.
+
+<details>
+<summary><strong>Repository questions</strong></summary>
+
+| Repository | Question type | Question |
+| --- | --- | --- |
+| **`pylint-dev/pylint`** | What<br>Architecture exploration | What is the architectural pattern that distinguishes type-annotated from non-annotated instance attribute initialization using AST node type separation? |
+| **`matplotlib/matplotlib`** | Where<br>Data / Control-flow | Where does the `FontInfo` NamedTuple propagate font metrics and glyph data through the mathematical text rendering pipeline, and what control flow determines whether the `postscript_name` or the `FT2Font` object is used at different stages of character rendering? |
+| **`django/django`** | Why<br>Design rationale | Why does the User model's unique constraint on the username field interact with Django's ORM transaction handling, and what cascading effects would occur if this constraint were removed on an existing database with formset-based bulk operations? |
+
+</details>
 
 ### 2. SWE-QA-Bench — 20 repository tasks
 
