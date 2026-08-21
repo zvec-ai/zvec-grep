@@ -141,7 +141,7 @@ Claude Opus 5；[BrowseComp-Plus](./benchmarks/browse-comp-plus/README_CN.md)
 Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
+  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
 </p>
 
 - **为何有效：** 语义发现先收窄搜索范围，排序后的词法检索再锚定精确标识符；
@@ -155,12 +155,12 @@ Profile 均使用 Qwen3.7 Text Embedding。
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
 </p>
 
-- **Pylint — Python 静态分析器：** 任务需要理解 AST 节点处理如何区分带标注与
+- **[Pylint](https://github.com/pylint-dev/pylint) — Python 静态分析器：** 任务需要理解 AST 节点处理如何区分带标注与
   不带标注的属性初始化；由于架构入口事先未知，保留符号与层级路径的检索
   更适合定位相关实现。
-- **Matplotlib — 绘图与渲染库：** 任务需要沿数学文本渲染的多个阶段追踪
+- **[Matplotlib](https://github.com/matplotlib/matplotlib) — 绘图与渲染库：** 任务需要沿数学文本渲染的多个阶段追踪
   `FontInfo` 与字体选择；语义与词法联合排序有助于还原跨文件的数据流和控制流。
-- **Django — Web 框架：** 任务关联 username 唯一约束、ORM 事务和 formset
+- **[Django](https://github.com/django/django) — Web 框架：** 任务关联 username 唯一约束、ORM 事务和 formset
   批量操作；紧凑的排序证据便于汇集分散在多处的设计依据。
 
 <details>

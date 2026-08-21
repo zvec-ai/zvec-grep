@@ -143,7 +143,7 @@ Codex `gpt-5.6-sol` at medium reasoning effort. Both zg profiles use Qwen3.7
 Text Embedding.
 
 <p align="center">
-  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v2.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
+  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
 </p>
 
 - **Why it helps:** semantic discovery narrows the search space, ranked lexical
@@ -159,14 +159,14 @@ Text Embedding.
   <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="980" />
 </p>
 
-- **Pylint — Python static analysis:** the task asks how AST node handling
+- **[Pylint](https://github.com/pylint-dev/pylint) — Python static analysis:** the task asks how AST node handling
   separates annotated and non-annotated attribute initialization. Symbol-aware
   retrieval is useful because the architectural entry point is not known in
   advance.
-- **Matplotlib — plotting and rendering:** the task traces `FontInfo` and font
+- **[Matplotlib](https://github.com/matplotlib/matplotlib) — plotting and rendering:** the task traces `FontInfo` and font
   selection through multiple math-text rendering stages. Ranked semantic and
   lexical evidence helps reconstruct the cross-file data and control flow.
-- **Django — web framework:** the task connects username uniqueness, ORM
+- **[Django](https://github.com/django/django) — web framework:** the task connects username uniqueness, ORM
   transactions, and formset bulk operations. Compact ranked evidence brings
   the distributed design rationale together.
 
