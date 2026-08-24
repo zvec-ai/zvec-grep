@@ -7,11 +7,7 @@
   "gate": {
     "required_tasks": 20,
     "smoke_task": "reflex:6",
-    "auto_tasks": [
-      "pylint:10",
-      "matplotlib:37",
-      "django:32"
-    ],
+    "auto_tasks": ["pylint:10", "matplotlib:37", "django:32"],
     "category_tasks": [
       "sqlfluff:2",
       "conan:1",
