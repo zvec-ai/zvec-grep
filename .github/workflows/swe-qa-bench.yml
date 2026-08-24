@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: Run the smoke pair or the 20-task All-Full benchmark
+        description: Run the three-case smoke benchmark or the 20-task All-Full benchmark
         required: true
         default: smoke
         type: choice
@@ -73,9 +73,7 @@ jobs:
           tasks = selection["tasks"]
           tasks_by_id = {task["task_id"]: task for task in tasks}
           scope = os.environ["SCOPE"]
-          if scope == "smoke":
-              task_ids = [selection["gate"]["smoke_task"]]
-          elif scope == "auto":
+          if scope in {"smoke", "auto"}:
               task_ids = selection["gate"]["auto_tasks"]
           elif scope in {"all-full", "gate-20"}:
               # gate-20 remains accepted for legacy API/CLI dispatches.
@@ -109,7 +107,6 @@ jobs:
           uv run --project benchmarks/swe-qa-bench zg-bench run
           swe-qa-bench
           --tier smoke
-          --task reflex-6
           --agent opencode
           --model custom-openai/glm-5.2
           --profile all

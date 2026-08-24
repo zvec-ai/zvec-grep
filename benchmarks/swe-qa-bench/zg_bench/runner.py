@@ -219,9 +219,6 @@ def load_suite(
         )
         if len(set(tasks)) != len(tasks):
             raise SuiteConfigError(f"tiers.{tier}.tasks must not contain duplicates")
-    if tier == "smoke" and tasks is not None and len(tasks) != 1:
-        raise SuiteConfigError("the smoke tier must contain exactly one task")
-
     if task_overrides:
         tasks = tuple(
             _require_nonempty_string(task, f"task override {index}")

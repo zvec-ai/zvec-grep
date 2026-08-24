@@ -24,9 +24,9 @@ Workflow 会在启动需要模型的 job 前，验证锁定的任务选择、代
 
 ## CI scope
 
-- 同一代码仓库的 pull request 和向 `main` 的 push 会运行以下 5 个精选任务：`reflex:6`、`pylint:9`、`matplotlib:37`、`streamlink:14` 和 `xarray:32`。
+- 同一代码仓库的 pull request 和向 `main` 的 push 会运行根 README 展示的 3 个案例：`pylint:10`、`matplotlib:37` 和 `django:32`。
 - 来自 fork 和 Dependabot 的 pull request 只运行锁定资源验证、单元测试和 dry-run 预检，不使用模型凭证。
-- 手动运行 `workflow_dispatch` 并设置 `scope=smoke` 时，会运行 `reflex:6`。
+- 手动运行 `workflow_dispatch` 并设置 `scope=smoke` 时，会运行相同的 3 个案例。
 - 手动运行 `workflow_dispatch` 并设置 `scope=all-full` 时，会运行全部 20 个锁定任务。
 
 维护者可以在代码仓库根目录使用 GitHub CLI 触发手动 scope：
@@ -102,12 +102,11 @@ zg-bench list tasks swe-qa-bench --tier smoke
 zg-bench list tasks swe-qa-bench --tier ci
 ```
 
-首先 dry run 单任务、每个 profile 三次 trial 的配置：
+首先 dry run 3 个任务、每个 profile 三次 trial 的配置：
 
 ```sh
 zg-bench run swe-qa-bench \
   --tier smoke \
-  --task reflex-6 \
   --agent opencode \
   --model custom-openai/glm-5.2 \
   --profile all \

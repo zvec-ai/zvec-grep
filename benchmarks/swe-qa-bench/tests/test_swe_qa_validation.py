@@ -14,11 +14,9 @@ SELECTION_PATH = SWE_QA_BENCH_DIR / "zg_bench" / "swe_qa" / "data" / "selection.
 REFERENCES_PATH = SWE_QA_BENCH_DIR / "zg_bench" / "swe_qa" / "data" / "references.json"
 DATASET_PATH = SWE_QA_BENCH_DIR / "datasets"
 EXPECTED_AUTO_TASK_IDS = (
-    "reflex:6",
-    "pylint:9",
+    "pylint:10",
     "matplotlib:37",
-    "streamlink:14",
-    "xarray:32",
+    "django:32",
 )
 
 
@@ -40,29 +38,36 @@ class AutoSelectionValidationTests(unittest.TestCase):
             dataset_path=DATASET_PATH,
         )
 
-        self.assertEqual(result["auto_task_count"], 5)
+        self.assertEqual(result["auto_task_count"], 3)
         self.assertEqual(tuple(result["auto_task_ids"]), EXPECTED_AUTO_TASK_IDS)
 
     def test_auto_selection_requires_exact_task_count(self) -> None:
         selection = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
         selection["gate"]["auto_tasks"].pop()
 
-        with self.assertRaisesRegex(SweQaError, "exactly 5 tasks"):
+        with self.assertRaisesRegex(SweQaError, "exactly 3 tasks"):
             self._validate_selection(selection)
 
-    def test_auto_selection_must_start_with_smoke(self) -> None:
+    def test_auto_selection_requires_what_where_why_order(self) -> None:
         selection = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
         auto_tasks = selection["gate"]["auto_tasks"]
         auto_tasks[0], auto_tasks[1] = auto_tasks[1], auto_tasks[0]
 
-        with self.assertRaisesRegex(SweQaError, "start with the configured smoke"):
+        with self.assertRaisesRegex(SweQaError, "what/where/why order"):
             self._validate_selection(selection)
 
-    def test_auto_selection_requires_all_four_categories_in_order(self) -> None:
+    def test_auto_selection_requires_category_tasks(self) -> None:
         selection = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
-        selection["gate"]["auto_tasks"][-1] = "sqlfluff:2"
+        selection["gate"]["auto_tasks"][0] = "reflex:6"
 
-        with self.assertRaisesRegex(SweQaError, "what/where/how/why order"):
+        with self.assertRaisesRegex(SweQaError, "entries must be category tasks"):
+            self._validate_selection(selection)
+
+    def test_auto_selection_rejects_duplicates(self) -> None:
+        selection = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))
+        selection["gate"]["auto_tasks"][-1] = "matplotlib:37"
+
+        with self.assertRaisesRegex(SweQaError, "must not contain duplicates"):
             self._validate_selection(selection)
 
     def test_auto_selection_rejects_unknown_task(self) -> None:

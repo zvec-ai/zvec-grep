@@ -466,6 +466,18 @@ class SuiteTierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.suite_name = _install_external_suite_fixture(self)
 
+    def test_local_swe_qa_smoke_uses_readme_cases(self) -> None:
+        suite_path = (
+            Path(__file__).resolve().parents[1] / "suites" / "swe-qa-bench.yaml"
+        )
+
+        suite = runner.load_suite(suite_path, tier="smoke")
+
+        self.assertEqual(
+            suite.tasks,
+            ("pylint-10", "matplotlib-37", "django-32"),
+        )
+
     def test_local_swe_qa_suite_uses_harbor_path(self) -> None:
         suite_path = (
             Path(__file__).resolve().parents[1] / "suites" / "swe-qa-bench.yaml"
