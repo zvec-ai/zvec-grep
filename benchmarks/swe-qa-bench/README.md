@@ -37,11 +37,14 @@ reference isolation before starting model-backed jobs.
 
 ## CI scopes
 
-- Same-repository pull requests and pushes to `main` run the three cases shown
-  in the root README: `pylint:10`, `matplotlib:37`, and `django:32`.
+- Same-repository pull requests and pushes to `main` run these three smoke
+  tasks: `pylint:10`, `matplotlib:37`, and `django:32`.
+- Model-backed CI uses the `opencode` agent with
+  `custom-openai/glm-5.2` for both profiles.
 - Fork and Dependabot pull requests run locked-asset validation, unit tests, and
   a dry-run preflight only, without model credentials.
-- Manual `workflow_dispatch` with `scope=smoke` runs the same three cases.
+- Manual `workflow_dispatch` with `scope=smoke` runs the same three smoke
+  tasks.
 - Manual `workflow_dispatch` with `scope=all-full` runs all 20 pinned tasks.
 
 From the repository root, maintainers can trigger the manual scopes with the

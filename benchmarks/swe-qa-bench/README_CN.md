@@ -24,9 +24,10 @@ Workflow 会在启动需要模型的 job 前，验证锁定的任务选择、代
 
 ## CI scope
 
-- 同一代码仓库的 pull request 和向 `main` 的 push 会运行根 README 展示的 3 个案例：`pylint:10`、`matplotlib:37` 和 `django:32`。
+- 同一代码仓库的 pull request 和向 `main` 的 push 会运行以下 3 个 smoke 任务：`pylint:10`、`matplotlib:37` 和 `django:32`。
+- 需要模型的 CI 在两个 profile 中均使用 `opencode` Agent 和 `custom-openai/glm-5.2` 模型。
 - 来自 fork 和 Dependabot 的 pull request 只运行锁定资源验证、单元测试和 dry-run 预检，不使用模型凭证。
-- 手动运行 `workflow_dispatch` 并设置 `scope=smoke` 时，会运行相同的 3 个案例。
+- 手动运行 `workflow_dispatch` 并设置 `scope=smoke` 时，会运行相同的 3 个 smoke 任务。
 - 手动运行 `workflow_dispatch` 并设置 `scope=all-full` 时，会运行全部 20 个锁定任务。
 
 维护者可以在代码仓库根目录使用 GitHub CLI 触发手动 scope：
