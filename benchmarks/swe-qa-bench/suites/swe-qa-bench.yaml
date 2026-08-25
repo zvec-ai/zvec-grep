@@ -3,9 +3,11 @@ path: ../datasets
 tiers:
   smoke:
     tasks:
-      - pylint-10
+      - reflex-6
+      - pylint-9
       - matplotlib-37
-      - django-32
+      - streamlink-14
+      - xarray-32
   ci:
     tasks:
       - reflex-6

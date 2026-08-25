@@ -466,7 +466,7 @@ class SuiteTierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.suite_name = _install_external_suite_fixture(self)
 
-    def test_local_swe_qa_smoke_uses_readme_cases(self) -> None:
+    def test_local_swe_qa_smoke_uses_ci_tasks(self) -> None:
         suite_path = (
             Path(__file__).resolve().parents[1] / "suites" / "swe-qa-bench.yaml"
         )
@@ -475,7 +475,13 @@ class SuiteTierTests(unittest.TestCase):
 
         self.assertEqual(
             suite.tasks,
-            ("pylint-10", "matplotlib-37", "django-32"),
+            (
+                "reflex-6",
+                "pylint-9",
+                "matplotlib-37",
+                "streamlink-14",
+                "xarray-32",
+            ),
         )
 
     def test_local_swe_qa_suite_uses_harbor_path(self) -> None:

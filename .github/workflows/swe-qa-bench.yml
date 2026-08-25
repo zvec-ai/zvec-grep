@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: Run the three-case smoke benchmark or the 20-task All-Full benchmark
+        description: Run the five-task smoke benchmark or the 20-task All-Full benchmark
         required: true
         default: smoke
         type: choice

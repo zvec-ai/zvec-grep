@@ -16,8 +16,7 @@ FULL_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 EXPECTED_TASK_COUNT = 20
 EXPECTED_CATEGORIES = ("what", "where", "how", "why")
 EXPECTED_TASKS_PER_CATEGORY = 5
-EXPECTED_AUTO_TASK_COUNT = 3
-EXPECTED_AUTO_CATEGORIES = ("what", "where", "why")
+EXPECTED_AUTO_TASK_COUNT = 1 + len(EXPECTED_CATEGORIES)
 
 
 def _object(path: Path, *, label: str) -> dict[str, Any]:
@@ -163,14 +162,20 @@ def validate_assets(
             "selection gate.auto_tasks contains unknown task IDs: "
             f"{unknown_auto_tasks}"
         )
-    auto_category_tasks = [selected[task_id] for task_id in auto_tasks]
-    if any(task.get("role") != "category" for task in auto_category_tasks):
-        raise SweQaError("selection gate.auto_tasks entries must be category tasks")
-    auto_categories = [str(task.get("category")) for task in auto_category_tasks]
-    if tuple(auto_categories) != EXPECTED_AUTO_CATEGORIES:
+    if auto_tasks[0] != smoke_task_id:
         raise SweQaError(
-            "selection gate.auto_tasks must contain one category task in "
-            "what/where/why order"
+            "selection gate.auto_tasks must start with the configured smoke task"
+        )
+    auto_category_tasks = [selected[task_id] for task_id in auto_tasks[1:]]
+    if any(task.get("role") != "category" for task in auto_category_tasks):
+        raise SweQaError(
+            "selection gate.auto_tasks entries after smoke must be category tasks"
+        )
+    auto_categories = [str(task.get("category")) for task in auto_category_tasks]
+    if tuple(auto_categories) != EXPECTED_CATEGORIES:
+        raise SweQaError(
+            "selection gate.auto_tasks must contain smoke followed by one category "
+            "task in what/where/how/why order"
         )
     expected_category_tasks = [
         str(task["task_id"]) for task in tasks if task.get("role") == "category"
