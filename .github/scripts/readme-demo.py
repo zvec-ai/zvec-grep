@@ -5,6 +5,7 @@ The install scene mirrors the interactive UI and output implemented in
 src/cli/commands.ts. Run with:
 
   uv run --with pillow .github/scripts/readme-demo.py
+  uv run --with pillow .github/scripts/readme-demo.py --theme dark
 
 Generate a visual comparison variant with:
 
@@ -20,16 +21,49 @@ from PIL import Image, ImageDraw, ImageFont
 
 WIDTH = 1200
 HEIGHT = 720
-BACKGROUND = "#0d1117"
-PANEL = "#161b22"
-BORDER = "#30363d"
-TEXT = "#e6edf3"
-MUTED = "#8b949e"
-GREEN = "#3fb950"
-BLUE = "#58a6ff"
-PURPLE = "#bc8cff"
-YELLOW = "#d29922"
-CYAN = "#39c5cf"
+THEMES = {
+    "light": {
+        "background": "#ffffff",
+        "panel": "#f6f8fa",
+        "border": "#d0d7de",
+        "text": "#1f2328",
+        "muted": "#59636e",
+        "green": "#1a7f37",
+        "blue": "#0969da",
+        "purple": "#8250df",
+        "yellow": "#9a6700",
+        "cyan": "#007d8a",
+        "input_text": "#1f2328",
+        "input_block": "#ddf4ff",
+    },
+    "dark": {
+        "background": "#0d1117",
+        "panel": "#161b22",
+        "border": "#30363d",
+        "text": "#e6edf3",
+        "muted": "#8b949e",
+        "green": "#3fb950",
+        "blue": "#58a6ff",
+        "purple": "#bc8cff",
+        "yellow": "#d29922",
+        "cyan": "#39c5cf",
+        "input_text": "#f0f6fc",
+        "input_block": "#111d2b",
+    },
+}
+
+BACKGROUND = None
+PANEL = None
+BORDER = None
+TEXT = None
+MUTED = None
+GREEN = None
+BLUE = None
+PURPLE = None
+YELLOW = None
+CYAN = None
+INPUT_TEXT = None
+INPUT_BLOCK = None
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / ".github" / "assets" / "zvec-grep-tour.gif"
@@ -44,9 +78,29 @@ LINE_HEIGHT = 29
 MAX_LINES = 19
 SHELL_TITLE = "zvec-grep — ~/code"
 INPUT_PROMPTS = {"$ ", "› "}
-INPUT_TEXT = "#f0f6fc"
-INPUT_BLOCK = "#111d2b"
 ACTIVE_VARIANT = "block"
+
+
+def apply_theme(name):
+    global BACKGROUND, PANEL, BORDER, TEXT, MUTED
+    global GREEN, BLUE, PURPLE, YELLOW, CYAN, INPUT_TEXT, INPUT_BLOCK
+
+    theme = THEMES[name]
+    BACKGROUND = theme["background"]
+    PANEL = theme["panel"]
+    BORDER = theme["border"]
+    TEXT = theme["text"]
+    MUTED = theme["muted"]
+    GREEN = theme["green"]
+    BLUE = theme["blue"]
+    PURPLE = theme["purple"]
+    YELLOW = theme["yellow"]
+    CYAN = theme["cyan"]
+    INPUT_TEXT = theme["input_text"]
+    INPUT_BLOCK = theme["input_block"]
+
+
+apply_theme("light")
 
 
 def load_font(size: int, bold: bool = False):
@@ -76,7 +130,8 @@ FONT_BOLD = load_font(20, bold=True)
 FONT_TITLE = load_font(20, bold=True)
 
 
-def part(value, color=TEXT, bold=False):
+def part(value, color=None, bold=False):
+    color = color or TEXT
     return (value, color, FONT_BOLD if bold else FONT)
 
 
@@ -84,7 +139,7 @@ def line(*parts):
     return list(parts)
 
 
-def plain(value="", color=TEXT, bold=False):
+def plain(value="", color=None, bold=False):
     return line(part(value, color, bold))
 
 
@@ -282,7 +337,7 @@ def index_scene(frames, lines):
     type_command(
         frames,
         lines,
-        "zg index --embedding local/potion-code-16m-v2",
+        "zg index",
         stride=2,
         title=repository_title,
     )
@@ -431,14 +486,28 @@ def parse_args():
         default="block",
         help="visual treatment to render",
     )
+    parser.add_argument(
+        "--theme",
+        choices=tuple(THEMES),
+        default="light",
+        help="README color scheme to render",
+    )
     return parser.parse_args()
+
+
+def output_path(variant, theme):
+    output = VARIANT_OUTPUTS[variant]
+    if theme == "dark":
+        return output.with_name(f"{output.stem}-dark{output.suffix}")
+    return output
 
 
 def main():
     global ACTIVE_VARIANT
     args = parse_args()
     ACTIVE_VARIANT = args.variant
-    output = VARIANT_OUTPUTS[args.variant]
+    apply_theme(args.theme)
+    output = output_path(args.variant, args.theme)
 
     frames = []
     shell_lines = install_scene(frames)

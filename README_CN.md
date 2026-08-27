@@ -36,7 +36,10 @@
 ## 🎬 功能演示
 
 <div align="center">
-  <img src="./.github/assets/zvec-grep-tour.gif" width="1000" alt="安装 Agent 集成、为工作区建索引并让 Agent 使用 zvec-grep 检索本地内容" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/zvec-grep-tour-dark.gif">
+    <img src="./.github/assets/zvec-grep-tour.gif" width="1000" alt="安装 Agent 集成、为工作区建索引并让 Agent 使用 zvec-grep 检索本地内容" />
+  </picture>
 </div>
 
 <a id="features"></a>

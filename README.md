@@ -36,7 +36,10 @@ terminal, or let your agent use it for you.
 ## 🎬 See it in action
 
 <div align="center">
-  <img src="./.github/assets/zvec-grep-tour.gif" width="1000" alt="Install the agent integration, index a workspace, and let the agent search it with zvec-grep" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/zvec-grep-tour-dark.gif">
+    <img src="./.github/assets/zvec-grep-tour.gif" width="1000" alt="Install the agent integration, index a workspace, and let the agent search it with zvec-grep" />
+  </picture>
 </div>
 
 <a id="features"></a>
