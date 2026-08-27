@@ -19,12 +19,25 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 
-WIDTH = 1200
-HEIGHT = 720
+LOGICAL_WIDTH = 1200
+LOGICAL_HEIGHT = 720
+RENDER_SCALE = 1.5
+
+
+def px(value):
+    return round(value * RENDER_SCALE)
+
+
+def box(left, top, right, bottom):
+    return tuple(px(value) for value in (left, top, right, bottom))
+
+
+WIDTH = px(LOGICAL_WIDTH)
+HEIGHT = px(LOGICAL_HEIGHT)
 THEMES = {
     "light": {
-        "background": "#ffffff",
-        "panel": "#f6f8fa",
+        "background": "#f6f8fa",
+        "panel": "#eaeef2",
         "border": "#d0d7de",
         "text": "#1f2328",
         "muted": "#59636e",
@@ -74,7 +87,7 @@ VARIANT_OUTPUTS = {
     "block": OUTPUT,
 }
 FRAME_MS = 70
-LINE_HEIGHT = 29
+LINE_HEIGHT = px(31)
 MAX_LINES = 19
 SHELL_TITLE = "zvec-grep — ~/code"
 INPUT_PROMPTS = {"$ ", "› "}
@@ -125,9 +138,9 @@ def load_font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
-FONT = load_font(20)
-FONT_BOLD = load_font(20, bold=True)
-FONT_TITLE = load_font(20, bold=True)
+FONT = load_font(px(22))
+FONT_BOLD = load_font(px(22), bold=True)
+FONT_TITLE = load_font(px(20), bold=True)
 
 
 def part(value, color=None, bold=False):
@@ -147,17 +160,26 @@ def terminal(title=SHELL_TITLE):
     image = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND)
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle(
-        (24, 24, WIDTH - 24, HEIGHT - 24),
-        radius=14,
+        box(24, 24, LOGICAL_WIDTH - 24, LOGICAL_HEIGHT - 24),
+        radius=px(14),
         fill=PANEL,
         outline=BORDER,
-        width=2,
+        width=px(2),
     )
-    draw.rectangle((25, 68, WIDTH - 25, HEIGHT - 25), fill=BACKGROUND)
+    draw.rectangle(
+        box(25, 68, LOGICAL_WIDTH - 25, LOGICAL_HEIGHT - 25),
+        fill=BACKGROUND,
+    )
+    draw.rounded_rectangle(
+        box(24, 24, LOGICAL_WIDTH - 24, LOGICAL_HEIGHT - 24),
+        radius=px(14),
+        outline=BORDER,
+        width=px(2),
+    )
     for x, color in ((52, "#ff5f56"), (80, "#ffbd2e"), (108, "#27c93f")):
-        draw.ellipse((x - 7, 39, x + 7, 53), fill=color)
+        draw.ellipse(box(x - 7, 39, x + 7, 53), fill=color)
     draw.text(
-        (WIDTH // 2, 46),
+        (WIDTH // 2, px(46)),
         title,
         font=FONT_TITLE,
         fill=MUTED,
@@ -177,26 +199,34 @@ def is_input_line(current):
 def render(lines, title=SHELL_TITLE):
     image = terminal(title)
     draw = ImageDraw.Draw(image)
-    y = 92
+    y = px(92)
     for current in visible(lines):
         input_line = is_input_line(current)
         if ACTIVE_VARIANT == "block" and input_line:
             draw.rounded_rectangle(
-                (43, y - 4, WIDTH - 43, y + LINE_HEIGHT - 3),
-                radius=6,
+                (
+                    px(43),
+                    y - px(4),
+                    px(LOGICAL_WIDTH - 43),
+                    y + LINE_HEIGHT - px(3),
+                ),
+                radius=px(6),
                 fill=INPUT_BLOCK,
             )
             draw.rounded_rectangle(
-                (43, y - 4, 47, y + LINE_HEIGHT - 3),
-                radius=2,
+                (px(43), y - px(4), px(47), y + LINE_HEIGHT - px(3)),
+                radius=px(2),
                 fill=GREEN,
             )
 
         if ACTIVE_VARIANT == "hierarchy" and not input_line:
-            draw.rectangle((62, y - 2, 64, y + LINE_HEIGHT - 2), fill=BORDER)
-            x = 79
+            draw.rectangle(
+                (px(62), y - px(2), px(64), y + LINE_HEIGHT - px(2)),
+                fill=BORDER,
+            )
+            x = px(79)
         else:
-            x = 55
+            x = px(55)
 
         for index, (value, color, font) in enumerate(current):
             if input_line and ACTIVE_VARIANT != "baseline":
