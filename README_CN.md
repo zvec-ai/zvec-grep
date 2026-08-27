@@ -145,7 +145,11 @@ gpt-5.6-sol 与 medium 推理强度。两项测试中的 zg
 Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
-  <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v3.png">
+    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v3-light.png">
+    <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3-light.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
+  </picture>
 </p>
 
 - **为何有效：** 语义发现先收窄搜索范围，排序后的词法检索再锚定精确标识符；
@@ -156,7 +160,11 @@ Profile 均使用 Qwen3.7 Text Embedding。
 ### 2. 真实案例分析
 
 <p align="center">
-  <img src="./.github/assets/benchmark-repository-top3-v2.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-repository-top3-v2.png">
+    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-repository-top3-v2-light.png">
+    <img src="./.github/assets/benchmark-repository-top3-v2-light.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
+  </picture>
 </p>
 
 - **[Pylint](https://github.com/pylint-dev/pylint) — Python 静态分析器：** 任务需要理解 AST 节点处理如何区分带标注与
