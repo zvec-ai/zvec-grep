@@ -4,7 +4,7 @@
 
 # 基准评测
 
-每项评测均以**可复现性为设计原则**，用于衡量 zvec-grep 在不同工作负载下对 Agent 回答质量和检索效率的影响。每个 benchmark 都可以独立运行：输入和依赖均已固定，配有专用 runner 和完整的评测流程，运行产物与源码分开存放，并在各自的 README 中提供详细说明。
+每项评测用于衡量 zvec-grep 在不同工作负载下对 Agent 回答质量和检索效率的影响。每个 benchmark 都会锁定输入与依赖，提供本地 runner，将运行产物与源码分开存放，并在各自的 README 中说明测试协议。
 
 配置方法和运行命令参见各 benchmark 的 README。
 
@@ -13,7 +13,7 @@
 | Benchmark | 说明 | Agent | 评测规模 |
 | --- | --- | --- | --- |
 | [BrowseComp-Plus](browse-comp-plus/README_CN.md) | 在固定的大规模语料库上评测多文档证据检索和回答准确率 | Codex | 100 个样例 |
-| [SWE-QA-Bench](swe-qa-bench/README_CN.md) | 评测代码仓库级、跨文件、多跳的软件工程问答 | OpenCode | 20 个任务 |
+| [SWE-QA-Bench](swe-qa-bench/README_CN.md) | 评测代码仓库级、跨文件、多跳的软件工程问答 | Claude Code · Claude Opus 5（high） | 20 个任务 |
 
 ## 评测协议
 

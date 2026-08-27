@@ -71,6 +71,7 @@ class _FakeEnvironment:
         self.container_root = container_root
         self.uploads: list[tuple[Path, str]] = []
         self.downloads: list[tuple[str, Path]] = []
+        self.uploaded_files: list[tuple[Path, str]] = []
 
     def container_path(self, path: str) -> Path:
         if not path.startswith("/"):
@@ -83,6 +84,13 @@ class _FakeEnvironment:
         target = self.container_path(destination)
         target.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, target, dirs_exist_ok=True)
+
+    async def upload_file(self, source: Path, destination: str) -> None:
+        source = Path(source)
+        self.uploaded_files.append((source, destination))
+        target = self.container_path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
     async def download_dir(self, source: str, destination: Path) -> None:
         destination = Path(destination)
@@ -166,6 +174,29 @@ class _SetupHarness(ZvecGrepMixin, _SetupBase):
         self.setup_metadata = dict(metadata)
 
 
+class _RemoteEmbeddingHarness(ZvecGrepMixin):
+    def __init__(self, *, endpoint: str) -> None:
+        self._embedding_model = "qwen/qwen3.7-text-embedding"
+        self._embedding_endpoint = endpoint
+        self._embedding_api_key: str | None = "embedding-secret"
+        self.agent_commands: list[str] = []
+        self.root_commands: list[str] = []
+
+    async def exec_as_agent(
+        self, environment: Any, command: str, **kwargs: Any
+    ) -> _Result:
+        self.agent_commands.append(command)
+        if command == 'printf "%s\\n" "$HOME"':
+            return _Result(stdout="/home/agent\n")
+        return _Result()
+
+    async def exec_as_root(
+        self, environment: Any, command: str, **kwargs: Any
+    ) -> _Result:
+        self.root_commands.append(command)
+        return _Result()
+
+
 class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
     def test_remote_index_uses_workspace_authorization(self) -> None:
         self.assertEqual(
@@ -231,6 +262,27 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(version, "0.1.5")
         self.assertFalse(reused)
+
+    async def test_remote_embedding_endpoint_is_uploaded_in_config(self) -> None:
+        endpoint = "https://embedding.example/v1/embeddings"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = _FakeEnvironment(Path(temp_dir))
+            harness = _RemoteEmbeddingHarness(endpoint=endpoint)
+
+            await harness._upload_embedding_config(environment)
+
+            config = json.loads(
+                environment.container_path(
+                    "/home/agent/.zvec-grep/config.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            config["models"]["qwen/qwen3.7-text-embedding"]["endpoint"],
+            endpoint,
+        )
+        self.assertEqual(config["providers"]["qwen"]["apiKey"], "embedding-secret")
+        self.assertIsNone(harness._embedding_api_key)
 
     async def test_npm_failure_cannot_be_masked_by_marker_output(self) -> None:
         harness = _InstallHarness(package="@zvec/zvec-grep")

@@ -5,11 +5,11 @@
 # SWE-QA benchmark
 
 This benchmark measures how `zvec-grep` affects an agent's ability to answer
-repository-level software-engineering questions. The canonical comparison uses
-the same OpenCode agent, model, task prompt, repository commit, environment, and
-limits for both profiles:
+repository-level software-engineering questions. The published comparison uses
+the same Claude Code agent, Claude Opus 5 model, task prompt, repository commit,
+environment, and limits for both profiles:
 
-- **Baseline:** OpenCode uses its standard tools.
+- **Baseline:** Claude Code uses its standard tools.
 - **zvec-grep:** the same agent receives a prepared repository index and uses
   zvec-grep through MCP.
 
@@ -18,13 +18,12 @@ time.
 
 ## Benchmark definition
 
-The [`SWE-QA Bench`](../../.github/workflows/swe-qa-bench.yml) workflow runs a
-pinned 20-task subset of
+This benchmark uses a pinned 20-task subset of
 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench).
 The benchmark inputs are locked in this directory:
 
 - [`selection.json`](zg_bench/swe_qa/data/selection.json) records task IDs,
-  task slugs, repository commits, asset hashes, and CI scope membership.
+  task slugs, repository commits, asset hashes, and runner tier membership.
 - [`references.json`](zg_bench/swe_qa/data/references.json) contains the
   isolated references used by the independent judge; agents cannot access it.
 - [`datasets/`](datasets/) contains the
@@ -32,36 +31,25 @@ The benchmark inputs are locked in this directory:
 - [`swe-qa-bench.yaml`](suites/swe-qa-bench.yaml) exposes the
   local dataset to the benchmark runner.
 
-The workflow validates the locked selection, repository commits, hashes, and
-reference isolation before starting model-backed jobs.
+The validation command below checks the locked selection, repository commits,
+hashes, and reference isolation before model-backed runs.
 
-## CI scopes
+## Published protocol
 
-- Same-repository pull requests and pushes to `main` run these five smoke tasks:
-  `reflex:6`, `pylint:9`, `matplotlib:37`, `streamlink:14`, and `xarray:32`.
-- Model-backed CI uses the `opencode` agent with
-  `custom-openai/glm-5.2` for both profiles.
-- Fork and Dependabot pull requests run locked-asset validation, unit tests, and
-  a dry-run preflight only, without model credentials.
-- Manual `workflow_dispatch` with `scope=smoke` runs the same five smoke tasks.
-- Manual `workflow_dispatch` with `scope=all-full` runs all 20 pinned tasks.
+- **Coverage:** 20 retrieval-intensive tasks spanning What, Where, How, and
+  Why, 8 intentions, and 11 repositories.
+- **Agent:** Claude Code `2.1.212`.
+- **Model:** Claude Opus 5 (`claude-opus-5`) at high reasoning effort.
+- **Treatment embedding:** Qwen3.7 Text Embedding
+  (`qwen/qwen3.7-text-embedding`).
+- **Embedding endpoint:** the OpenAI-compatible Qwen endpoint shown in the
+  local setup below.
+- **Trials:** three independent runs per task and profile.
+- **Budget:** USD 4.00 per task/profile run.
 
-From the repository root, maintainers can trigger the manual scopes with the
-GitHub CLI:
-
-```sh
-gh workflow run swe-qa-bench.yml -f scope=smoke
-gh workflow run swe-qa-bench.yml -f scope=all-full
-```
-
-`all-full` is a workflow scope, not a `zg-bench --tier full` value. The local
-suite stores its complete 20-task selection in the `ci` tier, and the workflow
-passes the tasks selected for each scope explicitly.
-
-Each selected task runs three baseline trials and three zvec-grep trials on the
-same runner. All six answers are judged independently. The workflow is
-report-only: numeric results do not gate review or merging, but every expected
-profile run and judge call must complete successfully.
+Baseline and zvec-grep run with identical settings. Index construction is
+measured separately, and the reference answers remain isolated from both
+profiles.
 
 ## Metrics and reporting
 
@@ -87,9 +75,8 @@ In the Aggregate row:
 
 ## Local setup
 
-CI runs on Ubuntu 24.04 with Python 3.12 and Node.js 24. Local harness runs also
-support Docker on macOS, although comparable benchmark results should use a
-consistent Linux x86-64 environment.
+Harbor runs the pinned task environments in Docker. Use the same host platform,
+Claude Code version, and provider configuration for comparable results.
 
 Install these prerequisites:
 
@@ -97,8 +84,8 @@ Install these prerequisites:
 - Docker Engine or Docker Desktop with Docker Compose v2
 - Node.js 22 or newer and npm
 
-Verify Docker Compose, install the locked dependencies, and export the model
-credential used by the workflow:
+Verify Docker Compose, install the locked dependencies, and export the Claude
+and embedding credentials:
 
 ```sh
 docker compose version
@@ -107,17 +94,27 @@ npm ci
 cd benchmarks/swe-qa-bench
 uv sync --frozen
 source .venv/bin/activate
-export GLM_API_KEY="your-api-key"
+export ANTHROPIC_API_KEY="your-anthropic-api-key"
+export ZVEC_GREP_API_KEY="your-qwen-embedding-api-key"
+export ZVEC_GREP_EMBEDDING_ENDPOINT="https://llm-67x4s810wr6kl2i4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings"
 ```
 
-Run the same profile-aware preflight used for the SWE-QA configuration:
+Validate the pinned assets, then run the profile-aware preflight:
+
+```sh
+python -m zg_bench.swe_qa validate \
+  --selection zg_bench/swe_qa/data/selection.json \
+  --references zg_bench/swe_qa/data/references.json \
+  --dataset datasets
+```
 
 ```sh
 zg-bench doctor \
-  --agent opencode \
-  --model custom-openai/glm-5.2 \
+  --agent claude-code \
+  --model claude-opus-5 \
   --profile all \
-  --embedding-model local/potion-code-16m-v2 \
+  --embedding-model qwen/qwen3.7-text-embedding \
+  --embedding-endpoint "$ZVEC_GREP_EMBEDDING_ENDPOINT" \
   --zvec-grep-package ../..
 ```
 
@@ -129,7 +126,7 @@ Inspect the locked task selections with:
 
 ```sh
 zg-bench list tasks swe-qa-bench --tier smoke
-zg-bench list tasks swe-qa-bench --tier ci
+zg-bench list tasks swe-qa-bench --tier full
 ```
 
 Start with a dry run of the five-task, three-trial-per-profile configuration:
@@ -137,19 +134,22 @@ Start with a dry run of the five-task, three-trial-per-profile configuration:
 ```sh
 zg-bench run swe-qa-bench \
   --tier smoke \
-  --agent opencode \
-  --model custom-openai/glm-5.2 \
+  --agent claude-code \
+  --model claude-opus-5 \
   --profile all \
   --n-attempts 3 \
-  --embedding-model local/potion-code-16m-v2 \
+  --embedding-model qwen/qwen3.7-text-embedding \
+  --embedding-endpoint "$ZVEC_GREP_EMBEDDING_ENDPOINT" \
   --zvec-grep-package ../.. \
   --dry-run
 ```
 
-Remove `--dry-run` to execute the paired Harbor run. The local runner writes
-trajectories and evaluator output to `runs/`; the GitHub Actions workflow is the
-canonical path for collecting pairs, independently judging every answer, and
-producing the aggregate report.
+Remove `--dry-run` to execute the five-task smoke run. To run the published
+20-task paired-agent protocol, change `--tier smoke` to `--tier full`. The
+runner pins Claude Code `2.1.212`, Claude Opus 5, high reasoning effort, and the
+USD 4.00 per-profile budget for both Baseline and zvec-grep. Harbor trajectories
+and verifier output are written to `runs/`; the command does not automatically
+recreate the published LLM Judge and aggregate report.
 
 ## Diagnose a failed run
 

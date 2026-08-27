@@ -28,7 +28,11 @@ from .runner import (
     validate_zvec_grep_package_compatibility,
     zvec_grep_package_install_spec,
 )
-from .settings import ZVEC_GREP_EMBEDDING, ZVEC_GREP_PACKAGE
+from .settings import (
+    ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_EMBEDDING_ENDPOINT,
+    ZVEC_GREP_PACKAGE,
+)
 
 
 class BenchmarkArgumentParser(argparse.ArgumentParser):
@@ -77,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="zvec-grep embedding model",
     )
     doctor.add_argument(
+        "--embedding-endpoint",
+        default=ZVEC_GREP_EMBEDDING_ENDPOINT,
+        help="remote embedding endpoint",
+    )
+    doctor.add_argument(
         "--zvec-grep-package",
         default=ZVEC_GREP_PACKAGE,
         help="zvec-grep npm spec, version, local directory, or .tgz",
@@ -117,6 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--embedding-model",
         default=ZVEC_GREP_EMBEDDING,
         help="zvec-grep embedding model",
+    )
+    run.add_argument(
+        "--embedding-endpoint",
+        default=ZVEC_GREP_EMBEDDING_ENDPOINT,
+        help="remote embedding endpoint",
     )
     run.add_argument("--agent", required=True, help="benchmark agent name")
     run.add_argument("--model", required=True, help="model identifier for the agent")
@@ -181,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             profiles=profiles,
             zvec_grep_package=args.zvec_grep_package,
             embedding_model=args.embedding_model,
+            embedding_endpoint=args.embedding_endpoint,
         )
 
     if args.command == "list":
@@ -264,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.zvec_grep_package
                     ),
                     embedding_model=args.embedding_model,
+                    embedding_endpoint=args.embedding_endpoint,
                 ),
             )
             for profile, job_name in run_specs
@@ -276,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
                 profiles=profiles,
                 zvec_grep_package=args.zvec_grep_package,
                 embedding_model=args.embedding_model,
+                embedding_endpoint=args.embedding_endpoint,
             )
             if print_report(checks) != 0:
                 raise SystemExit(
@@ -338,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 embedding_model=args.embedding_model,
+                embedding_endpoint=args.embedding_endpoint,
             )
             profile_return_code = execute(
                 command,

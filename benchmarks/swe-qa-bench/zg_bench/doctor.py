@@ -15,7 +15,11 @@ from .runner import (
     validate_profile_credentials,
     validate_zvec_grep_package_compatibility,
 )
-from .settings import ZVEC_GREP_EMBEDDING, ZVEC_GREP_PACKAGE
+from .settings import (
+    ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_EMBEDDING_ENDPOINT,
+    ZVEC_GREP_PACKAGE,
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,7 @@ def collect_checks(
     profiles: Sequence[Profile] = (),
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     embedding_model: str = ZVEC_GREP_EMBEDDING,
+    embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
 ) -> list[Check]:
     version = sys.version_info
     python_ok = (3, 12) <= version[:2] < (3, 14)
@@ -129,6 +134,7 @@ def collect_checks(
                 profiles=profiles,
                 zvec_grep_package=zvec_grep_package,
                 embedding_model=embedding_model,
+                embedding_endpoint=embedding_endpoint,
             )
         )
     return checks
@@ -141,6 +147,7 @@ def _collect_run_checks(
     profiles: Sequence[Profile],
     zvec_grep_package: str,
     embedding_model: str = ZVEC_GREP_EMBEDDING,
+    embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
 ) -> list[Check]:
     checks: list[Check] = []
     profile_label = ", ".join(profiles) or "none"
@@ -152,6 +159,7 @@ def _collect_run_checks(
             agent=agent,
             model=model,
             embedding_model=embedding_model,
+            embedding_endpoint=embedding_endpoint,
         )
     except ValueError as error:
         checks.append(Check("Credentials", False, str(error)))
@@ -298,6 +306,7 @@ def run_doctor(
     profiles: Sequence[Profile] = (),
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     embedding_model: str = ZVEC_GREP_EMBEDDING,
+    embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
 ) -> int:
     return print_report(
         collect_checks(
@@ -306,5 +315,6 @@ def run_doctor(
             profiles=profiles,
             zvec_grep_package=zvec_grep_package,
             embedding_model=embedding_model,
+            embedding_endpoint=embedding_endpoint,
         )
     )

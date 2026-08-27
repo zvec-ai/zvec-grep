@@ -16,6 +16,10 @@ import yaml
 
 from .settings import (
     AGENT_SETUP_TIMEOUT_MULTIPLIER,
+    CLAUDE_CODE_MAX_BUDGET_USD,
+    CLAUDE_CODE_REASONING_EFFORT,
+    CLAUDE_CODE_VERSION,
+    CLAUDE_OPUS_5_MODEL,
     CODEX_VERSION,
     OPENCODE_ALIYUN_GLM_MODEL,
     OPENCODE_ALIYUN_GLM_MODEL_ID,
@@ -30,6 +34,7 @@ from .settings import (
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
     ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_EMBEDDING_ENDPOINT,
     ZVEC_GREP_INDEX_SEED_ENV,
     ZVEC_GREP_PACKAGE,
     resolve_zvec_grep_index_seed_dir,
@@ -39,6 +44,7 @@ BENCHMARKS_DIR = Path(__file__).resolve().parents[1]
 SUITES_DIR = BENCHMARKS_DIR / "suites"
 DEFAULT_RUNS_DIR = BENCHMARKS_DIR / "runs"
 OPENCODE_IMPORT_PATH = "zg_bench.agents.opencode:ResilientOpenCode"
+ZVEC_CLAUDE_CODE_IMPORT_PATH = "zg_bench.agents.zvec_claude_code:ZvecClaudeCode"
 ZVEC_CODEX_IMPORT_PATH = "zg_bench.agents.zvec_codex:ZvecCodex"
 ZVEC_OPENCODE_IMPORT_PATH = "zg_bench.agents.zvec_opencode:ZvecOpenCode"
 SETUP_CACHE_DIR = BENCHMARKS_DIR / ".cache" / "agent-setup"
@@ -46,16 +52,25 @@ LOCAL_PACKAGE_DIR = SETUP_CACHE_DIR / "local-package"
 LOCAL_NPM_CACHE_DIR = SETUP_CACHE_DIR / "npm-cache"
 LOCAL_ZVEC_GREP_PACKAGE_TARGET = "/tmp/zg-bench-zvec-grep.tgz"
 _SETUP_CACHE_TARGET = "/root/.nvm"
+_CLAUDE_CODE_INSTALL_CACHE_TARGET = "/root/.local"
+_CLAUDE_CODE_INSTALL_CACHE_SOURCE = "claude-code-install-cache"
 _CODEX_AGENT = "codex"
+_CLAUDE_CODE_AGENT = "claude-code"
 _OPENCODE_AGENT = "opencode"
-_CACHEABLE_AGENTS = (_CODEX_AGENT, _OPENCODE_AGENT)
+_CACHEABLE_AGENTS = (_CLAUDE_CODE_AGENT, _CODEX_AGENT, _OPENCODE_AGENT)
 _ZVEC_AGENT_IMPORT_PATHS = {
+    _CLAUDE_CODE_AGENT: ZVEC_CLAUDE_CODE_IMPORT_PATH,
     _CODEX_AGENT: ZVEC_CODEX_IMPORT_PATH,
     _OPENCODE_AGENT: ZVEC_OPENCODE_IMPORT_PATH,
 }
 _OPENCODE_ALIYUN_API_KEY_ENV_VARS = (
     "DASHSCOPE_API_KEY",
     "OPENAI_API_KEY",
+)
+_CLAUDE_CODE_CREDENTIAL_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
 )
 
 Profile = Literal["baseline", "zvec-grep"]
@@ -97,6 +112,10 @@ _CODEX_MODEL_SUPPORT = AgentModelSupport(
     "*",
     configuration="native passthrough",
 )
+_CLAUDE_CODE_MODEL_SUPPORT = AgentModelSupport(
+    _CLAUDE_CODE_AGENT,
+    CLAUDE_OPUS_5_MODEL,
+)
 _OPENCODE_GLM_MODEL_SUPPORT = AgentModelSupport(
     _OPENCODE_AGENT,
     OPENCODE_ALIYUN_GLM_MODEL,
@@ -117,6 +136,7 @@ _OPENCODE_CUSTOM_GLM_MODEL_SUPPORT = AgentModelSupport(
 AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
     # Codex owns its model catalog and receives the selected model unchanged.
     _CODEX_MODEL_SUPPORT,
+    _CLAUDE_CODE_MODEL_SUPPORT,
     _OPENCODE_GLM_MODEL_SUPPORT,
     _OPENCODE_CUSTOM_GLM_MODEL_SUPPORT,
     _OPENCODE_QWEN_MODEL_SUPPORT,
@@ -316,8 +336,16 @@ def validate_profile_credentials(
     agent: str,
     model: str,
     embedding_model: str = ZVEC_GREP_EMBEDDING,
+    embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
 ) -> None:
     resolve_agent_model(agent, model)
+    if agent == _CLAUDE_CODE_AGENT:
+        if _first_nonempty_env(_CLAUDE_CODE_CREDENTIAL_ENV_VARS) is None:
+            accepted = ", ".join(_CLAUDE_CODE_CREDENTIAL_ENV_VARS)
+            raise ValueError(
+                "Claude Code requires Anthropic API or OAuth credentials; "
+                f"export one of: {accepted}"
+            )
     if _opencode_dashscope_model_id(agent, model) is not None:
         if _first_nonempty_env(_OPENCODE_ALIYUN_API_KEY_ENV_VARS) is None:
             accepted = ", ".join(_OPENCODE_ALIYUN_API_KEY_ENV_VARS)
@@ -333,6 +361,8 @@ def validate_profile_credentials(
 
     if "zvec-grep" not in profiles or not embedding_model.startswith("qwen/"):
         return
+    if embedding_endpoint is not None and not embedding_endpoint.strip():
+        raise ValueError("embedding endpoint must not be empty")
     if _first_nonempty_env(ZVEC_GREP_API_KEY_ENV_VARS) is not None:
         return
     accepted = ", ".join(ZVEC_GREP_API_KEY_ENV_VARS)
@@ -435,6 +465,8 @@ def _cache_slug(value: str) -> str:
 
 
 def _agent_version(agent: str) -> str:
+    if agent == _CLAUDE_CODE_AGENT:
+        return CLAUDE_CODE_VERSION
     if agent == _CODEX_AGENT:
         return CODEX_VERSION
     if agent == _OPENCODE_AGENT:
@@ -469,6 +501,44 @@ def setup_cache_volume_name(
 
 def setup_cache_compose_path(agent: str, profile: Profile) -> Path:
     return SETUP_CACHE_DIR / f"{_cache_slug(agent)}-{profile}.compose.json"
+
+
+def claude_code_install_cache_volume_name(profile: Profile) -> str:
+    identity = (
+        f"{_CLAUDE_CODE_AGENT}-{CLAUDE_CODE_VERSION}-{profile}-linux-x64-local"
+    )
+    return f"zg-bench-{_cache_slug(identity)}"
+
+
+def _ensure_external_docker_volume(name: str, *, purpose: str) -> None:
+    inspected = subprocess.run(
+        ["docker", "volume", "inspect", name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode == 0:
+        return
+
+    created = subprocess.run(
+        ["docker", "volume", "create", name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode == 0:
+        return
+
+    inspect_detail = (
+        inspected.stderr or inspected.stdout or "unknown inspect error"
+    ).strip()
+    create_detail = (
+        created.stderr or created.stdout or "unknown create error"
+    ).strip()
+    raise RuntimeError(
+        f"could not prepare {purpose} Docker volume {name!r}: "
+        f"inspect failed ({inspect_detail}); create failed ({create_detail})"
+    )
 
 
 def _cache_local_package(package: Path) -> tuple[Path, str]:
@@ -592,6 +662,27 @@ def prepare_setup_cache(
             "target": _SETUP_CACHE_TARGET,
         }
     ]
+    compose_volumes: dict[str, dict[str, Any]] = {
+        "agent-setup-cache": {
+            "external": True,
+            "name": volume_name,
+        }
+    }
+    external_volumes = [(volume_name, "agent setup cache")]
+    if agent == _CLAUDE_CODE_AGENT:
+        claude_install_volume = claude_code_install_cache_volume_name(profile)
+        service_volumes.append(
+            {
+                "type": "volume",
+                "source": _CLAUDE_CODE_INSTALL_CACHE_SOURCE,
+                "target": _CLAUDE_CODE_INSTALL_CACHE_TARGET,
+            }
+        )
+        compose_volumes[_CLAUDE_CODE_INSTALL_CACHE_SOURCE] = {
+            "external": True,
+            "name": claude_install_volume,
+        }
+        external_volumes.append((claude_install_volume, "Claude Code install cache"))
     if profile == "zvec-grep" and embedding_model.startswith("local/"):
         index_seed_path = resolve_zvec_grep_index_seed_dir(
             os.environ.get(ZVEC_GREP_INDEX_SEED_ENV)
@@ -620,12 +711,7 @@ def prepare_setup_cache(
                 "volumes": service_volumes,
             }
         },
-        "volumes": {
-            "agent-setup-cache": {
-                "external": True,
-                "name": volume_name,
-            }
-        },
+        "volumes": compose_volumes,
     }
     compose_path = setup_cache_compose_path(agent, profile)
     compose_path.write_text(
@@ -633,22 +719,8 @@ def prepare_setup_cache(
         encoding="utf-8",
     )
 
-    inspected = subprocess.run(
-        ["docker", "volume", "inspect", volume_name],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if inspected.returncode != 0:
-        completed = subprocess.run(
-            ["docker", "volume", "create", volume_name],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "unknown error").strip()
-            raise RuntimeError(f"could not prepare agent setup cache: {detail}")
+    for external_volume, purpose in external_volumes:
+        _ensure_external_docker_volume(external_volume, purpose=purpose)
 
     return PreparedSetupCache(
         compose_path=compose_path,
@@ -672,6 +744,7 @@ def build_harbor_command(
     zvec_grep_package: str = ZVEC_GREP_PACKAGE,
     zvec_grep_package_sha256: str | None = None,
     embedding_model: str = ZVEC_GREP_EMBEDDING,
+    embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
 ) -> list[str]:
     if profile not in PROFILES:
         raise ValueError(f"unsupported profile: {profile}")
@@ -689,6 +762,14 @@ def build_harbor_command(
 
     if agent == _CODEX_AGENT:
         agent_kwargs.append(f"version={CODEX_VERSION}")
+    elif agent == _CLAUDE_CODE_AGENT:
+        agent_kwargs.extend(
+            [
+                f"version={CLAUDE_CODE_VERSION}",
+                f"reasoning_effort={CLAUDE_CODE_REASONING_EFFORT}",
+                f"max_budget_usd={CLAUDE_CODE_MAX_BUDGET_USD}",
+            ]
+        )
     elif agent == _OPENCODE_AGENT:
         harbor_agent = OPENCODE_IMPORT_PATH
         agent_kwargs.append(f"version={OPENCODE_VERSION}")
@@ -776,6 +857,11 @@ def build_harbor_command(
                 f"embedding_model={embedding_model}",
             ]
         )
+        if (
+            embedding_endpoint is not None
+            and not embedding_model.startswith("local/")
+        ):
+            agent_kwargs.append(f"embedding_endpoint={embedding_endpoint}")
         if zvec_grep_package_sha256 is not None:
             agent_kwargs.append(f"zvec_grep_package_sha256={zvec_grep_package_sha256}")
         agent_kwargs.append(f"mcp_target={agent}")
@@ -826,6 +912,11 @@ def build_harbor_command(
         agent, model
     ) is not None or _is_opencode_custom_glm_model(agent, model):
         command.extend(["--agent-env", "OPENAI_API_KEY=${OPENAI_API_KEY}"])
+    if agent == _CLAUDE_CODE_AGENT:
+        credential = _first_nonempty_env(_CLAUDE_CODE_CREDENTIAL_ENV_VARS)
+        if credential is not None:
+            name, _ = credential
+            command.extend(["--agent-env", f"{name}=${{{name}}}"])
     return command
 
 

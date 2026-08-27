@@ -4,11 +4,10 @@
 
 # Benchmarks
 
-Each evaluation is **reproducible by design** and measures how zvec-grep
-affects agent answer quality and retrieval efficiency across different
-workloads. Every benchmark is self-contained, with **pinned inputs and
-dependencies**, its own runner and evaluation workflow, a clear
-generated-artifact boundary, and a detailed README.
+Each evaluation measures how zvec-grep affects agent answer quality and
+retrieval efficiency across different workloads. Every benchmark keeps its
+inputs and dependencies pinned, provides a local runner, separates generated
+artifacts from source, and documents its protocol in a dedicated README.
 
 See benchmark-specific README for setup and execution instructions.
 
@@ -17,7 +16,7 @@ See benchmark-specific README for setup and execution instructions.
 | Benchmark | Description | Agent | Study scope |
 | --- | --- | --- | --- |
 | [BrowseComp-Plus](browse-comp-plus/README.md) | Evaluates multi-document evidence retrieval and answer accuracy over a large, fixed corpus | Codex | 100 cases |
-| [SWE-QA-Bench](swe-qa-bench/README.md) | Evaluates repository-level, cross-file, and multi-hop software-engineering question answering | OpenCode | 20 tasks |
+| [SWE-QA-Bench](swe-qa-bench/README.md) | Evaluates repository-level, cross-file, and multi-hop software-engineering question answering | Claude Code · Claude Opus 5 (high) | 20 tasks |
 
 ## Evaluation protocol
 

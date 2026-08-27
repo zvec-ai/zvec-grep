@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from zg_bench import runner
+from harbor.agents.installed.claude_code import ClaudeCode
+
+from zg_bench import doctor, runner
+from zg_bench.agents.zvec_claude_code import ZvecClaudeCode
+from zg_bench.agents.zvec_grep import ZvecGrepMixin
 
 _FIXTURE_SUITE_NAME = "external-suite-fixture"
 _FIXTURE_DATASET = "fixture/external-dataset@1"
@@ -260,6 +264,220 @@ class LocalPackageTests(unittest.TestCase):
         )
         self.assertIn(f"zvec_grep_package_sha256={digest}", command)
 
+    def test_claude_code_local_package_is_bound_into_zvec_profile(self) -> None:
+        digest = "d" * 64
+        suite = runner.BenchmarkSuite(
+            name=_FIXTURE_SUITE_NAME,
+            dataset=_FIXTURE_DATASET,
+            tier="smoke",
+            tasks=(_FIXTURE_TASK,),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "agent-setup"
+            source_dir = Path(temp_dir) / "source"
+            source_dir.mkdir()
+            package = Path(temp_dir) / "zvec-grep.tgz"
+            package.write_bytes(b"package")
+            inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+            with (
+                patch.object(runner, "SETUP_CACHE_DIR", cache_dir),
+                patch.object(
+                    runner,
+                    "prepare_local_zvec_grep_package",
+                    return_value=(package, digest),
+                ),
+                patch.object(runner.subprocess, "run", return_value=inspected),
+            ):
+                prepared = runner.prepare_setup_cache(
+                    "claude-code",
+                    "zvec-grep",
+                    zvec_grep_package=str(source_dir),
+                )
+                command = runner.build_harbor_command(
+                    suite,
+                    profile="zvec-grep",
+                    agent="claude-code",
+                    model="claude-opus-5",
+                    job_name="claude-local-package",
+                    zvec_grep_package=prepared.zvec_grep_package or "",
+                    zvec_grep_package_sha256=prepared.zvec_grep_package_sha256,
+                )
+
+            overlay = json.loads(prepared.compose_path.read_text())
+            package_mount = next(
+                mount
+                for mount in overlay["services"]["main"]["volumes"]
+                if mount.get("target") == runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET
+            )
+            self.assertEqual(
+                package_mount,
+                {
+                    "type": "bind",
+                    "source": str(package),
+                    "target": runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET,
+                    "read_only": True,
+                },
+            )
+            self.assertIn(
+                f"zvec_grep_package={runner.LOCAL_ZVEC_GREP_PACKAGE_TARGET}",
+                command,
+            )
+            self.assertIn(f"zvec_grep_package_sha256={digest}", command)
+            self.assertIn("--extra-docker-compose", command)
+            self.assertIn("claude-code-2.1.212", json.dumps(overlay))
+
+    def test_claude_profiles_cache_nvm_and_local_install_separately(self) -> None:
+        inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "agent-setup"
+            overlays: dict[str, dict[str, object]] = {}
+            with (
+                patch.object(runner, "SETUP_CACHE_DIR", cache_dir),
+                patch.object(runner.subprocess, "run", return_value=inspected),
+            ):
+                for profile in runner.PROFILES:
+                    prepared = runner.prepare_setup_cache(
+                        "claude-code",
+                        profile,
+                    )
+                    overlays[profile] = json.loads(prepared.compose_path.read_text())
+
+        local_volume_names: list[str] = []
+        for profile, overlay in overlays.items():
+            service_volumes = overlay["services"]["main"]["volumes"]
+            self.assertIn(
+                {
+                    "type": "volume",
+                    "source": "agent-setup-cache",
+                    "target": "/root/.nvm",
+                },
+                service_volumes,
+            )
+            self.assertIn(
+                {
+                    "type": "volume",
+                    "source": runner._CLAUDE_CODE_INSTALL_CACHE_SOURCE,
+                    "target": "/root/.local",
+                },
+                service_volumes,
+            )
+            local_volume = overlay["volumes"][
+                runner._CLAUDE_CODE_INSTALL_CACHE_SOURCE
+            ]
+            self.assertTrue(local_volume["external"])
+            self.assertEqual(
+                local_volume["name"],
+                runner.claude_code_install_cache_volume_name(profile),
+            )
+            local_volume_names.append(local_volume["name"])
+
+        self.assertEqual(len(set(local_volume_names)), len(runner.PROFILES))
+
+    def test_non_claude_setup_cache_does_not_mount_local_install_volume(self) -> None:
+        inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(runner, "SETUP_CACHE_DIR", Path(temp_dir)),
+                patch.object(runner.subprocess, "run", return_value=inspected),
+            ):
+                prepared = runner.prepare_setup_cache("opencode", "baseline")
+
+            overlay = json.loads(prepared.compose_path.read_text())
+
+        self.assertEqual(
+            overlay["services"]["main"]["volumes"],
+            [
+                {
+                    "type": "volume",
+                    "source": "agent-setup-cache",
+                    "target": "/root/.nvm",
+                }
+            ],
+        )
+        self.assertNotIn(
+            runner._CLAUDE_CODE_INSTALL_CACHE_SOURCE,
+            overlay["volumes"],
+        )
+
+    def test_claude_install_cache_creation_error_names_failed_volume(self) -> None:
+        profile = "baseline"
+        nvm_volume = runner.setup_cache_volume_name("claude-code", profile)
+        local_volume = runner.claude_code_install_cache_volume_name(profile)
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            if command == ["docker", "volume", "inspect", nvm_volume]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if command == ["docker", "volume", "inspect", local_volume]:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout="",
+                    stderr="no such volume",
+                )
+            if command == ["docker", "volume", "create", local_volume]:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout="",
+                    stderr="permission denied",
+                )
+            raise AssertionError(f"unexpected Docker command: {command}")
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            runner,
+            "SETUP_CACHE_DIR",
+            Path(temp_dir),
+        ), patch.object(runner.subprocess, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Claude Code install cache Docker volume",
+            ) as error:
+                runner.prepare_setup_cache("claude-code", profile)
+
+        self.assertIn(local_volume, str(error.exception))
+        self.assertIn("no such volume", str(error.exception))
+        self.assertIn("permission denied", str(error.exception))
+
+
+class ClaudeMcpInstallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_zg_install_uses_harbor_claude_config_directory(self) -> None:
+        agent = object.__new__(ZvecClaudeCode)
+        agent._mcp_target = "claude-code"
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        async def fake_exec(
+            environment: object,
+            command: str,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        agent.exec_as_agent = fake_exec  # type: ignore[method-assign]
+        await agent._setup_mcp(
+            object(),
+            "/workspace",
+            {},
+            supports_ready_check=True,
+        )
+
+        install_command, install_kwargs = calls[0]
+        self.assertEqual(
+            install_command,
+            "zg install --target claude-code --yes",
+        )
+        self.assertEqual(install_kwargs["cwd"], "/workspace")
+        self.assertEqual(
+            install_kwargs["env"],
+            {"CLAUDE_CONFIG_DIR": "/logs/agent/sessions"},
+        )
+
 
 class RunValidationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -291,6 +509,114 @@ class RunValidationTests(unittest.TestCase):
                 job_name="invalid-trials",
                 n_attempts=0,
             )
+
+    def test_claude_code_baseline_uses_published_configuration(self) -> None:
+        suite = runner.load_suite(self.suite_name, tier="smoke")
+
+        with patch.dict(
+            runner.os.environ,
+            {"ANTHROPIC_API_KEY": "anthropic-secret"},
+            clear=True,
+        ):
+            command = runner.build_harbor_command(
+                suite,
+                profile="baseline",
+                agent="claude-code",
+                model="claude-opus-5",
+                job_name="claude-code-baseline",
+            )
+
+        self.assertEqual(command[command.index("--agent") + 1], "claude-code")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
+        self.assertIn("version=2.1.212", command)
+        self.assertIn("reasoning_effort=high", command)
+        self.assertIn("max_budget_usd=4.0", command)
+        self.assertIn("ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}", command)
+        self.assertNotIn("mcp_target=claude-code", command)
+
+    def test_claude_code_zvec_profile_registers_mcp_and_qwen_embedding(
+        self,
+    ) -> None:
+        suite = runner.load_suite(self.suite_name, tier="smoke")
+
+        with patch.dict(
+            runner.os.environ,
+            {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret"},
+            clear=True,
+        ):
+            endpoint = "https://embedding.example/v1/embeddings"
+            command = runner.build_harbor_command(
+                suite,
+                profile="zvec-grep",
+                agent="claude-code",
+                model="claude-opus-5",
+                job_name="claude-code-zvec",
+                embedding_endpoint=endpoint,
+            )
+
+        self.assertEqual(
+            command[command.index("--agent") + 1],
+            runner.ZVEC_CLAUDE_CODE_IMPORT_PATH,
+        )
+        self.assertIn("version=2.1.212", command)
+        self.assertIn("reasoning_effort=high", command)
+        self.assertIn("max_budget_usd=4.0", command)
+        self.assertIn("mcp_target=claude-code", command)
+        self.assertIn(
+            "embedding_model=qwen/qwen3.7-text-embedding",
+            command,
+        )
+        self.assertIn(f"embedding_endpoint={endpoint}", command)
+        self.assertIn(
+            "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}",
+            command,
+        )
+
+    def test_claude_code_accepts_api_and_oauth_credentials(self) -> None:
+        credential_names = (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        )
+        for credential_name in credential_names:
+            with self.subTest(credential=credential_name), patch.dict(
+                runner.os.environ,
+                {credential_name: "secret"},
+                clear=True,
+            ):
+                runner.validate_profile_credentials(
+                    ("baseline",),
+                    agent="claude-code",
+                    model="claude-opus-5",
+                )
+
+    def test_claude_code_requires_api_or_oauth_credentials(self) -> None:
+        with patch.dict(runner.os.environ, {}, clear=True), self.assertRaisesRegex(
+            ValueError,
+            "Anthropic API or OAuth credentials",
+        ):
+            runner.validate_profile_credentials(
+                ("baseline",),
+                agent="claude-code",
+                model="claude-opus-5",
+            )
+
+    def test_doctor_forwards_embedding_endpoint_to_credential_validation(
+        self,
+    ) -> None:
+        endpoint = "https://embedding.example/v1/embeddings"
+
+        with patch.object(doctor, "validate_profile_credentials") as validate:
+            doctor._collect_run_checks(
+                agent="claude-code",
+                model="claude-opus-5",
+                profiles=("zvec-grep",),
+                zvec_grep_package=runner.ZVEC_GREP_PACKAGE,
+                embedding_model=runner.ZVEC_GREP_EMBEDDING,
+                embedding_endpoint=endpoint,
+            )
+
+        self.assertEqual(validate.call_args.kwargs["embedding_endpoint"], endpoint)
 
     def test_custom_glm_uses_openai_compatible_provider(self) -> None:
         suite = runner.load_suite(self.suite_name, tier="smoke")
@@ -426,7 +752,7 @@ class RunValidationTests(unittest.TestCase):
     def test_remote_auth_rejects_published_package_without_workspace_grants(
         self,
     ) -> None:
-        for agent in ("codex", "opencode"):
+        for agent in ("claude-code", "codex", "opencode"):
             with self.subTest(agent=agent), self.assertRaisesRegex(
                 ValueError, "Workspace Remote Embedding authorization"
             ):
@@ -435,6 +761,10 @@ class RunValidationTests(unittest.TestCase):
                     agent=agent,
                     zvec_grep_package="0.1.5",
                 )
+
+    def test_zvec_claude_code_combines_mixin_with_harbor_adapter(self) -> None:
+        self.assertTrue(issubclass(ZvecClaudeCode, ZvecGrepMixin))
+        self.assertTrue(issubclass(ZvecClaudeCode, ClaudeCode))
 
     def test_opencode_accepts_local_package_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -466,7 +796,7 @@ class SuiteTierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.suite_name = _install_external_suite_fixture(self)
 
-    def test_local_swe_qa_smoke_uses_ci_tasks(self) -> None:
+    def test_local_swe_qa_smoke_uses_configured_tasks(self) -> None:
         suite_path = (
             Path(__file__).resolve().parents[1] / "suites" / "swe-qa-bench.yaml"
         )
@@ -488,7 +818,7 @@ class SuiteTierTests(unittest.TestCase):
         suite_path = (
             Path(__file__).resolve().parents[1] / "suites" / "swe-qa-bench.yaml"
         )
-        suite = runner.load_suite(suite_path, tier="ci")
+        suite = runner.load_suite(suite_path, tier="full")
 
         command = runner.build_harbor_command(
             suite,

@@ -8,7 +8,7 @@ tiers:
       - matplotlib-37
       - streamlink-14
       - xarray-32
-  ci:
+  full:
     tasks:
       - reflex-6
       - sqlfluff-2

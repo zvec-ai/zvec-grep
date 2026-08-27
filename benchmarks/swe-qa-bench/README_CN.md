@@ -4,42 +4,38 @@
 
 # SWE-QA benchmark
 
-此 benchmark 用于衡量 `zvec-grep` 对 Agent 回答代码仓库级软件工程问题的能力有何影响。标准对照中，两个 profile 使用相同的 OpenCode Agent、模型、任务 prompt、代码仓库 commit、环境和限制：
+此 benchmark 用于衡量 `zvec-grep` 对 Agent 回答代码仓库级软件工程问题的能力有何影响。发布结果中，两个 profile 使用相同的 Claude Code Agent、Claude Opus 5 模型、任务 prompt、代码仓库 commit、环境和限制：
 
-- **Baseline：** OpenCode 使用其标准工具。
+- **Baseline：** Claude Code 使用其标准工具。
 - **zvec-grep：** 同一个 Agent 获得准备好的代码仓库索引，并通过 MCP 使用 zvec-grep。
 
 索引构建单独测量，不计入 Agent 执行耗时。
 
 ## Benchmark 定义
 
-[`SWE-QA Bench`](../../.github/workflows/swe-qa-bench.yml) workflow 运行 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench) 中固定的 20 个任务子集。Benchmark 输入锁定在此目录中：
+本 benchmark 使用 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench) 中固定的 20 个任务子集。Benchmark 输入锁定在此目录中：
 
-- [`selection.json`](zg_bench/swe_qa/data/selection.json) 记录任务 ID、任务 slug、代码仓库 commit、资源哈希和 CI scope 成员关系。
+- [`selection.json`](zg_bench/swe_qa/data/selection.json) 记录任务 ID、任务 slug、代码仓库 commit、资源哈希和 runner tier 成员关系。
 - [`references.json`](zg_bench/swe_qa/data/references.json) 包含独立评审器使用的隔离参考答案，Agent 无法访问该文件。
 - [`datasets/`](datasets/) 包含锁定的 Harbor 任务环境、prompt 和 verifier。
 - [`swe-qa-bench.yaml`](suites/swe-qa-bench.yaml) 将本地数据集提供给 benchmark runner。
 
-Workflow 会在启动需要模型的 job 前，验证锁定的任务选择、代码仓库 commit、哈希以及参考答案的隔离状态。
+下文的验证命令会在模型运行前检查锁定的任务选择、代码仓库 commit、哈希以及参考答案的隔离状态。
 
-## CI scope
+## 发布测试配置
 
-- 同一代码仓库的 pull request 和向 `main` 的 push 会运行以下 5 个 smoke 任务：`reflex:6`、`pylint:9`、`matplotlib:37`、`streamlink:14` 和 `xarray:32`。
-- 需要模型的 CI 在两个 profile 中均使用 `opencode` Agent 和 `custom-openai/glm-5.2` 模型。
-- 来自 fork 和 Dependabot 的 pull request 只运行锁定资源验证、单元测试和 dry-run 预检，不使用模型凭证。
-- 手动运行 `workflow_dispatch` 并设置 `scope=smoke` 时，会运行相同的 5 个 smoke 任务。
-- 手动运行 `workflow_dispatch` 并设置 `scope=all-full` 时，会运行全部 20 个锁定任务。
+- **覆盖范围：** 20 个检索密集任务，覆盖 What、Where、How、Why、
+  8 个意图和 11 个代码仓库。
+- **Agent：** Claude Code `2.1.212`。
+- **模型：** Claude Opus 5（`claude-opus-5`），high 推理强度。
+- **Treatment Embedding：** Qwen3.7 Text Embedding
+  （`qwen/qwen3.7-text-embedding`）。
+- **Embedding Endpoint：** 使用下方本地配置中给出的 Qwen OpenAI-compatible
+  endpoint。
+- **运行次数：** 每个任务、每个 profile 独立运行 3 次。
+- **预算：** 每个任务/profile 最多 USD 4.00。
 
-维护者可以在代码仓库根目录使用 GitHub CLI 触发手动 scope：
-
-```sh
-gh workflow run swe-qa-bench.yml -f scope=smoke
-gh workflow run swe-qa-bench.yml -f scope=all-full
-```
-
-`all-full` 是 workflow scope，不是 `zg-bench --tier full` 的值。本地套件将完整的 20 个任务保存在 `ci` tier 中，workflow 会显式传入各 scope 选中的任务。
-
-每个选中的任务会在同一 runner 上运行 3 次 baseline trial 和 3 次 zvec-grep trial。全部 6 个回答均单独评审。Workflow 仅生成报告：数值结果不会阻止 review 或 merge，但所有预期的 profile run 和评审调用都必须成功完成。
+Baseline 与 zvec-grep 除工具访问外保持完全相同。索引构建单独计时，参考答案对两个 profile 均不可见。
 
 ## 指标与报告
 
@@ -61,7 +57,7 @@ Job Summary 单元格使用 `baseline / zvec-grep / change`。每个任务的 ba
 
 ## 本地配置
 
-CI 在 Ubuntu 24.04、Python 3.12 和 Node.js 24 上运行。本地 harness 也支持在 macOS 上使用 Docker，但可比较的 benchmark 结果应使用一致的 Linux x86-64 环境。
+Harbor 使用 Docker 运行锁定的任务环境。为了得到可比较的结果，请保持主机平台、Claude Code 版本和模型服务配置一致。
 
 安装以下前置依赖：
 
@@ -69,7 +65,7 @@ CI 在 Ubuntu 24.04、Python 3.12 和 Node.js 24 上运行。本地 harness 也�
 - Docker Engine 或 Docker Desktop，并支持 Docker Compose v2
 - Node.js 22 或更新版本以及 npm
 
-验证 Docker Compose、安装锁定的依赖，并导出 workflow 使用的模型凭证：
+验证 Docker Compose、安装锁定的依赖，并导出 Claude 与 Embedding 凭证：
 
 ```sh
 docker compose version
@@ -78,17 +74,27 @@ npm ci
 cd benchmarks/swe-qa-bench
 uv sync --frozen
 source .venv/bin/activate
-export GLM_API_KEY="your-api-key"
+export ANTHROPIC_API_KEY="your-anthropic-api-key"
+export ZVEC_GREP_API_KEY="your-qwen-embedding-api-key"
+export ZVEC_GREP_EMBEDDING_ENDPOINT="https://llm-67x4s810wr6kl2i4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings"
 ```
 
-运行 SWE-QA 配置所使用的同一套 profile-aware 预检：
+先验证锁定资源，再运行 profile-aware 预检：
+
+```sh
+python -m zg_bench.swe_qa validate \
+  --selection zg_bench/swe_qa/data/selection.json \
+  --references zg_bench/swe_qa/data/references.json \
+  --dataset datasets
+```
 
 ```sh
 zg-bench doctor \
-  --agent opencode \
-  --model custom-openai/glm-5.2 \
+  --agent claude-code \
+  --model claude-opus-5 \
   --profile all \
-  --embedding-model local/potion-code-16m-v2 \
+  --embedding-model qwen/qwen3.7-text-embedding \
+  --embedding-endpoint "$ZVEC_GREP_EMBEDDING_ENDPOINT" \
   --zvec-grep-package ../..
 ```
 
@@ -100,7 +106,7 @@ zg-bench doctor \
 
 ```sh
 zg-bench list tasks swe-qa-bench --tier smoke
-zg-bench list tasks swe-qa-bench --tier ci
+zg-bench list tasks swe-qa-bench --tier full
 ```
 
 首先 dry run 5 个任务、每个 profile 三次 trial 的配置：
@@ -108,16 +114,21 @@ zg-bench list tasks swe-qa-bench --tier ci
 ```sh
 zg-bench run swe-qa-bench \
   --tier smoke \
-  --agent opencode \
-  --model custom-openai/glm-5.2 \
+  --agent claude-code \
+  --model claude-opus-5 \
   --profile all \
   --n-attempts 3 \
-  --embedding-model local/potion-code-16m-v2 \
+  --embedding-model qwen/qwen3.7-text-embedding \
+  --embedding-endpoint "$ZVEC_GREP_EMBEDDING_ENDPOINT" \
   --zvec-grep-package ../.. \
   --dry-run
 ```
 
-移除 `--dry-run` 即可执行配对 Harbor run。本地 runner 会将轨迹和评审器输出写入 `runs/`；GitHub Actions workflow 是收集配对结果、独立评审每个回答并生成聚合报告的标准路径。
+移除 `--dry-run` 即可执行 5 题 smoke run；将 `--tier smoke` 改为
+`--tier full` 可运行发布测试对应的 20 题配对 Agent 协议。Runner 会为
+Baseline 和 zvec-grep 同时固定 Claude Code `2.1.212`、Claude Opus 5、high
+推理强度和每个 profile USD 4.00 预算。Harbor 轨迹和 verifier 输出写入
+`runs/`；该命令不会自动重建发布结果中的 LLM Judge 与聚合报告。
 
 ## 诊断失败的运行
 

@@ -1,4 +1,4 @@
-"""Command line interface for the SWE-QA-Bench CI pipeline."""
+"""Command line interface for the SWE-QA-Bench evaluation pipeline."""
 
 from __future__ import annotations
 

@@ -20,6 +20,7 @@ from ..settings import (
     ZVEC_GREP_API_KEY_ENV_VARS,
     ZVEC_GREP_BINDING_PACKAGE,
     ZVEC_GREP_EMBEDDING,
+    ZVEC_GREP_EMBEDDING_ENDPOINT,
     ZVEC_GREP_INDEX_SEED_ENV,
     ZVEC_GREP_INDEX_SEED_FORMAT_VERSION,
     ZVEC_GREP_PACKAGE,
@@ -40,6 +41,7 @@ class ZvecGrepMixin:
         zvec_grep_package: str = ZVEC_GREP_PACKAGE,
         zvec_binding_package: str = ZVEC_GREP_BINDING_PACKAGE,
         embedding_model: str = ZVEC_GREP_EMBEDDING,
+        embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
         mcp_target: str | None = None,
         zvec_grep_package_sha256: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -51,6 +53,8 @@ class ZvecGrepMixin:
             raise ValueError("zvec_binding_package must not be empty")
         if not embedding_model.strip():
             raise ValueError("embedding_model must not be empty")
+        if embedding_endpoint is not None and not embedding_endpoint.strip():
+            raise ValueError("embedding_endpoint must not be empty")
         if mcp_target is not None and not mcp_target.strip():
             raise ValueError("mcp_target must not be empty")
         if zvec_grep_package_sha256 is not None and not re.fullmatch(
@@ -87,6 +91,9 @@ class ZvecGrepMixin:
         self._zvec_grep_package = zvec_grep_package
         self._zvec_binding_package = zvec_binding_package
         self._embedding_model = embedding_model
+        self._embedding_endpoint = (
+            None if embedding_model.startswith("local/") else embedding_endpoint
+        )
         self._mcp_target = mcp_target
         self._zvec_grep_package_sha256 = zvec_grep_package_sha256
         self._api_key_source = api_key_source
@@ -114,6 +121,8 @@ class ZvecGrepMixin:
             "embedding_model": self._embedding_model,
             "api_key_source": self._api_key_source,
         }
+        if self._embedding_endpoint is not None:
+            metadata["embedding_endpoint"] = self._embedding_endpoint
         if self._zvec_grep_package_sha256 is not None:
             metadata["package_sha256"] = self._zvec_grep_package_sha256
         if self._mcp_target is not None:
@@ -488,12 +497,16 @@ class ZvecGrepMixin:
     ) -> None:
         assert self._mcp_target is not None
         mcp_started = time.monotonic()
+        install_kwargs: dict[str, Any] = {"cwd": workdir}
+        install_environment = self._mcp_install_environment()
+        if install_environment is not None:
+            install_kwargs["env"] = install_environment
         mcp_result = await self.exec_as_agent(
             environment,
             command=(
                 "zg install --target " f"{shlex.quote(self._mcp_target)} --yes"
             ),
-            cwd=workdir,
+            **install_kwargs,
         )
         metadata["mcp_setup_duration_seconds"] = round(
             time.monotonic() - mcp_started, 3
@@ -520,6 +533,10 @@ class ZvecGrepMixin:
             raise RuntimeError(
                 "zvec-grep MCP setup completed but the server did not report ready"
             )
+
+    def _mcp_install_environment(self) -> dict[str, str] | None:
+        """Return target-specific environment for `zg install`."""
+        return None
 
     async def _install_zvec_grep(
         self, environment: BaseEnvironment
@@ -636,18 +653,20 @@ class ZvecGrepMixin:
 
         with tempfile.TemporaryDirectory(prefix="zg-bench-secret-") as temp_dir:
             config_path = Path(temp_dir) / "config.json"
+            config: dict[str, Any] = {
+                "version": 1,
+                "providers": {
+                    provider: {"apiKey": self._embedding_api_key},
+                },
+            }
+            if self._embedding_endpoint is not None:
+                config["models"] = {
+                    self._embedding_model: {
+                        "endpoint": self._embedding_endpoint,
+                    }
+                }
             config_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "providers": {
-                            provider: {"apiKey": self._embedding_api_key},
-                        },
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
+                json.dumps(config, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
             config_path.chmod(0o600)

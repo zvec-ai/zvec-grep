@@ -63,6 +63,27 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.profile, "zvec-grep")
         self.assertEqual(args.zvec_grep_package, "..")
 
+    def test_doctor_forwards_embedding_endpoint(self) -> None:
+        endpoint = "https://embedding.example/v1/embeddings"
+
+        with patch("zg_bench.cli.run_doctor", return_value=0) as run_doctor:
+            return_code = main(
+                [
+                    "doctor",
+                    "--agent",
+                    "claude-code",
+                    "--model",
+                    "claude-opus-5",
+                    "--profile",
+                    "zvec-grep",
+                    "--embedding-endpoint",
+                    endpoint,
+                ]
+            )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(run_doctor.call_args.kwargs["embedding_endpoint"], endpoint)
+
     def test_lists_smoke_tasks(self) -> None:
         output = io.StringIO()
 
@@ -93,6 +114,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("qwen3.7-max", listing)
         self.assertIn("opencode", listing)
         self.assertIn("aliyun-glm-5.2", listing)
+        self.assertIn("claude-code", listing)
+        self.assertIn("claude-opus-5", listing)
 
     def test_rejects_unsupported_agent_model_during_parsing(self) -> None:
         stderr = io.StringIO()
@@ -129,6 +152,21 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.agent, "opencode")
         self.assertEqual(args.model, "qwen3.7-max")
+
+    def test_accepts_published_claude_code_configuration(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "run",
+                self.suite_name,
+                "--agent",
+                "claude-code",
+                "--model",
+                "claude-opus-5",
+            ]
+        )
+
+        self.assertEqual(args.agent, "claude-code")
+        self.assertEqual(args.model, "claude-opus-5")
 
     def test_accepts_independent_trial_count(self) -> None:
         args = build_parser().parse_args(
@@ -231,6 +269,47 @@ class CliTests(unittest.TestCase):
             self.assertEqual(return_code, 1)
             self.assertIn("Exception: NonZeroAgentExitCodeError", stderr.getvalue())
             self.assertIn("qwen exited with status 1", stderr.getvalue())
+
+    def test_run_keeps_embedding_endpoint_out_of_setup_cache(self) -> None:
+        endpoint = "https://embedding.example/v1/embeddings"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch("zg_bench.cli.collect_checks", return_value=[]),
+                patch("zg_bench.cli.print_report", return_value=0),
+                patch("zg_bench.cli.prepare_setup_cache", return_value=None) as cache,
+                patch(
+                    "zg_bench.cli.build_harbor_command",
+                    return_value=["harbor"],
+                ) as build,
+                patch("zg_bench.cli.execute", return_value=0),
+                patch("zg_bench.cli.job_has_exceptions", return_value=False),
+            ):
+                return_code = main(
+                    [
+                        "run",
+                        self.suite_name,
+                        "--agent",
+                        "claude-code",
+                        "--model",
+                        "claude-opus-5",
+                        "--profile",
+                        "zvec-grep",
+                        "--embedding-endpoint",
+                        endpoint,
+                        "--jobs-dir",
+                        temp_dir,
+                        "--job-name",
+                        "endpoint-forwarding",
+                    ]
+                )
+
+        self.assertEqual(return_code, 0)
+        cache_kwargs = cache.call_args.kwargs
+        self.assertNotIn("embedding_endpoint", cache_kwargs)
+        self.assertEqual(cache_kwargs["embedding_model"], runner.ZVEC_GREP_EMBEDDING)
+        self.assertEqual(len(build.call_args_list), 2)
+        for build_call in build.call_args_list:
+            self.assertEqual(build_call.kwargs["embedding_endpoint"], endpoint)
 
 
 if __name__ == "__main__":
