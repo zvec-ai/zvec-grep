@@ -163,13 +163,17 @@ Embedding.
 
 ### 2. Real-World Case Studies
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-repository-top3-v2.png">
-    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-repository-top3-v2-light.png">
-    <img src="./.github/assets/benchmark-repository-top3-v2-light.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="980" />
-  </picture>
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-repository-top3-v2.png">
+        <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-repository-top3-v2-light.png">
+        <img src="./.github/assets/benchmark-repository-top3-v2-light.png" alt="Baseline to zg comparison across three repository-comprehension tasks: Judge score, input tokens, tool calls, and wall time" width="980" />
+      </picture>
+    </td>
+  </tr>
+</table>
 
 - **[Pylint](https://github.com/pylint-dev/pylint) — Python static analysis:** the task asks how AST node handling
   separates annotated and non-annotated attribute initialization. Symbol-aware

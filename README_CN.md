@@ -159,13 +159,17 @@ Profile 均使用 Qwen3.7 Text Embedding。
 
 ### 2. 真实案例分析
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-repository-top3-v2.png">
-    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-repository-top3-v2-light.png">
-    <img src="./.github/assets/benchmark-repository-top3-v2-light.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
-  </picture>
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-repository-top3-v2.png">
+        <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-repository-top3-v2-light.png">
+        <img src="./.github/assets/benchmark-repository-top3-v2-light.png" alt="三个代码库理解任务中 Baseline 与 zg 的 Judge、输入 Token、工具调用和耗时对比" width="980" />
+      </picture>
+    </td>
+  </tr>
+</table>
 
 - **[Pylint](https://github.com/pylint-dev/pylint) — Python 静态分析器：** 任务需要理解 AST 节点处理如何区分带标注与
   不带标注的属性初始化；由于架构入口事先未知，保留符号与层级路径的检索
