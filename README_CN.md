@@ -146,9 +146,9 @@ Profile 均使用 Qwen3.7 Text Embedding。
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v3.png">
-    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v3-light.png">
-    <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3-light.png" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和耗时" width="1200" />
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v4-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v4-light.svg">
+    <img src="./.github/assets/benchmark-overall-retrieval-indexed-v4-light.svg" alt="zg 在 Coding 和通用文本检索场景中的整体测试结果，对比 Baseline 的答案质量、输入 Token、工具调用和 Agent 耗时" width="1200" />
   </picture>
 </p>
 

@@ -148,9 +148,9 @@ Embedding.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v3.png">
-    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v3-light.png">
-    <img src="./.github/assets/benchmark-overall-retrieval-indexed-v3-light.png" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and time against Baseline" width="1200" />
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v4-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="./.github/assets/benchmark-overall-retrieval-indexed-v4-light.svg">
+    <img src="./.github/assets/benchmark-overall-retrieval-indexed-v4-light.svg" alt="Overall zg benchmark results for Coding and general text retrieval, comparing answer quality, input tokens, tool calls, and agent time against Baseline" width="1200" />
   </picture>
 </p>
 

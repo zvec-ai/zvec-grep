@@ -58,19 +58,19 @@
       <text class="muted" x="636.0" y="168" font-size="15">80 个样例 · 深度研究 QA</text>
       <line class="rule" x1="636.0" y1="188" x2="1174.0" y2="188" />
       <text class="muted" x="636.0" y="222" font-size="16">准确率</text>
-      <text class="text number" x="1174.0" y="222" font-size="20" font-weight="700" text-anchor="end">90.00%<tspan class="muted" font-weight="400"> → </tspan><tspan class="text">90.00%</tspan></text>
+      <text class="text number" x="1174.0" y="222" font-size="20" font-weight="700" text-anchor="end">98.67%<tspan class="muted" font-weight="400"> → </tspan><tspan class="gain">99.00%</tspan></text>
       <line class="rule" x1="636.0" y1="244" x2="1174.0" y2="244" />
       <text class="text" x="636.0" y="272" font-size="16" font-weight="600">输入 Token</text>
-      <text class="gain number" x="1174.0" y="272" font-size="20" font-weight="700" text-anchor="end">−41.7%</text>
-      <rect class="treatment" x="636.0" y="282" width="313.7" height="16" rx="8" />
+      <text class="gain number" x="1174.0" y="272" font-size="20" font-weight="700" text-anchor="end">−37.56%</text>
+      <rect class="treatment" x="636.0" y="282" width="335.9" height="16" rx="8" />
       <rect class="baseline" x="636.0" y="306" width="538.0" height="16" rx="8" />
       <text class="text" x="636.0" y="348" font-size="16" font-weight="600">工具调用</text>
-      <text class="gain number" x="1174.0" y="348" font-size="20" font-weight="700" text-anchor="end">−37.3%</text>
-      <rect class="treatment" x="636.0" y="358" width="337.3" height="16" rx="8" />
+      <text class="gain number" x="1174.0" y="348" font-size="20" font-weight="700" text-anchor="end">−43.52%</text>
+      <rect class="treatment" x="636.0" y="358" width="303.9" height="16" rx="8" />
       <rect class="baseline" x="636.0" y="382" width="538.0" height="16" rx="8" />
       <text class="text" x="636.0" y="424" font-size="16" font-weight="600">Agent 耗时</text>
-      <text class="gain number" x="1174.0" y="424" font-size="20" font-weight="700" text-anchor="end">−30.0%</text>
-      <rect class="treatment" x="636.0" y="434" width="376.6" height="16" rx="8" />
+      <text class="gain number" x="1174.0" y="424" font-size="20" font-weight="700" text-anchor="end">−38.58%</text>
+      <rect class="treatment" x="636.0" y="434" width="330.4" height="16" rx="8" />
       <rect class="baseline" x="636.0" y="458" width="538.0" height="16" rx="8" />
     </g>
   </g>

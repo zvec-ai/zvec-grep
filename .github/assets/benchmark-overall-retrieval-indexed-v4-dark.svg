@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 704" role="img" aria-labelledby="title desc">
+  <title id="title">Overall zvec-grep benchmark results</title>
+  <desc id="desc">Paired Baseline and zvec-grep results for SWE-QA-Bench and BrowseComp-Plus, comparing answer quality, input tokens, tool calls, and agent time.</desc>
+  <style>
+    .title { fill: #f0f6fc; font-size: 34px; font-weight: 750; }
+    .subtitle { fill: #8b949e; font-size: 18px; }
+    .tick { fill: #8b949e; font-size: 15px; }
+    .badge { font-size: 17px; font-weight: 750; }
+    .bar-value { fill: #f0f6fc; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 15px; font-variant-numeric: tabular-nums; }
+    .quality-value { font-size: 13px; }
+    .strong { font-weight: 750; }
+    .category { fill: #8b949e; font-size: 17px; }
+  </style>
+  <rect width="1600" height="704" fill="#0d1117"/>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <rect x="24" y="22" width="762" height="626" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+    <text x="66" y="72" class="title">Coding</text>
+    <text x="66" y="108" class="subtitle">SWE-QA-Bench · 20 tasks · 11 repositories · 3 runs/profile</text>
+    <line x1="72" y1="590.00" x2="744" y2="590.00" stroke="#30363d" stroke-width="1"/>
+    <text x="58" y="596.00" class="tick" text-anchor="end">0</text>
+    <line x1="72" y1="493.75" x2="744" y2="493.75" stroke="#30363d" stroke-width="1"/>
+    <text x="58" y="499.75" class="tick" text-anchor="end">25</text>
+    <line x1="72" y1="397.50" x2="744" y2="397.50" stroke="#30363d" stroke-width="1"/>
+    <text x="58" y="403.50" class="tick" text-anchor="end">50</text>
+    <line x1="72" y1="301.25" x2="744" y2="301.25" stroke="#30363d" stroke-width="1"/>
+    <text x="58" y="307.25" class="tick" text-anchor="end">75</text>
+    <line x1="72" y1="205.00" x2="744" y2="205.00" stroke="#30363d" stroke-width="1"/>
+    <text x="58" y="211.00" class="tick" text-anchor="end">100</text>
+    <rect x="90.30" y="142" width="187.40" height="34" rx="7" fill="#3fb950" stroke="#3fb950" stroke-width="2"/>
+    <text x="184" y="165" class="badge" text-anchor="middle" fill="#0d1117">+1.50 pp · improved</text>
+    <rect x="130" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="184" y="197.82" width="54" height="392.18" fill="#3fb950"/>
+    <text x="180" y="236" class="bar-value quality-value" text-anchor="end">80.42</text>
+    <text x="188" y="236" class="bar-value quality-value strong" text-anchor="start">81.92</text>
+    <text x="184" y="628" class="category" text-anchor="middle">Judge</text>
+    <rect x="306.00" y="142" width="96.00" height="34" rx="7" fill="none" stroke="#58a6ff" stroke-width="2"/>
+    <text x="354" y="165" class="badge" text-anchor="middle" fill="#58a6ff">−47.3%</text>
+    <rect x="300" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="354" y="387.11" width="54" height="202.90" fill="#58a6ff"/>
+    <text x="327" y="236" class="bar-value" text-anchor="middle">559K</text>
+    <text x="381" y="375.11" class="bar-value strong" text-anchor="middle" fill="#58a6ff">294K</text>
+    <text x="354" y="628" class="category" text-anchor="middle">Input tokens</text>
+    <rect x="476.00" y="142" width="96.00" height="34" rx="7" fill="none" stroke="#bc8cff" stroke-width="2"/>
+    <text x="524" y="165" class="badge" text-anchor="middle" fill="#bc8cff">−58.6%</text>
+    <rect x="470" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="524" y="430.61" width="54" height="159.39" fill="#bc8cff"/>
+    <text x="497" y="236" class="bar-value" text-anchor="middle">23.42</text>
+    <text x="551" y="418.61" class="bar-value strong" text-anchor="middle" fill="#bc8cff">9.70</text>
+    <text x="524" y="628" class="category" text-anchor="middle">Tool calls</text>
+    <rect x="646.00" y="142" width="96.00" height="34" rx="7" fill="none" stroke="#ff7b32" stroke-width="2"/>
+    <text x="694" y="165" class="badge" text-anchor="middle" fill="#ff7b32">−37.5%</text>
+    <rect x="640" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="694" y="349.38" width="54" height="240.63" fill="#ff7b32"/>
+    <text x="667" y="236" class="bar-value" text-anchor="middle">127.5s</text>
+    <text x="721" y="337.38" class="bar-value strong" text-anchor="middle" fill="#ff7b32">79.7s</text>
+    <text x="694" y="628" class="category" text-anchor="middle">Agent time</text>
+    <rect x="814" y="22" width="762" height="626" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+    <text x="856" y="72" class="title">General text retrieval</text>
+    <text x="856" y="108" class="subtitle">BrowseComp-Plus · 80 cases · 100,195 documents · 2 trials/profile</text>
+    <line x1="862" y1="590.00" x2="1534" y2="590.00" stroke="#30363d" stroke-width="1"/>
+    <text x="848" y="596.00" class="tick" text-anchor="end">0</text>
+    <line x1="862" y1="493.75" x2="1534" y2="493.75" stroke="#30363d" stroke-width="1"/>
+    <text x="848" y="499.75" class="tick" text-anchor="end">25</text>
+    <line x1="862" y1="397.50" x2="1534" y2="397.50" stroke="#30363d" stroke-width="1"/>
+    <text x="848" y="403.50" class="tick" text-anchor="end">50</text>
+    <line x1="862" y1="301.25" x2="1534" y2="301.25" stroke="#30363d" stroke-width="1"/>
+    <text x="848" y="307.25" class="tick" text-anchor="end">75</text>
+    <line x1="862" y1="205.00" x2="1534" y2="205.00" stroke="#30363d" stroke-width="1"/>
+    <text x="848" y="211.00" class="tick" text-anchor="end">100</text>
+    <rect x="863.10" y="142" width="221.80" height="34" rx="7" fill="#3fb950" stroke="#3fb950" stroke-width="2"/>
+    <text x="974" y="165" class="badge" text-anchor="middle" fill="#0d1117">+0.33 pp · quality held</text>
+    <rect x="920" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="974" y="203.71" width="54" height="386.29" fill="#3fb950"/>
+    <text x="970" y="236" class="bar-value quality-value" text-anchor="end">98.67%</text>
+    <text x="978" y="236" class="bar-value quality-value strong" text-anchor="start">99.00%</text>
+    <text x="974" y="628" class="category" text-anchor="middle">Accuracy</text>
+    <rect x="1096.00" y="142" width="96.00" height="34" rx="7" fill="none" stroke="#58a6ff" stroke-width="2"/>
+    <text x="1144" y="165" class="badge" text-anchor="middle" fill="#58a6ff">−37.56%</text>
+    <rect x="1090" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="1144" y="349.61" width="54" height="240.39" fill="#58a6ff"/>
+    <text x="1117" y="236" class="bar-value" text-anchor="middle">1.68M</text>
+    <text x="1171" y="337.61" class="bar-value strong" text-anchor="middle" fill="#58a6ff">1.05M</text>
+    <text x="1144" y="628" class="category" text-anchor="middle">Input tokens</text>
+    <rect x="1266.00" y="142" width="96.00" height="34" rx="7" fill="none" stroke="#bc8cff" stroke-width="2"/>
+    <text x="1314" y="165" class="badge" text-anchor="middle" fill="#bc8cff">−43.52%</text>
+    <rect x="1260" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="1314" y="372.55" width="54" height="217.45" fill="#bc8cff"/>
+    <text x="1287" y="236" class="bar-value" text-anchor="middle">25.42</text>
+    <text x="1341" y="360.55" class="bar-value strong" text-anchor="middle" fill="#bc8cff">14.36</text>
+    <text x="1314" y="628" class="category" text-anchor="middle">Tool calls</text>
+    <rect x="1436.00" y="142" width="96.00" height="34" rx="7" fill="none" stroke="#ff7b32" stroke-width="2"/>
+    <text x="1484" y="165" class="badge" text-anchor="middle" fill="#ff7b32">−38.58%</text>
+    <rect x="1430" y="205" width="54" height="385" fill="#8b949e"/>
+    <rect x="1484" y="353.53" width="54" height="236.47" fill="#ff7b32"/>
+    <text x="1457" y="236" class="bar-value" text-anchor="middle">259.4s</text>
+    <text x="1511" y="341.53" class="bar-value strong" text-anchor="middle" fill="#ff7b32">159.3s</text>
+    <text x="1484" y="628" class="category" text-anchor="middle">Agent time</text>
+    <text x="32" y="686" fill="#8b949e" font-size="16">Grey = Baseline (100) · Colour = zvec-grep relative to Baseline · Quality ↑ · Resources ↓</text>
+  </g>
+</svg>
