@@ -79,7 +79,8 @@ const panels = [
   },
   {
     title: "General text retrieval",
-    subtitle: "BrowseComp-Plus · 80 cases · 100,195 documents · 2 trials/profile",
+    subtitle:
+      "BrowseComp-Plus · 80 cases · 100,195 documents · 2 trials/profile",
     metrics: [
       {
         label: "Accuracy",
@@ -153,7 +154,10 @@ function renderPanel(panel, panelX, theme) {
     const barWidth = 54;
     const treatmentHeight = (Math.min(metric.ratio, 105) / 100) * plotHeight;
     const treatmentY = plotBottom - treatmentHeight;
-    const badgeWidth = Math.min(240, Math.max(96, metric.change.length * 8.6 + 24));
+    const badgeWidth = Math.min(
+      240,
+      Math.max(96, metric.change.length * 8.6 + 24),
+    );
     const badgeX = center - badgeWidth / 2;
     const badgeFill = metric.quality ? color : "none";
     const badgeText = metric.quality
