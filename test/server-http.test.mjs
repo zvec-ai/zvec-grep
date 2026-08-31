@@ -395,8 +395,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     name: "zvec_grep_index",
     arguments: { root: unindexedRoot, wait: true },
   });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(searchSettled, true);
+  await waitFor(() => searchSettled);
   const writerSearch = await writerSearchPromise;
   assert.equal(writerSearch.isError, undefined);
   assertAdminSearchStructured(writerSearch);
