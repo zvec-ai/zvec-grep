@@ -1421,14 +1421,25 @@ test("CLI admin search includes per-group recall while public MCP remains text-o
     (tool) => tool.name === "zvec_grep_search",
   );
   assert.equal(publicSearchTool.inputSchema.properties.routes, undefined);
+  assert.equal(publicSearchTool.inputSchema.properties.apiKey, undefined);
+  assert.equal(publicSearchTool.inputSchema.properties.device, undefined);
   assert.equal(publicSearchTool.outputSchema, undefined);
   assert.ok(adminSearchTool.inputSchema.properties.routes);
+  assert.ok(adminSearchTool.inputSchema.properties.apiKey);
+  assert.ok(adminSearchTool.inputSchema.properties.device);
   assert.ok(adminSearchTool.outputSchema.properties.result);
 
   const publicSearch = await publicConnection.client.callTool({
     name: "zvec_grep_search",
-    arguments: { root, queries: ["alpha", "beta"] },
+    arguments: {
+      root,
+      queries: ["alpha", "beta"],
+      apiKey: "unused",
+      device: "auto",
+    },
   });
+  assert.equal(receivedSearches[0].apiKey, undefined);
+  assert.equal(receivedSearches[0].device, undefined);
   assert.equal(publicSearch.structuredContent, undefined);
   assert.match(publicSearch.content[0].text, /group_coverage: Q1/);
   assert.doesNotMatch(publicSearch.content[0].text, /beta-hit/);
@@ -1443,8 +1454,12 @@ test("CLI admin search includes per-group recall while public MCP remains text-o
       ],
       fts: ["beta"],
       vector: ["alpha"],
+      apiKey: "admin-key",
+      device: "cpu",
     },
   });
+  assert.equal(receivedSearches[1].apiKey, "admin-key");
+  assert.equal(receivedSearches[1].device, "cpu");
   assert.deepEqual(receivedSearches[1].routes, [
     { mode: "vector", query: "alpha" },
     { mode: "fts", query: "beta" },

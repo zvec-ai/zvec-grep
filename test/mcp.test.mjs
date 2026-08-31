@@ -13,7 +13,7 @@ test("stdio MCP entry points are not public CLI commands", () => {
   assert.throws(() => parseArgs(["--mcp"]), /Unknown command/i);
 });
 
-test("MCP index and search expose only supported runtime overrides", () => {
+test("public MCP search omits runtime overrides while CLI admin preserves them", () => {
   const searchRuntime = {
     apiKey: "request-key",
     device: "auto",
@@ -27,16 +27,37 @@ test("MCP index and search expose only supported runtime overrides", () => {
     { root: "/repo", ...indexRuntime },
   );
   assert.deepEqual(
-    zvecGrepSearchInputSchema.parse({ root: "/repo", ...searchRuntime }),
+    zvecGrepSearchInputSchema.parse({
+      root: "/repo",
+      query: "needle",
+      ...searchRuntime,
+    }),
     {
       root: "/repo",
+      query: "needle",
+      symbolTypes: [],
+      freshness: "eventual",
+      autoUpdate: true,
+    },
+  );
+  assert.equal("apiKey" in zvecGrepSearchInputSchema.shape, false);
+  assert.equal("device" in zvecGrepSearchInputSchema.shape, false);
+  assert.equal("endpoint" in zvecGrepSearchInputSchema.shape, false);
+  assert.deepEqual(
+    zvecGrepCliSearchInputSchema.parse({
+      root: "/repo",
+      query: "needle",
+      ...searchRuntime,
+    }),
+    {
+      root: "/repo",
+      query: "needle",
       ...searchRuntime,
       symbolTypes: [],
       freshness: "eventual",
       autoUpdate: true,
     },
   );
-  assert.equal("endpoint" in zvecGrepSearchInputSchema.shape, false);
 });
 
 test("internal CLI search accepts the legacy combined supplemental-route bound", () => {

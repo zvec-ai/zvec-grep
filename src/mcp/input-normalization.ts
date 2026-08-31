@@ -43,8 +43,8 @@ export function normalizeSearchInput(
   const common = normalizeSearchFields(input);
   return {
     root: input.root,
-    apiKey: input.apiKey,
-    device: input.device,
+    apiKey: "apiKey" in input ? input.apiKey : undefined,
+    device: "device" in input ? input.device : undefined,
     ...common,
     freshness: input.freshness,
     autoUpdate: input.autoUpdate,

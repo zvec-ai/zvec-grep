@@ -76,7 +76,6 @@ const embeddingIndexRuntimeFields = {
 };
 
 const searchFields = {
-  ...embeddingSearchRuntimeFields,
   query: boundedString(
     "One primary hybrid-search group using natural-language or exact terms.",
   ).optional(),
@@ -239,6 +238,10 @@ export const zvecGrepIndexInputSchema = z.object({
     ),
 });
 
+// Public agents search with the configured workspace runtime. Keeping credentials
+// and device selection out of this schema prevents agents from inventing unsafe
+// one-request overrides such as placeholder API keys or local devices for a
+// remote index.
 export const zvecGrepSearchInputSchema = z.object({
   root: absoluteRootSchema,
   ...searchFields,
@@ -263,8 +266,9 @@ const cliSearchRouteInputSchema = z.object({
   ),
 });
 
-/** Internal daemon-admin schema used to preserve CLI route argument order. */
+/** Internal daemon-admin schema preserving CLI runtime overrides and route order. */
 export const zvecGrepCliSearchInputSchema = zvecGrepSearchInputSchema.extend({
+  ...embeddingSearchRuntimeFields,
   routes: z
     .array(cliSearchRouteInputSchema)
     .max(MCP_MAX_QUERY_GROUPS * 2)
