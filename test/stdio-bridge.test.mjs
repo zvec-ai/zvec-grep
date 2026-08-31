@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shouldStopStdioBridge } from "../dist/mcp/stdio-bridge.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { Server } from "@modelcontextprotocol/server";
+import {
+  registerStdioBridgeElicitationForwarding,
+  shouldStopStdioBridge,
+} from "../dist/mcp/stdio-bridge.js";
 
 const connectedDaemon = {
   running: true,
@@ -42,4 +47,75 @@ test("stdio bridge stops when the daemon identity changes", () => {
     }),
     true,
   );
+});
+
+test("stdio bridge forwards elicitation requests to the downstream host", async (t) => {
+  const daemon = new Server(
+    { name: "stdio-bridge-daemon-test", version: "1.0.0" },
+    { capabilities: {} },
+  );
+  const upstream = new Client(
+    { name: "stdio-bridge-upstream-test", version: "1.0.0" },
+    { capabilities: { elicitation: { form: {} } } },
+  );
+  const downstream = new Server(
+    { name: "stdio-bridge-downstream-test", version: "1.0.0" },
+    { capabilities: {} },
+  );
+  const host = new Client(
+    { name: "stdio-bridge-host-test", version: "1.0.0" },
+    { capabilities: { elicitation: {} } },
+  );
+  let receivedRequest;
+  host.setRequestHandler("elicitation/create", async (request) => {
+    receivedRequest = request;
+    return {
+      action: "accept",
+      content: { decision: "allow_once" },
+    };
+  });
+  registerStdioBridgeElicitationForwarding(upstream, () => downstream);
+
+  const [daemonTransport, upstreamTransport] =
+    InMemoryTransport.createLinkedPair();
+  const [downstreamTransport, hostTransport] =
+    InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    daemon.connect(daemonTransport),
+    upstream.connect(upstreamTransport),
+    downstream.connect(downstreamTransport),
+    host.connect(hostTransport),
+  ]);
+  t.after(async () => {
+    await Promise.allSettled([
+      daemon.close(),
+      upstream.close(),
+      downstream.close(),
+      host.close(),
+    ]);
+  });
+
+  const result = await daemon.request({
+    method: "elicitation/create",
+    params: {
+      mode: "form",
+      message: "Authorize Remote Embedding?",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          decision: {
+            type: "string",
+            enum: ["allow_once", "cancel"],
+          },
+        },
+        required: ["decision"],
+      },
+    },
+  });
+
+  assert.equal(receivedRequest.params.message, "Authorize Remote Embedding?");
+  assert.deepEqual(result, {
+    action: "accept",
+    content: { decision: "allow_once" },
+  });
 });

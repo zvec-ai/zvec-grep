@@ -152,6 +152,16 @@ Before granting access, confirm that the workspace content is permitted to be
 sent to the selected provider and endpoint. MCP tool approval is separate from
 this data authorization.
 
+When a Qoder client reports that it has no handler for `elicitation/create`, or
+declines or cancels without displaying the form, the Qoder guidance installed
+by `zg install --target qoder` uses `AskUserQuestion` as a compatibility path.
+It runs the Workspace grant only after explicit approval and retries the
+original MCP search once. Choosing local FTS instead removes vector-producing
+query routes, sets `autoUpdate` to `false`, and keeps retrieval local without
+refreshing the remote-embedding index; a headless session never grants access
+automatically. `--allow-remote` is not a substitute for this path because it
+authorizes only the current CLI command, not a later MCP retry.
+
 ## Input length and truncation
 
 zvec-grep uses the selected model's input limit when it creates fragments, but

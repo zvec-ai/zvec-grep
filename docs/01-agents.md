@@ -70,6 +70,28 @@ For Qoder, `--mcp-transport` selects either a stdio or HTTP entry under
 search guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
 replacing unrelated guidance.
 
+Qoder receives the same MCP form-based Remote Embedding authorization request as
+other clients. If it reports that no handler is registered for
+`elicitation/create`, or returns a decline or cancellation without displaying
+the form, the installed guidance supplies a compatibility interaction through
+Qoder's `AskUserQuestion` tool. The agent must ask whether to allow Remote
+Embedding for the workspace, use local FTS only, or cancel. It may run the
+following persistent grant only after explicit workspace approval, then retry
+the original MCP search once:
+
+```bash
+zg auth grant "/absolute/workspace" \
+  --capability embedding \
+  --scope workspace
+```
+
+The local-FTS choice retries the search without `query`, `queries`, or `vector`
+routes and with `autoUpdate: false` and `freshness: "eventual"`. It neither
+refreshes the remote-embedding index nor sends query text or workspace content
+to a remote Embedding provider. In a headless session where Qoder cannot ask the
+user, the agent stops without granting access. Provider credentials remain
+separate from this data authorization.
+
 Restart the selected agent, or open a new session, after installation.
 
 ## How the agent searches

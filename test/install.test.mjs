@@ -1185,6 +1185,30 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   assert.match(guidance, /# Existing Qoder guidance/);
   assert.match(guidance, /`mcp__zvec_grep__zvec_grep_search`/);
   assert.match(guidance, /`mcp__zvec_grep__zvec_grep_rg`/);
+  assert.match(guidance, /### Qoder Remote Embedding authorization recovery/);
+  assert.match(guidance, /no handler registered for `elicitation\/create`/);
+  assert.match(
+    guidance,
+    /authorization was declined or cancelled without showing the user an authorization form/,
+  );
+  assert.match(
+    guidance,
+    /Use `AskUserQuestion` to offer exactly these choices/,
+  );
+  assert.match(
+    guidance,
+    /zg auth grant "<absolute-root>" --capability embedding --scope workspace/,
+  );
+  assert.match(guidance, /retry the original search call once/);
+  assert.match(
+    guidance,
+    /original search text in `fts`, omit `query`, `queries`, and `vector`, set `autoUpdate` to `false` and `freshness` to `eventual`/,
+  );
+  assert.match(guidance, /interactive user input is unavailable, stop/);
+  assert.match(
+    guidance,
+    /never request or modify an API key merely to resolve this interaction error/,
+  );
   assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_START -->"), 1);
   assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_END -->"), 1);
 });

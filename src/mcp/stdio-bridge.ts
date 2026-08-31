@@ -62,10 +62,10 @@ export async function runStdioBootstrapBridge(options: {
       versionNegotiation: { mode: { pin: "2026-07-28" } },
     },
   );
-  upstream.fallbackRequestHandler = async (
+  const forwardUpstreamRequest = async (
     request: JSONRPCRequest,
     context: ClientContext,
-  ) => {
+  ): Promise<Result> => {
     if (!downstreamHolder.server) {
       throw new Error("stdio MCP client is not connected");
     }
@@ -76,6 +76,11 @@ export async function runStdioBootstrapBridge(options: {
       context.mcpReq._meta,
     );
   };
+  upstream.fallbackRequestHandler = forwardUpstreamRequest;
+  registerStdioBridgeElicitationForwarding(
+    upstream,
+    () => downstreamHolder.server,
+  );
   upstream.fallbackNotificationHandler = async (notification: Notification) => {
     await downstreamHolder.server?.notification(notification);
   };
@@ -167,6 +172,34 @@ export function shouldStopStdioBridge(
     current.pid !== connected.pid ||
     current.serverUrl !== connected.serverUrl
   );
+}
+
+export function registerStdioBridgeElicitationForwarding(
+  upstream: Client,
+  downstreamServer: () => Server | undefined,
+): void {
+  // MCP SDK helpers resolve elicitation through the method-specific handler
+  // instead of the generic fallback. Register this path explicitly so a
+  // request from the shared daemon reaches the actual stdio host.
+  upstream.setRequestHandler("elicitation/create", async (request, context) => {
+    const downstream = downstreamServer();
+    if (!downstream) {
+      throw new Error("stdio MCP client is not connected");
+    }
+    return await downstream.request(
+      {
+        method: "elicitation/create",
+        params: context.mcpReq._meta
+          ? { ...request.params, _meta: context.mcpReq._meta }
+          : request.params,
+      },
+      {
+        signal: context.mcpReq.signal,
+        timeout: LONG_RUNNING_MCP_TIMEOUT_MS,
+        resetTimeoutOnProgress: true,
+      },
+    );
+  });
 }
 
 async function forwardRequest(

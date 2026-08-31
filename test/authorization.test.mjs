@@ -216,6 +216,15 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
     queryText: false,
     workspaceContent: "changed",
   });
+  assert.equal(
+    await planRemoteSearchAuthorization({
+      info: { ...baseInfo, status: staleStatus },
+      model,
+      search: { ...fts, autoUpdate: false, freshness: "eventual" },
+      runtimeNeedsReconciliation: true,
+    }),
+    undefined,
+  );
 
   assert.equal(
     await planRemoteIndexAuthorization({

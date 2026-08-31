@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   Client,
+  InMemoryTransport,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
+import { Server } from "@modelcontextprotocol/server";
 import { DaemonHttpServer } from "../dist/daemon/http-server.js";
+import { registerStdioBridgeElicitationForwarding } from "../dist/mcp/stdio-bridge.js";
 
 const token = "modern-http-test-token-at-least-32-characters";
 const root = "/private/tmp/zvec-grep-modern-http";
 
-test("modern HTTP performs MRTR authorization and rejects future versions", async (t) => {
+test("modern HTTP performs MRTR authorization through stdio elicitation forwarding and rejects future versions", async (t) => {
   const target = {
     workspaceRoots: [root],
     workspaceFingerprint: "workspace-fingerprint",
@@ -76,23 +79,44 @@ test("modern HTTP performs MRTR authorization and rejects future versions", asyn
   const url = new URL(`http://127.0.0.1:${address.port}/mcp/admin`);
 
   let elicitations = 0;
-  const client = new Client(
+  const upstream = new Client(
     { name: "modern-mrtr-test", version: "1.0.0" },
     {
       capabilities: { elicitation: { form: {} } },
       versionNegotiation: { mode: { pin: "2026-07-28" } },
     },
   );
-  client.setRequestHandler("elicitation/create", async () => {
+  const downstream = new Server(
+    { name: "modern-mrtr-downstream-test", version: "1.0.0" },
+    { capabilities: {} },
+  );
+  const qoderLikeHost = new Client(
+    { name: "qoder-like-host-test", version: "1.0.0" },
+    { capabilities: { elicitation: {} } },
+  );
+  qoderLikeHost.setRequestHandler("elicitation/create", async () => {
     elicitations += 1;
     return {
       action: "accept",
       content: { decision: "allow_once" },
     };
   });
-  await client.connect(transport(url));
-  t.after(async () => client.close());
-  const result = await client.callTool({
+  registerStdioBridgeElicitationForwarding(upstream, () => downstream);
+  const [downstreamTransport, hostTransport] =
+    InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    downstream.connect(downstreamTransport),
+    qoderLikeHost.connect(hostTransport),
+    upstream.connect(transport(url)),
+  ]);
+  t.after(async () => {
+    await Promise.allSettled([
+      upstream.close(),
+      downstream.close(),
+      qoderLikeHost.close(),
+    ]);
+  });
+  const result = await upstream.callTool({
     name: "zvec_grep_search",
     arguments: { root, query: "protocol upgrade" },
     _meta: {

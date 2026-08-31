@@ -427,6 +427,7 @@ async function installQoderIntegration(
     block: agentGuidanceBlock({
       search: NAMESPACED_SEARCH_TOOL,
       rg: NAMESPACED_RG_TOOL,
+      qoderAuthorizationRecovery: true,
     }),
     force: true,
   });
@@ -1741,10 +1742,22 @@ ${ZVEC_GREP_CONFIG_END}`;
 function agentGuidanceBlock(toolNames?: {
   search: string;
   rg: string;
+  qoderAuthorizationRecovery?: boolean;
 }): string {
   const searchTool = toolNames?.search ?? "zvec_grep_search";
   const rgTool = toolNames?.rg ?? "zvec_grep_rg";
   const exactLookupRoute = `\`${rgTool}\` when it is listed by the current host; otherwise native Grep or \`rg\``;
+  const qoderAuthorizationRecovery = toolNames?.qoderAuthorizationRecovery
+    ? `
+
+${formatPromptRules("### Qoder Remote Embedding authorization recovery", [
+  `When \`${searchTool}\` fails because \`remote_embedding_authorization\` has no handler registered for \`elicitation/create\`, or reports that authorization was declined or cancelled without showing the user an authorization form during that call, treat it as a Qoder client interaction limitation. Do not immediately fall back to broad file reads, do not treat it as a missing API credential, and do not grant access silently. If the user actually declined a displayed authorization form, respect that decision and do not ask again.`,
+  "Use `AskUserQuestion` to offer exactly these choices: allow Remote Embedding for this workspace, use local FTS only, or cancel. Explain that workspace approval may send query text and selected workspace content to the configured provider and endpoint and may incur provider charges.",
+  'Only after the user explicitly chooses workspace approval, run `zg auth grant "<absolute-root>" --capability embedding --scope workspace`, substituting the same absolute root used by the failed search, and then retry the original search call once. Do not use `--allow-remote`; it applies only to one CLI command and does not authorize the MCP retry.',
+  `If the user chooses local FTS, retry \`${searchTool}\` once with the original search text in \`fts\`, omit \`query\`, \`queries\`, and \`vector\`, set \`autoUpdate\` to \`false\` and \`freshness\` to \`eventual\`, and preserve \`root\`, filters, and limits. This route is lexical-only, does not refresh the remote-embedding index, and sends no query text or workspace content to a remote Embedding provider.`,
+  "If the user cancels, the grant command fails, or interactive user input is unavailable, stop and report that no remote data was sent. Provider credentials and Remote Embedding data authorization are separate; never request or modify an API key merely to resolve this interaction error.",
+])}`
+    : "";
   return `${ZVEC_GREP_AGENTS_START}
 ## zvec-grep
 
@@ -1774,5 +1787,6 @@ ${formatPromptRules("### Freshness and index lifecycle", [
   `If the index is missing but exact or regex lookup can answer the task, use ${exactLookupRoute}.`,
   "Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.",
 ])}
+${qoderAuthorizationRecovery}
 ${ZVEC_GREP_AGENTS_END}`;
 }
