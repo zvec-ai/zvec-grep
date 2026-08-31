@@ -159,7 +159,11 @@ the canonical `qoder` target. `zg install` also accepts:
 | `--mcp-toolset <agent\|full>` | Daemon MCP surface; default `agent` |
 | `--mcp-tool-timeout <seconds>` | Codex, Qwen Code, Qoder, and OpenCode MCP timeout; default 600 seconds |
 | `--mcp-token-env <name>` | Environment variable containing the server token |
-| `--force` | Replace a conflicting unmanaged `zvec_grep` entry |
+| `--force` | Replace a conflicting unmanaged `zvec_grep` entry or Qoder IDE rule |
+
+The Qoder target installs global MCP and CLI guidance plus an IDE rule in the
+current working directory. Run it from the Qoder IDE project root, or set
+`QODER_PROJECT_DIR` when running install/uninstall outside that project.
 
 See [Agent integrations](./01-agents.md) before using `--force`.
 
@@ -231,6 +235,7 @@ refresh, authentication, and logs. See [MCP](./03-mcp.md) for the tool contract.
 | `QWEN_API_KEY` | Qwen API-key fallback after `DASHSCOPE_API_KEY` |
 | `QWEN_HOME` | Qwen Code configuration directory used by `zg install` |
 | `QODER_CONFIG_DIR` | Qoder CLI configuration directory used by `zg install` |
+| `QODER_PROJECT_DIR` | Qoder IDE project root used for managed `.qoder/rules` guidance |
 
 Run `zg help environment` for advanced variables, agent integration paths,
 scope, and detailed precedence. A new index selects its model in this order:

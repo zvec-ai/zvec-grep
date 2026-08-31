@@ -110,9 +110,11 @@ const ZVEC_GREP_CONFIG_START = "# ZVEC_GREP_START";
 const ZVEC_GREP_CONFIG_END = "# ZVEC_GREP_END";
 const ZVEC_GREP_AGENTS_START = "<!-- ZVEC_GREP_START -->";
 const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
+const QODER_IDE_RULE_FRONTMATTER = "---\ntrigger: always_on\n---";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
 const NAMESPACED_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
 const NAMESPACED_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
+const ZVEC_GREP_MCP_DESCRIPTION = "Managed by zg install";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
 export async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -415,6 +417,19 @@ async function installQoderIntegration(
   const qoderHome = resolveQoderHome();
   const settingsPath = resolve(qoderHome, "settings.json");
   const guidancePath = resolve(qoderHome, "AGENTS.md");
+  const projectRoot = resolveQoderProjectRoot();
+  const ideGuidancePath = resolve(
+    projectRoot,
+    ".qoder",
+    "rules",
+    "zvec-grep.md",
+  );
+  const guidance = agentGuidanceBlock({
+    search: NAMESPACED_SEARCH_TOOL,
+    rg: NAMESPACED_RG_TOOL,
+    qoderAuthorizationRecovery: true,
+  });
+  await assertQoderIdeGuidanceWritable(ideGuidancePath, options.force);
 
   const warnings = await updateQoderSettings({
     ...options,
@@ -424,25 +439,33 @@ async function installQoderIntegration(
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
-    block: agentGuidanceBlock({
-      search: NAMESPACED_SEARCH_TOOL,
-      rg: NAMESPACED_RG_TOOL,
-      qoderAuthorizationRecovery: true,
-    }),
+    block: guidance,
     force: true,
   });
+  await writeQoderIdeGuidance(ideGuidancePath, guidance, options.force);
 
   for (const warning of warnings) {
     console.warn(`    warning   ${warning}`);
   }
 
-  return { files: [settingsPath, guidancePath] };
+  return {
+    files: [settingsPath, guidancePath, ideGuidancePath],
+  };
 }
 
 async function uninstallQoderIntegration(): Promise<InstallAgentResult> {
   const qoderHome = resolveQoderHome();
   const settingsPath = resolve(qoderHome, "settings.json");
   const guidancePath = resolve(qoderHome, "AGENTS.md");
+  const projectRoot = resolveQoderProjectRoot();
+  const ideGuidancePath = resolve(
+    projectRoot,
+    ".qoder",
+    "rules",
+    "zvec-grep.md",
+  );
+
+  await assertQoderIdeGuidanceRemovable(ideGuidancePath);
 
   await removeQoderSettings(settingsPath);
   await removeMarkedFile({
@@ -450,8 +473,11 @@ async function uninstallQoderIntegration(): Promise<InstallAgentResult> {
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
   });
+  await removeQoderIdeGuidance(ideGuidancePath);
 
-  return { files: [settingsPath, guidancePath] };
+  return {
+    files: [settingsPath, guidancePath, ideGuidancePath],
+  };
 }
 
 async function resolveInstallers(
@@ -820,6 +846,13 @@ function resolveQoderHome(): string {
   return resolve(process.env.QODER_CONFIG_DIR || resolve(homedir(), ".qoder"));
 }
 
+function resolveQoderProjectRoot(): string {
+  if (process.env.QODER_PROJECT_DIR?.trim()) {
+    return resolve(process.env.QODER_PROJECT_DIR);
+  }
+  return resolve(process.cwd());
+}
+
 async function resolveQwenHome(): Promise<string> {
   const defaultQwenHome = resolve(homedir(), ".qwen");
   const configured = process.env.QWEN_HOME;
@@ -1113,11 +1146,13 @@ function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
 function qoderMcpServer(options: InstallAgentOptions): Record<string, unknown> {
   const timeout = options.mcpToolTimeoutSeconds * 1_000;
   if (options.transport === "stdio") {
+    const launch = stableStdioLaunch(options.mcpToolset);
     return {
-      command: "zg",
-      args: stdioArgs(options.mcpToolset),
+      command: launch.command,
+      args: launch.args,
       timeout,
       trust: true,
+      description: ZVEC_GREP_MCP_DESCRIPTION,
     };
   }
 
@@ -1126,6 +1161,7 @@ function qoderMcpServer(options: InstallAgentOptions): Record<string, unknown> {
     url: resolveServerUrl(),
     timeout,
     trust: true,
+    description: ZVEC_GREP_MCP_DESCRIPTION,
     ...(options.mcpTokenEnv
       ? {
           headers: {
@@ -1394,6 +1430,13 @@ function isManagedJsonMcpServer(value: unknown): boolean {
   if (!isJsonObject(value)) return false;
   if (value.url === resolveServerUrl()) return true;
   if (value.command === "zg" && isStdioArgs(value.args)) return true;
+  if (
+    value.description === ZVEC_GREP_MCP_DESCRIPTION &&
+    ((typeof value.command === "string" && isStableStdioArgs(value.args)) ||
+      (value.type === "http" && typeof value.url === "string"))
+  ) {
+    return true;
+  }
   return (
     value.type === "local" &&
     Array.isArray(value.command) &&
@@ -1419,6 +1462,19 @@ function isStdioArgs(value: unknown): boolean {
   );
 }
 
+function isStableStdioArgs(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    (value.length === 3 || value.length === 5) &&
+    typeof value[0] === "string" &&
+    value[1] === "server" &&
+    value[2] === "--stdio" &&
+    (value.length === 3 ||
+      (value[3] === "--mcp-toolset" &&
+        (value[4] === "agent" || value[4] === "full")))
+  );
+}
+
 function stdioArgs(mcpToolset?: McpToolset): string[] {
   return [
     "server",
@@ -1429,6 +1485,20 @@ function stdioArgs(mcpToolset?: McpToolset): string[] {
 
 function stdioCommand(mcpToolset?: McpToolset): string[] {
   return ["zg", ...stdioArgs(mcpToolset)];
+}
+
+function stableStdioLaunch(mcpToolset?: McpToolset): {
+  command: string;
+  args: string[];
+} {
+  const cliPath = process.argv[1];
+  if (!cliPath) {
+    return { command: "zg", args: stdioArgs(mcpToolset) };
+  }
+  return {
+    command: process.execPath,
+    args: [resolve(cliPath), ...stdioArgs(mcpToolset)],
+  };
 }
 
 function tomlStringArray(values: readonly string[]): string {
@@ -1503,11 +1573,139 @@ async function removeMarkedFile(options: {
   await writeTextFileAtomic(options.path, next);
 }
 
+async function assertQoderIdeGuidanceWritable(
+  path: string,
+  force: boolean,
+): Promise<void> {
+  const state = await qoderIdeRulePathState(path);
+  if (state.symbolicLink) {
+    if (force) return;
+    throw new Error(
+      `Refusing to replace symbolic link ${path} without --force. The link target was not modified.`,
+    );
+  }
+  if (force) return;
+  const existing = await readTextFileIfExists(path);
+  if (!existing.trim()) return;
+
+  const removal = qoderIdeManagedRemoval(existing);
+  if (removal === null || removal.unmanaged.trim()) {
+    throw new Error(
+      `Existing unmanaged Qoder IDE rule found in ${path}. Re-run with --force to replace that file.`,
+    );
+  }
+}
+
+async function writeQoderIdeGuidance(
+  path: string,
+  guidance: string,
+  force: boolean,
+): Promise<void> {
+  await assertQoderIdeGuidanceWritable(path, force);
+  await writeTextFileAtomic(
+    path,
+    `${QODER_IDE_RULE_FRONTMATTER}\n\n${guidance.trim()}\n`,
+    { followFinalSymlink: false },
+  );
+}
+
+async function removeQoderIdeGuidance(path: string): Promise<void> {
+  await assertQoderIdeGuidanceRemovable(path);
+  const existing = await readTextFileIfExists(path);
+  if (!existing) return;
+
+  const removal = qoderIdeManagedRemoval(existing);
+  if (removal === null) return;
+  if (removal.unmanaged.trim()) {
+    await writeTextFileAtomic(path, removal.preserved, {
+      followFinalSymlink: false,
+    });
+    return;
+  }
+
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+}
+
+async function assertQoderIdeGuidanceRemovable(path: string): Promise<void> {
+  const state = await qoderIdeRulePathState(path);
+  if (state.symbolicLink) {
+    throw new Error(
+      `Refusing to remove Qoder IDE guidance through symbolic link ${path}. The link target was not modified.`,
+    );
+  }
+}
+
+async function qoderIdeRulePathState(
+  path: string,
+): Promise<{ symbolicLink: boolean }> {
+  const rulesDirectory = dirname(path);
+  const qoderDirectory = dirname(rulesDirectory);
+  for (const directory of [qoderDirectory, rulesDirectory]) {
+    const entry = await lstatIfExists(directory);
+    if (!entry) continue;
+    if (entry.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to manage Qoder IDE guidance through symbolic-link directory ${directory}.`,
+      );
+    }
+    if (!entry.isDirectory()) {
+      throw new Error(
+        `Cannot manage Qoder IDE guidance because ${directory} is not a directory.`,
+      );
+    }
+  }
+
+  const entry = await lstatIfExists(path);
+  if (entry && !entry.isFile() && !entry.isSymbolicLink()) {
+    throw new Error(
+      `Cannot manage Qoder IDE guidance because ${path} is not a file.`,
+    );
+  }
+  return { symbolicLink: entry?.isSymbolicLink() === true };
+}
+
+async function lstatIfExists(
+  path: string,
+): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function qoderIdeManagedRemoval(
+  existing: string,
+): { unmanaged: string; preserved: string } | null {
+  const withoutGuidance = replaceMarkedBlock(
+    existing,
+    ZVEC_GREP_AGENTS_START,
+    ZVEC_GREP_AGENTS_END,
+    "",
+  );
+  if (withoutGuidance === null) return null;
+
+  const unmanaged = withoutGuidance.replace(
+    /^---\r?\ntrigger: always_on\r?\n---(?:\r?\n)*/,
+    "",
+  );
+  return { unmanaged, preserved: unmanaged.trim() ? withoutGuidance : "" };
+}
+
 async function writeTextFileAtomic(
   path: string,
   content: string,
+  options: { followFinalSymlink?: boolean } = {},
 ): Promise<void> {
-  const targetPath = await resolveAtomicWriteTarget(path);
+  const targetPath =
+    options.followFinalSymlink === false
+      ? resolve(path)
+      : await resolveAtomicWriteTarget(path);
   await mkdir(dirname(targetPath), { recursive: true });
 
   const mode = await fileModeIfExists(targetPath);
@@ -1721,12 +1919,13 @@ function isCodexMcpServerTableName(tableName: string): boolean {
 }
 
 function codexConfigBlock(options: InstallAgentOptions): string {
+  const launch = stableStdioLaunch(options.mcpToolset);
   return `${ZVEC_GREP_CONFIG_START}
 [mcp_servers.zvec_grep]
 ${
   options.transport === "stdio"
-    ? `command = "zg"
-args = ${tomlStringArray(stdioArgs(options.mcpToolset))}`
+    ? `command = ${JSON.stringify(launch.command)}
+args = ${tomlStringArray(launch.args)}`
     : `url = "${resolveServerUrl()}"`
 }
 ${

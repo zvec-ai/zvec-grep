@@ -17,7 +17,7 @@ managed-rg route.
 | Codex | `codex` | `~/.codex/config.toml` and `~/.codex/AGENTS.md` |
 | Claude Code | `claude` | `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
-| Qoder CLI (`qoder` or `qodercli`) | `qoder` | `~/.qoder/settings.json` and `~/.qoder/AGENTS.md` |
+| Qoder CLI and IDE (`qoder` or `qodercli`) | `qoder` | `~/.qoder/settings.json`, `~/.qoder/AGENTS.md`, and `<project>/.qoder/rules/zvec-grep.md` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
@@ -29,7 +29,8 @@ The current Qoder CLI package exposes both `qoder` and `qodercli` commands. The
 installer accepts `qodercli` and `qoder-cli` as aliases for the canonical
 `qoder` target, and automatic detection recognizes either executable.
 `QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory used by the
-installer.
+installer. `QODER_PROJECT_DIR` overrides the project root used for Qoder IDE
+guidance.
 
 ## Install an integration
 
@@ -48,6 +49,13 @@ zg install --target qwen --yes
 zg install --target qoder --yes
 zg install --target all --yes
 ```
+
+Run the Qoder install from inside the project that should receive IDE guidance.
+The installer treats its current working directory as the Qoder IDE project
+root and manages `.qoder/rules/zvec-grep.md` there. When running the installer
+from elsewhere, set `QODER_PROJECT_DIR=/absolute/project`. This explicit scope
+also avoids guessing incorrectly when a monorepo subdirectory is opened as a
+separate IDE project.
 
 The installer:
 
@@ -68,7 +76,17 @@ using `--force` to replace it.
 For Qoder, `--mcp-transport` selects either a stdio or HTTP entry under
 `mcpServers`; the installer also manages the timeout and trust fields. Qoder CLI
 search guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
-replacing unrelated guidance.
+replacing unrelated guidance. Qoder IDE receives the same managed block in the
+project-specific `.qoder/rules/zvec-grep.md`, explicitly marked as always-on.
+Other project rules are preserved. An existing unmanaged rule with that exact
+filename must be reviewed before using `--force` to replace it.
+
+In stdio mode, the Codex and Qoder configurations record the absolute Node
+executable and zvec-grep CLI entrypoint used during installation. This avoids
+depending on a GUI process inheriting the interactive shell's `PATH`, including
+an NVM lazy-load trigger. Rerun `zg install` after moving the npm package or
+removing the recorded Node version. HTTP mode does not spawn this local stdio
+command.
 
 Qoder receives the same MCP form-based Remote Embedding authorization request as
 other clients. If it reports that no handler is registered for
@@ -171,6 +189,9 @@ zg uninstall --target qwen --yes
 zg uninstall --target qoder --yes
 zg uninstall --target all --yes
 ```
+
+Run the Qoder uninstall from the same project, or set `QODER_PROJECT_DIR`, to
+remove its managed IDE rule as well as the global CLI integration.
 
 Restart the agent or open a new session to apply the change. Uninstalling an
 agent integration does not delete repository indexes or the npm package.
