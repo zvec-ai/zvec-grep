@@ -51,7 +51,6 @@ const ENVIRONMENT_VARIABLES = {
   CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg install",
   QWEN_HOME: "Qwen Code configuration directory used by zg install",
   QODER_CONFIG_DIR: "Qoder configuration directory used by zg install",
-  QODER_PROJECT_DIR: "Qoder IDE project root for managed .qoder/rules guidance",
   OPENCODE_CONFIG: "OpenCode configuration file used by zg install",
   CURSOR_CONFIG_DIR: "Cursor configuration directory used by zg install",
 } as const;
@@ -308,16 +307,15 @@ Options:
   --mcp-tool-timeout <seconds>      MCP tool timeout where supported (default: 600)
   --mcp-token-env <name>            HTTP mode Bearer token environment variable
   --yes                             Install detected agents without prompting
-  --force                           Replace conflicting unmanaged configuration or Qoder IDE rule
+  --force                           Replace conflicting unmanaged configuration
 
-Qoder aliases: qodercli, qoder-cli. Run the Qoder install from the IDE project
-root, or set QODER_PROJECT_DIR when invoking it from another directory.
+Qoder aliases: qodercli, qoder-cli.
 
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
 Codex, Claude Code, Qwen Code, Qoder, and OpenCode also receive managed guidance.
-Qoder receives global CLI guidance plus project-level IDE guidance.
+Qoder writes MCP configuration for both Qoder CLI and Qoder IDE.
 Codex and Claude Code receive local tool pre-approval. Remote Embedding
 authorization remains separate and is requested by zvec-grep on first remote
 use. Restart the agent or open a new session after installation. This does not
@@ -556,7 +554,6 @@ ${formatEnvironmentVariables([
   "CLAUDE_CONFIG_DIR",
   "QWEN_HOME",
   "QODER_CONFIG_DIR",
-  "QODER_PROJECT_DIR",
   "OPENCODE_CONFIG",
   "CURSOR_CONFIG_DIR",
 ])}
