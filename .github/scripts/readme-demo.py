@@ -2,7 +2,7 @@
 """Generate the deterministic terminal tour used by the project READMEs.
 
 The install scene mirrors the interactive UI and output implemented in
-src/cli/commands.ts. Run with:
+src/cli/install.ts. Run with:
 
   uv run --with pillow .github/scripts/readme-demo.py
   uv run --with pillow .github/scripts/readme-demo.py --theme dark
@@ -270,7 +270,10 @@ def chooser_lines(active):
         ("Codex", "detected"),
         ("OpenCode", "not found"),
         ("Cursor", "not found"),
+        ("Qwen Code", "detected"),
+        ("Qoder", "detected"),
     ]
+    label_width = max(len(label) for label, _ in agents)
     result = []
     for index, (label, status) in enumerate(agents):
         marker = "●" if index == active else "○"
@@ -279,7 +282,7 @@ def chooser_lines(active):
             line(
                 part("  "),
                 part(marker, marker_color, index == active),
-                part(f" {label:<11}  "),
+                part(f" {label:<{label_width}}  "),
                 part(status, MUTED),
             )
         )
@@ -325,10 +328,11 @@ def install_scene(frames):
         ],
         [2, 3, 2, 1, 4, 1],
     )
-    lines.extend(chooser_lines(0))
+    choices = chooser_lines(0)
+    lines.extend(choices)
     hold(frames, lines, 18)
 
-    lines[-6:] = chooser_lines(1)
+    lines[-len(choices) :] = chooser_lines(1)
     hold(frames, lines, 12)
 
     reveal(
