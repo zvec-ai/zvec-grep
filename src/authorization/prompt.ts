@@ -10,6 +10,9 @@ export type RemoteEmbeddingAuthorizationPromptInput = {
   note?: string;
 };
 
+export const REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE =
+  "The connected MCP host does not support the Remote Embedding authorization interaction required by elicitation/create. The Agent should use AskUserQuestion to ask the user to choose: allow Remote Embedding for this workspace, use local FTS only, or cancel. No user decision was received, and no remote data was sent.";
+
 export function remoteEmbeddingDisclosureData(
   disclosure: RemoteEmbeddingDataDisclosure,
 ): string[] {

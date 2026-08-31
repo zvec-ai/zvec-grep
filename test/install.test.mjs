@@ -1217,7 +1217,30 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   assert.match(guidance, /`mcp__zvec_grep__zvec_grep_search`/);
   assert.match(guidance, /`mcp__zvec_grep__zvec_grep_rg`/);
   assert.match(guidance, /### Qoder Remote Embedding authorization recovery/);
-  assert.match(guidance, /no handler registered for `elicitation\/create`/);
+  assert.match(
+    guidance,
+    /`code = 51500 message = method not found: No request handler configured`/,
+  );
+  assert.match(
+    guidance,
+    /`The connected MCP host does not support the Remote Embedding authorization interaction required by elicitation\/create\. The Agent should use AskUserQuestion to ask the user to choose: allow Remote Embedding for this workspace, use local FTS only, or cancel\. No user decision was received, and no remote data was sent\.`/,
+  );
+  assert.match(
+    guidance,
+    /Qoder lacks the server-to-client `elicitation\/create` request handler/,
+  );
+  assert.match(
+    guidance,
+    /The outer MCP `tools\/call` has already reached the registered MCP server and tool/,
+  );
+  assert.match(
+    guidance,
+    /do not diagnose this error as a disconnected or missing MCP server or as a missing tool/,
+  );
+  assert.match(
+    guidance,
+    /only to the Remote Embedding authorization path, not to arbitrary 51500 failures/,
+  );
   assert.match(
     guidance,
     /authorization was declined or cancelled without showing the user an authorization form/,

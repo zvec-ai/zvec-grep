@@ -8,9 +8,14 @@ import {
   type Result,
 } from "@modelcontextprotocol/client";
 import { ResultSchema } from "@modelcontextprotocol/core";
-import { Server } from "@modelcontextprotocol/server";
+import {
+  ProtocolErrorCode,
+  SdkErrorCode,
+  Server,
+} from "@modelcontextprotocol/server";
 import type { ServerContext } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE } from "../authorization/prompt.js";
 import { resolveClientToken } from "../daemon/config.js";
 import {
   serverStatus,
@@ -186,20 +191,38 @@ export function registerStdioBridgeElicitationForwarding(
     if (!downstream) {
       throw new Error("stdio MCP client is not connected");
     }
-    return await downstream.request(
-      {
-        method: "elicitation/create",
-        params: context.mcpReq._meta
-          ? { ...request.params, _meta: context.mcpReq._meta }
-          : request.params,
-      },
-      {
-        signal: context.mcpReq.signal,
-        timeout: LONG_RUNNING_MCP_TIMEOUT_MS,
-        resetTimeoutOnProgress: true,
-      },
-    );
+    try {
+      return await downstream.request(
+        {
+          method: "elicitation/create",
+          params: context.mcpReq._meta
+            ? { ...request.params, _meta: context.mcpReq._meta }
+            : request.params,
+        },
+        {
+          signal: context.mcpReq.signal,
+          timeout: LONG_RUNNING_MCP_TIMEOUT_MS,
+          resetTimeoutOnProgress: true,
+        },
+      );
+    } catch (error) {
+      if (!isUnsupportedDownstreamElicitation(error)) throw error;
+      throw new Error(REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE, {
+        cause: error,
+      });
+    }
   });
+}
+
+function isUnsupportedDownstreamElicitation(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = "code" in error ? error.code : undefined;
+  return (
+    code === ProtocolErrorCode.MethodNotFound ||
+    (code === SdkErrorCode.CapabilityNotSupported &&
+      error.message.includes("elicitation")) ||
+    error.message.includes("no handler is registered for 'elicitation/create'")
+  );
 }
 
 async function forwardRequest(

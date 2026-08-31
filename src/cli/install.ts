@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseEnv } from "node:util";
+import { REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE } from "../authorization/prompt.js";
 import { resolveServerUrl } from "../client/mode-router.js";
 import type { DaemonControlStatus } from "../daemon/server-controller.js";
 import type { McpToolset } from "../mcp/toolset.js";
@@ -1863,7 +1864,7 @@ function agentGuidanceBlock(toolNames?: {
     ? `
 
 ${formatPromptRules("### Qoder Remote Embedding authorization recovery", [
-  `When \`${searchTool}\` fails because \`remote_embedding_authorization\` has no handler registered for \`elicitation/create\`, or reports that authorization was declined or cancelled without showing the user an authorization form during that call, treat it as a Qoder client interaction limitation. Do not immediately fall back to broad file reads, do not treat it as a missing API credential, and do not grant access silently. If the user actually declined a displayed authorization form, respect that decision and do not ask again.`,
+  `When \`${searchTool}\` needs \`remote_embedding_authorization\` and Qoder IDE returns \`code = 51500 message = method not found: No request handler configured\` without showing an authorization form, returns \`${REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE}\`, or reports that authorization was declined or cancelled without showing the user an authorization form, treat it as a Qoder client interaction limitation: Qoder lacks the server-to-client \`elicitation/create\` request handler. The outer MCP \`tools/call\` has already reached the registered MCP server and tool, so do not diagnose this error as a disconnected or missing MCP server or as a missing tool. Apply this recovery only to the Remote Embedding authorization path, not to arbitrary 51500 failures. Do not immediately fall back to broad file reads, do not treat it as a missing API credential, and do not grant access silently. If the user actually declined a displayed authorization form, respect that decision and do not ask again.`,
   "Use `AskUserQuestion` to offer exactly these choices: allow Remote Embedding for this workspace, use local FTS only, or cancel. Explain that workspace approval may send query text and selected workspace content to the configured provider and endpoint and may incur provider charges.",
   'Only after the user explicitly chooses workspace approval, run `zg auth grant "<absolute-root>" --capability embedding --scope workspace`, substituting the same absolute root used by the failed search, and then retry the original search call once. Do not use `--allow-remote`; it applies only to one CLI command and does not authorize the MCP retry.',
   `If the user chooses local FTS, retry \`${searchTool}\` once with the original search text in \`fts\`, omit \`query\`, \`queries\`, and \`vector\`, set \`autoUpdate\` to \`false\` and \`freshness\` to \`eventual\`, and preserve \`root\`, filters, and limits. This route is lexical-only, does not refresh the remote-embedding index, and sends no query text or workspace content to a remote Embedding provider.`,
