@@ -17,12 +17,19 @@ managed-rg route.
 | Codex | `codex` | `~/.codex/config.toml` and `~/.codex/AGENTS.md` |
 | Claude Code | `claude` | `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
+| Qoder CLI (`qoder` or `qodercli`) | `qoder` | `~/.qoder/settings.json` and `~/.qoder/AGENTS.md` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
 The standard environment overrides used by each agent are respected, including
-`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `OPENCODE_CONFIG`, and
-`CURSOR_CONFIG_DIR`.
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
+`OPENCODE_CONFIG`, and `CURSOR_CONFIG_DIR`.
+
+The current Qoder CLI package exposes both `qoder` and `qodercli` commands. The
+installer accepts `qodercli` and `qoder-cli` as aliases for the canonical
+`qoder` target, and automatic detection recognizes either executable.
+`QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory used by the
+installer.
 
 ## Install an integration
 
@@ -38,6 +45,7 @@ For scripts or repeatable setup, select targets explicitly:
 zg install --target codex --yes
 zg install --target claude --target cursor --yes
 zg install --target qwen --yes
+zg install --target qoder --yes
 zg install --target all --yes
 ```
 
@@ -46,15 +54,21 @@ The installer:
 1. adds a managed `zvec_grep` MCP entry;
 2. adds search guidance where the agent supports it;
 3. adds local MCP tool approval for Codex and Claude Code, and managed server
-   trust for Qwen Code;
+   trust for Qwen Code and Qoder;
 4. starts the local zvec-grep server when possible.
 
 The [Server guide](./06-server.md) explains when the daemon is useful and how its
 lifecycle differs from Direct execution.
 
 Managed text blocks use `ZVEC_GREP_START` and `ZVEC_GREP_END` markers. Existing
-content outside those blocks is preserved. If an unmanaged `zvec_grep` entry
-already exists, inspect it before using `--force` to replace it.
+content outside those blocks is preserved, as are unrelated settings and other
+MCP servers. If an unmanaged `zvec_grep` entry already exists, inspect it before
+using `--force` to replace it.
+
+For Qoder, `--mcp-transport` selects either a stdio or HTTP entry under
+`mcpServers`; the installer also manages the timeout and trust fields. Qoder CLI
+search guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
+replacing unrelated guidance.
 
 Restart the selected agent, or open a new session, after installation.
 
@@ -103,10 +117,11 @@ zg server status --check-ready
 
 Then start a new agent session and confirm that the client-specific search tool
 is available. It is `zvec_grep_search` in Codex and Claude Code,
-`mcp__zvec_grep__zvec_grep_search` in Qwen Code, and
-`zvec_grep_zvec_grep_search` in OpenCode. If the MCP connection is unavailable,
-the same indexed search and optional managed-rg route remain available from the
-shell:
+`mcp__zvec_grep__zvec_grep_search` in Qwen Code and Qoder, and
+`zvec_grep_zvec_grep_search` in OpenCode. With the optional `full` MCP toolset,
+Qoder exposes managed rg as `mcp__zvec_grep__zvec_grep_rg`. If the MCP
+connection is unavailable, the same indexed search and optional managed-rg
+route remain available from the shell:
 
 ```bash
 zg query "where theme preferences are restored"
@@ -131,6 +146,7 @@ Use the same target names to remove only zvec-grep-managed entries:
 ```bash
 zg uninstall --target codex --yes
 zg uninstall --target qwen --yes
+zg uninstall --target qoder --yes
 zg uninstall --target all --yes
 ```
 

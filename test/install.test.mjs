@@ -17,6 +17,7 @@ import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { parse as parseJsonWithComments } from "jsonc-parser";
 import { installerSelectionLines } from "../dist/cli/install.js";
 import { ZVEC_GREP_WORKSPACE_EVIDENCE_RULES } from "../dist/prompts/zvec-grep-guidance.js";
 
@@ -1112,6 +1113,316 @@ test("Qwen Code installer resolves QWEN_HOME and dotenv fallbacks", async (t) =>
     code: "ENOENT",
   });
 });
+
+test("Qoder installer accepts qoder aliases and numeric target 6", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-aliases-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  for (const target of ["qoder", "qodercli", "qoder-cli", "6"]) {
+    const qoderConfigDirectory = join(temporaryDirectory, target);
+    await installTarget(target, {
+      QODER_CONFIG_DIR: qoderConfigDirectory,
+    });
+    const config = JSON.parse(
+      await readFile(join(qoderConfigDirectory, "settings.json"), "utf8"),
+    );
+    assert.equal(config.mcpServers.zvec_grep.command, "zg");
+    assert.deepEqual(config.mcpServers.zvec_grep.args, ["server", "--stdio"]);
+  }
+});
+
+test("Qoder installer preserves JSONC comments and writes trusted stdio config and guidance", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-stdio-"),
+  );
+  const qoderConfigDirectory = join(temporaryDirectory, ".qoder");
+  const configPath = join(qoderConfigDirectory, "settings.json");
+  const guidancePath = join(qoderConfigDirectory, "AGENTS.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderConfigDirectory, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      "{",
+      "  // Keep the user's theme comment.",
+      '  "theme": "dark",',
+      "  /* Keep the other MCP server comment. */",
+      '  "mcpServers": {',
+      '    "other": { "type": "http", "url": "https://example.test/mcp" }',
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(guidancePath, "# Existing Qoder guidance\n");
+
+  await installTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory }, [
+    "--mcp-toolset=full",
+    "--mcp-tool-timeout=900",
+  ]);
+
+  const installed = await readFile(configPath, "utf8");
+  assert.match(installed, /\/\/ Keep the user's theme comment\./);
+  assert.match(installed, /\/\* Keep the other MCP server comment\. \*\//);
+  const config = parseJsonWithComments(installed);
+  assert.equal(config.theme, "dark");
+  assert.equal(config.mcpServers.other.url, "https://example.test/mcp");
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    command: "zg",
+    args: ["server", "--stdio", "--mcp-toolset", "full"],
+    timeout: 900000,
+    trust: true,
+  });
+
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.match(guidance, /# Existing Qoder guidance/);
+  assert.match(guidance, /`mcp__zvec_grep__zvec_grep_search`/);
+  assert.match(guidance, /`mcp__zvec_grep__zvec_grep_rg`/);
+  assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_START -->"), 1);
+  assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_END -->"), 1);
+});
+
+test("Qoder uninstaller preserves comments around a first or only managed server", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-qoder-comments-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const firstConfigDirectory = join(temporaryDirectory, "first");
+  const firstConfigPath = join(firstConfigDirectory, "settings.json");
+  await mkdir(firstConfigDirectory, { recursive: true });
+  await writeFile(
+    firstConfigPath,
+    [
+      "{",
+      '  "mcpServers": {',
+      "    // Keep the container note.",
+      '    "zvec_grep": { "command": "zg", "args": ["server", "--stdio"] } /* Keep the separator, note. */,',
+      "    // Keep the other server note.",
+      '    "other": { "type": "http", "url": "https://example.test/mcp" }',
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: firstConfigDirectory });
+  const firstUninstall = await readFile(firstConfigPath, "utf8");
+  assert.match(firstUninstall, /\/\/ Keep the container note\./);
+  assert.match(firstUninstall, /\/\* Keep the separator, note\. \*\//);
+  assert.match(firstUninstall, /\/\/ Keep the other server note\./);
+  const firstConfig = parseJsonWithComments(firstUninstall);
+  assert.equal(firstConfig.mcpServers.zvec_grep, undefined);
+  assert.equal(firstConfig.mcpServers.other.url, "https://example.test/mcp");
+
+  const onlyConfigDirectory = join(temporaryDirectory, "only");
+  const onlyConfigPath = join(onlyConfigDirectory, "settings.json");
+  await mkdir(onlyConfigDirectory, { recursive: true });
+  await writeFile(
+    onlyConfigPath,
+    [
+      "{",
+      '  "mcpServers": {',
+      "    // Keep this user note even when the managed server is removed.",
+      '    "zvec_grep": { "command": "zg", "args": ["server", "--stdio"] }',
+      "  },",
+      '  "theme": "dark"',
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: onlyConfigDirectory });
+  const onlyUninstall = await readFile(onlyConfigPath, "utf8");
+  assert.match(
+    onlyUninstall,
+    /\/\/ Keep this user note even when the managed server is removed\./,
+  );
+  const onlyConfig = parseJsonWithComments(onlyUninstall);
+  assert.deepEqual(onlyConfig.mcpServers, {});
+  assert.equal(onlyConfig.theme, "dark");
+});
+
+test("Qoder installer writes trusted HTTP configuration and token expansion", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-http-"),
+  );
+  const qoderConfigDirectory = join(temporaryDirectory, ".qoder");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory }, [
+    "--mcp-transport=http",
+    "--mcp-tool-timeout=42",
+    "--mcp-token-env=ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = JSON.parse(
+    await readFile(join(qoderConfigDirectory, "settings.json"), "utf8"),
+  );
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    timeout: 42000,
+    trust: true,
+    headers: {
+      Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
+    },
+  });
+});
+
+test("Qoder installer requires force and uninstall is managed and idempotent", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-conflict-"),
+  );
+  const qoderConfigDirectory = join(temporaryDirectory, ".qoder");
+  const configPath = join(qoderConfigDirectory, "settings.json");
+  const guidancePath = join(qoderConfigDirectory, "AGENTS.md");
+  const original = `${JSON.stringify(
+    {
+      theme: "dark",
+      mcpServers: {
+        other: { type: "http", url: "https://example.test/mcp" },
+        zvec_grep: {
+          type: "http",
+          url: "https://example.test/user-owned-mcp",
+          trust: false,
+        },
+      },
+    },
+    null,
+    2,
+  )}\n`;
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderConfigDirectory, { recursive: true });
+  await writeFile(configPath, original);
+  await writeFile(guidancePath, "# Existing Qoder guidance\n");
+
+  await assert.rejects(
+    installTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory }),
+    /--force/,
+  );
+  assert.equal(await readFile(configPath, "utf8"), original);
+
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory });
+  assert.equal(await readFile(configPath, "utf8"), original);
+  assert.equal(
+    await readFile(guidancePath, "utf8"),
+    "# Existing Qoder guidance\n",
+  );
+
+  await installTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory }, [
+    "--force",
+  ]);
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory });
+  const firstUninstallConfig = await readFile(configPath, "utf8");
+  const firstUninstallGuidance = await readFile(guidancePath, "utf8");
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderConfigDirectory });
+  assert.equal(await readFile(configPath, "utf8"), firstUninstallConfig);
+  assert.equal(await readFile(guidancePath, "utf8"), firstUninstallGuidance);
+
+  const config = JSON.parse(firstUninstallConfig);
+  assert.equal(config.theme, "dark");
+  assert.equal(config.mcpServers.zvec_grep, undefined);
+  assert.equal(config.mcpServers.other.url, "https://example.test/mcp");
+  assert.match(firstUninstallGuidance, /# Existing Qoder guidance/);
+  assert.doesNotMatch(firstUninstallGuidance, /ZVEC_GREP|## zvec-grep/);
+});
+
+test("Qoder installer uses the default home and honors QODER_CONFIG_DIR", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-home-"),
+  );
+  const defaultHome = join(temporaryDirectory, "default-home");
+  const qoderConfigDirectory = join(temporaryDirectory, "custom-qoder-home");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("qoder", {
+    HOME: defaultHome,
+    USERPROFILE: defaultHome,
+    QODER_CONFIG_DIR: undefined,
+  });
+  await stat(join(defaultHome, ".qoder", "settings.json"));
+
+  await installTarget("qoder", {
+    HOME: temporaryDirectory,
+    USERPROFILE: temporaryDirectory,
+    QODER_CONFIG_DIR: qoderConfigDirectory,
+  });
+
+  await stat(join(qoderConfigDirectory, "settings.json"));
+  await stat(join(qoderConfigDirectory, "AGENTS.md"));
+  await assert.rejects(
+    stat(join(temporaryDirectory, ".qoder", "settings.json")),
+    { code: "ENOENT" },
+  );
+});
+
+test(
+  "auto target detects either qoder executable",
+  {
+    skip:
+      process.platform === "win32" ? "PATH executable semantics differ" : false,
+  },
+  async (t) => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), "zvec-grep-install-auto-qoder-"),
+    );
+    t.after(async () => {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    });
+
+    for (const executable of ["qoder", "qodercli"]) {
+      const caseDirectory = join(temporaryDirectory, executable);
+      const binaryDirectory = join(caseDirectory, "bin");
+      const qoderConfigDirectory = join(caseDirectory, ".qoder");
+      await mkdir(binaryDirectory, { recursive: true });
+      const executablePath = join(binaryDirectory, executable);
+      await writeFile(executablePath, "#!/bin/sh\n");
+      await chmod(executablePath, 0o755);
+
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        [cliPath, "install", "--yes"],
+        {
+          env: {
+            ...process.env,
+            PATH: binaryDirectory,
+            HOME: caseDirectory,
+            USERPROFILE: caseDirectory,
+            QODER_CONFIG_DIR: qoderConfigDirectory,
+            ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+          },
+        },
+      );
+
+      assert.match(stdout, /Qoder/);
+      assert.doesNotMatch(
+        stdout,
+        /Claude Code|Codex|OpenCode|Cursor|Qwen Code/,
+      );
+      const config = JSON.parse(
+        await readFile(join(qoderConfigDirectory, "settings.json"), "utf8"),
+      );
+      assert.equal(config.mcpServers.zvec_grep.command, "zg");
+    }
+  },
+);
 
 test("Cursor installer manages a global Streamable HTTP MCP server", async (t) => {
   const temporaryDirectory = await mkdtemp(

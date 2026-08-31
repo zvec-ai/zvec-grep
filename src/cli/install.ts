@@ -1,8 +1,13 @@
 import {
   applyEdits,
+  createScanner,
+  findNodeAtLocation,
   modify,
   parse as parseJsonWithComments,
+  parseTree,
+  SyntaxKind,
   type FormattingOptions,
+  type Node as JsoncNode,
   type ParseError,
 } from "jsonc-parser";
 import { randomUUID } from "node:crypto";
@@ -36,7 +41,7 @@ type AgentInstaller = {
   id: string;
   aliases?: readonly string[];
   label: string;
-  executable: string;
+  executables: readonly string[];
   install: (options: InstallAgentOptions) => Promise<InstallAgentResult>;
   uninstall: () => Promise<InstallAgentResult>;
 };
@@ -58,28 +63,28 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
     id: "claude",
     aliases: ["cc", "claude-code"],
     label: "Claude Code",
-    executable: "claude",
+    executables: ["claude"],
     install: installClaudeIntegration,
     uninstall: uninstallClaudeIntegration,
   },
   {
     id: "codex",
     label: "Codex",
-    executable: "codex",
+    executables: ["codex"],
     install: installCodexIntegration,
     uninstall: uninstallCodexIntegration,
   },
   {
     id: "opencode",
     label: "OpenCode",
-    executable: "opencode",
+    executables: ["opencode"],
     install: installOpenCodeIntegration,
     uninstall: uninstallOpenCodeIntegration,
   },
   {
     id: "cursor",
     label: "Cursor",
-    executable: "cursor",
+    executables: ["cursor"],
     install: installCursorIntegration,
     uninstall: uninstallCursorIntegration,
   },
@@ -87,9 +92,17 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
     id: "qwen",
     aliases: ["qwen-code", "qwencode"],
     label: "Qwen Code",
-    executable: "qwen",
+    executables: ["qwen"],
     install: installQwenIntegration,
     uninstall: uninstallQwenIntegration,
+  },
+  {
+    id: "qoder",
+    aliases: ["qodercli", "qoder-cli"],
+    label: "Qoder",
+    executables: ["qoder", "qodercli"],
+    install: installQoderIntegration,
+    uninstall: uninstallQoderIntegration,
   },
 ];
 
@@ -98,8 +111,8 @@ const ZVEC_GREP_CONFIG_END = "# ZVEC_GREP_END";
 const ZVEC_GREP_AGENTS_START = "<!-- ZVEC_GREP_START -->";
 const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
-const QWEN_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
-const QWEN_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
+const NAMESPACED_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
+const NAMESPACED_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
 export async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -368,8 +381,8 @@ async function installQwenIntegration(
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
     block: agentGuidanceBlock({
-      search: QWEN_SEARCH_TOOL,
-      rg: QWEN_RG_TOOL,
+      search: NAMESPACED_SEARCH_TOOL,
+      rg: NAMESPACED_RG_TOOL,
     }),
     force: true,
   });
@@ -387,6 +400,50 @@ async function uninstallQwenIntegration(): Promise<InstallAgentResult> {
   const guidancePath = resolve(qwenHome, "QWEN.md");
 
   await removeQwenSettings(settingsPath);
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+
+  return { files: [settingsPath, guidancePath] };
+}
+
+async function installQoderIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const qoderHome = resolveQoderHome();
+  const settingsPath = resolve(qoderHome, "settings.json");
+  const guidancePath = resolve(qoderHome, "AGENTS.md");
+
+  const warnings = await updateQoderSettings({
+    ...options,
+    path: settingsPath,
+  });
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: agentGuidanceBlock({
+      search: NAMESPACED_SEARCH_TOOL,
+      rg: NAMESPACED_RG_TOOL,
+    }),
+    force: true,
+  });
+
+  for (const warning of warnings) {
+    console.warn(`    warning   ${warning}`);
+  }
+
+  return { files: [settingsPath, guidancePath] };
+}
+
+async function uninstallQoderIntegration(): Promise<InstallAgentResult> {
+  const qoderHome = resolveQoderHome();
+  const settingsPath = resolve(qoderHome, "settings.json");
+  const guidancePath = resolve(qoderHome, "AGENTS.md");
+
+  await removeQoderSettings(settingsPath);
   await removeMarkedFile({
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
@@ -529,7 +586,13 @@ async function detectAgentInstallers(): Promise<Set<string>> {
   const checks = await Promise.all(
     AGENT_INSTALLERS.map(async (installer) => ({
       installer,
-      available: await executableIsAvailable(installer.executable),
+      available: (
+        await Promise.all(
+          installer.executables.map((executable) =>
+            executableIsAvailable(executable),
+          ),
+        )
+      ).some(Boolean),
     })),
   );
   for (const check of checks) {
@@ -750,6 +813,10 @@ function resolveCursorConfigPath(): string {
     process.env.CURSOR_CONFIG_DIR ?? resolve(homedir(), ".cursor"),
     "mcp.json",
   );
+}
+
+function resolveQoderHome(): string {
+  return resolve(process.env.QODER_CONFIG_DIR || resolve(homedir(), ".qoder"));
 }
 
 async function resolveQwenHome(): Promise<string> {
@@ -982,52 +1049,35 @@ async function updateClaudePermissionSettings(
 async function updateQwenSettings(
   options: InstallAgentOptions & { path: string },
 ): Promise<string[]> {
-  const existing = await readTextFileIfExists(options.path);
-  let source = existing.trim() ? existing : "{}\n";
-  const root = parseQwenSettings(options.path, source);
-  validateQwenSettingsContainers(options.path, root);
-
-  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
-  const current = mcpServers.zvec_grep;
-  const managed = isManagedQwenMcpServer(current);
-  if (current !== undefined && !managed && !options.force) {
-    throw new Error(
-      `Existing unmanaged zvec_grep MCP server found in ${options.path}. Re-run with --force to replace it for Qwen Code.`,
-    );
-  }
-
-  source = editJsonWithComments(
-    source,
-    ["mcpServers", "zvec_grep"],
-    qwenMcpServer(options),
-  );
-
-  await writeTextFileAtomic(options.path, ensureTrailingNewline(source));
-  return qwenSettingsWarnings(root);
+  const root = await updateJsoncMcpSettings({
+    path: options.path,
+    force: options.force,
+    label: "Qwen Code",
+    server: qwenMcpServer(options),
+    isManaged: isManagedQwenMcpServer,
+  });
+  return contextFileWarnings(root, "QWEN.md");
 }
 
 async function removeQwenSettings(path: string): Promise<void> {
-  const existing = await readTextFileIfExists(path);
-  if (!existing.trim()) return;
+  await removeJsoncMcpSettings(path, "Qwen Code", isManagedQwenMcpServer);
+}
 
-  let source = existing;
-  const root = parseQwenSettings(path, source);
-  validateQwenSettingsContainers(path, root);
-  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
-  const managed = isManagedQwenMcpServer(mcpServers.zvec_grep);
+async function updateQoderSettings(
+  options: InstallAgentOptions & { path: string },
+): Promise<string[]> {
+  const root = await updateJsoncMcpSettings({
+    path: options.path,
+    force: options.force,
+    label: "Qoder",
+    server: qoderMcpServer(options),
+    isManaged: isManagedJsonMcpServer,
+  });
+  return contextFileWarnings(root, "AGENTS.md");
+}
 
-  if (managed) {
-    source = editJsonWithComments(
-      source,
-      Object.keys(mcpServers).length === 1
-        ? ["mcpServers"]
-        : ["mcpServers", "zvec_grep"],
-      undefined,
-    );
-  }
-  if (source !== existing) {
-    await writeTextFileAtomic(path, ensureTrailingNewline(source));
-  }
+async function removeQoderSettings(path: string): Promise<void> {
+  await removeJsoncMcpSettings(path, "Qoder", isManagedJsonMcpServer);
 }
 
 function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
@@ -1059,19 +1109,114 @@ function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
   };
 }
 
-function parseQwenSettings(path: string, source: string): JsonObject {
+function qoderMcpServer(options: InstallAgentOptions): Record<string, unknown> {
+  const timeout = options.mcpToolTimeoutSeconds * 1_000;
+  if (options.transport === "stdio") {
+    return {
+      command: "zg",
+      args: stdioArgs(options.mcpToolset),
+      timeout,
+      trust: true,
+    };
+  }
+
+  return {
+    type: "http",
+    url: resolveServerUrl(),
+    timeout,
+    trust: true,
+    ...(options.mcpTokenEnv
+      ? {
+          headers: {
+            Authorization: `Bearer \${${options.mcpTokenEnv}}`,
+          },
+        }
+      : {}),
+  };
+}
+
+type JsoncMcpSettingsOptions = {
+  path: string;
+  force: boolean;
+  label: string;
+  server: Record<string, unknown>;
+  isManaged: (value: unknown) => boolean;
+};
+
+async function updateJsoncMcpSettings(
+  options: JsoncMcpSettingsOptions,
+): Promise<JsonObject> {
+  const existing = await readTextFileIfExists(options.path);
+  let source = existing.trim() ? existing : "{}\n";
+  const root = parseJsoncSettings(options.path, source, options.label);
+  validateMcpSettingsContainer(options.path, root);
+
+  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
+  const current = mcpServers.zvec_grep;
+  if (current !== undefined && !options.isManaged(current) && !options.force) {
+    throw new Error(
+      `Existing unmanaged zvec_grep MCP server found in ${options.path}. Re-run with --force to replace it for ${options.label}.`,
+    );
+  }
+
+  source = editJsonWithComments(
+    source,
+    ["mcpServers", "zvec_grep"],
+    options.server,
+  );
+  await writeTextFileAtomic(options.path, ensureTrailingNewline(source));
+  return root;
+}
+
+async function removeJsoncMcpSettings(
+  path: string,
+  label: string,
+  isManaged: (value: unknown) => boolean,
+): Promise<void> {
+  const existing = await readTextFileIfExists(path);
+  if (!existing.trim()) return;
+
+  let source = existing;
+  const root = parseJsoncSettings(path, source, label);
+  validateMcpSettingsContainer(path, root);
+  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
+
+  if (isManaged(mcpServers.zvec_grep)) {
+    source = hasJsoncComments(source)
+      ? removeJsoncPropertyPreservingComments(source, [
+          "mcpServers",
+          "zvec_grep",
+        ])
+      : editJsonWithComments(
+          source,
+          Object.keys(mcpServers).length === 1
+            ? ["mcpServers"]
+            : ["mcpServers", "zvec_grep"],
+          undefined,
+        );
+  }
+  if (source !== existing) {
+    await writeTextFileAtomic(path, ensureTrailingNewline(source));
+  }
+}
+
+function parseJsoncSettings(
+  path: string,
+  source: string,
+  label: string,
+): JsonObject {
   const errors: ParseError[] = [];
   const parsed = parseJsonWithComments(source, errors, {
     allowTrailingComma: false,
     disallowComments: false,
   });
   if (errors.length > 0 || !isJsonObject(parsed)) {
-    throw new Error(`Invalid Qwen Code configuration in ${path}.`);
+    throw new Error(`Invalid ${label} configuration in ${path}.`);
   }
   return parsed;
 }
 
-function validateQwenSettingsContainers(path: string, root: JsonObject): void {
+function validateMcpSettingsContainer(path: string, root: JsonObject): void {
   if (root.mcpServers !== undefined && !isJsonObject(root.mcpServers)) {
     throw new Error(`Invalid mcpServers configuration in ${path}.`);
   }
@@ -1090,6 +1235,97 @@ function editJsonWithComments(
   );
 }
 
+function hasJsoncComments(source: string): boolean {
+  const scanner = createScanner(source, false);
+  for (
+    let token = scanner.scan();
+    token !== SyntaxKind.EOF;
+    token = scanner.scan()
+  ) {
+    if (
+      token === SyntaxKind.LineCommentTrivia ||
+      token === SyntaxKind.BlockCommentTrivia
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function removeJsoncPropertyPreservingComments(
+  source: string,
+  path: readonly (string | number)[],
+): string {
+  const root = parseTree(source);
+  if (!root) return source;
+
+  const valueNode = findNodeAtLocation(root, [...path]);
+  const propertyNode = valueNode?.parent;
+  const objectNode = propertyNode?.parent;
+  if (
+    propertyNode?.type !== "property" ||
+    objectNode?.type !== "object" ||
+    !objectNode.children
+  ) {
+    return source;
+  }
+
+  const propertyIndex = objectNode.children.indexOf(propertyNode);
+  if (propertyIndex < 0) return source;
+
+  const ranges = [nodeRange(propertyNode)];
+  const previousProperty = objectNode.children[propertyIndex - 1];
+  const nextProperty = objectNode.children[propertyIndex + 1];
+  const separatorOffset = nextProperty
+    ? findComma(
+        source,
+        propertyNode.offset + propertyNode.length,
+        nextProperty.offset,
+      )
+    : previousProperty
+      ? findComma(
+          source,
+          previousProperty.offset + previousProperty.length,
+          propertyNode.offset,
+        )
+      : undefined;
+  if (separatorOffset !== undefined) {
+    ranges.push({ offset: separatorOffset, length: 1 });
+  }
+
+  return ranges
+    .sort((left, right) => right.offset - left.offset)
+    .reduce(
+      (current, range) =>
+        current.slice(0, range.offset) +
+        current.slice(range.offset + range.length),
+      source,
+    );
+}
+
+function nodeRange(node: JsoncNode): { offset: number; length: number } {
+  return { offset: node.offset, length: node.length };
+}
+
+function findComma(
+  source: string,
+  startOffset: number,
+  endOffset: number,
+): number | undefined {
+  const scanner = createScanner(source, false);
+  scanner.setPosition(startOffset);
+  for (
+    let token = scanner.scan();
+    token !== SyntaxKind.EOF;
+    token = scanner.scan()
+  ) {
+    const tokenOffset = scanner.getTokenOffset();
+    if (tokenOffset >= endOffset) return undefined;
+    if (token === SyntaxKind.CommaToken) return tokenOffset;
+  }
+  return undefined;
+}
+
 function jsonFormattingOptions(source: string): FormattingOptions {
   const eol = source.includes("\r\n") ? "\r\n" : "\n";
   const indentation = source.match(/^[ \t]+(?=")/m)?.[0];
@@ -1103,7 +1339,7 @@ function jsonFormattingOptions(source: string): FormattingOptions {
   };
 }
 
-function qwenSettingsWarnings(root: JsonObject): string[] {
+function contextFileWarnings(root: JsonObject, fileName: string): string[] {
   if (!isJsonObject(root.context)) return [];
   const configured = root.context.fileName;
   const fileNames =
@@ -1113,9 +1349,9 @@ function qwenSettingsWarnings(root: JsonObject): string[] {
           configured.every((value) => typeof value === "string")
         ? (configured as string[])
         : undefined;
-  if (!fileNames || fileNames.includes("QWEN.md")) return [];
+  if (!fileNames || fileNames.includes(fileName)) return [];
   return [
-    "context.fileName does not include QWEN.md; the installed zvec-grep guidance may not be loaded.",
+    `context.fileName does not include ${fileName}; the installed zvec-grep guidance may not be loaded.`,
   ];
 }
 

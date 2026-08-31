@@ -197,7 +197,7 @@ Profile 均使用 Qwen3.7 Text Embedding。
 
 | 指南 | 你可以完成什么 |
 | :--- | :--- |
-| [Agent 集成](./docs/01-agents.md) | 将 zg 接入 Codex、Claude Code、Qwen Code、Cursor 或 OpenCode，并验证是否正常工作。 |
+| [Agent 集成](./docs/01-agents.md) | 将 zg 接入 Codex、Claude Code、Qwen Code、Qoder、Cursor 或 OpenCode，并验证是否正常工作。 |
 | [CLI 指南](./docs/02-cli.md) | 在终端中搜索、索引和管理本地工作区。 |
 | [MCP 指南](./docs/03-mcp.md) | 了解 Agent 可以使用哪些 zg 工具，以及访问权限如何受到保护。 |
 | [检索 Pipeline](./docs/04-pipeline.md) | 选择索引范围、保持内容新鲜，并获得更好的检索结果。 |
