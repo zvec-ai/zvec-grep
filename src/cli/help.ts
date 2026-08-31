@@ -315,7 +315,6 @@ Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
 Codex, Claude Code, Qwen Code, Qoder, and OpenCode also receive managed guidance.
-Qoder writes MCP configuration for both Qoder CLI and Qoder IDE.
 Codex and Claude Code receive local tool pre-approval. Remote Embedding
 authorization remains separate and is requested by zvec-grep on first remote
 use. Restart the agent or open a new session after installation. This does not

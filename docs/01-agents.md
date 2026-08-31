@@ -17,7 +17,7 @@ managed-rg route.
 | Codex | `codex` | `~/.codex/config.toml` and `~/.codex/AGENTS.md` |
 | Claude Code | `claude` | `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
-| Qoder CLI and IDE (`qoder` or `qodercli`) | `qoder` | `~/.qoder/settings.json`, `~/.qoder/mcp.json`, and `~/.qoder/AGENTS.md` |
+| Qoder CLI (`qoder` or `qodercli`) | `qoder` | `~/.qoder/settings.json` and `~/.qoder/AGENTS.md` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
@@ -28,7 +28,7 @@ The standard environment overrides used by each agent are respected, including
 The current Qoder CLI package exposes both `qoder` and `qodercli` commands. The
 installer accepts `qodercli` and `qoder-cli` as aliases for the canonical
 `qoder` target, and automatic detection recognizes either executable.
-`QODER_CONFIG_DIR` overrides the Qoder configuration directory used by the
+`QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory used by the
 installer.
 
 ## Install an integration
@@ -65,10 +65,9 @@ content outside those blocks is preserved, as are unrelated settings and other
 MCP servers. If an unmanaged `zvec_grep` entry already exists, inspect it before
 using `--force` to replace it.
 
-For Qoder, `--mcp-transport` selects the transport for both product entrypoints.
-The installer writes `mcpServers.zvec_grep` to `settings.json` for Qoder CLI and
-to `mcp.json` for Qoder IDE, preserving unrelated servers in both files. Qoder
-CLI search guidance remains in `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
+For Qoder, `--mcp-transport` selects either a stdio or HTTP entry under
+`mcpServers`; the installer also manages the timeout and trust fields. Qoder CLI
+search guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
 replacing unrelated guidance.
 
 Qoder receives the same MCP form-based Remote Embedding authorization request as

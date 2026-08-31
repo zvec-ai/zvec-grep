@@ -114,7 +114,7 @@ const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
 const NAMESPACED_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
 const NAMESPACED_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
-const ZVEC_GREP_MCP_DESCRIPTION = "Managed by zg install";
+const QODER_IDE_MCP_DESCRIPTION = "Managed by zg install";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
 export async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -419,32 +419,15 @@ async function installQoderIntegration(
   const ideMcpPath = resolve(qoderHome, "mcp.json");
   const guidancePath = resolve(qoderHome, "AGENTS.md");
 
-  await assertQoderMcpSettingsReplaceable(
-    settingsPath,
-    "Qoder CLI",
-    options.force,
-    isManagedJsonMcpServer,
-  );
-  await assertQoderMcpSettingsReplaceable(
-    ideMcpPath,
-    "Qoder IDE",
-    options.force,
-    isManagedQoderIdeMcpServer,
-  );
+  await assertQoderIdeMcpSettingsReplaceable(ideMcpPath, options.force);
 
   const warnings = await updateQoderSettings({
     ...options,
     path: settingsPath,
-    label: "Qoder CLI",
-    server: qoderMcpServer(options, "cli"),
-    isManaged: isManagedJsonMcpServer,
   });
-  await updateQoderSettings({
+  await updateQoderIdeSettings({
     ...options,
     path: ideMcpPath,
-    label: "Qoder IDE",
-    server: qoderMcpServer(options, "ide"),
-    isManaged: isManagedQoderIdeMcpServer,
   });
   await writeMarkedFile({
     path: guidancePath,
@@ -471,12 +454,8 @@ async function uninstallQoderIntegration(): Promise<InstallAgentResult> {
   const ideMcpPath = resolve(qoderHome, "mcp.json");
   const guidancePath = resolve(qoderHome, "AGENTS.md");
 
-  await removeQoderSettings(settingsPath, "Qoder CLI", isManagedJsonMcpServer);
-  await removeQoderSettings(
-    ideMcpPath,
-    "Qoder IDE",
-    isManagedQoderIdeMcpServer,
-  );
+  await removeQoderSettings(settingsPath);
+  await removeQoderIdeSettings(ideMcpPath);
   await removeMarkedFile({
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
@@ -1097,29 +1076,36 @@ async function removeQwenSettings(path: string): Promise<void> {
 }
 
 async function updateQoderSettings(
-  options: InstallAgentOptions & {
-    path: string;
-    label: string;
-    server: Record<string, unknown>;
-    isManaged: (value: unknown) => boolean;
-  },
+  options: InstallAgentOptions & { path: string },
 ): Promise<string[]> {
   const root = await updateJsoncMcpSettings({
     path: options.path,
     force: options.force,
-    label: options.label,
-    server: options.server,
-    isManaged: options.isManaged,
+    label: "Qoder",
+    server: qoderMcpServer(options),
+    isManaged: isManagedJsonMcpServer,
   });
   return contextFileWarnings(root, "AGENTS.md");
 }
 
-async function removeQoderSettings(
-  path: string,
-  label: string,
-  isManaged: (value: unknown) => boolean,
+async function removeQoderSettings(path: string): Promise<void> {
+  await removeJsoncMcpSettings(path, "Qoder", isManagedJsonMcpServer);
+}
+
+async function updateQoderIdeSettings(
+  options: InstallAgentOptions & { path: string },
 ): Promise<void> {
-  await removeJsoncMcpSettings(path, label, isManaged);
+  await updateJsoncMcpSettings({
+    path: options.path,
+    force: options.force,
+    label: "Qoder IDE",
+    server: qoderIdeMcpServer(options),
+    isManaged: isManagedQoderIdeMcpServer,
+  });
+}
+
+async function removeQoderIdeSettings(path: string): Promise<void> {
+  await removeJsoncMcpSettings(path, "Qoder IDE", isManagedQoderIdeMcpServer);
 }
 
 function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
@@ -1151,29 +1137,51 @@ function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
   };
 }
 
-function qoderMcpServer(
-  options: InstallAgentOptions,
-  target: "cli" | "ide",
-): Record<string, unknown> {
-  const ide = target === "ide";
+function qoderMcpServer(options: InstallAgentOptions): Record<string, unknown> {
   const timeout = options.mcpToolTimeoutSeconds * 1_000;
   if (options.transport === "stdio") {
-    const launch = stableQoderStdioLaunch(options.mcpToolset);
     return {
-      command: launch.command,
-      args: launch.args,
+      command: "zg",
+      args: stdioArgs(options.mcpToolset),
       timeout,
-      ...(!ide ? { trust: true } : {}),
-      description: ZVEC_GREP_MCP_DESCRIPTION,
+      trust: true,
     };
   }
 
   return {
-    type: ide ? "sse" : "http",
+    type: "http",
     url: resolveServerUrl(),
     timeout,
-    ...(!ide ? { trust: true } : {}),
-    description: ZVEC_GREP_MCP_DESCRIPTION,
+    trust: true,
+    ...(options.mcpTokenEnv
+      ? {
+          headers: {
+            Authorization: `Bearer \${${options.mcpTokenEnv}}`,
+          },
+        }
+      : {}),
+  };
+}
+
+function qoderIdeMcpServer(
+  options: InstallAgentOptions,
+): Record<string, unknown> {
+  const timeout = options.mcpToolTimeoutSeconds * 1_000;
+  if (options.transport === "stdio") {
+    const launch = stableQoderIdeStdioLaunch(options.mcpToolset);
+    return {
+      command: launch.command,
+      args: launch.args,
+      timeout,
+      description: QODER_IDE_MCP_DESCRIPTION,
+    };
+  }
+
+  return {
+    type: "sse",
+    url: resolveServerUrl(),
+    timeout,
+    description: QODER_IDE_MCP_DESCRIPTION,
     ...(options.mcpTokenEnv
       ? {
           headers: {
@@ -1192,24 +1200,22 @@ type JsoncMcpSettingsOptions = {
   isManaged: (value: unknown) => boolean;
 };
 
-async function assertQoderMcpSettingsReplaceable(
+async function assertQoderIdeMcpSettingsReplaceable(
   path: string,
-  label: string,
   force: boolean,
-  isManaged: (value: unknown) => boolean,
 ): Promise<void> {
   const existing = await readTextFileIfExists(path);
   const source = existing.trim() ? existing : "{}\n";
-  const root = parseJsoncSettings(path, source, label);
+  const root = parseJsoncSettings(path, source, "Qoder IDE");
   validateMcpSettingsContainer(path, root);
   const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
   if (
     mcpServers.zvec_grep !== undefined &&
-    !isManaged(mcpServers.zvec_grep) &&
+    !isManagedQoderIdeMcpServer(mcpServers.zvec_grep) &&
     !force
   ) {
     throw new Error(
-      `Existing unmanaged zvec_grep MCP server found in ${path}. Re-run with --force to replace it for ${label}.`,
+      `Existing unmanaged zvec_grep MCP server found in ${path}. Re-run with --force to replace it for Qoder IDE.`,
     );
   }
 }
@@ -1464,13 +1470,6 @@ function isManagedJsonMcpServer(value: unknown): boolean {
   if (!isJsonObject(value)) return false;
   if (value.url === resolveServerUrl()) return true;
   if (value.command === "zg" && isStdioArgs(value.args)) return true;
-  if (
-    value.description === ZVEC_GREP_MCP_DESCRIPTION &&
-    ((typeof value.command === "string" && isStableStdioArgs(value.args)) ||
-      (value.type === "http" && typeof value.url === "string"))
-  ) {
-    return true;
-  }
   return (
     value.type === "local" &&
     Array.isArray(value.command) &&
@@ -1487,7 +1486,7 @@ function isManagedJsonMcpServer(value: unknown): boolean {
 function isManagedQoderIdeMcpServer(value: unknown): boolean {
   return (
     isJsonObject(value) &&
-    value.description === ZVEC_GREP_MCP_DESCRIPTION &&
+    value.description === QODER_IDE_MCP_DESCRIPTION &&
     ((typeof value.command === "string" && isStableStdioArgs(value.args)) ||
       (value.type === "sse" && typeof value.url === "string"))
   );
@@ -1530,7 +1529,7 @@ function stdioCommand(mcpToolset?: McpToolset): string[] {
   return ["zg", ...stdioArgs(mcpToolset)];
 }
 
-function stableQoderStdioLaunch(mcpToolset?: McpToolset): {
+function stableQoderIdeStdioLaunch(mcpToolset?: McpToolset): {
   command: string;
   args: string[];
 } {

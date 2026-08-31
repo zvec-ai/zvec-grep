@@ -1128,14 +1128,14 @@ test("Qoder installer accepts qoder aliases and numeric target 6", async (t) => 
       QODER_CONFIG_DIR: qoderConfigDirectory,
     });
     const { cli, ide } = await readQoderConfigs(qoderConfigDirectory);
-    for (const config of [cli, ide]) {
-      assert.equal(config.mcpServers.zvec_grep.command, process.execPath);
-      assert.deepEqual(config.mcpServers.zvec_grep.args, [
-        cliPath,
-        "server",
-        "--stdio",
-      ]);
-    }
+    assert.equal(cli.mcpServers.zvec_grep.command, "zg");
+    assert.deepEqual(cli.mcpServers.zvec_grep.args, ["server", "--stdio"]);
+    assert.equal(ide.mcpServers.zvec_grep.command, process.execPath);
+    assert.deepEqual(ide.mcpServers.zvec_grep.args, [
+      cliPath,
+      "server",
+      "--stdio",
+    ]);
   }
 });
 
@@ -1193,11 +1193,10 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   assert.equal(config.theme, "dark");
   assert.equal(config.mcpServers.other.url, "https://example.test/mcp");
   assert.deepEqual(config.mcpServers.zvec_grep, {
-    command: process.execPath,
-    args: [cliPath, "server", "--stdio", "--mcp-toolset", "full"],
+    command: "zg",
+    args: ["server", "--stdio", "--mcp-toolset", "full"],
     timeout: 900000,
     trust: true,
-    description: "Managed by zg install",
   });
   const ideInstalled = await readFile(ideConfigPath, "utf8");
   assert.match(ideInstalled, /Keep the user's IDE MCP servers/);
@@ -1373,7 +1372,6 @@ test("Qoder installer writes trusted HTTP configuration and token expansion", as
     url: "http://127.0.0.1:7999/mcp",
     timeout: 42000,
     trust: true,
-    description: "Managed by zg install",
     headers: {
       Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
     },
@@ -1570,10 +1568,10 @@ test(
         /Claude Code|Codex|OpenCode|Cursor|Qwen Code/,
       );
       const { cli, ide } = await readQoderConfigs(qoderConfigDirectory);
-      for (const config of [cli, ide]) {
-        assert.equal(config.mcpServers.zvec_grep.command, process.execPath);
-        assert.equal(config.mcpServers.zvec_grep.args[0], cliPath);
-      }
+      assert.equal(cli.mcpServers.zvec_grep.command, "zg");
+      assert.equal(cli.mcpServers.zvec_grep.args[0], "server");
+      assert.equal(ide.mcpServers.zvec_grep.command, process.execPath);
+      assert.equal(ide.mcpServers.zvec_grep.args[0], cliPath);
     }
   },
 );

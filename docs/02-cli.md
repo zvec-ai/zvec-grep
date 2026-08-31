@@ -161,9 +161,6 @@ the canonical `qoder` target. `zg install` also accepts:
 | `--mcp-token-env <name>` | Environment variable containing the server token |
 | `--force` | Replace a conflicting unmanaged `zvec_grep` entry |
 
-The Qoder target writes MCP configuration to `settings.json` for Qoder CLI and
-`mcp.json` for Qoder IDE.
-
 See [Agent integrations](./01-agents.md) before using `--force`.
 
 ## `zg config`
@@ -233,7 +230,7 @@ refresh, authentication, and logs. See [MCP](./03-mcp.md) for the tool contract.
 | `DASHSCOPE_API_KEY` | Qwen API-key fallback after `ZVEC_GREP_API_KEY` |
 | `QWEN_API_KEY` | Qwen API-key fallback after `DASHSCOPE_API_KEY` |
 | `QWEN_HOME` | Qwen Code configuration directory used by `zg install` |
-| `QODER_CONFIG_DIR` | Qoder configuration directory used by `zg install` |
+| `QODER_CONFIG_DIR` | Qoder CLI configuration directory used by `zg install` |
 
 Run `zg help environment` for advanced variables, agent integration paths,
 scope, and detailed precedence. A new index selects its model in this order:
