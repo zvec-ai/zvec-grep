@@ -1114,7 +1114,7 @@ test("Qwen Code installer resolves QWEN_HOME and dotenv fallbacks", async (t) =>
   });
 });
 
-test("Qoder installer accepts qoder aliases and numeric target 6", async (t) => {
+test("Qoder installer accepts CLI and IDE aliases plus numeric target 6", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-qoder-aliases-"),
   );
@@ -1122,7 +1122,14 @@ test("Qoder installer accepts qoder aliases and numeric target 6", async (t) => 
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  for (const target of ["qoder", "qodercli", "qoder-cli", "6"]) {
+  for (const target of [
+    "qoder",
+    "qodercli",
+    "qoder-cli",
+    "qoderide",
+    "qoder-ide",
+    "6",
+  ]) {
     const qoderConfigDirectory = join(temporaryDirectory, target);
     await installTarget(target, {
       QODER_CONFIG_DIR: qoderConfigDirectory,
@@ -1222,11 +1229,11 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   );
   assert.match(
     guidance,
-    /`The connected MCP host does not support the Remote Embedding authorization interaction required by elicitation\/create\. The Agent should use AskUserQuestion to ask the user to choose: allow Remote Embedding for this workspace, use local FTS only, or cancel\. No user decision was received, and no remote data was sent\.`/,
+    /`The connected MCP host does not support the Remote Embedding authorization interaction required by elicitation\/create\.[^`]+ask_user_question in Qoder IDE or AskUserQuestion in Qoder CLI\/SDK\.[^`]+No user decision was received, and no remote data was sent\.`/,
   );
   assert.match(
     guidance,
-    /Qoder lacks the server-to-client `elicitation\/create` request handler/,
+    /the host lacks the server-to-client `elicitation\/create` request handler/,
   );
   assert.match(
     guidance,
@@ -1246,7 +1253,7 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   );
   assert.match(
     guidance,
-    /Use `AskUserQuestion` to offer exactly these choices/,
+    /`ask_user_question` in Qoder IDE or `AskUserQuestion` in Qoder CLI\/SDK.*offer exactly these choices/,
   );
   assert.match(
     guidance,
@@ -1491,12 +1498,15 @@ test("Qoder installer preflights an IDE MCP conflict before changing CLI config"
   assert.equal(await readFile(guidancePath, "utf8"), guidance);
 });
 
-test("Qoder installer uses the default home and honors QODER_CONFIG_DIR", async (t) => {
+test("Qoder installer resolves CLI and IDE user configuration independently", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-qoder-home-"),
   );
   const defaultHome = join(temporaryDirectory, "default-home");
   const qoderConfigDirectory = join(temporaryDirectory, "custom-qoder-home");
+  const customIdeMcpPath = join(temporaryDirectory, "custom-ide-mcp.json");
+  const defaultAppData = join(defaultHome, "AppData", "Roaming");
+  const defaultXdgConfig = join(defaultHome, ".config");
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
@@ -1504,24 +1514,78 @@ test("Qoder installer uses the default home and honors QODER_CONFIG_DIR", async 
   await installTarget("qoder", {
     HOME: defaultHome,
     USERPROFILE: defaultHome,
+    APPDATA: defaultAppData,
+    XDG_CONFIG_HOME: defaultXdgConfig,
     QODER_CONFIG_DIR: undefined,
+    QODER_IDE_MCP_PATH: undefined,
   });
   await stat(join(defaultHome, ".qoder", "settings.json"));
-  await stat(join(defaultHome, ".qoder", "mcp.json"));
+  await stat(
+    defaultQoderIdeMcpPath(defaultHome, {
+      APPDATA: defaultAppData,
+      XDG_CONFIG_HOME: defaultXdgConfig,
+    }),
+  );
 
   await installTarget("qoder", {
     HOME: temporaryDirectory,
     USERPROFILE: temporaryDirectory,
     QODER_CONFIG_DIR: qoderConfigDirectory,
+    QODER_IDE_MCP_PATH: customIdeMcpPath,
   });
 
   await stat(join(qoderConfigDirectory, "settings.json"));
-  await stat(join(qoderConfigDirectory, "mcp.json"));
+  await stat(customIdeMcpPath);
   await stat(join(qoderConfigDirectory, "AGENTS.md"));
+  await assert.rejects(stat(join(qoderConfigDirectory, "mcp.json")), {
+    code: "ENOENT",
+  });
   await assert.rejects(
     stat(join(temporaryDirectory, ".qoder", "settings.json")),
     { code: "ENOENT" },
   );
+});
+
+test("Qoder installer reuses the first existing IDE compatibility MCP path", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-ide-fallback-"),
+  );
+  const appData = join(temporaryDirectory, "AppData", "Roaming");
+  const xdgConfig = join(temporaryDirectory, ".config");
+  const primaryPath = defaultQoderIdeMcpPath(temporaryDirectory, {
+    APPDATA: appData,
+    XDG_CONFIG_HOME: xdgConfig,
+  });
+  const fallbackPath = join(
+    temporaryDirectory,
+    ".qoder",
+    "shared_client",
+    "mcp.json",
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(join(temporaryDirectory, ".qoder", "shared_client"), {
+    recursive: true,
+  });
+  await writeFile(
+    fallbackPath,
+    '{"mcpServers":{"github":{"command":"github-mcp"}}}\n',
+  );
+  await installTarget("qoder", {
+    HOME: temporaryDirectory,
+    USERPROFILE: temporaryDirectory,
+    APPDATA: appData,
+    XDG_CONFIG_HOME: xdgConfig,
+    QODER_CONFIG_DIR: undefined,
+    QODER_IDE_MCP_PATH: undefined,
+  });
+
+  const fallback = JSON.parse(await readFile(fallbackPath, "utf8"));
+  assert.equal(fallback.mcpServers.github.command, "github-mcp");
+  assert.equal(fallback.mcpServers.zvec_grep.command, process.execPath);
+  await assert.rejects(stat(primaryPath), { code: "ENOENT" });
 });
 
 test(
@@ -1557,6 +1621,7 @@ test(
             HOME: caseDirectory,
             USERPROFILE: caseDirectory,
             QODER_CONFIG_DIR: qoderConfigDirectory,
+            QODER_IDE_MCP_PATH: join(qoderConfigDirectory, "mcp.json"),
             ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
           },
         },
@@ -1573,6 +1638,60 @@ test(
       assert.equal(ide.mcpServers.zvec_grep.command, process.execPath);
       assert.equal(ide.mcpServers.zvec_grep.args[0], cliPath);
     }
+  },
+);
+
+test(
+  "auto target detects Qoder IDE without a Qoder CLI executable",
+  {
+    skip:
+      process.platform === "win32" ? "executable mode semantics differ" : false,
+  },
+  async (t) => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), "zvec-grep-install-auto-qoder-ide-"),
+    );
+    const binaryDirectory = join(temporaryDirectory, "empty-bin");
+    const ideExecutable = join(temporaryDirectory, "Qoder IDE");
+    const qoderConfigDirectory = join(temporaryDirectory, ".qoder");
+    const ideMcpPath = join(
+      temporaryDirectory,
+      "SharedClientCache",
+      "mcp.json",
+    );
+    t.after(async () => {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    });
+
+    await mkdir(binaryDirectory, { recursive: true });
+    await writeFile(ideExecutable, "#!/bin/sh\n");
+    await chmod(ideExecutable, 0o755);
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [cliPath, "install", "--yes"],
+      {
+        env: {
+          ...process.env,
+          PATH: binaryDirectory,
+          HOME: temporaryDirectory,
+          USERPROFILE: temporaryDirectory,
+          QODER_CONFIG_DIR: qoderConfigDirectory,
+          QODER_IDE_EXECUTABLE: ideExecutable,
+          QODER_IDE_MCP_PATH: ideMcpPath,
+          ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+        },
+      },
+    );
+
+    assert.match(stdout, /Qoder/);
+    assert.doesNotMatch(stdout, /Claude Code|Codex|OpenCode|Cursor|Qwen Code/);
+    const cli = JSON.parse(
+      await readFile(join(qoderConfigDirectory, "settings.json"), "utf8"),
+    );
+    const ide = JSON.parse(await readFile(ideMcpPath, "utf8"));
+    assert.equal(cli.mcpServers.zvec_grep.command, "zg");
+    assert.equal(ide.mcpServers.zvec_grep.command, process.execPath);
   },
 );
 
@@ -1733,6 +1852,7 @@ test(
           HOME: temporaryDirectory,
           CLAUDE_CONFIG_DIR: claudeConfigDirectory,
           CODEX_HOME: codexHome,
+          QODER_IDE_EXECUTABLE: join(temporaryDirectory, "missing-qoder-ide"),
           ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
         },
       },
@@ -1778,6 +1898,7 @@ test(
           HOME: temporaryDirectory,
           USERPROFILE: temporaryDirectory,
           QWEN_HOME: qwenHome,
+          QODER_IDE_EXECUTABLE: join(temporaryDirectory, "missing-qoder-ide"),
           ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
         },
       },
@@ -1824,6 +1945,9 @@ async function installTarget(target, env, extraArgs = []) {
     ...process.env,
     ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
     ...env,
+    ...(env.QODER_CONFIG_DIR && env.QODER_IDE_MCP_PATH === undefined
+      ? { QODER_IDE_MCP_PATH: join(env.QODER_CONFIG_DIR, "mcp.json") }
+      : {}),
   };
   for (const [key, value] of Object.entries(environment)) {
     if (value === undefined) delete environment[key];
@@ -1836,10 +1960,17 @@ async function installTarget(target, env, extraArgs = []) {
 }
 
 async function uninstallTarget(target, env, extraArgs = []) {
+  const environment = {
+    ...process.env,
+    ...env,
+    ...(env.QODER_CONFIG_DIR && env.QODER_IDE_MCP_PATH === undefined
+      ? { QODER_IDE_MCP_PATH: join(env.QODER_CONFIG_DIR, "mcp.json") }
+      : {}),
+  };
   await execFileAsync(
     process.execPath,
     [cliPath, "uninstall", "--target", target, "--yes", ...extraArgs],
-    { env: { ...process.env, ...env } },
+    { env: environment },
   );
 }
 
@@ -1850,6 +1981,33 @@ async function readQoderConfigs(qoderHome) {
     ),
   );
   return { cli, ide };
+}
+
+function defaultQoderIdeMcpPath(home, environment = {}) {
+  if (process.platform === "darwin") {
+    return join(
+      home,
+      "Library",
+      "Application Support",
+      "Qoder",
+      "SharedClientCache",
+      "mcp.json",
+    );
+  }
+  if (process.platform === "win32") {
+    return join(
+      environment.APPDATA ?? join(home, "AppData", "Roaming"),
+      "Qoder",
+      "SharedClientCache",
+      "mcp.json",
+    );
+  }
+  return join(
+    environment.XDG_CONFIG_HOME ?? join(home, ".config"),
+    "Qoder",
+    "SharedClientCache",
+    "mcp.json",
+  );
 }
 
 function countOccurrences(value, search) {

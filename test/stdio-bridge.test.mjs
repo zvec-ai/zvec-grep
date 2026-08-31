@@ -176,6 +176,17 @@ test("stdio bridge distinguishes a missing elicitation handler from other host e
   });
 
   host.setRequestHandler("elicitation/create", async () => {
+    throw Object.assign(
+      new Error("method not found: No request handler configured"),
+      { code: 51500 },
+    );
+  });
+  await assert.rejects(daemon.request(request), {
+    code: -32603,
+    message: REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE,
+  });
+
+  host.setRequestHandler("elicitation/create", async () => {
     throw new Error("Downstream authorization UI failed.");
   });
   await assert.rejects(daemon.request(request), {

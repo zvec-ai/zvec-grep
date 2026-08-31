@@ -152,14 +152,25 @@ Before granting access, confirm that the workspace content is permitted to be
 sent to the selected provider and endpoint. MCP tool approval is separate from
 this data authorization.
 
-When a Qoder client reports that it has no handler for `elicitation/create`, or
-declines or cancels without displaying the form, the Qoder guidance installed
-by `zg install --target qoder` uses `AskUserQuestion` as a compatibility path.
-It runs the Workspace grant only after explicit approval and retries the
-original MCP search once. Choosing local FTS instead removes vector-producing
-query routes, sets `autoUpdate` to `false`, and keeps retrieval local without
-refreshing the remote-embedding index; a headless session never grants access
-automatically. `--allow-remote` is not a substitute for this path because it
+When Qoder CLI reports that it has no handler for `elicitation/create`, or
+declines or cancels without displaying the form, the `AGENTS.md` guidance
+installed by `zg install --target qoder` uses the exact `AskUserQuestion` tool
+as a compatibility path. It offers workspace approval, local FTS only, or
+cancel.
+
+Qoder IDE uses the exact native tool name `ask_user_question`. Because Qoder IDE
+does not provide a supported global Rules location, the installer does not
+write equivalent IDE guidance. In stdio mode, the zvec-grep bridge instead
+turns a missing `elicitation/create` handler into an actionable error directing
+the top-level IDE agent to present the same choices with `ask_user_question`.
+This path still requires an end-to-end smoke test in a real Qoder IDE session.
+
+Either path runs the Workspace grant only after explicit approval and retries
+the original MCP search once. Choosing local FTS instead removes
+vector-producing query routes, sets `autoUpdate` to `false`, and keeps retrieval
+local without refreshing the remote-embedding index; a headless session never
+grants access automatically. Neither question tool should collect a token, API
+key, or password. `--allow-remote` is not a substitute for this path because it
 authorizes only the current CLI command, not a later MCP retry.
 
 ## Input length and truncation

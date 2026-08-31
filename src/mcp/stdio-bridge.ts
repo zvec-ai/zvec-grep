@@ -217,11 +217,13 @@ export function registerStdioBridgeElicitationForwarding(
 function isUnsupportedDownstreamElicitation(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = "code" in error ? error.code : undefined;
+  const message = error.message.toLowerCase();
   return (
     code === ProtocolErrorCode.MethodNotFound ||
     (code === SdkErrorCode.CapabilityNotSupported &&
-      error.message.includes("elicitation")) ||
-    error.message.includes("no handler is registered for 'elicitation/create'")
+      message.includes("elicitation")) ||
+    message.includes("no handler is registered for 'elicitation/create'") ||
+    message.includes("method not found: no request handler configured")
   );
 }
 

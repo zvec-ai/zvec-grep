@@ -17,19 +17,22 @@ managed-rg route.
 | Codex | `codex` | `~/.codex/config.toml` and `~/.codex/AGENTS.md` |
 | Claude Code | `claude` | `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
-| Qoder CLI (`qoder` or `qodercli`) | `qoder` | `~/.qoder/settings.json` and `~/.qoder/AGENTS.md` |
+| Qoder CLI and IDE | `qoder` | CLI `settings.json` and `AGENTS.md`, plus the IDE user-level `SharedClientCache/mcp.json` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
-`OPENCODE_CONFIG`, and `CURSOR_CONFIG_DIR`.
+`QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`, and
+`CURSOR_CONFIG_DIR`.
 
 The current Qoder CLI package exposes both `qoder` and `qodercli` commands. The
-installer accepts `qodercli` and `qoder-cli` as aliases for the canonical
-`qoder` target, and automatic detection recognizes either executable.
-`QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory used by the
-installer.
+installer accepts `qodercli`, `qoder-cli`, `qoderide`, and `qoder-ide` as
+aliases for the single canonical `qoder` target. One Qoder install configures
+both the CLI and IDE, and automatic detection recognizes either CLI executable
+or the IDE. `QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory;
+`QODER_IDE_MCP_PATH` overrides the full IDE `mcp.json` path, and
+`QODER_IDE_EXECUTABLE` overrides the IDE executable used by automatic detection.
 
 ## Install an integration
 
@@ -54,7 +57,7 @@ The installer:
 1. adds a managed `zvec_grep` MCP entry;
 2. adds search guidance where the agent supports it;
 3. adds local MCP tool approval for Codex and Claude Code, and managed server
-   trust for Qwen Code and Qoder;
+   trust for Qwen Code and Qoder CLI;
 4. starts the local zvec-grep server when possible.
 
 The [Server guide](./06-server.md) explains when the daemon is useful and how its
@@ -65,19 +68,46 @@ content outside those blocks is preserved, as are unrelated settings and other
 MCP servers. If an unmanaged `zvec_grep` entry already exists, inspect it before
 using `--force` to replace it.
 
-For Qoder, `--mcp-transport` selects either a stdio or HTTP entry under
-`mcpServers`; the installer also manages the timeout and trust fields. Qoder CLI
-search guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
+For Qoder CLI, `--mcp-transport` selects either a stdio or HTTP entry under
+`mcpServers`; the installer also manages the timeout and trust fields. Search
+guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
 replacing unrelated guidance.
 
-Qoder receives the same MCP form-based Remote Embedding authorization request as
-other clients. If it reports that no handler is registered for
-`elicitation/create`, or returns a decline or cancellation without displaying
-the form, the installed guidance supplies a compatibility interaction through
-Qoder's `AskUserQuestion` tool. The agent must ask whether to allow Remote
-Embedding for the workspace, use local FTS only, or cancel. It may run the
-following persistent grant only after explicit workspace approval, then retry
-the original MCP search once:
+The same install writes the Qoder IDE MCP entry to its platform user-level
+configuration:
+
+- macOS: `~/Library/Application Support/Qoder/SharedClientCache/mcp.json`
+- Windows: `%APPDATA%/Qoder/SharedClientCache/mcp.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/Qoder/SharedClientCache/mcp.json`
+
+Set `QODER_IDE_MCP_PATH` to override that complete file path. The IDE entry uses
+stdio when `--mcp-transport stdio` is selected. For HTTP it uses a `type: "sse"`
+URL entry, from which Qoder IDE automatically detects the streamable HTTP MCP
+endpoint. If the platform-primary file does not exist, the installer reuses the
+first existing compatibility file at `SharedClientCache/extension/local/mcp.json`,
+`~/.qoder/shared_client/mcp.json`, or
+`~/.qoder/shared_client/extension/local/mcp.json`. Qoder IDE has no supported
+global Rules file, so the installer does not claim to create or manage IDE
+search guidance.
+
+Both Qoder clients receive the same MCP form-based Remote Embedding
+authorization request as other clients. If Qoder CLI reports that no handler is
+registered for `elicitation/create`, or returns a decline or cancellation
+without displaying the form, its installed `AGENTS.md` guidance supplies a
+compatibility interaction through the exact `AskUserQuestion` tool. The CLI
+agent must ask whether to allow Remote Embedding for the workspace, use local
+FTS only, or cancel.
+
+Qoder IDE uses the exact native tool name `ask_user_question`, but its official
+integration does not provide a global Rules location where the installer can
+persist the fallback. In stdio mode, the zvec-grep bridge turns a missing
+`elicitation/create` handler into an actionable error that tells the top-level
+IDE agent to present the same three choices with `ask_user_question`. This path
+still needs an end-to-end smoke test in a real Qoder IDE session and should not
+be treated as proof that every IDE build follows the instruction.
+
+Only after explicit workspace approval may either client run the following
+persistent grant and retry the original MCP search once:
 
 ```bash
 zg auth grant "/absolute/workspace" \
@@ -89,8 +119,9 @@ The local-FTS choice retries the search without `query`, `queries`, or `vector`
 routes and with `autoUpdate: false` and `freshness: "eventual"`. It neither
 refreshes the remote-embedding index nor sends query text or workspace content
 to a remote Embedding provider. In a headless session where Qoder cannot ask the
-user, the agent stops without granting access. Provider credentials remain
-separate from this data authorization.
+user, the agent stops without granting access. Neither question tool should
+collect a token, API key, or password. Provider credentials remain separate
+from this data authorization.
 
 Restart the selected agent, or open a new session, after installation.
 
@@ -139,10 +170,12 @@ zg server status --check-ready
 
 Then start a new agent session and confirm that the client-specific search tool
 is available. It is `zvec_grep_search` in Codex and Claude Code,
-`mcp__zvec_grep__zvec_grep_search` in Qwen Code and Qoder, and
+`mcp__zvec_grep__zvec_grep_search` in Qwen Code and Qoder CLI, and
 `zvec_grep_zvec_grep_search` in OpenCode. With the optional `full` MCP toolset,
-Qoder exposes managed rg as `mcp__zvec_grep__zvec_grep_rg`. If the MCP
-connection is unavailable, the same indexed search and optional managed-rg
+Qoder CLI exposes managed rg as `mcp__zvec_grep__zvec_grep_rg`. For Qoder IDE,
+confirm after restart that the `zvec_grep` server and its tools appear; the exact
+host-qualified tool label remains part of the real-machine smoke test. If the
+MCP connection is unavailable, the same indexed search and optional managed-rg
 route remain available from the shell:
 
 ```bash

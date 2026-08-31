@@ -50,7 +50,11 @@ const ENVIRONMENT_VARIABLES = {
   CODEX_HOME: "Codex configuration directory used by zg install",
   CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg install",
   QWEN_HOME: "Qwen Code configuration directory used by zg install",
-  QODER_CONFIG_DIR: "Qoder configuration directory used by zg install",
+  QODER_CONFIG_DIR: "Qoder CLI configuration directory used by zg install",
+  QODER_IDE_MCP_PATH:
+    "Full Qoder IDE SharedClientCache/mcp.json path used by zg install",
+  QODER_IDE_EXECUTABLE:
+    "Qoder IDE executable used by automatic install-target detection",
   OPENCODE_CONFIG: "OpenCode configuration file used by zg install",
   CURSOR_CONFIG_DIR: "Cursor configuration directory used by zg install",
 } as const;
@@ -309,12 +313,15 @@ Options:
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
 
-Qoder aliases: qodercli, qoder-cli.
+Qoder aliases: qodercli, qoder-cli, qoderide, qoder-ide.
+The single qoder target configures Qoder CLI and Qoder IDE together.
 
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
-Codex, Claude Code, Qwen Code, Qoder, and OpenCode also receive managed guidance.
+Codex, Claude Code, Qwen Code, Qoder CLI, and OpenCode also receive managed
+guidance. Qoder IDE has no supported global Rules file, so only its MCP
+configuration is managed.
 Codex and Claude Code receive local tool pre-approval. Remote Embedding
 authorization remains separate and is requested by zvec-grep on first remote
 use. Restart the agent or open a new session after installation. This does not
@@ -324,7 +331,8 @@ install the npm package.`;
   zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
-guidance.`;
+guidance. Qoder aliases qodercli, qoder-cli, qoderide, and qoder-ide all remove
+the managed Qoder CLI and IDE integration together.`;
     case "help":
       return `Usage:
   zg help [command|topic]
@@ -553,6 +561,8 @@ ${formatEnvironmentVariables([
   "CLAUDE_CONFIG_DIR",
   "QWEN_HOME",
   "QODER_CONFIG_DIR",
+  "QODER_IDE_MCP_PATH",
+  "QODER_IDE_EXECUTABLE",
   "OPENCODE_CONFIG",
   "CURSOR_CONFIG_DIR",
 ])}
