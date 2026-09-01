@@ -100,7 +100,6 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
   },
   {
     id: "qoder",
-    aliases: ["qodercli", "qoder-cli", "qoderide", "qoder-ide"],
     label: "Qoder",
     executables: ["qoder", "qodercli", "qoder-ide"],
     detect: qoderIdeIsAvailable,

@@ -150,9 +150,8 @@ zg install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-tr
 zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
 ```
 
-`--target` is repeatable. `qodercli`, `qoder-cli`, `qoderide`, and `qoder-ide`
-are accepted aliases for the single canonical `qoder` target. That target
-configures Qoder CLI and Qoder IDE together. `zg install` also accepts:
+`--target` is repeatable. `qoder` is the single Qoder target and configures
+Qoder CLI and Qoder IDE together. `zg install` also accepts:
 
 | Option | Meaning |
 | --- | --- |

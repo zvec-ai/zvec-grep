@@ -1114,22 +1114,15 @@ test("Qwen Code installer resolves QWEN_HOME and dotenv fallbacks", async (t) =>
   });
 });
 
-test("Qoder installer accepts CLI and IDE aliases plus numeric target 6", async (t) => {
+test("Qoder installer accepts its canonical and numeric targets", async (t) => {
   const temporaryDirectory = await mkdtemp(
-    join(tmpdir(), "zvec-grep-install-qoder-aliases-"),
+    join(tmpdir(), "zvec-grep-install-qoder-targets-"),
   );
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  for (const target of [
-    "qoder",
-    "qodercli",
-    "qoder-cli",
-    "qoderide",
-    "qoder-ide",
-    "6",
-  ]) {
+  for (const target of ["qoder", "6"]) {
     const qoderConfigDirectory = join(temporaryDirectory, target);
     await installTarget(target, {
       QODER_CONFIG_DIR: qoderConfigDirectory,
@@ -1143,6 +1136,24 @@ test("Qoder installer accepts CLI and IDE aliases plus numeric target 6", async 
       "server",
       "--stdio",
     ]);
+  }
+});
+
+test("Qoder installer rejects client-name aliases", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-rejected-aliases-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  for (const target of ["qodercli", "qoder-cli", "qoderide", "qoder-ide"]) {
+    await assert.rejects(
+      installTarget(target, {
+        QODER_CONFIG_DIR: join(temporaryDirectory, target),
+      }),
+      new RegExp(`Unknown install target: ${target}`),
+    );
   }
 });
 

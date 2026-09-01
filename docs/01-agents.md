@@ -26,12 +26,11 @@ The standard environment overrides used by each agent are respected, including
 `QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`, and
 `CURSOR_CONFIG_DIR`.
 
-The current Qoder CLI package exposes both `qoder` and `qodercli` commands. The
-installer accepts `qodercli`, `qoder-cli`, `qoderide`, and `qoder-ide` as
-aliases for the single canonical `qoder` target. One Qoder install configures
-both the CLI and IDE, and automatic detection recognizes either CLI executable
-or the IDE. `QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory;
-`QODER_IDE_MCP_PATH` independently overrides the full IDE `mcp.json` path, and
+The current Qoder CLI package exposes both `qoder` and `qodercli` commands, but
+the installer exposes only the canonical `qoder` target. One Qoder install
+configures both the CLI and IDE, and automatic detection recognizes either CLI
+executable or the IDE. `QODER_CONFIG_DIR` overrides the Qoder CLI configuration
+directory; `QODER_IDE_MCP_PATH` independently overrides the full IDE `mcp.json` path, and
 `QODER_IDE_EXECUTABLE` overrides the IDE executable used by automatic detection.
 
 ## Install an integration
