@@ -83,9 +83,13 @@ With [OpenCode](https://opencode.ai/) configured:
 
 ```bash
 zg install --target opencode --yes
-opencode run --model opencode/deepseek-v4-flash-free \
+opencode models
+opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
 ```
+
+Free model availability can change. Check `opencode models` and replace the
+example model with one that is currently available in your environment.
 
 OpenCode chooses zg on its own—the prompt does not name a tool.
 

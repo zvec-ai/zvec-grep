@@ -83,9 +83,13 @@ zg index --embedding local/potion-retrieval-32m
 
 ```bash
 zg install --target opencode --yes
-opencode run --model opencode/deepseek-v4-flash-free \
+opencode models
+opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
 ```
+
+免费模型的可用性可能变化。请通过 `opencode models` 检查，并将示例模型
+替换为当前环境中可用的模型。
 
 Prompt 中没有指定任何工具，OpenCode 会自主选择 zg。
 
