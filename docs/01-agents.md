@@ -55,8 +55,9 @@ The installer:
 
 1. adds a managed `zvec_grep` MCP entry;
 2. adds search guidance where the agent supports it;
-3. adds local MCP tool approval for Codex and Claude Code, and managed server
-   trust for Qwen Code and Qoder CLI;
+3. adds local MCP tool approval for Codex and Claude Code, managed server trust
+   for Qwen Code and Qoder CLI, and exact search/rg allow rules for Qoder's
+   CLI-backed runtime;
 4. starts the local zvec-grep server when possible.
 
 The [Server guide](./06-server.md) explains when the daemon is useful and how its
@@ -71,6 +72,13 @@ For Qoder CLI, `--mcp-transport` selects either a stdio or HTTP entry under
 `mcpServers`; the installer also manages the timeout and trust fields. Search
 guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
 replacing unrelated guidance.
+
+The same Qoder `settings.json`, used by Qoder CLI and CLI-backed Qoder clients,
+receives exact `permissions.allow` rules for
+`mcp__zvec_grep__zvec_grep_search` and `mcp__zvec_grep__zvec_grep_rg`, plus the
+equivalent server-level `alwaysAllow` policy. This avoids repeated tool approval
+prompts without allowing other MCP tools. Existing permission rules and JSONC
+comments are preserved; uninstall removes only rules added by zg.
 
 The same install writes the Qoder IDE MCP entry to its user-level
 `~/.qoder/mcp.json`. Set `QODER_IDE_MCP_PATH` to override that complete file

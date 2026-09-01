@@ -320,7 +320,8 @@ daemon automatically after a reboot. HTTP users manage later daemon restarts.
 Codex, Claude Code, Qwen Code, Qoder CLI, and OpenCode also receive managed
 guidance. Qoder IDE has no supported global Rules file, so only its MCP
 configuration is managed.
-Codex and Claude Code receive local tool pre-approval. Remote Embedding
+Codex and Claude Code receive local tool pre-approval. Qoder's CLI-backed
+runtime receives exact pre-approval for zvec_grep_search and zvec_grep_rg. Remote Embedding
 authorization remains separate and is requested by zvec-grep on first remote
 use. Restart the agent or open a new session after installation. This does not
 install the npm package.`;

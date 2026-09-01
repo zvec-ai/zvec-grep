@@ -1215,6 +1215,12 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
     args: ["server", "--stdio", "--mcp-toolset", "full"],
     timeout: 900000,
     trust: true,
+    description:
+      "Managed by zg install; managed permissions=zvec_grep_search,zvec_grep_rg",
+    alwaysAllow: ["zvec_grep_search", "zvec_grep_rg"],
+  });
+  assert.deepEqual(config.permissions, {
+    allow: ["mcp__zvec_grep__zvec_grep_search", "mcp__zvec_grep__zvec_grep_rg"],
   });
   const ideInstalled = await readFile(ideConfigPath, "utf8");
   assert.match(ideInstalled, /Keep the user's IDE MCP servers/);
@@ -1282,6 +1288,230 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   );
   assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_START -->"), 1);
   assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_END -->"), 1);
+});
+
+test("Qoder installer manages least-privilege MCP permissions without replacing user policy", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-permissions-"),
+  );
+  const qoderHome = join(temporaryDirectory, ".qoder");
+  const settingsPath = join(qoderHome, "settings.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderHome, { recursive: true });
+  await writeFile(
+    settingsPath,
+    [
+      "{",
+      "  // Keep the user's permission policy.",
+      '  "permissions": {',
+      '    "allow": [',
+      "      // Keep this user rule comment.",
+      '      "Bash(git status)" // Keep this inline rule comment.',
+      "      // Keep this trailing array comment.",
+      "    ],",
+      '    "ask": ["mcp__github__create_issue"],',
+      '    "deny": ["Bash(rm -rf:*)"],',
+      '    "customPolicy": { "nested": ["keep"] }',
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  await installTarget("qoder", { QODER_CONFIG_DIR: qoderHome });
+  const firstInstall = await readFile(settingsPath, "utf8");
+  await installTarget("qoder", { QODER_CONFIG_DIR: qoderHome });
+  assert.equal(await readFile(settingsPath, "utf8"), firstInstall);
+
+  assert.match(firstInstall, /Keep the user's permission policy/);
+  const userRuleCommentSequence =
+    /Keep this user rule comment\.\s*"Bash\(git status\)"\s*\/\/ Keep this inline rule comment\.\s*\/\/ Keep this trailing array comment\./;
+  assert.match(firstInstall, userRuleCommentSequence);
+  const installed = parseJsonWithComments(firstInstall);
+  assert.deepEqual(installed.permissions, {
+    allow: [
+      "mcp__zvec_grep__zvec_grep_search",
+      "mcp__zvec_grep__zvec_grep_rg",
+      "Bash(git status)",
+    ],
+    ask: ["mcp__github__create_issue"],
+    deny: ["Bash(rm -rf:*)"],
+    customPolicy: { nested: ["keep"] },
+  });
+
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderHome });
+  const uninstalledSource = await readFile(settingsPath, "utf8");
+  assert.match(uninstalledSource, /Keep the user's permission policy/);
+  assert.match(uninstalledSource, userRuleCommentSequence);
+  const uninstalled = parseJsonWithComments(uninstalledSource);
+  assert.deepEqual(uninstalled.permissions, {
+    allow: ["Bash(git status)"],
+    ask: ["mcp__github__create_issue"],
+    deny: ["Bash(rm -rf:*)"],
+    customPolicy: { nested: ["keep"] },
+  });
+});
+
+test("Qoder uninstaller retains permission rules that predated installation", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-qoder-preexisting-permission-"),
+  );
+  const qoderHome = join(temporaryDirectory, ".qoder");
+  const settingsPath = join(qoderHome, "settings.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderHome, { recursive: true });
+  await writeFile(
+    settingsPath,
+    `${JSON.stringify({
+      mcpServers: {
+        zvec_grep: {
+          type: "http",
+          url: "https://example.test/user-owned-mcp",
+          alwaysAllow: ["zvec_grep_search"],
+        },
+      },
+      permissions: {
+        allow: ["Bash(git status)", "mcp__zvec_grep__zvec_grep_search"],
+      },
+    })}\n`,
+  );
+
+  await installTarget("qoder", { QODER_CONFIG_DIR: qoderHome }, ["--force"]);
+  const installed = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.deepEqual(installed.mcpServers.zvec_grep.alwaysAllow, [
+    "zvec_grep_search",
+    "zvec_grep_rg",
+  ]);
+  assert.equal(
+    installed.mcpServers.zvec_grep.description,
+    "Managed by zg install; managed permissions=zvec_grep_rg",
+  );
+  assert.deepEqual(installed.permissions.allow, [
+    "mcp__zvec_grep__zvec_grep_rg",
+    "Bash(git status)",
+    "mcp__zvec_grep__zvec_grep_search",
+  ]);
+
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderHome });
+  const uninstalled = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(uninstalled.mcpServers, undefined);
+  assert.deepEqual(uninstalled.permissions.allow, [
+    "Bash(git status)",
+    "mcp__zvec_grep__zvec_grep_search",
+  ]);
+});
+
+test("Qoder installer validates permissions before changing either client config", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-qoder-permission-preflight-"),
+  );
+  const qoderHome = join(temporaryDirectory, ".qoder");
+  const settingsPath = join(qoderHome, "settings.json");
+  const idePath = join(qoderHome, "mcp.json");
+  const guidancePath = join(qoderHome, "AGENTS.md");
+  const settings = '{"permissions":{"allow":"mcp__zvec_grep__*"}}\n';
+  const ide = '{"mcpServers":{"github":{"command":"github-mcp"}}}\n';
+  const guidance = "# Existing Qoder guidance\n";
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderHome, { recursive: true });
+  await writeFile(settingsPath, settings);
+  await writeFile(idePath, ide);
+  await writeFile(guidancePath, guidance);
+
+  await assert.rejects(
+    installTarget("qoder", { QODER_CONFIG_DIR: qoderHome }),
+    /Invalid permissions\.allow configuration/,
+  );
+  assert.equal(await readFile(settingsPath, "utf8"), settings);
+  assert.equal(await readFile(idePath, "utf8"), ide);
+  assert.equal(await readFile(guidancePath, "utf8"), guidance);
+});
+
+test("Qoder uninstaller leaves user-owned server permissions unchanged", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-qoder-user-permissions-"),
+  );
+  const qoderHome = join(temporaryDirectory, ".qoder");
+  const settingsPath = join(qoderHome, "settings.json");
+  const original = `${JSON.stringify(
+    {
+      mcpServers: {
+        zvec_grep: {
+          type: "http",
+          url: "https://example.test/user-owned-mcp",
+        },
+      },
+      permissions: {
+        allow: [
+          "mcp__zvec_grep__zvec_grep_search",
+          "mcp__zvec_grep__zvec_grep_rg",
+        ],
+      },
+    },
+    null,
+    2,
+  )}\n`;
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderHome, { recursive: true });
+  await writeFile(settingsPath, original);
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderHome });
+  assert.equal(await readFile(settingsPath, "utf8"), original);
+});
+
+test("Qoder uninstaller preserves comments in a managed-only permission array", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-qoder-managed-comments-"),
+  );
+  const qoderHome = join(temporaryDirectory, ".qoder");
+  const settingsPath = join(qoderHome, "settings.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(qoderHome, { recursive: true });
+  await writeFile(
+    settingsPath,
+    [
+      "{",
+      '  "mcpServers": {',
+      '    "zvec_grep": {',
+      '      "command": "zg",',
+      '      "args": ["server", "--stdio"],',
+      '      "description": "Managed by zg install; managed permissions=zvec_grep_search,zvec_grep_rg"',
+      "    }",
+      "  },",
+      '  "permissions": {',
+      '    "allow": [',
+      "      // Keep this managed permission note.",
+      '      "mcp__zvec_grep__zvec_grep_search",',
+      '      "mcp__zvec_grep__zvec_grep_rg" // Keep this inline note.',
+      "      // Keep this trailing permission note.",
+      "    ]",
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  await uninstallTarget("qoder", { QODER_CONFIG_DIR: qoderHome });
+  const uninstalledSource = await readFile(settingsPath, "utf8");
+  assert.match(uninstalledSource, /Keep this managed permission note/);
+  assert.match(uninstalledSource, /Keep this inline note/);
+  assert.match(uninstalledSource, /Keep this trailing permission note/);
+  const uninstalled = parseJsonWithComments(uninstalledSource);
+  assert.deepEqual(uninstalled.permissions.allow, []);
 });
 
 test("Qoder uninstaller preserves comments around a first or only managed server", async (t) => {
@@ -1390,6 +1620,9 @@ test("Qoder installer writes trusted HTTP configuration and token expansion", as
     url: "http://127.0.0.1:7999/mcp",
     timeout: 42000,
     trust: true,
+    description:
+      "Managed by zg install; managed permissions=zvec_grep_search,zvec_grep_rg",
+    alwaysAllow: ["zvec_grep_search", "zvec_grep_rg"],
     headers: {
       Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
     },
@@ -1471,6 +1704,7 @@ test("Qoder installer requires force and uninstall is managed and idempotent", a
 
   const config = JSON.parse(firstUninstallConfig);
   assert.equal(config.theme, "dark");
+  assert.equal(config.permissions, undefined);
   assert.equal(config.mcpServers.zvec_grep, undefined);
   assert.equal(config.mcpServers.other.url, "https://example.test/mcp");
   const ideConfig = JSON.parse(firstUninstallIdeConfig);

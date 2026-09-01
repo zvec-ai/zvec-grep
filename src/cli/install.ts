@@ -115,6 +115,21 @@ const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
 const NAMESPACED_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
 const NAMESPACED_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
+const QODER_MCP_PERMISSION_RULES = [
+  {
+    permission: NAMESPACED_SEARCH_TOOL,
+    tool: "zvec_grep_search",
+  },
+  {
+    permission: NAMESPACED_RG_TOOL,
+    tool: "zvec_grep_rg",
+  },
+] as const;
+const QODER_MCP_PERMISSIONS = QODER_MCP_PERMISSION_RULES.map(
+  ({ permission }) => permission,
+);
+const QODER_CLI_MCP_DESCRIPTION = "Managed by zg install";
+const QODER_PERMISSION_OWNERSHIP_PREFIX = `${QODER_CLI_MCP_DESCRIPTION}; managed permissions=`;
 const QODER_IDE_MCP_DESCRIPTION = "Managed by zg install";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
@@ -426,6 +441,7 @@ async function installQoderIntegration(
     options.force,
     isManagedJsonMcpServer,
   );
+  await assertQoderPermissionSettingsValid(settingsPath);
   await assertQoderMcpSettingsReplaceable(
     ideMcpPath,
     "Qoder IDE",
@@ -1166,18 +1182,275 @@ async function removeQwenSettings(path: string): Promise<void> {
 async function updateQoderSettings(
   options: InstallAgentOptions & { path: string },
 ): Promise<string[]> {
-  const root = await updateJsoncMcpSettings({
-    path: options.path,
-    force: options.force,
-    label: "Qoder",
-    server: qoderMcpServer(options),
-    isManaged: isManagedJsonMcpServer,
-  });
+  const existing = await readTextFileIfExists(options.path);
+  let source = existing.trim() ? existing : "{}\n";
+  const root = parseJsoncSettings(options.path, source, "Qoder");
+  validateMcpSettingsContainer(options.path, root);
+  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
+  const current = mcpServers.zvec_grep;
+  const currentIsManaged = isManagedJsonMcpServer(current);
+  if (current !== undefined && !currentIsManaged && !options.force) {
+    throw new Error(
+      `Existing unmanaged zvec_grep MCP server found in ${options.path}. Re-run with --force to replace it for Qoder.`,
+    );
+  }
+
+  const allow = qoderPermissionAllowRules(options.path, root);
+  const ownedPermissions = new Set([
+    ...(currentIsManaged ? qoderOwnedPermissionRules(current) : []),
+    ...QODER_MCP_PERMISSIONS.filter(
+      (permission) => !allow.includes(permission),
+    ),
+  ]);
+  const alwaysAllow = currentIsManaged ? qoderAlwaysAllowTools(current) : [];
+  for (const { tool } of QODER_MCP_PERMISSION_RULES) {
+    if (!alwaysAllow.includes(tool)) {
+      alwaysAllow.push(tool);
+    }
+  }
+
+  source = editJsonWithComments(
+    source,
+    ["mcpServers", "zvec_grep"],
+    qoderMcpServer(options, alwaysAllow, [...ownedPermissions]),
+  );
+  source = addQoderPermissionRules(source, options.path, root);
+  await writeTextFileAtomic(options.path, ensureTrailingNewline(source));
   return contextFileWarnings(root, "AGENTS.md");
 }
 
 async function removeQoderSettings(path: string): Promise<void> {
-  await removeJsoncMcpSettings(path, "Qoder", isManagedJsonMcpServer);
+  const existing = await readTextFileIfExists(path);
+  if (!existing.trim()) return;
+
+  let source = existing;
+  const root = parseJsoncSettings(path, source, "Qoder");
+  validateMcpSettingsContainer(path, root);
+  qoderPermissionAllowRules(path, root);
+  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
+  const current = mcpServers.zvec_grep;
+  if (!isManagedJsonMcpServer(current)) return;
+  const ownedPermissions = qoderOwnedPermissionRules(current);
+
+  source = hasJsoncComments(source)
+    ? removeJsoncPropertyPreservingComments(source, ["mcpServers", "zvec_grep"])
+    : editJsonWithComments(
+        source,
+        Object.keys(mcpServers).length === 1
+          ? ["mcpServers"]
+          : ["mcpServers", "zvec_grep"],
+        undefined,
+      );
+  source = removeQoderPermissionRules(source, path, root, ownedPermissions);
+  if (source !== existing) {
+    await writeTextFileAtomic(path, ensureTrailingNewline(source));
+  }
+}
+
+async function assertQoderPermissionSettingsValid(path: string): Promise<void> {
+  const source = await readTextFileIfExists(path);
+  if (!source.trim()) return;
+  const root = parseJsoncSettings(path, source, "Qoder");
+  qoderPermissionAllowRules(path, root);
+}
+
+function addQoderPermissionRules(
+  source: string,
+  path: string,
+  root: JsonObject,
+): string {
+  const allow = qoderPermissionAllowRules(path, root);
+  const missing = QODER_MCP_PERMISSIONS.filter(
+    (permission) => !allow.includes(permission),
+  );
+  if (missing.length === 0) return source;
+
+  const hasAllowArray =
+    isJsonObject(root.permissions) && Array.isArray(root.permissions.allow);
+  if (!hasAllowArray) {
+    return editJsonWithComments(
+      source,
+      ["permissions", "allow"],
+      [...allow, ...missing],
+    );
+  }
+  return insertJsoncArrayValuesAtStart(
+    source,
+    ["permissions", "allow"],
+    missing,
+  );
+}
+
+function removeQoderPermissionRules(
+  source: string,
+  path: string,
+  root: JsonObject,
+  ownedPermissions: readonly string[],
+): string {
+  const allow = qoderPermissionAllowRules(path, root);
+  let removedCount = 0;
+  for (const permission of ownedPermissions) {
+    const removal = removeFirstJsoncArrayStringValue(
+      source,
+      ["permissions", "allow"],
+      permission,
+    );
+    source = removal.source;
+    if (removal.removed) removedCount += 1;
+  }
+  if (removedCount === 0) return source;
+
+  if (removedCount < allow.length) return source;
+
+  const permissions = root.permissions as JsonObject;
+  const hasOtherPermissionSettings = Object.keys(permissions).some(
+    (key) => key !== "allow",
+  );
+  if (hasJsoncComments(source)) {
+    return source;
+  }
+  if (hasOtherPermissionSettings) {
+    return editJsonWithComments(source, ["permissions", "allow"], undefined);
+  }
+  return editJsonWithComments(source, ["permissions"], undefined);
+}
+
+function qoderOwnedPermissionRules(server: unknown): string[] {
+  if (
+    !isJsonObject(server) ||
+    typeof server.description !== "string" ||
+    !server.description.startsWith(QODER_PERMISSION_OWNERSHIP_PREFIX)
+  ) {
+    return [];
+  }
+  const alwaysAllow = server.description
+    .slice(QODER_PERMISSION_OWNERSHIP_PREFIX.length)
+    .split(",")
+    .filter(Boolean);
+  return QODER_MCP_PERMISSION_RULES.filter(({ tool }) =>
+    alwaysAllow.includes(tool),
+  ).map(({ permission }) => permission);
+}
+
+function qoderMcpDescription(ownedPermissions: readonly string[]): string {
+  const tools = QODER_MCP_PERMISSION_RULES.filter(({ permission }) =>
+    ownedPermissions.includes(permission),
+  ).map(({ tool }) => tool);
+  return tools.length > 0
+    ? `${QODER_PERMISSION_OWNERSHIP_PREFIX}${tools.join(",")}`
+    : QODER_CLI_MCP_DESCRIPTION;
+}
+
+function qoderAlwaysAllowTools(server: unknown): string[] {
+  if (!isJsonObject(server) || !Array.isArray(server.alwaysAllow)) return [];
+  return server.alwaysAllow.filter(
+    (tool): tool is string => typeof tool === "string",
+  );
+}
+
+function insertJsoncArrayValuesAtStart(
+  source: string,
+  path: readonly (string | number)[],
+  values: readonly string[],
+): string {
+  if (values.length === 0) return source;
+  const root = parseTree(source);
+  const arrayNode = root ? findNodeAtLocation(root, [...path]) : undefined;
+  if (arrayNode?.type !== "array") return source;
+
+  const children = arrayNode.children ?? [];
+  const insertionOffset = arrayNode.offset + 1;
+  const closingBracketOffset = arrayNode.offset + arrayNode.length - 1;
+  const multiline = source
+    .slice(arrayNode.offset, closingBracketOffset + 1)
+    .includes("\n");
+  const serialized = values.map((value) => JSON.stringify(value));
+
+  let insertion: string;
+  if (multiline) {
+    const formatting = jsonFormattingOptions(source);
+    const lineStart = source.lastIndexOf("\n", arrayNode.offset - 1) + 1;
+    const propertyIndent =
+      source.slice(lineStart, arrayNode.offset).match(/^[\t ]*/)?.[0] ?? "";
+    const indentUnit = formatting.insertSpaces
+      ? " ".repeat(formatting.tabSize ?? 2)
+      : "\t";
+    const itemIndent = `${propertyIndent}${indentUnit}`;
+    const lines = serialized.map(
+      (value, index) =>
+        `${itemIndent}${value}${index < serialized.length - 1 || children.length > 0 ? "," : ""}`,
+    );
+    insertion = `${formatting.eol}${lines.join(formatting.eol)}`;
+  } else {
+    insertion = `${serialized.join(", ")}${children.length > 0 ? ", " : ""}`;
+  }
+
+  return (
+    source.slice(0, insertionOffset) + insertion + source.slice(insertionOffset)
+  );
+}
+
+function removeFirstJsoncArrayStringValue(
+  source: string,
+  path: readonly (string | number)[],
+  value: string,
+): { source: string; removed: boolean } {
+  const root = parseTree(source);
+  const arrayNode = root ? findNodeAtLocation(root, [...path]) : undefined;
+  if (arrayNode?.type !== "array" || !arrayNode.children) {
+    return { source, removed: false };
+  }
+
+  const index = arrayNode.children.findIndex(
+    (child) => child.type === "string" && child.value === value,
+  );
+  if (index < 0) return { source, removed: false };
+
+  const target = arrayNode.children[index]!;
+  const previous = arrayNode.children[index - 1];
+  const next = arrayNode.children[index + 1];
+  const ranges = [nodeRange(target)];
+  const commaOffset = next
+    ? findComma(source, target.offset + target.length, next.offset)
+    : previous
+      ? findComma(source, previous.offset + previous.length, target.offset)
+      : undefined;
+  if (commaOffset !== undefined) {
+    ranges.push({ offset: commaOffset, length: 1 });
+  }
+
+  return {
+    source: ranges
+      .sort((left, right) => right.offset - left.offset)
+      .reduce(
+        (current, range) =>
+          current.slice(0, range.offset) +
+          current.slice(range.offset + range.length),
+        source,
+      ),
+    removed: true,
+  };
+}
+
+function qoderPermissionAllowRules(path: string, root: JsonObject): string[] {
+  const currentPermissions = root.permissions;
+  if (currentPermissions !== undefined && !isJsonObject(currentPermissions)) {
+    throw new Error(`Invalid permissions configuration in ${path}.`);
+  }
+  const permissions = isJsonObject(currentPermissions)
+    ? currentPermissions
+    : {};
+  const currentAllow = permissions.allow;
+  if (currentAllow !== undefined && !Array.isArray(currentAllow)) {
+    throw new Error(`Invalid permissions.allow configuration in ${path}.`);
+  }
+  if (
+    Array.isArray(currentAllow) &&
+    currentAllow.some((permission) => typeof permission !== "string")
+  ) {
+    throw new Error(`Invalid permissions.allow rule in ${path}.`);
+  }
+  return Array.isArray(currentAllow) ? (currentAllow as string[]) : [];
 }
 
 async function updateQoderIdeSettings(
@@ -1225,14 +1498,22 @@ function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
   };
 }
 
-function qoderMcpServer(options: InstallAgentOptions): Record<string, unknown> {
+function qoderMcpServer(
+  options: InstallAgentOptions,
+  alwaysAllow: readonly string[] = [],
+  ownedPermissions: readonly string[] = [],
+): Record<string, unknown> {
   const timeout = options.mcpToolTimeoutSeconds * 1_000;
+  const permissionPolicy =
+    alwaysAllow.length > 0 ? { alwaysAllow: [...alwaysAllow] } : {};
   if (options.transport === "stdio") {
     return {
       command: "zg",
       args: stdioArgs(options.mcpToolset),
       timeout,
       trust: true,
+      description: qoderMcpDescription(ownedPermissions),
+      ...permissionPolicy,
     };
   }
 
@@ -1241,6 +1522,8 @@ function qoderMcpServer(options: InstallAgentOptions): Record<string, unknown> {
     url: resolveServerUrl(),
     timeout,
     trust: true,
+    description: qoderMcpDescription(ownedPermissions),
+    ...permissionPolicy,
     ...(options.mcpTokenEnv
       ? {
           headers: {
