@@ -17,7 +17,7 @@ managed-rg route.
 | Codex | `codex` | `~/.codex/config.toml` and `~/.codex/AGENTS.md` |
 | Claude Code | `claude` | `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
-| Qoder CLI and IDE | `qoder` | CLI `settings.json` and `AGENTS.md`, plus the IDE user-level `SharedClientCache/mcp.json` |
+| Qoder CLI and IDE | `qoder` | `~/.qoder/settings.json`, `~/.qoder/AGENTS.md`, and the IDE user-level `~/.qoder/mcp.json` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
@@ -31,7 +31,7 @@ installer accepts `qodercli`, `qoder-cli`, `qoderide`, and `qoder-ide` as
 aliases for the single canonical `qoder` target. One Qoder install configures
 both the CLI and IDE, and automatic detection recognizes either CLI executable
 or the IDE. `QODER_CONFIG_DIR` overrides the Qoder CLI configuration directory;
-`QODER_IDE_MCP_PATH` overrides the full IDE `mcp.json` path, and
+`QODER_IDE_MCP_PATH` independently overrides the full IDE `mcp.json` path, and
 `QODER_IDE_EXECUTABLE` overrides the IDE executable used by automatic detection.
 
 ## Install an integration
@@ -73,22 +73,15 @@ For Qoder CLI, `--mcp-transport` selects either a stdio or HTTP entry under
 guidance is written to `${QODER_CONFIG_DIR:-~/.qoder}/AGENTS.md` without
 replacing unrelated guidance.
 
-The same install writes the Qoder IDE MCP entry to its platform user-level
-configuration:
-
-- macOS: `~/Library/Application Support/Qoder/SharedClientCache/mcp.json`
-- Windows: `%APPDATA%/Qoder/SharedClientCache/mcp.json`
-- Linux: `${XDG_CONFIG_HOME:-~/.config}/Qoder/SharedClientCache/mcp.json`
-
-Set `QODER_IDE_MCP_PATH` to override that complete file path. The IDE entry uses
+The same install writes the Qoder IDE MCP entry to its user-level
+`~/.qoder/mcp.json`. Set `QODER_IDE_MCP_PATH` to override that complete file
+path. The IDE entry uses
 stdio when `--mcp-transport stdio` is selected. For HTTP it uses a `type: "sse"`
 URL entry, from which Qoder IDE automatically detects the streamable HTTP MCP
-endpoint. If the platform-primary file does not exist, the installer reuses the
-first existing compatibility file at `SharedClientCache/extension/local/mcp.json`,
-`~/.qoder/shared_client/mcp.json`, or
-`~/.qoder/shared_client/extension/local/mcp.json`. Qoder IDE has no supported
-global Rules file, so the installer does not claim to create or manage IDE
-search guidance.
+endpoint. Qoder's platform `SharedClientCache` is runtime/cache state rather
+than the user MCP configuration entry point, so the installer does not write
+it. Qoder IDE has no supported global Rules file, so the installer does not
+claim to create or manage IDE search guidance.
 
 Both Qoder clients receive the same MCP form-based Remote Embedding
 authorization request as other clients. If Qoder CLI reports that no handler is

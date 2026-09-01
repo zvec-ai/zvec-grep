@@ -51,8 +51,7 @@ const ENVIRONMENT_VARIABLES = {
   CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg install",
   QWEN_HOME: "Qwen Code configuration directory used by zg install",
   QODER_CONFIG_DIR: "Qoder CLI configuration directory used by zg install",
-  QODER_IDE_MCP_PATH:
-    "Full Qoder IDE SharedClientCache/mcp.json path used by zg install",
+  QODER_IDE_MCP_PATH: "Full Qoder IDE mcp.json path used by zg install",
   QODER_IDE_EXECUTABLE:
     "Qoder IDE executable used by automatic install-target detection",
   OPENCODE_CONFIG: "OpenCode configuration file used by zg install",

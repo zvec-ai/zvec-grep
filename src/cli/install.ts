@@ -418,7 +418,7 @@ async function installQoderIntegration(
 ): Promise<InstallAgentResult> {
   const qoderHome = resolveQoderHome();
   const settingsPath = resolve(qoderHome, "settings.json");
-  const ideMcpPath = await resolveQoderIdeMcpPath();
+  const ideMcpPath = resolveQoderIdeMcpPath();
   const guidancePath = resolve(qoderHome, "AGENTS.md");
 
   await assertQoderMcpSettingsReplaceable(
@@ -846,50 +846,15 @@ function resolveQoderHome(): string {
   return resolve(process.env.QODER_CONFIG_DIR || resolve(homedir(), ".qoder"));
 }
 
-async function resolveQoderIdeMcpPath(): Promise<string> {
+function resolveQoderIdeMcpPath(): string {
   const configured = process.env.QODER_IDE_MCP_PATH?.trim();
   if (configured) return resolve(configured);
 
-  const candidates = qoderIdeMcpPathCandidates();
-  for (const candidate of candidates) {
-    if (await fileExists(candidate)) return candidate;
-  }
-  return candidates[0]!;
+  return resolve(homedir(), ".qoder", "mcp.json");
 }
 
 function qoderIdeMcpPathsForUninstall(): string[] {
-  const configured = process.env.QODER_IDE_MCP_PATH?.trim();
-  return configured ? [resolve(configured)] : qoderIdeMcpPathCandidates();
-}
-
-function qoderIdeMcpPathCandidates(): string[] {
-  const qoderHome = resolve(homedir(), ".qoder");
-  const sharedClientCache =
-    process.platform === "darwin"
-      ? resolve(
-          homedir(),
-          "Library",
-          "Application Support",
-          "Qoder",
-          "SharedClientCache",
-        )
-      : process.platform === "win32"
-        ? resolve(
-            process.env.APPDATA || resolve(homedir(), "AppData", "Roaming"),
-            "Qoder",
-            "SharedClientCache",
-          )
-        : resolve(
-            process.env.XDG_CONFIG_HOME || resolve(homedir(), ".config"),
-            "Qoder",
-            "SharedClientCache",
-          );
-  return [
-    resolve(sharedClientCache, "mcp.json"),
-    resolve(sharedClientCache, "extension", "local", "mcp.json"),
-    resolve(qoderHome, "shared_client", "mcp.json"),
-    resolve(qoderHome, "shared_client", "extension", "local", "mcp.json"),
-  ];
+  return [resolveQoderIdeMcpPath()];
 }
 
 async function qoderIdeIsAvailable(): Promise<boolean> {
@@ -953,16 +918,6 @@ function qoderIdeExecutableCandidates(): string[] {
     "/usr/bin/qoder-ide",
     "/usr/share/qoder/bin/qoder",
   ];
-}
-
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return false;
-    throw error;
-  }
 }
 
 async function resolveQwenHome(): Promise<string> {
