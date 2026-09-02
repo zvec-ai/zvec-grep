@@ -27,9 +27,9 @@
   </p>
 </div>
 
-**zg**（**z**vec-**g**rep）将 ripgrep、BM25 与向量检索统一在一个
-[本地优先的检索入口](./docs/05-architecture.md)中。既可以由人在终端中搜索，
-也可以让 Agent 根据问题选择合适的本地检索方式。
+**zg**（**z**vec-**g**rep），由 [zvec](https://github.com/alibaba/zvec) 驱动，
+将 ripgrep、BM25 与向量检索统一在一个[本地优先的检索入口](./docs/05-architecture.md)中。
+既可以由人在终端中搜索，也可以让 Agent 根据问题选择合适的本地检索方式。
 
 <a id="tour"></a>
 

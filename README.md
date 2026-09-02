@@ -27,7 +27,8 @@
   </p>
 </div>
 
-**zg** (**z**vec-**g**rep) unifies ripgrep, BM25, and vector search behind
+**zg** (**z**vec-**g**rep), powered by [zvec](https://github.com/alibaba/zvec),
+unifies ripgrep, BM25, and vector search behind
 [one local-first interface](./docs/05-architecture.md). Use it directly from the
 terminal, or let your agent use it for you.
 
