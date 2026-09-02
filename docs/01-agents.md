@@ -21,11 +21,14 @@ managed-rg route.
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 | GitHub Copilot | `copilot` | `~/.copilot/mcp-config.json` and `~/.copilot/copilot-instructions.md` |
+| VS Code | `vscode` | the VS Code user profile `mcp.json` and `~/.copilot/instructions/zvec-grep.instructions.md` |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
 `QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`,
-`CURSOR_CONFIG_DIR`, and `COPILOT_HOME`.
+`CURSOR_CONFIG_DIR`, `COPILOT_HOME`, `VSCODE_PORTABLE`, and `VSCODE_APPDATA`.
+`VSCODE_USER_DIR` overrides the complete VS Code `User` profile directory, for
+a non-default profile, VS Code Insiders, or a VS Code derivative.
 
 The current Qoder CLI package exposes both `qoder` and `qodercli` commands, but
 the installer exposes only the canonical `qoder` target. One Qoder install
@@ -50,6 +53,7 @@ zg install --target claude --target cursor --yes
 zg install --target qwen --yes
 zg install --target qoder --yes
 zg install --target copilot --yes
+zg install --target vscode --yes
 zg install --target all --yes
 ```
 
@@ -137,11 +141,43 @@ truncate. Search guidance is written to
 reads as personal instructions across all repositories. Unrelated MCP servers
 and instructions in both files are preserved.
 
-Copilot CLI and the VS Code agent host both read this user-level
-`mcp-config.json`, so one install covers both. The Copilot cloud coding agent
-and Copilot code review use separate repository-level MCP configuration and are
-not configured by `zg install`; zvec-grep indexes a local workspace, so those
-hosted surfaces cannot reach it.
+Agent Host reads this same user-level `mcp-config.json` natively, so the
+`copilot` target also covers Agent Host sessions. It does not cover VS Code's
+own agent mode, which keeps its servers in `mcp.json` and forwards them to
+Agent Host; use the `vscode` target for that.
+
+The Copilot cloud coding agent and Copilot code review use separate
+repository-level MCP configuration and are not configured by `zg install`;
+zvec-grep indexes a local workspace, so those hosted surfaces cannot reach it.
+
+For VS Code, the installer manages the `mcp.json` of the default user profile,
+so the server is available across every workspace. The profile directory is
+resolved the way VS Code resolves it: `VSCODE_PORTABLE` selects
+`<portable>/user-data/User`, `VSCODE_APPDATA` selects `<appdata>/Code/User`,
+and otherwise it is `%APPDATA%\Code\User` on Windows,
+`~/Library/Application Support/Code/User` on macOS, and
+`${XDG_CONFIG_HOME:-~/.config}/Code/User` on Linux. Set `VSCODE_USER_DIR` to
+point at a different profile directory. Comments and unrelated servers in an
+existing `mcp.json` are preserved.
+
+`--mcp-transport stdio` writes a `type: "stdio"` entry and `--mcp-transport
+http` writes a `type: "http"` entry. VS Code validates server entries with
+`additionalProperties: false`, so the managed entry carries only fields from
+its stdio and HTTP schemas; there is no per-server timeout or tool allowlist to
+manage, and `--mcp-tool-timeout` does not apply. An HTTP token is referenced as
+`${env:NAME}` rather than `${input:NAME}`, which keeps the entry forwardable to
+Agent Host — VS Code does not forward servers that require interactive input.
+
+VS Code search guidance is written to
+`${COPILOT_HOME:-~/.copilot}/instructions/zvec-grep.instructions.md`, the
+harness-agnostic user instructions folder that VS Code, Agent Host, and Copilot
+CLI all read. The file carries an `applyTo: '**'` frontmatter header, which is
+what makes VS Code apply it automatically; the managed block sits below that
+header. Installing both `copilot` and `vscode` therefore leaves the same
+guidance in two files, because Copilot CLI applies
+`copilot-instructions.md` on every turn while a modular `.instructions.md` file
+is path-scoped. Uninstall removes the managed block and deletes the
+instructions file when nothing else remains in it.
 
 Restart the selected agent, or open a new session, after installation.
 
@@ -223,6 +259,7 @@ zg uninstall --target codex --yes
 zg uninstall --target qwen --yes
 zg uninstall --target qoder --yes
 zg uninstall --target copilot --yes
+zg uninstall --target vscode --yes
 zg uninstall --target all --yes
 ```
 

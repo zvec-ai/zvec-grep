@@ -114,6 +114,15 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
     install: installCopilotIntegration,
     uninstall: uninstallCopilotIntegration,
   },
+  {
+    id: "vscode",
+    aliases: ["vs-code", "code"],
+    label: "VS Code",
+    executables: ["code", "code-insiders"],
+    detect: vsCodeUserDirectoryIsAvailable,
+    install: installVsCodeIntegration,
+    uninstall: uninstallVsCodeIntegration,
+  },
 ];
 
 const ZVEC_GREP_CONFIG_START = "# ZVEC_GREP_START";
@@ -144,6 +153,14 @@ const QODER_IDE_MCP_DESCRIPTION = "Managed by zg install";
 // advertised toolset rather than pinning a tool list that `--mcp-toolset full`
 // would silently truncate.
 const COPILOT_MCP_TOOLS = ["*"];
+// VS Code applies a user instructions file automatically only when its
+// `applyTo` glob matches; `**` is the documented "always apply" pattern.
+const VSCODE_INSTRUCTIONS_FRONTMATTER = `---
+applyTo: '**'
+---
+`;
+const VSCODE_INSTRUCTIONS_FILE = "zvec-grep.instructions.md";
+const VSCODE_PRODUCT_DIRECTORY = "Code";
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
 export async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -564,6 +581,97 @@ async function uninstallCopilotIntegration(): Promise<InstallAgentResult> {
   return { files: [configPath, guidancePath] };
 }
 
+async function installVsCodeIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const configPath = resolveVsCodeMcpConfigPath();
+  const guidancePath = resolveVsCodeGuidancePath();
+
+  await updateJsoncMcpSettings({
+    path: configPath,
+    containerKey: "servers",
+    force: options.force,
+    label: "VS Code",
+    server: vsCodeMcpServer(options),
+    isManaged: isManagedJsonMcpServer,
+  });
+
+  // VS Code reads user instructions from the harness-agnostic
+  // `~/.copilot/instructions` folder, so the guidance needs the frontmatter
+  // header before the managed block rather than a bare markdown file.
+  if (!(await readTextFileIfExists(guidancePath)).trim()) {
+    await writeTextFileAtomic(guidancePath, VSCODE_INSTRUCTIONS_FRONTMATTER);
+  }
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: agentGuidanceBlock(),
+    force: true,
+  });
+
+  return { files: [configPath, guidancePath] };
+}
+
+async function uninstallVsCodeIntegration(): Promise<InstallAgentResult> {
+  const configPath = resolveVsCodeMcpConfigPath();
+  const guidancePath = resolveVsCodeGuidancePath();
+
+  await removeJsoncMcpSettings(
+    configPath,
+    "VS Code",
+    isManagedJsonMcpServer,
+    "servers",
+  );
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+  await removeVsCodeGuidanceFileIfEmpty(guidancePath);
+
+  return { files: [configPath, guidancePath] };
+}
+
+// VS Code validates `servers` entries with `additionalProperties: false`, so
+// this entry carries only fields from its stdio and http schemas. `${env:...}`
+// keeps the entry forwardable to Agent Host, which drops servers that need
+// interactive `${input:...}` values.
+function vsCodeMcpServer(
+  options: InstallAgentOptions,
+): Record<string, unknown> {
+  if (options.transport === "stdio") {
+    return {
+      type: "stdio",
+      command: "zg",
+      args: stdioArgs(options.mcpToolset),
+    };
+  }
+
+  return {
+    type: "http",
+    url: resolveServerUrl(),
+    ...(options.mcpTokenEnv
+      ? {
+          headers: {
+            Authorization: `Bearer \${env:${options.mcpTokenEnv}}`,
+          },
+        }
+      : {}),
+  };
+}
+
+async function removeVsCodeGuidanceFileIfEmpty(path: string): Promise<void> {
+  const remaining = await readTextFileIfExists(path);
+  if (!remaining.trim()) return;
+  if (remaining.trim() !== VSCODE_INSTRUCTIONS_FRONTMATTER.trim()) return;
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+}
+
 async function resolveInstallers(
   parsed: ParsedArgs,
   action: "install" | "uninstall",
@@ -933,6 +1041,59 @@ function resolveCopilotHome(): string {
   return resolve(process.env.COPILOT_HOME || resolve(homedir(), ".copilot"));
 }
 
+function resolveVsCodeUserDirectory(): string {
+  const configured = process.env.VSCODE_USER_DIR?.trim();
+  if (configured) return resolve(configured);
+
+  const portable = process.env.VSCODE_PORTABLE?.trim();
+  if (portable) return resolve(portable, "user-data", "User");
+
+  return resolve(
+    vsCodeApplicationDataDirectory(),
+    VSCODE_PRODUCT_DIRECTORY,
+    "User",
+  );
+}
+
+// Mirrors the user-data path VS Code itself resolves, so the managed entry
+// lands in the default profile rather than a guessed location.
+function vsCodeApplicationDataDirectory(): string {
+  const configured = process.env.VSCODE_APPDATA?.trim();
+  if (configured) return resolve(configured);
+
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA?.trim();
+    return appData
+      ? resolve(appData)
+      : resolve(homedir(), "AppData", "Roaming");
+  }
+  if (process.platform === "darwin") {
+    return resolve(homedir(), "Library", "Application Support");
+  }
+  const xdgConfigHome = process.env.XDG_CONFIG_HOME?.trim();
+  return xdgConfigHome ? resolve(xdgConfigHome) : resolve(homedir(), ".config");
+}
+
+function resolveVsCodeMcpConfigPath(): string {
+  return resolve(resolveVsCodeUserDirectory(), "mcp.json");
+}
+
+function resolveVsCodeGuidancePath(): string {
+  return resolve(
+    resolveCopilotHome(),
+    "instructions",
+    VSCODE_INSTRUCTIONS_FILE,
+  );
+}
+
+async function vsCodeUserDirectoryIsAvailable(): Promise<boolean> {
+  try {
+    return (await stat(resolveVsCodeUserDirectory())).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function resolveQoderHome(): string {
   return resolve(process.env.QODER_CONFIG_DIR || resolve(homedir(), ".qoder"));
 }
@@ -1058,7 +1219,7 @@ function resolveQwenHomeValue(value: string): string {
 
 async function installJsonMcpServer(options: {
   path: string;
-  containerKey: "mcp" | "mcpServers";
+  containerKey: McpContainerKey;
   server: Record<string, unknown>;
   force: boolean;
   label: string;
@@ -1093,7 +1254,7 @@ async function installJsonMcpServer(options: {
 
 async function uninstallJsonMcpServer(
   path: string,
-  containerKey: "mcp" | "mcpServers",
+  containerKey: McpContainerKey,
 ): Promise<void> {
   const existing = await readTextFileIfExists(path);
   if (!existing) return;
@@ -1114,6 +1275,11 @@ async function uninstallJsonMcpServer(
 }
 
 type JsonObject = Record<string, unknown>;
+
+// Hosts disagree on the object that holds MCP server entries: Codex/Claude/
+// Cursor/Qoder/Copilot use `mcpServers`, OpenCode uses `mcp`, VS Code uses
+// `servers`.
+type McpContainerKey = "mcp" | "mcpServers" | "servers";
 
 async function updateClaudeMcpConfig(options: {
   path: string;
@@ -1645,6 +1811,7 @@ type JsoncMcpSettingsOptions = {
   label: string;
   server: Record<string, unknown>;
   isManaged: (value: unknown) => boolean;
+  containerKey?: McpContainerKey;
 };
 
 async function assertQoderMcpSettingsReplaceable(
@@ -1672,12 +1839,13 @@ async function assertQoderMcpSettingsReplaceable(
 async function updateJsoncMcpSettings(
   options: JsoncMcpSettingsOptions,
 ): Promise<JsonObject> {
+  const containerKey = options.containerKey ?? "mcpServers";
   const existing = await readTextFileIfExists(options.path);
   let source = existing.trim() ? existing : "{}\n";
   const root = parseJsoncSettings(options.path, source, options.label);
-  validateMcpSettingsContainer(options.path, root);
+  validateMcpSettingsContainer(options.path, root, containerKey);
 
-  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
+  const mcpServers = isJsonObject(root[containerKey]) ? root[containerKey] : {};
   const current = mcpServers.zvec_grep;
   if (current !== undefined && !options.isManaged(current) && !options.force) {
     throw new Error(
@@ -1687,7 +1855,7 @@ async function updateJsoncMcpSettings(
 
   source = editJsonWithComments(
     source,
-    ["mcpServers", "zvec_grep"],
+    [containerKey, "zvec_grep"],
     options.server,
   );
   await writeTextFileAtomic(options.path, ensureTrailingNewline(source));
@@ -1698,26 +1866,27 @@ async function removeJsoncMcpSettings(
   path: string,
   label: string,
   isManaged: (value: unknown) => boolean,
+  containerKey: McpContainerKey = "mcpServers",
 ): Promise<void> {
   const existing = await readTextFileIfExists(path);
   if (!existing.trim()) return;
 
   let source = existing;
   const root = parseJsoncSettings(path, source, label);
-  validateMcpSettingsContainer(path, root);
-  const mcpServers = isJsonObject(root.mcpServers) ? root.mcpServers : {};
+  validateMcpSettingsContainer(path, root, containerKey);
+  const mcpServers = isJsonObject(root[containerKey]) ? root[containerKey] : {};
 
   if (isManaged(mcpServers.zvec_grep)) {
     source = hasJsoncComments(source)
       ? removeJsoncPropertyPreservingComments(source, [
-          "mcpServers",
+          containerKey,
           "zvec_grep",
         ])
       : editJsonWithComments(
           source,
           Object.keys(mcpServers).length === 1
-            ? ["mcpServers"]
-            : ["mcpServers", "zvec_grep"],
+            ? [containerKey]
+            : [containerKey, "zvec_grep"],
           undefined,
         );
   }
@@ -1742,9 +1911,13 @@ function parseJsoncSettings(
   return parsed;
 }
 
-function validateMcpSettingsContainer(path: string, root: JsonObject): void {
-  if (root.mcpServers !== undefined && !isJsonObject(root.mcpServers)) {
-    throw new Error(`Invalid mcpServers configuration in ${path}.`);
+function validateMcpSettingsContainer(
+  path: string,
+  root: JsonObject,
+  containerKey: McpContainerKey = "mcpServers",
+): void {
+  if (root[containerKey] !== undefined && !isJsonObject(root[containerKey])) {
+    throw new Error(`Invalid ${containerKey} configuration in ${path}.`);
   }
 }
 
