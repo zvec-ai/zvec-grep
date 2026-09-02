@@ -106,6 +106,14 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
     install: installQoderIntegration,
     uninstall: uninstallQoderIntegration,
   },
+  {
+    id: "copilot",
+    aliases: ["github-copilot", "copilot-cli"],
+    label: "GitHub Copilot",
+    executables: ["copilot"],
+    install: installCopilotIntegration,
+    uninstall: uninstallCopilotIntegration,
+  },
 ];
 
 const ZVEC_GREP_CONFIG_START = "# ZVEC_GREP_START";
@@ -131,6 +139,11 @@ const QODER_MCP_PERMISSIONS = QODER_MCP_PERMISSION_RULES.map(
 const QODER_CLI_MCP_DESCRIPTION = "Managed by zg install";
 const QODER_PERMISSION_OWNERSHIP_PREFIX = `${QODER_CLI_MCP_DESCRIPTION}; managed permissions=`;
 const QODER_IDE_MCP_DESCRIPTION = "Managed by zg install";
+// GitHub Copilot filters MCP tools client-side. zvec-grep already scopes what
+// the server exposes through `--mcp-toolset`, so the managed entry allows the
+// advertised toolset rather than pinning a tool list that `--mcp-toolset full`
+// would silently truncate.
+const COPILOT_MCP_TOOLS = ["*"];
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
 export async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -490,6 +503,65 @@ async function uninstallQoderIntegration(): Promise<InstallAgentResult> {
   });
 
   return { files: [settingsPath, ...ideMcpPaths, guidancePath] };
+}
+
+async function installCopilotIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const copilotHome = resolveCopilotHome();
+  const configPath = resolve(copilotHome, "mcp-config.json");
+  const guidancePath = resolve(copilotHome, "copilot-instructions.md");
+
+  await installJsonMcpServer({
+    path: configPath,
+    containerKey: "mcpServers",
+    server:
+      options.transport === "stdio"
+        ? {
+            type: "local",
+            command: "zg",
+            args: stdioArgs(options.mcpToolset),
+            tools: COPILOT_MCP_TOOLS,
+          }
+        : {
+            type: "http",
+            url: resolveServerUrl(),
+            ...(options.mcpTokenEnv
+              ? {
+                  headers: {
+                    Authorization: `Bearer \${${options.mcpTokenEnv}}`,
+                  },
+                }
+              : {}),
+            tools: COPILOT_MCP_TOOLS,
+          },
+    force: options.force,
+    label: "GitHub Copilot",
+  });
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: agentGuidanceBlock(),
+    force: true,
+  });
+
+  return { files: [configPath, guidancePath] };
+}
+
+async function uninstallCopilotIntegration(): Promise<InstallAgentResult> {
+  const copilotHome = resolveCopilotHome();
+  const configPath = resolve(copilotHome, "mcp-config.json");
+  const guidancePath = resolve(copilotHome, "copilot-instructions.md");
+
+  await uninstallJsonMcpServer(configPath, "mcpServers");
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+
+  return { files: [configPath, guidancePath] };
 }
 
 async function resolveInstallers(
@@ -855,6 +927,10 @@ function resolveCursorConfigPath(): string {
     process.env.CURSOR_CONFIG_DIR ?? resolve(homedir(), ".cursor"),
     "mcp.json",
   );
+}
+
+function resolveCopilotHome(): string {
+  return resolve(process.env.COPILOT_HOME || resolve(homedir(), ".copilot"));
 }
 
 function resolveQoderHome(): string {

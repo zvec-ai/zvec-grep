@@ -210,7 +210,7 @@ Embedding.
 
 | Guide | What you can do |
 | :--- | :--- |
-| [Agent integrations](./docs/01-agents.md) | Connect zg to Codex, Claude Code, Qwen Code, Qoder, Cursor, or OpenCode and verify that it works. |
+| [Agent integrations](./docs/01-agents.md) | Connect zg to Codex, Claude Code, Qwen Code, Qoder, Cursor, GitHub Copilot, or OpenCode and verify that it works. |
 | [CLI guide](./docs/02-cli.md) | Search, index, and manage your local workspaces from the terminal. |
 | [MCP guide](./docs/03-mcp.md) | Understand which zg tools your agent can use and how access is secured. |
 | [Retrieval pipeline](./docs/04-pipeline.md) | Choose what to index, keep it fresh, and get better search results. |

@@ -39,6 +39,7 @@ test("interactive installer marker follows the active agent", () => {
   assert.match(qwen[2], /○ OpenCode\s+not found/);
   assert.match(qwen[3], /○ Cursor\s+not found/);
   assert.match(qwen[4], /● Qwen Code\s+not found/);
+  assert.match(qwen[6], /○ GitHub Copilot\s+not found/);
   assert.match(codex.at(-1), /Use ↑↓ to move · Enter to select/);
   assert.doesNotMatch(codex.join("\n"), /Space|\[●\]/);
 });
@@ -1875,7 +1876,7 @@ test(
       assert.match(stdout, /Qoder/);
       assert.doesNotMatch(
         stdout,
-        /Claude Code|Codex|OpenCode|Cursor|Qwen Code/,
+        /Claude Code|Codex|OpenCode|Cursor|Qwen Code|GitHub Copilot/,
       );
       const { cli, ide } = await readQoderConfigs(qoderConfigDirectory);
       assert.equal(cli.mcpServers.zvec_grep.command, "zg");
@@ -1926,7 +1927,10 @@ test(
     );
 
     assert.match(stdout, /Qoder/);
-    assert.doesNotMatch(stdout, /Claude Code|Codex|OpenCode|Cursor|Qwen Code/);
+    assert.doesNotMatch(
+      stdout,
+      /Claude Code|Codex|OpenCode|Cursor|Qwen Code|GitHub Copilot/,
+    );
     const cli = JSON.parse(
       await readFile(join(qoderConfigDirectory, "settings.json"), "utf8"),
     );
@@ -2146,13 +2150,255 @@ test(
     );
 
     assert.match(stdout, /Qwen Code/);
-    assert.doesNotMatch(stdout, /Claude Code|Codex|OpenCode|Cursor/);
+    assert.doesNotMatch(
+      stdout,
+      /Claude Code|Codex|OpenCode|Cursor|GitHub Copilot/,
+    );
     const config = JSON.parse(
       await readFile(join(qwenHome, "settings.json"), "utf8"),
     );
     assert.equal(config.mcpServers.zvec_grep.command, "zg");
   },
 );
+
+test("GitHub Copilot installer manages a user-level stdio MCP server", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-copilot-"),
+  );
+  const copilotHome = join(temporaryDirectory, ".copilot");
+  const configPath = join(copilotHome, "mcp-config.json");
+  const guidancePath = join(copilotHome, "copilot-instructions.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(copilotHome, { recursive: true });
+  await writeFile(guidancePath, "# Existing Copilot instructions\n");
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          other: { type: "local", command: "npx", args: ["@other/server"] },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await installTarget("copilot", { COPILOT_HOME: copilotHome });
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.other, {
+    type: "local",
+    command: "npx",
+    args: ["@other/server"],
+  });
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    type: "local",
+    command: "zg",
+    args: ["server", "--stdio"],
+    tools: ["*"],
+  });
+
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.match(guidance, /^# Existing Copilot instructions$/m);
+  assert.match(guidance, /<!-- ZVEC_GREP_START -->/);
+  assert.match(guidance, /zvec_grep_search/);
+  assert.match(guidance, /^## zvec-grep$/m);
+
+  await installTarget("copilot", { COPILOT_HOME: copilotHome });
+  const repeated = await readFile(configPath, "utf8");
+  assert.equal(repeated, `${JSON.stringify(config, null, 2)}\n`);
+  assert.equal(await readFile(guidancePath, "utf8"), guidance);
+
+  await uninstallTarget("copilot", { COPILOT_HOME: copilotHome });
+  const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.mcpServers.zvec_grep, undefined);
+  assert.deepEqual(uninstalled.mcpServers.other, {
+    type: "local",
+    command: "npx",
+    args: ["@other/server"],
+  });
+  const remainingGuidance = await readFile(guidancePath, "utf8");
+  assert.match(remainingGuidance, /^# Existing Copilot instructions$/m);
+  assert.doesNotMatch(remainingGuidance, /ZVEC_GREP_START/);
+});
+
+test("GitHub Copilot installer writes an HTTP MCP entry", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-copilot-http-"),
+  );
+  const copilotHome = join(temporaryDirectory, ".copilot");
+  const configPath = join(copilotHome, "mcp-config.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("copilot", { COPILOT_HOME: copilotHome }, [
+    "--mcp-transport",
+    "http",
+    "--mcp-toolset",
+    "full",
+    "--mcp-token-env",
+    "ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    headers: {
+      Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
+    },
+    tools: ["*"],
+  });
+});
+
+test("GitHub Copilot installer records the selected MCP toolset", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-copilot-toolset-"),
+  );
+  const copilotHome = join(temporaryDirectory, ".copilot");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("copilot", { COPILOT_HOME: copilotHome }, [
+    "--mcp-toolset",
+    "full",
+  ]);
+
+  const config = JSON.parse(
+    await readFile(join(copilotHome, "mcp-config.json"), "utf8"),
+  );
+  assert.deepEqual(config.mcpServers.zvec_grep.args, [
+    "server",
+    "--stdio",
+    "--mcp-toolset",
+    "full",
+  ]);
+});
+
+test("GitHub Copilot installer requires --force to replace an unmanaged entry", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-copilot-force-"),
+  );
+  const copilotHome = join(temporaryDirectory, ".copilot");
+  const configPath = join(copilotHome, "mcp-config.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(copilotHome, { recursive: true });
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          zvec_grep: { type: "local", command: "custom-zvec", args: [] },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await assert.rejects(
+    () => installTarget("copilot", { COPILOT_HOME: copilotHome }),
+    /Existing unmanaged zvec_grep MCP server/,
+  );
+  const unchanged = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(unchanged.mcpServers.zvec_grep.command, "custom-zvec");
+
+  await installTarget("copilot", { COPILOT_HOME: copilotHome }, ["--force"]);
+  const replaced = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(replaced.mcpServers.zvec_grep.command, "zg");
+});
+
+test("GitHub Copilot uninstall preserves an unmanaged zvec_grep entry", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-copilot-unmanaged-"),
+  );
+  const copilotHome = join(temporaryDirectory, ".copilot");
+  const configPath = join(copilotHome, "mcp-config.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(copilotHome, { recursive: true });
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          zvec_grep: { type: "local", command: "custom-zvec", args: [] },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await uninstallTarget("copilot", { COPILOT_HOME: copilotHome });
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(config.mcpServers.zvec_grep.command, "custom-zvec");
+});
+
+test(
+  "auto target detects the GitHub Copilot CLI executable",
+  {
+    skip:
+      process.platform === "win32" ? "executable mode semantics differ" : false,
+  },
+  async (t) => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), "zvec-grep-install-auto-copilot-"),
+    );
+    const binaryDirectory = join(temporaryDirectory, "bin");
+    const copilotHome = join(temporaryDirectory, ".copilot");
+    t.after(async () => {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    });
+
+    await mkdir(binaryDirectory, { recursive: true });
+    const copilotExecutable = join(binaryDirectory, "copilot");
+    await writeFile(copilotExecutable, "#!/bin/sh\nexit 0\n");
+    await chmod(copilotExecutable, 0o755);
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [cliPath, "install", "--yes"],
+      {
+        env: {
+          ...process.env,
+          PATH: binaryDirectory,
+          HOME: temporaryDirectory,
+          USERPROFILE: temporaryDirectory,
+          COPILOT_HOME: copilotHome,
+          QODER_IDE_EXECUTABLE: join(temporaryDirectory, "missing-qoder-ide"),
+          ZVEC_GREP_INSTALL_SKIP_SERVER: "1",
+        },
+      },
+    );
+
+    assert.match(stdout, /GitHub Copilot/);
+    const config = JSON.parse(
+      await readFile(join(copilotHome, "mcp-config.json"), "utf8"),
+    );
+    assert.equal(config.mcpServers.zvec_grep.command, "zg");
+  },
+);
+
+test("install help documents the GitHub Copilot target", async () => {
+  const { stdout } = await execFileAsync(process.execPath, [
+    cliPath,
+    "help",
+    "install",
+  ]);
+  assert.match(stdout, /copilot/);
+});
 
 async function installCodex(codexHome, extraArgs = []) {
   await execFileAsync(

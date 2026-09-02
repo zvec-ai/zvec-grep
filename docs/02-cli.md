@@ -146,8 +146,8 @@ scripts.
 ## `zg install` and `zg uninstall`
 
 ```text
-zg install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
-zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+zg install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|all|auto] [--yes]
 ```
 
 `--target` is repeatable. `qoder` is the single Qoder target and configures

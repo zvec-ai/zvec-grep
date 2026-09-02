@@ -20,11 +20,12 @@ managed-rg route.
 | Qoder CLI and IDE | `qoder` | `~/.qoder/settings.json`, `~/.qoder/AGENTS.md`, and the IDE user-level `~/.qoder/mcp.json` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
+| GitHub Copilot | `copilot` | `~/.copilot/mcp-config.json` and `~/.copilot/copilot-instructions.md` |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
-`QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`, and
-`CURSOR_CONFIG_DIR`.
+`QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`,
+`CURSOR_CONFIG_DIR`, and `COPILOT_HOME`.
 
 The current Qoder CLI package exposes both `qoder` and `qodercli` commands, but
 the installer exposes only the canonical `qoder` target. One Qoder install
@@ -48,6 +49,7 @@ zg install --target codex --yes
 zg install --target claude --target cursor --yes
 zg install --target qwen --yes
 zg install --target qoder --yes
+zg install --target copilot --yes
 zg install --target all --yes
 ```
 
@@ -122,6 +124,24 @@ to a remote Embedding provider. In a headless session where Qoder cannot ask the
 user, the agent stops without granting access. Neither question tool should
 collect a token, API key, or password. Provider credentials remain separate
 from this data authorization.
+
+For GitHub Copilot, the installer manages the user-level MCP configuration at
+`${COPILOT_HOME:-~/.copilot}/mcp-config.json`. `--mcp-transport stdio` writes a
+`type: "local"` entry that launches `zg server --stdio`; `--mcp-transport http`
+writes a `type: "http"` entry pointing at the local server URL, with an optional
+`Authorization` header when `--mcp-token-env` is set. The managed entry sets
+`tools` to `["*"]` so the toolset selected by `--mcp-toolset` decides which
+tools Copilot sees, rather than pinning a list that `--mcp-toolset full` would
+truncate. Search guidance is written to
+`${COPILOT_HOME:-~/.copilot}/copilot-instructions.md`, which GitHub Copilot CLI
+reads as personal instructions across all repositories. Unrelated MCP servers
+and instructions in both files are preserved.
+
+Copilot CLI and the VS Code agent host both read this user-level
+`mcp-config.json`, so one install covers both. The Copilot cloud coding agent
+and Copilot code review use separate repository-level MCP configuration and are
+not configured by `zg install`; zvec-grep indexes a local workspace, so those
+hosted surfaces cannot reach it.
 
 Restart the selected agent, or open a new session, after installation.
 
@@ -202,6 +222,7 @@ Use the same target names to remove only zvec-grep-managed entries:
 zg uninstall --target codex --yes
 zg uninstall --target qwen --yes
 zg uninstall --target qoder --yes
+zg uninstall --target copilot --yes
 zg uninstall --target all --yes
 ```
 
