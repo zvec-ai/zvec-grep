@@ -20,7 +20,6 @@ export type WatchManagerOptions = {
   resumeCheckIntervalMs?: number;
   resumeThresholdMs?: number;
   platform?: NodeJS.Platform;
-  nodeVersion?: string;
   getRootPaths?: () => readonly RootPath[] | undefined;
 };
 
@@ -312,12 +311,7 @@ export class WatchManager {
     if (this.closed) {
       return;
     }
-    if (
-      requiresDirectoryWatchers(
-        this.options.platform ?? process.platform,
-        this.options.nodeVersion ?? process.versions.node,
-      )
-    ) {
+    if (requiresDirectoryWatchers(this.options.platform ?? process.platform)) {
       void this.watchDirectoryTree(this.options.root, factory);
       return;
     }
@@ -444,13 +438,10 @@ export class WatchManager {
   }
 }
 
-function requiresDirectoryWatchers(
-  platform: NodeJS.Platform,
-  nodeVersion: string,
-): boolean {
-  if (platform !== "linux") {
-    return false;
-  }
-  const [major, minor] = nodeVersion.split(".", 2).map(Number);
-  return major === 22 && minor === 0;
+// Linux always uses per-directory watchers. Node's recursive watcher is not
+// native on Linux: it walks the whole tree and registers an inotify watch for
+// every file and directory, ignoring index exclusions, which exhausts the
+// per-user fs.inotify.max_user_watches quota for the whole machine.
+function requiresDirectoryWatchers(platform: NodeJS.Platform): boolean {
+  return platform === "linux";
 }

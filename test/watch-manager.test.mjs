@@ -43,7 +43,7 @@ test("watch manager debounces file changes and reports overflow reconciliation",
   }
 });
 
-test("watch manager uses per-directory watchers on Linux Node 22.0", async () => {
+test("watch manager uses per-directory watchers on Linux", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-watch-fallback-"),
   );
@@ -57,7 +57,6 @@ test("watch manager uses per-directory watchers on Linux Node 22.0", async () =>
   const manager = new WatchManager({
     root,
     platform: "linux",
-    nodeVersion: "22.0.0",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
@@ -145,7 +144,6 @@ test("fallback watcher prunes ignored directories and restores newly included on
   const manager = new WatchManager({
     root,
     platform: "linux",
-    nodeVersion: "22.0.0",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
@@ -185,7 +183,6 @@ test("fallback watcher honors noIgnore when selecting directories", async () => 
   const manager = new WatchManager({
     root,
     platform: "linux",
-    nodeVersion: "22.0.0",
     reconcileIntervalMs: 0,
     getRootPaths: () => [
       { absolutePath: root, recursive: true, noIgnore: true },
@@ -229,7 +226,6 @@ test("fallback watcher mirrors scanner hidden-directory selection", async () => 
     const manager = new WatchManager({
       root,
       platform: "linux",
-      nodeVersion: "22.0.0",
       reconcileIntervalMs: 0,
       getRootPaths: () => [rootPath],
       watchFactory: (directory, options) => {
@@ -454,7 +450,6 @@ test("directory watcher retries are independent", async () => {
   const manager = new WatchManager({
     root,
     platform: "linux",
-    nodeVersion: "22.0.0",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
