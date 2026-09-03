@@ -101,7 +101,14 @@ function scanManagedRgCommand(command: string): string[] {
       continue;
     }
     if (character === "\\") {
-      escaping = true;
+      // Backslashes are path separators in Windows shells, rather than generic
+      // escape characters. Keep them so copied rg paths such as `src\\cli`
+      // continue to point at the intended directory.
+      if (process.platform === "win32") {
+        token += character;
+      } else {
+        escaping = true;
+      }
       tokenStarted = true;
       continue;
     }

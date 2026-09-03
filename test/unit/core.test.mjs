@@ -230,6 +230,19 @@ test("MCP rg command normalization preserves quoted patterns, paths, and globs",
 });
 
 test(
+  "MCP rg command normalization preserves unquoted Windows path separators",
+  { skip: process.platform !== "win32" },
+  () => {
+    const normalized = contextOptionsFromRgInput({
+      root: process.cwd(),
+      command: String.raw`rg needle src\cli`,
+    });
+
+    assert.deepEqual(normalized.rgPaths, [String.raw`src\cli`]);
+  },
+);
+
+test(
   "MCP rg command normalization rejects paths that escape through symlinks",
   { skip: process.platform === "win32" },
   async (t) => {
