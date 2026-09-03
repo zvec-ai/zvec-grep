@@ -75,6 +75,9 @@ curl --retry 3 --retry-all-errors --progress-bar -fL \
 zg index --embedding local/potion-retrieval-32m
 ```
 
+> [!NOTE]
+> 索引保存在被索引项目根目录的 `.zvec-grep/` 中。
+
 ### 2. 选择检索方式
 
 #### Agent：通过 OpenCode 提问

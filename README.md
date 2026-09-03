@@ -76,6 +76,9 @@ curl --retry 3 --retry-all-errors --progress-bar -fL \
 zg index --embedding local/potion-retrieval-32m
 ```
 
+> [!NOTE]
+> The index is stored in `.zvec-grep/` under the indexed project root.
+
 ### 2. Choose how to search
 
 #### For agents: ask with OpenCode
