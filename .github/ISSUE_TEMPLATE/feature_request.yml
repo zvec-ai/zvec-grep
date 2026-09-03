@@ -1,0 +1,61 @@
+name: Feature Request
+description: Suggest a new capability or an improvement to zvec-grep
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping shape zvec-grep. Describe the user problem first so we can evaluate the best solution and its scope.
+
+  - type: textarea
+    id: problem_or_motivation
+    attributes:
+      label: Problem or Motivation
+      description: What workflow, limitation, or use case should zvec-grep address? Who is affected?
+      placeholder: I need to search ... but currently ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like it to work? Commands, configuration examples, or interface sketches are welcome.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What workarounds or alternative designs have you tried or considered?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected Area
+      multiple: true
+      options:
+        - Installation or packaging
+        - Indexing or file extraction
+        - Search or retrieval
+        - Embedding models or providers
+        - CLI
+        - Agent or MCP integration
+        - Local server
+        - Benchmarks or evaluation
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add examples, links, screenshots, benchmark results, or other context that would help evaluate the request.
+    validations:
+      required: false
