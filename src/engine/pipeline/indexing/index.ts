@@ -719,6 +719,7 @@ async function indexFiles(
   );
   const embeddingTiming = new ConcurrentTiming(timings, "index_embedding");
   const runningEmbeddings = new Set<Promise<void>>();
+  let firstEmbeddingError: { error: unknown } | undefined;
   const prepareModel =
     ctx.embeddingModel.info.provider === "local"
       ? ctx.embeddingModel.prepare?.bind(ctx.embeddingModel)
@@ -730,8 +731,15 @@ async function indexFiles(
   ): void => {
     onProgress(currentStats, detail, embeddingScheduler.snapshot());
   };
+  const throwFirstEmbeddingError = (): void => {
+    const failure = firstEmbeddingError;
+    if (failure) {
+      throw failure.error;
+    }
+  };
 
   const flushBatch = async (): Promise<void> => {
+    throwFirstEmbeddingError();
     throwIfIndexCancelled(ctx);
     if (batchFiles.length === 0) {
       return;
@@ -756,6 +764,7 @@ async function indexFiles(
   const scheduleEmbeddingTask = async (
     task: () => Promise<void>,
   ): Promise<void> => {
+    throwFirstEmbeddingError();
     throwIfIndexCancelled(ctx);
     if (!modelPrepared && prepareModel) {
       // Finish shared initialization before any file or fragment batch is queued.
@@ -779,24 +788,36 @@ async function indexFiles(
       throwIfIndexCancelled(ctx);
     }
     modelPrepared = true;
-    const promise = task().finally(() => {
+    const cleanup = (): void => {
       runningEmbeddings.delete(promise);
-    });
+    };
+    const promise = Promise.resolve()
+      .then(task)
+      .then(cleanup, (error: unknown) => {
+        if (!firstEmbeddingError) {
+          firstEmbeddingError = { error };
+        }
+        cleanup();
+      });
 
     runningEmbeddings.add(promise);
 
     if (runningEmbeddings.size >= embeddingScheduler.taskConcurrency) {
       await Promise.race(runningEmbeddings);
     }
+    throwFirstEmbeddingError();
+    throwIfIndexCancelled(ctx);
   };
 
   try {
     for (const file of files) {
+      throwFirstEmbeddingError();
       throwIfIndexCancelled(ctx);
       onProgress(stats, `reading ${file.relativePath}`);
       const prepared = await timings.time("index_prepare", () =>
         prepareFile(file, ctx),
       );
+      throwFirstEmbeddingError();
       throwIfIndexCancelled(ctx);
 
       if ("failedReason" in prepared) {
@@ -849,6 +870,8 @@ async function indexFiles(
 
     await flushBatch();
     await Promise.all(runningEmbeddings);
+    throwFirstEmbeddingError();
+    throwIfIndexCancelled(ctx);
   } catch (error) {
     await Promise.allSettled(runningEmbeddings);
     throw error;

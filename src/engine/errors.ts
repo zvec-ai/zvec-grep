@@ -47,6 +47,27 @@ export function workspaceIndexDetail(name: string): ErrorDetailEntry {
   return detail("workspaceIndex", name);
 }
 
+export function redactErrorText(value: string, maxLength: number): string {
+  const redacted = value
+    .replace(
+      /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi,
+      "$1[redacted]@",
+    )
+    .replace(
+      /(["']?authorization["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\r\n]+)/gi,
+      "$1[redacted]",
+    )
+    .replace(/\b(Bearer|Basic)\s+[^\s"',;]+/gi, "$1 [redacted]")
+    .replace(
+      /(["']?(?:api[_ -]?key|(?:access[_ -]?|refresh[_ -]?|id[_ -]?)?token|authorization|password|secret)["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s&]+)/gi,
+      "$1[redacted]",
+    )
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/gi, "sk-[redacted]");
+  return redacted.length <= maxLength
+    ? redacted
+    : `${redacted.slice(0, maxLength - 1)}…`;
+}
+
 function formatDetailEntry(entry: ErrorDetailEntry): string | null {
   if (entry === null || entry === undefined) {
     return null;

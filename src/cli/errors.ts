@@ -1,4 +1,4 @@
-import { isEngineError } from "../engine/errors.js";
+import { isEngineError, redactErrorText } from "../engine/errors.js";
 import type { ColorMode } from "./types.js";
 
 export type ErrorPrintOptions = {
@@ -24,12 +24,14 @@ export function printError(
 
   if (isEngineError(error)) {
     console.error(
-      `${theme.error("Error:")} ${downloadFailure ?? error.message}`,
+      `${theme.error("Error:")} ${redactErrorText(downloadFailure ?? error.message, 512)}`,
     );
     console.error(`${theme.label("Code:")} ${error.code}`);
     if (error.context) {
       console.error(`${theme.label("Details:")}`);
-      for (const line of formatContextLines(error.context)) {
+      for (const line of formatContextLines(
+        redactErrorText(error.context, 4_096),
+      )) {
         console.error(`  ${line}`);
       }
     }
@@ -38,7 +40,7 @@ export function printError(
   }
 
   console.error(
-    `${theme.error("Error:")} ${error instanceof Error ? error.message : String(error)}`,
+    `${theme.error("Error:")} ${redactErrorText(error instanceof Error ? error.message : String(error), 512)}`,
   );
   printCause(error, theme);
 }
@@ -122,7 +124,7 @@ function parseKeyValuePairs(line: string): { key: string; value: string }[] {
 function printCause(error: unknown, theme: ErrorTheme): void {
   const cause = errorCauseMessage(error);
   if (cause) {
-    console.error(`${theme.label("Cause:")} ${cause}`);
+    console.error(`${theme.label("Cause:")} ${redactErrorText(cause, 512)}`);
   }
 }
 

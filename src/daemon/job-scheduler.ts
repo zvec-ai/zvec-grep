@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { redactErrorText } from "../engine/errors.js";
 import type { IndexProgress } from "../engine/types.js";
 import { DaemonError } from "./errors.js";
 import { rootIdentity, type DaemonLogger } from "./logger.js";
@@ -478,7 +479,7 @@ function jobError(
 ): IndexJobError {
   return {
     code: safeErrorCode(code) ?? "INDEX_FAILED",
-    message: redactAndTruncate(message, 512),
+    message: redactErrorText(message, 512),
     ...(context ? { context } : {}),
     ...(cause ? { cause } : {}),
   };
@@ -494,7 +495,7 @@ function errorProperty(
   }
   const value = error[property];
   return typeof value === "string" && value.trim().length > 0
-    ? redactAndTruncate(value, maxLength)
+    ? redactErrorText(value, maxLength)
     : undefined;
 }
 
@@ -519,7 +520,7 @@ function errorCause(error: unknown): string | undefined {
     cause = nestedCause(cause);
   }
   return summaries.length > 0
-    ? redactAndTruncate(summaries.join("; "), 512)
+    ? redactErrorText(summaries.join("; "), 512)
     : undefined;
 }
 
@@ -560,27 +561,6 @@ function errorCodeProperty(error: unknown): string | undefined {
 }
 
 function safeErrorCode(code: string): string | undefined {
-  const value = redactAndTruncate(code.trim(), 128);
+  const value = redactErrorText(code.trim(), 128);
   return /^[A-Z][A-Z0-9_.-]{0,127}$/.test(value) ? value : undefined;
-}
-
-function redactAndTruncate(value: string, maxLength: number): string {
-  const redacted = value
-    .replace(
-      /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi,
-      "$1[redacted]@",
-    )
-    .replace(
-      /(["']?authorization["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\r\n]+)/gi,
-      "$1[redacted]",
-    )
-    .replace(/\b(Bearer|Basic)\s+[^\s"',;]+/gi, "$1 [redacted]")
-    .replace(
-      /(["']?(?:api[_ -]?key|(?:access[_ -]?|refresh[_ -]?|id[_ -]?)?token|authorization|password|secret)["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s&]+)/gi,
-      "$1[redacted]",
-    )
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/gi, "sk-[redacted]");
-  return redacted.length <= maxLength
-    ? redacted
-    : `${redacted.slice(0, maxLength - 1)}…`;
 }

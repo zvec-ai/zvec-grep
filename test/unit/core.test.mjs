@@ -20,6 +20,7 @@ import {
   EngineError,
   errorDetails,
   isEngineError,
+  redactErrorText,
 } from "../../dist/engine/errors.js";
 import { makeEntityId } from "../../dist/engine/extraction/ids.js";
 import { detectFileType } from "../../dist/engine/file-type.js";
@@ -615,6 +616,10 @@ test("color, range, highlighting, and error helpers are deterministic", () => {
   });
   assert.equal(isEngineError(error), true);
   assert.equal(isEngineError(new Error("failed")), false);
+  assert.equal(
+    redactErrorText("fetch failed token=model-download-secret", 512),
+    "fetch failed token=[redacted]",
+  );
 });
 
 test("file, model, content, and entity helpers classify inputs", () => {

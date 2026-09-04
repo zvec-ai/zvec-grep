@@ -50,6 +50,28 @@ class SharedFailureEmbeddingModel extends FakeEmbeddingModel {
   }
 }
 
+class ImmediateAuthenticationFailureEmbeddingModel extends FakeEmbeddingModel {
+  calls = 0;
+
+  constructor() {
+    super();
+    this.info = {
+      ...this.info,
+      provider: "qwen",
+      defaultConcurrency: 4,
+      limits: { maxBatchSize: 1 },
+    };
+  }
+
+  async doEmbed() {
+    const call = ++this.calls;
+    throw new EngineError(`fixture authentication failure call=${call}`, {
+      code: "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR",
+      context: `status=401 providerCode=invalid_api_key call=${call}`,
+    });
+  }
+}
+
 class RecoveringRemoteEmbeddingModel extends FakeEmbeddingModel {
   calls = 0;
 
@@ -433,6 +455,50 @@ test("service fails fast on permanent remote authentication failures", async (t)
       error.code === "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR",
   );
   assert.equal(model.calls, 1);
+});
+
+test("service stops scheduling multi-file embedding batches after the first fatal rejection", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-fast-reject-multi-file-",
+    { cleanup: false },
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root, { recursive: true });
+  await Promise.all(
+    Array.from({ length: 20 }, (_, index) =>
+      writeFile(join(root, `file-${index}.txt`), `unique content ${index}\n`),
+    ),
+  );
+  const model = new ImmediateAuthenticationFailureEmbeddingModel();
+  const service = await createZvecGrep({ root, embeddingModel: model });
+  t.after(async () => {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const unhandledRejections = [];
+  const onUnhandledRejection = (reason) => unhandledRejections.push(reason);
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    await assert.rejects(
+      service.index({ embeddingConcurrency: 4 }),
+      (error) =>
+        error.code ===
+          "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR" &&
+        error.message === "fixture authentication failure call=1",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+
+  assert.ok(model.calls >= 1);
+  assert.ok(
+    model.calls <= 4,
+    `expected at most the active concurrency, received ${model.calls} calls`,
+  );
+  assert.deepEqual(unhandledRejections, []);
 });
 
 test("service stops after bounded remote retries without a failed-file pass", async (t) => {

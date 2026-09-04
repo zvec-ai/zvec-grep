@@ -1602,12 +1602,14 @@ test("model download summary does not mistake unrelated errors or fields for dow
 test("error formatter keeps direct and aggregated model download failures to one line by default", async () => {
   const downloadCode = "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DOWNLOAD_FAILED";
   const downloadContext =
-    "model=local/potion-code-16m-v2 url=https://huggingface.co/model/config.json";
+    "model=local/potion-code-16m-v2 url=https://huggingface.co/model/config.json token=model-download-secret";
   const cases = [
     new EngineError("Unable to download Model2vec model artifact", {
       code: downloadCode,
       context: downloadContext,
-      cause: new Error("HTTP 503 Service Unavailable"),
+      cause: new Error(
+        "HTTP 503 Service Unavailable token=model-download-secret",
+      ),
     }),
     new EngineError("Indexing completed with 1 failed file", {
       code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
@@ -1629,8 +1631,14 @@ test("error formatter keeps direct and aggregated model download failures to one
     assert.ok(debug.errors.includes(`Code: ${error.code}`));
     assert.ok(debug.errors.includes("Details:"));
     assert.match(debug.errors.join("\n"), /https:\/\/huggingface\.co/);
+    assert.match(debug.errors.join("\n"), /\[redacted\]/);
+    assert.doesNotMatch(debug.errors.join("\n"), /model-download-secret/);
     if (error.cause) {
-      assert.ok(debug.errors.includes("Cause: HTTP 503 Service Unavailable"));
+      assert.ok(
+        debug.errors.includes(
+          "Cause: HTTP 503 Service Unavailable token=[redacted]",
+        ),
+      );
     }
   }
 
