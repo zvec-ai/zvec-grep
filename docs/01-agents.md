@@ -10,7 +10,7 @@ server. After that, the agent can use indexed retrieval for workspace-grounded
 semantic discovery while keeping exact lookup on the appropriate native or
 managed-rg route.
 
-## Supported agents
+## Officially supported agents
 
 | Agent | Target | Managed configuration |
 | --- | --- | --- |
@@ -207,3 +207,22 @@ zg uninstall --target all --yes
 
 Restart the agent or open a new session to apply the change. Uninstalling an
 agent integration does not delete repository indexes or the npm package.
+
+## Community integrations
+
+**Pi**
+
+Pi is not currently configured by `zg install`. For Pi support, you can use the
+community extension [`pi-zvec-grep`](https://www.npmjs.com/package/pi-zvec-grep),
+which runs the local `zg` CLI directly inside Pi instead of using an MCP server.
+It provides `/zg-query`, `/zg-rg`, `/zg-status`, `/zg-index`, and
+`/zg-index-drop`.
+
+Install it with:
+
+```bash
+pi install npm:pi-zvec-grep
+```
+
+The extension is separate from the official MCP integrations above and is not
+managed by `zg install`.
