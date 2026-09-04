@@ -57,7 +57,10 @@ export function redactErrorText(value: string, maxLength: number): string {
       /(["']?authorization["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\r\n]+)/gi,
       "$1[redacted]",
     )
-    .replace(/\b(Bearer|Basic)\s+[^\s"',;]+/gi, "$1 [redacted]")
+    .replace(
+      /\b(Bearer|Basic)[^\S\r\n]+(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s"',;]+)/gi,
+      "$1 [redacted]",
+    )
     .replace(
       /(["']?(?:api[_ -]?key|(?:access[_ -]?|refresh[_ -]?|id[_ -]?)?token|authorization|password|secret)["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^\s&]+)/gi,
       "$1[redacted]",

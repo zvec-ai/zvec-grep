@@ -363,7 +363,7 @@ test("scheduler redacts credentials from failure context", async (t) => {
     reason: "manual",
     run: async () => {
       throw new EngineError(
-        "Indexing completed with 1 failed file secret=message-secret",
+        "Indexing completed with 1 failed file secret=message-secret Bearer \"message-bearer-secret\" status=401 Basic 'message-basic-secret'",
         {
           code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
           context: [
@@ -380,6 +380,8 @@ test("scheduler redacts credentials from failure context", async (t) => {
               authorization: 'Negotiate quoted-auth-start, quoted-auth-end"',
             }),
             "Basic standalone-basic-secret",
+            'Bearer "context-bearer-secret" status=403',
+            "Basic 'context-basic-secret' retryable=false",
             "id_token=id-secret refresh_token=refresh-secret",
             "downloadUrl=https://models.example/tokenizer.json?token=url-secret",
             "downloadUrl=https://user-secret:password-secret@models.example/tokenizer.json?access_token=access-secret&other=retained",
@@ -387,7 +389,7 @@ test("scheduler redacts credentials from failure context", async (t) => {
             "downloadUrl=custom.scheme+v1://scheme-user-secret@models.example/tokenizer.json",
           ].join("\n"),
           cause: new Error(
-            'fetch failed password="cause password secret" id_token=cause-id-secret',
+            'fetch failed password="cause password secret" id_token=cause-id-secret Bearer "cause-bearer-secret" causeCode=AUTH Basic \'cause-basic-secret\'',
           ),
         },
       );
@@ -399,9 +401,21 @@ test("scheduler redacts credentials from failure context", async (t) => {
   assert.match(result.error.context, /MODEL2VEC_DOWNLOAD_FAILED/);
   assert.match(result.error.context, /model=local\/potion-code-16m-v2/);
   assert.match(result.error.context, /\[redacted\]/);
+  assert.match(
+    result.error.message,
+    /Bearer \[redacted\] status=401 Basic \[redacted\]/,
+  );
+  assert.match(result.error.context, /Bearer \[redacted\]/);
+  assert.match(result.error.context, /Basic \[redacted\]/);
+  assert.match(result.error.context, /status=403/);
+  assert.match(result.error.context, /retryable=false/);
+  assert.match(
+    result.error.cause,
+    /Bearer \[redacted\] causeCode=AUTH Basic \[redacted\]/,
+  );
   assert.doesNotMatch(
     JSON.stringify(result.error),
-    /message-secret|bearer-secret|camel-secret|snake-secret|token-secret|json-secret|quoted-token-start|quoted-token-end|escaped-prefix|escaped-tail|single-prefix|single-tail|basic-secret|negotiate-secret|quoted-auth-start|quoted-auth-end|standalone-basic-secret|id-secret|refresh-secret|url-secret|user-secret|password-secret|access-secret|userinfo-secret|scheme-user-secret|cause password secret|cause-id-secret/,
+    /message-secret|message-bearer-secret|message-basic-secret|bearer-secret|camel-secret|snake-secret|token-secret|json-secret|quoted-token-start|quoted-token-end|escaped-prefix|escaped-tail|single-prefix|single-tail|basic-secret|negotiate-secret|quoted-auth-start|quoted-auth-end|standalone-basic-secret|context-bearer-secret|context-basic-secret|id-secret|refresh-secret|url-secret|user-secret|password-secret|access-secret|userinfo-secret|scheme-user-secret|cause password secret|cause-id-secret|cause-bearer-secret|cause-basic-secret/,
   );
   assert.match(result.error.context, /models\.example\/tokenizer\.json/);
   assert.match(result.error.context, /&other=retained/);
