@@ -260,7 +260,7 @@ export class RuntimeManager {
   }
 
   private touchRuntime(canonicalRoot: string): void {
-    const idleTtlMs = this.options.runtimeIdleTtlMs ?? 30 * 60_000;
+    const idleTtlMs = this.options.runtimeIdleTtlMs ?? 4 * 60 * 60_000;
     const existing = this.idleTimers.get(canonicalRoot);
     if (existing) clearTimeout(existing);
     if (idleTtlMs <= 0 || this.closed) {
