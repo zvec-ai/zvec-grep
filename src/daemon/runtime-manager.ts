@@ -7,12 +7,15 @@ import {
 } from "../engine/service/index.js";
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import { DaemonError } from "./errors.js";
+import { DEFAULT_WATCHER_IDLE_TIMEOUT_MS } from "./config.js";
 import type {
   EmbeddingModelLoadRequest,
   EmbeddingModelPool,
 } from "./model-pool.js";
 import { RootRuntime } from "./root-runtime.js";
 import { RootLeaseManager } from "./root-lease.js";
+
+const BUSY_RUNTIME_IDLE_RETRY_MS = 1_000;
 
 export type RuntimeManagerOptions = {
   modelPool: EmbeddingModelPool;
@@ -260,15 +263,20 @@ export class RuntimeManager {
   }
 
   private touchRuntime(canonicalRoot: string): void {
-    const idleTtlMs = this.options.runtimeIdleTtlMs ?? 4 * 60 * 60_000;
+    const idleTtlMs =
+      this.options.runtimeIdleTtlMs ?? DEFAULT_WATCHER_IDLE_TIMEOUT_MS;
+    this.scheduleIdleCheck(canonicalRoot, idleTtlMs);
+  }
+
+  private scheduleIdleCheck(canonicalRoot: string, delayMs: number): void {
     const existing = this.idleTimers.get(canonicalRoot);
     if (existing) clearTimeout(existing);
-    if (idleTtlMs <= 0 || this.closed) {
+    if (delayMs <= 0 || this.closed) {
       return;
     }
     const timer = setTimeout(
       () => void this.evictIfIdle(canonicalRoot),
-      idleTtlMs,
+      delayMs,
     );
     timer.unref?.();
     this.idleTimers.set(canonicalRoot, timer);
@@ -287,7 +295,12 @@ export class RuntimeManager {
       snapshot.writerPending ||
       snapshot.watcherPending
     ) {
-      this.touchRuntime(canonicalRoot);
+      const idleTtlMs =
+        this.options.runtimeIdleTtlMs ?? DEFAULT_WATCHER_IDLE_TIMEOUT_MS;
+      this.scheduleIdleCheck(
+        canonicalRoot,
+        Math.min(idleTtlMs, BUSY_RUNTIME_IDLE_RETRY_MS),
+      );
       return;
     }
     await this.evict(canonicalRoot);

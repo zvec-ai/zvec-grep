@@ -193,6 +193,31 @@ test("root runtime releases model leases when the read session closes", async ()
   await pool.close();
 });
 
+test("watcher pending state does not count as runtime activity", async () => {
+  const pool = new EmbeddingModelPool({
+    createModel: () => ({ dispose: async () => {} }),
+  });
+  let activities = 0;
+  const runtime = new RootRuntime({
+    canonicalRoot: "/tmp/repo",
+    modelPool: pool,
+    onActivity: () => {
+      activities += 1;
+    },
+  });
+
+  runtime.setWatcherPending(true);
+  assert.equal(runtime.snapshot().watcherPending, true);
+  runtime.setWatcherPending(false);
+  assert.equal(runtime.snapshot().watcherPending, false);
+  assert.equal(activities, 0);
+
+  runtime.recordWatcherActivity();
+  assert.equal(activities, 1);
+  await runtime.close();
+  await pool.close();
+});
+
 test("root runtime replaces a cached session when the embedding model changes", async () => {
   let modelLoads = 0;
   let sessionCloses = 0;

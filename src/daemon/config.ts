@@ -6,6 +6,11 @@ import { DaemonError } from "./errors.js";
 
 export const DEFAULT_SERVER_HOST = "127.0.0.1";
 export const DEFAULT_SERVER_PORT = 7_999;
+export const DEFAULT_WATCHER_IDLE_TIMEOUT_MS = 4 * 60 * 60_000;
+export const WATCHER_IDLE_TIMEOUT_SECONDS_ENV =
+  "ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS";
+
+const MAX_TIMER_DELAY_SECONDS = Math.floor(2_147_483_647 / 1_000);
 
 export type ServerListenAddress = {
   host: string;
@@ -34,6 +39,21 @@ export function configuredServerUrl(): string {
   const listen = configuredListenAddress();
   const host = listen.host.includes(":") ? `[${listen.host}]` : listen.host;
   return `http://${host}:${listen.port}/mcp`;
+}
+
+export function configuredWatcherIdleTimeoutMs(
+  environment: NodeJS.ProcessEnv = process.env,
+): number {
+  const configured = environment[WATCHER_IDLE_TIMEOUT_SECONDS_ENV]?.trim();
+  if (!configured) return DEFAULT_WATCHER_IDLE_TIMEOUT_MS;
+  if (!/^\d+$/.test(configured)) {
+    throw invalidWatcherIdleTimeout();
+  }
+  const seconds = Number(configured);
+  if (!Number.isSafeInteger(seconds) || seconds > MAX_TIMER_DELAY_SECONDS) {
+    throw invalidWatcherIdleTimeout();
+  }
+  return seconds * 1_000;
 }
 
 export function parseListenAddress(value?: string): ServerListenAddress {
@@ -124,4 +144,11 @@ function validateToken(token: string): void {
       "Server token must contain at least 32 characters.",
     );
   }
+}
+
+function invalidWatcherIdleTimeout(): DaemonError {
+  return new DaemonError(
+    "INVALID_WATCHER_IDLE_TIMEOUT",
+    `${WATCHER_IDLE_TIMEOUT_SECONDS_ENV} must be an integer between 0 and ${MAX_TIMER_DELAY_SECONDS}; 0 disables idle watcher eviction.`,
+  );
 }
