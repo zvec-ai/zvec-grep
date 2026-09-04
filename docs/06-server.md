@@ -99,6 +99,19 @@ zg server off
 zg server on --mcp-toolset full
 ```
 
+The Server releases a Workspace watcher and its lightweight runtime after four
+hours without a client request or a relevant file-system change. Periodic
+reconciliation does not extend this idle deadline. To select another timeout,
+set the number of seconds before starting or restarting the Server:
+
+```bash
+export ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS=7200
+zg server off
+zg server on
+```
+
+Set the value to `0` to keep activated watchers until the Server stops.
+
 ## Configure the mode
 
 Choose a mode for one command:

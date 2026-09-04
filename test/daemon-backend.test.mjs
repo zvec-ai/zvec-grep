@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { DaemonBackend } from "../dist/daemon/backend.js";
 import { inspectRoot } from "../dist/daemon/runtime-manager.js";
+import { WatchManager } from "../dist/daemon/watch-manager.js";
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
 
@@ -1814,6 +1816,54 @@ test("watch changes use the path-level index pipeline and advance revisions", as
     assert.equal(status.runtime.watcherActive, true);
     assert.equal(status.runtime.dirtyRevision, 2);
     assert.equal(status.runtime.indexedRevision, 2);
+    await waitFor(() => watcherCloses === 1);
+    assert.equal((await backend.serverStatus()).activeRuntimes, 0);
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("scheduled watcher reconciliation does not prevent idle eviction", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-watch-idle-reconcile-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new TestEmbeddingModel(),
+  });
+  await service.index();
+  await service.close();
+  let watcherCloses = 0;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
+    runtimeIdleTtlMs: 100,
+    watchManagerFactory: (options) =>
+      new WatchManager({
+        ...options,
+        debounceMs: 1,
+        maxWaitMs: 5,
+        reconcileIntervalMs: 20,
+        resumeCheckIntervalMs: 0,
+        watchFactory: () => {
+          const watcher = new EventEmitter();
+          watcher.close = () => {
+            watcherCloses += 1;
+          };
+          return watcher;
+        },
+      }),
+  });
+  try {
+    await backend.search({
+      ...searchInput(root, "answer", "eventual"),
+      autoUpdate: false,
+    });
+    assert.equal((await backend.serverStatus()).activeRuntimes, 1);
     await waitFor(() => watcherCloses === 1);
     assert.equal((await backend.serverStatus()).activeRuntimes, 0);
   } finally {

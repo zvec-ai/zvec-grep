@@ -14,7 +14,11 @@ import {
   resolveServerSearchPolicy,
 } from "../dist/client/search-policy.js";
 import { DaemonClient } from "../dist/client/daemon-client.js";
-import { parseListenAddress } from "../dist/daemon/config.js";
+import {
+  DEFAULT_WATCHER_IDLE_TIMEOUT_MS,
+  configuredWatcherIdleTimeoutMs,
+  parseListenAddress,
+} from "../dist/daemon/config.js";
 import { DaemonHttpServer } from "../dist/daemon/http-server.js";
 import { readInstanceRecord } from "../dist/daemon/server-controller.js";
 
@@ -33,6 +37,32 @@ test("server run parses a loopback listen address", () => {
     host: "127.0.0.1",
     port: 8123,
   });
+});
+
+test("watcher idle timeout uses a four-hour default and accepts seconds from the environment", () => {
+  assert.equal(configuredWatcherIdleTimeoutMs({}), 4 * 60 * 60_000);
+  assert.equal(
+    configuredWatcherIdleTimeoutMs({
+      ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS: "90",
+    }),
+    90_000,
+  );
+  assert.equal(
+    configuredWatcherIdleTimeoutMs({
+      ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS: "0",
+    }),
+    0,
+  );
+  assert.equal(DEFAULT_WATCHER_IDLE_TIMEOUT_MS, 4 * 60 * 60_000);
+  for (const value of ["-1", "1.5", "forever", "2147484"]) {
+    assert.throws(
+      () =>
+        configuredWatcherIdleTimeoutMs({
+          ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS: value,
+        }),
+      /must be an integer between 0 and 2147483/,
+    );
+  }
 });
 
 test("server lifecycle and client mode arguments are parsed", () => {

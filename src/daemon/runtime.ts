@@ -1,6 +1,10 @@
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import { DaemonBackend } from "./backend.js";
-import { configuredListenAddress, resolveServerToken } from "./config.js";
+import {
+  configuredListenAddress,
+  configuredWatcherIdleTimeoutMs,
+  resolveServerToken,
+} from "./config.js";
 import { DaemonHttpServer } from "./http-server.js";
 import { DaemonInstanceLock } from "./server-controller.js";
 import { createDaemonLogger } from "./logger.js";
@@ -31,6 +35,7 @@ export async function runDaemonForeground(
     options.mcpToolset,
     process.env[MCP_TOOLSET_ENV],
   );
+  const runtimeIdleTtlMs = configuredWatcherIdleTimeoutMs();
   const listen = configuredListenAddress(options.listen);
   const displayAddress = `http://${displayHost(listen.host)}:${listen.port}/mcp`;
   const instanceLock = await DaemonInstanceLock.acquire(
@@ -60,6 +65,7 @@ export async function runDaemonForeground(
   const backend = new DaemonBackend({
     version: options.version,
     serviceOptions: options.serviceOptions,
+    runtimeIdleTtlMs,
     logger,
   });
   let requestStop: (() => void) | undefined;
