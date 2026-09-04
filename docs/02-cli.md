@@ -222,6 +222,7 @@ refresh, authentication, and logs. See [MCP](./03-mcp.md) for the tool contract.
 | `ZVEC_GREP_SERVER_TOKEN` | Server/client Bearer token |
 | `ZVEC_GREP_SERVER_TOKEN_FILE` | File containing the server/client token |
 | `ZVEC_GREP_MCP_TOOLSET` | Default `agent` or `full` MCP surface |
+| `ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS` | Seconds of workspace inactivity before the server releases its watcher; default `14400`, `0` disables idle eviction |
 | `ZVEC_GREP_EMBEDDING` | Default model for new indexes |
 | `ZVEC_GREP_API_KEY` | Embedding provider API key |
 | `ZVEC_GREP_ENDPOINT` | Remote Embedding endpoint |

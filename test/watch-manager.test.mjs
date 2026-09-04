@@ -44,6 +44,48 @@ test("watch manager debounces file changes and reports overflow reconciliation",
   }
 });
 
+test("scheduled reconciliation does not count as watcher activity", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-watch-activity-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "a.ts"), "export const a = 1;\n");
+  let listener;
+  let activities = 0;
+  const reasons = [];
+  const watcher = new EventEmitter();
+  watcher.close = () => {};
+  const manager = new WatchManager({
+    root,
+    platform: "darwin",
+    debounceMs: 1,
+    maxWaitMs: 5,
+    reconcileIntervalMs: 10,
+    resumeCheckIntervalMs: 0,
+    watchFactory: (_root, _options, callback) => {
+      listener = callback;
+      return watcher;
+    },
+    onActivity: () => {
+      activities += 1;
+    },
+    onChanges: (_changes, reason) => reasons.push(reason),
+  });
+  try {
+    manager.start();
+    await waitFor(() => reasons.includes("reconcile"));
+    assert.equal(activities, 0);
+
+    listener("change", "a.ts");
+    await waitFor(() => activities === 1);
+    assert.equal(activities, 1);
+  } finally {
+    await manager.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("watch manager uses per-directory watchers on Linux", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-watch-fallback-"),

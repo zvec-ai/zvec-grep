@@ -278,12 +278,15 @@ export class RootRuntime {
     this.watcherActive = active;
   }
 
+  recordWatcherActivity(): void {
+    if (!this.closed) this.options.onActivity?.();
+  }
+
   setWatcherPending(pending: boolean): void {
     if (pending) {
       this.watcherEpoch += 1;
     }
     this.watcherPending = pending;
-    this.options.onActivity?.();
   }
 
   async withWrite<T>(operation: () => Promise<T>): Promise<T> {
