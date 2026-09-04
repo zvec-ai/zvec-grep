@@ -15,6 +15,61 @@ const noopWatchManagerFactory = () => ({
   close: async () => {},
 });
 
+test("daemon reports watcher active only after watch registration", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-watcher-active-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new TestEmbeddingModel(),
+  });
+  await service.index();
+  await service.close();
+  let watcherOptions;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
+    createService: (options) =>
+      createZvecGrep({
+        ...options,
+        embeddingModel: new TestEmbeddingModel(),
+      }),
+    watchManagerFactory: (options) => {
+      watcherOptions = options;
+      return {
+        start() {},
+        flushPending: async () => {},
+        close: async () => {},
+      };
+    },
+  });
+  try {
+    await backend.search(searchInput(root, "answer", "eventual"));
+    assert.equal(
+      (await backend.indexStatus({ root })).runtime.watcherActive,
+      false,
+    );
+
+    watcherOptions.onActiveChange(true);
+    assert.equal(
+      (await backend.indexStatus({ root })).runtime.watcherActive,
+      true,
+    );
+
+    watcherOptions.onActiveChange(false);
+    assert.equal(
+      (await backend.indexStatus({ root })).runtime.watcherActive,
+      false,
+    );
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("index releases its model lease when service creation fails", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-backend-"),
@@ -1780,7 +1835,9 @@ test("watch changes use the path-level index pipeline and advance revisions", as
     watchManagerFactory: (options) => {
       watcherOptions = options;
       return {
-        start() {},
+        start() {
+          options.onActiveChange(true);
+        },
         flushPending: async () => {},
         close: async () => {
           watcherCloses += 1;
