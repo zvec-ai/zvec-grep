@@ -1001,13 +1001,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         coordinator.enqueue(changes, reason);
       },
       onPendingChange: (pending) => runtime.setWatcherPending(pending),
+      onActiveChange: (active) => runtime.setWatcherActive(active),
       getRootPaths: () =>
         this.statusCache.get(runtime.canonicalRoot)?.workspaceIndex?.rootPaths,
     });
     watcher.start();
     this.indexCoordinators.set(runtime.canonicalRoot, coordinator);
     this.watchers.set(runtime.canonicalRoot, watcher);
-    runtime.setWatcherActive(true);
   }
 
   private async settleKnownChanges(runtime: RootRuntime): Promise<void> {
