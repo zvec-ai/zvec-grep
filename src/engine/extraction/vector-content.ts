@@ -97,9 +97,53 @@ function vectorMetadataText(
         ? `heading_level: ${metadata.level}`
         : null,
       metadata.scope ? `scope: ${metadata.scope}` : null,
+      ...markdownFrontMatterLines(metadata.frontMatter),
     ],
     maxChars,
   );
+}
+
+function markdownFrontMatterLines(
+  frontMatter: Extract<EntityMetadata, { kind: "markdown" }>["frontMatter"],
+): string[] {
+  if (!frontMatter) {
+    return [];
+  }
+
+  return Object.entries(frontMatter)
+    .map(([key, value], index) => ({
+      index,
+      priority: frontMatterPriority(key),
+      line: `${key}: ${oneLine(
+        typeof value === "string" ? value : value.join(", "),
+      )}`,
+    }))
+    .sort((left, right) =>
+      left.priority === right.priority
+        ? left.index - right.index
+        : left.priority - right.priority,
+    )
+    .map(({ line }) => line);
+}
+
+function frontMatterPriority(key: string): number {
+  if (key === "title") {
+    return 0;
+  }
+  if (key === "description" || key === "summary" || key === "abstract") {
+    return 1;
+  }
+  if (/(?:^|_)(?:name|names)$/.test(key)) {
+    return 2;
+  }
+  if (
+    /^(?:keywords?|tags?|topics?|categories|category|aliases?|authors?|languages?)$/.test(
+      key,
+    )
+  ) {
+    return 3;
+  }
+  return 4;
 }
 
 function metadataBudget(maxChars: number | undefined): number | undefined {

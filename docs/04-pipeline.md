@@ -85,11 +85,24 @@ participate in indexed search.
 | Structure-aware code | C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`), Go, Java, JavaScript/JSX, TypeScript/TSX, Python, Rust | `CodeExtractor` | Symbols, signatures, breadcrumbs, and surrounding source |
 | Component scripts | `.vue`, `.svelte` | `CodeExtractor` | JavaScript or TypeScript `<script>` blocks; plain-text fallback when no structure is found |
 | Other recognized code | Ruby, PHP, Swift, Kotlin, C#, Scala, shell, SQL, CSS/SCSS/Less, `Dockerfile`, `Makefile` | `CodeExtractor` | Plain-text chunks until a structural grammar is available |
-| Markdown | `.md`, `.mdx` | `MarkdownExtractor` | Heading sections and breadcrumbs; plain-text fallback for documents without headings |
+| Markdown | `.md`, `.mdx` | `MarkdownExtractor` | CommonMark/GFM block structure, heading sections and breadcrumbs, with block-aware chunks for documents without headings |
 | Text documents | `.txt`, `.rst`, `.html`, `.htm`, `.xml` | `TextExtractor` | Plain-text chunks |
 | Text data | `.csv`, `.json`, `.jsonc`, `.toml`, `.yaml`, `.yml` | `TextExtractor` | Plain-text chunks |
 | Other non-binary files | Unrecognized extensions that pass binary detection | `TextExtractor` | Plain-text chunks |
 | Raster images | `.gif`, `.jpeg`, `.jpg`, `.png`, `.webp` | `ImageExtractor` | Image content when explicitly included and the selected Embedding model accepts images |
+
+Markdown structure is parsed with CommonMark and GitHub Flavored Markdown block
+rules, including ATX and Setext headings, fenced code, HTML blocks, lists,
+blockquotes, and tables. Chunk boundaries prefer parsed block boundaries and do
+not treat heading-like text inside another block as a document section.
+
+An opening YAML front matter block closed by `---` or `...` is handled as the
+document envelope before Markdown section discovery and is excluded from stored
+chunks. Top-level scalar and scalar-list fields are normalized into a bounded
+`frontMatter` metadata map. High-signal fields such as titles, descriptions,
+names, and tags are prioritized in vector input without indexing the raw YAML
+preamble as document content. Nested YAML structures are intentionally omitted
+from indexed metadata.
 
 Raster images are excluded by the default discovery rules and must be selected
 explicitly. A text-only Embedding model cannot add image fragments to its
