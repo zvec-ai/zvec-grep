@@ -218,7 +218,7 @@ test("embedding reference resolver validates only a selected environment model",
       resolveEmbeddingReference({
         environment: { ZVEC_GREP_EMBEDDING: "unknown/model" },
       }),
-    /zg help models/,
+    /zg --help models/,
   );
   assert.equal(
     resolveEmbeddingReference({

@@ -5,38 +5,45 @@
 [Architecture](./05-architecture.md) · [Server](./06-server.md) ·
 [Embedding](./07-embedding.md) · [Roadmap](./08-roadmap.md)
 
-The `zg` command is the human and shell interface to the same local search
-layer used by agents. This page groups the main commands and options; use the
+The `zg` command is a search interface first. Positional arguments are always
+queries; maintenance operations use long action options so ordinary words such
+as `index`, `install`, and `status` never collide with commands. Use the
 installed CLI for version-specific help:
 
+To expose accidental use of the old command shape without making it an alias,
+a leading command-shaped word such as `query`, `index`, or `install` emits a
+warning on stderr and is still parsed as search input. Use `zg -- query` (or
+another literal word after `--`) to make that search intent explicit and
+suppress the warning.
+
 ```bash
-zg help
-zg help query
-zg help models
-zg help file-types
-zg help environment
-zg <command> --help
+zg --help
+zg --help search
+zg --help models
+zg --help file-types
+zg --help environment
+zg --index --help
 ```
 
-## Command overview
+## Interface overview
 
-| Command | Purpose |
+| Form | Purpose |
 | --- | --- |
-| `query` | Search an index or run managed ripgrep |
-| `index` | Build, update, rebuild, or drop a Workspace index |
-| `status` | Inspect Workspace and index state |
-| `install` / `uninstall` | Manage agent integrations |
-| `config` | Configure provider credentials and model defaults |
-| `auth` | Manage Remote Embedding authorization |
-| `server` | Manage the shared MCP server |
-| `help` / `version` | Show help or the installed version |
+| `zg <query>` | Search an index or run managed ripgrep |
+| `--index` | Build, update, rebuild, or drop a Workspace index |
+| `--status` | Inspect Workspace and index state |
+| `--install` / `--uninstall` | Manage agent integrations |
+| `--config` | Configure provider credentials and model defaults |
+| `--auth` | Manage Remote Embedding authorization |
+| `--server` | Manage the shared MCP server |
+| `--help` / `--version` | Show help or the installed version |
 
-## `zg query`
+## `zg`
 
 ```text
-zg query <query> [options]
-zg query --hybrid <query> --fts <query> --vector <query> [--fuse]
-zg query --rg [rg-options] <pattern> [path...]
+zg <query> [options]
+zg --hybrid <query> --fts <query> --vector <query> [--fuse]
+zg --rg [rg-options] <pattern> [path...]
 ```
 
 Search routes:
@@ -55,7 +62,7 @@ Result controls:
 | Option | Meaning |
 | --- | --- |
 | `--limit <n>` | Maximum returned items per group |
-| `--human` | Terminal-oriented output with full previews by default |
+| `--compact` | Force compact output intended for pipes |
 | `--preview none\|short\|full` | Indexed source preview size |
 | `--refresh background\|wait\|off` | Index refresh policy |
 | `--mode direct\|server\|auto` | Execution transport |
@@ -78,25 +85,30 @@ Common scope options for indexed search are `-g/--glob`, `--iglob`, `-t/--type`,
 and `-T/--type-not`. Managed rg additionally supports common ripgrep matching,
 context, discovery, encoding, and regex-engine flags.
 
+If no index exists, `zg` creates one with a local embedding model before the
+first indexed search. A configured local model is respected; a configured
+remote model is not used implicitly. Use `zg --index` when you want to choose a
+remote model, narrow the indexed paths, rebuild, or drop the index.
+
 Examples:
 
 ```bash
-zg query "theme preference persistence on startup"
-zg query --fts "loadTheme" -g "src/**" -t ts
-zg query --vector "where user preferences are restored" --limit 5
-zg query --human "plugin lifecycle" --preview full
-zg query --rg -i -C 2 -g "*.ts" "dark mode" src
+zg "theme preference persistence on startup"
+zg --fts "loadTheme" -g "src/**" -t ts
+zg --vector "where user preferences are restored" --limit 5
+zg "plugin lifecycle" --preview full
+zg --rg -i -C 2 -g "*.ts" "dark mode" src
 ```
 
 See [Retrieval pipeline](./04-pipeline.md#3-query-through-one-search-layer) for
 route selection and freshness behavior.
 
-## `zg index`
+## `zg --index`
 
 ```text
-zg index [root] [options]
-zg index [root] --rebuild [options]
-zg index [root] --drop [--yes]
+zg --index [root] [options]
+zg --index [root] --rebuild [options]
+zg --index [root] --drop [--yes]
 ```
 
 Core options:
@@ -126,16 +138,16 @@ File discovery accepts `-g/--glob`, `--iglob`, `-t/--type`, `-T/--type-not`,
 Examples:
 
 ```bash
-zg index --embedding local/potion-code-16m-v2
-zg index
-zg index --rebuild --embedding local/jina-embeddings-v2-base-code
-zg index --drop --yes
+zg --index --embedding local/potion-code-16m-v2
+zg --index
+zg --index --rebuild --embedding local/jina-embeddings-v2-base-code
+zg --index --drop --yes
 ```
 
-## `zg status`
+## `zg --status`
 
 ```text
-zg status [root] [--mode direct|server|auto] [--check-ready]
+zg --status [root] [--mode direct|server|auto] [--check-ready]
 ```
 
 Status includes the selected root, index policy, stored schema and paths, file
@@ -143,15 +155,15 @@ counts, refresh state, and a suggested next action. `--check-ready` preserves
 normal output and exits non-zero unless the index is ready, which is useful in
 scripts.
 
-## `zg install` and `zg uninstall`
+## `zg --install` and `zg --uninstall`
 
 ```text
-zg install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
-zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+zg --install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
 ```
 
 `--target` is repeatable. `qoder` is the single Qoder target and configures
-Qoder CLI and Qoder IDE together. `zg install` also accepts:
+Qoder CLI and Qoder IDE together. `zg --install` also accepts:
 
 | Option | Meaning |
 | --- | --- |
@@ -163,46 +175,46 @@ Qoder CLI and Qoder IDE together. `zg install` also accepts:
 
 See [Agent integrations](./01-agents.md) before using `--force`.
 
-## `zg config`
+## `zg --config`
 
 ```text
-zg config provider set <provider> --api-key <key>
-zg config model set <model> [--endpoint <url> | --device <device>] [--default]
+zg --config provider set <provider> --api-key <key>
+zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
 ```
 
 Examples:
 
 ```bash
-zg config provider set qwen --api-key "$DASHSCOPE_API_KEY"
-zg config model set qwen/text-embedding-v4 --default
-zg config model set local/potion-code-16m-v2 --device metal
+zg --config provider set qwen --api-key "$DASHSCOPE_API_KEY"
+zg --config model set qwen/text-embedding-v4 --default
+zg --config model set local/potion-code-16m-v2 --device metal
 ```
 
 Global configuration is stored in `~/.zvec-grep/config.json`. Existing indexes
 continue to use their stored model until explicitly rebuilt.
 
-## `zg auth`
+## `zg --auth`
 
 ```text
-zg auth grant [root] --capability embedding --scope workspace [--embedding <model>]
-zg auth status [root]
-zg auth revoke [root]
+zg --auth grant [root] --capability embedding --scope workspace [--embedding <model>]
+zg --auth status [root]
+zg --auth revoke [root]
 ```
 
 Workspace grants are stored under `.zvec-grep/authorization.json` and shared by
 the CLI and MCP server. `--allow-remote` is the non-persistent alternative for
-one `query` or `index` command. `--embedding` selects the Remote Embedding model
+one search or `--index` operation. `--embedding` selects the Remote Embedding model
 to authorize; it does not run embedding. It may be omitted when the model can be
 resolved from the existing Workspace index, `ZVEC_GREP_EMBEDDING`, or the global
 default, in that order.
 
-## `zg server`
+## `zg --server`
 
 ```text
-zg server on [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset agent|full]
-zg server off [--token-file <path>]
-zg server status [--check-ready]
-zg server run [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset agent|full]
+zg --server on [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset agent|full]
+zg --server off [--token-file <path>]
+zg --server status [--check-ready]
+zg --server run [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset agent|full]
 ```
 
 `on` starts the background daemon; `run` keeps it in the foreground. The server
@@ -229,18 +241,18 @@ refresh, authentication, and logs. See [MCP](./03-mcp.md) for the tool contract.
 | `ZVEC_GREP_DEVICE` | Local model device |
 | `DASHSCOPE_API_KEY` | Qwen API-key fallback after `ZVEC_GREP_API_KEY` |
 | `QWEN_API_KEY` | Qwen API-key fallback after `DASHSCOPE_API_KEY` |
-| `QWEN_HOME` | Qwen Code configuration directory used by `zg install` |
-| `QODER_CONFIG_DIR` | Qoder CLI configuration directory used by `zg install` |
-| `QODER_IDE_MCP_PATH` | Full Qoder IDE `mcp.json` path used by `zg install` |
+| `QWEN_HOME` | Qwen Code configuration directory used by `zg --install` |
+| `QODER_CONFIG_DIR` | Qoder CLI configuration directory used by `zg --install` |
+| `QODER_IDE_MCP_PATH` | Full Qoder IDE `mcp.json` path used by `zg --install` |
 | `QODER_IDE_EXECUTABLE` | Qoder IDE executable used for automatic install-target detection |
 
-Run `zg help environment` for advanced variables, agent integration paths,
+Run `zg --help environment` for advanced variables, agent integration paths,
 scope, and detailed precedence. A new index selects its model in this order:
-explicit `--embedding`, `ZVEC_GREP_EMBEDDING`, then the global default. Existing
-indexes continue to use their stored model unless `--embedding` and `--rebuild`
-explicitly change it.
+explicit `--embedding`, `ZVEC_GREP_EMBEDDING`, the global default, then the
+built-in local default. Existing indexes continue to use their stored model
+unless `--embedding` and `--rebuild` explicitly change it.
 
 Embedding runtime values such as endpoint and device retain this order: explicit
 command option, Workspace snapshot, global configuration, then environment.
-`zg index` forwards its `ZVEC_GREP_EMBEDDING` value in server and auto modes;
+`zg --index` forwards its `ZVEC_GREP_EMBEDDING` value in server and auto modes;
 direct MCP calls use the environment inherited when the daemon started.

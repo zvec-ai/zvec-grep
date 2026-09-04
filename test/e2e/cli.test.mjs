@@ -43,7 +43,7 @@ test("direct and server indexes report aggregate local model download progress",
   await assert.rejects(
     runCli(
       [
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--embedding",
@@ -67,20 +67,20 @@ test("direct and server indexes report aggregate local model download progress",
     ZVEC_GREP_MODEL_CACHE: serverCache,
   };
   t.after(async () => {
-    await runCli(["server", "off", "--home", home], {
+    await runCli(["--server", "off", "--home", home], {
       cwd: root,
       env: serverEnv,
     }).catch(() => undefined);
     await removeTemporaryDirectory(temporaryDirectory);
   });
   await runCli(
-    ["server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
     { cwd: root, env: serverEnv },
   );
   await assert.rejects(
     runCli(
       [
-        "index",
+        "--index",
         "--mode",
         "server",
         "--embedding",
@@ -126,7 +126,7 @@ test("direct-mode debug index reports a redacted local model download failure", 
   await assert.rejects(
     runCli(
       [
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--embedding",
@@ -186,21 +186,21 @@ test("server-mode debug index reports a redacted local model download failure", 
     ZVEC_GREP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
   };
   t.after(async () => {
-    await runCli(["server", "off", "--home", home], {
+    await runCli(["--server", "off", "--home", home], {
       cwd: root,
       env,
     }).catch(() => undefined);
     await removeTemporaryDirectory(temporaryDirectory);
   });
   await runCli(
-    ["server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
     { cwd: root, env },
   );
 
   await assert.rejects(
     runCli(
       [
-        "index",
+        "--index",
         "--mode",
         "server",
         "--embedding",
@@ -234,9 +234,16 @@ test("direct and server indexes summarize model download failures unless debuggi
     { cleanup: false },
   );
   const directRoot = join(temporaryDirectory, "direct-repo");
+  const implicitRoot = join(temporaryDirectory, "implicit-repo");
+  const implicitServerRoot = join(temporaryDirectory, "implicit-server-repo");
   const serverRoot = join(temporaryDirectory, "server-repo");
   const home = join(temporaryDirectory, "home");
-  for (const root of [directRoot, serverRoot]) {
+  for (const root of [
+    directRoot,
+    implicitRoot,
+    implicitServerRoot,
+    serverRoot,
+  ]) {
     await mkdir(root, { recursive: true });
     await writeFile(join(root, "README.md"), "# Model download failure\n");
   }
@@ -259,7 +266,7 @@ test("direct and server indexes summarize model download failures unless debuggi
     ZVEC_GREP_TEST_MODEL_DOWNLOAD_FAILURE: "1",
   };
   t.after(async () => {
-    await runCli(["server", "off", "--home", home], {
+    await runCli(["--server", "off", "--home", home], {
       env: clientEnv,
     }).catch(() => undefined);
     await removeTemporaryDirectory(temporaryDirectory);
@@ -299,11 +306,35 @@ test("direct and server indexes summarize model download failures unless debuggi
     }
     return true;
   };
+  const assertImplicitDownloadFailure = (debug) => (error) => {
+    assert.match(
+      error.stderr,
+      /No index found; creating one with local\/potion-code-16m-v2\./,
+    );
+    return assertDownloadFailure(debug)(error);
+  };
+  await runCli(
+    ["--config", "model", "set", "qwen/text-embedding-v4", "--default"],
+    { cwd: implicitRoot, env: clientEnv },
+  );
+  await assert.rejects(
+    runCli(
+      [
+        "implicit local index",
+        "--mode",
+        "direct",
+        "--model-cache",
+        join(temporaryDirectory, "implicit-models"),
+      ],
+      { cwd: implicitRoot, env: downloadEnv, timeout: 120_000 },
+    ),
+    assertImplicitDownloadFailure(false),
+  );
   for (const debug of [false, true]) {
     await assert.rejects(
       runCli(
         [
-          "index",
+          "--index",
           directRoot,
           "--mode",
           "direct",
@@ -320,7 +351,6 @@ test("direct and server indexes summarize model download failures unless debuggi
     await assert.rejects(
       runCli(
         [
-          "query",
           "model download failure",
           "--mode",
           "direct",
@@ -335,7 +365,13 @@ test("direct and server indexes summarize model download failures unless debuggi
       assertDownloadFailure(debug),
     );
     const directStatus = await runCli(
-      ["status", directRoot, "--mode", "direct", ...(debug ? ["--debug"] : [])],
+      [
+        "--status",
+        directRoot,
+        "--mode",
+        "direct",
+        ...(debug ? ["--debug"] : []),
+      ],
       { env: clientEnv },
     );
     assert.doesNotMatch(
@@ -345,7 +381,7 @@ test("direct and server indexes summarize model download failures unless debuggi
   }
 
   await runCli(
-    ["server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
     {
       env: {
         ...downloadEnv,
@@ -353,11 +389,19 @@ test("direct and server indexes summarize model download failures unless debuggi
       },
     },
   );
+  await assert.rejects(
+    runCli(["implicit server index", "--mode", "server"], {
+      cwd: implicitServerRoot,
+      env: clientEnv,
+      timeout: 120_000,
+    }),
+    assertImplicitDownloadFailure(false),
+  );
   for (const debug of [false, true]) {
     await assert.rejects(
       runCli(
         [
-          "index",
+          "--index",
           serverRoot,
           "--mode",
           "server",
@@ -370,11 +414,11 @@ test("direct and server indexes summarize model download failures unless debuggi
       assertDownloadFailure(debug),
     );
   }
-  const ready = await runCli(["server", "status", "--check-ready"], {
+  const ready = await runCli(["--server", "status", "--check-ready"], {
     env: clientEnv,
   });
   assert.match(ready.stdout, /Server: ready/);
-  const status = await runCli(["status", serverRoot, "--mode", "server"], {
+  const status = await runCli(["--status", serverRoot, "--mode", "server"], {
     env: clientEnv,
   });
   assert.match(status.stdout, /Workspace index failed/);
@@ -384,7 +428,7 @@ test("direct and server indexes summarize model download failures unless debuggi
   );
   assertConciseOutput(status.stdout);
   const debugStatus = await runCli(
-    ["status", serverRoot, "--mode", "server", "--debug"],
+    ["--status", serverRoot, "--mode", "server", "--debug"],
     { env: clientEnv },
   );
   assert.match(debugStatus.stdout, /Workspace index failed/);
@@ -429,19 +473,19 @@ test("server-mode index reports Workspace progress", async (t) => {
     })}\n`,
   );
   t.after(async () => {
-    await runCli(["server", "off", "--home", home], {
+    await runCli(["--server", "off", "--home", home], {
       cwd: root,
       env,
     }).catch(() => undefined);
     await removeTemporaryDirectory(temporaryDirectory);
   });
   await runCli(
-    ["server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
     { cwd: root, env },
   );
 
   const indexed = await runCli(
-    ["index", "--mode", "server", "--allow-remote", root],
+    ["--index", "--mode", "server", "--allow-remote", root],
     {
       cwd: root,
       env: {
@@ -457,7 +501,6 @@ test("server-mode index reports Workspace progress", async (t) => {
   assert.match(indexed.stderr, /Indexing complete/);
 
   const groupedQueryArgs = [
-    "query",
     "--vector",
     "missing-symbol",
     "--fts",
@@ -491,12 +534,12 @@ test("server-mode index reports Workspace progress", async (t) => {
     /group_coverage|global_fill|groups: Q/,
   );
 
-  const indexedStatus = await runCli(["status", "--mode", "server", root], {
+  const indexedStatus = await runCli(["--status", "--mode", "server", root], {
     cwd: root,
     env,
   });
   assert.match(indexedStatus.stdout, /qwen\/qwen3\.7-text-embedding/);
-  await runCli(["index", "--mode", "server", "--allow-remote", root], {
+  await runCli(["--index", "--mode", "server", "--allow-remote", root], {
     cwd: root,
     env: {
       ...env,
@@ -504,7 +547,7 @@ test("server-mode index reports Workspace progress", async (t) => {
     },
     timeout: 120_000,
   });
-  const reusedStatus = await runCli(["status", "--mode", "server", root], {
+  const reusedStatus = await runCli(["--status", "--mode", "server", root], {
     cwd: root,
     env,
   });
@@ -512,7 +555,7 @@ test("server-mode index reports Workspace progress", async (t) => {
   await assert.rejects(
     runCli(
       [
-        "index",
+        "--index",
         "--mode",
         "server",
         "--embedding",
@@ -526,7 +569,7 @@ test("server-mode index reports Workspace progress", async (t) => {
   );
   await runCli(
     [
-      "index",
+      "--index",
       "--mode",
       "server",
       "--embedding",
@@ -537,19 +580,19 @@ test("server-mode index reports Workspace progress", async (t) => {
     ],
     { cwd: root, env, timeout: 120_000 },
   );
-  const rebuiltStatus = await runCli(["status", "--mode", "server", root], {
+  const rebuiltStatus = await runCli(["--status", "--mode", "server", root], {
     cwd: root,
     env,
   });
   assert.match(rebuiltStatus.stdout, /qwen\/text-embedding-v4/);
 
   const dropped = await runCli(
-    ["index", "--drop", "--yes", "--mode", "server", root],
+    ["--index", "--drop", "--yes", "--mode", "server", root],
     { cwd: root, env },
   );
   assert.match(dropped.stdout, /Dropped index/);
 
-  const status = await runCli(["status", "--mode", "server", root], {
+  const status = await runCli(["--status", "--mode", "server", root], {
     cwd: root,
     env,
   });
@@ -587,7 +630,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
 
   const indexed = await runCli(
     [
-      "index",
+      "--index",
       "--api-key",
       "test-key",
       "--endpoint",
@@ -605,7 +648,6 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
 
   const first = await runCli(
     [
-      "query",
       "FirstWorkflowSymbol",
       "--allow-remote",
       "--limit",
@@ -619,20 +661,32 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   );
   assert.match(first.stdout, /example\.ts/);
 
+  const warnedOldQuery = await runCli(
+    [
+      "query",
+      "FirstWorkflowSymbol",
+      "--allow-remote",
+      "--limit",
+      "5",
+      "-g",
+      "src/**",
+      "-t",
+      "ts",
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(warnedOldQuery.stdout, /example\.ts/);
+  assert.match(
+    warnedOldQuery.stderr,
+    /warning: "zg query \.\.\." is not a subcommand/,
+  );
+
   await writeFile(
     join(root, "src", "example.ts"),
     "export const RefreshedWorkflowSymbol = 42;\nexport const OtherWorkflowSymbol = 43;\n",
   );
   const stale = await runCli(
-    [
-      "query",
-      "--mode",
-      "direct",
-      "--fts",
-      "RefreshedWorkflowSymbol",
-      "--limit",
-      "5",
-    ],
+    ["--mode", "direct", "--fts", "RefreshedWorkflowSymbol", "--limit", "5"],
     { cwd: root, env, timeout: 120_000 },
   );
   assert.match(stale.stdout, /hits: 0/);
@@ -641,7 +695,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(stale.stderr, /results: served_from_current_index/);
   assert.match(stale.stderr, /background_refresh: idle \(0\/1\)/);
   await assert.rejects(
-    runCli(["status", "--check-ready", root], { cwd: root, env }),
+    runCli(["--status", "--check-ready", root], { cwd: root, env }),
     (error) => {
       assert.match(error.stdout, /Workspace index needs an update/i);
       assert.match(error.stderr, /state: stale/i);
@@ -651,7 +705,6 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
 
   const background = await runCli(
     [
-      "query",
       "--mode",
       "direct",
       "--refresh",
@@ -669,7 +722,6 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
 
   const refreshed = await runCli(
     [
-      "query",
       "--fts",
       "RefreshedWorkflowSymbol",
       "--limit",
@@ -687,7 +739,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(refreshed.stdout, /RefreshedWorkflowSymbol/);
   assert.doesNotMatch(refreshed.stdout, /FirstWorkflowSymbol/);
 
-  const status = await runCli(["status", root], { cwd: root, env });
+  const status = await runCli(["--status", root], { cwd: root, env });
   assert.match(status.stdout, /Workspace index is ready/i);
   assert.match(status.stdout, /qwen\/qwen3\.7-text-embedding/);
   assert.match(status.stdout, /Coverage\s+.*100%\s+1 \/ 1 files/i);
@@ -695,7 +747,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(status.stdout, /type=ts/);
   const existingAuth = await runCli(
     [
-      "auth",
+      "--auth",
       "grant",
       root,
       "--capability",
@@ -714,7 +766,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   );
   assert.match(existingAuth.stdout, /qwen\/qwen3\.7-text-embedding/);
   assert.doesNotMatch(existingAuth.stdout, /qwen\/text-embedding-v4/);
-  const checkedStatus = await runCli(["status", "--check-ready", root], {
+  const checkedStatus = await runCli(["--status", "--check-ready", root], {
     cwd: root,
     env,
   });
@@ -724,7 +776,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
     join(root, "outside.ts"),
     "export const OutsideStoredFilterSymbol = 44;\n",
   );
-  const reindexed = await runCli(["index", root], {
+  const reindexed = await runCli(["--index", root], {
     cwd: root,
     env,
     timeout: 120_000,
@@ -732,14 +784,13 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(reindexed.stdout, /glob=src\/\*\*/);
   assert.match(reindexed.stdout, /type=ts/);
   const outside = await runCli(
-    ["query", "--fts", "OutsideStoredFilterSymbol", "--refresh", "off"],
+    ["--fts", "OutsideStoredFilterSymbol", "--refresh", "off"],
     { cwd: root, env },
   );
   assert.doesNotMatch(outside.stdout, /outside\.ts/);
 
   const lexical = await runCli(
     [
-      "query",
       "--rg",
       "-F",
       "-i",
@@ -757,14 +808,13 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   assert.match(lexical.stdout, /RefreshedWorkflowSymbol/);
 
   const inverted = await runCli(
-    ["query", "--rg", "-F", "-v", "RefreshedWorkflowSymbol", "src/example.ts"],
+    ["--rg", "-F", "-v", "RefreshedWorkflowSymbol", "src/example.ts"],
     { cwd: root, env },
   );
   assert.match(inverted.stdout, /OtherWorkflowSymbol/);
 
   const multiline = await runCli(
     [
-      "query",
       "--rg",
       "-F",
       "-U",
@@ -779,17 +829,17 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
 
   await writeFile(join(root, "patterns.txt"), "RefreshedWorkflowSymbol\n");
   const patternFile = await runCli(
-    ["query", "--rg", "-f", "patterns.txt", "-t", "ts", "src"],
+    ["--rg", "-f", "patterns.txt", "-t", "ts", "src"],
     { cwd: root, env },
   );
   assert.match(patternFile.stdout, /RefreshedWorkflowSymbol/);
 
-  const dropped = await runCli(["index", root, "--drop", "--yes"], {
+  const dropped = await runCli(["--index", root, "--drop", "--yes"], {
     cwd: root,
     env,
   });
   assert.match(dropped.stdout, /Dropped index/);
-  const droppedStatus = await runCli(["status", root], { cwd: root, env });
+  const droppedStatus = await runCli(["--status", root], { cwd: root, env });
   assert.match(droppedStatus.stdout, /Workspace index is not configured/i);
 });
 
@@ -819,7 +869,7 @@ test("auth grant uses the environment model before the global default", async (t
 
   const granted = await runCli(
     [
-      "auth",
+      "--auth",
       "grant",
       root,
       "--capability",
@@ -845,7 +895,7 @@ test("direct index points an empty workspace to file type help", async (t) => {
 
   const indexed = await runCli(
     [
-      "index",
+      "--index",
       "--mode",
       "direct",
       "--embedding",
@@ -864,19 +914,29 @@ test("direct index points an empty workspace to file type help", async (t) => {
   );
 
   assert.match(indexed.stdout, /0 scanned/);
-  assert.match(indexed.stdout, /zg help file-types/);
+  assert.match(indexed.stdout, /zg --help file-types/);
 });
 
 test("CLI exposes stable help, version, and failure behavior", async (t) => {
-  const help = await runCli(["help"]);
+  const help = await runCli(["--help"]);
   assert.match(help.stdout, /Usage:/);
-  assert.match(help.stdout, /zg help models or zg help file-types/);
-  assert.match(help.stdout, /zg help environment/);
+  assert.equal(help.stderr, "");
+  assert.match(help.stdout, /zg --help models or zg --help file-types/);
+  assert.match(help.stdout, /zg --help environment/);
   assert.match(help.stdout, /ZVEC_GREP_MODE/);
-  const helpTopics = await runCli(["help", "help"]);
+  const oldQueryShape = await runCli(["query", "--help"]);
+  assert.match(oldQueryShape.stdout, /zg <query> \[options\]/);
+  assert.match(
+    oldQueryShape.stderr,
+    /warning: "zg query \.\.\." is not a subcommand/,
+  );
+  const oldIndexShape = await runCli(["index", "--help"]);
+  assert.match(oldIndexShape.stdout, /zg <query> \[options\]/);
+  assert.match(oldIndexShape.stderr, /Use "zg --index \.\.\."/);
+  const helpTopics = await runCli(["--help", "help"]);
   assert.match(helpTopics.stdout, /models\s+Supported embedding models/);
   assert.match(helpTopics.stdout, /file-types\s+Supported file types/);
-  const modelsHelp = await runCli(["help", "models"]);
+  const modelsHelp = await runCli(["--help", "models"]);
   assert.match(modelsHelp.stdout, /local\/potion-code-16m-v2/);
   assert.match(modelsHelp.stdout, /local\/potion-retrieval-32m/);
   assert.match(modelsHelp.stdout, /local\/potion-multilingual-128m/);
@@ -884,7 +944,7 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
   assert.match(modelsHelp.stdout, /qwen\/qwen3-vl-embedding/);
   assert.match(modelsHelp.stdout, /Local models are downloaded/);
   assert.match(modelsHelp.stdout, /Workspace authorization/);
-  const fileTypesHelp = await runCli(["help", "file-types"]);
+  const fileTypesHelp = await runCli(["--help", "file-types"]);
   assert.match(fileTypesHelp.stdout, /Structured code \(symbols and scopes\)/);
   assert.match(fileTypesHelp.stdout, /typescript\s+\.ts/);
   assert.match(fileTypesHelp.stdout, /Other code \(plain-text chunks\)/);
@@ -897,21 +957,21 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
   assert.match(fileTypesHelp.stdout, /\.pdf/);
   assert.match(fileTypesHelp.stdout, /Code\s+1 MiB/);
   assert.match(fileTypesHelp.stdout, /Text\s+256 MiB/);
-  const indexHelp = await runCli(["index", "-h"]);
+  const indexHelp = await runCli(["--index", "-h"]);
   assert.match(indexHelp.stdout, /qwen\/text-embedding-v4/);
   assert.doesNotMatch(indexHelp.stdout, /qwen3\.7-text-embedding/);
   assert.match(indexHelp.stdout, /ZVEC_GREP_EMBEDDING/);
-  const configHelp = await runCli(["config", "--help"]);
+  const configHelp = await runCli(["--config", "--help"]);
   assert.match(configHelp.stdout, /Default API key for the provider/);
   assert.match(configHelp.stdout, /Existing indexes continue to use/);
-  const authHelp = await runCli(["auth", "--help"]);
+  const authHelp = await runCli(["--auth", "--help"]);
   assert.match(
     authHelp.stdout,
     /selects the Remote Embedding model to authorize/,
   );
   assert.match(authHelp.stdout, /existing Workspace index model/);
   assert.match(authHelp.stdout, /ZVEC_GREP_EMBEDDING, then the global default/);
-  const environmentHelp = await runCli(["help", "environment"], {
+  const environmentHelp = await runCli(["--help", "environment"], {
     env: {
       ...process.env,
       ZVEC_GREP_API_KEY: "environment-help-secret",
@@ -928,23 +988,23 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
   assert.match(environmentHelp.stdout, /forwards its ZVEC_GREP_EMBEDDING/);
   assert.doesNotMatch(environmentHelp.stdout, /environment-help-secret/);
   assert.doesNotMatch(environmentHelp.stdout, /server-help-secret/);
-  const environmentAliasHelp = await runCli(["help", "env"]);
+  const environmentAliasHelp = await runCli(["--help", "env"]);
   assert.equal(environmentAliasHelp.stdout, environmentHelp.stdout);
-  const version = await runCli(["version"]);
+  const version = await runCli(["--version"]);
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+/);
-  const verboseVersion = await runCli(["version", "-v"]);
+  const verboseVersion = await runCli(["-v"]);
   assert.equal(verboseVersion.stdout, version.stdout);
   await assert.rejects(runCli(["--definitely-invalid"]), (error) => {
     assert.equal(error.code, 1);
-    assert.match(error.stderr, /Unknown command/);
+    assert.match(error.stderr, /Unknown option/);
     return true;
   });
   await assert.rejects(
-    runCli(["index", "--embedding", "unknown/model"]),
+    runCli(["--index", "--embedding", "unknown/model"]),
     (error) => {
       assert.equal(error.code, 1);
       assert.match(error.stderr, /Unsupported embedding model: unknown\/model/);
-      assert.match(error.stderr, /zg help models/);
+      assert.match(error.stderr, /zg --help models/);
       return true;
     },
   );
@@ -953,7 +1013,7 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
     "zvec-grep-invalid-embedding-environment-",
   );
   await assert.rejects(
-    runCli(["index", invalidEnvironmentRoot, "--mode", "direct"], {
+    runCli(["--index", invalidEnvironmentRoot, "--mode", "direct"], {
       cwd: invalidEnvironmentRoot,
       env: { ZVEC_GREP_EMBEDDING: "unknown/model" },
     }),
@@ -962,11 +1022,10 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
         error.stderr,
         /Invalid ZVEC_GREP_EMBEDDING: unsupported model unknown\/model/,
       );
-      assert.match(error.stderr, /zg help models/);
+      assert.match(error.stderr, /zg --help models/);
       return true;
     },
   );
-  await assert.rejects(runCli(["collections"]), /Unknown command/);
 });
 
 async function availablePort() {

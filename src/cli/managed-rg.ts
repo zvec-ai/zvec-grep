@@ -272,7 +272,7 @@ export function parseManagedRgCommand(
   );
   const argv = normalizedCommand.argv;
   validateManagedRgTokens(argv);
-  const parsed = parseArgs(["query", "--rg", ...argv.slice(1)]);
+  const parsed = parseArgs(["--rg", ...argv.slice(1)]);
   assertOnlyManagedRgOptions(parsed.options);
   const normalized = normalizeManagedRgInput(parsed);
   normalized.queries = normalized.queries

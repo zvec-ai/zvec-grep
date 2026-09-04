@@ -44,9 +44,9 @@ release.
 The CLI remains the source of truth for flags in the installed version:
 
 ```bash
-zg help
-zg help query
-zg help index
+zg --help
+zg --help search
+zg --help index
 ```
 
 For development setup and pull request conventions, see

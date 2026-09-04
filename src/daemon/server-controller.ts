@@ -196,7 +196,7 @@ export async function startServer(options: {
       current.mcpToolset !== requestedToolset
     ) {
       throw new Error(
-        `zvec-grep server is already running with MCP toolset "${current.mcpToolset}". Run \`zg server off\`, then restart it with \`zg server on --mcp-toolset ${requestedToolset}\`.`,
+        `zvec-grep server is already running with MCP toolset "${current.mcpToolset}". Run \`zg --server off\`, then restart it with \`zg --server on --mcp-toolset ${requestedToolset}\`.`,
       );
     }
     if (current.ready) return current;
@@ -212,7 +212,7 @@ export async function startServer(options: {
     }
     throw error;
   }
-  const args = [LIFTOFF_ONLY_FLAG, options.cliPath, "server", "run"];
+  const args = [LIFTOFF_ONLY_FLAG, options.cliPath, "--server", "run"];
   args.push("--mcp-toolset", requestedToolset);
   if (options.listen) args.push("--listen", options.listen);
   if (options.tokenFile) args.push("--token-file", options.tokenFile);

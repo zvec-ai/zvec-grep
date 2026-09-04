@@ -170,7 +170,7 @@ export function printRemoteEmbeddingAuthorizationStatus(
     console.log("");
     console.log(theme.accent("Run"));
     console.log(
-      `  ${theme.path("zg auth grant --capability embedding --scope workspace")}`,
+      `  ${theme.path("zg --auth grant --capability embedding --scope workspace")}`,
     );
     return;
   }
@@ -223,7 +223,7 @@ export function printWorkspaceInfo(
   const status = info.status ?? undefined;
   const completion = indexCompletionFromStatus(status);
   const suggestion =
-    status && statusNeedsRefresh(status) ? "zg index" : info.suggestion;
+    status && statusNeedsRefresh(status) ? "zg --index" : info.suggestion;
 
   const state = workspaceState(info);
   printWorkspaceIndexStatus(theme, {
@@ -253,7 +253,7 @@ export function printWorkspaceInfo(
       : undefined,
     suggestion,
     failedReasons: status
-      ? summarizeFailedFileReasons(status.failedFiles, "zg index")
+      ? summarizeFailedFileReasons(status.failedFiles, "zg --index")
       : undefined,
   });
   return state;
@@ -726,7 +726,7 @@ export function printNoIndexableFilesTip(options: CliOptions): void {
     theme,
     "tip",
     theme.warning(
-      "No indexable files were found. Run `zg help file-types` to review supported file types and indexing rules.",
+      "No indexable files were found. Run `zg --help file-types` to review supported file types and indexing rules.",
     ),
   );
 }

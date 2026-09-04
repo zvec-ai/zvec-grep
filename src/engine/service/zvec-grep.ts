@@ -234,7 +234,7 @@ class ZvecGrepService implements ZvecGrep {
                 existing,
                 existingRuntime,
                 effectiveRuntime,
-                "zg index --endpoint <url> --rebuild",
+                "zg --index --endpoint <url> --rebuild",
               );
             }
             const rootPaths = resolveIndexRootPaths(
@@ -266,7 +266,7 @@ class ZvecGrepService implements ZvecGrep {
               assertWorkspaceEmbeddingMatchesCurrentModel(
                 existingAfterRebuild,
                 embeddingModel,
-                "zg index --rebuild",
+                "zg --index --rebuild",
               );
             }
 
@@ -459,7 +459,7 @@ class ZvecGrepService implements ZvecGrep {
         home: location.home,
         indexPath: location.indexPath,
         source: "unindexed",
-        suggestion: "zg index or zg query --rg",
+        suggestion: "zg --index or zg --rg",
       };
     }
 
@@ -593,12 +593,12 @@ class ZvecGrepService implements ZvecGrep {
               embeddingModel,
               workspaceRuntime,
             ),
-            "zg index --endpoint <url> --rebuild",
+            "zg --index --endpoint <url> --rebuild",
           );
           assertWorkspaceEmbeddingMatchesCurrentModel(
             existing,
             embeddingModel,
-            "zg index --rebuild",
+            "zg --index --rebuild",
           );
 
           const workspaceIndex = new WorkspaceIndex(existing, {
@@ -905,7 +905,7 @@ class ZvecGrepService implements ZvecGrep {
           detail("operation", operation),
           detail(
             "hint",
-            `Pass "--embedding <model>", set ZVEC_GREP_EMBEDDING, or configure defaults.embedding in ${globalConfigPath()}. Existing indexes can run "zg index" without --embedding to reuse the stored schema.`,
+            `Pass "--embedding <model>", set ZVEC_GREP_EMBEDDING, or configure defaults.embedding in ${globalConfigPath()}. Existing indexes can run "zg --index" without --embedding to reuse the stored schema.`,
           ),
           detail(
             "examples",
@@ -1124,15 +1124,15 @@ function workspaceInfoSuggestion(
   workspaceIndex: WorkspaceIndexInfo | null,
 ): string | undefined {
   if (!workspaceIndex) {
-    return "zg index or zg query --rg";
+    return "zg --index or zg --rg";
   }
 
   if (workspaceIndex.indexPolicy === "disabled") {
-    return "zg query --rg";
+    return "zg --rg";
   }
 
   if (!isWorkspaceIndexed(workspaceIndex)) {
-    return "zg index";
+    return "zg --index";
   }
 
   return undefined;
@@ -1150,14 +1150,14 @@ function workspaceIndexMissingError(
       detail(
         "hint",
         policy === "undecided"
-          ? "Ask the user whether to build an index with zg index, or use zg query --rg for no-index search."
-          : "Run zg index to build the enabled workspace index, or use zg query --rg for no-index search.",
+          ? "Ask the user whether to build an index with zg --index, or use zg --rg for no-index search."
+          : "Run zg --index to build the enabled workspace index, or use zg --rg for no-index search.",
       ),
       detail(
         "agent_prompt",
         policy === "undecided"
-          ? "Ask the user whether this workspace should be indexed. If yes, run zg index --embedding <model> with appropriate -g/--glob and -t/--type filters; otherwise use zg query --rg for immediate no-index search."
-          : "This workspace is marked index-enabled but has no built index. Ask before running zg index if an embedding model or cost is involved; otherwise use zg query --rg for immediate no-index search.",
+          ? "Ask the user whether this workspace should be indexed. If yes, run zg --index --embedding <model> with appropriate -g/--glob and -t/--type filters; otherwise use zg --rg for immediate no-index search."
+          : "This workspace is marked index-enabled but has no built index. Ask before running zg --index if an embedding model or cost is involved; otherwise use zg --rg for immediate no-index search.",
       ),
     ]),
   });
@@ -1171,7 +1171,7 @@ function workspaceIndexDisabledError(root: string): EngineError {
       detail("policy", "disabled"),
       detail(
         "hint",
-        "Use zg query --rg for no-index search. Run zg index only if the user explicitly decides to index this workspace.",
+        "Use zg --rg for no-index search. Run zg --index only if the user explicitly decides to index this workspace.",
       ),
       detail("agent_action", "do_not_build_index"),
     ]),
@@ -1395,7 +1395,7 @@ function indexedEmbeddingSchema(
     code: "ZVEC_GREP.ENGINE.SERVICE.INDEX_MISSING",
     context: errorDetails([
       workspaceIndexDetail(info.name),
-      detail("hint", "Run zg index to build this index."),
+      detail("hint", "Run zg --index to build this index."),
     ]),
   });
 }
@@ -1612,7 +1612,7 @@ function assertSearchEndpointMatchesWorkspace(
         workspaceIndexDetail(info.name),
         detail(
           "hint",
-          'Run "zg index --endpoint <url> --rebuild" before searching with this endpoint.',
+          'Run "zg --index --endpoint <url> --rebuild" before searching with this endpoint.',
         ),
       ]),
     },

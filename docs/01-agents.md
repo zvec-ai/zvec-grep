@@ -5,7 +5,7 @@
 [Architecture](./05-architecture.md) · [Server](./06-server.md) ·
 [Embedding](./07-embedding.md) · [Roadmap](./08-roadmap.md)
 
-`zg install` connects zvec-grep to supported agents through the local MCP
+`zg --install` connects zvec-grep to supported agents through the local MCP
 server. After that, the agent can use indexed retrieval for workspace-grounded
 semantic discovery while keeping exact lookup on the appropriate native or
 managed-rg route.
@@ -38,17 +38,17 @@ directory; `QODER_IDE_MCP_PATH` independently overrides the full IDE `mcp.json` 
 Run the guided installer to select from detected agents:
 
 ```bash
-zg install
+zg --install
 ```
 
 For scripts or repeatable setup, select targets explicitly:
 
 ```bash
-zg install --target codex --yes
-zg install --target claude --target cursor --yes
-zg install --target qwen --yes
-zg install --target qoder --yes
-zg install --target all --yes
+zg --install --target codex --yes
+zg --install --target claude --target cursor --yes
+zg --install --target qwen --yes
+zg --install --target qoder --yes
+zg --install --target all --yes
 ```
 
 The installer:
@@ -110,7 +110,7 @@ Only after explicit workspace approval may either client run the following
 persistent grant and retry the original MCP search once:
 
 ```bash
-zg auth grant "/absolute/workspace" \
+zg --auth grant "/absolute/workspace" \
   --capability embedding \
   --scope workspace
 ```
@@ -150,7 +150,7 @@ lexical lookup to the agent's native tools:
 | The answer is unrelated open-world knowledge, a current external fact, or web content that does not depend on local evidence | The appropriate external source, not zvec-grep |
 
 `zvec_grep_search` needs an existing index. Managed rg remains available through
-`zg query --rg` and through the optional `full` MCP toolset. See the
+`zg --rg` and through the optional `full` MCP toolset. See the
 [Pipeline guide](./04-pipeline.md) for the distinction and the
 [MCP guide](./03-mcp.md) for tool inputs.
 
@@ -165,7 +165,7 @@ filenames, regexes, and exhaustive occurrence requests stay on the exact route.
 Check the server first:
 
 ```bash
-zg server status --check-ready
+zg --server status --check-ready
 ```
 
 Then start a new agent session and confirm that the client-specific search tool
@@ -179,8 +179,8 @@ MCP connection is unavailable, the same indexed search and optional managed-rg
 route remain available from the shell:
 
 ```bash
-zg query "where theme preferences are restored"
-zg query --rg -F "loadTheme" src
+zg "where theme preferences are restored"
+zg --rg -F "loadTheme" src
 ```
 
 ## Permissions and remote data
@@ -199,10 +199,10 @@ provider. Remote Embedding asks separately on first use; see
 Use the same target names to remove only zvec-grep-managed entries:
 
 ```bash
-zg uninstall --target codex --yes
-zg uninstall --target qwen --yes
-zg uninstall --target qoder --yes
-zg uninstall --target all --yes
+zg --uninstall --target codex --yes
+zg --uninstall --target qwen --yes
+zg --uninstall --target qoder --yes
+zg --uninstall --target all --yes
 ```
 
 Restart the agent or open a new session to apply the change. Uninstalling an

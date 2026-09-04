@@ -47,15 +47,15 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM:
     "Positive llama.cpp context parallelism override (advanced)",
   NO_COLOR: "Disable terminal colors",
-  CODEX_HOME: "Codex configuration directory used by zg install",
-  CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg install",
-  QWEN_HOME: "Qwen Code configuration directory used by zg install",
-  QODER_CONFIG_DIR: "Qoder CLI configuration directory used by zg install",
-  QODER_IDE_MCP_PATH: "Full Qoder IDE mcp.json path used by zg install",
+  CODEX_HOME: "Codex configuration directory used by zg --install",
+  CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg --install",
+  QWEN_HOME: "Qwen Code configuration directory used by zg --install",
+  QODER_CONFIG_DIR: "Qoder CLI configuration directory used by zg --install",
+  QODER_IDE_MCP_PATH: "Full Qoder IDE mcp.json path used by zg --install",
   QODER_IDE_EXECUTABLE:
     "Qoder IDE executable used by automatic install-target detection",
-  OPENCODE_CONFIG: "OpenCode configuration file used by zg install",
-  CURSOR_CONFIG_DIR: "Cursor configuration directory used by zg install",
+  OPENCODE_CONFIG: "OpenCode configuration file used by zg --install",
+  CURSOR_CONFIG_DIR: "Cursor configuration directory used by zg --install",
 } as const;
 
 type EnvironmentVariableName = keyof typeof ENVIRONMENT_VARIABLES;
@@ -72,47 +72,52 @@ function mainHelp(version: string): string {
   return `zvec-grep ${version}
 
 Usage:
-  zg <command> [options]
+  zg [search options] <query>
+  zg --<action> [action options]
 
-Commands:
-  query          Search indexed context or run managed ripgrep
-  index          Build, rebuild, or drop the workspace index
-  status         Show workspace and index status
-  config         Configure provider credentials and embedding model defaults
-  auth           Manage Workspace Remote Embedding authorization
-  server         Start, stop, inspect, or run the shared MCP server
-  install        Install agent integrations
-  uninstall      Remove agent integrations
-  help           Show help for a command or topic
-  version        Print the installed version
+Search is the default operation. Management actions use reserved long options,
+so words such as "index", "install", and "status" remain valid queries.
+Leading command-shaped words emit a migration warning; use zg -- "index" to
+confirm that such a word is intended as literal search input.
+
+Actions:
+  --index        Build, rebuild, or drop the workspace index
+  --status       Show workspace and index status
+  --config       Configure provider credentials and embedding model defaults
+  --auth         Manage Workspace Remote Embedding authorization
+  --server       Start, stop, inspect, or run the shared MCP server
+  --install      Install agent integrations
+  --uninstall    Remove agent integrations
+  --help         Show help for an action or topic
+  --version      Print the installed version
 
 Examples:
-  zg query "where authentication is validated"
-  zg query --fts "AuthService"
-  zg query --rg -F "AuthService" src
-  zg index --embedding local/potion-code-16m-v2
-  zg status
-  zg auth status
-  zg server on
-  zg config model set local/potion-code-16m-v2 --device metal
-  zg install
+  zg "where authentication is validated"
+  zg --fts "AuthService"
+  zg --rg -F "AuthService" src
+  zg --index --embedding local/potion-code-16m-v2
+  zg --status
+  zg --auth status
+  zg --server on
+  zg --config model set local/potion-code-16m-v2 --device metal
+  zg --install
 
 Environment:
 ${formatEnvironmentVariables(MAIN_ENVIRONMENT_VARIABLES)}
 
-Run zg help models or zg help file-types for supported indexing capabilities.
-Run zg help environment for all variables, scopes, aliases, and precedence.
-Run zg help <command> or zg <command> --help for command-specific help.
+Run zg --help models or zg --help file-types for supported indexing capabilities.
+Run zg --help environment for all variables, scopes, aliases, and precedence.
+Run zg --help <action> or zg --<action> --help for action-specific help.
 Use zg -h/--help for this page and zg -v/--version for the version.`;
 }
 
 function commandHelp(topic: string): string | undefined {
   switch (topic) {
-    case "query":
+    case "search":
       return `Usage:
-  zg query <query> [options]
-  zg query --hybrid <query> --fts <query> --vector <query> [--fuse]
-  zg query --rg [rg-options] <pattern> [path...]
+  zg <query> [options]
+  zg --hybrid <query> --fts <query> --vector <query> [--fuse]
+  zg --rg [rg-options] <pattern> [path...]
 
 Search routes:
   positional query                  Hybrid FTS and vector search
@@ -124,8 +129,8 @@ Search routes:
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
-  --human                           Human-readable output (default: agent markdown)
-  --preview <none|short|full>       Indexed preview size (default: none; --human: full)
+  --compact                         Force compact output intended for pipes
+  --preview <none|short|full>       Indexed preview size (default: terminal=full, pipe=none)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
@@ -164,12 +169,15 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_DEVICE",
 ])}
 
-See zg help environment for precedence and Server-mode scope.`;
+If no index exists, zg creates one with a local embedding model before searching.
+Terminal output is human-readable by default; redirected output is compact.
+
+See zg --help environment for precedence and Server-mode scope.`;
     case "index":
       return `Usage:
-  zg index [root] [options]
-  zg index [root] --rebuild [options]
-  zg index [root] --drop [--yes]
+  zg --index [root] [options]
+  zg --index [root] --rebuild [options]
+  zg --index [root] --drop [--yes]
 
 Index options:
   --rebuild                         Rebuild the existing index
@@ -200,8 +208,8 @@ File selection:
   -L, --follow                      Follow symbolic links safely
   --reset-paths                     Clear inherited file-selection settings
 
-New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
-Existing indexes reuse their stored embedding schema.
+New indexes use --embedding, ZVEC_GREP_EMBEDDING, a configured default, or the
+built-in local default in that order. Existing indexes reuse their schema.
 
 Environment:
 ${formatEnvironmentVariables([
@@ -213,10 +221,10 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_DEVICE",
 ])}
 
-See zg help environment for precedence and Server-mode scope.`;
+See zg --help environment for precedence and Server-mode scope.`;
     case "status":
       return `Usage:
-  zg status [root] [--mode <direct|server|auto>] [--check-ready] [--debug]
+  zg --status [root] [--mode <direct|server|auto>] [--check-ready] [--debug]
 
 Shows the nearest workspace root, index policy, index state, embedding schema,
 stored paths, refresh status, and suggested next action.
@@ -226,8 +234,8 @@ stored paths, refresh status, and suggested next action.
 Workspace index is ready.`;
     case "config":
       return `Usage:
-  zg config provider set <provider> --api-key <key>
-  zg config model set <model> [--endpoint <url> | --device <device>] [--default]
+  zg --config provider set <provider> --api-key <key>
+  zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
 
 Provider options:
   --api-key <key>                   Default API key for the provider
@@ -244,9 +252,9 @@ Existing indexes continue to use their stored model.
 Global configuration is stored in ~/.zvec-grep/config.json.`;
     case "auth":
       return `Usage:
-  zg auth grant [root] --capability embedding --scope workspace [--embedding <model>]
-  zg auth status [root]
-  zg auth revoke [root]
+  zg --auth grant [root] --capability embedding --scope workspace [--embedding <model>]
+  zg --auth status [root]
+  zg --auth revoke [root]
 
 Manage the signed Remote Embedding grant stored in the Workspace under
 .zvec-grep/authorization.json. Workspace grants are shared by zg CLI and zg MCP.
@@ -259,7 +267,7 @@ Scopes used during operations:
   once                              Current CLI command or Agent tool call only
   workspace                         Persisted in this Workspace
 
-Use --allow-remote on zg query or zg index to authorize Remote Embedding for
+Use --allow-remote on zg or zg --index to authorize Remote Embedding for
 that command only. This authorization is not persisted. API credentials
 configure a provider but do not grant permission.
 
@@ -272,11 +280,11 @@ ${formatEnvironmentVariables([
 ])}`;
     case "server":
       return `Usage:
-  zg server --stdio [--token-file <path>] [--mcp-toolset <agent|full>]
-  zg server on [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset <agent|full>]
-  zg server off [--token-file <path>]
-  zg server status [--check-ready]
-  zg server run [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset <agent|full>]
+  zg --server --stdio [--token-file <path>] [--mcp-toolset <agent|full>]
+  zg --server on [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset <agent|full>]
+  zg --server off [--token-file <path>]
+  zg --server status [--check-ready]
+  zg --server run [--listen 127.0.0.1:7999] [--token-file <path>] [--mcp-toolset <agent|full>]
 
 --stdio is the MCP client bootstrap transport. It safely starts or reuses the
 shared daemon, proxies MCP over stdin/stdout, and leaves the daemon running
@@ -299,10 +307,10 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_MCP_TOOLSET",
 ])}
 
-See zg help environment for daemon startup scope.`;
+See zg --help environment for daemon startup scope.`;
     case "install":
       return `Usage:
-  zg install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
 
 Options:
   --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, auto, or all; repeatable
@@ -328,19 +336,20 @@ use. Restart the agent or open a new session after installation. This does not
 install the npm package.`;
     case "uninstall":
       return `Usage:
-  zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
 guidance. The qoder target removes the managed Qoder CLI and IDE integration
 together.`;
     case "help":
       return `Usage:
-  zg help [command|topic]
-  zg <command> --help
+  zg --help [action|topic]
+  zg --<action> --help
   zg -h
   zg --help
 
 Topics:
+  search                             Search options and behavior
   models                             Supported embedding models
   file-types                         Supported file types and structural parsing
   environment, env                   Environment variables and precedence`;
@@ -353,8 +362,6 @@ Topics:
       return environmentHelp();
     case "version":
       return `Usage:
-  zg version
-  zg version -v
   zg -v
   zg --version`;
     default:
@@ -373,7 +380,7 @@ function modelsHelp(): string {
   });
 
   return `Usage:
-  zg help models
+  zg --help models
 
 Supported embedding models:
 ${formatEmbeddingModels(models)}
@@ -382,7 +389,7 @@ Local models are downloaded to the model cache on first use. Remote models
 require provider credentials plus --allow-remote or a Workspace authorization.
 Only qwen/qwen3-vl-embedding accepts image input.
 
-Existing indexes keep their stored model. See zg help environment for
+Existing indexes keep their stored model. See zg --help environment for
 new-index model selection and runtime precedence.`;
 }
 
@@ -424,7 +431,7 @@ function fileTypesHelp(): string {
   ]);
 
   return `Usage:
-  zg help file-types
+  zg --help file-types
 
 Structured code (symbols and scopes):
 ${formatFileTypeTable(structuredCode)}
@@ -518,8 +525,8 @@ function formatTable(
 
 function environmentHelp(): string {
   return `Usage:
-  zg help environment
-  zg help env
+  zg --help environment
+  zg --help env
 
 Client and Server:
 ${formatEnvironmentVariables([
@@ -569,12 +576,12 @@ ${formatEnvironmentVariables([
 
 Precedence:
   Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
-  New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config
+  New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config > Built-in local
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY
 
 Server scope:
-  zg index forwards its ZVEC_GREP_EMBEDDING default to Server and auto modes.
+  zg --index forwards its ZVEC_GREP_EMBEDDING default to Server and auto modes.
   Direct MCP calls use the embedding environment inherited by the daemon.
   Restart the daemon after changing its embedding runtime environment.
 

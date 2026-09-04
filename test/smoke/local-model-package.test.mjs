@@ -105,6 +105,7 @@ test("packed package runs a real local embedding model end to end", async (t) =>
     USERPROFILE: packageHome,
     NO_COLOR: "1",
     ZVEC_GREP_HOME: packageHome,
+    ZVEC_GREP_EMBEDDING: modelReference,
     ZVEC_GREP_MODEL_CACHE: modelCache,
   };
 
@@ -157,35 +158,9 @@ test("packed package runs a real local embedding model end to end", async (t) =>
       "",
     ].join("\n"),
   );
-  const indexed = await runExecutable(
-    cli,
-    [
-      "index",
-      "--mode",
-      "direct",
-      "--embedding",
-      modelReference,
-      "--device",
-      "cpu",
-      "-g",
-      "fixture.ts",
-      "-t",
-      "ts",
-      ".",
-    ],
-    {
-      cwd: consumerDirectory,
-      env: runtimeEnvironment,
-      timeout: 600_000,
-    },
-  );
-  assert.match(indexed.stdout, /^Workspace index$/m);
-  assert.match(indexed.stdout, /1 added/);
-
   const queried = await runExecutable(
     cli,
     [
-      "query",
       "--mode",
       "direct",
       "--vector",
@@ -206,12 +181,22 @@ test("packed package runs a real local embedding model end to end", async (t) =>
   );
   assert.match(queried.stdout, /CrossPlatformPotionNeedle/);
   assert.match(queried.stdout, /fixture\.ts/);
+  assert.match(
+    queried.stderr,
+    new RegExp(
+      `No index found; creating one with ${modelReference.replaceAll("/", "\\/")}\\.`,
+    ),
+  );
 
-  const status = await runExecutable(cli, ["status", "--mode", "direct", "."], {
-    cwd: consumerDirectory,
-    env: runtimeEnvironment,
-    timeout: 120_000,
-  });
+  const status = await runExecutable(
+    cli,
+    ["--status", "--mode", "direct", "."],
+    {
+      cwd: consumerDirectory,
+      env: runtimeEnvironment,
+      timeout: 120_000,
+    },
+  );
   assert.match(
     status.stdout,
     new RegExp(modelReference.replaceAll("/", "\\/")),

@@ -916,7 +916,7 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
     service.info(),
     (error) =>
       error.code === "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH" &&
-      error.context.includes("zg index --rebuild"),
+      error.context.includes("zg --index --rebuild"),
   );
 
   await service.index({ rebuild: true });

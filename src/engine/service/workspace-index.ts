@@ -120,7 +120,7 @@ export class WorkspaceIndex {
           detail("actual", this.info.indexVersion),
           detail(
             "hint",
-            'Recreate the index with the current zvec-grep version; run "zg index --rebuild" for a workspace index.',
+            'Recreate the index with the current zvec-grep version; run "zg --index --rebuild" for a workspace index.',
           ),
         ]),
       });
@@ -253,7 +253,7 @@ function requireWorkspaceIndexEmbedding(
     context: errorDetails([
       workspaceIndexDetail(info.name),
       detail("operation", operation),
-      detail("hint", "Run zg index to build this index."),
+      detail("hint", "Run zg --index to build this index."),
     ]),
   });
 }

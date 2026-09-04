@@ -128,9 +128,11 @@ const QODER_MCP_PERMISSION_RULES = [
 const QODER_MCP_PERMISSIONS = QODER_MCP_PERMISSION_RULES.map(
   ({ permission }) => permission,
 );
-const QODER_CLI_MCP_DESCRIPTION = "Managed by zg install";
+const QODER_CLI_MCP_DESCRIPTION = "Managed by zg --install";
 const QODER_PERMISSION_OWNERSHIP_PREFIX = `${QODER_CLI_MCP_DESCRIPTION}; managed permissions=`;
-const QODER_IDE_MCP_DESCRIPTION = "Managed by zg install";
+const QODER_IDE_MCP_DESCRIPTION = "Managed by zg --install";
+const LEGACY_QODER_MCP_DESCRIPTION = "Managed by zg install";
+const LEGACY_QODER_PERMISSION_OWNERSHIP_PREFIX = `${LEGACY_QODER_MCP_DESCRIPTION}; managed permissions=`;
 const DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 600;
 
 export async function runInstall(parsed: ParsedArgs): Promise<void> {
@@ -164,7 +166,7 @@ export async function runInstall(parsed: ParsedArgs): Promise<void> {
     console.log(`    ready at ${server.serverUrl ?? resolveServerUrl()}`);
   } else {
     console.log(`  ${installMutedMark()} Server`);
-    console.log("    not started; run `zg server on`");
+    console.log("    not started; run `zg --server on`");
   }
   if (transport === "stdio") {
     console.log(`  ${installSuccessMark()} Connection`);
@@ -1316,15 +1318,17 @@ function removeQoderPermissionRules(
 }
 
 function qoderOwnedPermissionRules(server: unknown): string[] {
-  if (
-    !isJsonObject(server) ||
-    typeof server.description !== "string" ||
-    !server.description.startsWith(QODER_PERMISSION_OWNERSHIP_PREFIX)
-  ) {
+  if (!isJsonObject(server) || typeof server.description !== "string") {
     return [];
   }
-  const alwaysAllow = server.description
-    .slice(QODER_PERMISSION_OWNERSHIP_PREFIX.length)
+  const description = server.description;
+  const prefix = [
+    QODER_PERMISSION_OWNERSHIP_PREFIX,
+    LEGACY_QODER_PERMISSION_OWNERSHIP_PREFIX,
+  ].find((candidate) => description.startsWith(candidate));
+  if (!prefix) return [];
+  const alwaysAllow = description
+    .slice(prefix.length)
     .split(",")
     .filter(Boolean);
   return QODER_MCP_PERMISSION_RULES.filter(({ tool }) =>
@@ -1848,7 +1852,7 @@ function isManagedJsonMcpServer(value: unknown): boolean {
     Array.isArray(value.command) &&
     (value.command.length === 3 || value.command.length === 5) &&
     value.command[0] === "zg" &&
-    value.command[1] === "server" &&
+    isServerActionArg(value.command[1]) &&
     value.command[2] === "--stdio" &&
     (value.command.length === 3 ||
       (value.command[3] === "--mcp-toolset" &&
@@ -1859,7 +1863,8 @@ function isManagedJsonMcpServer(value: unknown): boolean {
 function isManagedQoderIdeMcpServer(value: unknown): boolean {
   return (
     isJsonObject(value) &&
-    value.description === QODER_IDE_MCP_DESCRIPTION &&
+    (value.description === QODER_IDE_MCP_DESCRIPTION ||
+      value.description === LEGACY_QODER_MCP_DESCRIPTION) &&
     ((typeof value.command === "string" && isStableStdioArgs(value.args)) ||
       (value.type === "sse" && typeof value.url === "string"))
   );
@@ -1869,7 +1874,7 @@ function isStdioArgs(value: unknown): boolean {
   return (
     Array.isArray(value) &&
     (value.length === 2 || value.length === 4) &&
-    value[0] === "server" &&
+    isServerActionArg(value[0]) &&
     value[1] === "--stdio" &&
     (value.length === 2 ||
       (value[2] === "--mcp-toolset" &&
@@ -1882,7 +1887,7 @@ function isStableStdioArgs(value: unknown): boolean {
     Array.isArray(value) &&
     (value.length === 3 || value.length === 5) &&
     typeof value[0] === "string" &&
-    value[1] === "server" &&
+    isServerActionArg(value[1]) &&
     value[2] === "--stdio" &&
     (value.length === 3 ||
       (value[3] === "--mcp-toolset" &&
@@ -1890,9 +1895,13 @@ function isStableStdioArgs(value: unknown): boolean {
   );
 }
 
+function isServerActionArg(value: unknown): boolean {
+  return value === "--server" || value === "server";
+}
+
 function stdioArgs(mcpToolset?: McpToolset): string[] {
   return [
-    "server",
+    "--server",
     "--stdio",
     ...(mcpToolset ? ["--mcp-toolset", mcpToolset] : []),
   ];
@@ -2238,7 +2247,7 @@ function agentGuidanceBlock(toolNames?: {
 ${formatPromptRules("### Qoder Remote Embedding authorization recovery", [
   `When \`${searchTool}\` needs \`remote_embedding_authorization\` and the current Qoder host returns \`code = 51500 message = method not found: No request handler configured\` without showing an authorization form, returns \`${REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE}\`, or reports that authorization was declined or cancelled without showing the user an authorization form, treat it as a Qoder client interaction limitation: the host lacks the server-to-client \`elicitation/create\` request handler. The outer MCP \`tools/call\` has already reached the registered MCP server and tool, so do not diagnose this error as a disconnected or missing MCP server or as a missing tool. Apply this recovery only to the Remote Embedding authorization path, not to arbitrary 51500 failures. Do not immediately fall back to broad file reads, do not treat it as a missing API credential, and do not grant access silently. If the user actually declined a displayed authorization form, respect that decision and do not ask again.`,
   "Use the current Qoder host's built-in user-question tool (`ask_user_question` in Qoder IDE or `AskUserQuestion` in Qoder CLI/SDK) to offer exactly these choices: allow Remote Embedding for this workspace, use local FTS only, or cancel. Explain that workspace approval may send query text and selected workspace content to the configured provider and endpoint and may incur provider charges.",
-  'Only after the user explicitly chooses workspace approval, run `zg auth grant "<absolute-root>" --capability embedding --scope workspace`, substituting the same absolute root used by the failed search, and then retry the original search call once. Do not use `--allow-remote`; it applies only to one CLI command and does not authorize the MCP retry.',
+  'Only after the user explicitly chooses workspace approval, run `zg --auth grant "<absolute-root>" --capability embedding --scope workspace`, substituting the same absolute root used by the failed search, and then retry the original search call once. Do not use `--allow-remote`; it applies only to one CLI command and does not authorize the MCP retry.',
   `If the user chooses local FTS, retry \`${searchTool}\` once with the original search text in \`fts\`, omit \`query\`, \`queries\`, and \`vector\`, set \`autoUpdate\` to \`false\` and \`freshness\` to \`eventual\`, and preserve \`root\`, filters, and limits. This route is lexical-only, does not refresh the remote-embedding index, and sends no query text or workspace content to a remote Embedding provider.`,
   "If the user cancels, the grant command fails, or interactive user input is unavailable, stop and report that no remote data was sent. Provider credentials and Remote Embedding data authorization are separate; never request or modify an API key merely to resolve this interaction error.",
 ])}`

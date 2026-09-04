@@ -69,7 +69,7 @@ test("install starts the shared server with the selected MCP toolset", async (t)
   t.after(async () => {
     await execFileAsync(
       process.execPath,
-      [cliPath, "server", "off", "--home", home],
+      [cliPath, "--server", "off", "--home", home],
       { env: environment },
     ).catch(() => undefined);
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -77,13 +77,21 @@ test("install starts the shared server with the selected MCP toolset", async (t)
 
   const { stdout } = await execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", "codex", "--mcp-toolset", "full", "--yes"],
+    [
+      cliPath,
+      "--install",
+      "--target",
+      "codex",
+      "--mcp-toolset",
+      "full",
+      "--yes",
+    ],
     { env: environment },
   );
   assert.match(stdout, new RegExp(`ready at ${serverUrl}`));
   const { stdout: statusOutput } = await execFileAsync(
     process.execPath,
-    [cliPath, "server", "status", "--check-ready", "--home", home],
+    [cliPath, "--server", "status", "--check-ready", "--home", home],
     { env: environment },
   );
   assert.match(statusOutput, /MCP toolset: full/);
@@ -93,7 +101,7 @@ test("install starts the shared server with the selected MCP toolset", async (t)
   );
   assert.match(
     config,
-    /^args = \["server", "--stdio", "--mcp-toolset", "full"\]$/m,
+    /^args = \["--server", "--stdio", "--mcp-toolset", "full"\]$/m,
   );
 });
 
@@ -117,7 +125,7 @@ test("Codex installer removes orphaned managed markers", async (t) => {
 
   await execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", "codex", "--yes"],
+    [cliPath, "--install", "--target", "codex", "--yes"],
     {
       env: {
         ...process.env,
@@ -130,7 +138,7 @@ test("Codex installer removes orphaned managed markers", async (t) => {
   const installed = await readFile(configPath, "utf8");
   assert.match(installed, /\[mcp_servers\.other\]/);
   assert.match(installed, /^command = "zg"$/m);
-  assert.match(installed, /^args = \["server", "--stdio"\]$/m);
+  assert.match(installed, /^args = \["--server", "--stdio"\]$/m);
   assert.doesNotMatch(installed, /^bearer_token_env_var\s*=/m);
   assert.doesNotMatch(installed, /^url\s*=/m);
   assert.match(installed, /^tool_timeout_sec = 600$/m);
@@ -154,7 +162,7 @@ test("Codex installer writes an explicit MCP token environment variable", async 
     process.execPath,
     [
       cliPath,
-      "install",
+      "--install",
       "--target",
       "codex",
       "--mcp-transport",
@@ -270,7 +278,7 @@ test("Codex installer ignores an orphaned end marker before a complete block", a
 
   await execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", "codex", "--yes"],
+    [cliPath, "--install", "--target", "codex", "--yes"],
     {
       env: {
         ...process.env,
@@ -509,7 +517,7 @@ test("Codex installer refreshes legacy managed guidance", async (t) => {
   assert.doesNotMatch(agents, /indexed search first/);
   assert.doesNotMatch(agents, /Indexing and status/);
   assert.doesNotMatch(agents, /Remote data authorization/);
-  assert.doesNotMatch(agents, /zg status/);
+  assert.doesNotMatch(agents, /zg (?:--)?status/);
   assert.doesNotMatch(agents, /legacy guidance/);
 });
 
@@ -530,7 +538,7 @@ test("Claude Code installer configures MCP trust and guidance", async (t) => {
 
   const { stdout } = await execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", "claude", "--yes"],
+    [cliPath, "--install", "--target", "claude", "--yes"],
     {
       env: {
         ...process.env,
@@ -556,7 +564,7 @@ test("Claude Code installer configures MCP trust and guidance", async (t) => {
     alwaysLoad: true,
     type: "stdio",
     command: "zg",
-    args: ["server", "--stdio"],
+    args: ["--server", "--stdio"],
   });
   assert.ok(settings.permissions.allow.includes("mcp__zvec_grep__*"));
   assert.match(guidance, /zvec_grep_search/);
@@ -568,7 +576,7 @@ test("Claude Code installer configures MCP trust and guidance", async (t) => {
   assert.doesNotMatch(guidance, /managed-rg/);
   assert.doesNotMatch(guidance, /Indexing and status/);
   assert.doesNotMatch(guidance, /Remote data authorization/);
-  assert.doesNotMatch(guidance, /zg status/);
+  assert.doesNotMatch(guidance, /zg --status/);
   assert.match(stdout, /zvec-grep setup/);
   assert.match(stdout, /Installing integrations/);
   assert.match(stdout, /Claude Code/);
@@ -608,12 +616,12 @@ test("Claude Code installer preserves user configuration on install and uninstal
   };
   await execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", "claude", "--yes"],
+    [cliPath, "--install", "--target", "claude", "--yes"],
     { env: environment },
   );
   await execFileAsync(
     process.execPath,
-    [cliPath, "uninstall", "--target", "claude", "--yes"],
+    [cliPath, "--uninstall", "--target", "claude", "--yes"],
     { env: environment },
   );
 
@@ -649,7 +657,7 @@ test("Claude Code installer writes MCP token environment expansion", async (t) =
     process.execPath,
     [
       cliPath,
-      "install",
+      "--install",
       "--target",
       "claude",
       "--mcp-transport",
@@ -692,7 +700,7 @@ test("Claude Code installer accepts cc and claude-code compatibility aliases", a
       await readFile(join(configDirectory, ".claude.json"), "utf8"),
     );
     assert.equal(config.mcpServers.zvec_grep.command, "zg");
-    assert.deepEqual(config.mcpServers.zvec_grep.args, ["server", "--stdio"]);
+    assert.deepEqual(config.mcpServers.zvec_grep.args, ["--server", "--stdio"]);
   }
 });
 
@@ -711,7 +719,7 @@ test("Qwen Code installer accepts qwen aliases and numeric target 5", async (t) 
       await readFile(join(qwenHome, "settings.json"), "utf8"),
     );
     assert.equal(config.mcpServers.zvec_grep.command, "zg");
-    assert.deepEqual(config.mcpServers.zvec_grep.args, ["server", "--stdio"]);
+    assert.deepEqual(config.mcpServers.zvec_grep.args, ["--server", "--stdio"]);
   }
 });
 
@@ -734,7 +742,7 @@ test("Qwen Code installer configures full stdio tools, trust, timeout, and guida
   );
   assert.deepEqual(config.mcpServers.zvec_grep, {
     command: "zg",
-    args: ["server", "--stdio", "--mcp-toolset", "full"],
+    args: ["--server", "--stdio", "--mcp-toolset", "full"],
     timeout: 900000,
     alwaysLoadTools: true,
     trust: true,
@@ -868,7 +876,7 @@ test("Qwen Code installer requires force for unmanaged servers and force replace
   assert.equal(config.theme, "dark");
   assert.deepEqual(config.mcpServers.zvec_grep, {
     command: "zg",
-    args: ["server", "--stdio"],
+    args: ["--server", "--stdio"],
     timeout: 600000,
     alwaysLoadTools: true,
     trust: true,
@@ -876,7 +884,7 @@ test("Qwen Code installer requires force for unmanaged servers and force replace
   assert.equal(config.mcpServers.zvec_grep.description, undefined);
 });
 
-test("Qwen Code installer replaces its managed server entry cleanly", async (t) => {
+test("Qwen Code installer migrates its legacy managed server entry cleanly", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-qwen-policy-"),
   );
@@ -1129,11 +1137,11 @@ test("Qoder installer accepts its canonical and numeric targets", async (t) => {
     });
     const { cli, ide } = await readQoderConfigs(qoderConfigDirectory);
     assert.equal(cli.mcpServers.zvec_grep.command, "zg");
-    assert.deepEqual(cli.mcpServers.zvec_grep.args, ["server", "--stdio"]);
+    assert.deepEqual(cli.mcpServers.zvec_grep.args, ["--server", "--stdio"]);
     assert.equal(ide.mcpServers.zvec_grep.command, process.execPath);
     assert.deepEqual(ide.mcpServers.zvec_grep.args, [
       cliPath,
-      "server",
+      "--server",
       "--stdio",
     ]);
   }
@@ -1212,11 +1220,11 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   assert.equal(config.mcpServers.other.url, "https://example.test/mcp");
   assert.deepEqual(config.mcpServers.zvec_grep, {
     command: "zg",
-    args: ["server", "--stdio", "--mcp-toolset", "full"],
+    args: ["--server", "--stdio", "--mcp-toolset", "full"],
     timeout: 900000,
     trust: true,
     description:
-      "Managed by zg install; managed permissions=zvec_grep_search,zvec_grep_rg",
+      "Managed by zg --install; managed permissions=zvec_grep_search,zvec_grep_rg",
     alwaysAllow: ["zvec_grep_search", "zvec_grep_rg"],
   });
   assert.deepEqual(config.permissions, {
@@ -1229,9 +1237,9 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   assert.equal(ideConfig.mcpServers.yuque.url, "https://yuque.test/mcp");
   assert.deepEqual(ideConfig.mcpServers.zvec_grep, {
     command: process.execPath,
-    args: [cliPath, "server", "--stdio", "--mcp-toolset", "full"],
+    args: [cliPath, "--server", "--stdio", "--mcp-toolset", "full"],
     timeout: 900000,
-    description: "Managed by zg install",
+    description: "Managed by zg --install",
   });
   assert.equal(ideConfig.mcpServers.zvec_grep.trust, undefined);
 
@@ -1274,7 +1282,7 @@ test("Qoder installer preserves JSONC comments and writes trusted stdio config a
   );
   assert.match(
     guidance,
-    /zg auth grant "<absolute-root>" --capability embedding --scope workspace/,
+    /zg --auth grant "<absolute-root>" --capability embedding --scope workspace/,
   );
   assert.match(guidance, /retry the original search call once/);
   assert.match(
@@ -1390,7 +1398,7 @@ test("Qoder uninstaller retains permission rules that predated installation", as
   ]);
   assert.equal(
     installed.mcpServers.zvec_grep.description,
-    "Managed by zg install; managed permissions=zvec_grep_rg",
+    "Managed by zg --install; managed permissions=zvec_grep_rg",
   );
   assert.deepEqual(installed.permissions.allow, [
     "mcp__zvec_grep__zvec_grep_rg",
@@ -1470,7 +1478,7 @@ test("Qoder uninstaller leaves user-owned server permissions unchanged", async (
   assert.equal(await readFile(settingsPath, "utf8"), original);
 });
 
-test("Qoder uninstaller preserves comments in a managed-only permission array", async (t) => {
+test("Qoder uninstaller migrates legacy ownership while preserving permission comments", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-uninstall-qoder-managed-comments-"),
   );
@@ -1532,7 +1540,7 @@ test("Qoder uninstaller preserves comments around a first or only managed server
       "{",
       '  "mcpServers": {',
       "    // Keep the container note.",
-      '    "zvec_grep": { "command": "zg", "args": ["server", "--stdio"] } /* Keep the separator, note. */,',
+      '    "zvec_grep": { "command": "zg", "args": ["--server", "--stdio"] } /* Keep the separator, note. */,',
       "    // Keep the other server note.",
       '    "other": { "type": "http", "url": "https://example.test/mcp" }',
       "  }",
@@ -1541,7 +1549,7 @@ test("Qoder uninstaller preserves comments around a first or only managed server
     ].join("\n"),
   );
   const manualIdeConfig =
-    '{"mcpServers":{"zvec_grep":{"command":"zg","args":["server","--stdio"]}}}\n';
+    '{"mcpServers":{"zvec_grep":{"command":"zg","args":["--server","--stdio"]}}}\n';
   await writeFile(firstIdeConfigPath, manualIdeConfig);
 
   await uninstallTarget("qoder", { QODER_CONFIG_DIR: firstConfigDirectory });
@@ -1564,7 +1572,7 @@ test("Qoder uninstaller preserves comments around a first or only managed server
       "{",
       '  "mcpServers": {',
       "    // Keep this user note even when the managed server is removed.",
-      '    "zvec_grep": { "command": "zg", "args": ["server", "--stdio"] }',
+      '    "zvec_grep": { "command": "zg", "args": ["--server", "--stdio"] }',
       "  },",
       '  "theme": "dark"',
       "}",
@@ -1578,8 +1586,8 @@ test("Qoder uninstaller preserves comments around a first or only managed server
         github: { command: "github-mcp" },
         zvec_grep: {
           command: process.execPath,
-          args: [cliPath, "server", "--stdio"],
-          description: "Managed by zg install",
+          args: [cliPath, "--server", "--stdio"],
+          description: "Managed by zg --install",
         },
       },
     })}\n`,
@@ -1621,7 +1629,7 @@ test("Qoder installer writes trusted HTTP configuration and token expansion", as
     timeout: 42000,
     trust: true,
     description:
-      "Managed by zg install; managed permissions=zvec_grep_search,zvec_grep_rg",
+      "Managed by zg --install; managed permissions=zvec_grep_search,zvec_grep_rg",
     alwaysAllow: ["zvec_grep_search", "zvec_grep_rg"],
     headers: {
       Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
@@ -1631,7 +1639,7 @@ test("Qoder installer writes trusted HTTP configuration and token expansion", as
     type: "sse",
     url: "http://127.0.0.1:7999/mcp",
     timeout: 42000,
-    description: "Managed by zg install",
+    description: "Managed by zg --install",
     headers: {
       Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
     },
@@ -1724,7 +1732,7 @@ test("Qoder installer preflights an IDE MCP conflict before changing CLI config"
   const guidancePath = join(qoderHome, "AGENTS.md");
   const settings = '{"theme":"dark"}\n';
   const ide =
-    '{"mcpServers":{"zvec_grep":{"command":"zg","args":["server","--stdio"]}}}\n';
+    '{"mcpServers":{"zvec_grep":{"command":"zg","args":["--server","--stdio"]}}}\n';
   const guidance = "# Existing Qoder guidance\n";
   t.after(async () => {
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -1858,7 +1866,7 @@ test(
 
       const { stdout } = await execFileAsync(
         process.execPath,
-        [cliPath, "install", "--yes"],
+        [cliPath, "--install", "--yes"],
         {
           env: {
             ...process.env,
@@ -1879,7 +1887,7 @@ test(
       );
       const { cli, ide } = await readQoderConfigs(qoderConfigDirectory);
       assert.equal(cli.mcpServers.zvec_grep.command, "zg");
-      assert.equal(cli.mcpServers.zvec_grep.args[0], "server");
+      assert.equal(cli.mcpServers.zvec_grep.args[0], "--server");
       assert.equal(ide.mcpServers.zvec_grep.command, process.execPath);
       assert.equal(ide.mcpServers.zvec_grep.args[0], cliPath);
     }
@@ -1910,7 +1918,7 @@ test(
 
     const { stdout } = await execFileAsync(
       process.execPath,
-      [cliPath, "install", "--yes"],
+      [cliPath, "--install", "--yes"],
       {
         env: {
           ...process.env,
@@ -2085,7 +2093,7 @@ test(
 
     const { stdout } = await execFileAsync(
       process.execPath,
-      [cliPath, "install", "--yes"],
+      [cliPath, "--install", "--yes"],
       {
         env: {
           ...process.env,
@@ -2131,7 +2139,7 @@ test(
 
     const { stdout } = await execFileAsync(
       process.execPath,
-      [cliPath, "install", "--yes"],
+      [cliPath, "--install", "--yes"],
       {
         env: {
           ...process.env,
@@ -2157,7 +2165,7 @@ test(
 async function installCodex(codexHome, extraArgs = []) {
   await execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", "codex", "--yes", ...extraArgs],
+    [cliPath, "--install", "--target", "codex", "--yes", ...extraArgs],
     {
       env: {
         ...process.env,
@@ -2171,7 +2179,7 @@ async function installCodex(codexHome, extraArgs = []) {
 async function uninstallCodex(codexHome, extraArgs = []) {
   await execFileAsync(
     process.execPath,
-    [cliPath, "uninstall", "--target", "codex", "--yes", ...extraArgs],
+    [cliPath, "--uninstall", "--target", "codex", "--yes", ...extraArgs],
     {
       env: {
         ...process.env,
@@ -2195,7 +2203,7 @@ async function installTarget(target, env, extraArgs = []) {
   }
   return execFileAsync(
     process.execPath,
-    [cliPath, "install", "--target", target, "--yes", ...extraArgs],
+    [cliPath, "--install", "--target", target, "--yes", ...extraArgs],
     { env: environment },
   );
 }
@@ -2213,7 +2221,7 @@ async function uninstallTarget(target, env, extraArgs = []) {
   }
   await execFileAsync(
     process.execPath,
-    [cliPath, "uninstall", "--target", target, "--yes", ...extraArgs],
+    [cliPath, "--uninstall", "--target", target, "--yes", ...extraArgs],
     { env: environment },
   );
 }

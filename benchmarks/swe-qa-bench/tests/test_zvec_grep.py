@@ -36,7 +36,7 @@ class _InstallHarness(ZvecGrepMixin):
         self, environment: Any, command: str, **kwargs: Any
     ) -> _Result:
         self.agent_commands.append(command)
-        if command == "zg version -v":
+        if command == "zg --version":
             return _Result(stdout="0.1.5\n")
         return _Result(
             stdout=(
@@ -148,16 +148,16 @@ class _SetupHarness(ZvecGrepMixin, _SetupBase):
             shutil.rmtree(index_dir, ignore_errors=True)
             index_dir.mkdir(parents=True)
             return _Result()
-        if command.startswith("if zg status --check-ready;"):
+        if command.startswith("if zg --status --check-ready;"):
             ready_path = index_dir / "ready"
             ready = ready_path.is_file() and ready_path.read_text() == "ready\n"
             return _Result(stdout=f"ZG_INDEX_SEED_READY={int(ready)}\n")
-        if command.startswith("zg index "):
+        if command.startswith("zg --index "):
             index_dir.mkdir(parents=True, exist_ok=True)
             (index_dir / "ready").write_text("ready\n", encoding="utf-8")
             (index_dir / "index.bin").write_bytes(b"trusted-index-data")
             return _Result(stdout="index built")
-        if command == "zg status --check-ready":
+        if command == "zg --status --check-ready":
             return _Result(stdout="\N{CHECK MARK} Workspace index is ready")
         if command == "rm -rf -- .zvec-grep":
             shutil.rmtree(index_dir, ignore_errors=True)
@@ -201,13 +201,13 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
     def test_remote_index_uses_workspace_authorization(self) -> None:
         self.assertEqual(
             ZvecGrepMixin._authorization_command("qwen/text-embedding-v4"),
-            "zg auth grant --capability embedding --scope workspace "
+            "zg --auth grant --capability embedding --scope workspace "
             "--embedding qwen/text-embedding-v4",
         )
         index_command = ZvecGrepMixin._index_command("qwen/text-embedding-v4")
         self.assertEqual(
             index_command,
-            "zg index --embedding qwen/text-embedding-v4",
+            "zg --index --embedding qwen/text-embedding-v4",
         )
         self.assertNotIn("--allow-remote", index_command)
         self.assertIsNone(
@@ -371,7 +371,7 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(
                 any(
-                    command.startswith("zg index ")
+                    command.startswith("zg --index ")
                     for command in cold_harness.agent_commands
                 )
             )
@@ -397,7 +397,7 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(hit_environment.downloads, [])
             self.assertFalse(
                 any(
-                    command.startswith("zg index ")
+                    command.startswith("zg --index ")
                     for command in hit_harness.agent_commands
                 )
             )
@@ -440,7 +440,7 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
 
             cleanup = retry_harness.agent_commands.index("rm -rf -- .zvec-grep")
             cold_index = retry_harness.agent_commands.index(
-                "zg index --embedding local/potion-code-16m-v2"
+                "zg --index --embedding local/potion-code-16m-v2"
             )
             self.assertLess(cleanup, cold_index)
             self.assertEqual(len(retry_environment.uploads), 1)

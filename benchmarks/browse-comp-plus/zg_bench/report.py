@@ -1047,7 +1047,7 @@ Index preparation is measured separately and excluded from Agent execution metri
 | End-to-end preparation | {runtime_preparation['total_wall_seconds']:.2f} |
 | Server startup | {runtime_preparation['server_start_wall_seconds']:.2f} |
 | Profile preparation | {runtime_preparation['profile_preparation_wall_seconds']:.2f} |
-| `zg install` | {runtime_preparation['profile_install_wall_seconds']:.2f} |
+| `zg --install` | {runtime_preparation['profile_install_wall_seconds']:.2f} |
 | Runtime verification and index warmup | {runtime_preparation['warmup_wall_seconds']:.2f} |
 
 ## Environment

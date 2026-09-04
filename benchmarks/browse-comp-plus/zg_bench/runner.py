@@ -789,7 +789,7 @@ def run_benchmark(
     codex_version = run_command([codex, "--version"], timeout=30)
     if not codex_version.ok or not codex_version.stdout.strip():
         raise RuntimeError("could not determine the installed Codex version")
-    zg_version = run_command([zg, "version"], timeout=30)
+    zg_version = run_command([zg, "--version"], timeout=30)
     actual_zg_version = (
         zg_version.stdout.strip().splitlines()[0] if zg_version.stdout else ""
     )
