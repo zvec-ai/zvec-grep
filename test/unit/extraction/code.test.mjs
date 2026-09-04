@@ -348,3 +348,133 @@ test("code chunk boundaries never split Unicode surrogate pairs", async () => {
     assert.doesNotMatch(fragment.content.text, /^[\uDC00-\uDFFF]/u);
   }
 });
+
+test("code extractor preserves php symbols, scopes, properties, and constants", async () => {
+  const php = await new CodeExtractor().extract(
+    codeSource(
+      "php",
+      [
+        "<?php",
+        "namespace App {",
+        "/** Charges a guest. */",
+        "interface ChargerInterface { public function charge(int $cents): bool; }",
+        "trait Loggable { public function log(string $msg): void {} }",
+        "enum ChargeStatus: string { case Paid = 'paid'; const int MIN = 1; }",
+        "abstract class BaseCharger implements ChargerInterface {",
+        "  /** The wallet. */",
+        "  private readonly Wallet $wallet;",
+        "  public const int MAX = 100;",
+        "  public string $full {",
+        "    get => $this->a;",
+        "    set(string $v) { $this->a = $v; }",
+        "  }",
+        "  private(set) int $counter = 0;",
+        "  public static function make(int $limit): static { return new static($limit); }",
+        "  public function __construct(",
+        "    private Logger $logger,",
+        "    string $tag,",
+        "  ) {}",
+        "}",
+        "function helper(int $x): int { return $x * 2; }",
+        "}",
+      ].join("\n"),
+      "fixture.php",
+    ),
+  );
+
+  assert.deepEqual(fragmentNamed(php, "ChargerInterface").metadata, {
+    kind: "code",
+    symbolType: "interface",
+    symbolName: "ChargerInterface",
+    scope: "App",
+    nodeType: "interface_declaration",
+    signature: "interface ChargerInterface",
+    doc: "Charges a guest.",
+    modifiers: [],
+  });
+  assert.deepEqual(fragmentNamed(php, "make").metadata, {
+    kind: "code",
+    symbolType: "function",
+    symbolName: "make",
+    scope: "App::BaseCharger",
+    nodeType: "method_declaration",
+    signature: "public static function make(int $limit): static",
+    doc: null,
+    modifiers: ["public", "static"],
+  });
+  assert.deepEqual(fragmentNamed(php, "wallet").metadata, {
+    kind: "code",
+    symbolType: "value",
+    symbolName: "wallet",
+    scope: "App::BaseCharger",
+    nodeType: "property_element",
+    signature: "private readonly Wallet $wallet",
+    doc: "The wallet.",
+    modifiers: ["private"],
+  });
+  assert.deepEqual(fragmentNamed(php, "MAX").metadata, {
+    kind: "code",
+    symbolType: "value",
+    symbolName: "MAX",
+    scope: "App::BaseCharger",
+    nodeType: "const_element",
+    signature: "public const int MAX = 100",
+    doc: null,
+    modifiers: ["public"],
+  });
+  assert.deepEqual(fragmentNamed(php, "full").metadata, {
+    kind: "code",
+    symbolType: "value",
+    symbolName: "full",
+    scope: "App::BaseCharger",
+    nodeType: "property_element",
+    signature: "public string $full",
+    doc: null,
+    modifiers: ["public"],
+  });
+  assert.deepEqual(fragmentNamed(php, "charge").metadata, {
+    kind: "code",
+    symbolType: "function",
+    symbolName: "charge",
+    scope: "App::ChargerInterface",
+    nodeType: "method_declaration",
+    signature: "public function charge(int $cents): bool",
+    doc: null,
+    modifiers: ["public"],
+  });
+  assert.equal(fragmentNamed(php, "App").metadata.symbolType, "module");
+  assert.equal(fragmentNamed(php, "ChargeStatus").metadata.symbolType, "class");
+  assert.deepEqual(fragmentNamed(php, "Paid").metadata.modifiers, []);
+  assert.equal(fragmentNamed(php, "Paid").metadata.symbolType, "value");
+  assert.equal(fragmentNamed(php, "MIN").metadata.scope, "App::ChargeStatus");
+  assert.equal(
+    fragmentNamed(php, "Loggable").metadata.nodeType,
+    "trait_declaration",
+  );
+  assert.equal(fragmentNamed(php, "log").metadata.scope, "App::Loggable");
+  assert.equal(fragmentNamed(php, "helper").metadata.scope, "App");
+  assert.deepEqual(fragmentNamed(php, "counter").metadata.modifiers, [
+    "private",
+  ]);
+  assert.deepEqual(fragmentNamed(php, "logger").metadata, {
+    kind: "code",
+    symbolType: "value",
+    symbolName: "logger",
+    scope: "App::BaseCharger",
+    nodeType: "property_promotion_parameter",
+    signature: "private Logger $logger",
+    doc: null,
+    modifiers: ["private"],
+  });
+  assert.equal(
+    php.find((fragment) => fragment.metadata?.symbolName === "tag"),
+    undefined,
+  );
+  assert.deepEqual(fragmentNamed(php, "__construct").metadata.modifiers, [
+    "public",
+  ]);
+  assert.equal(
+    fragmentNamed(php, "__construct").metadata.signature,
+    "public function __construct( private Logger $logger, string $tag, )",
+  );
+});

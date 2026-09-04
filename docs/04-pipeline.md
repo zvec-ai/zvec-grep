@@ -82,9 +82,9 @@ participate in indexed search.
 
 | Files | Formats | Extractor | Indexed representation |
 | --- | --- | --- | --- |
-| Structure-aware code | C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`), Go, Java, JavaScript/JSX, TypeScript/TSX, Python, Rust | `CodeExtractor` | Symbols, signatures, breadcrumbs, and surrounding source |
+| Structure-aware code | C/C++ (`.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`), Go, Java, JavaScript/JSX, TypeScript/TSX, PHP, Python, Rust | `CodeExtractor` | Symbols, signatures, breadcrumbs, and surrounding source |
 | Component scripts | `.vue`, `.svelte` | `CodeExtractor` | JavaScript or TypeScript `<script>` blocks; plain-text fallback when no structure is found |
-| Other recognized code | Ruby, PHP, Swift, Kotlin, C#, Scala, shell, SQL, CSS/SCSS/Less, `Dockerfile`, `Makefile` | `CodeExtractor` | Plain-text chunks until a structural grammar is available |
+| Other recognized code | Ruby, Swift, Kotlin, C#, Scala, shell, SQL, CSS/SCSS/Less, `Dockerfile`, `Makefile` | `CodeExtractor` | Plain-text chunks until a structural grammar is available |
 | Markdown | `.md`, `.mdx` | `MarkdownExtractor` | Heading sections and breadcrumbs; plain-text fallback for documents without headings |
 | Text documents | `.txt`, `.rst`, `.html`, `.htm`, `.xml` | `TextExtractor` | Plain-text chunks |
 | Text data | `.csv`, `.json`, `.jsonc`, `.toml`, `.yaml`, `.yml` | `TextExtractor` | Plain-text chunks |

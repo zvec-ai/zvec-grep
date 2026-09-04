@@ -10,7 +10,7 @@ export const GO_ADAPTER: LanguageAdapter = {
   format: "go",
   entityTypes: new Set([
     "function_declaration",
-    "method_spec",
+    "method_elem",
     "method_declaration",
     "type_alias",
     "type_spec",
@@ -56,7 +56,7 @@ export const GO_ADAPTER: LanguageAdapter = {
       return "alias";
     }
 
-    if (node.type === "method_spec") {
+    if (node.type === "method_elem") {
       return "function";
     }
 

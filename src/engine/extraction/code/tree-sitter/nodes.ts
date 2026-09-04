@@ -1,6 +1,6 @@
-import type Parser from "web-tree-sitter";
+import type { Node } from "web-tree-sitter";
 
-export type TSNode = Parser.SyntaxNode;
+export type TSNode = Node;
 
 export function findIdentifierLeaf(node: TSNode): TSNode | null {
   const wrappers = new Set([

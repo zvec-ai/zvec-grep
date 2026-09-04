@@ -6,6 +6,7 @@ import { CPP_ADAPTER } from "./languages/cpp.js";
 import { GO_ADAPTER } from "./languages/go.js";
 import { JAVA_ADAPTER } from "./languages/java.js";
 import { JAVASCRIPT_ADAPTER } from "./languages/javascript.js";
+import { PHP_ADAPTER } from "./languages/php.js";
 import { PYTHON_ADAPTER } from "./languages/python.js";
 import { RUST_ADAPTER } from "./languages/rust.js";
 import { TYPESCRIPT_ADAPTER } from "./languages/typescript.js";
@@ -40,6 +41,7 @@ const ADAPTERS = {
   java: JAVA_ADAPTER,
   javascript: JAVASCRIPT_ADAPTER,
   jsx: JAVASCRIPT_ADAPTER,
+  php: PHP_ADAPTER,
   python: PYTHON_ADAPTER,
   rust: RUST_ADAPTER,
   tsx: TYPESCRIPT_ADAPTER,
