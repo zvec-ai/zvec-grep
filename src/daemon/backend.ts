@@ -1004,6 +1004,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         coordinator.enqueue(changes, reason);
       },
       onPendingChange: (pending) => runtime.setWatcherPending(pending),
+      onActivity: () => runtime.recordWatcherActivity(),
       getRootPaths: () =>
         this.statusCache.get(runtime.canonicalRoot)?.workspaceIndex?.rootPaths,
     });

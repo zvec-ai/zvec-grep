@@ -17,6 +17,7 @@ export type WatchManagerOptions = {
   maxChangedPaths?: number;
   watchFactory?: typeof watch;
   onPendingChange?: (pending: boolean) => void;
+  onActivity?: () => void;
   resumeCheckIntervalMs?: number;
   resumeThresholdMs?: number;
   platform?: NodeJS.Platform;
@@ -156,6 +157,7 @@ export class WatchManager {
     if (info?.isDirectory() && eventType === "rename") {
       void this.watchDirectoryTree(path, factory);
     }
+    this.options.onActivity?.();
     this.changes.add(
       path,
       info ? (eventType === "rename" ? "created" : "changed") : "deleted",
@@ -321,7 +323,9 @@ export class WatchManager {
           this.options.root,
           { recursive: true },
           (eventType, filename) => {
-            if (!filename || this.closed) {
+            if (this.closed) return;
+            if (!filename) {
+              this.options.onActivity?.();
               this.queueFullReconcile();
               return;
             }
@@ -358,7 +362,9 @@ export class WatchManager {
       try {
         this.addWatcher(
           factory(directory, { recursive: false }, (eventType, filename) => {
-            if (!filename || this.closed) {
+            if (this.closed) return;
+            if (!filename) {
+              this.options.onActivity?.();
               this.queueFullReconcile();
               return;
             }

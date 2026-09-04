@@ -33,6 +33,8 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_SERVER_TOKEN: "Server/client Bearer token",
   ZVEC_GREP_SERVER_TOKEN_FILE: "File containing the Server/client Bearer token",
   ZVEC_GREP_MCP_TOOLSET: "Server MCP surface: agent or full",
+  ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS:
+    "Seconds of workspace inactivity before the Server releases its watcher; default 14400, 0 disables eviction",
   ZVEC_GREP_EMBEDDING: "Default model for new indexes and auth grant",
   ZVEC_GREP_API_KEY: "Embedding provider credential fallback",
   ZVEC_GREP_ENDPOINT: "Remote Embedding endpoint fallback",
@@ -297,6 +299,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_SERVER_TOKEN",
   "ZVEC_GREP_SERVER_TOKEN_FILE",
   "ZVEC_GREP_MCP_TOOLSET",
+  "ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS",
 ])}
 
 See zg help environment for daemon startup scope.`;
@@ -528,6 +531,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_SERVER_TOKEN",
   "ZVEC_GREP_SERVER_TOKEN_FILE",
   "ZVEC_GREP_MCP_TOOLSET",
+  "ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS",
 ])}
 
 Embedding:
