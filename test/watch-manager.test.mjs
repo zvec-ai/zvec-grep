@@ -17,6 +17,7 @@ test("watch manager debounces file changes and reports overflow reconciliation",
   const batches = [];
   const manager = new WatchManager({
     root,
+    platform: "darwin",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
@@ -103,6 +104,7 @@ test("watch manager drops ignored file events before creating a change batch", a
   const pending = [];
   const manager = new WatchManager({
     root,
+    platform: "darwin",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
@@ -289,6 +291,7 @@ test("watch manager compacts an exact event storm into one directory scan", asyn
   const batches = [];
   const manager = new WatchManager({
     root,
+    platform: "darwin",
     debounceMs: 10,
     maxWaitMs: 30,
     reconcileIntervalMs: 0,
@@ -372,6 +375,7 @@ test("resume drift requests reconciliation and pending state spans debounce", as
   const reasons = [];
   const manager = new WatchManager({
     root,
+    platform: "darwin",
     debounceMs: 20,
     maxWaitMs: 40,
     reconcileIntervalMs: 0,
@@ -410,6 +414,7 @@ test("watcher errors trigger reconciliation and replace the failed watcher", asy
   const reasons = [];
   const manager = new WatchManager({
     root,
+    platform: "darwin",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
@@ -496,6 +501,7 @@ test("close waits for an in-flight async change callback", async () => {
   watcher.close = () => {};
   const manager = new WatchManager({
     root,
+    platform: "darwin",
     debounceMs: 5,
     maxWaitMs: 20,
     reconcileIntervalMs: 0,
