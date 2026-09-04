@@ -2036,6 +2036,57 @@ test("OpenCode installer preserves config and manages a remote MCP server", asyn
   assert.doesNotMatch(uninstalledGuidance, /ZVEC_GREP|## zvec-grep/);
 });
 
+test("OpenCode installer preserves JSONC comments", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-opencode-jsonc-"),
+  );
+  const configPath = join(temporaryDirectory, "opencode.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await writeFile(
+    configPath,
+    [
+      "{",
+      "  // Keep the user's model comment.",
+      '  "model": "custom/model",',
+      "  /* Keep the other MCP server comment. */",
+      '  "mcp": {',
+      '    "other": { "type": "remote", "url": "https://example.com/mcp" }',
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  await installTarget("opencode", { OPENCODE_CONFIG: configPath }, [
+    "--mcp-transport=http",
+  ]);
+  const installed = await readFile(configPath, "utf8");
+  assert.match(installed, /\/\/ Keep the user's model comment\./);
+  assert.match(installed, /\/\* Keep the other MCP server comment\. \*\//);
+  const config = parseJsonWithComments(installed);
+  assert.equal(config.model, "custom/model");
+  assert.equal(config.mcp.other.url, "https://example.com/mcp");
+  assert.deepEqual(config.mcp.zvec_grep, {
+    type: "remote",
+    url: "http://127.0.0.1:7999/mcp",
+    enabled: true,
+    timeout: 600000,
+    oauth: false,
+  });
+
+  await uninstallTarget("opencode", { OPENCODE_CONFIG: configPath });
+  const uninstalled = await readFile(configPath, "utf8");
+  assert.match(uninstalled, /\/\/ Keep the user's model comment\./);
+  assert.match(uninstalled, /\/\* Keep the other MCP server comment\. \*\//);
+  const uninstalledConfig = parseJsonWithComments(uninstalled);
+  assert.equal(uninstalledConfig.mcp.zvec_grep, undefined);
+  assert.equal(uninstalledConfig.mcp.other.url, "https://example.com/mcp");
+  assert.equal(uninstalledConfig.model, "custom/model");
+});
+
 test("JSON installers require force before replacing an unmanaged server", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-json-conflict-"),
