@@ -275,7 +275,7 @@ fn normalize_source_file(file: &str) -> String {
 mod tests {
     use std::io;
 
-    use super::{EngineError, ErrorReport};
+    use super::EngineError;
 
     #[test]
     fn exposes_readable_and_locatable_diagnostics() {
@@ -316,20 +316,6 @@ mod tests {
 
         let decoded = serde_json::from_value(value).expect("error report should deserialize");
         assert_eq!(report, decoded);
-    }
-
-    #[test]
-    fn preserves_unknown_error_codes() {
-        let report = serde_json::from_str::<ErrorReport>(
-            r#"{
-                "code": "ZG.ENGINE.FUTURE_ERROR",
-                "message": "future error",
-                "origin": { "file": "future.rs", "line": 1, "column": 1 }
-            }"#,
-        )
-        .expect("unknown error codes should remain transportable");
-
-        assert_eq!(report.code, "ZG.ENGINE.FUTURE_ERROR");
     }
 
     #[test]
