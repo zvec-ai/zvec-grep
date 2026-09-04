@@ -490,6 +490,66 @@ test("scheduler keeps failures without context backward compatible", async (t) =
   }
 });
 
+test("scheduler releases finished run closures and bounds retained jobs", async (t) => {
+  const scheduler = new JobScheduler({ concurrency: 1 });
+  t.after(() => scheduler.close());
+  const submitted = [];
+  for (let index = 0; index < 300; index++) {
+    submitted.push(
+      scheduler.submit({
+        canonicalRoot: `/repo-${index}`,
+        reason: "manual",
+        run: async () => {},
+      }).job,
+    );
+  }
+  const finished = [];
+  for (const job of submitted) {
+    finished.push(await scheduler.wait(job.id));
+  }
+  assert.ok(
+    finished.every((job) => job.state === "succeeded"),
+    "every job should succeed",
+  );
+
+  // Terminal jobs keep their snapshots for late lookups but must not pin the
+  // run closure (which can capture credentials from the index options).
+  const newest = submitted[submitted.length - 1];
+  const internals = scheduler;
+  assert.equal(internals.jobs.get(newest.id)?.run, undefined);
+  assert.equal(scheduler.get(newest.id)?.state, "succeeded");
+  assert.equal(scheduler.getByRoot(newest.canonicalRoot)?.state, "succeeded");
+
+  // The jobs Map stays bounded; the oldest finished jobs are evicted.
+  assert.equal(internals.jobs.size, 256);
+  assert.equal(scheduler.get(submitted[0].id), undefined);
+  assert.equal((await scheduler.wait(newest.id)).state, "succeeded");
+});
+
+test("scheduler clears the run reference once a job reaches a terminal state", async (t) => {
+  const scheduler = new JobScheduler({
+    concurrency: 1,
+    maxAttempts: 2,
+    retryBaseDelayMs: 5,
+  });
+  t.after(() => scheduler.close());
+  let attempts = 0;
+  const retrying = scheduler.submit({
+    canonicalRoot: "/repo-retry",
+    reason: "manual",
+    run: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new DaemonError("INDEX_BUSY", "busy", true);
+      }
+    },
+  });
+  assert.equal((await scheduler.wait(retrying.job.id)).state, "succeeded");
+  assert.equal(attempts, 2);
+  const internals = scheduler;
+  assert.equal(internals.jobs.get(retrying.job.id)?.run, undefined);
+});
+
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 100; attempt++) {
     if (predicate()) {
