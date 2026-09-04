@@ -12,7 +12,7 @@ endpoint is:
 http://127.0.0.1:7999/mcp
 ```
 
-Run `zg install` to configure a supported agent automatically. Use this page
+Run `zg --install` to configure a supported agent automatically. Use this page
 when building another MCP client or when you need the exact boundary between
 the default and compatibility toolsets. See
 [Server and execution modes](./06-server.md) for lifecycle, mode selection,
@@ -120,7 +120,7 @@ authorization. See
 ## `zvec_grep_rg`
 
 This tool is retained in the optional `full` MCP toolset and is not registered
-in the default `agent` toolset. The CLI equivalent, `zg query --rg`, remains
+in the default `agent` toolset. The CLI equivalent, `zg --rg`, remains
 available without changing the MCP toolset.
 
 Pass the ripgrep command you would otherwise run. The command is parsed into
@@ -153,8 +153,8 @@ The CLI owns index lifecycle and diagnostics, so agents normally do not need
 administrative MCP tools. Clients that require them can restart the server with:
 
 ```bash
-zg server off
-zg server on --mcp-toolset full
+zg --server off
+zg --server on --mcp-toolset full
 ```
 
 The `full` toolset exposes six tools:

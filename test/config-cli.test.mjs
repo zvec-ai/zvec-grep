@@ -12,7 +12,7 @@ const cliPath = resolve("dist/cli/index.js");
 
 test("config model set parses local runtime settings", () => {
   const parsed = parseArgs([
-    "config",
+    "--config",
     "model",
     "set",
     "local/embeddinggemma-300m",
@@ -26,7 +26,7 @@ test("config model set parses local runtime settings", () => {
 
 test("config provider and default model settings parse", () => {
   const provider = parseArgs([
-    "config",
+    "--config",
     "provider",
     "set",
     "qwen",
@@ -37,7 +37,7 @@ test("config provider and default model settings parse", () => {
   assert.equal(provider.options.apiKey, "secret");
 
   const model = parseArgs([
-    "config",
+    "--config",
     "model",
     "set",
     "qwen/text-embedding-v4",
@@ -62,7 +62,7 @@ test("config model set persists independent local model settings", async (t) => 
     process.execPath,
     [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "local/embeddinggemma-300m",
@@ -75,7 +75,7 @@ test("config model set persists independent local model settings", async (t) => 
     process.execPath,
     [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "local/embeddinggemma-300m",
@@ -88,7 +88,7 @@ test("config model set persists independent local model settings", async (t) => 
     process.execPath,
     [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "local/qwen3-embedding-0.6b",
@@ -99,14 +99,22 @@ test("config model set persists independent local model settings", async (t) => 
   );
   await execFileAsync(
     process.execPath,
-    [cliPath, "config", "provider", "set", "qwen", "--api-key", "provider-key"],
+    [
+      cliPath,
+      "--config",
+      "provider",
+      "set",
+      "qwen",
+      "--api-key",
+      "provider-key",
+    ],
     { env, cwd: workspace },
   );
   await execFileAsync(
     process.execPath,
     [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "qwen/text-embedding-v4",
@@ -141,7 +149,7 @@ test("config model set rejects missing and incompatible settings", async () => {
   await assert.rejects(
     execFileAsync(process.execPath, [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "local/embeddinggemma-300m",
@@ -151,7 +159,7 @@ test("config model set rejects missing and incompatible settings", async () => {
   await assert.rejects(
     execFileAsync(process.execPath, [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "qwen/text-embedding-v4",
@@ -163,7 +171,7 @@ test("config model set rejects missing and incompatible settings", async () => {
   await assert.rejects(
     execFileAsync(process.execPath, [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "local/unknown",
@@ -172,14 +180,14 @@ test("config model set rejects missing and incompatible settings", async () => {
     ]),
     (error) => {
       assert.match(error.stderr, /Unsupported embedding model/);
-      assert.match(error.stderr, /zg help models/);
+      assert.match(error.stderr, /zg --help models/);
       return true;
     },
   );
   await assert.rejects(
     execFileAsync(process.execPath, [
       cliPath,
-      "config",
+      "--config",
       "model",
       "set",
       "local/embeddinggemma-300m",
@@ -191,7 +199,7 @@ test("config model set rejects missing and incompatible settings", async () => {
   await assert.rejects(
     execFileAsync(process.execPath, [
       cliPath,
-      "config",
+      "--config",
       "provider",
       "set",
       "unknown",
@@ -211,7 +219,7 @@ test("config model set rejects missing and incompatible settings", async () => {
     assert.throws(
       () =>
         parseArgs([
-          "config",
+          "--config",
           "model",
           "set",
           "local/embeddinggemma-300m",
@@ -223,7 +231,7 @@ test("config model set rejects missing and incompatible settings", async () => {
   assert.throws(
     () =>
       parseArgs([
-        "config",
+        "--config",
         "model",
         "set",
         "local/embeddinggemma-300m",

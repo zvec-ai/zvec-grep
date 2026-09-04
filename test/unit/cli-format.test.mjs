@@ -955,7 +955,7 @@ test("status formatters cover workspace states, failures, filters, and color", a
         indexPath: "/repo/.zvec-grep/index.zvec",
         workspaceIndex: info,
         status: stale,
-        suggestion: "zg index",
+        suggestion: "zg --index",
       },
       { color: "never" },
     );
@@ -1034,7 +1034,7 @@ test("status formatters cover workspace states, failures, filters, and color", a
             entities: 7,
             truncated_fragments: 4,
           },
-          suggestion: "zg index",
+          suggestion: "zg --index",
         },
         runtime: {
           job_state: "running",
@@ -1073,7 +1073,7 @@ test("status formatters cover workspace states, failures, filters, and color", a
   assert.match(output.logs.join("\n"), /1m 5s/);
   assert.match(output.logs.join("\n"), /ignore-file=\.rgignore/);
   assert.match(output.logs.join("\n"), /Default indexing skips/);
-  assert.match(output.logs.join("\n"), /zg help file-types/);
+  assert.match(output.logs.join("\n"), /zg --help file-types/);
   assert.match(
     output.logs.join("\n"),
     new RegExp(
@@ -1139,7 +1139,7 @@ test("status formatters cover workspace states, failures, filters, and color", a
       indexPath: "/repo/.zvec-grep/index.zvec",
       workspaceIndex: stateInfo.workspaceIndex,
       status: stateInfo.status,
-      suggestion: "zg index",
+      suggestion: "zg --index",
     };
     const rendered = await captureConsole(() =>
       printWorkspaceInfo(workspace, { color: "never" }),
@@ -1496,7 +1496,7 @@ test("Remote Embedding authorization status uses grouped colors and compact path
     "  /repo",
     "",
     "Run",
-    "  zg auth grant --capability embedding --scope workspace",
+    "  zg --auth grant --capability embedding --scope workspace",
   ]);
 });
 

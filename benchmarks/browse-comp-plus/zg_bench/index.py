@@ -52,7 +52,7 @@ def index_is_ready(
         (artifacts / "runtime" / "zvec-home").resolve()
     )
     status = run_command(
-        [executable, "status", root, "--mode", "direct", "--check-ready"],
+        [executable, "--status", root, "--mode", "direct", "--check-ready"],
         cwd=root,
         env=environment,
         timeout=120,
@@ -69,7 +69,7 @@ def build_index(
     executable = resolve_executable("zg")
     if executable is None:
         raise RuntimeError("zvec-grep executable not found: zg")
-    version = run_command([executable, "version"], timeout=30)
+    version = run_command([executable, "--version"], timeout=30)
     actual_version = version.stdout.strip().splitlines()[0] if version.stdout else ""
     if not version.ok or not actual_version:
         raise RuntimeError("could not determine the installed zvec-grep version")
@@ -94,7 +94,7 @@ def build_index(
             and state.get("root") == str(root)
         ):
             check = run_command(
-                [executable, "status", root, "--mode", "direct", "--check-ready"],
+                [executable, "--status", root, "--mode", "direct", "--check-ready"],
                 cwd=root,
                 env=environment,
                 timeout=120,
@@ -108,7 +108,7 @@ def build_index(
 
     command: list[str | Path] = [
         executable,
-        "index",
+        "--index",
         root,
         "--mode",
         "direct",
@@ -142,7 +142,7 @@ def build_index(
             _index_failure(config, result.stderr, result.stdout, stderr_log)
         )
     status = run_command(
-        [executable, "status", root, "--mode", "direct", "--check-ready"],
+        [executable, "--status", root, "--mode", "direct", "--check-ready"],
         cwd=root,
         env=environment,
         timeout=120,
@@ -183,7 +183,7 @@ def _prepare_remote_authorization(
     grant = run_command(
         [
             executable,
-            "auth",
+            "--auth",
             "grant",
             root,
             "--capability",

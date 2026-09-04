@@ -230,9 +230,9 @@ class ZvecGrepMixin:
                 status_result = await self.exec_as_agent(
                     environment,
                     command=(
-                        "zg status --check-ready"
+                        "zg --status --check-ready"
                         if supports_ready_check
-                        else "zg status"
+                        else "zg --status"
                     ),
                     cwd=workdir,
                 )
@@ -240,7 +240,7 @@ class ZvecGrepMixin:
                     status_result.stdout or ""
                 ):
                     raise RuntimeError(
-                        "zvec-grep index setup completed but zg status did not "
+                        "zvec-grep index setup completed but zg --status did not "
                         "report state ready"
                     )
                 if seed_identity is not None and seed_key is not None:
@@ -264,7 +264,7 @@ class ZvecGrepMixin:
                 metadata["index_status"]
             ):
                 raise RuntimeError(
-                    "zvec-grep index setup completed but zg status did not "
+                    "zvec-grep index setup completed but zg --status did not "
                     "report state ready"
                 )
 
@@ -392,7 +392,7 @@ class ZvecGrepMixin:
             result = await self.exec_as_agent(
                 environment,
                 command=(
-                    "if zg status --check-ready; then ready=1; else ready=0; fi; "
+                    "if zg --status --check-ready; then ready=1; else ready=0; fi; "
                     "printf 'ZG_INDEX_SEED_READY=%s\\n' \"$ready\""
                 ),
                 cwd=workdir,
@@ -405,7 +405,7 @@ class ZvecGrepMixin:
 
         result = await self.exec_as_agent(
             environment,
-            command="zg status",
+            command="zg --status",
             cwd=workdir,
         )
         return result, self._index_is_ready(result.stdout or "")
@@ -504,7 +504,7 @@ class ZvecGrepMixin:
         mcp_result = await self.exec_as_agent(
             environment,
             command=(
-                "zg install --target " f"{shlex.quote(self._mcp_target)} --yes"
+                "zg --install --target " f"{shlex.quote(self._mcp_target)} --yes"
             ),
             **install_kwargs,
         )
@@ -517,9 +517,9 @@ class ZvecGrepMixin:
         server_status = await self.exec_as_agent(
             environment,
             command=(
-                "zg server status --check-ready"
+                "zg --server status --check-ready"
                 if supports_ready_check
-                else "zg server status"
+                else "zg --server status"
             ),
             cwd=workdir,
         )
@@ -535,7 +535,7 @@ class ZvecGrepMixin:
             )
 
     def _mcp_install_environment(self) -> dict[str, str] | None:
-        """Return target-specific environment for `zg install`."""
+        """Return target-specific environment for `zg --install`."""
         return None
 
     async def _install_zvec_grep(
@@ -574,7 +574,7 @@ class ZvecGrepMixin:
             expected = shlex.quote(expected_version)
             install_command = (
                 "if command -v zg >/dev/null 2>&1 && "
-                f"[ \"$(zg version -v)\" = {expected} ] && "
+                f"[ \"$(zg --version)\" = {expected} ] && "
                 f"npm list -g --depth=0 {binding_package} >/dev/null 2>&1; "
                 "then reused=1; else "
                 f"npm install -g {package} {binding_package} "
@@ -612,11 +612,11 @@ class ZvecGrepMixin:
             )
         await self.exec_as_root(environment, command=" && ".join(link_commands))
         version_result = await self.exec_as_agent(
-            environment, command="zg version -v"
+            environment, command="zg --version"
         )
         version = (version_result.stdout or "").strip()
         if not version:
-            raise RuntimeError("zg version -v returned no version")
+            raise RuntimeError("zg --version returned no version")
         return version, reused == "1"
 
     async def _upload_embedding_config(self, environment: BaseEnvironment) -> None:
@@ -725,14 +725,14 @@ class ZvecGrepMixin:
 
     @staticmethod
     def _index_command(embedding_model: str) -> str:
-        return f"zg index --embedding {shlex.quote(embedding_model)}"
+        return f"zg --index --embedding {shlex.quote(embedding_model)}"
 
     @staticmethod
     def _authorization_command(embedding_model: str) -> str | None:
         if embedding_model.startswith("local/"):
             return None
         return (
-            "zg auth grant --capability embedding --scope workspace "
+            "zg --auth grant --capability embedding --scope workspace "
             f"--embedding {shlex.quote(embedding_model)}"
         )
 

@@ -470,7 +470,7 @@ class ClaudeMcpInstallTests(unittest.IsolatedAsyncioTestCase):
         install_command, install_kwargs = calls[0]
         self.assertEqual(
             install_command,
-            "zg install --target claude-code --yes",
+            "zg --install --target claude-code --yes",
         )
         self.assertEqual(install_kwargs["cwd"], "/workspace")
         self.assertEqual(

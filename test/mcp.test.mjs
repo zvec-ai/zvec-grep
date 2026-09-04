@@ -9,8 +9,8 @@ import {
 } from "../dist/mcp/schemas.js";
 
 test("stdio MCP entry points are not public CLI commands", () => {
-  assert.throws(() => parseArgs(["serve", "--mcp"]), /removed/i);
-  assert.throws(() => parseArgs(["--mcp"]), /Unknown command/i);
+  assert.throws(() => parseArgs(["serve", "--mcp"]), /Unknown option/i);
+  assert.throws(() => parseArgs(["--mcp"]), /Unknown option/i);
 });
 
 test("public MCP search omits runtime overrides while CLI admin preserves them", () => {

@@ -124,11 +124,11 @@ test("npm package contains and exposes the supported public surface", async (t) 
     );
     assert.equal(installedCli.mode & 0o111, 0o111);
   }
-  const version = await runExecutable(cli, ["version"], {
+  const version = await runExecutable(cli, ["--version"], {
     cwd: consumerDirectory,
   });
   assert.equal(version.stdout.trim(), packageJson.version);
-  const help = await runExecutable(cli, ["help"], {
+  const help = await runExecutable(cli, ["--help"], {
     cwd: consumerDirectory,
   });
   assert.match(help.stdout, /Usage:/);
@@ -139,7 +139,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
   );
   const rg = await runExecutable(
     cli,
-    ["query", "--rg", "-g", "*.ts", "-t", "ts", "PackageIndexedNeedle", "."],
+    ["--rg", "-g", "*.ts", "-t", "ts", "PackageIndexedNeedle", "."],
     { cwd: consumerDirectory },
   );
   assert.match(rg.stdout, /fixture\.ts/);
@@ -155,7 +155,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
   await runExecutable(
     cli,
     [
-      "index",
+      "--index",
       "--embedding",
       "qwen/qwen3.7-text-embedding",
       "--api-key",
@@ -173,17 +173,7 @@ test("npm package contains and exposes the supported public surface", async (t) 
   );
   const indexed = await runExecutable(
     cli,
-    [
-      "query",
-      "--fts",
-      "PackageIndexedNeedle",
-      "--limit",
-      "5",
-      "-g",
-      "*.ts",
-      "-t",
-      "ts",
-    ],
+    ["--fts", "PackageIndexedNeedle", "--limit", "5", "-g", "*.ts", "-t", "ts"],
     { cwd: consumerDirectory, env: cliEnvironment, timeout: 120_000 },
   );
   assert.match(indexed.stdout, /PackageIndexedNeedle/);

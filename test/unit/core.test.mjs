@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import {
+  compatibilityWarningForArgs,
   parseArgs,
   parseDevice,
   parseModifiedTime,
@@ -57,8 +58,7 @@ import { contextOptionsFromRgInput } from "../../dist/mcp/input-normalization.js
 
 test("CLI argument parser handles command, provider, path, and rg options", () => {
   const parsed = parseArgs([
-    "query",
-    "--human",
+    "--compact",
     "--trace",
     "--preview",
     "short",
@@ -74,7 +74,7 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   ]);
   assert.equal(parsed.command, "query");
   assert.deepEqual(parsed.positionals, ["query text"]);
-  assert.equal(parsed.options.human, true);
+  assert.equal(parsed.options.human, false);
   assert.equal(parsed.options.trace, true);
   assert.equal(parsed.options.preview, "short");
   assert.equal(parsed.options.limit, 7);
@@ -82,7 +82,7 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(typeof parsed.options.modifiedAfter, "number");
 
   const index = parseArgs([
-    "index",
+    "--index",
     "--embedding",
     "qwen/text-embedding-v4",
     "--api-key",
@@ -103,7 +103,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(index.options.embeddingConcurrency, 4);
 
   const queryRuntime = parseArgs([
-    "query",
     "--api-key",
     "secret",
     "--model-cache",
@@ -117,7 +116,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(queryRuntime.options.device, "cpu");
 
   const rg = parseArgs([
-    "query",
     "--rg",
     "-F",
     "-i",
@@ -140,12 +138,11 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
   assert.throws(
     () =>
       parseArgs([
-        "query",
         "--endpoint",
         "https://example.test/embeddings",
         "query text",
       ]),
-    /--endpoint is not supported with zg query/,
+    /--endpoint is not supported while searching/,
   );
   assert.equal(parseDevice("cpu"), "cpu");
   assert.equal(parseDevice("CUDA"), "cuda");
@@ -163,25 +160,54 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
     1700000000000,
   );
   assert.throws(() => parseDevice("magic"), /Unsupported device/);
+  assert.throws(() => parseArgs(["--limit", "0", "query"]), /positive integer/);
   assert.throws(
-    () => parseArgs(["query", "--limit", "0", "query"]),
+    () => parseArgs(["--limit", "2x", "query"]),
     /positive integer/,
   );
   assert.throws(
-    () => parseArgs(["query", "--limit", "2x", "query"]),
-    /positive integer/,
-  );
-  assert.throws(
-    () => parseArgs(["query", "--preview", "huge", "query"]),
+    () => parseArgs(["--preview", "huge", "query"]),
     /Unsupported preview mode/,
   );
-  assert.throws(() => parseArgs(["query", "--json", "query"]), /removed/);
+  assert.throws(() => parseArgs(["--json", "query"]), /not supported/);
+  assert.throws(() => parseArgs(["--human", "query"]), /removed/);
   assert.throws(
-    () =>
-      parseArgs(["query", "--embedding", "local/embeddinggemma-300m", "query"]),
-    /--embedding is not supported with zg query/,
+    () => parseArgs(["--embedding", "local/embeddinggemma-300m", "query"]),
+    /--embedding is not supported while searching/,
   );
-  assert.throws(() => parseArgs(["--unknown"]), /Unknown command/);
+  assert.throws(() => parseArgs(["--unknown"]), /Unknown option/);
+});
+
+test("CLI warns about command-shaped leading queries without restoring aliases", () => {
+  assert.match(
+    compatibilityWarningForArgs(["query", "xxx"]),
+    /search is already the default/,
+  );
+  assert.match(
+    compatibilityWarningForArgs(["search", "authentication"]),
+    /search is already the default/,
+  );
+  for (const word of [
+    "index",
+    "status",
+    "install",
+    "uninstall",
+    "config",
+    "auth",
+    "server",
+    "help",
+    "version",
+  ]) {
+    const warning = compatibilityWarningForArgs([word, "literal"]);
+    assert.match(warning, /is parsed as search input/);
+    assert.match(warning, new RegExp(`zg --${word}`));
+  }
+  assert.equal(compatibilityWarningForArgs(["--", "query"]), undefined);
+  assert.equal(
+    compatibilityWarningForArgs(["authentication", "query"]),
+    undefined,
+  );
+  assert.deepEqual(parseArgs(["query", "xxx"]).positionals, ["query", "xxx"]);
 });
 
 test("MCP rg command normalization preserves quoted patterns, paths, and globs", () => {
@@ -291,7 +317,7 @@ test("MCP rg command parsing rejects shell syntax, non-rg flags, and root escape
 
 test("CLI parser covers utility commands, provider controls, routes, and equals syntax", () => {
   const install = parseArgs([
-    "install",
+    "--install",
     "--target=codex, claude",
     "--target",
     "cursor",
@@ -310,37 +336,55 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
   assert.equal(install.options.installMcpTransport, "stdio");
   assert.equal(install.options.mcpToolset, "full");
   assert.throws(
-    () => parseArgs(["install", "--mcp-token-env", "TOKEN"]),
+    () => parseArgs(["--install", "--mcp-token-env", "TOKEN"]),
     /requires --mcp-transport http/,
   );
 
-  assert.throws(() => parseArgs(["serve", "--mcp"]), /removed/i);
+  assert.throws(() => parseArgs(["serve", "--mcp"]), /Unknown option/i);
   assert.equal(parseArgs(["-h"]).command, "help");
-  assert.equal(parseArgs(["help", "query"]).helpTopic, "query");
-  assert.equal(parseArgs(["help", "environment"]).helpTopic, "environment");
-  assert.equal(parseArgs(["help", "env"]).helpTopic, "env");
+  assert.equal(parseArgs(["--help", "search"]).helpTopic, "search");
+  assert.equal(parseArgs(["--help", "environment"]).helpTopic, "environment");
+  assert.equal(parseArgs(["--help=env"]).helpTopic, "env");
   assert.equal(parseArgs(["-v"]).command, "version");
-  assert.equal(parseArgs(["version", "-v"]).command, "version");
-  assert.equal(parseArgs(["version", "--version"]).command, "version");
+  assert.equal(parseArgs(["version"]).command, "query");
   assert.deepEqual(
-    parseArgs(["query", "--rg", "-v", "needle"]).options.rgOptions?.extraArgs,
+    parseArgs(["--rg", "-v", "needle"]).options.rgOptions?.extraArgs,
     ["-v"],
   );
-  assert.equal(parseArgs(["index", "--drop", "--yes"]).options.drop, true);
-  assert.equal(parseArgs(["status"]).command, "status");
-  assert.equal(parseArgs(["status", "--check-ready"]).options.checkReady, true);
+  assert.equal(parseArgs(["--index", "--drop", "--yes"]).options.drop, true);
+  const formerCommands = [
+    "query",
+    "index",
+    "status",
+    "install",
+    "uninstall",
+    "config",
+    "auth",
+    "server",
+    "help",
+    "version",
+  ];
+  assert.deepEqual(parseArgs(formerCommands), {
+    command: "query",
+    options: {},
+    positionals: formerCommands,
+  });
   assert.equal(
-    parseArgs(["server", "status", "--check-ready"]).options.checkReady,
+    parseArgs(["--status", "--check-ready"]).options.checkReady,
+    true,
+  );
+  assert.equal(
+    parseArgs(["--server", "status", "--check-ready"]).options.checkReady,
     true,
   );
   assert.throws(
-    () => parseArgs(["query", "--check-ready", "query"]),
-    /zg status or zg server status/,
+    () => parseArgs(["--check-ready", "query"]),
+    /zg --status or zg --server status/,
   );
-  assert.throws(() => parseArgs(["collections"]), /Unknown command/);
+  assert.deepEqual(parseArgs(["collections"]).positionals, ["collections"]);
   assert.deepEqual(
     parseArgs([
-      "auth",
+      "--auth",
       "grant",
       "/tmp/workspace",
       "--capability",
@@ -358,22 +402,21 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     },
   );
   assert.equal(
-    parseArgs(["query", "--allow-remote", "query"]).options.allowRemote,
+    parseArgs(["--allow-remote", "query"]).options.allowRemote,
     true,
   );
   assert.throws(
-    () => parseArgs(["query", "--allow-remote=once", "query"]),
+    () => parseArgs(["--allow-remote=once", "query"]),
     /does not accept a value/,
   );
   assert.throws(
-    () => parseArgs(["query", "--allow-remote", "workspace", "query"]),
+    () => parseArgs(["--allow-remote", "workspace", "query"]),
     /does not accept a value/,
   );
 
   const query = parseArgs([
-    "query",
     "--debug",
-    "--human",
+    "--compact",
     "--preview=full",
     "--refresh=off",
     "--prefer-symbol",
@@ -404,6 +447,7 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     "-literal-query",
   ]);
   assert.equal(query.options.debug, true);
+  assert.equal(query.options.human, false);
   assert.deepEqual(query.options.hybridQueries, ["zero"]);
   assert.deepEqual(query.options.routes, [
     { mode: "fts", query: "one" },
@@ -414,25 +458,25 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
   assert.deepEqual(query.options.globs, ["src/**", "docs/**", "!dist/**"]);
   assert.deepEqual(query.options.fileTypes, ["ts"]);
   assert.deepEqual(query.positionals, ["-literal-query"]);
-  assert.equal(parseArgs(["index", "--debug"]).options.debug, true);
+  assert.equal(parseArgs(["--index", "--debug"]).options.debug, true);
 });
 
 test("CLI parser limits debug output to query, index, and workspace status", () => {
   const supported = [
-    ["query", "--debug", "needle"],
-    ["index", "--debug"],
-    ["status", "--debug"],
-    ["status", "--check-ready", "--debug"],
+    ["--debug", "needle"],
+    ["--index", "--debug"],
+    ["--status", "--debug"],
+    ["--status", "--check-ready", "--debug"],
   ];
   for (const args of supported) {
     assert.equal(parseArgs(args).options.debug, true, args.join(" "));
   }
 
   const unsupported = [
-    ["install", "--debug"],
-    ["uninstall", "--debug"],
-    ["server", "start", "--debug"],
-    ["server", "status", "--debug"],
+    ["--install", "--debug"],
+    ["--uninstall", "--debug"],
+    ["--server", "start", "--debug"],
+    ["--server", "status", "--debug"],
   ];
   for (const args of unsupported) {
     assert.throws(
@@ -445,7 +489,6 @@ test("CLI parser limits debug output to query, index, and workspace status", () 
 
 test("CLI parser covers managed rg long and short compatibility options", () => {
   const long = parseArgs([
-    "query",
     "--rg",
     "--ignore-case",
     "--word-regexp",
@@ -506,7 +549,6 @@ test("CLI parser covers managed rg long and short compatibility options", () => 
   assert.ok(long.options.rgOptions?.extraArgs?.includes("--word-regexp"));
 
   const short = parseArgs([
-    "query",
     "--rg",
     "-nHFiwPSsuvxUzL",
     "-einline",
@@ -537,57 +579,53 @@ test("CLI parser covers managed rg long and short compatibility options", () => 
 
 test("CLI shape validation rejects every incompatible command family", () => {
   const invalid = [
-    [["serve"], /removed/i],
-    [["serve", "--mcp", "--fts", "query"], /removed/i],
-    [["query", "--mcp", "query"], /Unknown option/],
-    [["query", "--collection", "docs", "query"], /Unknown option/],
-    [["index", "--fts", "query"], /only be used with zg query/],
-    [["status", "--rg", "query"], /only be used with zg query/],
-    [["index", "--refresh", "off"], /only be used with zg query/],
-    [["query", "--rg", "query", "--fts", "query"], /cannot be combined/],
-    [["query", "--rg", "query", "--hybrid", "query"], /cannot be combined/],
-    [["query", "--rg", "query", "--fuse"], /cannot be combined/],
+    [["serve", "--mcp", "--fts", "query"], /Unknown option/i],
+    [["--mcp", "query"], /Unknown option/],
+    [["--collection", "docs", "query"], /Unknown option/],
+    [["--index", "--fts", "query"], /only be used for search/],
+    [["--status", "--rg", "query"], /only be used for search/],
+    [["--index", "--refresh", "off"], /only be used for search/],
+    [["--rg", "query", "--fts", "query"], /cannot be combined/],
+    [["--rg", "query", "--hybrid", "query"], /cannot be combined/],
+    [["--rg", "query", "--fuse"], /cannot be combined/],
+    [["--rg", "query", "--preview", "short"], /not supported with --rg/],
+    [["--rg", "query", "--trace"], /cannot be combined/],
+    [["--rg", "query", "--prefer-symbol"], /indexed symbol options/],
+    [["--rg", "query", "--refresh", "off"], /indexed refresh options/],
     [
-      ["query", "--rg", "query", "--preview", "short"],
-      /not supported with --rg/,
-    ],
-    [["query", "--rg", "query", "--trace"], /cannot be combined/],
-    [["query", "--rg", "query", "--prefer-symbol"], /indexed symbol options/],
-    [["query", "--rg", "query", "--refresh", "off"], /indexed refresh options/],
-    [
-      ["query", "--rg", "query", "--embedding-concurrency", "2"],
+      ["--rg", "query", "--embedding-concurrency", "2"],
       /indexed refresh options/,
     ],
-    [["query", "--reset-paths", "query"], /only be used with zg index/],
-    [["query", "--ignore-case", "query"], /only be used with --rg/],
-    [["query", "--hidden", "query"], /index commands or zg query --rg/],
-    [["install", "-g", "src/**"], /query or index commands/],
-    [["query", "--drop", "query"], /only be used with zg index/],
-    [["index", "--drop", "--rebuild"], /cannot be combined/],
-    [["index", "--drop", "-g", "src/**"], /cannot be combined/],
-    [["uninstall", "--force"], /only be used with zg install/],
-    [["status", "--target", "codex"], /only be used with zg install/],
-    [["auth", "grant", "--scope", "session"], /only workspace scope/],
-    [["status", "--allow-remote"], /query or index commands/],
+    [["--reset-paths", "query"], /only be used with zg --index/],
+    [["--ignore-case", "query"], /only be used with --rg/],
+    [["--hidden", "query"], /--index or --rg/],
+    [["--install", "-g", "src/**"], /search or --index/],
+    [["--drop", "query"], /only be used with zg --index/],
+    [["--index", "--drop", "--rebuild"], /cannot be combined/],
+    [["--index", "--drop", "-g", "src/**"], /cannot be combined/],
+    [["--uninstall", "--force"], /only be used with zg --install/],
+    [["--status", "--target", "codex"], /only be used with --install/],
+    [["--auth", "grant", "--scope", "session"], /only workspace scope/],
+    [["--status", "--allow-remote"], /search or --index/],
   ];
   for (const [args, message] of invalid) {
     assert.throws(() => parseArgs(args), message, args.join(" "));
   }
 
   for (const args of [
-    ["query", "--color", "sometimes", "query"],
-    ["query", "--symbol-type", "method", "query"],
-    ["query", "--modified-after", "not-a-date", "query"],
-    ["query", "--modified-after", "999999999999999999999", "query"],
-    ["query", "--modified-after", "2026-13-40", "query"],
-    ["query", "--rg", "--context", "-1", "query"],
-    ["query", "--count", "query"],
-    ["query", "--rg", "-l", "query"],
-    ["query", "--rg", "-q", "query"],
-    ["query", "--rg", "--stats", "query"],
-    ["query", "--include", "src/**", "query"],
-    ["query", "--fts"],
-    ["install", "--target"],
+    ["--color", "sometimes", "query"],
+    ["--symbol-type", "method", "query"],
+    ["--modified-after", "not-a-date", "query"],
+    ["--modified-after", "999999999999999999999", "query"],
+    ["--modified-after", "2026-13-40", "query"],
+    ["--rg", "--context", "-1", "query"],
+    ["--count", "query"],
+    ["--rg", "-l", "query"],
+    ["--rg", "-q", "query"],
+    ["--rg", "--stats", "query"],
+    ["--include", "src/**", "query"],
+    ["--fts"],
+    ["--install", "--target"],
   ]) {
     assert.throws(() => parseArgs(args), undefined, args.join(" "));
   }

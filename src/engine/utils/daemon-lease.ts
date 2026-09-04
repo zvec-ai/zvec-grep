@@ -164,7 +164,7 @@ function daemonLeaseActiveError(root: string, pid: number): EngineError {
     context: [
       `root=${root}`,
       `pid=${pid}`,
-      "hint=Run with --mode auto so a ready daemon handles indexed operations. If auto is already active, check zg server status and restore or stop the daemon before retrying.",
+      "hint=Run with --mode auto so a ready daemon handles indexed operations. If auto is already active, check zg --server status and restore or stop the daemon before retrying.",
       'config=Edit ~/.zvec-grep/config.json and set client.mode to "auto" to persist this behavior.',
     ].join("\n"),
   });

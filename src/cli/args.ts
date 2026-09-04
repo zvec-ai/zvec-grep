@@ -93,6 +93,44 @@ const MANAGED_RG_OUTPUT_OPTIONS = new Set([
   "-r",
 ]);
 
+const ACTION_FLAGS = new Map<string, CliCommand>([
+  ["--index", "index"],
+  ["--status", "status"],
+  ["--install", "install"],
+  ["--uninstall", "uninstall"],
+  ["--config", "config"],
+  ["--auth", "auth"],
+  ["--server", "server"],
+]);
+
+const COMMAND_SHAPED_QUERY_WORDS = new Set(["query", "search"]);
+const COMMAND_SHAPED_ACTION_WORDS = new Map<string, string>([
+  ["index", "--index"],
+  ["status", "--status"],
+  ["install", "--install"],
+  ["uninstall", "--uninstall"],
+  ["config", "--config"],
+  ["auth", "--auth"],
+  ["server", "--server"],
+  ["help", "--help"],
+  ["version", "--version"],
+]);
+
+export function compatibilityWarningForArgs(
+  args: readonly string[],
+): string | undefined {
+  const first = args[0];
+  if (!first) return undefined;
+
+  if (COMMAND_SHAPED_QUERY_WORDS.has(first)) {
+    return `warning: "zg ${first} ..." is not a subcommand; search is already the default. Remove "${first}", or use 'zg -- "${first}" ...' to search for that literal word.`;
+  }
+
+  const action = COMMAND_SHAPED_ACTION_WORDS.get(first);
+  if (!action) return undefined;
+  return `warning: "zg ${first} ..." no longer runs an action and is parsed as search input. Use "zg ${action} ...", or 'zg -- "${first}" ...' to search for that literal word.`;
+}
+
 export function parseArgs(args: readonly string[]): ParsedArgs {
   const commandInput = parseCommand(args);
   if (commandInput.command === "help" || commandInput.command === "version") {
@@ -104,39 +142,44 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     };
   }
 
+  const commandArgs = commandInput.args;
   const options: CliOptions = {};
   const positionals: string[] = [];
-  let startIndex = 1;
+  let startIndex = 0;
   if (commandInput.command === "config") {
-    if (args[1] === "model" && args[2] === "set") {
+    if (commandArgs[0] === "model" && commandArgs[1] === "set") {
       options.configAction = "model-set";
-      startIndex = 3;
-    } else if (args[1] === "provider" && args[2] === "set") {
+      startIndex = 2;
+    } else if (commandArgs[0] === "provider" && commandArgs[1] === "set") {
       options.configAction = "provider-set";
-      startIndex = 3;
+      startIndex = 2;
     }
   } else if (commandInput.command === "auth") {
-    if (args[1] === "grant" || args[1] === "status" || args[1] === "revoke") {
-      options.authAction = args[1];
-      startIndex = 2;
+    if (
+      commandArgs[0] === "grant" ||
+      commandArgs[0] === "status" ||
+      commandArgs[0] === "revoke"
+    ) {
+      options.authAction = commandArgs[0];
+      startIndex = 1;
     }
   } else if (commandInput.command === "server") {
     if (
-      args[1] === "on" ||
-      args[1] === "off" ||
-      args[1] === "status" ||
-      args[1] === "run"
+      commandArgs[0] === "on" ||
+      commandArgs[0] === "off" ||
+      commandArgs[0] === "status" ||
+      commandArgs[0] === "run"
     ) {
-      options.serverAction = args[1];
-      startIndex = 2;
+      options.serverAction = commandArgs[0];
+      startIndex = 1;
     }
   }
 
-  for (let index = startIndex; index < args.length; index++) {
-    const arg = args[index]!;
+  for (let index = startIndex; index < commandArgs.length; index++) {
+    const arg = commandArgs[index]!;
 
     if (arg === "--") {
-      positionals.push(...args.slice(index + 1));
+      positionals.push(...commandArgs.slice(index + 1));
       break;
     }
 
@@ -150,14 +193,17 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
         command: "help",
         options: {},
         positionals: [],
-        helpTopic: commandInput.command,
+        helpTopic:
+          commandInput.command === "query" ? "search" : commandInput.command,
       };
     } else if (arg === "--version") {
       throw new Error(`${arg} must be used without a command`);
     } else if (isLongOptionWithValue(arg, "--mode")) {
       options.mode = parseClientMode(valueFromLongOption(arg));
     } else if (arg === "--mode") {
-      options.mode = parseClientMode(readOptionValue(args, ++index, arg));
+      options.mode = parseClientMode(
+        readOptionValue(commandArgs, ++index, arg),
+      );
     } else if (arg === "--force-direct") {
       options.forceDirect = true;
     } else if (arg === "--stdio") {
@@ -165,15 +211,17 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (isLongOptionWithValue(arg, "--mcp-toolset")) {
       options.mcpToolset = parseMcpToolset(valueFromLongOption(arg));
     } else if (arg === "--mcp-toolset") {
-      options.mcpToolset = parseMcpToolset(readOptionValue(args, ++index, arg));
+      options.mcpToolset = parseMcpToolset(
+        readOptionValue(commandArgs, ++index, arg),
+      );
     } else if (isLongOptionWithValue(arg, "--listen")) {
       options.listen = valueFromLongOption(arg);
     } else if (arg === "--listen") {
-      options.listen = readOptionValue(args, ++index, arg);
+      options.listen = readOptionValue(commandArgs, ++index, arg);
     } else if (isLongOptionWithValue(arg, "--token-file")) {
       options.serverTokenFile = valueFromLongOption(arg);
     } else if (arg === "--token-file") {
-      options.serverTokenFile = readOptionValue(args, ++index, arg);
+      options.serverTokenFile = readOptionValue(commandArgs, ++index, arg);
     } else if (isLongOptionWithValue(arg, "--target")) {
       options.installTargets = appendInstallTargets(
         options.installTargets,
@@ -182,7 +230,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--target") {
       options.installTargets = appendInstallTargets(
         options.installTargets,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       );
     } else if (isLongOptionWithValue(arg, "--mcp-tool-timeout")) {
       options.installMcpToolTimeoutSeconds = parsePositiveInteger(
@@ -191,7 +239,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--mcp-tool-timeout") {
       options.installMcpToolTimeoutSeconds = parsePositiveInteger(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--mcp-token-env")) {
@@ -201,7 +249,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--mcp-token-env") {
       options.installMcpTokenEnv = parseEnvironmentVariable(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--mcp-transport")) {
@@ -210,14 +258,14 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--mcp-transport") {
       options.installMcpTransport = parseMcpInstallTransport(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       );
     } else if (arg === "--yes") {
       options.yes = true;
     } else if (isLongOptionWithValue(arg, "--allow-remote")) {
       throw allowRemoteValueError();
     } else if (arg === "--allow-remote") {
-      const legacyScope = args[index + 1];
+      const legacyScope = commandArgs[index + 1];
       if (legacyScope === "once" || legacyScope === "workspace") {
         throw allowRemoteValueError();
       }
@@ -228,7 +276,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--capability") {
       options.authorizationCapability = parseAuthorizationCapability(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       );
     } else if (isLongOptionWithValue(arg, "--scope")) {
       options.authorizationScope = parseAuthorizationScope(
@@ -236,7 +284,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--scope") {
       options.authorizationScope = parseAuthorizationScope(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       );
     } else if (arg === "--rg") {
       options.rg = true;
@@ -245,16 +293,22 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--trace") {
       options.trace = true;
     } else if (arg === "--human") {
-      options.human = true;
+      throw new Error(
+        "--human has been removed; terminal output is human-readable by default",
+      );
+    } else if (arg === "--compact") {
+      options.human = false;
     } else if (arg === "--check-ready") {
       options.checkReady = true;
     } else if (isLongOptionWithValue(arg, "--preview")) {
       options.preview = parsePreviewMode(valueFromLongOption(arg));
     } else if (arg === "--preview") {
-      options.preview = parsePreviewMode(readOptionValue(args, ++index, arg));
+      options.preview = parsePreviewMode(
+        readOptionValue(commandArgs, ++index, arg),
+      );
     } else if (arg === "--json") {
       throw new Error(
-        "--json has been removed; use the default agent markdown output or --human",
+        "--json is not supported; redirect output or use --compact for compact markdown",
       );
     } else if (arg === "--no-color") {
       options.color = "never";
@@ -272,30 +326,30 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.refresh = parseQueryRefreshMode(valueFromLongOption(arg));
     } else if (arg === "--refresh") {
       options.refresh = parseQueryRefreshMode(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       );
     } else if (arg === "--prefer-symbol") {
       options.preferSymbol = true;
     } else if (arg === "--home") {
-      options.home = readOptionValue(args, ++index, arg);
+      options.home = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--embedding") {
-      options.embedding = readOptionValue(args, ++index, arg);
+      options.embedding = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--model-cache") {
-      options.modelCacheDir = readOptionValue(args, ++index, arg);
+      options.modelCacheDir = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--device") {
-      options.device = parseDevice(readOptionValue(args, ++index, arg));
+      options.device = parseDevice(readOptionValue(commandArgs, ++index, arg));
     } else if (arg === "--api-key") {
-      options.apiKey = readOptionValue(args, ++index, arg);
+      options.apiKey = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--endpoint") {
-      options.endpoint = readOptionValue(args, ++index, arg);
+      options.endpoint = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--limit") {
       options.limit = parsePositiveInteger(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (arg === "--embedding-concurrency") {
       options.embeddingConcurrency = parsePositiveInteger(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--hybrid")) {
@@ -307,7 +361,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--hybrid") {
       options.hybridQueries = appendQuery(
         options.hybridQueries,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--fts")) {
@@ -321,7 +375,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.routes = appendRoute(
         options.routes,
         "fts",
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--vector")) {
@@ -335,13 +389,15 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.routes = appendRoute(
         options.routes,
         "vector",
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (arg === "--fuse") {
       options.fuse = true;
     } else if (arg === "--color") {
-      options.color = parseColorMode(readOptionValue(args, ++index, arg));
+      options.color = parseColorMode(
+        readOptionValue(commandArgs, ++index, arg),
+      );
     } else if (isLongOptionWithValue(arg, "--glob")) {
       options.globs = appendValue(
         options.globs,
@@ -351,7 +407,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--glob" || arg === "-g") {
       options.globs = appendValue(
         options.globs,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--iglob")) {
@@ -363,7 +419,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--iglob") {
       options.insensitiveGlobs = appendValue(
         options.insensitiveGlobs,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--type")) {
@@ -375,7 +431,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--type" || arg === "-t") {
       options.fileTypes = appendValue(
         options.fileTypes,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--type-not")) {
@@ -387,7 +443,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--type-not" || arg === "-T") {
       options.excludedFileTypes = appendValue(
         options.excludedFileTypes,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (arg === "--hidden") {
@@ -403,7 +459,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--ignore-file") {
       options.ignoreFiles = appendValue(
         options.ignoreFiles,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--max-depth")) {
@@ -413,7 +469,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--max-depth") {
       options.maxDepth = parseNonNegativeInteger(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (isLongOptionWithValue(arg, "--max-filesize")) {
@@ -423,7 +479,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--max-filesize") {
       options.maxFileSizeBytes = parseByteSize(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (arg === "--follow" || arg === "-L") {
@@ -447,7 +503,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--file") {
       options.rgOptions = appendRgPatternFile(
         options.rgOptions,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
       markRgCompatibilityOption(options, arg);
@@ -461,7 +517,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (RG_OPTIONS_WITH_VALUE.has(arg)) {
       options.rgOptions = appendRgExtraArgs(options.rgOptions, [
         arg,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       ]);
       markRgCompatibilityOption(options, arg);
     } else if (RG_OPTIONS_WITHOUT_VALUE.has(arg)) {
@@ -482,7 +538,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
     } else if (arg === "--regexp") {
       options.rgOptions = appendRgPattern(
         options.rgOptions,
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
       );
       markRgCompatibilityOption(options, arg);
     } else if (isLongOptionWithValue(arg, "--context")) {
@@ -497,7 +553,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.rgOptions = setRgContext(
         options.rgOptions,
         "both",
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
       markRgCompatibilityOption(options, arg);
@@ -513,7 +569,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.rgOptions = setRgContext(
         options.rgOptions,
         "before",
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
       markRgCompatibilityOption(options, arg);
@@ -529,7 +585,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.rgOptions = setRgContext(
         options.rgOptions,
         "after",
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
       markRgCompatibilityOption(options, arg);
@@ -538,21 +594,21 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
         `${arg} changes rg output and cannot be used with managed --rg`,
       );
     } else if (isShortRgOptionGroup(arg)) {
-      index = parseShortRgOptionGroup(args, index, options);
+      index = parseShortRgOptionGroup(commandArgs, index, options);
     } else if (arg === "--modified-after") {
       options.modifiedAfter = parseModifiedTime(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (arg === "--modified-before") {
       options.modifiedBefore = parseModifiedTime(
-        readOptionValue(args, ++index, arg),
+        readOptionValue(commandArgs, ++index, arg),
         arg,
       );
     } else if (arg === "--symbol-type") {
       options.symbolTypes = [
         ...(options.symbolTypes ?? []),
-        parseSymbolType(readOptionValue(args, ++index, arg)),
+        parseSymbolType(readOptionValue(commandArgs, ++index, arg)),
       ];
     } else {
       throw new Error(`Unknown option: ${arg}`);
@@ -566,57 +622,58 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
 function parseCommand(args: readonly string[]): {
   command: CliCommand;
   helpTopic?: string;
+  args: readonly string[];
 } {
   const [first, ...rest] = args;
-  if (
-    first === undefined ||
-    first === "help" ||
-    first === "-h" ||
-    first === "--help"
-  ) {
-    if (first !== "help" && rest.length > 0) {
-      throw new Error(`${first} does not accept arguments`);
-    }
-    if (first === "help" && rest.length > 1) {
-      throw new Error("zg help accepts at most one command or topic");
+  if (first === undefined) {
+    return { command: "help", args: [] };
+  }
+  if (first === "-h" || first === "--help") {
+    if (rest.length > 1) {
+      throw new Error(`${first} accepts at most one topic`);
     }
     return {
       command: "help",
-      ...(first === "help" && rest[0] ? { helpTopic: rest[0] } : {}),
+      ...(rest[0] ? { helpTopic: rest[0] } : {}),
+      args: [],
+    };
+  }
+  if (first.startsWith("--help=")) {
+    if (rest.length > 0) {
+      throw new Error("--help=<topic> does not accept arguments");
+    }
+    const helpTopic = first.slice("--help=".length);
+    if (!helpTopic) throw new Error("--help requires a topic after =");
+    return { command: "help", helpTopic, args: [] };
+  }
+
+  if (first === "-v" || first === "--version") {
+    if (rest.length > 0) {
+      throw new Error(`${first} does not accept arguments`);
+    }
+    return { command: "version", args: [] };
+  }
+
+  const delimiter = args.indexOf("--");
+  const optionEnd = delimiter === -1 ? args.length : delimiter;
+  const actions = args
+    .slice(0, optionEnd)
+    .map((arg, index) => ({ command: ACTION_FLAGS.get(arg), index }))
+    .filter(
+      (entry): entry is { command: CliCommand; index: number } =>
+        entry.command !== undefined,
+    );
+  if (actions.length > 1) {
+    throw new Error("Only one management action can be used at a time");
+  }
+  if (actions[0]) {
+    return {
+      command: actions[0].command,
+      args: args.filter((_, index) => index !== actions[0]!.index),
     };
   }
 
-  if (first === "version" || first === "-v" || first === "--version") {
-    const acceptsVersionFlag =
-      first === "version" &&
-      rest.length === 1 &&
-      (rest[0] === "-v" || rest[0] === "--version");
-    if (rest.length > 0 && !acceptsVersionFlag) {
-      throw new Error(`${first} does not accept arguments`);
-    }
-    return { command: "version" };
-  }
-
-  if (
-    first === "query" ||
-    first === "index" ||
-    first === "status" ||
-    first === "install" ||
-    first === "uninstall" ||
-    first === "config" ||
-    first === "auth" ||
-    first === "server"
-  ) {
-    return { command: first };
-  }
-
-  if (first === "serve") {
-    throw new Error(
-      "zg serve has been removed; use zg server on and Streamable HTTP MCP",
-    );
-  }
-
-  throw new Error(`Unknown command: ${first}`);
+  return { command: "query", args };
 }
 
 function validateCliShape(
@@ -626,27 +683,27 @@ function validateCliShape(
 ): void {
   if (command === "auth") {
     if (!options.authAction) {
-      throw new Error("zg auth requires grant, status, or revoke");
+      throw new Error("zg --auth requires grant, status, or revoke");
     }
     if (positionals.length > 1) {
-      throw new Error(`zg auth ${options.authAction} accepts at most one root`);
+      throw new Error(
+        `zg --auth ${options.authAction} accepts at most one root`,
+      );
     }
     if (
       options.authAction !== "grant" &&
       (options.authorizationCapability || options.authorizationScope)
     ) {
       throw new Error(
-        `--capability and --scope can only be used with zg auth grant`,
+        `--capability and --scope can only be used with zg --auth grant`,
       );
     }
   } else if (options.authorizationCapability || options.authorizationScope) {
-    throw new Error("--capability and --scope can only be used with zg auth");
+    throw new Error("--capability and --scope can only be used with zg --auth");
   }
 
   if (options.allowRemote && command !== "query" && command !== "index") {
-    throw new Error(
-      "--allow-remote can only be used with query or index commands",
-    );
+    throw new Error("--allow-remote can only be used with search or --index");
   }
   const queryOnly = firstEnabledOption([
     [options.rg, "--rg"],
@@ -654,7 +711,7 @@ function validateCliShape(
     [options.routes?.length, "--fts/--vector"],
     [options.fuse, "--fuse"],
     [options.trace, "--trace"],
-    [options.human, "--human"],
+    [options.human, "--compact"],
     [options.preview, "--preview"],
     [options.limit, "--limit"],
     [options.refresh, "--refresh"],
@@ -665,7 +722,7 @@ function validateCliShape(
     [options.rgCompatibilityOptions?.length, "ripgrep options"],
   ]);
   if (command !== "query" && queryOnly) {
-    throw new Error(`${queryOnly} can only be used with zg query`);
+    throw new Error(`${queryOnly} can only be used for search`);
   }
   if (
     options.debug &&
@@ -674,7 +731,7 @@ function validateCliShape(
     command !== "status"
   ) {
     throw new Error(
-      "--debug can only be used with zg query, zg index, or zg status",
+      "--debug can only be used with zg, zg --index, or zg --status",
     );
   }
 
@@ -686,7 +743,7 @@ function validateCliShape(
   ]);
   if (sharedSelection && command !== "query" && command !== "index") {
     throw new Error(
-      `${sharedSelection} can only be used with query or index commands`,
+      `${sharedSelection} can only be used with search or --index`,
     );
   }
 
@@ -703,14 +760,12 @@ function validateCliShape(
     command !== "index" &&
     !(command === "query" && options.rg)
   ) {
-    throw new Error(
-      `${discoveryOption} can only be used with index commands or zg query --rg`,
-    );
+    throw new Error(`${discoveryOption} can only be used with --index or --rg`);
   }
 
   if (command === "config") {
     if (!options.configAction) {
-      throw new Error("zg config requires provider set or model set");
+      throw new Error("zg --config requires provider set or model set");
     }
     const unsupported = firstEnabledOption([
       [options.installTargets?.length, "--target"],
@@ -744,16 +799,16 @@ function validateCliShape(
     ]);
     if (unsupported) {
       throw new Error(
-        `zg config ${options.configAction === "model-set" ? "model" : "provider"} set does not accept ${unsupported}`,
+        `zg --config ${options.configAction === "model-set" ? "model" : "provider"} set does not accept ${unsupported}`,
       );
     }
   } else if (options.defaultModel) {
-    throw new Error("--default can only be used with zg config model set");
+    throw new Error("--default can only be used with zg --config model set");
   }
 
   if (command === "server") {
     if (!options.serverAction && !options.serverStdio) {
-      throw new Error("zg server requires on, off, status, run, or --stdio");
+      throw new Error("zg --server requires on, off, status, run, or --stdio");
     }
     if (options.serverAction && options.serverStdio) {
       throw new Error("--stdio cannot be combined with a server action");
@@ -764,13 +819,13 @@ function validateCliShape(
       options.serverAction !== "on" &&
       !options.serverStdio
     ) {
-      throw new Error("--listen can only be used with zg server on or run");
+      throw new Error("--listen can only be used with zg --server on or run");
     }
     if (
       options.serverTokenFile !== undefined &&
       options.serverAction === "status"
     ) {
-      throw new Error("--token-file cannot be used with zg server status");
+      throw new Error("--token-file cannot be used with zg --server status");
     }
     if (
       options.mcpToolset !== undefined &&
@@ -779,15 +834,15 @@ function validateCliShape(
       !options.serverStdio
     ) {
       throw new Error(
-        "--mcp-toolset can only be used with zg server on or run",
+        "--mcp-toolset can only be used with zg --server on or run",
       );
     }
   } else if (options.mcpToolset !== undefined && command !== "install") {
     throw new Error(
-      "--mcp-toolset can only be used with zg server on, run, --stdio, or zg install",
+      "--mcp-toolset can only be used with zg --server on, run, --stdio, or zg --install",
     );
   } else if (options.serverStdio !== undefined) {
-    throw new Error("--stdio can only be used with zg server");
+    throw new Error("--stdio can only be used with zg --server");
   }
 
   if (
@@ -833,7 +888,9 @@ function validateCliShape(
     command !== "index" &&
     command !== "status"
   ) {
-    throw new Error("--mode can only be used with query, index, or status");
+    throw new Error(
+      "--mode can only be used with search, --index, or --status",
+    );
   }
   if (
     options.checkReady &&
@@ -841,14 +898,14 @@ function validateCliShape(
     !(command === "server" && options.serverAction === "status")
   ) {
     throw new Error(
-      "--check-ready can only be used with zg status or zg server status",
+      "--check-ready can only be used with zg --status or zg --server status",
     );
   }
   if (options.listen !== undefined && command !== "server") {
-    throw new Error("--listen can only be used with zg server on or run");
+    throw new Error("--listen can only be used with zg --server on or run");
   }
   if (options.serverTokenFile !== undefined && command !== "server") {
-    throw new Error("--token-file can only be used with zg server");
+    throw new Error("--token-file can only be used with zg --server");
   }
 
   if (
@@ -856,21 +913,19 @@ function validateCliShape(
     command !== "install" &&
     command !== "uninstall"
   ) {
-    throw new Error(
-      "--target can only be used with zg install or zg uninstall",
-    );
+    throw new Error("--target can only be used with --install or --uninstall");
   }
   if (
     options.installMcpToolTimeoutSeconds !== undefined &&
     command !== "install"
   ) {
-    throw new Error("--mcp-tool-timeout can only be used with zg install");
+    throw new Error("--mcp-tool-timeout can only be used with zg --install");
   }
   if (options.installMcpTokenEnv !== undefined && command !== "install") {
-    throw new Error("--mcp-token-env can only be used with zg install");
+    throw new Error("--mcp-token-env can only be used with zg --install");
   }
   if (options.installMcpTransport !== undefined && command !== "install") {
-    throw new Error("--mcp-transport can only be used with zg install");
+    throw new Error("--mcp-transport can only be used with zg --install");
   }
   if (
     command === "install" &&
@@ -880,7 +935,7 @@ function validateCliShape(
     throw new Error("--mcp-token-env requires --mcp-transport http");
   }
   if (options.force && command !== "install") {
-    throw new Error("--force can only be used with zg install");
+    throw new Error("--force can only be used with zg --install");
   }
 
   if (command === "install" || command === "uninstall") {
@@ -908,7 +963,7 @@ function validateCliShape(
       [options.embeddingConcurrency, "--embedding-concurrency"],
     ]);
     if (unsupported) {
-      throw new Error(`${unsupported} is not supported with zg ${command}`);
+      throw new Error(`${unsupported} is not supported with zg --${command}`);
     }
   }
   if (
@@ -918,18 +973,18 @@ function validateCliShape(
     !(command === "index" && options.drop)
   ) {
     throw new Error(
-      "--yes is only valid for install, uninstall, or index --drop",
+      "--yes is only valid for --install, --uninstall, or --index --drop",
     );
   }
 
   if (options.drop && command !== "index") {
-    throw new Error("--drop can only be used with zg index");
+    throw new Error("--drop can only be used with zg --index");
   }
   if (options.rebuild && command !== "index") {
-    throw new Error("--rebuild can only be used with zg index");
+    throw new Error("--rebuild can only be used with zg --index");
   }
   if (options.resetPaths && command !== "index") {
-    throw new Error("--reset-paths can only be used with zg index");
+    throw new Error("--reset-paths can only be used with zg --index");
   }
   if (
     options.drop &&
@@ -954,7 +1009,9 @@ function validateCliShape(
       options.follow ||
       options.embeddingConcurrency)
   ) {
-    throw new Error("zg index --drop cannot be combined with indexing options");
+    throw new Error(
+      "zg --index --drop cannot be combined with indexing options",
+    );
   }
 
   if (command === "query") {
@@ -964,7 +1021,7 @@ function validateCliShape(
       [options.embeddingConcurrency, "--embedding-concurrency"],
     ]);
     if (unsupported) {
-      throw new Error(`${unsupported} is not supported with zg query`);
+      throw new Error(`${unsupported} is not supported while searching`);
     }
   }
 
@@ -974,9 +1031,7 @@ function validateCliShape(
       (options.hybridQueries?.length ?? 0) +
       (options.routes?.length ?? 0);
     if (queryCount === 0) {
-      throw new Error(
-        "zg query requires a query or --hybrid/--fts/--vector route",
-      );
+      throw new Error("zg requires a query or --hybrid/--fts/--vector route");
     }
   }
 }
@@ -1008,7 +1063,7 @@ function allowRemoteValueError(): Error {
       "--allow-remote does not accept a value.",
       "It authorizes Remote Embedding for the current command only.",
       "For persistent authorization, use:",
-      "  zg auth grant --capability embedding --scope workspace",
+      "  zg --auth grant --capability embedding --scope workspace",
     ].join("\n"),
   );
 }
@@ -1020,7 +1075,7 @@ function parseAuthorizationCapability(value: string): "embedding" {
 
 function parseAuthorizationScope(value: string): "workspace" {
   if (value === "workspace") return value;
-  throw new Error("zg auth supports only workspace scope");
+  throw new Error("zg --auth supports only workspace scope");
 }
 
 function readOptionValue(

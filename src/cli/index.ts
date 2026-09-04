@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --liftoff-only
 
-import { parseArgs } from "./args.js";
+import { compatibilityWarningForArgs, parseArgs } from "./args.js";
 import { runParsedCommand } from "./commands.js";
 import { colorModeFromArgs, printError } from "./errors.js";
 import { printHelp } from "./help.js";
@@ -16,7 +16,13 @@ async function main(): Promise<void> {
   let debug = false;
 
   try {
+    const compatibilityWarning = compatibilityWarningForArgs(args);
+    if (compatibilityWarning) console.error(compatibilityWarning);
+
     const parsed = parseArgs(args);
+    if (parsed.command === "query" && parsed.options.human === undefined) {
+      parsed.options.human = process.stdout.isTTY === true;
+    }
     debug = parsed.options.debug === true;
 
     if (parsed.command === "version") {

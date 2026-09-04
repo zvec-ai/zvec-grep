@@ -39,12 +39,12 @@ flowchart LR
 ## Entry and execution
 
 People and scripts enter through the CLI. Agents normally enter through the
-local Streamable HTTP MCP endpoint configured by `zg install`.
+local Streamable HTTP MCP endpoint configured by `zg --install`.
 
 The CLI routes indexed operations through `auto`, `server`, or `direct` mode.
 Both Server and Direct modes call the same engine; the difference is process
 lifetime and coordination, not search behavior. MCP requests always arrive
-through the Server. Managed `zg query --rg` can run directly without a Server
+through the Server. Managed `zg --rg` can run directly without a Server
 or index.
 
 See [Agent integrations](./01-agents.md), [CLI](./02-cli.md),

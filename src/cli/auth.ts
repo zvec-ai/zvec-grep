@@ -55,7 +55,7 @@ export async function runAuth(parsed: ParsedArgs): Promise<void> {
     return;
   }
   if (parsed.options.authAction !== "grant") {
-    throw new Error("zg auth requires grant, status, or revoke");
+    throw new Error("zg --auth requires grant, status, or revoke");
   }
 
   const serviceOptions = createServiceOptions(parsed.options, root);
@@ -147,7 +147,7 @@ export async function authorizeCliPlan(
       [
         "Remote Embedding authorization is required.",
         "Re-run with --allow-remote, or grant Workspace authorization:",
-        "  zg auth grant --capability embedding --scope workspace",
+        "  zg --auth grant --capability embedding --scope workspace",
       ].join("\n"),
     );
   }
@@ -268,7 +268,7 @@ export function requireEmbeddingModelCatalogEntry(reference: string) {
   throw new Error(
     [
       `Unsupported embedding model: ${reference}`,
-      "Run `zg help models` to list supported models.",
+      "Run `zg --help models` to list supported models.",
     ].join("\n"),
   );
 }
@@ -317,7 +317,7 @@ export function assertRequestedEndpointCompatible(
     return;
   }
   throw new Error(
-    "The requested embedding endpoint differs from the workspace snapshot. Run zg index --endpoint <url> --rebuild first.",
+    "The requested embedding endpoint differs from the workspace snapshot. Run zg --index --endpoint <url> --rebuild first.",
   );
 }
 

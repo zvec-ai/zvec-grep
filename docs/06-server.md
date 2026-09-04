@@ -40,18 +40,18 @@ Use Direct mode when:
 - a CI job should not leave a daemon running;
 - you want foreground failures and resource lifetime tied to one process.
 
-Managed `zg query --rg` does not need an index or loaded Embedding model. It
+Managed `zg --rg` does not need an index or loaded Embedding model. It
 runs locally regardless of whether a Server is available.
 
 ## Agent setup
 
-`zg install` configures the selected Agent and starts the Server when possible:
+`zg --install` configures the selected Agent and starts the Server when possible:
 
 ```bash
-zg install
+zg --install
 ```
 
-Most Agent users therefore never need to run `zg server on` manually. Restart
+Most Agent users therefore never need to run `zg --server on` manually. Restart
 the Agent or open a new session after installation so it discovers the MCP
 endpoint.
 
@@ -66,14 +66,14 @@ See [Agent integrations](./01-agents.md) for managed configuration and
 Start the background daemon:
 
 ```bash
-zg server on
+zg --server on
 ```
 
 Inspect process readiness, endpoint, PID, and MCP toolset:
 
 ```bash
-zg server status
-zg server status --check-ready
+zg --server status
+zg --server status --check-ready
 ```
 
 `--check-ready` preserves normal output and exits non-zero unless the Server is
@@ -82,21 +82,21 @@ ready, making it suitable for scripts and health checks.
 Stop the daemon gracefully:
 
 ```bash
-zg server off
+zg --server off
 ```
 
 Run it in the foreground for logs or process supervision:
 
 ```bash
-zg server run
+zg --server run
 ```
 
 Only one Server instance can own a given zvec-grep home. If a running Server
 uses the wrong MCP toolset, stop it before restarting with the new profile:
 
 ```bash
-zg server off
-zg server on --mcp-toolset full
+zg --server off
+zg --server on --mcp-toolset full
 ```
 
 ## Configure the mode
@@ -104,8 +104,8 @@ zg server on --mcp-toolset full
 Choose a mode for one command:
 
 ```bash
-zg query --mode direct "root-local index discovery"
-zg status --mode server --check-ready
+zg --mode direct "root-local index discovery"
+zg --status --mode server --check-ready
 ```
 
 Set an environment default:
@@ -164,7 +164,7 @@ The Server only accepts loopback listen addresses. Change the loopback address
 or port with:
 
 ```bash
-zg server on --listen 127.0.0.1:8999
+zg --server on --listen 127.0.0.1:8999
 ```
 
 Set `ZVEC_GREP_SERVER_URL` when a client should use a non-default configured
@@ -183,18 +183,18 @@ file:
 
 ```bash
 export ZVEC_GREP_SERVER_TOKEN="replace-with-a-long-random-token"
-zg server on
+zg --server on
 ```
 
 ```bash
-zg server on --token-file /secure/path/zvec-grep.token
+zg --server on --token-file /secure/path/zvec-grep.token
 ```
 
 Clients can use `ZVEC_GREP_SERVER_TOKEN` or `ZVEC_GREP_SERVER_TOKEN_FILE`.
 Supported Agent integrations can reference an environment-backed token:
 
 ```bash
-zg install \
+zg --install \
   --target codex \
   --mcp-token-env ZVEC_GREP_SERVER_TOKEN \
   --yes
@@ -216,5 +216,5 @@ Credential, authorization, token, API-key, and query fields are filtered from
 daemon log records. Repository identities are logged opaquely rather than as
 raw paths where identity is sufficient.
 
-Use `ZVEC_GREP_HOME` to relocate Server state. Check `zg server status` before
+Use `ZVEC_GREP_HOME` to relocate Server state. Check `zg --server status` before
 reading logs; routine searches do not need a status preflight.

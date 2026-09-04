@@ -58,7 +58,7 @@ def _zvec_version() -> Check:
     executable = resolve_executable("zg")
     if executable is None:
         return Check("zvec-grep", False, "'zg' was not found")
-    result = run_command([executable, "version"], timeout=30)
+    result = run_command([executable, "--version"], timeout=30)
     value = result.stdout.strip()
     return Check(
         "zvec-grep",

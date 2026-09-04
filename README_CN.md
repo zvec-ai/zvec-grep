@@ -46,8 +46,8 @@
 
 ## 💫 为什么选择 zg？
 
-- **人与 Agent 开箱即用**：安装一次、索引一次，即可在 macOS、Linux 和
-  Windows 上通过 CLI 或 Agent 复用同一个工作区。
+- **人与 Agent 开箱即用**：安装后直接搜索；首次 CLI 搜索会自动创建本地索引，
+  CLI 与 Agent 可在 macOS、Linux 和 Windows 上复用同一个工作区。
 - **不止关键词搜索**：先按语义发现内容、按相关性排序，再在需要时使用精确文本
   或正则完成验证。
 - **多格式检索**：搜索源代码、文档和结构化数据，同时保留有用的内容结构与
@@ -61,7 +61,7 @@
 
 ## 🚀 动手体验
 
-### 1. 准备示例书架
+### 1. 准备并搜索示例书架
 
 ```bash
 # 需要 Node.js 22 或更新版本。
@@ -72,26 +72,28 @@ curl --retry 3 --retry-all-errors --progress-bar -fL \
   -o alice-in-wonderland.txt https://raw.githubusercontent.com/GITenberg/Alice-s-Adventures-in-Wonderland_11/master/11.txt \
   -o sherlock-holmes.txt https://raw.githubusercontent.com/GITenberg/The-Memoirs-of-Sherlock-Holmes_834/master/834.txt
 
-zg index --embedding local/potion-retrieval-32m
+zg "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 > [!NOTE]
-> 索引保存在被索引项目根目录的 `.zvec-grep/` 中。
+> 首次索引搜索会自动创建本地索引。索引保存在项目根目录的 `.zvec-grep/`
+> 中，并由后续搜索复用。
 
 > [!TIP]
-> `zg index` 或 `zg query` 失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。
-> 在同一项目下，可用 `zg status --mode direct --debug` 或
-> `zg status --mode server --debug` 查看已记录的索引错误。
-> Server 连接失败时，检查 `zg server status` 和[服务日志](./docs/06-server.md#logs-and-state)。
+> `zg --index` 或 `zg` 失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。
+> 在同一项目下，可用 `zg --status --mode direct --debug` 或
+> `zg --status --mode server --debug` 查看已记录的索引错误。
+> Server 连接失败时，检查 `zg --server status` 和[服务日志](./docs/06-server.md#logs-and-state)。
 
-### 2. 选择检索方式
+zg 会将 `sherlock-holmes.txt` 中的相关段落排在
+`alice-in-wonderland.txt` 前面。
 
-#### Agent：通过 OpenCode 提问
+### 2. 连接 Agent（可选）
 
 配置好 [OpenCode](https://opencode.ai/) 后：
 
 ```bash
-zg install --target opencode --yes
+zg --install --target opencode --yes
 opencode models
 opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
@@ -128,17 +130,6 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 ```
 
 </details>
-
-#### 用户：直接检索
-
-不通过 Agent，直接搜索同一个书架：
-
-```bash
-zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
-```
-
-zg 会将 `sherlock-holmes.txt` 中的相关段落排在
-`alice-in-wonderland.txt` 前面。
 
 <a id="benchmarks"></a>
 

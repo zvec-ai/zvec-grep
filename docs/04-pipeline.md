@@ -17,14 +17,23 @@ same workspace and output conventions but can run without an index.
 
 ## 1. Choose the workspace scope
 
-Run indexing from the repository root, or pass it explicitly:
+For the common case, run a search from the repository root. If no index exists,
+zg creates one there with a local embedding model and then completes the search:
 
 ```bash
 cd your-repository
-zg index --embedding local/potion-code-16m-v2
+zg "where authentication is validated"
+```
+
+Use `--index` when you need to select a model or constrain the workspace before
+the first search:
+
+```bash
+cd your-repository
+zg --index --embedding local/potion-code-16m-v2
 
 # Equivalent with an explicit root
-zg index /absolute/path/to/your-repository \
+zg --index /absolute/path/to/your-repository \
   --embedding local/potion-code-16m-v2
 ```
 
@@ -40,7 +49,7 @@ including an API key when one was explicitly persisted for that workspace.
 Scope large repositories early:
 
 ```bash
-zg index \
+zg --index \
   --embedding local/potion-code-16m-v2 \
   -g "src/**" \
   -g "docs/**" \
@@ -71,7 +80,7 @@ Without an explicit `--max-filesize`, indexing uses type-aware safety limits:
 1 MiB for code, 256 MiB for text and Markdown, 16 MiB for structured data, and
 10 MiB for images. An explicit value replaces the type-aware defaults for every
 selected file. Files excluded by these limits remain silent during normal
-indexing; use `zg index --debug` to print skipped-file counts and samples.
+indexing; use `zg --index --debug` to print skipped-file counts and samples.
 
 ### Supported formats and extraction
 
@@ -113,38 +122,39 @@ not list each skipped path or reason.
 
 ## 2. Build and maintain the index
 
-A new index resolves its model from explicit `--embedding`,
-`ZVEC_GREP_EMBEDDING`, then the configured default. Existing indexes reuse their
-stored model and file-selection settings:
+A manually created index resolves its model from explicit `--embedding`,
+`ZVEC_GREP_EMBEDDING`, the configured default, then the built-in local default.
+An implicit first-search index always uses a local model. Existing indexes reuse
+their stored model and file-selection settings:
 
 ```bash
 # First build
-zg index --embedding local/potion-code-16m-v2
+zg --index --embedding local/potion-code-16m-v2
 
 # Incremental update with the stored schema
-zg index
+zg --index
 ```
 
-Use `zg status` to see the root, selected model, file counts, failures,
+Use `zg --status` to see the root, selected model, file counts, failures,
 truncation, and the suggested next action:
 
 ```bash
-zg status
-zg status --check-ready
+zg --status
+zg --status --check-ready
 ```
 
 Changing the Embedding model or an incompatible endpoint requires an explicit
 rebuild:
 
 ```bash
-zg index --rebuild --embedding local/jina-embeddings-v2-base-code
+zg --index --rebuild --embedding local/jina-embeddings-v2-base-code
 ```
 
 Use `--reset-paths` when the existing file-selection settings should be
 replaced rather than reused. Deleting an index is explicit and destructive:
 
 ```bash
-zg index --drop --yes
+zg --index --drop --yes
 ```
 
 See [Embedding models](./07-embedding.md) before choosing or changing a model.
@@ -156,7 +166,7 @@ See [Embedding models](./07-embedding.md) before choosing or changing a model.
 The shortest query uses hybrid ranked retrieval:
 
 ```bash
-zg query "where theme preferences are restored"
+zg "where theme preferences are restored"
 ```
 
 Choose an explicit route only when you need more control:
@@ -172,20 +182,20 @@ Examples:
 
 ```bash
 # Ranked lexical search
-zg query --fts "AuthService"
+zg --fts "AuthService"
 
 # Explicit semantic search
-zg query --vector "where credentials are validated"
+zg --vector "where credentials are validated"
 
 # Combine and fuse several query groups
-zg query \
+zg \
   --hybrid "authentication flow" \
   --fts "ForbiddenError" \
   --fuse \
   --limit 10
 
 # No index required
-zg query --rg -n -F "AuthService" -g "*.ts" src
+zg --rg -n -F "AuthService" -g "*.ts" src
 ```
 
 Multiple positional queries remain separate groups unless `--fuse` is set.
@@ -206,20 +216,18 @@ between `auto`, `server`, `direct`, and `--refresh`.
 
 ## Output for agents and people
 
-Default indexed CLI output is compact, grouped by query group, and ordered by
-that group's retrieval rank. A result recalled by several groups appears in
-each matching group. Indexed source previews are omitted unless requested,
-reducing context passed to an agent:
+When stdout is a terminal, indexed CLI output is human-readable and includes a
+full source preview by default. When stdout is redirected, output is compact,
+grouped by query group, and omits previews unless requested:
 
 ```bash
-zg query "plugin lifecycle" --preview short --limit 5
+zg "plugin lifecycle" --preview short --limit 5
 ```
 
-For terminal reading, `--human` enables richer presentation and defaults to a
-full preview:
+Use `--compact` to request the pipe-oriented form even in a terminal:
 
 ```bash
-zg query --human "plugin lifecycle" --limit 5
+zg --compact "plugin lifecycle" --limit 5
 ```
 
 Use `--debug` for query diagnostics and `--trace` for per-hit indexed search

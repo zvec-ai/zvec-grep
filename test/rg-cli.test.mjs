@@ -24,7 +24,7 @@ test("managed rg runs locally when indexed operations use server mode", async (t
 
   const result = await execFileAsync(
     process.execPath,
-    [cliPath, "query", "--rg", "-n", "exactNeedle", "src"],
+    [cliPath, "--rg", "-n", "exactNeedle", "src"],
     {
       cwd: root,
       env: { ...process.env, ZVEC_GREP_MODE: "server" },
@@ -51,7 +51,7 @@ test("managed rg bypasses workspace index state in direct and server modes", asy
   for (const mode of ["direct", "server"]) {
     const result = await execFileAsync(
       process.execPath,
-      [cliPath, "query", "--mode", mode, "--rg", "fastPathNeedle", "src"],
+      [cliPath, "--mode", mode, "--rg", "fastPathNeedle", "src"],
       { cwd: root, env: { ...process.env, NO_COLOR: "1" } },
     );
 
@@ -82,7 +82,7 @@ test("managed rg ignores stale index status in direct and server modes", async (
   for (const mode of ["direct", "server"]) {
     const result = await execFileAsync(
       process.execPath,
-      [cliPath, "query", "--mode", mode, "--rg", "deletedNeedle"],
+      [cliPath, "--mode", mode, "--rg", "deletedNeedle"],
       { cwd: root, env: { ...process.env, NO_COLOR: "1" } },
     );
 
@@ -119,7 +119,7 @@ test("managed rg emits a compact file and adaptive symbol hierarchy", async (t) 
 
   const result = await execFileAsync(
     process.execPath,
-    [cliPath, "query", "--rg", "-n", "grouped_needle", "src/grouped.py"],
+    [cliPath, "--rg", "-n", "grouped_needle", "src/grouped.py"],
     { cwd: root },
   );
 

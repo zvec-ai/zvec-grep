@@ -112,7 +112,7 @@ Index preparation is measured separately and excluded from Agent execution metri
 | End-to-end preparation | 22.92 |
 | Server startup | 0.87 |
 | Profile preparation | 0.29 |
-| `zg install` | 0.22 |
+| `zg --install` | 0.22 |
 | Runtime verification and index warmup | 21.57 |
 
 ## Environment
