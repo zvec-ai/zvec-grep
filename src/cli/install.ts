@@ -342,7 +342,7 @@ async function installOpenCodeIntegration(
 async function uninstallOpenCodeIntegration(): Promise<InstallAgentResult> {
   const configPath = resolveOpenCodeConfigPath();
   const guidancePath = resolve(dirname(configPath), "AGENTS.md");
-  await uninstallJsonMcpServer(configPath, "mcp");
+  await uninstallJsonMcpServer(configPath, "mcp", "OpenCode");
   await removeMarkedFile({
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
@@ -379,7 +379,7 @@ async function installCursorIntegration(
 
 async function uninstallCursorIntegration(): Promise<InstallAgentResult> {
   const configPath = resolveCursorConfigPath();
-  await uninstallJsonMcpServer(configPath, "mcpServers");
+  await uninstallJsonMcpServer(configPath, "mcpServers", "Cursor");
   return { files: [configPath] };
 }
 
@@ -987,7 +987,9 @@ async function installJsonMcpServer(options: {
   force: boolean;
   label: string;
 }): Promise<void> {
-  const config = await readJsonObject(options.path);
+  const existing = await readTextFileIfExists(options.path);
+  let source = existing.trim() ? existing : "{}\n";
+  const config = parseJsoncSettings(options.path, source, options.label);
   const existingContainer = config[options.containerKey];
   if (existingContainer !== undefined && !isJsonObject(existingContainer)) {
     throw new Error(
@@ -1007,34 +1009,40 @@ async function installJsonMcpServer(options: {
     );
   }
 
-  container.zvec_grep = options.server;
-  config[options.containerKey] = container;
-  await writeTextFileAtomic(
-    options.path,
-    `${JSON.stringify(config, null, 2)}\n`,
+  source = editJsonWithComments(
+    source,
+    [options.containerKey, "zvec_grep"],
+    options.server,
   );
+  await writeTextFileAtomic(options.path, ensureTrailingNewline(source));
 }
 
 async function uninstallJsonMcpServer(
   path: string,
   containerKey: "mcp" | "mcpServers",
+  label: string,
 ): Promise<void> {
   const existing = await readTextFileIfExists(path);
-  if (!existing) return;
+  if (!existing.trim()) return;
 
-  const config = parseJsonObject(path, existing);
+  let source = existing;
+  const config = parseJsoncSettings(path, source, label);
   const container = config[containerKey];
   if (!isJsonObject(container)) return;
   if (!isManagedJsonMcpServer(container.zvec_grep)) return;
 
-  const nextContainer = { ...container };
-  delete nextContainer.zvec_grep;
-  if (Object.keys(nextContainer).length === 0) {
-    delete config[containerKey];
-  } else {
-    config[containerKey] = nextContainer;
+  source = hasJsoncComments(source)
+    ? removeJsoncPropertyPreservingComments(source, [containerKey, "zvec_grep"])
+    : editJsonWithComments(
+        source,
+        Object.keys(container).length === 1
+          ? [containerKey]
+          : [containerKey, "zvec_grep"],
+        undefined,
+      );
+  if (source !== existing) {
+    await writeTextFileAtomic(path, ensureTrailingNewline(source));
   }
-  await writeTextFileAtomic(path, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 type JsonObject = Record<string, unknown>;
