@@ -5,12 +5,14 @@
 [Architecture](./05-architecture.md) · [Server](./06-server.md) ·
 [Embedding](./07-embedding.md) · [Roadmap](./08-roadmap.md)
 
-`zg install` connects zvec-grep to supported agents through the local MCP
-server. After that, the agent can use indexed retrieval for workspace-grounded
-semantic discovery while keeping exact lookup on the appropriate native or
-managed-rg route.
+`zg install` connects zvec-grep to officially supported agents through the
+local MCP server. After that, the agent can use indexed retrieval for
+workspace-grounded semantic discovery while keeping exact lookup on the
+appropriate native or managed-rg route. Pi is not currently an official
+`zg install` target; see [Pi integration](#pi-integration-community-extension)
+for a community extension.
 
-## Supported agents
+## Officially supported agents
 
 | Agent | Target | Managed configuration |
 | --- | --- | --- |
@@ -32,6 +34,23 @@ configures both the CLI and IDE, and automatic detection recognizes either CLI
 executable or the IDE. `QODER_CONFIG_DIR` overrides the Qoder CLI configuration
 directory; `QODER_IDE_MCP_PATH` independently overrides the full IDE `mcp.json` path, and
 `QODER_IDE_EXECUTABLE` overrides the IDE executable used by automatic detection.
+
+## Pi integration (community extension)
+
+Pi is not currently configured by `zg install`. For Pi support, you can use the
+community extension [`pi-zvec-grep`](https://www.npmjs.com/package/pi-zvec-grep),
+which runs the local `zg` CLI directly inside Pi instead of using an MCP server.
+It provides `/zg-query`, `/zg-rg`, `/zg-status`, `/zg-index`, and
+`/zg-index-drop`.
+
+Install it with:
+
+```bash
+pi install npm:pi-zvec-grep
+```
+
+The extension is separate from the official MCP integrations above and is not
+managed by `zg install`.
 
 ## Install an integration
 
