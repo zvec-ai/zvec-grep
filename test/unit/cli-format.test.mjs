@@ -207,7 +207,7 @@ test("direct workspace status summarizes stored model download failures unless d
           indexStatus: {
             indexedTime: null,
             entityCount: 0,
-            error: `embed: ${downloadCode}: Unable to download Model2vec model artifact (model=local/potion-code-16m-v2 url=https://huggingface.co/model/config.json)`,
+            error: `embed: ${downloadCode}: Unable to download Model2vec model artifact (model=local/potion-code-16m-v2 url=https://huggingface.co/model/config.json) Authorization: Bearer direct-status-secret`,
           },
         },
       ],
@@ -237,6 +237,8 @@ test("direct workspace status summarizes stored model download failures unless d
   assert.match(debugText, /Details\s+README\.md: embed:/);
   assert.match(debugText, /MODEL2VEC_DOWNLOAD_FAILED/);
   assert.match(debugText, /https:\/\/huggingface\.co\/model\/config\.json/);
+  assert.match(debugText, /Authorization: \[redacted\]/);
+  assert.doesNotMatch(debugText, /direct-status-secret/);
 });
 
 function contextResult(overrides = {}) {

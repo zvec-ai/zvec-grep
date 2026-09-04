@@ -587,9 +587,9 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   assert.equal(unsupported.isError, undefined);
   assert.equal(unsupported.structuredContent.state, "failed");
   assert.deepEqual(unsupported.structuredContent.error, {
-    code: "MODEL_LOAD_FAILED",
-    message:
-      "[MODEL_LOAD_FAILED] Embedding model qwen/unsupported-embedding could not be created: Embedding model is not in the zvec-grep catalog",
+    code: "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_CATALOG_MODEL_NOT_FOUND",
+    message: "Embedding model is not in the zvec-grep catalog",
+    context: "embedding=qwen/unsupported-embedding",
   });
   assert.match(unsupported.content[0].text, /qwen\/unsupported-embedding/);
   const unsupportedStatus = await client.callTool({
@@ -599,7 +599,7 @@ test("Streamable HTTP indexes and searches with qwen text-embedding-v4", async (
   assert.equal(unsupportedStatus.structuredContent.indexed, false);
   assert.equal(
     unsupportedStatus.structuredContent.runtime.error.code,
-    "MODEL_LOAD_FAILED",
+    "ZVEC_GREP.ENGINE.MODELS.EMBEDDING_CATALOG_MODEL_NOT_FOUND",
   );
   await assert.rejects(access(join(unsupportedRoot, ".zvec-grep", "index")));
 });

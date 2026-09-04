@@ -45,6 +45,77 @@ test("index releases its model lease when service creation fails", async () => {
   }
 });
 
+test("index preserves Qwen model creation diagnostics when the API key is missing", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-backend-qwen-missing-key-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    serviceOptions: { apiKey: "" },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+
+  try {
+    const result = await backend.index({
+      root,
+      embedding: "qwen/text-embedding-v4",
+      wait: true,
+    });
+
+    assert.equal(result.state, "failed");
+    assert.equal(
+      result.error.code,
+      "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_V4_MISSING_API_KEY",
+    );
+    assert.equal(
+      result.error.message,
+      "Qwen text-embedding-v4 model requires an API key",
+    );
+    assert.match(result.error.context, /model=qwen\/text-embedding-v4/);
+    assert.match(result.error.context, /hint=Pass --api-key/);
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("index wraps unstructured model creation failures", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-backend-model-create-failure-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: {
+      createModel: () => {
+        throw new Error("fixture model creation failure");
+      },
+    },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+
+  try {
+    const result = await backend.index({
+      root,
+      embedding: "test/deterministic",
+      wait: true,
+    });
+
+    assert.equal(result.state, "failed");
+    assert.deepEqual(result.error, {
+      code: "MODEL_LOAD_FAILED",
+      message:
+        "[MODEL_LOAD_FAILED] Embedding model test/deterministic could not be created: fixture model creation failure",
+    });
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("index returns scan diagnostics only when debug is requested", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-backend-debug-"),

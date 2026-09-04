@@ -105,6 +105,18 @@ const EMBEDDING_TRANSIENT_RETRY_MAX_DELAY_MS = 8000;
 const EMBEDDING_RATE_LIMIT_RETRY_MAX_DELAY_MS = 30000;
 const EMBEDDING_RETRY_JITTER_MS = 500;
 const EMBEDDING_SUCCESS_STREAK_MIN = 4;
+const PERMANENT_REMOTE_MODEL_PROVIDER_CODES = new Set([
+  "invalid_model",
+  "model_not_found",
+  "unsupported_model",
+  "invalid_dimension",
+  "invalid_dimensions",
+  "unsupported_dimension",
+  "unsupported_dimensions",
+  "dimension_out_of_range",
+  "invalid_embedding_dimension",
+  "unsupported_embedding_dimension",
+]);
 
 type EmbeddingScheduler = {
   readonly taskConcurrency: number;
@@ -264,31 +276,7 @@ async function indexWorkspaceUnchecked(
 
   if (result.filesFailed > 0) {
     report({ phase: "done", detail: "Indexing completed with failed files" });
-    throw new EngineError(
-      `Indexing completed with ${result.filesFailed} failed ${result.filesFailed === 1 ? "file" : "files"}`,
-      {
-        code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
-        context: errorDetails([
-          workspaceIndexDetail(ctx.workspaceIndex.name),
-          detail("filesFailed", result.filesFailed),
-          detail("filesScanned", result.filesScanned),
-          detail(
-            "failedFiles",
-            summarizeFailedFiles(finalPass.stats.failedFiles),
-          ),
-          detail(
-            "failedReasons",
-            summarizeFailedFiles(finalPass.stats.failedFileReasons),
-          ),
-          detail(
-            "hint",
-            passes.length > 1
-              ? "Retried failed files once automatically; if failures persist, fix the failed files or embedding configuration."
-              : "If the failure was transient, rerun the same indexing command; if it persists, fix the failed files or embedding configuration.",
-          ),
-        ]),
-      },
-    );
+    throw filesFailedError(ctx, result, finalPass, passes.length);
   }
 
   report({ phase: "done", detail: "Indexing complete" });
@@ -330,16 +318,43 @@ async function indexWorkspacePathsUnchecked(
   await timings.time("index_optimize", () => optimizeStorage(ctx));
   const result = buildIndexResult(ctx, passes, Date.now() - start, timings);
   if (result.filesFailed > 0) {
-    throw new EngineError(
-      `Indexing completed with ${result.filesFailed} failed files`,
-      {
-        code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
-        context: workspaceIndexContext(ctx.workspaceIndex),
-      },
-    );
+    throw filesFailedError(ctx, result, finalPass, passes.length);
   }
   report({ phase: "done", detail: "Indexing complete" });
   return result;
+}
+
+function filesFailedError(
+  ctx: IndexContext,
+  result: IndexResult,
+  finalPass: IndexPassResult,
+  passCount: number,
+): EngineError {
+  return new EngineError(
+    `Indexing completed with ${result.filesFailed} failed ${result.filesFailed === 1 ? "file" : "files"}`,
+    {
+      code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
+      context: errorDetails([
+        workspaceIndexDetail(ctx.workspaceIndex.name),
+        detail("filesFailed", result.filesFailed),
+        detail("filesScanned", result.filesScanned),
+        detail(
+          "failedFiles",
+          summarizeFailedFiles(finalPass.stats.failedFiles),
+        ),
+        detail(
+          "failedReasons",
+          summarizeFailedFiles(finalPass.stats.failedFileReasons),
+        ),
+        detail(
+          "hint",
+          passCount > 1
+            ? "Retried failed files once automatically; if failures persist, fix the failed files or embedding configuration."
+            : "If the failure was transient, rerun the same indexing command; if it persists, fix the failed files or embedding configuration.",
+        ),
+      ]),
+    },
+  );
 }
 
 async function runPathIndexPass(
@@ -1200,6 +1215,10 @@ async function embedFragments(
 
   const vectors: number[][] = new Array(fragments.length);
   const truncatedInputIndexes: number[] = [];
+  const batchAbortController = new AbortController();
+  const batchSignal = signal
+    ? AbortSignal.any([signal, batchAbortController.signal])
+    : batchAbortController.signal;
   const results = await Promise.allSettled(
     batches.map((batch) =>
       embedFragmentBatch(
@@ -1207,8 +1226,9 @@ async function embedFragments(
         model,
         batch.start,
         embeddingScheduler,
-        signal,
+        batchSignal,
         onModelProgress,
+        (error) => batchAbortController.abort(error),
       ),
     ),
   );
@@ -1246,6 +1266,7 @@ async function embedFragmentBatch(
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
   onModelProgress?: (progress: EmbeddingModelProgress) => void,
+  onTerminalFailure?: (error: unknown) => void,
 ): Promise<EmbeddingResult> {
   const contents = fragments.map((fragment) => fragment.embeddingContent);
 
@@ -1256,6 +1277,7 @@ async function embedFragmentBatch(
       embeddingScheduler,
       signal,
       onModelProgress,
+      onTerminalFailure,
     );
   } catch (error) {
     if (fragments.length === 1 || shouldFailFastEmbeddingError(error, model)) {
@@ -1269,6 +1291,7 @@ async function embedFragmentBatch(
       embeddingScheduler,
       signal,
       onModelProgress,
+      onTerminalFailure,
     );
   }
 }
@@ -1280,6 +1303,7 @@ async function embedFragmentBatchOneByOne(
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
   onModelProgress?: (progress: EmbeddingModelProgress) => void,
+  onTerminalFailure?: (error: unknown) => void,
 ): Promise<EmbeddingResult> {
   const vectors: number[][] = [];
   const truncatedInputIndexes: number[] = [];
@@ -1292,6 +1316,7 @@ async function embedFragmentBatchOneByOne(
         embeddingScheduler,
         signal,
         onModelProgress,
+        onTerminalFailure,
       );
       vectors.push(result.vectors[0]);
       if (result.truncated.length > 0) {
@@ -1331,6 +1356,7 @@ async function embedContentsWithRetry(
   embeddingScheduler: EmbeddingScheduler,
   signal?: AbortSignal,
   onModelProgress?: (progress: EmbeddingModelProgress) => void,
+  onTerminalFailure?: (error: unknown) => void,
 ): Promise<EmbeddingResult> {
   let attempt = 0;
 
@@ -1356,6 +1382,12 @@ async function embedContentsWithRetry(
               rateLimited: retry.rateLimited,
               delayMs,
             });
+          }
+          if (
+            retry.failFast &&
+            (!retry.retryable || attempt >= maxRetryAttempts(retry))
+          ) {
+            onTerminalFailure?.(error);
           }
         },
       );
@@ -1632,6 +1664,10 @@ function classifyEmbeddingRetry(
       /\b(?:invalid|missing|unauthorized|forbidden)[ _-]?(?:api[ _-]?)?key\b/i.test(
         text,
       ));
+  const permanentRemoteModelFailure =
+    remoteEmbedding &&
+    (codes.includes("ZVEC_GREP.ENGINE.MODELS.EMBEDDING_DIMENSION_MISMATCH") ||
+      (status === 400 && isPermanentRemoteModelBadRequest(text)));
 
   return {
     retryable,
@@ -1640,9 +1676,34 @@ function classifyEmbeddingRetry(
       retryable ||
       sharedLocalModelFailure ||
       remoteConfigurationFailure ||
+      permanentRemoteModelFailure ||
       (remoteEmbedding && requestFailure),
     retryAfterMs: retryAfterMsFromText(text),
   };
+}
+
+function isPermanentRemoteModelBadRequest(text: string): boolean {
+  const providerCode = /\bproviderCode=([^\s]+)/i.exec(text)?.[1];
+  const normalizedCode = providerCode
+    ?.replace(/[^a-z0-9]+/gi, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  if (
+    normalizedCode &&
+    PERMANENT_REMOTE_MODEL_PROVIDER_CODES.has(normalizedCode)
+  ) {
+    return true;
+  }
+
+  const providerMessage = /\bproviderMessage=(.*?)(?=\s+ZVEC_GREP\.|$)/i.exec(
+    text,
+  )?.[1];
+  return (
+    providerMessage !== undefined &&
+    /(?:\b(?:invalid|unsupported|unknown)\b.{0,48}\bmodel\b|\bmodel\b.{0,48}\b(?:invalid|unsupported|unknown|not found|does not exist)\b|\b(?:invalid|unsupported|out of range)\b.{0,48}\bdimensions?\b|\bdimensions?\b.{0,48}\b(?:invalid|unsupported|not supported|out of range|must|should|expected|between|only supports?)\b)/i.test(
+      providerMessage,
+    )
+  );
 }
 
 function nonRetryableEmbeddingError(): EmbeddingRetryClassification {

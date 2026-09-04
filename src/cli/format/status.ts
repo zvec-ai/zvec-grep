@@ -16,6 +16,7 @@ import {
   indexCompletionFromStatus,
   indexStatusNeedsRefresh as statusNeedsRefresh,
 } from "../../engine/index-status.js";
+import { redactErrorText } from "../../engine/errors.js";
 
 type StatusTheme = {
   color: boolean;
@@ -425,24 +426,21 @@ function printWorkspaceIndexStatus(
     }
   }
   if (view.failedReasons) {
+    const failedReasons = redactErrorText(view.failedReasons, 4_096);
     const downloadFailure = modelDownloadFailureMessage({
       code: "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
-      context: `failedReasons=${view.failedReasons}`,
+      context: `failedReasons=${failedReasons}`,
     });
     diagnostics.push(
       ...formatStatusField(
         theme,
         downloadFailure ? "Error" : "Problem",
-        theme.danger(downloadFailure ?? view.failedReasons),
+        theme.danger(downloadFailure ?? failedReasons),
       ),
     );
     if (downloadFailure && view.debug) {
       diagnostics.push(
-        ...formatStatusField(
-          theme,
-          "Details",
-          theme.danger(view.failedReasons),
-        ),
+        ...formatStatusField(theme, "Details", theme.danger(failedReasons)),
       );
     }
   }
@@ -766,7 +764,12 @@ function summarizeFailedFileReasons(
     .slice(0, 3)
     .map(
       (file) =>
-        `${file.relativePath}: ${clipReason(explainStoredFailureReason(file.indexStatus!.error!, retryCommand))}`,
+        `${file.relativePath}: ${clipReason(
+          redactErrorText(
+            explainStoredFailureReason(file.indexStatus!.error!, retryCommand),
+            4_096,
+          ),
+        )}`,
     );
   const remaining = withReasons.length - shown.length;
 

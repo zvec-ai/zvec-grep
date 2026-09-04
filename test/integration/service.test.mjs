@@ -457,6 +457,43 @@ test("service fails fast on permanent remote authentication failures", async (t)
   assert.equal(model.calls, 1);
 });
 
+for (const [name, context] of [
+  [
+    "invalid model",
+    "status=400 providerCode=invalid_model providerType=invalid_request_error providerMessage=Model does not exist",
+  ],
+  [
+    "invalid dimensions",
+    "status=400 providerCode=InvalidParameter providerType=invalid_request_error providerMessage=dimensions must be between 1 and 4096",
+  ],
+]) {
+  test(`service fails fast on permanent remote ${name} failures`, async (t) => {
+    const temporaryDirectory = await createTemporaryDirectory(
+      t,
+      "zvec-grep-remote-configuration-failure-",
+    );
+    const root = join(temporaryDirectory, "repo");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "example.ts"), "export const Example = 1;\n");
+    const model = new SharedFailureEmbeddingModel({
+      provider: "qwen",
+      code: "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR",
+      context,
+    });
+    const service = await createZvecGrep({ root, embeddingModel: model });
+    t.after(() => service.close());
+
+    await assert.rejects(
+      service.index(),
+      (error) =>
+        error.code ===
+          "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR" &&
+        error.context === context,
+    );
+    assert.equal(model.calls, 1);
+  });
+}
+
 test("service stops scheduling multi-file embedding batches after the first fatal rejection", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
@@ -499,6 +536,37 @@ test("service stops scheduling multi-file embedding batches after the first fata
     `expected at most the active concurrency, received ${model.calls} calls`,
   );
   assert.deepEqual(unhandledRejections, []);
+});
+
+test("service stops scheduling remaining fragment batches after a fatal rejection", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-fast-reject-multi-fragment-",
+    { cleanup: false },
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    join(root, "large.ts"),
+    Array.from(
+      { length: 12 },
+      (_, index) => `export function Fragment${index}() { return ${index}; }\n`,
+    ).join(""),
+  );
+  const model = new ImmediateAuthenticationFailureEmbeddingModel();
+  const service = await createZvecGrep({ root, embeddingModel: model });
+  t.after(async () => {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    service.index({ embeddingConcurrency: 1 }),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR" &&
+      error.message === "fixture authentication failure call=1",
+  );
+  assert.equal(model.calls, 1);
 });
 
 test("service stops after bounded remote retries without a failed-file pass", async (t) => {
@@ -948,4 +1016,34 @@ test("service records failed files, retries them, deletes stale records, and reb
   const rebuilt = await service.index({ rebuild: true });
   assert.equal(rebuilt.filesScanned, 1);
   assert.equal(rebuilt.filesAdded, 1);
+});
+
+test("changedPaths preserves request-specific embedding failure details", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-path-failure-details-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root, { recursive: true });
+  const changedPath = join(root, "changed.ts");
+  await writeFile(changedPath, "export const InitialNeedle = 1;\n");
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new SelectivelyFailingEmbeddingModel(),
+  });
+  t.after(() => service.close());
+  await service.index();
+
+  await writeFile(changedPath, "export const FailureNeedle = 2;\n");
+  await assert.rejects(
+    service.index({ changedPaths: [changedPath] }),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED" &&
+      /failedFiles=changed\.ts/.test(error.context) &&
+      /QWEN_TEXT_EMBEDDING_API_ERROR/.test(error.context) &&
+      /fixture embedding failure/.test(error.context) &&
+      /status=400/.test(error.context) &&
+      /providerCode=invalid_input/.test(error.context) &&
+      /Retried failed files once automatically/.test(error.context),
+  );
 });

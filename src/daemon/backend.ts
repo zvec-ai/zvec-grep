@@ -775,6 +775,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     try {
       lease = await this.modelPool.acquire(modelLoadRequest);
     } catch (error) {
+      if (isEngineError(error)) {
+        throw error;
+      }
       throw new DaemonError(
         "MODEL_LOAD_FAILED",
         `Embedding model ${embeddingModelReference(model)} could not be created: ${error instanceof Error ? error.message : String(error)}`,

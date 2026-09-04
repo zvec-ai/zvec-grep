@@ -81,9 +81,11 @@ zg index --embedding local/potion-retrieval-32m
 
 > [!TIP]
 > If `zg index` or `zg query` fails, rerun the same command with `--debug`
-> for diagnostics (supported in both direct and server modes). From the same
-> project, use `zg status --mode direct --debug` or
-> `zg status --mode server --debug` to inspect recorded indexing errors.
+> for diagnostics (supported in both direct and server modes).
+> `zg status --mode direct --debug` reports per-file failures stored in an
+> existing index; rerun a failed direct command to diagnose command-level
+> fatal errors. Use
+> `zg status --mode server --debug` to inspect recorded server indexing errors.
 > For server connection failures, check `zg server status` and the
 > [server logs](./docs/06-server.md#logs-and-state).
 
