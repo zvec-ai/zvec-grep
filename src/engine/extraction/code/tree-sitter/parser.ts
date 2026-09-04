@@ -1,10 +1,10 @@
-import Parser from "web-tree-sitter";
+import { Parser, type Tree } from "web-tree-sitter";
 import { ensureParser, loadGrammar } from "./grammar.js";
 
 export async function withParser<T>(
   source: string,
   format: string,
-  fn: (tree: Parser.Tree) => T | Promise<T>,
+  fn: (tree: Tree) => T | Promise<T>,
 ): Promise<T | null> {
   await ensureParser();
 
@@ -16,7 +16,7 @@ export async function withParser<T>(
   const parser = new Parser();
   parser.setLanguage(grammar);
 
-  let tree: Parser.Tree | null;
+  let tree: Tree | null;
 
   try {
     tree = parser.parse(source);
