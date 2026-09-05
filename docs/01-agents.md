@@ -18,13 +18,21 @@ managed-rg route.
 | Claude Code | `claude` | `~/.claude.json`, `~/.claude/settings.json`, and `~/.claude/CLAUDE.md` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
 | Qoder CLI and IDE | `qoder` | `~/.qoder/settings.json`, `~/.qoder/AGENTS.md`, and the IDE user-level `~/.qoder/mcp.json` |
-| OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
+| OpenCode | `opencode` | the existing `~/.config/opencode/opencode.jsonc` or `opencode.json`, and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
 `QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`, and
 `CURSOR_CONFIG_DIR`.
+
+For OpenCode, `OPENCODE_CONFIG` selects the exact configuration file. Without
+that override, the installer uses an existing global `opencode.jsonc` before
+`opencode.json`, preserves JSONC comments and unrelated settings, and creates
+`opencode.json` only when neither file exists. If both files exist, the selected
+`opencode.jsonc` path is reported in the install output. On Linux and other
+XDG-based environments, `XDG_CONFIG_HOME` replaces the default `~/.config`
+root.
 
 The current Qoder CLI package exposes both `qoder` and `qodercli` commands, but
 the installer exposes only the canonical `qoder` target. One Qoder install
