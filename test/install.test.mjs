@@ -28,17 +28,20 @@ test("interactive installer marker follows the active agent", () => {
   const detected = new Set(["claude", "codex"]);
   const claude = installerSelectionLines(0, detected);
   const codex = installerSelectionLines(1, detected);
-  const qwen = installerSelectionLines(4, detected);
+  const ohMyPi = installerSelectionLines(3, detected);
+  const qwen = installerSelectionLines(5, detected);
 
   assert.match(claude[0], /● Claude Code\s+detected/);
   assert.match(claude[1], /○ Codex\s+detected/);
   assert.match(codex[0], /○ Claude Code\s+detected/);
   assert.match(codex[1], /● Codex\s+detected/);
+  assert.match(ohMyPi[3], /● Oh My Pi\s+not found/);
   assert.match(qwen[0], /○ Claude Code\s+detected/);
   assert.match(qwen[1], /○ Codex\s+detected/);
   assert.match(qwen[2], /○ OpenCode\s+not found/);
-  assert.match(qwen[3], /○ Cursor\s+not found/);
-  assert.match(qwen[4], /● Qwen Code\s+not found/);
+  assert.match(qwen[3], /○ Oh My Pi\s+not found/);
+  assert.match(qwen[4], /○ Cursor\s+not found/);
+  assert.match(qwen[5], /● Qwen Code\s+not found/);
   assert.match(codex.at(-1), /Use ↑↓ to move · Enter to select/);
   assert.doesNotMatch(codex.join("\n"), /Space|\[●\]/);
 });
@@ -696,7 +699,7 @@ test("Claude Code installer accepts cc and claude-code compatibility aliases", a
   }
 });
 
-test("Qwen Code installer accepts qwen aliases and numeric target 5", async (t) => {
+test("Qwen Code installer accepts qwen aliases and numeric target 6", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-qwen-aliases-"),
   );
@@ -704,7 +707,7 @@ test("Qwen Code installer accepts qwen aliases and numeric target 5", async (t) 
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  for (const target of ["qwen", "qwen-code", "qwencode", "5"]) {
+  for (const target of ["qwen", "qwen-code", "qwencode", "6"]) {
     const qwenHome = join(temporaryDirectory, target);
     await installTarget(target, { QWEN_HOME: qwenHome });
     const config = JSON.parse(
@@ -1122,7 +1125,7 @@ test("Qoder installer accepts its canonical and numeric targets", async (t) => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   });
 
-  for (const target of ["qoder", "6"]) {
+  for (const target of ["qoder", "7"]) {
     const qoderConfigDirectory = join(temporaryDirectory, target);
     await installTarget(target, {
       QODER_CONFIG_DIR: qoderConfigDirectory,
@@ -2033,6 +2036,79 @@ test("OpenCode installer preserves config and manages a remote MCP server", asyn
   assert.equal(uninstalled.mcp.other.url, "https://example.com/mcp");
   const uninstalledGuidance = await readFile(guidancePath, "utf8");
   assert.match(uninstalledGuidance, /# Existing OpenCode guidance/);
+  assert.doesNotMatch(uninstalledGuidance, /ZVEC_GREP|## zvec-grep/);
+});
+
+test("Oh My Pi installer preserves config and manages MCP servers", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-ohmypi-"),
+  );
+  const agentDir = join(temporaryDirectory, ".omp", "agent");
+  const configPath = join(agentDir, "mcp.json");
+  const guidancePath = join(agentDir, "AGENTS.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(guidancePath, "# Existing Oh My Pi guidance\n");
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ mcpServers: { other: { type: "http", url: "https://example.com/mcp" } } }, null, 2)}\n`,
+  );
+
+  await installTarget("ohmypi", { PI_CODING_AGENT_DIR: agentDir }, [
+    "--mcp-tool-timeout=900",
+  ]);
+  const stdioConfig = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(stdioConfig.mcpServers.other.url, "https://example.com/mcp");
+  assert.deepEqual(stdioConfig.mcpServers.zvec_grep, {
+    command: "zg",
+    args: ["server", "--stdio"],
+    enabled: true,
+    timeout: 900000,
+  });
+  const stdioGuidance = await readFile(guidancePath, "utf8");
+  assert.match(stdioGuidance, /# Existing Oh My Pi guidance/);
+  assert.match(
+    stdioGuidance,
+    /Use `mcp__zvec_grep_search` when wording or location is unknown/,
+  );
+  assert.match(stdioGuidance, /`mcp__zvec_grep_rg` when it is listed/);
+  assert.equal(countOccurrences(stdioGuidance, "<!-- ZVEC_GREP_START -->"), 1);
+  assert.equal(countOccurrences(stdioGuidance, "<!-- ZVEC_GREP_END -->"), 1);
+
+  await installTarget(
+    "ohmypi",
+    {
+      PI_CODING_AGENT_DIR: agentDir,
+      ZVEC_GREP_SERVER_TOKEN: "secret-token",
+    },
+    ["--mcp-transport=http", "--mcp-token-env=ZVEC_GREP_SERVER_TOKEN"],
+  );
+  const httpConfig = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(httpConfig.mcpServers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    enabled: true,
+    timeout: 600000,
+    headers: { Authorization: "Bearer secret-token" },
+  });
+
+  await assert.rejects(
+    installTarget("ohmypi", { PI_CODING_AGENT_DIR: agentDir }, [
+      "--mcp-transport=http",
+      "--mcp-token-env=ZVEC_GREP_UNSET_TOKEN",
+    ]),
+    /ZVEC_GREP_UNSET_TOKEN/,
+  );
+
+  await uninstallTarget("ohmypi", { PI_CODING_AGENT_DIR: agentDir });
+  const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.mcpServers.zvec_grep, undefined);
+  assert.equal(uninstalled.mcpServers.other.url, "https://example.com/mcp");
+  const uninstalledGuidance = await readFile(guidancePath, "utf8");
+  assert.match(uninstalledGuidance, /# Existing Oh My Pi guidance/);
   assert.doesNotMatch(uninstalledGuidance, /ZVEC_GREP|## zvec-grep/);
 });
 

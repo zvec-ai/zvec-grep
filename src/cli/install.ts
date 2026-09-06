@@ -84,6 +84,13 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
     uninstall: uninstallOpenCodeIntegration,
   },
   {
+    id: "ohmypi",
+    label: "Oh My Pi",
+    executables: ["omp"],
+    install: installOhMyPiIntegration,
+    uninstall: uninstallOhMyPiIntegration,
+  },
+  {
     id: "cursor",
     label: "Cursor",
     executables: ["cursor"],
@@ -115,6 +122,8 @@ const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
 const NAMESPACED_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
 const NAMESPACED_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
+const OMP_MCP_SEARCH_TOOL = "mcp__zvec_grep_search";
+const OMP_MCP_RG_TOOL = "mcp__zvec_grep_rg";
 const QODER_MCP_PERMISSION_RULES = [
   {
     permission: NAMESPACED_SEARCH_TOOL,
@@ -291,6 +300,43 @@ async function uninstallCodexIntegration(): Promise<InstallAgentResult> {
   });
 
   return { files: [configPath, agentsPath] };
+}
+
+async function installOhMyPiIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const configPath = resolveOhMyPiConfigPath();
+  const guidancePath = resolve(dirname(configPath), "AGENTS.md");
+  await installJsonMcpServer({
+    path: configPath,
+    containerKey: "mcpServers",
+    server: ohMyPiMcpServer(options),
+    force: options.force,
+    label: "Oh My Pi",
+  });
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: agentGuidanceBlock({
+      search: OMP_MCP_SEARCH_TOOL,
+      rg: OMP_MCP_RG_TOOL,
+    }),
+    force: true,
+  });
+  return { files: [configPath, guidancePath] };
+}
+
+async function uninstallOhMyPiIntegration(): Promise<InstallAgentResult> {
+  const configPath = resolveOhMyPiConfigPath();
+  const guidancePath = resolve(dirname(configPath), "AGENTS.md");
+  await uninstallJsonMcpServer(configPath, "mcpServers");
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+  return { files: [configPath, guidancePath] };
 }
 
 async function installOpenCodeIntegration(
@@ -847,6 +893,15 @@ function resolveOpenCodeConfigPath(): string {
   return resolve(
     process.env.OPENCODE_CONFIG ??
       resolve(homedir(), ".config", "opencode", "opencode.json"),
+  );
+}
+
+function resolveOhMyPiConfigPath(): string {
+  // Oh My Pi (omp.sh) is built on pi (pi.dev). PI_CODING_AGENT_DIR
+  // overrides the agent directory, which defaults to ~/.omp/agent.
+  return resolve(
+    process.env.PI_CODING_AGENT_DIR ?? resolve(homedir(), ".omp", "agent"),
+    "mcp.json",
   );
 }
 
@@ -1496,6 +1551,44 @@ function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
         }
       : {}),
   };
+}
+
+function ohMyPiMcpServer(
+  options: InstallAgentOptions,
+): Record<string, unknown> {
+  const timeout = options.mcpToolTimeoutSeconds * 1_000;
+  if (options.transport === "stdio") {
+    return {
+      command: "zg",
+      args: stdioArgs(options.mcpToolset),
+      enabled: true,
+      timeout,
+    };
+  }
+
+  return {
+    type: "http",
+    url: resolveServerUrl(),
+    enabled: true,
+    timeout,
+    ...(options.mcpTokenEnv
+      ? {
+          headers: {
+            Authorization: `Bearer ${resolveOhMyPiMcpToken(options.mcpTokenEnv)}`,
+          },
+        }
+      : {}),
+  };
+}
+
+function resolveOhMyPiMcpToken(envName: string): string {
+  const token = process.env[envName];
+  if (!token) {
+    throw new Error(
+      `Environment variable ${envName} is not set. Oh My Pi does not expand environment variables in MCP headers, so set it and re-run zg install.`,
+    );
+  }
+  return token;
 }
 
 function qoderMcpServer(

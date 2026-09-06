@@ -19,12 +19,13 @@ managed-rg route.
 | Qwen Code | `qwen` | `~/.qwen/settings.json` and `~/.qwen/QWEN.md` |
 | Qoder CLI and IDE | `qoder` | `~/.qoder/settings.json`, `~/.qoder/AGENTS.md`, and the IDE user-level `~/.qoder/mcp.json` |
 | OpenCode | `opencode` | `~/.config/opencode/opencode.json` and the adjacent `AGENTS.md` |
+| Oh My Pi | `ohmypi` | `~/.omp/agent/mcp.json` and the adjacent `AGENTS.md` |
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
-`QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`, and
-`CURSOR_CONFIG_DIR`.
+`QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`,
+`CURSOR_CONFIG_DIR`, and `PI_CODING_AGENT_DIR`.
 
 The current Qoder CLI package exposes both `qoder` and `qodercli` commands, but
 the installer exposes only the canonical `qoder` target. One Qoder install
@@ -48,6 +49,7 @@ zg install --target codex --yes
 zg install --target claude --target cursor --yes
 zg install --target qwen --yes
 zg install --target qoder --yes
+zg install --target ohmypi --yes
 zg install --target all --yes
 ```
 
@@ -171,7 +173,7 @@ zg server status --check-ready
 Then start a new agent session and confirm that the client-specific search tool
 is available. It is `zvec_grep_search` in Codex and Claude Code,
 `mcp__zvec_grep__zvec_grep_search` in Qwen Code and Qoder CLI, and
-`zvec_grep_zvec_grep_search` in OpenCode. With the optional `full` MCP toolset,
+`zvec_grep_zvec_grep_search` in OpenCode, and `mcp__zvec_grep_search` in Oh My Pi. With the optional `full` MCP toolset,
 Qoder CLI exposes managed rg as `mcp__zvec_grep__zvec_grep_rg`. For Qoder IDE,
 confirm after restart that the `zvec_grep` server and its tools appear; the exact
 host-qualified tool label remains part of the real-machine smoke test. If the
