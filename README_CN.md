@@ -76,7 +76,7 @@ zg index --embedding local/potion-retrieval-32m
 ```
 
 > [!NOTE]
-> 索引保存在被索引项目根目录的 `.zvec-grep/` 中。
+> 索引保存在被索引项目根目录的 `.zvec-grep/` 中。建议将 `.zvec-grep/` 添加至 `.gitignore`（索引包含本机特定路径及本地文件时间戳，不适用于跨机器或跨平台共享）。
 
 > [!TIP]
 > `zg index` 或 `zg query` 失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。

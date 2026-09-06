@@ -77,7 +77,7 @@ zg index --embedding local/potion-retrieval-32m
 ```
 
 > [!NOTE]
-> The index is stored in `.zvec-grep/` under the indexed project root.
+> The index is stored in `.zvec-grep/` under the indexed project root. Add `.zvec-grep/` to your `.gitignore`—the index stores host-specific paths and local filesystem timestamps that are not portable across machines or platforms.
 
 > [!TIP]
 > If `zg index` or `zg query` fails, rerun the same command with `--debug`

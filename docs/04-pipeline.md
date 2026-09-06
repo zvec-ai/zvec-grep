@@ -29,9 +29,12 @@ zg index /absolute/path/to/your-repository \
 ```
 
 The workspace index is stored under `<root>/.zvec-grep/`. `.git` and
-`.zvec-grep` are always excluded. Common dependency, build, generated, cache,
-and log directories are excluded by default, as are files ignored by the
-repository's ignore rules.
+`.zvec-grep` are always excluded from indexing. Add `.zvec-grep/` to your
+repository's `.gitignore`—the index stores machine-local absolute paths and
+tracks filesystem timestamps (`mtime`), so it is not portable across machines
+or operating systems. Common dependency, build, generated, cache, and log
+directories are excluded by default, as are files ignored by the repository's
+ignore rules.
 
 The main workspace files are `manifest.json`, `files.zvec`, and `index.zvec`.
 The manifest stores index metadata and the workspace Embedding runtime settings,
