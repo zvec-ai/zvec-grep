@@ -10,6 +10,28 @@ function entry(overrides = {}) {
     model: "test-transformer",
     repo: "test/model-ONNX",
     revision: "0123456789abcdef",
+    sources: {
+      huggingFace: {
+        repo: "test/model-ONNX",
+        revision: "0123456789abcdef",
+      },
+      modelScope: {
+        repo: "mirror/test-model-ONNX",
+        revision: "fedcba9876543210",
+      },
+    },
+    artifacts: [
+      {
+        path: "onnx/model_quantized.onnx",
+        size: 100,
+        sha256: "a".repeat(64),
+      },
+      {
+        path: "tokenizer.json",
+        size: 20,
+        sha256: "b".repeat(64),
+      },
+    ],
     dtype: "q8",
     dimension: 3,
     metric: "cosine",
@@ -60,10 +82,27 @@ function createTokenizer(tokenCount = () => 1) {
   );
 }
 
-test("Transformers.js adapter fixes artifact recipe and formats query/document inputs", async () => {
+function createArtifactResolver(
+  directory = "/tmp/resolved-transformers-model",
+) {
+  return async ({ sources, artifacts }) => ({
+    source: sources[0],
+    directory,
+    paths: Object.fromEntries(
+      artifacts.map((artifact) => [
+        artifact.path,
+        `${directory}/${artifact.path}`,
+      ]),
+    ),
+  });
+}
+
+test("Transformers.js resolves artifacts before loading a local-only pipeline", async () => {
   const loads = [];
+  const resolutions = [];
   const calls = [];
   const downloadProgress = [];
+  let artifactsResolved = false;
   let disposals = 0;
   const extractor = Object.assign(
     async (texts, options) => {
@@ -83,42 +122,44 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
     },
   );
   const dependencies = {
-    loadRuntime: async () => {
-      assert.deepEqual(downloadProgress, [
-        {
-          stage: "preparing",
-          model: "local/test-transformer",
+    async resolveArtifacts(options) {
+      resolutions.push(options);
+      options.onDownloadPlan?.(options.artifacts);
+      options.onProgress?.({
+        model: options.model,
+        source: "huggingface",
+        artifact: "onnx/model_quantized.onnx",
+        downloadedBytes: 25,
+        totalBytes: 100,
+      });
+      options.onProgress?.({
+        model: options.model,
+        source: "huggingface",
+        artifact: "tokenizer.json",
+        downloadedBytes: 10,
+        totalBytes: 20,
+      });
+      artifactsResolved = true;
+      return {
+        source: options.sources[0],
+        directory: "/tmp/model-cache/test/model-ONNX/0123456789abcdef",
+        paths: {
+          "onnx/model_quantized.onnx":
+            "/tmp/model-cache/test/model-ONNX/0123456789abcdef/onnx/model_quantized.onnx",
+          "tokenizer.json":
+            "/tmp/model-cache/test/model-ONNX/0123456789abcdef/tokenizer.json",
         },
-      ]);
+      };
+    },
+    loadRuntime: async () => {
+      assert.equal(artifactsResolved, true);
+      assert.deepEqual(downloadProgress[0], {
+        stage: "preparing",
+        model: "local/test-transformer",
+      });
       return {
         async pipeline(task, repo, options) {
           loads.push({ task, repo, options });
-          options.progress_callback?.({
-            status: "initiate",
-            name: repo,
-            file: "model_quantized.onnx",
-          });
-          options.progress_callback?.({
-            status: "initiate",
-            name: repo,
-            file: "tokenizer.json",
-          });
-          options.progress_callback?.({
-            status: "progress",
-            name: repo,
-            file: "model_quantized.onnx",
-            progress: 25,
-            loaded: 25,
-            total: 100,
-          });
-          options.progress_callback?.({
-            status: "progress",
-            name: repo,
-            file: "tokenizer.json",
-            progress: 50,
-            loaded: 10,
-            total: 20,
-          });
           return extractor;
         },
       };
@@ -154,28 +195,41 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
   );
   await model.embed([{ kind: "text", text: "implementation" }]);
 
-  assert.equal(typeof loads[0].options.progress_callback, "function");
-  const pipelineOptions = { ...loads[0].options };
-  delete pipelineOptions.progress_callback;
-  assert.deepEqual(
-    [
-      {
-        ...loads[0],
-        options: pipelineOptions,
+  assert.deepEqual(loads, [
+    {
+      task: "feature-extraction",
+      repo: "/tmp/model-cache/test/model-ONNX/0123456789abcdef",
+      options: {
+        dtype: "q8",
+        local_files_only: true,
       },
-    ],
-    [
+    },
+  ]);
+  assert.equal(resolutions.length, 1);
+  const { onDownloadPlan, onProgress, onFallback, ...resolution } =
+    resolutions[0];
+  assert.equal(typeof onDownloadPlan, "function");
+  assert.equal(typeof onProgress, "function");
+  assert.equal(typeof onFallback, "function");
+  assert.deepEqual(resolution, {
+    model: "local/test-transformer",
+    sources: [
       {
-        task: "feature-extraction",
+        kind: "huggingface",
         repo: "test/model-ONNX",
-        options: {
-          cache_dir: "/tmp/model-cache",
-          revision: "0123456789abcdef",
-          dtype: "q8",
-        },
+        revision: "0123456789abcdef",
+        cacheDirectory: "/tmp/model-cache/test/model-ONNX/0123456789abcdef",
+      },
+      {
+        kind: "modelscope",
+        repo: "mirror/test-model-ONNX",
+        revision: "fedcba9876543210",
+        cacheDirectory:
+          "/tmp/model-cache/modelscope/transformers-js/mirror--test-model-ONNX/fedcba9876543210",
       },
     ],
-  );
+    artifacts: entry().artifacts,
+  });
   assert.deepEqual(downloadProgress, [
     {
       stage: "preparing",
@@ -185,6 +239,7 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
       stage: "downloading",
       model: "local/test-transformer",
       downloadedBytes: 25,
+      totalBytes: 120,
     },
     {
       stage: "downloading",
@@ -246,12 +301,160 @@ test("Transformers.js adapter fixes artifact recipe and formats query/document i
   );
 });
 
+test("Transformers.js resets progress to the missing ModelScope artifacts on fallback", async () => {
+  const loads = [];
+  const progress = [];
+  const extractor = Object.assign(
+    async () => ({ dims: [1, 3], data: new Float32Array(3) }),
+    { tokenizer: createTokenizer(), async dispose() {} },
+  );
+  const dependencies = {
+    async resolveArtifacts(options) {
+      options.onDownloadPlan?.(options.artifacts);
+      options.onProgress?.({
+        model: options.model,
+        source: "huggingface",
+        artifact: "onnx/model_quantized.onnx",
+        downloadedBytes: 100,
+        totalBytes: 100,
+      });
+      options.onProgress?.({
+        model: options.model,
+        source: "huggingface",
+        artifact: "tokenizer.json",
+        downloadedBytes: 10,
+        totalBytes: 20,
+      });
+      options.onFallback?.("Hugging Face unavailable; using ModelScope.");
+      options.onFallback?.("duplicate fallback warning");
+      const eventCountBeforePlan = progress.length;
+      options.onDownloadPlan?.([options.artifacts[1]]);
+      assert.equal(progress.length, eventCountBeforePlan);
+      options.onProgress?.({
+        model: options.model,
+        source: "modelscope",
+        artifact: "tokenizer.json",
+        downloadedBytes: 0,
+        totalBytes: 20,
+      });
+      options.onProgress?.({
+        model: options.model,
+        source: "modelscope",
+        artifact: "tokenizer.json",
+        downloadedBytes: 20,
+        totalBytes: 20,
+      });
+      const source = options.sources[1];
+      return {
+        source,
+        directory: source.cacheDirectory,
+        paths: Object.fromEntries(
+          options.artifacts.map((artifact) => [
+            artifact.path,
+            `${source.cacheDirectory}/${artifact.path}`,
+          ]),
+        ),
+      };
+    },
+    loadRuntime: async () => ({
+      async pipeline(task, repo, options) {
+        loads.push({ task, repo, options });
+        return extractor;
+      },
+    }),
+  };
+  const model = new TransformersJsEmbeddingModel(
+    entry(),
+    { apiKey: "", modelCacheDir: "/tmp/model-cache" },
+    dependencies,
+  );
+
+  await model.embed([{ kind: "text", text: "value" }], {
+    onProgress: (event) => progress.push(event),
+  });
+
+  assert.deepEqual(loads, [
+    {
+      task: "feature-extraction",
+      repo: "/tmp/model-cache/modelscope/transformers-js/mirror--test-model-ONNX/fedcba9876543210",
+      options: { dtype: "q8", local_files_only: true },
+    },
+  ]);
+  assert.deepEqual(
+    progress.filter((event) => event.stage === "downloading"),
+    [
+      {
+        stage: "downloading",
+        model: "local/test-transformer",
+        downloadedBytes: 100,
+        totalBytes: 120,
+      },
+      {
+        stage: "downloading",
+        model: "local/test-transformer",
+        downloadedBytes: 110,
+        totalBytes: 120,
+      },
+      {
+        stage: "downloading",
+        model: "local/test-transformer",
+        downloadedBytes: 0,
+        totalBytes: 20,
+      },
+      {
+        stage: "downloading",
+        model: "local/test-transformer",
+        downloadedBytes: 20,
+        totalBytes: 20,
+      },
+    ],
+  );
+  assert.deepEqual(
+    progress.filter((event) => event.stage === "warning"),
+    [
+      {
+        stage: "warning",
+        model: "local/test-transformer",
+        message: "Hugging Face unavailable; using ModelScope.",
+      },
+    ],
+  );
+  await model.dispose();
+});
+
+test("Transformers.js keeps cached model loading in the preparation stage", async () => {
+  const progress = [];
+  const extractor = Object.assign(
+    async () => ({ dims: [1, 3], data: new Float32Array(3) }),
+    { tokenizer: createTokenizer(), async dispose() {} },
+  );
+  const model = new TransformersJsEmbeddingModel(
+    entry(),
+    { apiKey: "" },
+    {
+      resolveArtifacts: createArtifactResolver(),
+      loadRuntime: async () => ({ pipeline: async () => extractor }),
+    },
+  );
+
+  await model.embed([{ kind: "text", text: "cached" }], {
+    onProgress: (event) => progress.push(event),
+  });
+
+  assert.deepEqual(progress, [
+    { stage: "preparing", model: "local/test-transformer" },
+    { stage: "ready", model: "local/test-transformer" },
+  ]);
+  await model.dispose();
+});
+
 test("Transformers.js adapter validates the returned batch tensor", async () => {
   const extractor = Object.assign(
     async () => ({ dims: [1, 2], data: new Float32Array(2) }),
     { tokenizer: createTokenizer(), async dispose() {} },
   );
   const dependencies = {
+    resolveArtifacts: createArtifactResolver(),
     loadRuntime: async () => ({
       async pipeline() {
         return extractor;
@@ -280,6 +483,7 @@ test("Transformers.js adapter maps Metal to WebGPU", async () => {
     { tokenizer: createTokenizer(), async dispose() {} },
   );
   const dependencies = {
+    resolveArtifacts: createArtifactResolver(),
     loadRuntime: async () => ({
       async pipeline(task, repo, options) {
         loads.push({ task, repo, options });
@@ -306,11 +510,17 @@ test("Transformers.js adapter maps Metal to WebGPU", async () => {
 
 test("Transformers.js adapter falls back to CPU when GPU initialization fails", async (t) => {
   const providers = [];
+  let artifactResolutions = 0;
   const extractor = Object.assign(
     async () => ({ dims: [1, 3], data: new Float32Array(3) }),
     { tokenizer: createTokenizer(), async dispose() {} },
   );
+  const resolveArtifacts = createArtifactResolver();
   const dependencies = {
+    async resolveArtifacts(options) {
+      artifactResolutions++;
+      return await resolveArtifacts(options);
+    },
     loadRuntime: async () => ({
       async pipeline(_task, _repo, options) {
         const provider = options.session_options?.executionProviders[0];
@@ -339,12 +549,14 @@ test("Transformers.js adapter falls back to CPU when GPU initialization fails", 
   await model.embed([{ kind: "text", text: "value" }]);
 
   assert.deepEqual(providers, ["webgpu", "cpu"]);
+  assert.equal(artifactResolutions, 1);
   assert.match(writes.join(""), /falling back to CPU/);
   await model.dispose();
 });
 
 test("Transformers.js adapter retries on CPU when GPU inference returns invalid values", async (t) => {
   const providers = [];
+  let artifactResolutions = 0;
   let activeProvider;
   let gpuDisposals = 0;
   const makeExtractor = (provider) =>
@@ -365,7 +577,12 @@ test("Transformers.js adapter retries on CPU when GPU inference returns invalid 
         },
       },
     );
+  const resolveArtifacts = createArtifactResolver();
   const dependencies = {
+    async resolveArtifacts(options) {
+      artifactResolutions++;
+      return await resolveArtifacts(options);
+    },
     loadRuntime: async () => ({
       async pipeline(_task, _repo, options) {
         activeProvider = options.session_options?.executionProviders[0];
@@ -394,6 +611,7 @@ test("Transformers.js adapter retries on CPU when GPU inference returns invalid 
     truncated: [],
   });
   assert.deepEqual(providers, ["webgpu", "cpu"]);
+  assert.equal(artifactResolutions, 1);
   assert.equal(activeProvider, "cpu");
   assert.equal(gpuDisposals, 1);
   assert.match(writes.join(""), /inference failed.*falling back to CPU/);
@@ -412,6 +630,7 @@ test("Transformers.js reports inputs truncated by the feature extraction pipelin
     { tokenizer, async dispose() {} },
   );
   const dependencies = {
+    resolveArtifacts: createArtifactResolver(),
     loadRuntime: async () => ({
       async pipeline() {
         return extractor;
@@ -459,6 +678,7 @@ test("Transformers.js does not treat tokenizer failures as GPU inference failure
     },
   );
   const dependencies = {
+    resolveArtifacts: createArtifactResolver(),
     loadRuntime: async () => ({
       async pipeline(_task, _repo, options) {
         providers.push(options.session_options?.executionProviders[0]);

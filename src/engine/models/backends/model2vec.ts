@@ -1,12 +1,9 @@
-import { createWriteStream, existsSync, statSync } from "node:fs";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import { basename, dirname, join, resolve } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { Content, TextContent } from "../../types.js";
+import { writeJsonFile } from "../../utils/json.js";
 import { defaultHome } from "../../utils/path.js";
 import {
   BaseEmbeddingModel,
@@ -19,9 +16,10 @@ import {
 } from "../embeddings.js";
 import type { Model2VecEmbeddingCatalogEntry } from "../catalog.js";
 import {
-  createModelDownloadProgressReporter,
-  type ModelDownloadProgressReporter,
-} from "../download-progress.js";
+  resolveModelArtifacts,
+  type ModelArtifactSource,
+} from "../artifact-downloader.js";
+import { createModelDownloadProgressReporter } from "../download-progress.js";
 import { loadModel2VecTokenizer } from "./model2vec-tokenizer.js";
 import { Model2VecWorkerPool } from "./model2vec-worker-pool.js";
 import {
@@ -45,14 +43,7 @@ type Model2VecDependencies = {
     tensorName: string,
     dimension: number,
   ): Promise<StaticEmbeddingTable>;
-  download(
-    url: string,
-    destination: string,
-    onProgress?: (progress: {
-      downloadedBytes: number;
-      totalBytes?: number;
-    }) => void,
-  ): Promise<void>;
+  resolveArtifacts: typeof resolveModelArtifacts;
 };
 
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
@@ -64,35 +55,7 @@ const defaultDependencies: Model2VecDependencies = {
   async loadSafetensors(path, tensorName, dimension) {
     return await readStaticEmbeddingTable(path, tensorName, dimension);
   },
-  async download(url, destination, onProgress) {
-    const response = await fetch(url, { redirect: "follow" });
-    if (!response.ok || !response.body) {
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    }
-    const contentLength = response.headers.get("content-length");
-    const parsedTotalBytes = contentLength
-      ? Number.parseInt(contentLength, 10)
-      : undefined;
-    const totalBytes =
-      parsedTotalBytes !== undefined &&
-      Number.isFinite(parsedTotalBytes) &&
-      parsedTotalBytes >= 0
-        ? parsedTotalBytes
-        : undefined;
-    let downloadedBytes = 0;
-    const progressStream = new Transform({
-      transform(chunk, _encoding, callback) {
-        downloadedBytes += Buffer.byteLength(chunk);
-        onProgress?.({ downloadedBytes, totalBytes });
-        callback(null, chunk);
-      },
-    });
-    await pipeline(
-      Readable.fromWeb(response.body as NodeReadableStream),
-      progressStream,
-      createWriteStream(destination),
-    );
-  },
+  resolveArtifacts: resolveModelArtifacts,
 };
 
 export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
@@ -105,6 +68,7 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
   private workerPool: Model2VecWorkerPool | null = null;
   private loadPromise: Promise<void> | null = null;
   private readonly useWorkerPool: boolean;
+  private sourceFallbackWarningReported = false;
   private disposed = false;
 
   constructor(
@@ -126,10 +90,11 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
         maxInputTokens: entry.maxInputTokens,
       },
     };
-    this.modelCacheDir =
+    this.modelCacheDir = resolve(
       options.modelCacheDir ??
-      process.env.ZVEC_GREP_MODEL_CACHE ??
-      DEFAULT_MODEL_CACHE_DIR;
+        process.env.ZVEC_GREP_MODEL_CACHE ??
+        DEFAULT_MODEL_CACHE_DIR,
+    );
     this.dependencies = { ...defaultDependencies, ...dependencies };
     this.useWorkerPool = Object.keys(dependencies).length === 0;
   }
@@ -211,14 +176,54 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
     const downloadProgress = createModelDownloadProgressReporter(
       this.entry.reference,
       onProgress,
-      [basename(this.entry.modelFile), basename(this.entry.tokenizerFile)],
     );
     downloadProgress.start();
     try {
-      const [modelPath, tokenizerSource] = await Promise.all([
-        this.resolveModelPath(downloadProgress),
-        this.resolveTokenizerSource(downloadProgress),
-      ]);
+      const resolved = await this.dependencies
+        .resolveArtifacts({
+          model: this.entry.reference,
+          sources: this.createArtifactSources(),
+          artifacts: this.entry.artifacts,
+          onDownloadPlan: (artifacts) => {
+            downloadProgress.setDownloadPlan(artifacts);
+          },
+          onProgress: (progress) => {
+            downloadProgress.report({
+              artifact: progress.artifact,
+              downloadedBytes: progress.downloadedBytes,
+            });
+          },
+          onFallback: (warning) => {
+            if (this.sourceFallbackWarningReported) {
+              return;
+            }
+            this.sourceFallbackWarningReported = true;
+            if (!downloadProgress.warning(warning)) {
+              process.stderr.write(`zvec-grep warning: ${warning}\n`);
+            }
+          },
+        })
+        .catch((cause: unknown) => {
+          throw new EngineError(
+            "Unable to download Model2Vec model artifacts",
+            {
+              code: "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DOWNLOAD_FAILED",
+              context: `model=${this.entry.reference} repo=${this.entry.repo} revision=${this.entry.revision}`,
+              cause,
+            },
+          );
+        });
+      const modelPath = resolved.paths[this.entry.modelFile];
+      const tokenizerPath = resolved.paths[this.entry.tokenizerFile];
+      if (!modelPath || !tokenizerPath) {
+        throw new EngineError("Resolved Model2Vec snapshot is incomplete", {
+          code: "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DOWNLOAD_FAILED",
+          context: `model=${this.entry.reference} source=${resolved.source.kind}`,
+        });
+      }
+      const tokenizerSource = dirname(tokenizerPath);
+      const configPath = join(tokenizerSource, "tokenizer_config.json");
+      await ensureTokenizerConfig(configPath);
       const staticTable = await this.dependencies.loadSafetensors(
         modelPath,
         this.entry.embeddingTensor,
@@ -249,10 +254,8 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
           tokenizerSource,
           {
             cache_dir: this.modelCacheDir,
-            revision: this.entry.revision,
-            ...(tokenizerSource !== this.entry.repo
-              ? { local_files_only: true }
-              : {}),
+            revision: resolved.source.revision,
+            local_files_only: true,
           },
         );
         this.ensureNotDisposed();
@@ -278,82 +281,40 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
     }
   }
 
-  private async resolveModelPath(
-    downloadProgress: ModelDownloadProgressReporter,
-  ): Promise<string> {
-    const modelPath = join(
-      this.modelCacheDir,
-      "model2vec",
-      this.entry.repo.replaceAll("/", "--"),
-      this.entry.revision,
-      basename(this.entry.modelFile),
-    );
-    return await this.resolveCachedFile(
-      this.entry.modelFile,
-      modelPath,
-      downloadProgress,
-    );
-  }
-
-  private async resolveTokenizerSource(
-    downloadProgress: ModelDownloadProgressReporter,
-  ): Promise<string> {
-    const tokenizerDirectory = join(
-      this.modelCacheDir,
-      "model2vec",
-      this.entry.repo.replaceAll("/", "--"),
-      this.entry.revision,
-      "tokenizer",
-    );
-    await this.resolveCachedFile(
-      this.entry.tokenizerFile,
-      join(tokenizerDirectory, "tokenizer.json"),
-      downloadProgress,
-    );
-    const configPath = join(tokenizerDirectory, "tokenizer_config.json");
-    if (!isUsableModelFile(configPath)) {
-      await writeFile(
-        configPath,
-        `${JSON.stringify({ tokenizer_class: "PreTrainedTokenizer" })}\n`,
-      );
-    }
-    return tokenizerDirectory;
-  }
-
-  private async resolveCachedFile(
-    remoteFile: string,
-    localPath: string,
-    downloadProgress: ModelDownloadProgressReporter,
-  ): Promise<string> {
-    if (isUsableModelFile(localPath)) {
-      downloadProgress.skip(basename(remoteFile));
-      return localPath;
-    }
-
-    await mkdir(dirname(localPath), { recursive: true });
-    const partialPath = `${localPath}.part-${process.pid}-${Date.now()}`;
-    const url = `https://huggingface.co/${this.entry.repo}/resolve/${this.entry.revision}/${remoteFile}`;
-    try {
-      downloadProgress.begin(basename(remoteFile));
-      await this.dependencies.download(url, partialPath, (progress) => {
-        downloadProgress.report({
-          artifact: basename(remoteFile),
-          ...progress,
-        });
-      });
-      if (!isUsableModelFile(partialPath)) {
-        throw new Error("Downloaded model file is empty");
-      }
-      await rename(partialPath, localPath);
-      return localPath;
-    } catch (cause) {
-      await rm(partialPath, { force: true });
-      throw new EngineError("Unable to download Model2Vec model artifact", {
-        code: "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DOWNLOAD_FAILED",
-        context: `model=${this.entry.reference} repo=${this.entry.repo} revision=${this.entry.revision}`,
-        cause,
-      });
-    }
+  private createArtifactSources(): readonly ModelArtifactSource[] {
+    const huggingFace = this.entry.sources.huggingFace;
+    const modelScope = this.entry.sources.modelScope;
+    const localPaths = {
+      [this.entry.modelFile]: basename(this.entry.modelFile),
+      [this.entry.tokenizerFile]: "tokenizer/tokenizer.json",
+    };
+    return [
+      {
+        kind: "huggingface",
+        repo: huggingFace.repo,
+        revision: huggingFace.revision,
+        cacheDirectory: join(
+          this.modelCacheDir,
+          "model2vec",
+          huggingFace.repo.replaceAll("/", "--"),
+          huggingFace.revision,
+        ),
+        localPaths,
+      },
+      {
+        kind: "modelscope",
+        repo: modelScope.repo,
+        revision: modelScope.revision,
+        cacheDirectory: join(
+          this.modelCacheDir,
+          "modelscope",
+          "model2vec",
+          modelScope.repo.replaceAll("/", "--"),
+          modelScope.revision,
+        ),
+        localPaths,
+      },
+    ];
   }
 
   private async embedTexts(texts: string[]): Promise<EmbeddingResult> {
@@ -382,8 +343,32 @@ export class Model2VecEmbeddingModel extends BaseEmbeddingModel {
   }
 }
 
-function isUsableModelFile(path: string): boolean {
-  return existsSync(path) && statSync(path).size > 0;
+async function ensureTokenizerConfig(path: string): Promise<void> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "tokenizer_class" in value &&
+      value.tokenizer_class === "PreTrainedTokenizer"
+    ) {
+      return;
+    }
+  } catch (error) {
+    if (
+      !(error instanceof SyntaxError) &&
+      !(
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      )
+    ) {
+      throw error;
+    }
+  }
+
+  await writeJsonFile(path, { tokenizer_class: "PreTrainedTokenizer" });
 }
 
 function formatText(

@@ -15,7 +15,13 @@ zg index --embedding local/potion-code-16m-v2
 ```
 
 Local models keep workspace content and query text on the machine. Their files
-are downloaded on first use and cached under `~/.zvec-grep/models` by default.
+are downloaded from Hugging Face on first use and cached under
+`~/.zvec-grep/models` by default. If a pinned Hugging Face artifact cannot be
+downloaded, zvec-grep automatically falls back to its pinned, integrity-checked
+ModelScope copy. A complete ModelScope snapshot is reused on later runs without
+retrying Hugging Face. ModelScope downloads use a separate `modelscope` cache
+subdirectory.
+
 Remote models avoid local inference but send disclosed query or workspace
 content to the configured provider after authorization.
 

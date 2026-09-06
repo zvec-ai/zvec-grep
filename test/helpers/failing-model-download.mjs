@@ -5,7 +5,10 @@ globalThis.fetch = async (input, init) => {
     typeof Request !== "undefined" && input instanceof Request
       ? input.url
       : String(input);
-  if (!url.startsWith("https://huggingface.co/")) {
+  if (
+    !url.startsWith("https://huggingface.co/") &&
+    !url.startsWith("https://modelscope.cn/models/")
+  ) {
     return await originalFetch(input, init);
   }
 

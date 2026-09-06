@@ -145,7 +145,7 @@ test("direct-mode debug index reports a redacted local model download failure", 
       );
       assert.match(
         error.stderr,
-        /Cause:\s+simulated model download network failure/,
+        /Cause:.*simulated model download network failure/,
       );
       assert.match(error.stderr, /\[redacted\]/);
       assert.doesNotMatch(
@@ -218,7 +218,7 @@ test("server-mode debug index reports a redacted local model download failure", 
       );
       assert.match(
         error.stderr,
-        /Cause:\s+simulated model download network failure/,
+        /Cause:.*simulated model download network failure/,
       );
       assert.match(error.stderr, /\[redacted\]/);
       assert.doesNotMatch(error.stderr, /model-download-secret/);

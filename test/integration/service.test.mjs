@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { EngineError } from "../../dist/engine/errors.js";
+import { resolveModelArtifacts } from "../../dist/engine/models/artifact-downloader.js";
 import { Model2VecEmbeddingModel } from "../../dist/engine/models/backends/model2vec.js";
 import { CURRENT_INDEX_VERSION } from "../../dist/engine/types.js";
 import { createZvecGrep } from "../../dist/index.js";
@@ -131,7 +133,10 @@ class DownloadProgressEmbeddingModel extends FakeEmbeddingModel {
 }
 
 function multiBatchModel2Vec(modelCacheDir, failure) {
+  const artifactBytes = Buffer.from("fixture model asset");
+  const artifactHash = createHash("sha256").update(artifactBytes).digest("hex");
   const calls = {
+    resolutions: 0,
     downloads: [],
     loads: [],
     batches: [],
@@ -141,7 +146,6 @@ function multiBatchModel2Vec(modelCacheDir, failure) {
     maxActiveBatches: 0,
     failure,
   };
-  let releaseFailedDownload;
   let releaseFirstBatch;
   const firstBatchMayComplete = new Promise((resolve) => {
     releaseFirstBatch = resolve;
@@ -179,6 +183,21 @@ function multiBatchModel2Vec(modelCacheDir, failure) {
       model: "test-multi-batch-potion",
       repo: "test/multi-batch-potion",
       revision: "0123456789abcdef",
+      sources: {
+        huggingFace: {
+          repo: "test/multi-batch-potion",
+          revision: "0123456789abcdef",
+        },
+        modelScope: {
+          repo: "test/multi-batch-potion",
+          revision: "fedcba9876543210",
+        },
+      },
+      artifacts: ["model.safetensors", "tokenizer.json"].map((path) => ({
+        path,
+        size: artifactBytes.length,
+        sha256: artifactHash,
+      })),
       modelFile: "model.safetensors",
       embeddingTensor: "embeddings",
       tokenizerFile: "tokenizer.json",
@@ -191,22 +210,20 @@ function multiBatchModel2Vec(modelCacheDir, failure) {
     },
     { modelCacheDir },
     {
-      async download(url, destination) {
-        calls.downloads.push(url.split("/").at(-1));
-        calls.events.push("download");
-        if (calls.failure === "download") {
-          // Both artifacts belong to one preparation attempt. Let both start
-          // before failing so the count does not depend on filesystem timing.
-          if (calls.downloads.length % 2 === 1) {
-            await new Promise((resolve) => {
-              releaseFailedDownload = resolve;
-            });
-          } else {
-            releaseFailedDownload();
-          }
-          throw new Error("HTTP 503 Service Unavailable");
-        }
-        await writeFile(destination, "fixture model asset");
+      async resolveArtifacts(options) {
+        calls.resolutions++;
+        return await resolveModelArtifacts({
+          ...options,
+          dependencies: {
+            async fetch(url) {
+              calls.downloads.push(url.split("/").at(-1));
+              calls.events.push("download");
+              return calls.failure === "download"
+                ? new Response(null, { status: 503 })
+                : new Response(artifactBytes);
+            },
+          },
+        });
       },
       async loadSafetensors() {
         calls.loads.push("table");
@@ -359,10 +376,13 @@ test("service prepares Model2Vec once before queuing a large file and can recove
           error.code ===
           `ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_${failure.toUpperCase()}_FAILED`,
       );
-      assert.deepEqual(calls.downloads.toSorted(), [
-        "model.safetensors",
-        "tokenizer.json",
-      ]);
+      assert.equal(calls.resolutions, 1);
+      assert.deepEqual(
+        calls.downloads.toSorted(),
+        failure === "download"
+          ? ["model.safetensors", "model.safetensors"]
+          : ["model.safetensors", "tokenizer.json"],
+      );
       assert.deepEqual(calls.loads, failure === "load" ? ["table"] : []);
       assert.deepEqual(calls.batches, []);
 
@@ -372,6 +392,7 @@ test("service prepares Model2Vec once before queuing a large file and can recove
 
       assert.equal(recovered.filesFailed, 0);
       assert.equal(recovered.filesScanned, 1);
+      assert.equal(calls.resolutions, 2);
       assert.ok(recovered.entitiesCreated >= 769);
       assert.equal(calls.downloads.length, failure === "download" ? 4 : 2);
       assert.deepEqual(

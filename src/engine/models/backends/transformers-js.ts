@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { Content, TextContent } from "../../types.js";
 import { defaultHome } from "../../utils/path.js";
@@ -11,6 +11,10 @@ import {
   type NormalizedEmbeddingOptions,
 } from "../embeddings.js";
 import type { TransformersJsEmbeddingCatalogEntry } from "../catalog.js";
+import {
+  resolveModelArtifacts,
+  type ModelArtifactSource,
+} from "../artifact-downloader.js";
 import {
   createModelDownloadProgressReporter,
   type ModelDownloadProgressReporter,
@@ -68,10 +72,8 @@ type TransformersJsModule = {
     task: "feature-extraction",
     repo: string,
     options: {
-      cache_dir: string;
-      revision: string;
       dtype: "fp32" | "q8" | "q4";
-      progress_callback?: (progress: TransformersJsProgressInfo) => void;
+      local_files_only: true;
       session_options?: {
         executionProviders: TransformersJsExecutionProvider[];
       };
@@ -79,17 +81,13 @@ type TransformersJsModule = {
   ): Promise<FeatureExtractionPipeline>;
 };
 
-type TransformersJsProgressInfo = {
-  status: "initiate" | "download" | "progress" | "done" | "ready";
-  file?: string;
-  loaded?: number;
-  total?: number;
-};
-
 type TransformersJsLoader = () => Promise<TransformersJsModule>;
 type TransformersJsExecutionProvider = "cpu" | "webgpu" | "cuda" | "dml";
+type ModelArtifactResolver = typeof resolveModelArtifacts;
+type ResolvedModelArtifacts = Awaited<ReturnType<ModelArtifactResolver>>;
 type TransformersJsDependencies = {
   loadRuntime: TransformersJsLoader;
+  resolveArtifacts: ModelArtifactResolver;
 };
 
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
@@ -116,6 +114,7 @@ const defaultDependencies: TransformersJsDependencies = {
     defaultRuntimeImport ??= defaultTransformersJsLoader();
     return defaultRuntimeImport;
   },
+  resolveArtifacts: resolveModelArtifacts,
 };
 
 export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
@@ -126,6 +125,10 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
   private readonly dependencies: TransformersJsDependencies;
   private pipeline: FeatureExtractionPipeline | null = null;
   private pipelineLoadPromise: Promise<FeatureExtractionPipeline> | null = null;
+  private resolvedArtifacts: ResolvedModelArtifacts | null = null;
+  private artifactResolutionPromise: Promise<ResolvedModelArtifacts> | null =
+    null;
+  private sourceFallbackWarningReported = false;
   private usingCpuFallback = false;
   private disposed = false;
 
@@ -147,10 +150,11 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
         maxInputTokens: entry.maxInputTokens,
       },
     };
-    this.modelCacheDir =
+    this.modelCacheDir = resolve(
       options.modelCacheDir ??
-      process.env.ZVEC_GREP_MODEL_CACHE ??
-      DEFAULT_MODEL_CACHE_DIR;
+        process.env.ZVEC_GREP_MODEL_CACHE ??
+        DEFAULT_MODEL_CACHE_DIR,
+    );
     this.executionProvider = resolveExecutionProvider(options.device);
     this.dependencies = { ...defaultDependencies, ...dependencies };
   }
@@ -259,6 +263,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
       onProgress,
     );
     downloadProgress.start();
+    const resolvedArtifacts = await this.ensureArtifacts(downloadProgress);
     const runtime = await this.dependencies.loadRuntime();
     let pipeline: FeatureExtractionPipeline;
     const executionProvider = this.usingCpuFallback
@@ -268,8 +273,8 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     try {
       pipeline = await this.createPipeline(
         runtime,
+        resolvedArtifacts.directory,
         executionProvider,
-        downloadProgress,
       );
     } catch (cause) {
       if (!executionProvider || executionProvider === "cpu") {
@@ -281,7 +286,11 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
         process.stderr.write(`zvec-grep warning: ${warning}\n`);
       }
       this.usingCpuFallback = true;
-      pipeline = await this.createPipeline(runtime, "cpu", downloadProgress);
+      pipeline = await this.createPipeline(
+        runtime,
+        resolvedArtifacts.directory,
+        "cpu",
+      );
     }
 
     pipeline.tokenizer.model_max_length = this.entry.maxInputTokens;
@@ -338,38 +347,87 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
 
   private async createPipeline(
     runtime: TransformersJsModule,
+    modelDirectory: string,
     executionProvider: TransformersJsExecutionProvider | null,
-    downloadProgress: ModelDownloadProgressReporter,
   ): Promise<FeatureExtractionPipeline> {
-    return await runtime.pipeline("feature-extraction", this.entry.repo, {
-      cache_dir: this.modelCacheDir,
-      revision: this.entry.revision,
+    return await runtime.pipeline("feature-extraction", modelDirectory, {
       dtype: this.entry.dtype,
-      progress_callback: (progress) => {
-        if (
-          progress.status === "initiate" &&
-          typeof progress.file === "string"
-        ) {
-          downloadProgress.register(progress.file);
-          return;
-        }
-        if (
-          progress.status !== "progress" ||
-          typeof progress.file !== "string" ||
-          typeof progress.loaded !== "number"
-        ) {
-          return;
-        }
-        downloadProgress.report({
-          artifact: progress.file,
-          downloadedBytes: progress.loaded,
-          totalBytes: progress.total,
-        });
-      },
+      local_files_only: true,
       ...(executionProvider
         ? { session_options: { executionProviders: [executionProvider] } }
         : {}),
     });
+  }
+
+  private async ensureArtifacts(
+    downloadProgress: ModelDownloadProgressReporter,
+  ): Promise<ResolvedModelArtifacts> {
+    if (this.resolvedArtifacts) {
+      return this.resolvedArtifacts;
+    }
+    if (this.artifactResolutionPromise) {
+      return await this.artifactResolutionPromise;
+    }
+
+    const sources = this.createArtifactSources();
+    this.artifactResolutionPromise = this.dependencies.resolveArtifacts({
+      model: this.entry.reference,
+      sources,
+      artifacts: this.entry.artifacts,
+      onDownloadPlan: (artifacts) => {
+        downloadProgress.setDownloadPlan(artifacts);
+      },
+      onProgress: (progress) => {
+        downloadProgress.report({
+          artifact: progress.artifact,
+          downloadedBytes: progress.downloadedBytes,
+        });
+      },
+      onFallback: (warning) => {
+        if (this.sourceFallbackWarningReported) {
+          return;
+        }
+        this.sourceFallbackWarningReported = true;
+        if (!downloadProgress.warning(warning)) {
+          process.stderr.write(`zvec-grep warning: ${warning}\n`);
+        }
+      },
+    });
+    try {
+      this.resolvedArtifacts = await this.artifactResolutionPromise;
+      return this.resolvedArtifacts;
+    } finally {
+      this.artifactResolutionPromise = null;
+    }
+  }
+
+  private createArtifactSources(): readonly ModelArtifactSource[] {
+    const huggingFace = this.entry.sources.huggingFace;
+    const modelScope = this.entry.sources.modelScope;
+    return [
+      {
+        kind: "huggingface",
+        repo: huggingFace.repo,
+        revision: huggingFace.revision,
+        cacheDirectory: resolve(
+          this.modelCacheDir,
+          huggingFace.repo,
+          huggingFace.revision,
+        ),
+      },
+      {
+        kind: "modelscope",
+        repo: modelScope.repo,
+        revision: modelScope.revision,
+        cacheDirectory: resolve(
+          this.modelCacheDir,
+          "modelscope",
+          "transformers-js",
+          modelScope.repo.replaceAll("/", "--"),
+          modelScope.revision,
+        ),
+      },
+    ];
   }
 
   private ensureNotDisposed(): void {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { LlamaCppEmbeddingModel } from "../../../dist/engine/models/backends/llama-cpp.js";
 import { createTemporaryDirectory } from "../../helpers/fixtures.mjs";
@@ -10,7 +10,25 @@ function entry(overrides = {}) {
     reference: "local/test-model",
     provider: "local",
     model: "test-model",
-    uri: "hf:test/model.gguf",
+    uri: "hf:test/model/model.gguf#hf-revision",
+    cacheFile: "hf_test_model.gguf",
+    sources: {
+      huggingFace: {
+        repo: "test/model",
+        revision: "hf-revision",
+      },
+      modelScope: {
+        repo: "mirror/test-model",
+        revision: "ms-revision",
+      },
+    },
+    artifacts: [
+      {
+        path: "model.gguf",
+        size: 100,
+        sha256: "a".repeat(64),
+      },
+    ],
     dimension: 2,
     metric: "cosine",
     format: "embeddinggemma",
@@ -37,6 +55,7 @@ function createDependencies(modelPath, options = {}) {
     disposedContexts: 0,
     disposedModels: 0,
     disposedLlamas: 0,
+    runtimeLoads: 0,
     lifecycle: [],
   };
   const model = {
@@ -90,15 +109,6 @@ function createDependencies(modelPath, options = {}) {
   });
   const runtime = {
     LlamaLogLevel: { error: "error" },
-    resolveModelFile: async (_uri, resolveOptions) => {
-      calls.lifecycle.push("resolveModelFile");
-      calls.resolveOptions = resolveOptions;
-      resolveOptions.onProgress?.({
-        downloadedSize: 25,
-        totalSize: 100,
-      });
-      return modelPath;
-    },
     getLlama: async (llamaOptions) => {
       calls.lifecycle.push("getLlama");
       calls.llama.push(llamaOptions);
@@ -113,7 +123,50 @@ function createDependencies(modelPath, options = {}) {
   };
   return {
     dependencies: {
-      loadRuntime: async () => runtime,
+      loadRuntime: async () => {
+        calls.runtimeLoads++;
+        if (options.failRuntimeLoad) {
+          throw new Error("runtime import failed");
+        }
+        return runtime;
+      },
+      resolveArtifacts: async (resolveOptions) => {
+        calls.lifecycle.push("resolveArtifacts");
+        calls.resolveOptions = resolveOptions;
+        if (options.failArtifactResolution) {
+          throw new Error("artifact download failed");
+        }
+        resolveOptions.onDownloadPlan?.(resolveOptions.artifacts);
+        resolveOptions.onProgress?.({
+          model: resolveOptions.model,
+          source: "huggingface",
+          artifact: "model.gguf",
+          downloadedBytes: 25,
+          totalBytes: 100,
+        });
+        if (options.useModelScope) {
+          resolveOptions.onFallback?.(
+            "Hugging Face unavailable; using ModelScope.",
+          );
+          if (options.duplicateFallbackWarning) {
+            resolveOptions.onFallback?.("duplicate fallback warning");
+          }
+          resolveOptions.onDownloadPlan?.(resolveOptions.artifacts);
+          resolveOptions.onProgress?.({
+            model: resolveOptions.model,
+            source: "modelscope",
+            artifact: "model.gguf",
+            downloadedBytes: 0,
+            totalBytes: 100,
+          });
+        }
+        const source = resolveOptions.sources[options.useModelScope ? 1 : 0];
+        return {
+          source,
+          directory: source.cacheDirectory,
+          paths: { "model.gguf": modelPath },
+        };
+      },
       runtimeState: {
         failedGpuInitModes: new Set(),
         cpuCompatibleFallbackWarningShown: false,
@@ -180,9 +233,39 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
     true,
   );
   assert.equal(setup.calls.model[0].gpuLayers, 0);
-  assert.equal(setup.calls.resolveOptions.cli, false);
+  assert.equal(setup.calls.model[0].modelPath, modelFile.path);
+  const { onDownloadPlan, onProgress, onFallback, ...resolution } =
+    setup.calls.resolveOptions;
+  assert.equal(typeof onDownloadPlan, "function");
+  assert.equal(typeof onProgress, "function");
+  assert.equal(typeof onFallback, "function");
+  assert.deepEqual(resolution, {
+    model: "local/test-model",
+    sources: [
+      {
+        kind: "huggingface",
+        repo: "test/model",
+        revision: "hf-revision",
+        cacheDirectory: modelFile.root,
+        localPaths: { "model.gguf": "hf_test_model.gguf" },
+      },
+      {
+        kind: "modelscope",
+        repo: "mirror/test-model",
+        revision: "ms-revision",
+        cacheDirectory: join(
+          modelFile.root,
+          "modelscope",
+          "llama-cpp",
+          "mirror--test-model",
+          "ms-revision",
+        ),
+      },
+    ],
+    artifacts: entry().artifacts,
+  });
   assert.deepEqual(setup.calls.lifecycle.slice(0, 2), [
-    "resolveModelFile",
+    "resolveArtifacts",
     "getLlama",
   ]);
   assert.deepEqual(downloadProgress, [
@@ -204,6 +287,11 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
 
   await model.embed([{ kind: "text", text: "cached" }]);
   assert.equal(setup.calls.model.length, 1);
+  assert.equal(
+    setup.calls.lifecycle.filter((event) => event === "resolveArtifacts")
+      .length,
+    1,
+  );
   await model.dispose();
   await model.dispose();
   assert.equal(setup.calls.disposedContexts, 2);
@@ -213,6 +301,125 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
     model.embed([{ kind: "text", text: "after dispose" }]),
     /model is disposed/,
   );
+});
+
+test("local embedding uses the resolved ModelScope path and reports source fallback once", async (t) => {
+  const cacheDirectory = await createTemporaryDirectory(t, "zvec-llama-ms-");
+  const modelPath = join(
+    cacheDirectory,
+    "modelscope",
+    "llama-cpp",
+    "mirror--test-model",
+    "ms-revision",
+    "model.gguf",
+  );
+  await mkdir(dirname(modelPath), { recursive: true });
+  await writeFile(modelPath, "GGUFpayload");
+  const setup = createDependencies(modelPath, {
+    useModelScope: true,
+    duplicateFallbackWarning: true,
+  });
+  const progress = [];
+  const model = new LlamaCppEmbeddingModel(
+    entry(),
+    { modelCacheDir: cacheDirectory, device: "cpu" },
+    setup.dependencies,
+  );
+
+  await model.embed([{ kind: "text", text: "value" }], {
+    onProgress: (event) => progress.push(event),
+  });
+
+  assert.equal(setup.calls.model[0].modelPath, modelPath);
+  assert.equal(
+    setup.calls.resolveOptions.sources[1].cacheDirectory,
+    join(
+      cacheDirectory,
+      "modelscope",
+      "llama-cpp",
+      "mirror--test-model",
+      "ms-revision",
+    ),
+  );
+  assert.deepEqual(
+    progress.filter((event) => event.stage === "downloading"),
+    [
+      {
+        stage: "downloading",
+        model: "local/test-model",
+        downloadedBytes: 25,
+        totalBytes: 100,
+      },
+      {
+        stage: "downloading",
+        model: "local/test-model",
+        downloadedBytes: 0,
+        totalBytes: 100,
+      },
+    ],
+  );
+  assert.deepEqual(
+    progress.filter((event) => event.stage === "warning"),
+    [
+      {
+        stage: "warning",
+        model: "local/test-model",
+        message: "Hugging Face unavailable; using ModelScope.",
+      },
+    ],
+  );
+  await model.dispose();
+});
+
+test("artifact resolution failures do not enter llama.cpp GPU fallback", async (t) => {
+  const modelFile = await ggufFile(t);
+  const setup = createDependencies(modelFile.path, {
+    failArtifactResolution: true,
+  });
+  const model = new LlamaCppEmbeddingModel(
+    entry(),
+    { modelCacheDir: modelFile.root, device: "metal" },
+    setup.dependencies,
+  );
+
+  const output = await captureStderr(async () => {
+    await assert.rejects(
+      model.embed([{ kind: "text", text: "value" }]),
+      (error) =>
+        error.message === "llama.cpp embedding failed" &&
+        error.cause?.message === "artifact download failed",
+    );
+  });
+
+  assert.equal(setup.calls.llama.length, 0);
+  assert.equal(setup.calls.model.length, 0);
+  assert.doesNotMatch(output.messages.join(""), /GPU|falling back to CPU/);
+  await model.dispose();
+});
+
+test("runtime import failures do not enter llama.cpp GPU model fallback", async (t) => {
+  const modelFile = await ggufFile(t);
+  const setup = createDependencies(modelFile.path, { failRuntimeLoad: true });
+  const model = new LlamaCppEmbeddingModel(
+    entry(),
+    { modelCacheDir: modelFile.root, device: "metal" },
+    setup.dependencies,
+  );
+
+  const output = await captureStderr(async () => {
+    await assert.rejects(
+      model.embed([{ kind: "text", text: "value" }]),
+      (error) =>
+        error.message === "llama.cpp embedding failed" &&
+        error.cause?.message === "runtime import failed",
+    );
+  });
+
+  assert.equal(setup.calls.runtimeLoads, 1);
+  assert.equal(setup.calls.llama.length, 0);
+  assert.equal(setup.calls.model.length, 0);
+  assert.doesNotMatch(output.messages.join(""), /GPU model load failed/);
+  await model.dispose();
 });
 
 test("local embedding supports qwen query format, automatic GPU parallelism, and context partial capacity", async (t) => {
@@ -261,6 +468,12 @@ test("local embedding falls back from GPU initialization to CPU", async (t) => {
     setup.calls.llama.map((item) => item.gpu),
     ["metal", false],
   );
+  assert.equal(setup.calls.lifecycle[0], "resolveArtifacts");
+  assert.equal(
+    setup.calls.lifecycle.filter((event) => event === "resolveArtifacts")
+      .length,
+    1,
+  );
 });
 
 test("local embedding falls back to packaged backend and retries model/context GPU failures", async (t) => {
@@ -304,6 +517,15 @@ test("local embedding falls back to packaged backend and retries model/context G
   });
   assert.match(retryOutput.messages.join(""), /GPU model load failed/);
   assert.equal(modelRetry.calls.model.length, 2);
+  assert.equal(
+    modelRetry.calls.lifecycle.filter((event) => event === "resolveArtifacts")
+      .length,
+    1,
+  );
+  assert.equal(
+    new Set(modelRetry.calls.model.map((options) => options.modelPath)).size,
+    1,
+  );
 });
 
 test("local embedding rejects invalid downloaded GGUF and removes corrupt artifacts", async (t) => {
