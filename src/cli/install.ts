@@ -122,6 +122,8 @@ const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
 const NAMESPACED_SEARCH_TOOL = "mcp__zvec_grep__zvec_grep_search";
 const NAMESPACED_RG_TOOL = "mcp__zvec_grep__zvec_grep_rg";
+const OMP_MCP_SEARCH_TOOL = "mcp__zvec_grep_search";
+const OMP_MCP_RG_TOOL = "mcp__zvec_grep_rg";
 const QODER_MCP_PERMISSION_RULES = [
   {
     permission: NAMESPACED_SEARCH_TOOL,
@@ -307,29 +309,8 @@ async function installOhMyPiIntegration(
   const guidancePath = resolve(dirname(configPath), "AGENTS.md");
   await installJsonMcpServer({
     path: configPath,
-    containerKey: "mcp",
-    server:
-      options.transport === "stdio"
-        ? {
-            type: "local",
-            command: stdioCommand(options.mcpToolset),
-            enabled: true,
-            timeout: options.mcpToolTimeoutSeconds * 1_000,
-          }
-        : {
-            type: "remote",
-            url: resolveServerUrl(),
-            enabled: true,
-            timeout: options.mcpToolTimeoutSeconds * 1_000,
-            oauth: false,
-            ...(options.mcpTokenEnv
-              ? {
-                  headers: {
-                    Authorization: `Bearer {env:${options.mcpTokenEnv}}`,
-                  },
-                }
-              : {}),
-          },
+    containerKey: "mcpServers",
+    server: ohMyPiMcpServer(options),
     force: options.force,
     label: "Oh My Pi",
   });
@@ -338,8 +319,8 @@ async function installOhMyPiIntegration(
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
     block: agentGuidanceBlock({
-      search: "zvec_grep_zvec_grep_search",
-      rg: "zvec_grep_zvec_grep_rg",
+      search: OMP_MCP_SEARCH_TOOL,
+      rg: OMP_MCP_RG_TOOL,
     }),
     force: true,
   });
@@ -349,7 +330,7 @@ async function installOhMyPiIntegration(
 async function uninstallOhMyPiIntegration(): Promise<InstallAgentResult> {
   const configPath = resolveOhMyPiConfigPath();
   const guidancePath = resolve(dirname(configPath), "AGENTS.md");
-  await uninstallJsonMcpServer(configPath, "mcp");
+  await uninstallJsonMcpServer(configPath, "mcpServers");
   await removeMarkedFile({
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
@@ -916,11 +897,11 @@ function resolveOpenCodeConfigPath(): string {
 }
 
 function resolveOhMyPiConfigPath(): string {
-  // oh my pi (omp.sh) is built on top of pi (pi.dev)
-  // installing support for oh my pi, and we use PI_CONFIG_DIR
+  // Oh My Pi (omp.sh) is built on pi (pi.dev). PI_CODING_AGENT_DIR
+  // overrides the agent directory, which defaults to ~/.omp/agent.
   return resolve(
-    process.env.PI_CODING_AGENT_DIR ??
-      resolve(homedir(), ".omp", "agent", "mcp.json"),
+    process.env.PI_CODING_AGENT_DIR ?? resolve(homedir(), ".omp", "agent"),
+    "mcp.json",
   );
 }
 
@@ -1570,6 +1551,44 @@ function qwenMcpServer(options: InstallAgentOptions): Record<string, unknown> {
         }
       : {}),
   };
+}
+
+function ohMyPiMcpServer(
+  options: InstallAgentOptions,
+): Record<string, unknown> {
+  const timeout = options.mcpToolTimeoutSeconds * 1_000;
+  if (options.transport === "stdio") {
+    return {
+      command: "zg",
+      args: stdioArgs(options.mcpToolset),
+      enabled: true,
+      timeout,
+    };
+  }
+
+  return {
+    type: "http",
+    url: resolveServerUrl(),
+    enabled: true,
+    timeout,
+    ...(options.mcpTokenEnv
+      ? {
+          headers: {
+            Authorization: `Bearer ${resolveOhMyPiMcpToken(options.mcpTokenEnv)}`,
+          },
+        }
+      : {}),
+  };
+}
+
+function resolveOhMyPiMcpToken(envName: string): string {
+  const token = process.env[envName];
+  if (!token) {
+    throw new Error(
+      `Environment variable ${envName} is not set. Oh My Pi does not expand environment variables in MCP headers, so set it and re-run zg install.`,
+    );
+  }
+  return token;
 }
 
 function qoderMcpServer(

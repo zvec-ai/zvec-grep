@@ -302,10 +302,10 @@ ${formatEnvironmentVariables([
 See zg help environment for daemon startup scope.`;
     case "install":
       return `Usage:
-  zg install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg install [--target codex|claude|qwen|qoder|opencode|ohmypi|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
 
 Options:
-  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, auto, or all; repeatable
+  --target <agent>                  codex, claude, qwen, qoder, opencode, ohmypi, cursor, auto, or all; repeatable
   --mcp-transport <stdio|http>      MCP connection mode (default: stdio)
   --mcp-toolset <agent|full>        Daemon MCP toolset (default: agent)
   --mcp-tool-timeout <seconds>      MCP tool timeout where supported (default: 600)
@@ -318,7 +318,7 @@ The qoder target configures Qoder CLI and Qoder IDE together.
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
-Codex, Claude Code, Qwen Code, Qoder CLI, and OpenCode also receive managed
+Codex, Claude Code, Qwen Code, Qoder CLI, OpenCode, and Oh My Pi also receive managed
 guidance. Qoder IDE has no supported global Rules file, so only its MCP
 configuration is managed.
 Codex and Claude Code receive local tool pre-approval. Qoder's CLI-backed
@@ -328,7 +328,7 @@ use. Restart the agent or open a new session after installation. This does not
 install the npm package.`;
     case "uninstall":
       return `Usage:
-  zg uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+  zg uninstall [--target codex|claude|qwen|qoder|opencode|ohmypi|cursor|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
 guidance. The qoder target removes the managed Qoder CLI and IDE integration
