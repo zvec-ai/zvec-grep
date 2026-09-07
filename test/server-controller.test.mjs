@@ -15,7 +15,7 @@ import {
   stopServer,
 } from "../dist/daemon/server-controller.js";
 
-test("daemon instance lock is exclusive, heartbeat-safe and owner-released", async (t) => {
+test("daemon instance lock is exclusive and owner-released", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "zvec-grep-controller-"));
   t.after(async () => rm(home, { recursive: true, force: true }));
   const port = await availablePort();
