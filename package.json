@@ -1,6 +1,6 @@
 {
   "name": "@zvec/zvec-grep",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Agent-friendly hybrid workspace search across code and non-code content.",
   "type": "module",
   "license": "Apache-2.0",
