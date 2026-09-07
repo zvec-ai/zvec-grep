@@ -172,6 +172,36 @@ export class JobScheduler {
     }
   }
 
+  /**
+   * Drop all in-memory bookkeeping for a root: cancels any active job,
+   * removes the last-job record, and evicts the root's finished jobs from
+   * retention. Call when a root is dropped or evicted — without this the
+   * entries outlive the workspace and accumulate without bound on
+   * long-lived daemons. Drain the root first (cancelRoot +
+   * waitForRootIdle) so no job is still running; a running job left behind
+   * finishes into normal retention.
+   */
+  forgetRoot(canonicalRoot: string): void {
+    this.cancelRoot(canonicalRoot);
+    const forgotten = new Set<string>();
+    for (const [jobId, job] of this.jobs) {
+      if (
+        job.canonicalRoot === canonicalRoot &&
+        job.state !== "queued" &&
+        job.state !== "running"
+      ) {
+        forgotten.add(jobId);
+        this.jobs.delete(jobId);
+      }
+    }
+    this.latestByRoot.delete(canonicalRoot);
+    for (let index = this.finishedJobIds.length - 1; index >= 0; index--) {
+      if (forgotten.has(this.finishedJobIds[index])) {
+        this.finishedJobIds.splice(index, 1);
+      }
+    }
+  }
+
   cancelRoot(canonicalRoot: string): boolean {
     const active = this.activeByRoot.get(canonicalRoot);
     if (!active) {

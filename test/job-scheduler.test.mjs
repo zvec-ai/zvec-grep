@@ -550,6 +550,69 @@ test("scheduler clears the run reference once a job reaches a terminal state", a
   assert.equal(internals.jobs.get(retrying.job.id)?.run, undefined);
 });
 
+test("scheduler forgetRoot releases a dropped root's bookkeeping", async (t) => {
+  const scheduler = new JobScheduler({ concurrency: 1 });
+  t.after(() => scheduler.close());
+  const first = scheduler.submit({
+    canonicalRoot: "/repo-a",
+    reason: "manual",
+    run: async () => {},
+  });
+  await scheduler.wait(first.job.id);
+  const second = scheduler.submit({
+    canonicalRoot: "/repo-b",
+    reason: "manual",
+    run: async () => {},
+  });
+  await scheduler.wait(second.job.id);
+  const internals = scheduler;
+  assert.equal(internals.jobs.size, 2);
+
+  scheduler.forgetRoot("/repo-a");
+  assert.equal(scheduler.getByRoot("/repo-a"), undefined);
+  assert.equal(scheduler.get(first.job.id), undefined);
+  assert.equal(internals.finishedJobIds.includes(first.job.id), false);
+  // Other roots are untouched.
+  assert.equal(scheduler.getByRoot("/repo-b")?.state, "succeeded");
+  assert.equal(internals.jobs.size, 1);
+
+  // The forgotten root can be indexed again afterwards.
+  const again = scheduler.submit({
+    canonicalRoot: "/repo-a",
+    reason: "manual",
+    run: async () => {},
+  });
+  assert.equal(again.reused, false);
+  assert.equal((await scheduler.wait(again.job.id)).state, "succeeded");
+});
+
+test("scheduler forgetRoot cancels an active job for the root", async (t) => {
+  const scheduler = new JobScheduler({ concurrency: 1 });
+  t.after(() => scheduler.close());
+  let aborted = false;
+  const running = scheduler.submit({
+    canonicalRoot: "/repo-live",
+    reason: "manual",
+    run: (_report, signal) =>
+      new Promise((resolve) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      }),
+  });
+  await waitFor(() => scheduler.get(running.job.id)?.state === "running");
+  scheduler.forgetRoot("/repo-live");
+  assert.equal(scheduler.getByRoot("/repo-live"), undefined);
+  const result = await scheduler.wait(running.job.id);
+  assert.equal(aborted, true);
+  assert.equal(result.state, "cancelled");
+});
+
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 100; attempt++) {
     if (predicate()) {
