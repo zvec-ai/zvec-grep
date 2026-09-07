@@ -2086,6 +2086,51 @@ test("OpenCode installer selects an existing JSONC config and preserves comments
   assert.equal(uninstalled.mcp.other.url, "https://example.com/mcp");
 });
 
+test("OpenCode installer leaves an unmanaged JSONC entry byte-identical without force", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-opencode-jsonc-conflict-"),
+  );
+  const xdgConfigHome = join(temporaryDirectory, "config");
+  const configDirectory = join(xdgConfigHome, "opencode");
+  const configPath = join(configDirectory, "opencode.jsonc");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    configPath,
+    `{
+  // Keep this header and the unmanaged server exactly as written.
+  "model": "custom/model",
+  "mcp": {
+    "zvec_grep": {
+      "type": "remote",
+      "url": "https://example.com/unmanaged"
+    },
+    "other": { "type": "remote", "url": "https://example.com/mcp" }
+  }
+}
+`,
+  );
+  const original = await readFile(configPath);
+
+  await assert.rejects(
+    installTarget("opencode", {
+      OPENCODE_CONFIG: undefined,
+      XDG_CONFIG_HOME: xdgConfigHome,
+    }),
+    (error) => {
+      assert.match(error.stderr, /Existing unmanaged zvec_grep MCP server/);
+      assert.ok(error.stderr.includes(configPath));
+      assert.match(error.stderr, /--force/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(await readFile(configPath), original);
+});
+
 test("OpenCode installer explains that JSONC wins when both configs exist", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-opencode-both-"),
