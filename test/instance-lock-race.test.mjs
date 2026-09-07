@@ -156,3 +156,30 @@ test("failed readiness replacement preserves the lock and cleans temporary files
     await fs.rm(home, { recursive: true, force: true });
   }
 });
+
+test("readiness publication retries transient replacement conflicts", async () => {
+  const home = await fs.mkdtemp(join(tmpdir(), "zg-instance-retry-"));
+  const lock = await DaemonInstanceLock.acquire(home, "http://127.0.0.1:1/mcp");
+  const originalRename = fs.rename;
+  let attempts = 0;
+  try {
+    fs.rename = async (...args) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error("file temporarily busy"), {
+          code: "EPERM",
+        });
+      }
+      return originalRename(...args);
+    };
+    syncBuiltinESMExports();
+    await lock.markReady();
+    assert.equal(attempts, 2);
+    assert.equal((await readInstanceRecord(home)).ready, true);
+  } finally {
+    fs.rename = originalRename;
+    syncBuiltinESMExports();
+    await lock.release();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
