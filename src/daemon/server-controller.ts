@@ -1,14 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import {
-  link,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { createServer } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -18,6 +10,7 @@ import {
   resolveClientToken,
 } from "./config.js";
 import { processIsAlive } from "../engine/utils/daemon-lease.js";
+import { replaceFileAtomically } from "../engine/utils/atomic-file.js";
 import {
   DEFAULT_MCP_TOOLSET,
   MCP_TOOLSET_ENV,
@@ -134,16 +127,9 @@ export class DaemonInstanceLock {
       throw new Error("zvec-grep server no longer owns its instance lock.");
     }
     // Keep the old record readable until the complete replacement is ready.
-    const temporaryPath = `${this.path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporaryPath, `${JSON.stringify(this.record)}\n`, {
-        mode: 0o600,
-        flag: "wx",
-      });
-      await rename(temporaryPath, this.path);
-    } finally {
-      await unlink(temporaryPath).catch(() => undefined);
-    }
+    await replaceFileAtomically(this.path, `${JSON.stringify(this.record)}\n`, {
+      mode: 0o600,
+    });
   }
 }
 

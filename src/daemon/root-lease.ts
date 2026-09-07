@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
   processIsAlive,
   type DaemonLeaseRecord,
 } from "../engine/utils/daemon-lease.js";
+import { replaceFileAtomically } from "../engine/utils/atomic-file.js";
 import { DaemonError } from "./errors.js";
 
 export type RootLease = {
@@ -161,20 +162,27 @@ export class RootLeaseManager {
     const timer = setInterval(() => {
       const heartbeat = (async () => {
         if (managed.stopped) return;
-        const current = await readLeaseFile(daemonLeasePath(root));
-        if (
-          managed.stopped ||
-          current?.pid !== managed.record.pid ||
-          current.instanceToken !== managed.record.instanceToken
-        )
-          return;
-        managed.record.updatedAt = Date.now();
-        if (managed.stopped) return;
-        await writeFile(
-          daemonLeasePath(root),
-          `${JSON.stringify(managed.record)}\n`,
-          { mode: 0o600 },
-        );
+        const guard = acquireDaemonLeaseGuard(root, this.instanceToken);
+        if (!guard) return;
+        try {
+          const path = daemonLeasePath(root);
+          const current = await readLeaseFile(path);
+          if (
+            managed.stopped ||
+            current?.pid !== managed.record.pid ||
+            current.instanceToken !== managed.record.instanceToken
+          )
+            return;
+          const updatedAt = Date.now();
+          await replaceFileAtomically(
+            path,
+            `${JSON.stringify({ ...managed.record, updatedAt })}\n`,
+            { mode: 0o600 },
+          );
+          managed.record.updatedAt = updatedAt;
+        } finally {
+          guard.release();
+        }
       })().catch(() => undefined);
       managed.heartbeatInFlight = heartbeat;
       void heartbeat.finally(() => {
