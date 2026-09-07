@@ -906,9 +906,27 @@ async function installDownloadedArtifact(
         `Refusing to replace non-file destination '${destination}'`,
       );
     }
-    // All downloader writers use the snapshot lock. Rename replaces the entry
-    // atomically on POSIX and Windows, without moving the old file out first.
-    await rename(partialPath, destination);
+    // All downloader writers use the snapshot lock. POSIX rename replaces the
+    // destination atomically. Windows rejects that operation when the existing
+    // file is open, so preserve the old entry under a unique name while the
+    // verified replacement is installed.
+    try {
+      await rename(partialPath, destination);
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !currentDestination ||
+        !isWindowsRenameReplacementError(error)
+      ) {
+        throw error;
+      }
+      await replaceDownloadedArtifactOnWindows(
+        partialPath,
+        destination,
+        currentDestination,
+        lock,
+      );
+    }
   } catch (error) {
     if (error instanceof ArtifactDownloadError) {
       throw error;
@@ -920,6 +938,57 @@ async function installDownloadedArtifact(
       error,
     );
   }
+}
+
+async function replaceDownloadedArtifactOnWindows(
+  partialPath: string,
+  destination: string,
+  expectedDestination: FileIdentity,
+  lock: ModelArtifactCacheLock,
+): Promise<void> {
+  await lock.assertOwned();
+  const currentDestination = await inspectFileIdentity(destination);
+  if (!sameFileIdentity(expectedDestination, currentDestination)) {
+    throw new Error(
+      "Artifact destination changed concurrently while replacing",
+    );
+  }
+
+  const displacedPath = `${destination}.replaced-${process.pid}-${randomUUID()}`;
+  await rename(destination, displacedPath);
+  let replacementInstalled = false;
+  try {
+    await lock.assertOwned();
+    if ((await inspectFileIdentity(destination)) !== undefined) {
+      throw new Error(
+        "Artifact destination was recreated concurrently while replacing",
+      );
+    }
+    await rename(partialPath, destination);
+    replacementInstalled = true;
+  } catch (error) {
+    if ((await inspectFileIdentity(destination)) === undefined) {
+      try {
+        await rename(displacedPath, destination);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          "Unable to install or restore the local artifact",
+          { cause: restoreError },
+        );
+      }
+    }
+    throw error;
+  } finally {
+    if (replacementInstalled) {
+      await rm(displacedPath, { force: true });
+    }
+  }
+}
+
+function isWindowsRenameReplacementError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EACCES" || code === "EEXIST" || code === "EPERM";
 }
 
 async function writeCompleteMarker(

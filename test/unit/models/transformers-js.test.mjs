@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { TransformersJsEmbeddingModel } from "../../../dist/engine/models/backends/transformers-js.js";
+
+const MODEL_CACHE_DIRECTORY = resolve("/tmp/model-cache");
+const HUGGING_FACE_SNAPSHOT_DIRECTORY = join(
+  MODEL_CACHE_DIRECTORY,
+  "test",
+  "model-ONNX",
+  "0123456789abcdef",
+);
+const MODEL_SCOPE_SNAPSHOT_DIRECTORY = join(
+  MODEL_CACHE_DIRECTORY,
+  "modelscope",
+  "transformers-js",
+  "mirror--test-model-ONNX",
+  "fedcba9876543210",
+);
 
 function entry(overrides = {}) {
   return {
@@ -83,7 +99,7 @@ function createTokenizer(tokenCount = () => 1) {
 }
 
 function createArtifactResolver(
-  directory = "/tmp/resolved-transformers-model",
+  directory = resolve("/tmp/resolved-transformers-model"),
 ) {
   return async ({ sources, artifacts }) => ({
     source: sources[0],
@@ -91,7 +107,7 @@ function createArtifactResolver(
     paths: Object.fromEntries(
       artifacts.map((artifact) => [
         artifact.path,
-        `${directory}/${artifact.path}`,
+        join(directory, artifact.path),
       ]),
     ),
   });
@@ -142,12 +158,16 @@ test("Transformers.js resolves artifacts before loading a local-only pipeline", 
       artifactsResolved = true;
       return {
         source: options.sources[0],
-        directory: "/tmp/model-cache/test/model-ONNX/0123456789abcdef",
+        directory: HUGGING_FACE_SNAPSHOT_DIRECTORY,
         paths: {
-          "onnx/model_quantized.onnx":
-            "/tmp/model-cache/test/model-ONNX/0123456789abcdef/onnx/model_quantized.onnx",
-          "tokenizer.json":
-            "/tmp/model-cache/test/model-ONNX/0123456789abcdef/tokenizer.json",
+          "onnx/model_quantized.onnx": join(
+            HUGGING_FACE_SNAPSHOT_DIRECTORY,
+            "onnx/model_quantized.onnx",
+          ),
+          "tokenizer.json": join(
+            HUGGING_FACE_SNAPSHOT_DIRECTORY,
+            "tokenizer.json",
+          ),
         },
       };
     },
@@ -170,7 +190,7 @@ test("Transformers.js resolves artifacts before loading a local-only pipeline", 
     entry(),
     {
       apiKey: "",
-      modelCacheDir: "/tmp/model-cache",
+      modelCacheDir: MODEL_CACHE_DIRECTORY,
     },
     dependencies,
   );
@@ -198,7 +218,7 @@ test("Transformers.js resolves artifacts before loading a local-only pipeline", 
   assert.deepEqual(loads, [
     {
       task: "feature-extraction",
-      repo: "/tmp/model-cache/test/model-ONNX/0123456789abcdef",
+      repo: HUGGING_FACE_SNAPSHOT_DIRECTORY,
       options: {
         dtype: "q8",
         local_files_only: true,
@@ -218,14 +238,13 @@ test("Transformers.js resolves artifacts before loading a local-only pipeline", 
         kind: "huggingface",
         repo: "test/model-ONNX",
         revision: "0123456789abcdef",
-        cacheDirectory: "/tmp/model-cache/test/model-ONNX/0123456789abcdef",
+        cacheDirectory: HUGGING_FACE_SNAPSHOT_DIRECTORY,
       },
       {
         kind: "modelscope",
         repo: "mirror/test-model-ONNX",
         revision: "fedcba9876543210",
-        cacheDirectory:
-          "/tmp/model-cache/modelscope/transformers-js/mirror--test-model-ONNX/fedcba9876543210",
+        cacheDirectory: MODEL_SCOPE_SNAPSHOT_DIRECTORY,
       },
     ],
     artifacts: entry().artifacts,
@@ -351,7 +370,7 @@ test("Transformers.js resets progress to the missing ModelScope artifacts on fal
         paths: Object.fromEntries(
           options.artifacts.map((artifact) => [
             artifact.path,
-            `${source.cacheDirectory}/${artifact.path}`,
+            join(source.cacheDirectory, artifact.path),
           ]),
         ),
       };
@@ -365,7 +384,7 @@ test("Transformers.js resets progress to the missing ModelScope artifacts on fal
   };
   const model = new TransformersJsEmbeddingModel(
     entry(),
-    { apiKey: "", modelCacheDir: "/tmp/model-cache" },
+    { apiKey: "", modelCacheDir: MODEL_CACHE_DIRECTORY },
     dependencies,
   );
 
@@ -376,7 +395,7 @@ test("Transformers.js resets progress to the missing ModelScope artifacts on fal
   assert.deepEqual(loads, [
     {
       task: "feature-extraction",
-      repo: "/tmp/model-cache/modelscope/transformers-js/mirror--test-model-ONNX/fedcba9876543210",
+      repo: MODEL_SCOPE_SNAPSHOT_DIRECTORY,
       options: { dtype: "q8", local_files_only: true },
     },
   ]);
