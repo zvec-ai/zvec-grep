@@ -4,6 +4,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { Server } from "@modelcontextprotocol/server";
 import { REMOTE_EMBEDDING_ELICITATION_UNSUPPORTED_MESSAGE } from "../dist/authorization/prompt.js";
 import {
+  createStdioBridgeStopCheck,
   registerStdioBridgeElicitationForwarding,
   shouldStopStdioBridge,
 } from "../dist/mcp/stdio-bridge.js";
@@ -15,6 +16,26 @@ const connectedDaemon = {
   serverUrl: "http://127.0.0.1:7999/mcp",
   mcpToolset: "agent",
 };
+
+test("stdio monitor requires consecutive missing statuses and resets on recovery", () => {
+  const check = createStdioBridgeStopCheck(connectedDaemon);
+  const missing = { running: false, ready: false };
+  assert.equal(check(missing), false);
+  assert.equal(check(missing), false);
+  assert.equal(check({ ...connectedDaemon, ready: false }), false);
+  assert.equal(check(missing), false);
+  assert.equal(check(missing), false);
+  assert.equal(check(missing), true);
+});
+
+test("stdio monitor stops immediately on a confirmed identity change", () => {
+  for (const changed of [
+    { ...connectedDaemon, pid: 5678 },
+    { ...connectedDaemon, serverUrl: "http://127.0.0.1:8000/mcp" },
+  ]) {
+    assert.equal(createStdioBridgeStopCheck(connectedDaemon)(changed), true);
+  }
+});
 
 test("stdio bridge tolerates a transient health-check timeout", () => {
   assert.equal(

@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { open, readFile, unlink } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -41,8 +49,6 @@ export type DaemonControlStatus = {
 };
 
 export class DaemonInstanceLock {
-  private heartbeat?: ReturnType<typeof setInterval>;
-
   private constructor(
     readonly path: string,
     readonly record: DaemonInstanceRecord,
@@ -64,52 +70,51 @@ export class DaemonInstanceLock {
       ready: false,
       mcpToolset,
     };
-    for (let attempt = 0; attempt < 3; attempt++) {
+    await mkdir(daemonHome(home), { recursive: true, mode: 0o700 });
+    const temporaryPath = `${path}.${record.instanceToken}.tmp`;
+    try {
+      const handle = await open(temporaryPath, "wx", 0o600);
       try {
-        const handle = await open(path, "wx", 0o600);
-        try {
-          await handle.writeFile(`${JSON.stringify(record)}\n`);
-        } finally {
-          await handle.close();
-        }
-        return new DaemonInstanceLock(path, record);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          const { mkdir } = await import("node:fs/promises");
-          await mkdir(daemonHome(home), { recursive: true, mode: 0o700 });
-          continue;
-        }
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        const existing = await readInstanceRecord(home);
-        if (
-          existing &&
-          existing.hostname === hostname() &&
-          processIsAlive(existing.pid)
-        ) {
-          throw new Error(
-            `zvec-grep server is already running with PID ${existing.pid}`,
-            {
-              cause: error,
-            },
-          );
-        }
-        await unlink(path).catch(() => undefined);
+        await handle.writeFile(`${JSON.stringify(record)}\n`);
+      } finally {
+        await handle.close();
       }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          // Publish a complete record without replacing another owner. Unlike
+          // rename, link fails with EEXIST if a competing daemon published first.
+          await link(temporaryPath, path);
+          return new DaemonInstanceLock(path, record);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const existing = await readInstanceRecord(home);
+          if (
+            existing &&
+            existing.hostname === hostname() &&
+            processIsAlive(existing.pid)
+          ) {
+            throw new Error(
+              `zvec-grep server is already running with PID ${existing.pid}`,
+              { cause: error },
+            );
+          }
+          await unlink(path).catch(() => undefined);
+        }
+      }
+      throw new Error("Could not acquire the zvec-grep server instance lock.");
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
     }
-    throw new Error("Could not acquire the zvec-grep server instance lock.");
   }
 
   async markReady(): Promise<void> {
     this.record.ready = true;
     await this.write();
-    this.heartbeat = setInterval(() => {
-      void this.write();
-    }, 5_000);
-    this.heartbeat.unref?.();
+    // Liveness is checked using the PID and /healthz, not updatedAt.
+    // Persist state transitions only; no disk heartbeat is needed.
   }
 
   async release(): Promise<void> {
-    if (this.heartbeat) clearInterval(this.heartbeat);
     const current = await readRecordPath(this.path);
     if (
       current?.instanceToken === this.record.instanceToken &&
@@ -125,12 +130,20 @@ export class DaemonInstanceLock {
     if (
       current?.instanceToken !== this.record.instanceToken ||
       current.pid !== process.pid
-    )
-      return;
-    const { writeFile } = await import("node:fs/promises");
-    await writeFile(this.path, `${JSON.stringify(this.record)}\n`, {
-      mode: 0o600,
-    });
+    ) {
+      throw new Error("zvec-grep server no longer owns its instance lock.");
+    }
+    // Keep the old record readable until the complete replacement is ready.
+    const temporaryPath = `${this.path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, `${JSON.stringify(this.record)}\n`, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      await rename(temporaryPath, this.path);
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
   }
 }
 

@@ -137,6 +137,7 @@ export async function runStdioBootstrapBridge(options: {
   downstream.onclose = finish;
 
   const downstreamTransport = new StdioServerTransport();
+  const shouldStop = createStdioBridgeStopCheck(status);
   let monitorRunning = false;
   let daemonFailure: Error | undefined;
   const monitor = setInterval(() => {
@@ -144,7 +145,7 @@ export async function runStdioBootstrapBridge(options: {
     monitorRunning = true;
     void serverStatus(options.home)
       .then(async (current) => {
-        if (!shouldStopStdioBridge(status, current)) {
+        if (!shouldStop(current)) {
           return;
         }
         daemonFailure = new Error(
@@ -166,6 +167,19 @@ export async function runStdioBootstrapBridge(options: {
     await Promise.allSettled([upstream.close(), downstream.close()]);
   }
   if (daemonFailure) throw daemonFailure;
+}
+
+export function createStdioBridgeStopCheck(
+  connected: DaemonControlStatus,
+): (current: DaemonControlStatus) => boolean {
+  let consecutiveMissing = 0;
+  return (current) => {
+    // An unreadable lock is ambiguous. Allow two polls to recover, while
+    // still stopping immediately when a different live daemon is observed.
+    if (!current.running) return ++consecutiveMissing >= 3;
+    consecutiveMissing = 0;
+    return shouldStopStdioBridge(connected, current);
+  };
 }
 
 export function shouldStopStdioBridge(
