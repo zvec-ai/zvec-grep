@@ -33,16 +33,22 @@ jobs:
           RELEASE_REF: ${{ github.ref }}
           RELEASE_SHA: ${{ github.sha }}
         run: |
-          if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
-            echo "::error::npm releases must run from main, not $RELEASE_REF"
-            exit 1
-          fi
-
           PACKAGE_NAME="$(node -p "require('./package.json').name")"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           export PACKAGE_VERSION
           LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
           LOCK_ROOT_VERSION="$(node -p "require('./package-lock.json').packages[''].version")"
+          TEMPORARY_RELEASE_REF="refs/heads/release/v0.2.2"
+          TEMPORARY_RELEASE_VERSION="0.2.2"
+
+          if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
+            if [[ "$RELEASE_REF" != "$TEMPORARY_RELEASE_REF" || "$PACKAGE_VERSION" != "$TEMPORARY_RELEASE_VERSION" ]]; then
+              echo "::error::npm releases must run from main; the only temporary exception is $TEMPORARY_RELEASE_REF at version $TEMPORARY_RELEASE_VERSION"
+              exit 1
+            fi
+            echo "::warning::Using the temporary $TEMPORARY_RELEASE_REF release exception for version $TEMPORARY_RELEASE_VERSION"
+          fi
+
           EXPECTED_TAG="v$PACKAGE_VERSION"
 
           if [[ "$LOCK_VERSION" != "$PACKAGE_VERSION" || "$LOCK_ROOT_VERSION" != "$PACKAGE_VERSION" ]]; then
