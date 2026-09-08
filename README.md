@@ -52,8 +52,8 @@ terminal, or let your agent use it for you.
 
 ## 💫 Why zg?
 
-- **Ready for humans and agents** — install once, then just search. The first
-  CLI search creates a local index that the CLI and your agent can share.
+- **Ready for humans and agents** — install once, index once, then use the same
+  workspace from the CLI or your agent on macOS, Linux, and Windows.
 - **Search beyond keywords** — discover by meaning, rank by relevance, then
   verify with exact text or regex when needed.
 - **Multi-format search** — search source code, documents, and structured data
@@ -67,7 +67,7 @@ terminal, or let your agent use it for you.
 
 ## 🚀 Try it yourself
 
-### 1. Set up and search a sample bookshelf
+### 1. Set up a sample bookshelf
 
 ```bash
 # Requires Node.js 22 or newer.
@@ -78,32 +78,30 @@ curl --retry 3 --retry-all-errors --progress-bar -fL \
   -o alice-in-wonderland.txt https://raw.githubusercontent.com/GITenberg/Alice-s-Adventures-in-Wonderland_11/master/11.txt \
   -o sherlock-holmes.txt https://raw.githubusercontent.com/GITenberg/The-Memoirs-of-Sherlock-Holmes_834/master/834.txt
 
-zg "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg index --embedding local/potion-retrieval-32m
 ```
 
 > [!NOTE]
-> The first indexed search creates a local index automatically. It is stored in
-> `.zvec-grep/` under the project root and is reused by later searches.
+> The index is stored in `.zvec-grep/` under the indexed project root.
 
 > [!TIP]
-> If `zg --index` or `zg` fails, rerun the same command with `--debug`
+> If `zg index` or `zg query` fails, rerun the same command with `--debug`
 > for diagnostics (supported in both direct and server modes).
-> `zg --status --mode direct --debug` reports per-file failures stored in an
+> `zg status --mode direct --debug` reports per-file failures stored in an
 > existing index; rerun a failed direct command to diagnose command-level
 > fatal errors. Use
-> `zg --status --mode server --debug` to inspect recorded server indexing errors.
-> For server connection failures, check `zg --server status` and the
+> `zg status --mode server --debug` to inspect recorded server indexing errors.
+> For server connection failures, check `zg server status` and the
 > [server logs](./docs/06-server.md#logs-and-state).
 
-zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
-`alice-in-wonderland.txt`.
+### 2. Choose how to search
 
-### 2. Connect an agent (optional)
+#### For agents: ask with OpenCode
 
 With [OpenCode](https://opencode.ai/) configured:
 
 ```bash
-zg --install --target opencode --yes
+zg install --target opencode --yes
 opencode models
 opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
@@ -140,6 +138,17 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 ```
 
 </details>
+
+#### For humans: search directly
+
+Search the same bookshelf directly, without an agent:
+
+```bash
+zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
+```
+
+zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
+`alice-in-wonderland.txt`.
 
 <a id="benchmarks"></a>
 
