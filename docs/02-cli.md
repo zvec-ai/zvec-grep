@@ -187,6 +187,9 @@ Examples:
 ```bash
 zg --config provider set qwen --api-key "$DASHSCOPE_API_KEY"
 zg --config model set qwen/text-embedding-v4 --default
+zg --config provider set dgx --no-auth
+zg --config model set dgx/qwen3-embedding-0.6b \
+  --endpoint http://dgx-spark:11434/v1/embeddings --default
 zg --config model set local/potion-code-16m-v2 --device metal
 ```
 
@@ -197,6 +200,9 @@ unrelated credential is not sent to a trusted-network endpoint:
 ```bash
 zg --config provider set dgx --no-auth
 ```
+
+The model endpoint must be the complete OpenAI-compatible Embeddings URL,
+including `/v1/embeddings`; zvec-grep does not append that path.
 
 `--api-key` and `--no-auth` are mutually exclusive. Providers such as Qwen that
 require credentials reject `--no-auth`.

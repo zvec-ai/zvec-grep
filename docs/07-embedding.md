@@ -42,6 +42,7 @@ default. Select and authorize a remote model explicitly with `zg --index`.
 | A lightweight English model | `local/all-minilm-l6-v2` | Small local model for short English text |
 | Long English documents | `local/gte-modernbert-base` or `local/nomic-embed-text-v1.5` | 8,192-token local context |
 | No local model runtime | `qwen/qwen3.7-text-embedding` | Managed text Embedding API |
+| A DGX Spark on the local network | `dgx/qwen3-embedding-0.6b` | Self-hosted OpenAI-compatible Qwen3 Embedding |
 | Text and image retrieval | `qwen/qwen3-vl-embedding` | Managed multimodal Embedding API |
 
 The best model still depends on the repository and its real queries. Start with
@@ -69,6 +70,7 @@ file.
 | `qwen/text-embedding-v4` | Remote text | 8,192 | 1,024 |
 | `qwen/qwen3.7-text-embedding` | Remote text | 128,000 | 1,024 |
 | `qwen/qwen3-vl-embedding` | Remote multimodal | 32,000 | 2,560 |
+| `dgx/qwen3-embedding-0.6b` | DGX OpenAI-compatible | 32,768 | 1,024 |
 
 All catalog entries currently use cosine similarity. Exact model revisions are
 pinned by zvec-grep so the same reference resolves consistently for a given
@@ -126,6 +128,45 @@ zg --index \
 ```
 
 ## Remote Embedding and authorization
+
+### DGX Spark
+
+For an unauthenticated endpoint on a trusted network, configure the provider,
+the complete OpenAI-compatible Embeddings URL, and the catalog model:
+
+```bash
+zg --config provider set dgx --no-auth
+zg --config model set dgx/qwen3-embedding-0.6b \
+  --endpoint http://dgx-spark:11434/v1/embeddings \
+  --default
+zg index --allow-remote
+```
+
+The server must accept `POST /v1/embeddings` with the OpenAI-compatible
+`model` and `input` fields. zvec-grep sends the served model identifier
+`qwen3-embedding:0.6b` and expects 1,024-number vectors. It deliberately omits
+the optional `dimensions` and `encoding_format` fields for compatibility with
+Ollama-backed endpoints.
+
+If a reverse proxy protects the endpoint, configure its Bearer credential
+instead:
+
+```bash
+zg --config provider set dgx --api-key "$DGX_EMBEDDING_API_KEY"
+```
+
+Provider authentication and data authorization are separate. Even a no-auth
+LAN endpoint requires `--allow-remote` for each CLI command or a signed
+Workspace grant, because repository content and query text leave the
+zvec-grep process.
+
+Common failures have direct causes: `requires an endpoint` means the model URL
+was not configured; connection failures usually mean the DGX hostname, port,
+or `/v1/embeddings` path is wrong; a wrong-dimension response means the server
+is not serving the cataloged 1,024-dimensional model. Changing either the
+model or endpoint for an existing index requires `--rebuild`.
+
+### Managed Qwen
 
 Configure the Qwen provider credential and, optionally, a model endpoint:
 

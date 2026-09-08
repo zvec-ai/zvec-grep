@@ -37,11 +37,16 @@ export function deterministicVector(value, dimension = 1024) {
   );
 }
 
-export async function createFakeEmbeddingServer(t, dimension = 1024) {
+export async function createFakeEmbeddingServer(
+  t,
+  dimension = 1024,
+  options = {},
+) {
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    options.onRequest?.({ request, body });
     const inputs = Array.isArray(body.input) ? body.input : [];
     response.writeHead(200, { "content-type": "application/json" });
     response.end(
