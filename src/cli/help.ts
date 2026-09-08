@@ -390,7 +390,8 @@ Supported embedding models:
 ${formatEmbeddingModels(models)}
 
 Local models are downloaded to the model cache on first use. Remote models
-require provider credentials plus --allow-remote or a Workspace authorization.
+require provider configuration plus --allow-remote or a Workspace authorization;
+provider credentials are optional when the configured endpoint permits them.
 Only qwen/qwen3-vl-embedding accepts image input.
 
 Existing indexes keep their stored model. See zg --help environment for

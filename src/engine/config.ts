@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { EngineError } from "./errors.js";
-import { getRemoteEmbeddingProviderCatalogEntry } from "./models/index.js";
+import { getRemoteEmbeddingProviderCatalogEntry } from "./remote-embedding-providers.js";
 import { readJsonFileSync, writeJsonFileSync } from "./utils/json.js";
 import { acquireReadWriteLock } from "./utils/lock.js";
 
