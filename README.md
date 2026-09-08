@@ -78,7 +78,9 @@ curl --retry 3 --retry-all-errors --progress-bar -fL \
   -o alice-in-wonderland.txt https://raw.githubusercontent.com/GITenberg/Alice-s-Adventures-in-Wonderland_11/master/11.txt \
   -o sherlock-holmes.txt https://raw.githubusercontent.com/GITenberg/The-Memoirs-of-Sherlock-Holmes_834/master/834.txt
 
-zg "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg index
+
+zg query "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 > [!NOTE]
