@@ -211,3 +211,78 @@ test("lease heartbeats never expose a truncated record", async (t) => {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+for (const action of ["release", "close"]) {
+  test(`lease ${action} waits for a slow heartbeat across subsequent ticks`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "zvec-grep-lease-overlap-"));
+    let heartbeat;
+    t.mock.method(globalThis, "setInterval", (callback) => {
+      heartbeat = callback;
+      return { unref() {} };
+    });
+    const manager = new RootLeaseManager();
+    const lease = await manager.acquire(root);
+    const originalRename = fs.rename;
+    const renameEntered = Promise.withResolvers();
+    const resumeRename = Promise.withResolvers();
+    const renameFinished = Promise.withResolvers();
+    let cleanup;
+    try {
+      fs.rename = async (...args) => {
+        renameEntered.resolve();
+        await resumeRename.promise;
+        try {
+          return await originalRename(...args);
+        } finally {
+          renameFinished.resolve();
+        }
+      };
+      syncBuiltinESMExports();
+      heartbeat();
+      await renameEntered.promise;
+      heartbeat();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // Exhaust cleanup retries immediately if it fails to wait for the heartbeat.
+      t.mock.method(globalThis, "setTimeout", (callback) => {
+        queueMicrotask(callback);
+      });
+      let settled = false;
+      let cleanupError;
+      cleanup = (action === "release" ? lease.release() : manager.close()).then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          cleanupError = error;
+        },
+      );
+      heartbeat();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(
+        settled,
+        false,
+        "cleanup must wait for the pending heartbeat",
+      );
+      assert.equal(readDaemonLease(root)?.instanceToken, manager.instanceToken);
+
+      resumeRename.resolve();
+      await cleanup;
+      assert.equal(cleanupError, undefined);
+      await assert.rejects(access(daemonLeasePath(root)), { code: "ENOENT" });
+      const permit = assertDaemonWriteAllowed(root);
+      assert.ok(permit);
+      permit.release();
+    } finally {
+      resumeRename.resolve();
+      await renameFinished.promise;
+      await cleanup;
+      fs.rename = originalRename;
+      syncBuiltinESMExports();
+      await lease.release();
+      await manager.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
