@@ -8,21 +8,26 @@ import {
   type EmbeddingResult,
   type NormalizedEmbeddingOptions,
 } from "../embeddings.js";
+import type { OpenAiCompatibleEmbeddingCatalogEntry } from "../catalog.js";
 
 const DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS = 60_000;
 
-export type OpenAiCompatibleTextEmbeddingCatalogEntry = Readonly<{
-  reference: string;
-  provider: string;
-  model: string;
-  dimension: number;
-  metric: "cosine" | "dot" | "euclidean";
-  defaultEndpoint?: string;
-  maxBatchSize: number;
-  maxInputTokens?: number;
-  requestDimensions?: boolean;
-  requestEncodingFormat?: boolean;
-}>;
+export type OpenAiCompatibleTextEmbeddingCatalogEntry = Readonly<
+  Pick<
+    OpenAiCompatibleEmbeddingCatalogEntry,
+    | "reference"
+    | "provider"
+    | "model"
+    | "dimension"
+    | "metric"
+    | "maxBatchSize"
+    | "maxInputTokens"
+  > & {
+    defaultEndpoint?: string;
+    requestDimensions?: boolean;
+    requestEncodingFormat?: boolean;
+  }
+>;
 
 export type OpenAiCompatibleTextEmbeddingSpec = Readonly<{
   displayName: string;

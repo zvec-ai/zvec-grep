@@ -9,6 +9,7 @@ import type {
 } from "./embeddings.js";
 import { LlamaCppEmbeddingModel } from "./backends/llama-cpp.js";
 import { Model2VecEmbeddingModel } from "./backends/model2vec.js";
+import { OpenAiCompatibleTextEmbeddingModel } from "./backends/openai-compatible.js";
 import {
   Qwen37TextEmbeddingModel,
   Qwen3VlEmbeddingModel,
@@ -37,6 +38,8 @@ export function createEmbeddingModel(
       return new TransformersJsEmbeddingModel(catalogEntry, options);
     case "qwen":
       return createQwenEmbeddingModel(catalogEntry, options);
+    case "openai-compatible":
+      return new OpenAiCompatibleTextEmbeddingModel(catalogEntry, options);
     default:
       return unsupportedCatalogEntry(catalogEntry);
   }

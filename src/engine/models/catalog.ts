@@ -138,6 +138,18 @@ export const EMBEDDING_MODEL_CATALOG = {
     maxImageBytes: 10 * 1024 * 1024,
   },
 
+  "dgx/qwen3-embedding-0.6b": {
+    backend: "openai-compatible",
+    kind: "text",
+    reference: "dgx/qwen3-embedding-0.6b",
+    provider: "dgx",
+    model: "qwen3-embedding:0.6b",
+    dimension: 1024,
+    metric: "cosine",
+    maxBatchSize: 256,
+    maxInputTokens: 32768,
+  },
+
   "local/bge-small-en-v1.5": {
     backend: "transformers-js",
     reference: "local/bge-small-en-v1.5",
@@ -616,6 +628,21 @@ export type QwenEmbeddingCatalogEntry = Extract<
   EmbeddingCatalogEntry,
   { backend: "qwen" }
 >;
+
+export type OpenAiCompatibleEmbeddingCatalogEntry = Readonly<{
+  backend: "openai-compatible";
+  kind: "text";
+  reference: string;
+  provider: string;
+  model: string;
+  dimension: number;
+  metric: "cosine" | "dot" | "euclidean";
+  defaultEndpoint?: string;
+  maxBatchSize: number;
+  maxInputTokens?: number;
+  requestDimensions?: boolean;
+  requestEncodingFormat?: boolean;
+}>;
 
 export type QwenTextEmbeddingCatalogEntry = Extract<
   QwenEmbeddingCatalogEntry,

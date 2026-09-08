@@ -692,7 +692,7 @@ test("file, model, content, and entity helpers classify inputs", () => {
   });
   assert.equal(detectFileType("archive.zip"), null);
   assert.deepEqual(detectFileType("NOTICE"), { kind: "text", format: "text" });
-  assert.equal(listEmbeddingModels().length, 14);
+  assert.equal(listEmbeddingModels().length, 15);
   assert.equal(
     getEmbeddingModelCatalogEntry("local/embeddinggemma-300m")?.dimension,
     768,
