@@ -150,6 +150,68 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
 
+### Use a DGX Spark embedding endpoint
+
+zg can use a DGX Spark running an OpenAI-compatible Embeddings API instead of
+loading an embedding model in the local zg process. The supported catalog
+entry uses the served model ID `qwen3-embedding:0.6b`, produces
+1,024-dimensional vectors, and supports inputs up to 32,768 tokens.
+
+First verify that the endpoint accepts `POST /v1/embeddings`:
+
+```bash
+curl http://dgx-spark:11434/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-embedding:0.6b","input":["DGX Spark is ready"]}'
+```
+
+For an endpoint without authentication on a trusted network, configure the
+provider explicitly as unauthenticated, save the complete endpoint URL, and
+make the DGX model the default for new indexes:
+
+```bash
+zg config provider set dgx --no-auth
+zg config model set dgx/qwen3-embedding-0.6b \
+  --endpoint http://dgx-spark:11434/v1/embeddings \
+  --default
+
+zg index --allow-remote
+```
+
+Replace `dgx-spark` with the hostname or IP address of your DGX Spark. zg does
+not append `/v1/embeddings`, so the configured URL must include the complete
+path.
+
+If the endpoint requires a Bearer token, configure it instead of `--no-auth`:
+
+```bash
+zg config provider set dgx --api-key "$DGX_EMBEDDING_API_KEY"
+```
+
+Provider authentication and remote-data authorization are separate.
+`--allow-remote` approves sending repository content for that one command. To
+create a signed authorization shared by the CLI and MCP server for the current
+workspace, run:
+
+```bash
+zg auth grant \
+  --capability embedding \
+  --scope workspace \
+  --embedding dgx/qwen3-embedding-0.6b
+```
+
+Existing indexes retain their model and endpoint. Use `--rebuild` when moving
+an index to the DGX model or changing its endpoint:
+
+```bash
+zg index --rebuild \
+  --embedding dgx/qwen3-embedding-0.6b \
+  --allow-remote
+```
+
+See [Embedding models](./docs/07-embedding.md#dgx-spark) for authentication,
+authorization, and troubleshooting details.
+
 <a id="benchmarks"></a>
 
 ## 📊 Benchmarks
