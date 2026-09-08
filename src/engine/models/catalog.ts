@@ -3,6 +3,32 @@ const DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT =
 const DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT =
   "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding";
 
+export const REMOTE_EMBEDDING_PROVIDER_CATALOG = {
+  qwen: {
+    provider: "qwen",
+    apiKey: "required",
+  },
+  dgx: {
+    provider: "dgx",
+    apiKey: "optional",
+  },
+} as const;
+
+export type RemoteEmbeddingProviderCatalogEntry =
+  (typeof REMOTE_EMBEDDING_PROVIDER_CATALOG)[keyof typeof REMOTE_EMBEDDING_PROVIDER_CATALOG];
+
+export function listRemoteEmbeddingProviders(): RemoteEmbeddingProviderCatalogEntry[] {
+  return Object.values(REMOTE_EMBEDDING_PROVIDER_CATALOG);
+}
+
+export function getRemoteEmbeddingProviderCatalogEntry(
+  provider: string,
+): RemoteEmbeddingProviderCatalogEntry | undefined {
+  return REMOTE_EMBEDDING_PROVIDER_CATALOG[
+    provider as keyof typeof REMOTE_EMBEDDING_PROVIDER_CATALOG
+  ];
+}
+
 export const EMBEDDING_MODEL_CATALOG = {
   "local/embeddinggemma-300m": {
     backend: "llama-cpp",

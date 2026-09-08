@@ -178,7 +178,7 @@ See [Agent integrations](./01-agents.md) before using `--force`.
 ## `zg --config`
 
 ```text
-zg --config provider set <provider> --api-key <key>
+zg --config provider set <provider> (--api-key <key> | --no-auth)
 zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
 ```
 
@@ -189,6 +189,17 @@ zg --config provider set qwen --api-key "$DASHSCOPE_API_KEY"
 zg --config model set qwen/text-embedding-v4 --default
 zg --config model set local/potion-code-16m-v2 --device metal
 ```
+
+Providers whose credentials are optional can be explicitly configured without
+authentication. This suppresses the generic `ZVEC_GREP_API_KEY` fallback so an
+unrelated credential is not sent to a trusted-network endpoint:
+
+```bash
+zg --config provider set dgx --no-auth
+```
+
+`--api-key` and `--no-auth` are mutually exclusive. Providers such as Qwen that
+require credentials reject `--no-auth`.
 
 Global configuration is stored in `~/.zvec-grep/config.json`. Existing indexes
 continue to use their stored model until explicitly rebuilt.

@@ -17,7 +17,7 @@ import {
   EngineError,
   type EngineErrorCode,
 } from "../engine/errors.js";
-import { listEmbeddingModels } from "../engine/models/index.js";
+import { getRemoteEmbeddingProviderCatalogEntry } from "../engine/models/index.js";
 import { DaemonClient } from "../client/daemon-client.js";
 import {
   resolveDirectSearchPolicy,
@@ -125,20 +125,36 @@ async function runConfig(parsed: ParsedArgs): Promise<void> {
         "Invalid embedding provider",
       );
     }
-    if (
-      reference === "local" ||
-      !listEmbeddingModels().some((entry) => entry.provider === reference)
-    ) {
+    const provider = getRemoteEmbeddingProviderCatalogEntry(reference);
+    if (reference === "local" || provider === undefined) {
       throw unsupportedRemoteEmbeddingProvider(reference);
     }
-    if (parsed.options.apiKey === undefined) {
-      throw new Error("zg --config provider set requires --api-key");
+    if (
+      parsed.options.apiKey !== undefined &&
+      parsed.options.providerNoAuth === true
+    ) {
+      throw new Error(
+        "zg --config provider set accepts either --api-key or --no-auth, not both",
+      );
+    }
+    if (
+      parsed.options.apiKey === undefined &&
+      parsed.options.providerNoAuth !== true
+    ) {
+      throw new Error(
+        "zg --config provider set requires --api-key or --no-auth",
+      );
+    }
+    if (parsed.options.providerNoAuth && provider.apiKey === "required") {
+      throw new Error(
+        `Embedding provider ${reference} requires an API key and does not support --no-auth`,
+      );
     }
     updateGlobalConfig({
       providers: {
-        [reference]: {
-          apiKey: parsed.options.apiKey,
-        },
+        [reference]: parsed.options.providerNoAuth
+          ? { auth: "none" }
+          : { apiKey: parsed.options.apiKey! },
       },
     });
     console.log(`Provider config: ${reference}`);

@@ -236,11 +236,12 @@ stored paths, refresh status, and suggested next action.
 Workspace index is ready.`;
     case "config":
       return `Usage:
-  zg --config provider set <provider> --api-key <key>
+  zg --config provider set <provider> (--api-key <key> | --no-auth)
   zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
 
 Provider options:
   --api-key <key>                   Default API key for the provider
+  --no-auth                         Explicitly use an unauthenticated provider
 
 Model options:
   --endpoint <url>                  Endpoint for a remote embedding model

@@ -10,7 +10,9 @@ export {
 export { createEmbeddingModel } from "./factory.js";
 export {
   getEmbeddingModelCatalogEntry,
+  getRemoteEmbeddingProviderCatalogEntry,
   listEmbeddingModels,
+  listRemoteEmbeddingProviders,
 } from "./catalog.js";
 export {
   resolveEmbeddingReference,

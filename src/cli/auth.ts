@@ -12,7 +12,7 @@ import {
 } from "../engine/config.js";
 import {
   getEmbeddingModelCatalogEntry,
-  listEmbeddingModels,
+  listRemoteEmbeddingProviders,
   resolveEmbeddingReference,
 } from "../engine/models/index.js";
 import { readWorkspaceManifest } from "../engine/manifest.js";
@@ -277,13 +277,9 @@ export function unsupportedRemoteEmbeddingProvider(
   reference: string,
   message = "Unsupported remote embedding provider",
 ): Error {
-  const providers = [
-    ...new Set(
-      listEmbeddingModels()
-        .map((model) => model.provider)
-        .filter((provider) => provider !== "local"),
-    ),
-  ];
+  const providers = listRemoteEmbeddingProviders().map(
+    ({ provider }) => provider,
+  );
   return new Error(
     [
       `${message}: ${reference}`,
