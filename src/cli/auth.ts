@@ -11,6 +11,7 @@ import {
   type EmbeddingRuntimeConfig,
 } from "../engine/config.js";
 import {
+  findEmbeddingModelCatalogEntry,
   getEmbeddingModelCatalogEntry,
   listRemoteEmbeddingProviders,
   resolveEmbeddingReference,
@@ -203,9 +204,10 @@ export function resolveAuthorizationSchema(
   }
   const provider = reference.slice(0, separator);
   const model = reference.slice(separator + 1);
+  const entry = findEmbeddingModelCatalogEntry(provider, model);
   return {
-    provider,
-    model,
+    provider: entry?.provider ?? provider,
+    model: entry?.model ?? model,
   };
 }
 
@@ -255,7 +257,10 @@ export function configuredEmbeddingReference(
 ): string | undefined {
   return resolveEmbeddingReference({
     explicit: options.embedding,
-    existing: existing ? `${existing.provider}/${existing.model}` : undefined,
+    existing: existing
+      ? (findEmbeddingModelCatalogEntry(existing.provider, existing.model)
+          ?.reference ?? `${existing.provider}/${existing.model}`)
+      : undefined,
     globalDefault: readGlobalConfig().defaults?.embedding,
   });
 }

@@ -6,9 +6,17 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { parseArgs } from "../dist/cli/args.js";
+import { resolveAuthorizationSchema } from "../dist/cli/auth.js";
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve("dist/cli/index.js");
+
+test("catalog references resolve to served model identities", () => {
+  assert.deepEqual(resolveAuthorizationSchema("dgx/qwen3-embedding-0.6b"), {
+    provider: "dgx",
+    model: "qwen3-embedding:0.6b",
+  });
+});
 
 test("config model set parses local runtime settings", () => {
   const parsed = parseArgs([

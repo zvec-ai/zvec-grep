@@ -16,6 +16,7 @@ import type {
   EmbeddingModelInfo,
 } from "../engine/models/index.js";
 import {
+  findEmbeddingModelCatalogEntry,
   isRemoteEmbeddingProvider,
   resolveEmbeddingReference,
 } from "../engine/models/index.js";
@@ -1425,7 +1426,10 @@ function parseEmbeddingModelReference(
 function embeddingModelReference(
   model: EmbeddingModelLoadRequest["model"],
 ): string {
-  return `${model.provider}/${model.name}`;
+  return (
+    findEmbeddingModelCatalogEntry(model.provider, model.name)?.reference ??
+    `${model.provider}/${model.name}`
+  );
 }
 
 function persistentStatus(

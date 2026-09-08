@@ -19,6 +19,7 @@ import {
 import {
   createEmbeddingModel,
   EmbeddingPurpose,
+  findEmbeddingModelCatalogEntry,
   isRemoteEmbeddingProvider,
   resolveEmbeddingReference,
   type CreateEmbeddingModelOptions,
@@ -1487,7 +1488,10 @@ function parseEmbeddingModelReference(
 }
 
 function embeddingModelReference(identity: EmbeddingModelIdentity): string {
-  return `${identity.provider}/${identity.name}`;
+  return (
+    findEmbeddingModelCatalogEntry(identity.provider, identity.name)
+      ?.reference ?? `${identity.provider}/${identity.name}`
+  );
 }
 
 function providerOptionsFingerprint(options: {

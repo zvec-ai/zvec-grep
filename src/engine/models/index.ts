@@ -9,6 +9,7 @@ export {
 } from "./embeddings.js";
 export { createEmbeddingModel } from "./factory.js";
 export {
+  findEmbeddingModelCatalogEntry,
   getEmbeddingModelCatalogEntry,
   listEmbeddingModels,
 } from "./catalog.js";

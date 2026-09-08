@@ -161,7 +161,7 @@ test("DGX provider uses the same fail-closed authorization guard", async (t) => 
     );
   };
   const model = createEmbeddingModelForIdentity(
-    { provider: "dgx", name: "qwen3-embedding-0.6b" },
+    { provider: "dgx", name: "qwen3-embedding:0.6b" },
     {
       endpoint,
       authorizationSigningKeyPath: join(temporaryDirectory, "signing.key"),

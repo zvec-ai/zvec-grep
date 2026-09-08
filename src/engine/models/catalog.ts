@@ -639,3 +639,15 @@ export function getEmbeddingModelCatalogEntry(
 ): EmbeddingCatalogEntry | undefined {
   return EMBEDDING_MODEL_CATALOG[reference as EmbeddingModelCatalogId];
 }
+
+export function findEmbeddingModelCatalogEntry(
+  provider: string,
+  model: string,
+): EmbeddingCatalogEntry | undefined {
+  return (
+    getEmbeddingModelCatalogEntry(`${provider}/${model}`) ??
+    listEmbeddingModels().find(
+      (entry) => entry.provider === provider && entry.model === model,
+    )
+  );
+}
