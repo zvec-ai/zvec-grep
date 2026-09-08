@@ -1,6 +1,6 @@
 import { globalConfigPath } from "../../config.js";
-import { EngineError, type EngineErrorCode } from "../../errors.js";
-import type { Content, ImageFormat, TextContent } from "../../types.js";
+import { EngineError } from "../../errors.js";
+import type { Content, ImageFormat } from "../../types.js";
 import {
   BaseEmbeddingModel,
   type CreateEmbeddingModelOptions,
@@ -13,6 +13,15 @@ import type {
   QwenTextEmbeddingCatalogEntry,
 } from "../catalog.js";
 import { traceHeaders } from "../../../observability/trace-context.js";
+import {
+  OpenAiCompatibleTextEmbeddingModel,
+  providerErrorContext,
+  readProviderError,
+  remoteEmbeddingSignal,
+  throwIfEmbeddingCancelled,
+  type OpenAiCompatibleDependencies,
+  type OpenAiCompatibleTextEmbeddingSpec,
+} from "./openai-compatible.js";
 
 // -----------------------------------------------------------------------------
 // Text embedding models (OpenAI-compatible API)
@@ -28,20 +37,19 @@ const defaultDependencies: QwenDependencies = {
   fetch: (...args) => globalThis.fetch(...args),
 };
 
-type QwenTextEmbeddingSpec = {
-  displayName: string;
-  errorCodePrefix: string;
-};
-
 const QWEN_TEXT_EMBEDDING_V4_SPEC = {
   displayName: "Qwen text-embedding-v4",
   errorCodePrefix: "QWEN_TEXT_EMBEDDING_V4",
-} as const satisfies QwenTextEmbeddingSpec;
+  requireApiKey: true,
+  missingApiKeyHint: `Pass --api-key, set ZVEC_GREP_API_KEY, or configure providers.qwen.apiKey in ${globalConfigPath()}.`,
+} as const satisfies OpenAiCompatibleTextEmbeddingSpec;
 
 const QWEN37_TEXT_EMBEDDING_SPEC = {
   displayName: "Qwen3.7 text embedding",
   errorCodePrefix: "QWEN37_TEXT_EMBEDDING",
-} as const satisfies QwenTextEmbeddingSpec;
+  requireApiKey: true,
+  missingApiKeyHint: `Pass --api-key, set ZVEC_GREP_API_KEY, or configure providers.qwen.apiKey in ${globalConfigPath()}.`,
+} as const satisfies OpenAiCompatibleTextEmbeddingSpec;
 
 type QwenTextEmbeddingV4CatalogEntry = Extract<
   QwenTextEmbeddingCatalogEntry,
@@ -53,197 +61,23 @@ type Qwen37TextEmbeddingCatalogEntry = Extract<
   { model: "qwen3.7-text-embedding" }
 >;
 
-abstract class QwenTextEmbeddingModel extends BaseEmbeddingModel {
-  readonly info: EmbeddingModelInfo;
-
-  private readonly entry: QwenTextEmbeddingCatalogEntry;
-  private readonly apiKey: string;
-  private readonly endpoint: string;
-  private readonly displayName: string;
-  private readonly errorCodePrefix: string;
-  private readonly dependencies: QwenDependencies;
-
-  constructor(
-    entry: QwenTextEmbeddingCatalogEntry,
-    spec: QwenTextEmbeddingSpec,
-    options: CreateEmbeddingModelOptions,
-    dependencies: Partial<QwenDependencies>,
-  ) {
-    super();
-
-    this.entry = entry;
-    const endpoint =
-      options.endpoint === undefined
-        ? entry.defaultEndpoint
-        : options.endpoint.trim();
-    this.info = {
-      reference: entry.reference,
-      provider: entry.provider,
-      name: entry.model,
-      dimension: entry.dimension,
-      metric: entry.metric,
-      endpoint,
-      inputKinds: ["text"],
-      limits: {
-        maxBatchSize: entry.maxBatchSize,
-        maxInputTokens: entry.maxInputTokens,
-      },
-    };
-    this.displayName = spec.displayName;
-    this.errorCodePrefix = spec.errorCodePrefix;
-    this.dependencies = { ...defaultDependencies, ...dependencies };
-
-    const apiKey = options.apiKey?.trim() ?? "";
-    if (apiKey.length === 0) {
-      throw new EngineError(`${this.displayName} model requires an API key`, {
-        code: this.errorCode("MISSING_API_KEY"),
-        context: `model=${this.info.reference}\nhint=Pass --api-key, set ZVEC_GREP_API_KEY, or configure providers.qwen.apiKey in ${globalConfigPath()}.`,
-      });
-    }
-
-    if (endpoint.length === 0) {
-      throw new EngineError(`${this.displayName} model requires an endpoint`, {
-        code: this.errorCode("MISSING_ENDPOINT"),
-        context: `model=${this.info.reference}`,
-      });
-    }
-
-    this.apiKey = apiKey;
-    this.endpoint = endpoint;
-  }
-
-  protected async doEmbed(
-    contents: readonly Content[],
-    options: NormalizedEmbeddingOptions,
-  ): Promise<EmbeddingResult> {
-    const texts = (contents as readonly TextContent[]).map(
-      (content) => content.text,
-    );
-
-    let response: Response;
-    const signal = remoteEmbeddingSignal(options.signal);
-
-    try {
-      response = await this.dependencies.fetch(this.endpoint, {
-        method: "POST",
-        headers: {
-          ...traceHeaders(),
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: this.entry.model,
-          input: texts,
-          dimensions: this.info.dimension,
-          encoding_format: "float",
-        }),
-        signal,
-      });
-    } catch (cause) {
-      throwIfEmbeddingCancelled(options.signal);
-      throw new EngineError(`${this.displayName} request failed`, {
-        code: this.errorCode("REQUEST_FAILED"),
-        context: `model=${this.info.reference} endpoint=${this.endpoint} timeoutMs=${DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS}`,
-        cause,
-      });
-    }
-
-    let body: unknown;
-
-    try {
-      body = await response.json();
-    } catch (cause) {
-      throw new EngineError(`${this.displayName} response was not valid JSON`, {
-        code: this.errorCode("INVALID_JSON"),
-        context: `model=${this.info.reference} status=${response.status}`,
-        cause,
-      });
-    }
-
-    if (!response.ok) {
-      const error = readProviderError(body);
-
-      throw new EngineError(`${this.displayName} request returned an error`, {
-        code: this.errorCode("API_ERROR"),
-        context: providerErrorContext(this.entry.model, response, error),
-      });
-    }
-
-    if (!isRecord(body) || !Array.isArray(body.data)) {
-      throw new EngineError(
-        `${this.displayName} response did not include data`,
-        {
-          code: this.errorCode("MISSING_DATA"),
-          context: `model=${this.info.reference}`,
-        },
-      );
-    }
-
-    const vectors = new Array<number[]>(texts.length);
-
-    for (const item of body.data) {
-      if (
-        !isRecord(item) ||
-        typeof item.index !== "number" ||
-        !Number.isInteger(item.index)
-      ) {
-        throw new EngineError(
-          `${this.displayName} response included an invalid index`,
-          {
-            code: this.errorCode("INVALID_INDEX"),
-            context: `model=${this.info.reference} index=${isRecord(item) ? String(item.index) : "unknown"}`,
-          },
-        );
-      }
-
-      if (item.index < 0 || item.index >= texts.length) {
-        throw new EngineError(
-          `${this.displayName} response index was out of range`,
-          {
-            code: this.errorCode("INDEX_OUT_OF_RANGE"),
-            context: `model=${this.info.reference} index=${item.index} inputCount=${texts.length}`,
-          },
-        );
-      }
-
-      if (!Array.isArray(item.embedding)) {
-        throw new EngineError(
-          `${this.displayName} response included an invalid embedding`,
-          {
-            code: this.errorCode("INVALID_VECTOR"),
-            context: `model=${this.info.reference} index=${item.index}`,
-          },
-        );
-      }
-
-      vectors[item.index] = item.embedding as number[];
-    }
-
-    return { vectors, truncated: [] };
-  }
-
-  private errorCode(suffix: string): EngineErrorCode {
-    return `ZVEC_GREP.ENGINE.MODELS.${this.errorCodePrefix}_${suffix}`;
-  }
-}
-
-export class QwenTextEmbeddingV4Model extends QwenTextEmbeddingModel {
+export class QwenTextEmbeddingV4Model extends OpenAiCompatibleTextEmbeddingModel {
   constructor(
     entry: QwenTextEmbeddingV4CatalogEntry,
     options: CreateEmbeddingModelOptions,
-    dependencies: Partial<QwenDependencies> = {},
+    dependencies: Partial<OpenAiCompatibleDependencies> = {},
   ) {
-    super(entry, QWEN_TEXT_EMBEDDING_V4_SPEC, options, dependencies);
+    super(entry, options, QWEN_TEXT_EMBEDDING_V4_SPEC, dependencies);
   }
 }
 
-export class Qwen37TextEmbeddingModel extends QwenTextEmbeddingModel {
+export class Qwen37TextEmbeddingModel extends OpenAiCompatibleTextEmbeddingModel {
   constructor(
     entry: Qwen37TextEmbeddingCatalogEntry,
     options: CreateEmbeddingModelOptions,
-    dependencies: Partial<QwenDependencies> = {},
+    dependencies: Partial<OpenAiCompatibleDependencies> = {},
   ) {
-    super(entry, QWEN37_TEXT_EMBEDDING_SPEC, options, dependencies);
+    super(entry, options, QWEN37_TEXT_EMBEDDING_SPEC, dependencies);
   }
 }
 
@@ -447,65 +281,6 @@ export class Qwen3VlEmbeddingModel extends BaseEmbeddingModel {
 const BASE64_CHARS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-function providerErrorContext(
-  model: string,
-  response: Response,
-  error: { code: string; type: string; message: string },
-): string {
-  const retryAfter = retryAfterHeaderMs(response.headers.get("retry-after"));
-  const retryAfterDetail =
-    typeof retryAfter === "number" ? ` retryAfterMs=${retryAfter}` : "";
-
-  return `model=${model} status=${response.status}${retryAfterDetail} providerCode=${error.code} providerType=${error.type} providerMessage=${error.message}`;
-}
-
-function retryAfterHeaderMs(value: string | null): number | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.round(seconds * 1000);
-  }
-
-  const dateMs = Date.parse(value);
-  if (Number.isFinite(dateMs)) {
-    return Math.max(0, dateMs - Date.now());
-  }
-
-  return undefined;
-}
-
-function readProviderError(body: unknown): {
-  code: string;
-  type: string;
-  message: string;
-} {
-  if (!isRecord(body) || !isRecord(body.error)) {
-    if (isRecord(body)) {
-      return {
-        code: typeof body.code === "string" ? body.code : "unknown",
-        type: "unknown",
-        message: typeof body.message === "string" ? body.message : "unknown",
-      };
-    }
-
-    return {
-      code: "unknown",
-      type: "unknown",
-      message: "unknown",
-    };
-  }
-
-  return {
-    code: typeof body.error.code === "string" ? body.error.code : "unknown",
-    type: typeof body.error.type === "string" ? body.error.type : "unknown",
-    message:
-      typeof body.error.message === "string" ? body.error.message : "unknown",
-  };
-}
-
 function readEmbeddingIndex(
   item: Record<string, unknown>,
   fallbackIndex: number,
@@ -581,18 +356,4 @@ function bytesToBase64(bytes: Uint8Array): string {
   }
 
   return output;
-}
-
-function remoteEmbeddingSignal(signal: AbortSignal | undefined): AbortSignal {
-  const timeout = AbortSignal.timeout(DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-function throwIfEmbeddingCancelled(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) {
-    return;
-  }
-  throw signal.reason instanceof Error
-    ? signal.reason
-    : new Error("Embedding request was cancelled.");
 }

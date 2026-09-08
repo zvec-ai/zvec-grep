@@ -79,6 +79,8 @@ export const EMBEDDING_MODEL_CATALOG = {
     defaultEndpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
     maxBatchSize: 10,
     maxInputTokens: 8192,
+    requestDimensions: true,
+    requestEncodingFormat: true,
   },
 
   "qwen/qwen3.7-text-embedding": {
@@ -92,6 +94,8 @@ export const EMBEDDING_MODEL_CATALOG = {
     defaultEndpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
     maxBatchSize: 20,
     maxInputTokens: 128000,
+    requestDimensions: true,
+    requestEncodingFormat: true,
   },
 
   "qwen/qwen3-vl-embedding": {
