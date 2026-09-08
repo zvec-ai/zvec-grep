@@ -88,6 +88,38 @@ type LlamaCppDependencies = {
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
 const GGUF_MAGIC = Buffer.from("GGUF");
 const DEFAULT_PARALLELISM_CAP = 8;
+const BYTES_PER_MIB = 1024 * 1024;
+const DEFAULT_CONTEXT_VRAM_OVERHEAD_MB = 150;
+const GPU_CONTEXT_VRAM_BUDGET_RATIO = 0.25;
+const LOGITS_BYTES_PER_ELEMENT = 4;
+const GGUF_VALUE_TYPE = {
+  UINT8: 0,
+  INT8: 1,
+  UINT16: 2,
+  INT16: 3,
+  UINT32: 4,
+  INT32: 5,
+  FLOAT32: 6,
+  BOOL: 7,
+  STRING: 8,
+  ARRAY: 9,
+  UINT64: 10,
+  INT64: 11,
+  FLOAT64: 12,
+} as const;
+const GGUF_VALUE_TYPE_SIZE: Readonly<Record<number, number>> = {
+  [GGUF_VALUE_TYPE.UINT8]: 1,
+  [GGUF_VALUE_TYPE.INT8]: 1,
+  [GGUF_VALUE_TYPE.UINT16]: 2,
+  [GGUF_VALUE_TYPE.INT16]: 2,
+  [GGUF_VALUE_TYPE.UINT32]: 4,
+  [GGUF_VALUE_TYPE.INT32]: 4,
+  [GGUF_VALUE_TYPE.FLOAT32]: 4,
+  [GGUF_VALUE_TYPE.BOOL]: 1,
+  [GGUF_VALUE_TYPE.UINT64]: 8,
+  [GGUF_VALUE_TYPE.INT64]: 8,
+  [GGUF_VALUE_TYPE.FLOAT64]: 8,
+};
 const DEFAULT_DARWIN_CMAKE_OPTIONS = {
   GGML_OPENMP: "OFF",
 } as const;
@@ -157,6 +189,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
   private contextsCreatePromise: Promise<LlamaEmbeddingContext[]> | null = null;
   private usingCpuFallback = false;
   private disposed = false;
+  private vocabSize?: number;
 
   constructor(
     private readonly entry: LlamaCppEmbeddingCatalogEntry,
@@ -409,6 +442,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     downloadProgress: ModelDownloadProgressReporter,
   ): Promise<LlamaModel> {
     const modelPath = await this.resolveModelPath(downloadProgress);
+    this.vocabSize = readGgufVocabSize(modelPath);
     const llama = await this.ensureLlama(downloadProgress);
     const model = await llama.loadModel(this.modelLoadOptions(modelPath));
     this.model = model;
@@ -429,6 +463,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     textCount: number,
     onProgress?: (progress: EmbeddingModelProgress) => void,
   ): Promise<LlamaEmbeddingContext[]> {
+    await this.ensureModel(onProgress);
     const targetParallelism = await this.resolveEffectiveParallelism(textCount);
     if (this.contexts.length >= targetParallelism) {
       return this.contexts.slice(0, targetParallelism);
@@ -567,11 +602,11 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     ) {
       try {
         const vram = await llama.getVramState();
-        const freeMb = vram.free / (1024 * 1024);
-        return Math.max(
-          1,
-          Math.min(DEFAULT_PARALLELISM_CAP, Math.floor((freeMb * 0.25) / 150)),
-        );
+        return resolveLlamaGpuContextParallelism({
+          freeVramBytes: vram.free,
+          contextSize: this.entry.contextSize,
+          vocabSize: this.vocabSize,
+        });
       } catch {
         return 2;
       }
@@ -725,6 +760,246 @@ function resolveParallelismOverride(
   }
 
   return Math.min(DEFAULT_PARALLELISM_CAP, parsed);
+}
+
+export function estimateLlamaEmbeddingContextVramMb(options: {
+  contextSize: number;
+  vocabSize?: number;
+}): number {
+  const contextSize = Math.max(0, options.contextSize);
+  const vocabSize = normalizePositiveInt(options.vocabSize) ?? 0;
+  const logitsMb =
+    contextSize > 0 && vocabSize > 0
+      ? (contextSize * vocabSize * LOGITS_BYTES_PER_ELEMENT) / BYTES_PER_MIB
+      : 0;
+  return DEFAULT_CONTEXT_VRAM_OVERHEAD_MB + logitsMb;
+}
+
+export function resolveLlamaGpuContextParallelism(options: {
+  freeVramBytes: number;
+  contextSize: number;
+  vocabSize?: number;
+  cap?: number;
+}): number {
+  const freeMb = Math.max(0, options.freeVramBytes) / BYTES_PER_MIB;
+  const perContextMb = estimateLlamaEmbeddingContextVramMb(options);
+  const cap = options.cap ?? DEFAULT_PARALLELISM_CAP;
+
+  return Math.max(
+    1,
+    Math.min(
+      cap,
+      Math.floor((freeMb * GPU_CONTEXT_VRAM_BUDGET_RATIO) / perContextMb),
+    ),
+  );
+}
+
+export function readGgufVocabSize(filePath: string): number | undefined {
+  if (!existsSync(filePath)) {
+    return undefined;
+  }
+
+  const fd = openSync(filePath, "r");
+  try {
+    return parseGgufVocabSize(fd);
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function parseGgufVocabSize(fd: number): number | undefined {
+  const cursor = { fd, pos: 0 };
+  const magic = readCursorBytes(cursor, 4);
+  if (!magic.equals(GGUF_MAGIC)) {
+    return undefined;
+  }
+
+  const version = readCursorU32(cursor);
+  if (version < 2 || version > 3) {
+    return undefined;
+  }
+
+  readCursorU64(cursor);
+  const keyCount = readCursorU64(cursor);
+  if (keyCount > 10_000) {
+    return undefined;
+  }
+
+  for (let index = 0; index < keyCount; index++) {
+    const key = readCursorString(cursor, 4096);
+    const type = readCursorU32(cursor);
+    if (key.endsWith(".vocab_size")) {
+      const vocabSize = normalizePositiveInt(readGgufNumeric(cursor, type));
+      if (vocabSize !== undefined) {
+        return vocabSize;
+      }
+      continue;
+    }
+
+    if (key === "tokenizer.ggml.tokens" && type === GGUF_VALUE_TYPE.ARRAY) {
+      const elementType = readCursorU32(cursor);
+      const count = normalizePositiveInt(readCursorU64(cursor));
+      if (count !== undefined) {
+        return count;
+      }
+      skipGgufArrayElements(cursor, elementType, 0);
+      continue;
+    }
+
+    skipGgufValue(cursor, type);
+  }
+
+  return undefined;
+}
+
+type GgufCursor = {
+  fd: number;
+  pos: number;
+};
+
+function readCursorBytes(cursor: GgufCursor, size: number): Buffer {
+  if (size < 0 || size > 16 * 1024 * 1024) {
+    throw new Error("invalid GGUF read size");
+  }
+
+  const buffer = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const bytesRead = readSync(
+      cursor.fd,
+      buffer,
+      offset,
+      size - offset,
+      cursor.pos,
+    );
+    if (bytesRead === 0) {
+      throw new Error("unexpected GGUF EOF");
+    }
+    cursor.pos += bytesRead;
+    offset += bytesRead;
+  }
+  return buffer;
+}
+
+function readCursorU32(cursor: GgufCursor): number {
+  return readCursorBytes(cursor, 4).readUInt32LE(0);
+}
+
+function readCursorU64(cursor: GgufCursor): number {
+  const value = readCursorBytes(cursor, 8).readBigUInt64LE(0);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("GGUF integer exceeds Number.MAX_SAFE_INTEGER");
+  }
+  return Number(value);
+}
+
+function readCursorI32(cursor: GgufCursor): number {
+  return readCursorBytes(cursor, 4).readInt32LE(0);
+}
+
+function readCursorI64(cursor: GgufCursor): number {
+  const value = readCursorBytes(cursor, 8).readBigInt64LE(0);
+  if (
+    value > BigInt(Number.MAX_SAFE_INTEGER) ||
+    value < BigInt(Number.MIN_SAFE_INTEGER)
+  ) {
+    throw new Error("GGUF integer exceeds Number safe range");
+  }
+  return Number(value);
+}
+
+function readCursorString(cursor: GgufCursor, maxBytes: number): string {
+  const length = readCursorU64(cursor);
+  if (length > maxBytes) {
+    throw new Error("GGUF string exceeds limit");
+  }
+  return readCursorBytes(cursor, length).toString("utf8");
+}
+
+function readGgufNumeric(cursor: GgufCursor, type: number): number | undefined {
+  switch (type) {
+    case GGUF_VALUE_TYPE.UINT8:
+      return readCursorBytes(cursor, 1).readUInt8(0);
+    case GGUF_VALUE_TYPE.INT8:
+      return readCursorBytes(cursor, 1).readInt8(0);
+    case GGUF_VALUE_TYPE.UINT16:
+      return readCursorBytes(cursor, 2).readUInt16LE(0);
+    case GGUF_VALUE_TYPE.INT16:
+      return readCursorBytes(cursor, 2).readInt16LE(0);
+    case GGUF_VALUE_TYPE.UINT32:
+      return readCursorU32(cursor);
+    case GGUF_VALUE_TYPE.INT32:
+      return readCursorI32(cursor);
+    case GGUF_VALUE_TYPE.UINT64:
+      return readCursorU64(cursor);
+    case GGUF_VALUE_TYPE.INT64:
+      return readCursorI64(cursor);
+    default:
+      skipGgufValue(cursor, type);
+      return undefined;
+  }
+}
+
+function skipGgufValue(cursor: GgufCursor, type: number): void {
+  if (type === GGUF_VALUE_TYPE.STRING) {
+    const length = readCursorU64(cursor);
+    cursor.pos += length;
+    return;
+  }
+
+  if (type === GGUF_VALUE_TYPE.ARRAY) {
+    const elementType = readCursorU32(cursor);
+    const count = readCursorU64(cursor);
+    skipGgufArrayElements(cursor, elementType, count);
+    return;
+  }
+
+  const size = GGUF_VALUE_TYPE_SIZE[type];
+  if (size === undefined) {
+    throw new Error("unsupported GGUF value type");
+  }
+  cursor.pos += size;
+}
+
+function skipGgufArrayElements(
+  cursor: GgufCursor,
+  elementType: number,
+  count: number,
+): void {
+  if (count < 0 || count > 2_000_000) {
+    throw new Error("GGUF array is too large");
+  }
+
+  if (elementType === GGUF_VALUE_TYPE.STRING) {
+    for (let index = 0; index < count; index++) {
+      const length = readCursorU64(cursor);
+      cursor.pos += length;
+    }
+    return;
+  }
+
+  if (elementType === GGUF_VALUE_TYPE.ARRAY) {
+    for (let index = 0; index < count; index++) {
+      skipGgufValue(cursor, GGUF_VALUE_TYPE.ARRAY);
+    }
+    return;
+  }
+
+  const size = GGUF_VALUE_TYPE_SIZE[elementType];
+  if (size === undefined) {
+    throw new Error("unsupported GGUF array type");
+  }
+  cursor.pos += size * count;
+}
+
+function normalizePositiveInt(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  return Math.floor(value);
 }
 
 function validateGgufFile(filePath: string, modelUri: string): void {
