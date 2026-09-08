@@ -4,7 +4,7 @@ import {
   EngineError,
   errorDetails,
 } from "../../errors.js";
-import type { EmbeddingModel } from "../../models/index.js";
+import type { EmbeddingModel, EmbeddingModelInfo } from "../../models/index.js";
 import type { WorkspaceIndexStorage } from "../../storage/index.js";
 import type {
   WorkspaceIndexInfo,
@@ -22,8 +22,11 @@ import type {
   SearchPlan,
   SearchPlanResult,
   SearchRecallTrace,
+  TimingEntry,
 } from "../../types.js";
 import { TimingCollector } from "../../utils/timing.js";
+import { exactMatchPriority, searchIntent } from "./intent.js";
+import { lexicalSupport } from "./lexical-support.js";
 import {
   hasPathGlob,
   isAbsolutePathPattern,
@@ -59,6 +62,9 @@ type Candidate = {
   score: number;
   rank: number;
   forced: boolean;
+  fusionScore?: number;
+  fusionRank?: number;
+  lexicalSupport?: number;
 };
 
 type InternalSearchEvidence = {
@@ -75,6 +81,7 @@ type PathFilterMatcher = (file: FileInfo) => boolean;
 
 const DEFAULT_LIMIT = 7;
 const RRF_K = 60;
+const SUPPORTED_HYBRID_RRF_K = 10;
 const RECALL_INITIAL_DEPTH = 200;
 const RECALL_MAX_DEPTH = 2000;
 const RECALL_GROWTH_FACTOR = 2;
@@ -86,11 +93,95 @@ type RecallRoute = ResolvedSearchPlanRoute & {
   vectorRouteId?: string;
 };
 
+/** Query-only work that can safely outlive a particular storage handle. */
+export type PreparedSearchPlan = {
+  readonly plan: ResolvedSearchPlan;
+  readonly vectorsByRoute: ReadonlyMap<string, number[]>;
+  readonly embedding?: EmbeddingModelInfo;
+  readonly timings: readonly TimingEntry[];
+};
+
+export type SearchPlanPreflight = {
+  readonly hasSearchableFiles: boolean;
+};
+
+export function resolveSearchPlan(plan: SearchPlan): ResolvedSearchPlan {
+  return validateSearchPlan(plan);
+}
+
+export async function preflightSearchPlan(
+  plan: SearchPlan,
+  ctx: SearchContext,
+): Promise<SearchPlanPreflight> {
+  const normalized = validateSearchPlan(plan);
+  const fileTypePatterns = await resolveFileTypePatterns(
+    normalized.fileTypes,
+    normalized.excludedFileTypes,
+  );
+  // FTS never needs query vectors. Validate its types, but defer file metadata
+  // filtering to consumption so a prepared FTS request only enumerates once.
+  if (!planUsesVector(normalized)) return { hasSearchableFiles: true };
+  const filter = searchPlanToStorageFilter(
+    normalized,
+    ctx.storage,
+    fileTypePatterns,
+  );
+  return { hasSearchableFiles: !filterMatchesNoFiles(filter) };
+}
+
+export async function prepareSearchPlan(
+  plan: SearchPlan,
+  embeddingModel?: EmbeddingModel,
+  preflight?: SearchPlanPreflight,
+  signal?: AbortSignal,
+): Promise<PreparedSearchPlan> {
+  signal?.throwIfAborted();
+  const normalized = validateSearchPlan(plan);
+  const timings = new TimingCollector();
+  const needsVectors =
+    preflight?.hasSearchableFiles !== false && planUsesVector(normalized);
+  if (needsVectors && !embeddingModel) {
+    throw new EngineError("Search operation requires an embedding model", {
+      code: "ZVEC_GREP.ENGINE.SEARCH.EMBEDDING_MODEL_REQUIRED",
+    });
+  }
+  const vectorsByRoute = needsVectors
+    ? await timings.time("query_embedding", () =>
+        embedVectorRoutes(normalized.routes, embeddingModel!, signal),
+      )
+    : new Map<string, number[]>();
+  signal?.throwIfAborted();
+  return {
+    plan: normalized,
+    vectorsByRoute,
+    embedding: needsVectors ? embeddingModel!.info : undefined,
+    timings: timings.entries(),
+  };
+}
+
+export function assertPreparedSearchPlanMatches(
+  plan: SearchPlan,
+  prepared: PreparedSearchPlan,
+): void {
+  if (
+    JSON.stringify(validateSearchPlan(plan)) !== JSON.stringify(prepared.plan)
+  ) {
+    throw new EngineError("Prepared search does not match the requested plan", {
+      code: "ZVEC_GREP.ENGINE.SEARCH.PREPARED_PLAN_MISMATCH",
+    });
+  }
+}
+
 export async function searchWorkspaceIndex(
   plan: SearchPlan,
   ctx: SearchContext,
+  prepared?: PreparedSearchPlan,
 ): Promise<SearchPlanResult> {
   const timings = new TimingCollector();
+  if (prepared) {
+    assertPreparedSearchPlanMatches(plan, prepared);
+    timings.addEntries(prepared.timings);
+  }
 
   const result = await timings.time("search_total", async () => {
     const normalized = timings.timeSync("search_plan", () =>
@@ -110,8 +201,9 @@ export async function searchWorkspaceIndex(
     );
     const hasSearchableFiles = !filterMatchesNoFiles(filter);
     const candidates = new Map<string, Candidate>();
-    const vectorByRoute =
-      hasSearchableFiles && planUsesVector(normalized)
+    const vectorByRoute = prepared
+      ? preparedVectors(normalized, prepared, hasSearchableFiles)
+      : hasSearchableFiles && planUsesVector(normalized)
         ? await timings.time("query_embedding", () =>
             embedVectorRoutes(
               normalized.routes,
@@ -149,7 +241,9 @@ export async function searchWorkspaceIndex(
       );
     }
 
-    const fused = timings.timeSync("fusion", () => fuseCandidates(candidates));
+    const fused = timings.timeSync("fusion", () =>
+      fuseCandidates(candidates, normalized.routes),
+    );
     const visible = fused.slice(0, limit);
     const tracked = normalized.trackEntityId
       ? fused.find((candidate) => candidate.id === normalized.trackEntityId)
@@ -177,6 +271,36 @@ export async function searchWorkspaceIndex(
     ...result,
     timings: timings.entries(),
   };
+}
+
+function preparedVectors(
+  plan: ResolvedSearchPlan,
+  prepared: PreparedSearchPlan,
+  hasSearchableFiles: boolean,
+): Map<string, number[]> {
+  if (!hasSearchableFiles) return new Map();
+  for (const route of plan.routes) {
+    if (route.mode !== "vector") continue;
+    const vector = prepared.vectorsByRoute.get(route.id);
+    if (!vector) {
+      throw new EngineError(
+        "Searchable files now require prepared query vectors",
+        {
+          code: "ZVEC_GREP.ENGINE.SEARCH.PREPARED_VECTORS_REQUIRED",
+        },
+      );
+    }
+    if (
+      !prepared.embedding ||
+      vector.length !== prepared.embedding.dimension ||
+      vector.some((value) => !Number.isFinite(value))
+    ) {
+      throw new EngineError("Prepared query vector has an invalid shape", {
+        code: "ZVEC_GREP.ENGINE.SEARCH.INVALID_PREPARED_VECTOR",
+      });
+    }
+  }
+  return new Map(prepared.vectorsByRoute);
 }
 
 export async function diagnoseEntitySearch(
@@ -292,6 +416,9 @@ function validateSearchPlan(plan: SearchPlan): ResolvedSearchPlan {
   return {
     ...plan,
     routes,
+    symbolTypes: Array.isArray(plan.symbolTypes)
+      ? [...plan.symbolTypes]
+      : plan.symbolTypes,
     includePaths: normalizePathFilters(plan.includePaths, "includePaths"),
     excludePaths: normalizePathFilters(plan.excludePaths, "excludePaths"),
     globs: normalizeStringFilters(plan.globs, "globs"),
@@ -432,7 +559,9 @@ function normalizeModifiedTime(
 async function embedVectorRoutes(
   routes: readonly ResolvedSearchPlanRoute[],
   model: EmbeddingModel,
+  signal?: AbortSignal,
 ): Promise<Map<string, number[]>> {
+  signal?.throwIfAborted();
   const vectorRoutes = routes.filter((route) => route.mode === "vector");
   const vectorsByRoute = new Map<string, number[]>();
 
@@ -441,17 +570,29 @@ async function embedVectorRoutes(
     start < vectorRoutes.length;
     start += model.info.limits.maxBatchSize
   ) {
+    signal?.throwIfAborted();
     const batch = vectorRoutes.slice(
       start,
       start + model.info.limits.maxBatchSize,
     );
-    const { vectors } = await model.embed(
-      batch.map((route) => ({
-        kind: "text",
-        text: route.query,
-      })),
-      { purpose: "query" },
-    );
+    let vectors: number[][];
+    try {
+      ({ vectors } = await model.embed(
+        batch.map((route) => ({
+          kind: "text",
+          text: route.query,
+        })),
+        { purpose: "query", signal },
+      ));
+    } catch (error) {
+      // Some backends wrap aborts as model failures. Preserve the caller's
+      // cancellation reason instead of turning cancellation into a fallback.
+      signal?.throwIfAborted();
+      throw error;
+    }
+    // A backend may ignore cancellation while loading or running native work.
+    // Reject its late result and never submit the next batch in that case.
+    signal?.throwIfAborted();
 
     for (const [index, route] of batch.entries()) {
       vectorsByRoute.set(route.id, vectors[index]);
@@ -1038,11 +1179,9 @@ function searchPlanToStorageFilter(
   storage: WorkspaceIndexStorage,
   fileTypePatterns: FileTypePatterns,
 ): StorageSearchFilter | undefined {
-  const fileIds = resolveFilteredFileIds(
-    plan,
-    storage.listFiles(),
-    fileTypePatterns,
-  );
+  const fileIds = hasFileFilters(plan, fileTypePatterns)
+    ? resolveFilteredFileIds(plan, storage.listFiles(), fileTypePatterns)
+    : undefined;
   const symbolTypes =
     plan.symbolTypes && plan.symbolTypes.length > 0
       ? plan.symbolTypes
@@ -1068,26 +1207,9 @@ function resolveFilteredFileIds(
   plan: SearchPlan,
   files: readonly FileInfo[],
   fileTypePatterns: FileTypePatterns,
-): string[] | undefined {
+): string[] {
   const includeMatchers = (plan.includePaths ?? []).map(compilePathFilter);
   const excludeMatchers = (plan.excludePaths ?? []).map(compilePathFilter);
-  const hasModifiedFilter =
-    plan.modifiedAfter !== undefined || plan.modifiedBefore !== undefined;
-  const hasSharedSelection =
-    (plan.globs?.length ?? 0) > 0 ||
-    (plan.insensitiveGlobs?.length ?? 0) > 0 ||
-    fileTypePatterns.include.length > 0 ||
-    fileTypePatterns.exclude.length > 0;
-
-  if (
-    includeMatchers.length === 0 &&
-    excludeMatchers.length === 0 &&
-    !hasModifiedFilter &&
-    !hasSharedSelection
-  ) {
-    return undefined;
-  }
-
   return files
     .filter((file) => {
       const included =
@@ -1103,6 +1225,22 @@ function resolveFilteredFileIds(
       );
     })
     .map((file) => file.id);
+}
+
+function hasFileFilters(
+  plan: SearchPlan,
+  fileTypePatterns: FileTypePatterns,
+): boolean {
+  return (
+    (plan.includePaths?.length ?? 0) > 0 ||
+    (plan.excludePaths?.length ?? 0) > 0 ||
+    plan.modifiedAfter !== undefined ||
+    plan.modifiedBefore !== undefined ||
+    (plan.globs?.length ?? 0) > 0 ||
+    (plan.insensitiveGlobs?.length ?? 0) > 0 ||
+    fileTypePatterns.include.length > 0 ||
+    fileTypePatterns.exclude.length > 0
+  );
 }
 
 function matchesModifiedTimeFilter(file: FileInfo, plan: SearchPlan): boolean {
@@ -1144,25 +1282,80 @@ function normalizePathFilterPattern(pattern: string): string {
   return normalizePathPattern(pattern);
 }
 
-function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
+function fuseCandidates(
+  candidates: Map<string, Candidate>,
+  routes: readonly ResolvedSearchPlanRoute[],
+): Candidate[] {
+  const queries = [...new Set(routes.map((route) => route.query))];
+  // A deliberately fused multi-query request has no single lookup intent.
+  const intent = queries.length === 1 ? searchIntent(queries[0]!) : undefined;
+  const support =
+    intent?.kind === "text" &&
+    routes.some((route) => route.mode === "fts") &&
+    routes.some((route) => route.mode === "vector")
+      ? lexicalSupport(
+          [...candidates.values()]
+            // Diagnostic-only candidates must not change the ordinary recall
+            // population, its term frequencies, or the hybrid rank constant.
+            .filter((candidate) =>
+              candidate.recall.some((recall) => recall.found && !recall.forced),
+            )
+            .map((candidate) => ({
+              ...candidate,
+              fragments: candidate.evidence
+                .filter((item) => !item.forced)
+                .map((item) => item.fragment),
+            })),
+          intent.query,
+        )
+      : new Map<string, number>();
+  const supportedHybrid = [...support.values()].some((value) => value > 0);
+  const rankConstant = supportedHybrid ? SUPPORTED_HYBRID_RRF_K : RRF_K;
+  const priorities = new Map<string, number>();
   for (const candidate of candidates.values()) {
+    priorities.set(
+      candidate.id,
+      intent
+        ? exactMatchPriority(
+            intent,
+            candidate.entity,
+            candidate.file,
+            candidate.evidence.map((item) => item.fragment),
+          )
+        : 0,
+    );
     candidate.score = 0;
     candidate.forced = candidate.recall.some((trace) => trace.forced);
 
     for (const recall of candidate.recall) {
       if (recall.found && recall.rank !== undefined) {
-        candidate.score += 1 / (RRF_K + recall.rank);
+        candidate.score += 1 / (rankConstant + recall.rank);
       }
     }
   }
 
-  const fused = [...candidates.values()].sort((left, right) => {
+  const compare = (left: Candidate, right: Candidate): number => {
+    const priority = priorities.get(right.id)! - priorities.get(left.id)!;
+    if (priority !== 0) return priority;
     if (right.score !== left.score) {
       return right.score - left.score;
     }
 
     return left.id.localeCompare(right.id);
-  });
+  };
+  const fused = [...candidates.values()].sort(compare);
+
+  if (supportedHybrid) {
+    for (const [index, candidate] of fused.entries()) {
+      candidate.fusionRank = index + 1;
+      candidate.fusionScore = candidate.score;
+      candidate.lexicalSupport = support.get(candidate.id) ?? 0;
+      // Head-sensitive fusion plus a bounded (1x..3x) support bonus. Strong
+      // single-route evidence need not disappear behind weak agreement votes.
+      candidate.score *= 1 + 2 * candidate.lexicalSupport;
+    }
+    fused.sort(compare);
+  }
 
   for (const [index, candidate] of fused.entries()) {
     candidate.rank = index + 1;
@@ -1232,10 +1425,19 @@ function candidateToTrace(candidate: Candidate, limit: number): SearchHitTrace {
   return {
     recall: candidate.recall,
     fusion: {
-      rank: candidate.rank,
-      score: candidate.score,
+      rank: candidate.fusionRank ?? candidate.rank,
+      score: candidate.fusionScore ?? candidate.score,
       forced: candidate.forced || undefined,
     },
+    ...(candidate.lexicalSupport === undefined
+      ? {}
+      : {
+          ranking: {
+            rank: candidate.rank,
+            score: candidate.score,
+            lexicalSupport: candidate.lexicalSupport,
+          },
+        }),
     final,
   };
 }
@@ -1278,7 +1480,9 @@ async function chooseBestEntityInFile(
     ctx.storage,
   );
 
-  const [best] = fuseCandidates(candidates);
+  const [best] = fuseCandidates(candidates, [
+    { id: "fts", mode: "fts", query },
+  ]);
   if (best) {
     return best.id;
   }

@@ -1,5 +1,5 @@
 import { realpathSync, statSync, type Stats } from "node:fs";
-import { dirname, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { RootPath } from "../../types.js";
 import { pathPatternMatches } from "../../utils/glob.js";
@@ -49,6 +49,52 @@ export function normalizeRootPath(path: string | RootPath): RootPath {
     absolutePath: normalizePath(path.absolutePath),
     recursive: path.recursive,
   };
+}
+
+/**
+ * Watchers use canonical workspace paths, while persisted file identities may
+ * use a directory alias (notably /var -> /private/var on macOS). Translate
+ * events back to the configured spelling without changing stored identities
+ * or resolving file symlinks that remain subject to the scanner's follow rules.
+ */
+export function pathsForConfiguredRoots(
+  roots: readonly RootPath[],
+  path: string,
+): string[] {
+  const input = normalizePath(path);
+  const mapped = new Set<string>();
+  for (const root of roots) {
+    if (isPathInside(root.absolutePath, input)) {
+      mapped.add(input);
+      continue;
+    }
+    const canonical = canonicalRootWithMissingTail(root.absolutePath);
+    if (!canonical) continue;
+    if (isPathInside(canonical, input)) {
+      mapped.add(join(root.absolutePath, relative(canonical, input)));
+    } else if (isPathInside(input, canonical)) {
+      // A directory rescan can cover several configured roots.
+      mapped.add(root.absolutePath);
+    }
+  }
+  return mapped.size > 0 ? [...mapped] : [input];
+}
+
+function canonicalRootWithMissingTail(path: string): string | undefined {
+  let current = normalizePath(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return join(realpathSync(current), ...missing);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+      const parent = dirname(current);
+      if (parent === current) return undefined;
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
 }
 
 export function fileBelongsToRootPath(

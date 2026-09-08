@@ -130,9 +130,9 @@ Search routes:
   --rg                              Run exhaustive managed ripgrep
 
 Result options:
-  --limit <n>                       Maximum results per group (default: 7)
+  --limit <n>                       Maximum results per group (default: 10)
   --compact                         Force compact output intended for pipes
-  --preview <none|short|full>       Indexed preview size (default: terminal=full, pipe=none)
+  --preview <none|short|full>       Indexed preview size (default: terminal=short, pipe=none)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
@@ -171,7 +171,20 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_DEVICE",
 ])}
 
-If no index exists, zg creates one with a local embedding model before searching.
+Positional words form one query; single/double shell quotes have the same meaning.
+File names and clear code identifiers are searched in current files without an
+index; complete lookups with no match do not return unrelated neighbors. Otherwise,
+auto mode starts/reuses a local daemon; a missing index is built in the background.
+Literal matches return with a semantic-readiness warning. If the index is not
+usable and no literal matches exist, ordinary default auto search tries a bounded
+keyword scan first. Useful hits return as matchedBy=keyword with a warning that
+coverage is incomplete. Local indexing continues; an existing job is reused.
+These early results may omit semantic neighbors. With neither literal nor keyword
+hits, initial preparation gets up to 8 seconds, then searches if ready or reports
+incomplete coverage. This is not a total CLI latency limit.
+Ready-index retrieval and explicit --hybrid, --vector, and --refresh wait are
+unchanged. Use --refresh wait to wait beyond the initial preparation budget.
+--mode direct avoids a background daemon.
 Terminal output is human-readable by default; redirected output is compact.
 
 See zg --help environment for precedence and Server-mode scope.`;
@@ -292,8 +305,9 @@ ${formatEnvironmentVariables([
 shared daemon, proxies MCP over stdin/stdout, and leaves the daemon running
 when the client disconnects.
 
-The server listens on loopback. Authentication is disabled by default; pass a
-token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
+The server listens on loopback. Implicit search startup creates a private Bearer
+token automatically. Manual startup accepts --token-file or ZVEC_GREP_SERVER_TOKEN;
+without either, manually started servers do not require authentication.
 The public MCP endpoint defaults to the agent toolset (indexed search only).
 Use --mcp-toolset full, or ZVEC_GREP_MCP_TOOLSET=full, to expose managed rg and
 the four index and status tools. CLI managed rg, index, and status commands

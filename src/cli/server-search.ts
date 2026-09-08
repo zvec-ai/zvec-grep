@@ -8,10 +8,15 @@ export function parseServerSearchResponse(
   value: unknown,
 ): ZvecGrepSearchResult {
   const parsed = zvecGrepSearchOutputSchema.safeParse(value);
+  const currentSource =
+    parsed.success &&
+    parsed.data.result.source === "rg" &&
+    parsed.data.result.diagnostics.semantic?.reason === "index_unavailable";
   if (
     !parsed.success ||
-    parsed.data.result.groupResults === undefined ||
-    parsed.data.result.groupResults.length === 0
+    (!currentSource &&
+      (parsed.data.result.groupResults === undefined ||
+        parsed.data.result.groupResults.length === 0))
   ) {
     throw new Error(INCOMPATIBLE_SERVER_SEARCH_MESSAGE);
   }

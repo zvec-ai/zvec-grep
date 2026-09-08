@@ -18,6 +18,7 @@ type IndexedFragment = {
 
 type FileIndexDiagnostics = {
   truncatedFragmentCount?: number;
+  extractionVersion?: number;
 };
 
 type StorageSearchFilter = {

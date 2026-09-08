@@ -717,7 +717,8 @@ test("CLI indexed results are grouped by recall group without cross-group fill l
     { ...result, groupResults: [result.groupResults[0]] },
     { preview: "short", color: "never" },
   );
-  assert.match(oneGroup, /^query groups \(1\):/);
+  assert.doesNotMatch(oneGroup, /query groups|Q1 \[primary\]/);
+  assert.match(oneGroup, /shared-result/);
 
   const output = await captureConsole(() =>
     printCliContextResult(result, { human: true, color: "never" }),

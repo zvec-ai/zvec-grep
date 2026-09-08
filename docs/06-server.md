@@ -19,12 +19,48 @@ Indexed CLI commands accept `--mode auto|server|direct`.
 
 | Mode | Use it when | Behavior |
 | --- | --- | --- |
-| `auto` | Almost all terminal use | Use a ready Server; otherwise run Direct before submitting the operation |
+| `auto` | Almost all terminal use | Searches start or reuse a local Server when indexed retrieval is needed; other operations use a ready Server or run Direct |
 | `server` | A script requires the daemon, shared state, or background refresh | Require the Server and fail if it is unavailable |
 | `direct` | One-off use, CI, foreground debugging, or no daemon is desired | Run entirely in the current process |
 
-`auto` is the default and the recommended mode for people. It does not start a
-missing Server; it simply chooses the Server when one is already ready.
+`auto` is the default. Ordinary search first checks live files, so a verified
+code-shaped symbol lookup needs neither an index nor a daemon. Indexed searches
+start or reuse a missing local Server, with a three-second startup wait budget.
+If startup fails, local execution remains available. Non-local or nonstandard
+MCP URLs are not implicitly launched, and a different running endpoint is never
+restarted or replaced. `--mode direct` disables implicit daemon startup.
+
+Implicit startup creates a private Bearer token in the daemon home (unless an
+explicit token is configured). Concurrent starters reuse that token and daemon.
+No source code is sent to a remote embedding provider by implicit indexing.
+When the index is not usable and a default `auto` query has no literal matches,
+a lazy, bounded keyword scan runs before the readiness wait. Useful hits return
+as `matchedBy=keyword` with an incomplete-coverage warning while local indexing
+continues; an existing job is reused. These early results may omit semantic
+neighbors; ready-index retrieval and explicit `--hybrid`, `--vector`, and
+`--refresh wait` are unchanged.
+
+Only when neither literal nor keyword matches exist does ordinary default search
+give initial preparation up to eight seconds after startup. Status polling and
+scheduling share that deadline; polling does not restart the job, and longer
+builds remain background work. This is not a total CLI latency guarantee. An
+initialized collection alone is not proof that the first build is ready.
+`--refresh wait` requests foreground waiting beyond this preparation budget.
+The separate [query-model preparation budget](./02-cli.md#zg) applies to ordinary
+daemon queries against an existing local-model index; it is not a deadline for
+the whole search or for the independently owned background indexing job.
+The shared model pool evicts idle models after 15 minutes. Workspace watchers and
+their lightweight runtimes are released after four hours without a client
+request or a relevant file-system change by default; active work is not evicted.
+See [Server lifecycle](#server-lifecycle) for the configurable watcher timeout.
+The daemon remains available until `zg --server off`.
+
+Direct MCP search calls do not perform the CLI's implicit index preparation.
+An ordinary single-query eventual search can return current-file literal and
+bounded keyword matches when no local index is usable, without loading a model
+or creating an index job. It warns that semantic coverage is incomplete;
+explicit routes, freshness waits, and existing remote-index authorization keep
+their prior behavior. See the [MCP search contract](./03-mcp.md#zvec_grep_search).
 
 Use Server mode when:
 
@@ -106,8 +142,8 @@ set the number of seconds before starting or restarting the Server:
 
 ```bash
 export ZVEC_GREP_WATCHER_IDLE_TIMEOUT_SECONDS=7200
-zg server off
-zg server on
+zg --server off
+zg --server on
 ```
 
 Set the value to `0` to keep activated watchers until the Server stops.
@@ -156,6 +192,17 @@ drift. The first refresh after activation may use this conservative status; an
 hourly reconciliation remains `fresh` until its probe finds a mismatch. Use
 `--refresh wait` only when the latest file state is required.
 
+Returned-source hash mismatches, missing files, and unverifiable indexed source
+also count as drift, even when size and modification time did not change.
+Background refresh coalesces those exact paths with watcher updates. Freshness
+remains unconfirmed until the repaired paths are checked against the actual
+committed content; unrelated job success does not clear them. `off` records but
+does not repair, while `wait` repairs and rechecks or reports a bounded
+reconciliation error. A failed/cancelled repair is not restarted by every query
+for the same observed version; a subsequent edit or explicit `zg --index` can
+retry. Automatic remote source repair requires a Workspace Remote Embedding
+grant, never just a one-time query permit.
+
 Watcher-reported path updates skip workspace-wide status scans. Because
 file-system watchers can silently miss events, the Server schedules an hourly
 full reconciliation probe; the next search uses it to scan the Workspace and
@@ -190,8 +237,9 @@ contract.
 
 ## Bearer authentication
 
-Authentication is disabled by default because the Server is loopback-only. To
-require a token, provide at least 32 characters through the environment or a
+Implicit search startup enables authentication with an automatically generated
+private token. Manual startup without a token remains unauthenticated. To
+configure a token explicitly, provide at least 32 characters through the environment or a
 file:
 
 ```bash

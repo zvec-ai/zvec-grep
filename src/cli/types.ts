@@ -23,6 +23,8 @@ export type CliOptions = {
   listen?: string;
   serverTokenFile?: string;
   mode?: ZvecGrepClientMode;
+  /** Resolved by implicit daemon startup, never parsed as a CLI option. */
+  resolvedServerUrl?: string;
   forceDirect?: boolean;
   installTargets?: string[];
   installMcpToolTimeoutSeconds?: number;

@@ -67,6 +67,11 @@ terminal, or let your agent use it for you.
 
 ## 🚀 Try it yourself
 
+The following quickstart uses the published npm release. The development build
+in this source checkout has a different, search-first CLI; see
+[Development build](#development-build) below before running these examples
+against a source installation. Check `zg --help` for your installed version.
+
 ### 1. Set up a sample bookshelf
 
 ```bash
@@ -149,6 +154,37 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
+
+### Development build
+
+The source checkout uses `zg <query>` for search and long action options for
+maintenance. It does not retain the published release's subcommands as aliases:
+`zg query connection pool` warns on stderr and searches for `query connection pool`.
+Terminal output is human-readable automatically; `--compact` selects pipe-style
+output. After building and installing this source checkout:
+
+```bash
+zg connection pool
+zg --index                 # Optional explicit index maintenance
+zg --install --target opencode --yes
+```
+
+Exact file and code-symbol lookups need no index or model. Other ordinary `auto`
+queries can return current literal or bounded keyword matches while a missing
+local index is prepared in the background. Keyword matches are approximate,
+marked `matchedBy=keyword`, and carry an incomplete-coverage warning. With no
+local evidence, initial readiness gets up to eight seconds. Existing local-model
+indexes have a separate 1,000 ms query-model preparation budget; exceeding it
+returns local evidence with an incomplete semantic-coverage warning. These are
+not end-to-end latency guarantees. Explicit routes and freshness waits retain
+their indexed behavior, and remote authorization is not expanded.
+
+Ordinary single-query MCP searches can read current files without an index or
+model, but do not implicitly create persistent indexes. The default embedding
+model is unchanged. Workspace watchers default to four hours of inactivity;
+the idle model pool uses a separate 15-minute timeout. See the development
+[CLI guide](./docs/02-cli.md), [MCP contract](./docs/03-mcp.md#zvec_grep_search), and
+[Server lifecycle](./docs/06-server.md#server-lifecycle) for limits and controls.
 
 <a id="benchmarks"></a>
 
