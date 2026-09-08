@@ -19,6 +19,7 @@ import {
 import {
   createEmbeddingModel,
   EmbeddingPurpose,
+  isRemoteEmbeddingProvider,
   resolveEmbeddingReference,
   type CreateEmbeddingModelOptions,
   type EmbeddingModel,
@@ -1431,7 +1432,7 @@ function createServiceEmbeddingModel(
   serviceOptions: CreateZvecGrepOptions,
 ): EmbeddingModel {
   const model = createEmbeddingModel(reference, modelOptions);
-  if (model.info.provider !== "qwen") {
+  if (!isRemoteEmbeddingProvider(model.info.provider)) {
     return model;
   }
 

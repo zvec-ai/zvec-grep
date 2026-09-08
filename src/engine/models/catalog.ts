@@ -29,6 +29,10 @@ export function getRemoteEmbeddingProviderCatalogEntry(
   ];
 }
 
+export function isRemoteEmbeddingProvider(provider: string): boolean {
+  return provider !== "local";
+}
+
 export const EMBEDDING_MODEL_CATALOG = {
   "local/embeddinggemma-300m": {
     backend: "llama-cpp",

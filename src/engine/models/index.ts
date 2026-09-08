@@ -11,6 +11,7 @@ export { createEmbeddingModel } from "./factory.js";
 export {
   getEmbeddingModelCatalogEntry,
   getRemoteEmbeddingProviderCatalogEntry,
+  isRemoteEmbeddingProvider,
   listEmbeddingModels,
   listRemoteEmbeddingProviders,
 } from "./catalog.js";

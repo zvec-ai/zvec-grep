@@ -13,6 +13,7 @@ import test from "node:test";
 import {
   RemoteEmbeddingAuthorizationManager,
   RemoteEmbeddingAuthorizationStore,
+  createRemoteEmbeddingOperationPermit,
   createRemoteEmbeddingTarget,
   planRemoteIndexAuthorization,
   planRemoteSearchAuthorization,
@@ -137,6 +138,53 @@ test("remote provider guard fails closed and re-checks Workspace revocation", as
   assert.equal(fetches, 2);
 });
 
+test("DGX provider uses the same fail-closed authorization guard", async (t) => {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zg-auth-dgx-"));
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  const endpoint = "http://spark.test:11434/v1/embeddings";
+  const target = await createRemoteEmbeddingTarget({
+    roots: [root],
+    provider: "dgx",
+    model: "qwen3-embedding:0.6b",
+    endpoint,
+  });
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    return new Response(
+      JSON.stringify({
+        data: [{ index: 0, embedding: new Array(1024).fill(0.01) }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const model = createEmbeddingModelForIdentity(
+    { provider: "dgx", name: "qwen3-embedding-0.6b" },
+    {
+      endpoint,
+      authorizationSigningKeyPath: join(temporaryDirectory, "signing.key"),
+    },
+  );
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    model.embed([{ kind: "text", text: "not authorized" }]),
+    /authorization is required/i,
+  );
+  assert.equal(fetches, 0);
+
+  const permit = createRemoteEmbeddingOperationPermit(target, "once");
+  await withRemoteEmbeddingOperationPermit(permit, () =>
+    model.embed([{ kind: "text", text: "authorized" }]),
+  );
+  assert.equal(fetches, 1);
+});
+
 test("authorization planner follows merged Query and Index behavior", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "zg-auth-plan-"));
   const root = join(temporaryDirectory, "repo");
@@ -239,6 +287,61 @@ test("authorization planner follows merged Query and Index behavior", async (t) 
   });
   assert.equal(updatePlan.operation, "index");
   assert.equal(updatePlan.reason, "index_update");
+});
+
+test("authorization planner treats DGX as a remote provider", async (t) => {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zg-auth-plan-dgx-"));
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const embedding = {
+    provider: "dgx",
+    model: "qwen3-embedding:0.6b",
+    dimension: 1024,
+    metric: "cosine",
+  };
+  const model = {
+    reference: "dgx/qwen3-embedding-0.6b",
+    ...embedding,
+    name: embedding.model,
+    endpoint: "http://spark.test:11434/v1/embeddings",
+    inputKinds: ["text"],
+    limits: { maxBatchSize: 256, maxInputTokens: 32768 },
+  };
+  const info = {
+    root,
+    indexed: true,
+    indexPolicy: "enabled",
+    home: join(root, ".zvec-grep"),
+    indexPath: join(root, ".zvec-grep", "index"),
+    source: "index",
+    status: status(0),
+    workspaceIndex: {
+      id: "workspace-index",
+      name: "workspace",
+      path: join(root, ".zvec-grep", "index"),
+      rootPaths: [{ absolutePath: root, recursive: true }],
+      embedding,
+      indexVersion: 1,
+      createdTime: 1,
+      updatedTime: 1,
+    },
+  };
+
+  const searchPlan = await planRemoteSearchAuthorization({
+    info,
+    model,
+    search: {
+      root,
+      queries: ["authorization"],
+      routes: [],
+      freshness: "eventual",
+      autoUpdate: true,
+    },
+  });
+  assert.equal(searchPlan.target.provider, "dgx");
+  assert.equal(searchPlan.target.model, "qwen3-embedding:0.6b");
+  assert.equal(searchPlan.operation, "query");
 });
 
 function status(filesModified) {

@@ -6,10 +6,11 @@ import {
   errorDetails,
   isEngineError,
 } from "../../errors.js";
-import type {
-  EmbeddingModel,
-  EmbeddingModelProgress,
-  EmbeddingResult,
+import {
+  isRemoteEmbeddingProvider,
+  type EmbeddingModel,
+  type EmbeddingModelProgress,
+  type EmbeddingResult,
 } from "../../models/index.js";
 import type { WorkspaceIndexStorage } from "../../storage/index.js";
 import type {
@@ -1452,7 +1453,7 @@ function resolveEmbeddingConcurrencyPolicy(
     };
   }
 
-  const remote = model.info.provider === "qwen";
+  const remote = isRemoteEmbeddingProvider(model.info.provider);
   const multimodal = model.info.inputKinds.includes("image");
   const configuredLocalDefault = model.info.defaultConcurrency;
   const localDefault =
