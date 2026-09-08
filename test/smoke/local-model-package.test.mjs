@@ -106,6 +106,8 @@ test("packed package runs a real local embedding model end to end", async (t) =>
     NO_COLOR: "1",
     ZVEC_GREP_HOME: packageHome,
     ZVEC_GREP_EMBEDDING: modelReference,
+    // Match the direct embedding check without requiring GPU support on runners.
+    ZVEC_GREP_DEVICE: "cpu",
     ZVEC_GREP_MODEL_CACHE: modelCache,
   };
 
