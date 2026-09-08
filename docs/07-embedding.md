@@ -139,7 +139,7 @@ zg --config provider set dgx --no-auth
 zg --config model set dgx/qwen3-embedding-0.6b \
   --endpoint http://dgx-spark:11434/v1/embeddings \
   --default
-zg index --allow-remote
+zg --index --allow-remote
 ```
 
 The server must accept `POST /v1/embeddings` with the OpenAI-compatible
