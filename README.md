@@ -170,12 +170,12 @@ provider explicitly as unauthenticated, save the complete endpoint URL, and
 make the DGX model the default for new indexes:
 
 ```bash
-zg config provider set dgx --no-auth
-zg config model set dgx/qwen3-embedding-0.6b \
+zg --config provider set dgx --no-auth
+zg --config model set dgx/qwen3-embedding-0.6b \
   --endpoint http://dgx-spark:11434/v1/embeddings \
   --default
 
-zg index --allow-remote
+zg --index --allow-remote
 ```
 
 Replace `dgx-spark` with the hostname or IP address of your DGX Spark. zg does
@@ -185,7 +185,7 @@ path.
 If the endpoint requires a Bearer token, configure it instead of `--no-auth`:
 
 ```bash
-zg config provider set dgx --api-key "$DGX_EMBEDDING_API_KEY"
+zg --config provider set dgx --api-key "$DGX_EMBEDDING_API_KEY"
 ```
 
 Provider authentication and remote-data authorization are separate.
@@ -194,7 +194,7 @@ create a signed authorization shared by the CLI and MCP server for the current
 workspace, run:
 
 ```bash
-zg auth grant \
+zg --auth grant \
   --capability embedding \
   --scope workspace \
   --embedding dgx/qwen3-embedding-0.6b
@@ -204,7 +204,7 @@ Existing indexes retain their model and endpoint. Use `--rebuild` when moving
 an index to the DGX model or changing its endpoint:
 
 ```bash
-zg index --rebuild \
+zg --index --rebuild \
   --embedding dgx/qwen3-embedding-0.6b \
   --allow-remote
 ```
