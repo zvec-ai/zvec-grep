@@ -17,6 +17,88 @@ const noopWatchManagerFactory = () => ({
   close: async () => {},
 });
 
+for (const searchFirst of [false, true]) {
+  test(`index targets a nested repository even with a parent index (search alias: ${searchFirst})`, async () => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), "zvec-grep-nested-index-"),
+    );
+    const root = join(temporaryDirectory, "repo");
+    const child = join(root, "campaign");
+    await mkdir(join(child, ".git"), { recursive: true });
+    await writeFile(
+      join(root, "parent.md"),
+      "# Parent\nParent workspace document.\n",
+    );
+    await writeFile(join(child, "answer.ts"), "export const answer = 42;\n");
+    const parentModel = new TestEmbeddingModel();
+    parentModel.info = {
+      ...parentModel.info,
+      reference: "test/parent",
+      name: "parent",
+    };
+    const service = await createZvecGrep({ root, embeddingModel: parentModel });
+    try {
+      await service.index({ globs: ["**/*.md"] });
+      const inherited = await service.info({ root: child });
+      assert.equal(inherited.root, await realpath(root));
+      const exact = await service.info({ root: child, discoverParents: false });
+      assert.equal(exact.root, child);
+      assert.equal(exact.indexed, false);
+      assert.equal(exact.workspaceIndex, undefined);
+    } finally {
+      await service.close();
+    }
+    const backend = new DaemonBackend({
+      version: "1.0.0",
+      watchManagerFactory: noopWatchManagerFactory,
+      modelPoolOptions: {
+        createModel: () => {
+          const model = new TestEmbeddingModel();
+          model.info = {
+            ...model.info,
+            provider: "local",
+            reference: "local/deterministic",
+          };
+          return model;
+        },
+      },
+    });
+    try {
+      if (searchFirst) {
+        const runtime = await backend.runtimeManager.activate(child);
+        assert.equal(runtime.canonicalRoot, await realpath(root));
+      }
+      const request = {
+        root: child,
+        embedding: "local/deterministic",
+        wait: true,
+      };
+      assert.equal(await backend.planIndexAuthorization(request), undefined);
+      const result = await backend.index(request);
+      assert.equal(result.state, "succeeded", JSON.stringify(result.error));
+      assert.equal(result.root, await realpath(child));
+      const childInfo = await inspectRoot(child);
+      assert.equal(childInfo.status.filesStored, 1);
+      assert.equal(childInfo.workspaceIndex.embedding.model, "deterministic");
+      assert.equal(
+        childInfo.workspaceIndex.rootPaths[0].absolutePath,
+        await realpath(child),
+      );
+      assert.equal(childInfo.workspaceIndex.rootPaths[0].globs, undefined);
+      assert.equal((await backend.index(request)).root, await realpath(child));
+      const parentInfo = await inspectRoot(root);
+      assert.equal(parentInfo.status.filesStored, 1);
+      assert.equal(parentInfo.workspaceIndex.embedding.model, "parent");
+      assert.deepEqual(parentInfo.workspaceIndex.rootPaths[0].globs, [
+        "**/*.md",
+      ]);
+    } finally {
+      await backend.close();
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("index releases its model lease when service creation fails", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-backend-"),

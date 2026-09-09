@@ -98,6 +98,16 @@ metric unless `--embedding` and `--rebuild` explicitly change them. `zg --index`
 forwards the current CLI environment default in server and auto modes; direct
 MCP calls use the environment inherited by the daemon.
 
+Indexing caps retrieval passages at 3,600 characters with a 15% overlap
+target. Smaller model input limits still take precedence, and heading or
+symbol metadata shares the passage budget. A model's maximum context length
+is a safety ceiling, not the target passage size.
+
+Index version 2 records this chunking policy. Existing version 1 indexes
+require an explicit `zg --index --rebuild` (plus `--allow-remote` for remote
+embedding) to regenerate all passages; ordinary incremental indexing will
+report the required rebuild instead of mixing chunking policies.
+
 ## Local runtime and device
 
 Select a device for local Transformer and GGUF models:
@@ -159,6 +169,27 @@ Provider authentication and data authorization are separate. Even a no-auth
 LAN endpoint requires `--allow-remote` for each CLI command or a signed
 Workspace grant, because repository content and query text leave the
 zvec-grep process.
+
+DGX embedding requests allow up to 30 minutes, including server queue time
+and reading the response. DGX indexing defaults to one in-flight request to
+avoid building a server queue and retrying work that may still be running.
+Requests contain at most 32 fragments and 64,000 total text characters,
+including heading and symbol metadata. Both limits apply to batches spanning
+multiple files and to fragments from a single large file. The text budget is
+a character count, not an exact token count or a JSON/UTF-8 byte limit.
+Indexing prepares the next batch while the current
+batch is in flight.
+Use `zg --index --allow-remote --no-prefetch` to disable this preparation
+overlap when comparing performance.
+Use `--embedding-concurrency` to tune concurrency for your server's capacity:
+
+```bash
+zg --index --allow-remote --embedding-concurrency 2
+```
+
+Explicit concurrency backs off as low as one after transient failures.
+Hosted providers retain their 60-second request timeout. If DGX requests
+still time out, check server logs and inference latency before increasing load.
 
 Common failures have direct causes: `requires an endpoint` means the model URL
 was not configured; connection failures usually mean the DGX hostname, port,

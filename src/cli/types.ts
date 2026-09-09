@@ -70,6 +70,7 @@ export type CliOptions = {
   modifiedBefore?: number;
   symbolTypes?: CodeSymbolType[];
   embeddingConcurrency?: number;
+  noPrefetch?: boolean;
 };
 
 export type CliCommand =

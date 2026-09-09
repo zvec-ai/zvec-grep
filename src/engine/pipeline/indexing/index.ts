@@ -45,6 +45,7 @@ export type IndexContext = {
   storage: WorkspaceIndexStorage;
   embeddingModel: EmbeddingModel;
   embeddingConcurrency?: number;
+  noPrefetch?: boolean;
   onProgress?: (progress: IndexProgress) => void;
   signal?: AbortSignal;
 };
@@ -729,6 +730,9 @@ async function indexFiles(
   };
   const batchFiles: PreparedFile[] = [];
   let batchFragmentCount = 0;
+  let batchChars = 0;
+  const maxBatchChars =
+    ctx.embeddingModel.info.limits.maxBatchChars ?? Infinity;
   const embeddingScheduler = createEmbeddingScheduler(
     ctx.embeddingConcurrency,
     ctx.embeddingModel,
@@ -763,6 +767,7 @@ async function indexFiles(
 
     const filesToEmbed = batchFiles.splice(0);
     batchFragmentCount = 0;
+    batchChars = 0;
 
     await scheduleEmbeddingTask(() =>
       embedAndCommitBatch(
@@ -782,6 +787,14 @@ async function indexFiles(
   ): Promise<void> => {
     throwFirstEmbeddingError();
     throwIfIndexCancelled(ctx);
+    // Apply backpressure before launching, so the producer can prepare the
+    // next batch while existing tasks await embeddings. Only one prepared
+    // batch waits here; embedding request concurrency remains unchanged.
+    while (runningEmbeddings.size >= embeddingScheduler.taskConcurrency) {
+      await Promise.race(runningEmbeddings);
+      throwFirstEmbeddingError();
+      throwIfIndexCancelled(ctx);
+    }
     if (!modelPrepared && prepareModel) {
       // Finish shared initialization before any file or fragment batch is queued.
       try {
@@ -817,8 +830,10 @@ async function indexFiles(
       });
 
     runningEmbeddings.add(promise);
-
-    if (runningEmbeddings.size >= embeddingScheduler.taskConcurrency) {
+    if (
+      ctx.noPrefetch &&
+      runningEmbeddings.size >= embeddingScheduler.taskConcurrency
+    ) {
       await Promise.race(runningEmbeddings);
     }
     throwFirstEmbeddingError();
@@ -848,8 +863,11 @@ async function indexFiles(
         continue;
       }
 
+      const preparedChars = fragmentTextChars(prepared.fragments);
       if (
-        prepared.fragments.length > ctx.embeddingModel.info.limits.maxBatchSize
+        prepared.fragments.length >
+          ctx.embeddingModel.info.limits.maxBatchSize ||
+        preparedChars > maxBatchChars
       ) {
         await flushBatch();
         await scheduleEmbeddingTask(async () => {
@@ -870,16 +888,21 @@ async function indexFiles(
 
       if (
         batchFragmentCount > 0 &&
-        batchFragmentCount + prepared.fragments.length >
-          ctx.embeddingModel.info.limits.maxBatchSize
+        (batchFragmentCount + prepared.fragments.length >
+          ctx.embeddingModel.info.limits.maxBatchSize ||
+          batchChars + preparedChars > maxBatchChars)
       ) {
         await flushBatch();
       }
 
       batchFiles.push(prepared);
       batchFragmentCount += prepared.fragments.length;
+      batchChars += preparedChars;
 
-      if (batchFragmentCount === ctx.embeddingModel.info.limits.maxBatchSize) {
+      if (
+        batchFragmentCount === ctx.embeddingModel.info.limits.maxBatchSize ||
+        batchChars === maxBatchChars
+      ) {
         await flushBatch();
       }
     }
@@ -1193,6 +1216,15 @@ async function readSource(file: FileInfo): Promise<Source> {
   };
 }
 
+function fragmentTextChars(fragments: readonly PreparedFragment[]): number {
+  return fragments.reduce(
+    (total, { embeddingContent }) =>
+      total +
+      (embeddingContent.kind === "text" ? embeddingContent.text.length : 0),
+    0,
+  );
+}
+
 async function embedFragments(
   fragments: readonly PreparedFragment[],
   model: EmbeddingModel,
@@ -1202,16 +1234,23 @@ async function embedFragments(
 ): Promise<EmbeddingResult> {
   const batches: { start: number; fragments: PreparedFragment[] }[] = [];
 
-  for (
-    let start = 0;
-    start < fragments.length;
-    start += model.info.limits.maxBatchSize
-  ) {
-    const batch = fragments.slice(
-      start,
-      start + model.info.limits.maxBatchSize,
-    );
+  const maxBatchChars = model.info.limits.maxBatchChars ?? Infinity;
+  for (let start = 0; start < fragments.length;) {
+    let end = start;
+    let chars = 0;
+    while (
+      end < fragments.length &&
+      end - start < model.info.limits.maxBatchSize
+    ) {
+      const content = fragments[end].embeddingContent;
+      const nextChars = content.kind === "text" ? content.text.length : 0;
+      if (end > start && chars + nextChars > maxBatchChars) break;
+      chars += nextChars;
+      end++;
+    }
+    const batch = fragments.slice(start, end);
     batches.push({ start, fragments: batch });
+    start = end;
   }
 
   const vectors: number[][] = new Array(fragments.length);
@@ -1455,20 +1494,30 @@ function resolveEmbeddingConcurrencyPolicy(
 
   const remote = isRemoteEmbeddingProvider(model.info.provider);
   const multimodal = model.info.inputKinds.includes("image");
-  const configuredLocalDefault = model.info.defaultConcurrency;
-  const localDefault =
-    configuredLocalDefault !== undefined &&
-    Number.isInteger(configuredLocalDefault) &&
-    configuredLocalDefault > 0
-      ? configuredLocalDefault
+  const configuredDefault = model.info.defaultConcurrency;
+  const modelDefault =
+    configuredDefault !== undefined &&
+    Number.isInteger(configuredDefault) &&
+    configuredDefault > 0
+      ? configuredDefault
       : 1;
-  const initial = remote ? (multimodal ? 4 : 8) : localDefault;
-  const max = remote ? (multimodal ? 8 : 12) : localDefault;
-  const min = Math.min(initial, 4);
+  const initial =
+    remote && configuredDefault === undefined
+      ? multimodal
+        ? 4
+        : 8
+      : modelDefault;
+  const max =
+    remote && configuredDefault === undefined
+      ? multimodal
+        ? 8
+        : 12
+      : modelDefault;
 
   return {
     initial,
-    min,
+    // Self-hosted remote endpoints may only sustain one request at a time.
+    min: 1,
     max: Math.max(initial, max),
     adaptive: max > 1,
   };

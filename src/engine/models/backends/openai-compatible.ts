@@ -11,6 +11,7 @@ import {
 import type { OpenAiCompatibleEmbeddingCatalogEntry } from "../catalog.js";
 
 const DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS = 60_000;
+const DGX_EMBEDDING_TIMEOUT_MS = 30 * 60_000;
 
 export type OpenAiCompatibleTextEmbeddingCatalogEntry = Readonly<
   Pick<
@@ -21,6 +22,7 @@ export type OpenAiCompatibleTextEmbeddingCatalogEntry = Readonly<
     | "dimension"
     | "metric"
     | "maxBatchSize"
+    | "maxBatchChars"
     | "maxInputTokens"
   > & {
     defaultEndpoint?: string;
@@ -53,6 +55,7 @@ export class OpenAiCompatibleTextEmbeddingModel extends BaseEmbeddingModel {
   private readonly displayName: string;
   private readonly errorCodePrefix: string;
   private readonly dependencies: OpenAiCompatibleDependencies;
+  private readonly timeoutMs: number;
 
   constructor(
     entry: OpenAiCompatibleTextEmbeddingCatalogEntry,
@@ -66,6 +69,10 @@ export class OpenAiCompatibleTextEmbeddingModel extends BaseEmbeddingModel {
     super();
 
     this.entry = entry;
+    this.timeoutMs =
+      entry.provider === "dgx"
+        ? DGX_EMBEDDING_TIMEOUT_MS
+        : DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS;
     const endpoint =
       options.endpoint === undefined
         ? (entry.defaultEndpoint?.trim() ?? "")
@@ -77,9 +84,13 @@ export class OpenAiCompatibleTextEmbeddingModel extends BaseEmbeddingModel {
       dimension: entry.dimension,
       metric: entry.metric,
       endpoint,
+      ...(entry.provider === "dgx" ? { defaultConcurrency: 1 } : {}),
       inputKinds: ["text"],
       limits: {
         maxBatchSize: entry.maxBatchSize,
+        ...(entry.maxBatchChars === undefined
+          ? {}
+          : { maxBatchChars: entry.maxBatchChars }),
         maxInputTokens: entry.maxInputTokens,
       },
     };
@@ -135,7 +146,7 @@ export class OpenAiCompatibleTextEmbeddingModel extends BaseEmbeddingModel {
     }
 
     let response: Response;
-    const signal = remoteEmbeddingSignal(options.signal);
+    const signal = remoteEmbeddingSignal(options.signal, this.timeoutMs);
 
     try {
       response = await this.dependencies.fetch(this.endpoint, {
@@ -148,7 +159,7 @@ export class OpenAiCompatibleTextEmbeddingModel extends BaseEmbeddingModel {
       throwIfEmbeddingCancelled(options.signal);
       throw new EngineError(`${this.displayName} request failed`, {
         code: this.errorCode("REQUEST_FAILED"),
-        context: `model=${this.info.reference} endpoint=${this.endpoint} timeoutMs=${DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS}`,
+        context: `model=${this.info.reference} endpoint=${this.endpoint} timeoutMs=${this.timeoutMs}`,
         cause,
       });
     }
@@ -292,8 +303,9 @@ export function readProviderError(body: unknown): {
 
 export function remoteEmbeddingSignal(
   signal: AbortSignal | undefined,
+  timeoutMs = DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS,
 ): AbortSignal {
-  const timeout = AbortSignal.timeout(DEFAULT_REMOTE_EMBEDDING_TIMEOUT_MS);
+  const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 

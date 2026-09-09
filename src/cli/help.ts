@@ -195,6 +195,7 @@ Embedding options:
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --embedding-concurrency <n>       Embedding task concurrency
+  --no-prefetch                    Disable preparing the next batch during embedding
   --allow-remote                    Allow Remote Embedding for this command only
 
 File selection:

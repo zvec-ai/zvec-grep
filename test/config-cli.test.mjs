@@ -11,6 +11,19 @@ import { resolveAuthorizationSchema } from "../dist/cli/auth.js";
 const execFileAsync = promisify(execFile);
 const cliPath = resolve("dist/cli/index.js");
 
+test("no-prefetch is accepted only for indexing", () => {
+  for (const mode of ["direct", "server"]) {
+    assert.equal(
+      parseArgs(["--index", "--mode", mode, "--no-prefetch", "."]).options
+        .noPrefetch,
+      true,
+    );
+  }
+  for (const args of [["query"], ["--status"], ["--index", "--drop"]]) {
+    assert.throws(() => parseArgs([...args, "--no-prefetch"]), /--no-prefetch/);
+  }
+});
+
 test("catalog references resolve to served model identities", () => {
   assert.deepEqual(resolveAuthorizationSchema("dgx/qwen3-embedding-0.6b"), {
     provider: "dgx",

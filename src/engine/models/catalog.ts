@@ -120,7 +120,8 @@ export const EMBEDDING_MODEL_CATALOG = {
     model: "qwen3-embedding:0.6b",
     dimension: 1024,
     metric: "cosine",
-    maxBatchSize: 256,
+    maxBatchSize: 32,
+    maxBatchChars: 64_000,
     maxInputTokens: 32768,
   },
 
@@ -613,6 +614,7 @@ export type OpenAiCompatibleEmbeddingCatalogEntry = Readonly<{
   metric: "cosine" | "dot" | "euclidean";
   defaultEndpoint?: string;
   maxBatchSize: number;
+  maxBatchChars?: number;
   maxInputTokens?: number;
   requestDimensions?: boolean;
   requestEncodingFormat?: boolean;

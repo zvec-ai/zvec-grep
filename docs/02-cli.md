@@ -111,6 +111,11 @@ zg --index [root] --rebuild [options]
 zg --index [root] --drop [--yes]
 ```
 
+An explicit root, including `.`, targets that directory's index. Without a
+root, the CLI updates the nearest existing workspace index, falling back to the
+current directory. To index a nested Git repository separately, run
+`zg --index .` inside it; parent scans skip nested Git repositories by default.
+
 Core options:
 
 | Option | Meaning |
@@ -126,6 +131,7 @@ Core options:
 | `--model-cache <path>` | Local model cache directory |
 | `--device <device>` | `auto`, `cpu`, `metal`, `vulkan`, or `cuda` |
 | `--embedding-concurrency <n>` | Concurrent Embedding tasks |
+| `--no-prefetch` | Wait for an indexing task slot before preparing the next batch |
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
 Local Potion embedding tasks run on worker threads. They default to two workers;

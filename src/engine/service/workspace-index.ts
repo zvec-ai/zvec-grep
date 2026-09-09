@@ -81,6 +81,7 @@ export class WorkspaceIndex {
       embeddingModel,
       storage: this.storage,
       embeddingConcurrency: options.embeddingConcurrency,
+      noPrefetch: options.noPrefetch,
       onProgress: options.onProgress,
       signal: options.signal,
     };

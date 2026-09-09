@@ -220,6 +220,12 @@ export const zvecGrepIndexInputSchema = z.object({
     .optional()
     .describe("Maximum indexed file size in bytes."),
   follow: z.boolean().optional().describe("Follow symbolic links."),
+  noPrefetch: z
+    .boolean()
+    .optional()
+    .describe(
+      "Disable preparing the next indexing batch while embeddings are pending.",
+    ),
   embeddingConcurrency: z
     .number()
     .int()

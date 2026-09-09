@@ -8,7 +8,8 @@ const entry = {
   model: "qwen3-embedding:0.6b",
   dimension: 3,
   metric: "cosine",
-  maxBatchSize: 256,
+  maxBatchSize: 32,
+  maxBatchChars: 64000,
   maxInputTokens: 8192,
 };
 
@@ -52,6 +53,7 @@ test("generic OpenAI-compatible model sends the minimal DGX request and restores
   ]);
 
   assert.equal(request.url, "http://spark:11434/v1/embeddings");
+  assert.equal(model.info.limits.maxBatchChars, 64000);
   assert.deepEqual(request.body, {
     model: "qwen3-embedding:0.6b",
     input: ["first", "second"],
@@ -143,4 +145,30 @@ test("generic OpenAI-compatible model validates endpoint and indexed response sh
     },
     /non-finite vector value/,
   );
+});
+
+test("DGX allows slow inference while hosted models keep their timeout", async (t) => {
+  const timeouts = [];
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    timeouts.push(ms);
+    return new AbortController().signal;
+  });
+  for (const provider of ["dgx", "qwen"]) {
+    const model = new OpenAiCompatibleTextEmbeddingModel(
+      { ...entry, provider },
+      { endpoint: "http://example.test/embeddings" },
+      undefined,
+      {
+        async fetch() {
+          return jsonResponse({ data: [{ index: 0, embedding: vector() }] });
+        },
+      },
+    );
+    assert.equal(
+      model.info.defaultConcurrency,
+      provider === "dgx" ? 1 : undefined,
+    );
+    await model.embed([{ kind: "text", text: "value" }]);
+  }
+  assert.deepEqual(timeouts, [1_800_000, 60_000]);
 });

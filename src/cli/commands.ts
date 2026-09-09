@@ -277,6 +277,7 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
             maxFileSizeBytes: parsed.options.maxFileSizeBytes,
             follow: parsed.options.follow,
             embeddingConcurrency: parsed.options.embeddingConcurrency,
+            noPrefetch: parsed.options.noPrefetch,
             debug: parsed.options.debug,
             wait: true,
           },
@@ -408,6 +409,7 @@ async function runDirectIndex(
     const infoBefore = await zvecGrep.info({
       root: rootPath.absolutePath,
       includeStatus: parsed.options.rebuild !== true,
+      discoverParents: false,
     });
     const schema = resolveAuthorizationSchema(
       configuredEmbeddingReference(
@@ -463,6 +465,7 @@ async function runDirectIndex(
           maxFileSizeBytes: parsed.options.maxFileSizeBytes,
           follow: parsed.options.follow,
           embeddingConcurrency: parsed.options.embeddingConcurrency,
+          noPrefetch: parsed.options.noPrefetch,
           onProgress: progress.report,
         }),
     );

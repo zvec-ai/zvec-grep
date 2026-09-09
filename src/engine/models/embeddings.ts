@@ -55,6 +55,8 @@ export type EmbeddingModelInfo = Readonly<{
   inputKinds: readonly ContentKind[];
   limits: Readonly<{
     maxBatchSize: number;
+    /** Total text characters per indexing request, including metadata. */
+    maxBatchChars?: number;
     maxInputTokens?: number;
     maxImageBytes?: number;
   }>;

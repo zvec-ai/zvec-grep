@@ -258,6 +258,141 @@ function multiBatchModel2Vec(modelCacheDir, failure) {
   return { model, calls };
 }
 
+for (const noPrefetch of [false, true]) {
+  test(`service bounds preparation with noPrefetch=${noPrefetch} and embedding concurrency one`, async (t) => {
+    const temporaryDirectory = await createTemporaryDirectory(
+      t,
+      "zvec-grep-prefetch-",
+    );
+    const root = join(temporaryDirectory, "repo");
+    await mkdir(root, { recursive: true });
+    await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        writeFile(join(root, `file-${index}.txt`), `unique content ${index}\n`),
+      ),
+    );
+    const model = new FakeEmbeddingModel();
+    model.info = {
+      ...model.info,
+      defaultConcurrency: 1,
+      limits: { maxBatchSize: 1 },
+    };
+    let releaseFirst;
+    const firstRequest = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    let prefetched = false;
+    let firstFinished = false;
+    const reading = [];
+    const embed = model.doEmbed.bind(model);
+    model.doEmbed = async (contents) => {
+      calls++;
+      active++;
+      maxActive = Math.max(maxActive, active);
+      try {
+        if (calls === 1) {
+          await firstRequest;
+          firstFinished = true;
+        }
+        return await embed(contents);
+      } finally {
+        active--;
+      }
+    };
+    const service = await createZvecGrep({ root, embeddingModel: model });
+    t.after(() => service.close());
+    // Release even if prefetch regresses, so the test fails without hanging.
+    const timeout = setTimeout(releaseFirst, 2000);
+    let readingWhileBlocked;
+    let callsWhileBlocked;
+    try {
+      await service.index({
+        noPrefetch,
+        onProgress(progress) {
+          if (!progress.detail?.startsWith("reading ")) return;
+          reading.push(progress.detail);
+          if (reading.length === 2 && !firstFinished) {
+            prefetched = true;
+            // Let file preparation and scheduling proceed before checking the
+            // bound. A third read must wait for the first request to complete.
+            setTimeout(() => {
+              readingWhileBlocked = reading.length;
+              callsWhileBlocked = calls;
+              releaseFirst();
+            }, 50);
+          }
+        },
+      });
+    } finally {
+      clearTimeout(timeout);
+      releaseFirst();
+    }
+    assert.equal(prefetched, !noPrefetch);
+    if (!noPrefetch) {
+      assert.equal(readingWhileBlocked, 2);
+      assert.equal(callsWhileBlocked, 1);
+    }
+    assert.equal(maxActive, 1);
+    assert.equal(calls, 4);
+    assert.equal((await service.info()).status?.filesIndexed, 4);
+  });
+}
+
+for (const layout of ["multiple files", "single file", "many fragments"]) {
+  test(`service respects retrieval and request text budgets for ${layout}`, async (t) => {
+    const temporaryDirectory = await createTemporaryDirectory(
+      t,
+      "zvec-grep-text-budget-",
+    );
+    const root = join(temporaryDirectory, "repo");
+    await mkdir(root, { recursive: true });
+    const count = layout === "multiple files" ? 40 : 1;
+    const length =
+      layout === "multiple files"
+        ? 3200
+        : layout === "single file"
+          ? 90000
+          : 160000;
+    for (let index = 0; index < count; index++) {
+      await writeFile(
+        join(root, `file-${index}.md`),
+        `# Topic ${index}\n${"retrieval passage ".repeat(Math.ceil(length / 18)).slice(0, length)}`,
+      );
+    }
+    const model = new FakeEmbeddingModel();
+    model.info = {
+      ...model.info,
+      limits: { maxBatchSize: 32, maxBatchChars: 64000, maxInputTokens: 32768 },
+    };
+    const requests = [];
+    const embed = model.doEmbed.bind(model);
+    model.doEmbed = async (contents) => {
+      requests.push(contents.map((content) => content.text));
+      return embed(contents);
+    };
+    const service = await createZvecGrep({ root, embeddingModel: model });
+    t.after(() => service.close());
+    await service.index();
+    assert.ok(requests.length >= 2);
+    for (const request of requests) {
+      assert.ok(request.length <= 32);
+      assert.ok(request.reduce((sum, text) => sum + text.length, 0) <= 64000);
+      assert.ok(request.every((text) => text.length <= 3600));
+    }
+    assert.equal((await service.info()).status?.filesIndexed, count);
+    const before = requests.length;
+    await service.index();
+    assert.equal(
+      requests.length,
+      before,
+      "unchanged files are not re-embedded",
+    );
+  });
+}
+
 test("service exposes embedding model download progress while indexing", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
@@ -624,6 +759,59 @@ test("service stops after bounded remote retries without a failed-file pass", as
   );
 });
 
+for (const configuredConcurrency of [undefined, 1]) {
+  test(`remote concurrency ${configuredConcurrency ?? "adaptive"} recovers from timeouts`, async (t) => {
+    const temporaryDirectory = await createTemporaryDirectory(
+      t,
+      "zvec-grep-timeout-backoff-",
+    );
+    const root = join(temporaryDirectory, "repo");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "example.ts"), "export const Example = 1;\n");
+    const model = new FakeEmbeddingModel();
+    model.info = {
+      ...model.info,
+      provider: "dgx",
+      defaultConcurrency: configuredConcurrency,
+    };
+    const embed = model.doEmbed.bind(model);
+    let calls = 0;
+    model.doEmbed = async (contents, options) => {
+      if (++calls <= 3) {
+        throw new EngineError(
+          "OpenAI-compatible text embedding request failed",
+          {
+            code: "ZVEC_GREP.ENGINE.MODELS.OPENAI_COMPATIBLE_TEXT_EMBEDDING_REQUEST_FAILED",
+            context: "timeoutMs=60000 retryAfterMs=0",
+            cause: new DOMException(
+              "The operation was aborted due to timeout",
+              "TimeoutError",
+            ),
+          },
+        );
+      }
+      options.onProgress?.({
+        stage: "warning",
+        model: model.info.reference,
+        message: "fixture recovered",
+      });
+      return embed(contents);
+    };
+    const service = await createZvecGrep({ root, embeddingModel: model });
+    t.after(() => service.close());
+    const progressEvents = [];
+    const result = await service.index({
+      onProgress: (progress) => progressEvents.push(progress),
+    });
+    assert.equal(result.filesFailed, 0);
+    assert.equal(calls, 4);
+    assert.ok(
+      progressEvents.some((progress) => progress.embedding?.concurrency === 1),
+      JSON.stringify(progressEvents),
+    );
+  });
+}
+
 test("service retries bounded remote HTTP and network failures before recovery", async (t) => {
   const fixtures = [
     {
@@ -938,6 +1126,16 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
     (error) =>
       error.code === "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH" &&
       error.context.includes("zg --index --rebuild"),
+  );
+
+  await assert.rejects(
+    service.index(),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH",
+  );
+  assert.equal(
+    JSON.parse(await readFile(manifestPath, "utf8")).indexVersion,
+    999,
   );
 
   await service.index({ rebuild: true });
