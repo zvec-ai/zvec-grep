@@ -1858,3 +1858,106 @@ test("progress reporter covers TTY and non-TTY phases, counters, truncation, and
   assert.doesNotMatch(ttyText, /a long progress detail/);
   assert.match(ttyText, /\n\x1b\[\?25h$/);
 });
+
+test("workspace status formatters report failed state with error and rebuild suggestion on storage probe failure", async () => {
+  const directOutput = await captureConsole(() => {
+    const state = printWorkspaceInfo(
+      {
+        root: "/repo",
+        indexed: false,
+        indexPolicy: "enabled",
+        source: "unindexed",
+        home: "/repo/.zvec-grep",
+        indexPath: "/repo/.zvec-grep/index.zvec",
+        workspaceIndex: {
+          id: "repo",
+          name: "repo",
+          path: "/repo/.zvec-grep",
+          rootPaths: [{ absolutePath: "/repo", recursive: true }],
+          indexPolicy: "enabled",
+          embedding: {
+            provider: "local",
+            model: "test",
+            dimension: 16,
+            metric: "cosine",
+          },
+          indexVersion: 1,
+          createdTime: 1,
+          updatedTime: 1,
+        },
+        status: null,
+        suggestion:
+          "re-run zg index (or zg index --rebuild) to rebuild the index",
+        error: {
+          code: "ZVEC_GREP.ENGINE.STORAGE.ZVEC_FILE_META_MISSING",
+          message: "zvec file metadata storage does not exist",
+          context: "path=/repo/.zvec-grep/files.zvec",
+        },
+      },
+      { color: "never" },
+    );
+    assert.equal(state, "failed");
+  });
+
+  const directText = directOutput.logs.join("\n");
+  assert.match(directText, /✗ Workspace index failed/);
+  assert.match(
+    directText,
+    /ZVEC_GREP\.ENGINE\.STORAGE\.ZVEC_FILE_META_MISSING/,
+  );
+  assert.match(directText, /zvec file metadata storage does not exist/);
+  assert.match(
+    directText,
+    /Next\s+re-run zg index \(or zg index --rebuild\) to rebuild the index/,
+  );
+
+  const serverOutput = await captureConsole(() => {
+    const state = printServerIndexInfo(
+      {
+        root: "/repo",
+        indexed: false,
+        index_policy: "enabled",
+        source: "unindexed",
+        persistent: {
+          home: "/repo/.zvec-grep",
+          index_path: "/repo/.zvec-grep/index.zvec",
+          workspace_index: {
+            root_paths: [{ absolute_path: "/repo", recursive: true }],
+            embedding: {
+              provider: "local",
+              model: "test",
+              dimension: 16,
+              metric: "cosine",
+            },
+            index_version: 1,
+          },
+          suggestion:
+            "re-run zg index (or zg index --rebuild) to rebuild the index",
+        },
+        runtime: {
+          watcher_active: false,
+          dirty_revision: 0,
+          indexed_revision: 0,
+          job_state: "failed",
+          error: {
+            code: "ZVEC_GREP.ENGINE.STORAGE.ZVEC_FILE_META_MISSING",
+            message: "zvec file metadata storage does not exist",
+          },
+        },
+      },
+      { color: "never" },
+    );
+    assert.equal(state, "failed");
+  });
+
+  const serverText = serverOutput.logs.join("\n");
+  assert.match(serverText, /✗ Workspace index failed/);
+  assert.match(
+    serverText,
+    /ZVEC_GREP\.ENGINE\.STORAGE\.ZVEC_FILE_META_MISSING/,
+  );
+  assert.match(
+    serverText,
+    /Next\s+re-run zg index \(or zg index --rebuild\) to rebuild the index/,
+  );
+});

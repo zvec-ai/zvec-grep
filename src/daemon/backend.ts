@@ -639,22 +639,23 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       indexPolicy: info.indexPolicy,
       source: info.source,
       persistent: persistentStatus(info),
-      runtime: runtimeSnapshot
-        ? {
-            watcherActive: runtimeSnapshot.watcherActive,
-            dirtyRevision: runtimeSnapshot.dirtyRevision,
-            indexedRevision: runtimeSnapshot.indexedRevision,
-            activeJobId: job?.id,
-            jobState: job?.state,
-            progress: job?.progress ? formatProgress(job) : undefined,
-            completion: indexCompletionForJob(
-              indexCompletionFromStatus(info.status),
-              job?.state,
-              job?.progress,
-            ),
-            error: job?.error,
-          }
-        : undefined,
+      runtime:
+        runtimeSnapshot || info.error
+          ? {
+              watcherActive: runtimeSnapshot?.watcherActive ?? false,
+              dirtyRevision: runtimeSnapshot?.dirtyRevision ?? 0,
+              indexedRevision: runtimeSnapshot?.indexedRevision ?? 0,
+              activeJobId: job?.id,
+              jobState: job?.state ?? (info.error ? "failed" : undefined),
+              progress: job?.progress ? formatProgress(job) : undefined,
+              completion: indexCompletionForJob(
+                indexCompletionFromStatus(info.status),
+                job?.state,
+                job?.progress,
+              ),
+              error: job?.error ?? info.error,
+            }
+          : undefined,
     };
   }
 

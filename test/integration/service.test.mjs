@@ -8,7 +8,7 @@ import { resolveModelArtifacts } from "../../dist/engine/models/artifact-downloa
 import { Model2VecEmbeddingModel } from "../../dist/engine/models/backends/model2vec.js";
 import { CURRENT_INDEX_VERSION } from "../../dist/engine/types.js";
 import { createZvecGrep } from "../../dist/index.js";
-import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
+import { createTemporaryDirectory, runCli } from "../helpers/fixtures.mjs";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
 
 class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
@@ -952,6 +952,116 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
     autoUpdate: false,
   });
   assert.ok(result.items.length > 0);
+});
+
+test("workspace status reports failed and unready when storage is missing or unopenable, and --check-ready fails", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-storage-probe-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "file.ts"), "export const ProbeNeedle = 1;\n");
+
+  let service = await createZvecGrep({
+    root,
+    home,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  t.after(async () => {
+    await service.close();
+  });
+  await service.index();
+  await service.close();
+
+  // Case 1: manifest present but files.zvec missing
+  const filesPath = join(root, ".zvec-grep", "files.zvec");
+  await rm(filesPath, { recursive: true, force: true });
+
+  service = await createZvecGrep({
+    root,
+    home,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  const infoMissingFiles = await service.info();
+  assert.equal(infoMissingFiles.indexed, false);
+  assert.equal(
+    infoMissingFiles.error?.code,
+    "ZVEC_GREP.ENGINE.STORAGE.ZVEC_FILE_META_MISSING",
+  );
+  assert.equal(
+    infoMissingFiles.suggestion,
+    "re-run zg index (or zg index --rebuild) to rebuild the index",
+  );
+
+  const statusMissingFiles = await runCli(
+    ["--status", root, "--mode", "direct"],
+    { cwd: root },
+  );
+  assert.match(statusMissingFiles.stdout, /✗ Workspace index failed/);
+  assert.match(
+    statusMissingFiles.stdout,
+    /ZVEC_GREP\.ENGINE\.STORAGE\.ZVEC_FILE_META_MISSING/,
+  );
+  assert.match(
+    statusMissingFiles.stdout,
+    /re-run zg index \(or zg index --rebuild\) to rebuild the index/,
+  );
+
+  await assert.rejects(
+    runCli(["--status", root, "--mode", "direct", "--check-ready"], {
+      cwd: root,
+    }),
+    (error) => {
+      assert.match(
+        error.stderr,
+        /Workspace index is not ready \(state: failed\)/,
+      );
+      return true;
+    },
+  );
+
+  // Case 2: files.zvec present but unopenable (empty folder without LOCK / valid schema)
+  await mkdir(filesPath, { recursive: true });
+
+  const infoUnopenable = await service.info();
+  assert.equal(infoUnopenable.indexed, false);
+  assert.equal(
+    infoUnopenable.error?.code,
+    "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED",
+  );
+  assert.equal(
+    infoUnopenable.suggestion,
+    "re-run zg index (or zg index --rebuild) to rebuild the index",
+  );
+
+  const statusUnopenable = await runCli(
+    ["--status", root, "--mode", "direct"],
+    { cwd: root },
+  );
+  assert.match(statusUnopenable.stdout, /✗ Workspace index failed/);
+  assert.match(
+    statusUnopenable.stdout,
+    /ZVEC_GREP\.ENGINE\.STORAGE\.ZVEC_OPEN_FAILED/,
+  );
+  assert.match(
+    statusUnopenable.stdout,
+    /re-run zg index \(or zg index --rebuild\) to rebuild the index/,
+  );
+
+  await assert.rejects(
+    runCli(["--status", root, "--mode", "direct", "--check-ready"], {
+      cwd: root,
+    }),
+    (error) => {
+      assert.match(
+        error.stderr,
+        /Workspace index is not ready \(state: failed\)/,
+      );
+      return true;
+    },
+  );
 });
 
 test("service records failed files, retries them, deletes stale records, and rebuilds", async (t) => {
