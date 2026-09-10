@@ -1,11 +1,14 @@
-import { existsSync, realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { deleteWorkspaceManifest, workspaceManifestPath } from "../manifest.js";
 import {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,
+  installWorkspaceIndexStorage,
 } from "../storage/index.js";
 import { workspaceIndexPath } from "../storage/layout.js";
+import { normalizePath } from "../utils/path.js";
 
 export const ZVEC_GREP_DIR = ".zvec-grep";
 export type WorkspaceIndexLocation = {
@@ -16,7 +19,7 @@ export type WorkspaceIndexLocation = {
 };
 
 export function resolveZvecGrepRoot(root: string | undefined): string {
-  return resolve(root ?? process.cwd());
+  return normalizePath(root ?? process.cwd());
 }
 
 export function workspaceHome(root: string): string {
@@ -42,6 +45,38 @@ export function workspaceIndexLocation(root: string): WorkspaceIndexLocation {
 export function resetWorkspaceIndex(location: WorkspaceIndexLocation): void {
   deleteWorkspaceManifest(location.home);
   deleteWorkspaceIndexStorage(location.home);
+}
+
+export function createRebuildStagingLocation(
+  location: WorkspaceIndexLocation,
+): WorkspaceIndexLocation {
+  const home = join(location.home, `rebuild.${process.pid}.${randomUUID()}`);
+  return {
+    root: location.root,
+    home,
+    manifestPath: workspaceManifestPath(home),
+    indexPath: workspaceIndexPath(home),
+  };
+}
+
+export function installRebuiltWorkspaceIndex(
+  location: WorkspaceIndexLocation,
+  staging: WorkspaceIndexLocation,
+): void {
+  if (dirname(staging.home) !== location.home) {
+    throw new Error("Rebuild staging must be inside the workspace index home");
+  }
+  installWorkspaceIndexStorage(location.home, staging.home);
+}
+
+export function discardRebuildStaging(
+  location: WorkspaceIndexLocation,
+  staging: WorkspaceIndexLocation,
+): void {
+  if (dirname(staging.home) !== location.home) {
+    throw new Error("Rebuild staging must be inside the workspace index home");
+  }
+  rmSync(staging.home, { recursive: true, force: true });
 }
 
 export function findNearestWorkspaceIndex(
