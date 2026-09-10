@@ -81,4 +81,5 @@ export { createWorkspaceIndexStorage } from "./zvec.js";
 export {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,
+  installWorkspaceIndexStorage,
 } from "./layout.js";

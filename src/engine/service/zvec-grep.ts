@@ -46,8 +46,11 @@ import {
 } from "../manifest.js";
 import { validateRootPaths } from "../pipeline/indexing/root-paths.js";
 import {
+  createRebuildStagingLocation,
+  discardRebuildStaging,
   findNearestWorkspace,
   hasWorkspaceIndex,
+  installRebuiltWorkspaceIndex,
   resetWorkspaceIndex,
   resolveZvecGrepRoot,
   workspaceHome,
@@ -257,7 +260,19 @@ class ZvecGrepService implements ZvecGrep {
                 follow: options.follow,
               },
             );
-            if (options.rebuild || !isWorkspaceIndexed(existing)) {
+            validateRootPaths(rootPaths);
+
+            const replaceExisting =
+              options.rebuild === true && existing !== null;
+            const stagingLocation = replaceExisting
+              ? createRebuildStagingLocation(location)
+              : undefined;
+            const writeLocation = stagingLocation ?? location;
+
+            if (
+              !replaceExisting &&
+              (options.rebuild || !isWorkspaceIndexed(existing))
+            ) {
               resetWorkspaceIndex(location);
             }
 
@@ -279,18 +294,25 @@ class ZvecGrepService implements ZvecGrep {
             );
 
             const manifest = prepareWorkspaceManifest(
-              location,
+              writeLocation,
               existingAfterRebuild,
               rootPaths,
               embeddingModel,
               embeddingRuntime,
             );
+            const liveManifest = {
+              ...manifest,
+              path: location.home,
+            };
             const workspaceIndex = new WorkspaceIndex(manifest, {
               mode: "write",
               embeddingModel,
             });
-            writeWorkspaceManifest(location.home, manifest);
+            if (!replaceExisting) {
+              writeWorkspaceManifest(location.home, liveManifest);
+            }
 
+            let rebuildSucceeded = false;
             try {
               const releaseWriterContext = options.onWriterContext?.(
                 (contextOptions) =>
@@ -308,24 +330,43 @@ class ZvecGrepService implements ZvecGrep {
                   changedPaths: options.changedPaths,
                   signal: options.signal,
                 });
-                writeWorkspaceManifest(location.home, {
-                  ...manifest,
-                  embeddingRuntime,
-                  updatedTime: Date.now(),
-                });
+                rebuildSucceeded = true;
+                if (!replaceExisting) {
+                  writeWorkspaceManifest(location.home, {
+                    ...liveManifest,
+                    embeddingRuntime,
+                    updatedTime: Date.now(),
+                  });
+                }
                 return result;
               } catch (error) {
-                writeWorkspaceManifest(location.home, {
-                  ...manifest,
-                  embeddingRuntime,
-                  updatedTime: Date.now(),
-                });
+                if (!replaceExisting) {
+                  writeWorkspaceManifest(location.home, {
+                    ...liveManifest,
+                    embeddingRuntime,
+                    updatedTime: Date.now(),
+                  });
+                }
                 throw error;
               } finally {
                 await releaseWriterContext?.();
               }
             } finally {
               workspaceIndex.close();
+              if (stagingLocation) {
+                try {
+                  if (rebuildSucceeded) {
+                    installRebuiltWorkspaceIndex(location, stagingLocation);
+                    writeWorkspaceManifest(location.home, {
+                      ...liveManifest,
+                      embeddingRuntime,
+                      updatedTime: Date.now(),
+                    });
+                  }
+                } finally {
+                  discardRebuildStaging(location, stagingLocation);
+                }
+              }
             }
           },
         ),
