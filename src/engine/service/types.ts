@@ -75,6 +75,12 @@ export type ZvecGrepInfoResult = {
   workspaceIndex?: WorkspaceIndexInfo;
   status?: WorkspaceIndexStatus | null;
   suggestion?: string;
+  error?: {
+    code: string;
+    message: string;
+    context?: string;
+    cause?: string;
+  };
 };
 
 export type ZvecGrepContextRoute = SearchPlanRoute;

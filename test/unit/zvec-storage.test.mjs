@@ -8,7 +8,10 @@ import {
   ZVecCreateAndOpen,
   ZVecDataType,
 } from "@zvec/zvec";
-import { createWorkspaceIndexStorage } from "../../dist/engine/storage/index.js";
+import {
+  createWorkspaceIndexStorage,
+  probeWorkspaceIndexStorage,
+} from "../../dist/engine/storage/index.js";
 import { queryFileMetadataDocs } from "../../dist/engine/storage/zvec.js";
 
 function doc(id) {
@@ -152,3 +155,87 @@ function fileInfo(id, root, relativePath) {
     format: relativePath.endsWith(".md") ? "markdown" : "typescript",
   };
 }
+
+test("probeWorkspaceIndexStorage detects missing files.zvec storage", async (t) => {
+  const parent = await mkdtemp(
+    join(tmpdir(), "zvec-grep-probe-missing-files-"),
+  );
+  t.after(async () => {
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  assert.throws(
+    () => probeWorkspaceIndexStorage(parent),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.STORAGE.ZVEC_FILE_META_MISSING" &&
+      error.context.includes("files.zvec"),
+  );
+});
+
+test("probeWorkspaceIndexStorage detects missing index.zvec collection", async (t) => {
+  const parent = await mkdtemp(
+    join(tmpdir(), "zvec-grep-probe-missing-index-"),
+  );
+  t.after(async () => {
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  // Create valid files.zvec but leave index.zvec missing
+  const storage = createWorkspaceIndexStorage({
+    storagePath: parent,
+    readOnly: false,
+    embedding: {
+      provider: "local",
+      model: "test",
+      dimension: 2,
+      metric: "cosine",
+    },
+  });
+  storage.close();
+  await rm(join(parent, "index.zvec"), { recursive: true, force: true });
+
+  assert.throws(
+    () => probeWorkspaceIndexStorage(parent),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.STORAGE.ZVEC_COLLECTION_MISSING" &&
+      error.context.includes("index.zvec"),
+  );
+});
+
+test("probeWorkspaceIndexStorage detects unopenable storage collections", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-probe-unopenable-"));
+  t.after(async () => {
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  // Create unopenable directory placeholders
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(join(parent, "files.zvec"), { recursive: true });
+  await mkdir(join(parent, "index.zvec"), { recursive: true });
+
+  assert.throws(
+    () => probeWorkspaceIndexStorage(parent),
+    (error) => error.code === "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED",
+  );
+});
+
+test("probeWorkspaceIndexStorage succeeds on valid workspace index storage", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-probe-valid-"));
+  t.after(async () => {
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  const storage = createWorkspaceIndexStorage({
+    storagePath: parent,
+    readOnly: false,
+    embedding: {
+      provider: "local",
+      model: "test",
+      dimension: 2,
+      metric: "cosine",
+    },
+  });
+  storage.close();
+
+  assert.doesNotThrow(() => probeWorkspaceIndexStorage(parent));
+});
