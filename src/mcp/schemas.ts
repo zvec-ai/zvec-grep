@@ -269,6 +269,12 @@ const cliSearchRouteInputSchema = z.object({
 /** Internal daemon-admin schema preserving CLI runtime overrides and route order. */
 export const zvecGrepCliSearchInputSchema = zvecGrepSearchInputSchema.extend({
   ...embeddingSearchRuntimeFields,
+  semanticPolicy: z
+    .literal("wait")
+    .optional()
+    .describe(
+      "Preserve explicitly requested hybrid retrieval instead of applying the default semantic preparation budget. Internal CLI transport only.",
+    ),
   routes: z
     .array(cliSearchRouteInputSchema)
     .max(MCP_MAX_QUERY_GROUPS * 2)
@@ -361,7 +367,7 @@ const contextItemSchema = z.object({
   contentRole: z.enum(["source", "outline"]).optional(),
   status: z.enum(["fresh", "possibly_stale"]),
   score: z.number().optional(),
-  matchedBy: z.enum(["fts", "vector", "fts+vector", "lexical"]),
+  matchedBy: z.enum(["fts", "vector", "fts+vector", "lexical", "keyword"]),
   metadata: z.unknown().optional(),
   entityId: z.string().optional(),
   container: z
@@ -415,13 +421,34 @@ const searchResultSchema = z.object({
       .enum([
         "no_matches",
         "no_searchable_files",
+        "semantic_incomplete",
         "index_unavailable",
         "search_failed",
+      ])
+      .optional(),
+    semantic: z
+      .discriminatedUnion("reason", [
+        z.object({
+          status: z.literal("skipped"),
+          reason: z.literal("preparation_budget_exceeded"),
+          budgetMs: z.number().nonnegative(),
+        }),
+        z.object({
+          status: z.literal("skipped"),
+          reason: z.literal("index_unavailable"),
+        }),
       ])
       .optional(),
     index: z.unknown().optional(),
     fallback: z.unknown().optional(),
     rg: z.unknown().optional(),
+    keywords: z
+      .object({
+        terms: z.array(z.string()),
+        candidates: z.number().int().nonnegative(),
+        truncated: z.boolean(),
+      })
+      .optional(),
     structure: z.unknown().optional(),
     timings: z
       .array(

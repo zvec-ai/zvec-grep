@@ -20,6 +20,7 @@ export type LanguageAdapter = {
   resolveEntities?(node: TSNode): readonly TSNode[];
   enterScopeNode?(node: TSNode): TSNode;
   resolveEntity?(node: TSNode): TSNode;
+  sourceNode?(node: TSNode): TSNode;
   scopeBreadcrumb?(
     node: TSNode,
     breadcrumb: readonly string[],

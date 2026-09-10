@@ -84,6 +84,12 @@ function cliAgentContextLines(
   if (result.source === "rg" || result.groupResults === undefined) {
     return agentContextLines(result, options);
   }
+  if (result.groupResults.length === 1) {
+    return agentContextLines(
+      contextResultForGroup(result, result.groupResults[0]!),
+      options,
+    );
+  }
 
   const lines = [`query groups (${result.groupResults.length}):`];
   for (const [index, group] of result.groupResults.entries()) {
@@ -117,7 +123,12 @@ function contextResultForGroup(
     groupResults: undefined,
     diagnostics: {
       ...result.diagnostics,
-      emptyReason: group.items.length === 0 ? "no_matches" : undefined,
+      emptyReason:
+        group.items.length > 0
+          ? undefined
+          : result.diagnostics.semantic && group.role === "primary"
+            ? "semantic_incomplete"
+            : "no_matches",
       index: result.diagnostics.index
         ? {
             ...result.diagnostics.index,
@@ -246,6 +257,9 @@ function agentRgContextLines(
     lines.push(group.file.relativePath);
 
     for (const block of groupAgentRgItems(group)) {
+      if (block.items.some((item) => item.matchedBy === "keyword")) {
+        lines.push("  matchedBy=keyword");
+      }
       if (block.kind === "symbol" && !isRedundantDeclarationBlock(block)) {
         lines.push(...agentRgSymbolBlockLines(block, highlighter));
       } else {
@@ -472,6 +486,13 @@ function printCliHumanContextResult(
     printHumanContextResult(result, options);
     return;
   }
+  if (result.groupResults.length === 1) {
+    printHumanContextResult(
+      contextResultForGroup(result, result.groupResults[0]!),
+      options,
+    );
+    return;
+  }
 
   const theme = createHumanTheme(options);
   const allItems = result.groupResults.flatMap((group) => group.items);
@@ -499,7 +520,14 @@ function printCliHumanContextResult(
     );
     printHumanField(theme, "Hits", String(group.items.length));
     if (group.items.length === 0) {
-      printHumanField(theme, "Reason", "No matches");
+      printHumanField(
+        theme,
+        "Reason",
+        emptyContextLabel(contextResultForGroup(result, group)).replace(
+          /\.$/,
+          "",
+        ),
+      );
       continue;
     }
     printHumanItemGroups(
@@ -608,15 +636,29 @@ function printHumanItemGroups(
 }
 
 export function contextWarningLines(result: ZvecGrepContextResult): string[] {
+  const warnings: string[] = [];
+  if (result.diagnostics.semantic) {
+    warnings.push(
+      result.diagnostics.semantic.reason === "index_unavailable"
+        ? "warning: semantic index is not ready; showing current text matches only (search coverage is incomplete)"
+        : "warning: semantic search exceeded the preparation budget; showing local text matches only (search coverage is incomplete)",
+    );
+  }
+  if (result.diagnostics.keywords?.truncated) {
+    warnings.push(
+      "warning: keyword search reached a scan or resource limit; text coverage is incomplete",
+    );
+  }
   const missingPaths = result.diagnostics.rg?.missingPaths ?? [];
   if (
     missingPaths.length === 0 ||
     result.diagnostics.emptyReason === "no_searchable_files"
   ) {
-    return [];
+    return warnings;
   }
 
   return [
+    ...warnings,
     `warning: skipped missing ${missingPaths.length === 1 ? "path" : "paths"}: ${missingPaths.join(", ")}`,
   ];
 }
@@ -629,11 +671,15 @@ function previewMode(
     return "full";
   }
 
-  return options.preview ?? (options.human ? "full" : "none");
+  return options.preview ?? (options.human ? "short" : "none");
 }
 
 function emptyContextLabel(result: ZvecGrepContextResult): string {
   switch (result.diagnostics.emptyReason ?? "no_matches") {
+    case "semantic_incomplete":
+      return result.diagnostics.semantic?.reason === "index_unavailable"
+        ? "No local text matches; semantic index is not ready."
+        : "No local text matches; semantic search exceeded the preparation budget.";
     case "no_searchable_files":
       return "No searchable files.";
     case "no_matches":
@@ -1106,6 +1152,9 @@ function entitySummary(item: ZvecGrepContextItem): string {
 }
 
 function contextLabel(result: ZvecGrepContextResult): string {
+  if (result.source === "index" && result.diagnostics.rg) {
+    return `${result.root} current files + workspace index`;
+  }
   if (result.workspaceIndex) {
     return `${result.root} workspace index`;
   }

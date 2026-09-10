@@ -8,6 +8,7 @@ import {
 } from "./metadata.js";
 
 const JS_TS_FUNCTION_VALUE_DECLARATION_TYPES = new Set([
+  "assignment_expression",
   "field_definition",
   "public_field_definition",
   "variable_declarator",
@@ -16,6 +17,7 @@ const JS_TS_FUNCTION_VALUE_DECLARATION_TYPES = new Set([
 const JS_TS_FUNCTION_VALUE_TYPES = new Set([
   "arrow_function",
   "function_expression",
+  "generator_function",
 ]);
 
 export function shouldIndexJavascriptTypescriptEntity(node: TSNode): boolean {
@@ -59,9 +61,34 @@ export function resolveJavascriptTypescriptEntities(
   return objectEntities.length > 0 ? objectEntities : [node];
 }
 
+/** Keep declaration prefixes with a single symbol, not as separate fragments. */
+export function javascriptTypescriptSourceNode(node: TSNode): TSNode {
+  let current = node;
+  while (current.parent) {
+    const parent = current.parent;
+    if (
+      ![
+        "export_statement",
+        "lexical_declaration",
+        "variable_declaration",
+        "expression_statement",
+      ].includes(parent.type)
+    )
+      break;
+    const declarations = parent.namedChildren.filter(
+      (child) => child.type !== "comment",
+    );
+    if (declarations.length !== 1 || declarations[0]!.id !== current.id) break;
+    current = parent;
+  }
+  return current;
+}
+
 export function extractJavascriptTypescriptName(
   node: TSNode,
 ): string | undefined {
+  if (node.type === "assignment_expression")
+    return assignmentBinding(node)?.name;
   if (node.type === "pair") {
     return node.childForFieldName("key")?.text.replace(/^['"`]|['"`]$/g, "");
   }
@@ -75,6 +102,8 @@ export function javascriptTypescriptScopeBreadcrumb(
   node: TSNode,
   breadcrumb: readonly string[],
 ): readonly string[] {
+  const receiver = assignmentBinding(node)?.scope;
+  if (receiver) return [...breadcrumb, receiver];
   const objectName = exportedObjectVariableName(node);
 
   return objectName ? [...breadcrumb, objectName] : breadcrumb;
@@ -83,6 +112,12 @@ export function javascriptTypescriptScopeBreadcrumb(
 export function extractJavascriptTypescriptSignature(
   node: TSNode,
 ): string | undefined {
+  const assigned = assignedFunction(node);
+  if (assigned) {
+    const signature = extractGenericSignature(assigned);
+    const target = node.childForFieldName("left")?.text;
+    if (signature && target) return `${target} = ${signature}`;
+  }
   if (node.type === "pair") {
     const key = extractJavascriptTypescriptName(node);
     const value = node.childForFieldName("value");
@@ -109,11 +144,28 @@ export function classifyJavascriptTypescriptNode(
   return undefined;
 }
 
-export const extractJavascriptTypescriptDoc = extractPrecedingDoc;
+export function extractJavascriptTypescriptDoc(
+  node: TSNode,
+): string | undefined {
+  return extractPrecedingDoc(
+    node.type === "assignment_expression" &&
+      node.parent?.type === "expression_statement"
+      ? node.parent
+      : node,
+  );
+}
 
-export const extractJavascriptTypescriptModifiers = extractCommonModifiers;
+export function extractJavascriptTypescriptModifiers(node: TSNode) {
+  return extractCommonModifiers(assignedFunction(node) ?? node);
+}
 
 function hasFunctionValue(node: TSNode): boolean {
+  if (node.type === "assignment_expression") {
+    return (
+      assignmentBinding(node) !== undefined &&
+      assignedFunction(node) !== undefined
+    );
+  }
   const value =
     node.childForFieldName("value") ??
     node.namedChildren.find((child) =>
@@ -128,11 +180,55 @@ function containsFunctionValue(node: TSNode): boolean {
     return true;
   }
 
-  if (node.type !== "call_expression" && node.type !== "arguments") {
+  if (
+    node.type !== "call_expression" &&
+    node.type !== "arguments" &&
+    node.type !== "parenthesized_expression"
+  ) {
     return false;
   }
 
   return node.namedChildren.some((child) => containsFunctionValue(child));
+}
+
+function assignedFunction(node: TSNode): TSNode | undefined {
+  if (node.type !== "assignment_expression") return undefined;
+  let value = node.childForFieldName("right");
+  while (value?.type === "parenthesized_expression")
+    value = value.namedChildren[0] ?? null;
+  // A call that accepts a callback may return an array, subscription, etc.
+  // Do not infer a function-valued binding merely from a nested callback.
+  return value && JS_TS_FUNCTION_VALUE_TYPES.has(value.type)
+    ? value
+    : undefined;
+}
+
+function assignmentBinding(
+  node: TSNode,
+): { name: string; scope?: string } | undefined {
+  if (node.type !== "assignment_expression") return undefined;
+  const target = node.childForFieldName("left");
+  if (target?.type === "identifier") return { name: target.text };
+  if (target?.type === "member_expression") {
+    const property = target.childForFieldName("property");
+    const object = target.childForFieldName("object");
+    if (property && object) return { name: property.text, scope: object.text };
+  }
+  if (target?.type === "subscript_expression") {
+    const index = target.childForFieldName("index");
+    const object = target.childForFieldName("object");
+    // Only a known literal name is a lookup anchor. Never claim that the
+    // variable in object[name], or undecoded escape text, defines that name.
+    if (
+      index?.type === "string" &&
+      object &&
+      index.namedChildren.every((child) => child.type === "string_fragment")
+    ) {
+      const name = index.text.slice(1, -1);
+      if (name) return { name, scope: object.text };
+    }
+  }
+  return undefined;
 }
 
 function exportedObjectFunctionEntities(node: TSNode): TSNode[] {

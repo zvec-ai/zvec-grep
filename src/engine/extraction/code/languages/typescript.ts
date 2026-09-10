@@ -6,6 +6,7 @@ import {
   extractJavascriptTypescriptName,
   extractJavascriptTypescriptSignature,
   javascriptTypescriptScopeBreadcrumb,
+  javascriptTypescriptSourceNode,
   resolveJavascriptTypescriptEntities,
   shouldIndexJavascriptTypescriptEntity,
 } from "../families/js-ts.js";
@@ -13,6 +14,7 @@ import {
 export const TYPESCRIPT_ADAPTER: LanguageAdapter = {
   format: "typescript",
   entityTypes: new Set([
+    "assignment_expression",
     "abstract_class_declaration",
     "abstract_method_signature",
     "class_declaration",
@@ -39,6 +41,7 @@ export const TYPESCRIPT_ADAPTER: LanguageAdapter = {
   extractName: extractJavascriptTypescriptName,
   shouldIndexEntity: shouldIndexJavascriptTypescriptEntity,
   resolveEntities: resolveJavascriptTypescriptEntities,
+  sourceNode: javascriptTypescriptSourceNode,
   scopeBreadcrumb: javascriptTypescriptScopeBreadcrumb,
   classifyNode: classifyJavascriptTypescriptNode,
   extractSignature: extractJavascriptTypescriptSignature,

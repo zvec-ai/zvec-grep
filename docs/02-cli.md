@@ -5,6 +5,10 @@
 [Architecture](./05-architecture.md) · [Server](./06-server.md) ·
 [Embedding](./07-embedding.md) · [Roadmap](./08-roadmap.md)
 
+This guide describes the development build in this source checkout. The
+[README quickstart](../README.md#try-it-yourself) keeps the published npm
+release's syntax; use `zg --help` to check the version you have installed.
+
 The `zg` command is a search interface first. Positional arguments are always
 queries; maintenance operations use long action options so ordinary words such
 as `index`, `install`, and `status` never collide with commands. Use the
@@ -73,7 +77,13 @@ Result controls:
 | `--modified-after <time>` | Search files modified after a time |
 | `--modified-before <time>` | Search files modified before a time |
 
-Indexed CLI results are separated by query group and preserve the rank assigned
+Ordinary positional words form one query: `zg connection pool timeout`,
+`zg 'connection pool timeout'`, and `zg "connection pool timeout"` have the same
+search intent. Shell quotes group text; they are not search-mode operators.
+Use repeated `--hybrid` options for deliberate independent query groups.
+
+Single-query CLI output is one result list. Explicit multi-query results are
+separated by query group and preserve the rank assigned
 inside that group. The CLI does not apply the MCP response's cross-group
 coverage/global-fill presentation. A result recalled by several groups appears
 under each of those groups. `--limit` continues to bound each group.
@@ -85,10 +95,111 @@ Common scope options for indexed search are `-g/--glob`, `--iglob`, `-t/--type`,
 and `-T/--type-not`. Managed rg additionally supports common ripgrep matching,
 context, discovery, encoding, and regex-engine flags.
 
-If no index exists, `zg` creates one with a local embedding model before the
-first indexed search. A configured local model is respected; a configured
-remote model is not used implicitly. Use `zg --index` when you want to choose a
-remote model, narrow the indexed paths, rebuild, or drop the index.
+Ordinary searches first check current files. File paths such as `src/auth.ts` or
+`auth.ts` find files by name, without reading or embedding their contents. A
+path found only in source text still returns those text matches. Clear code
+identifiers such as `verifyToken` or `CONNECTION_POOL` use literal matching;
+definitions precede references. A complete lookup with no match returns
+`No matches.` instead of unrelated vector neighbors, even with a warm index.
+These lookups need no model, index, or daemon and respect the stored workspace
+scope and query filters. Ambiguous words and questions retain hybrid retrieval.
+Explicit routes (`--fts`, `--vector`, `--hybrid`), `--refresh`, model overrides
+and `--mode server` retain the indexed workflow.
+
+In default `auto` mode, indexed search starts or reuses the local daemon. If no
+index is usable, it starts or reuses background local preparation. Existing text
+matches return without waiting for the build, with an explicit stderr warning
+that semantic results are not ready. With neither literal nor bounded keyword
+matches, ordinary search waits
+up to eight seconds for initial preparation and then runs semantic search in the
+same invocation if ready. This budget includes preparation status and scheduling
+requests, but not daemon startup or the subsequent search. Longer builds survive
+the CLI exit; the output distinguishes incomplete search from an exhaustive
+`No matches.` answer. Failed initialization is not treated as a usable index on
+the next invocation, which can retry preparation using the persisted local model,
+even if the default model has changed. Implicit retries never replace an existing
+remote index or authorize remote preparation. A populated index can still be
+searched during a refresh or after a per-file failure.
+
+For an existing index using a local embedding provider, ordinary primary queries
+served by the daemon have a separate internal 1,000 ms query-model preparation
+budget, covering model loading and query embedding. If it expires, the same
+request returns indexed FTS results with a warning that semantic retrieval was
+skipped and search coverage is incomplete. If no fresh indexed hits remain
+(none were recalled or all are stale), the default `auto` CLI also tries the
+bounded current-source keyword fallback below, preserves semantic-budget
+diagnostics, and reports any remaining empty result as incomplete rather than
+`No matches.`; fresh FTS hits do not trigger that extra keyword scan.
+Queries that finish preparation in time retain hybrid retrieval.
+Explicit `--hybrid` or `--vector`, `--refresh wait`, and non-local providers are
+not silently downgraded by this budget. It is not an end-to-end response deadline:
+startup, transport, index checks, FTS retrieval, and output take additional time.
+It does not change the configured model, the missing-index preparation behavior
+above, or Direct mode's foreground behavior.
+
+When initial index preparation is still unavailable, the ordinary CLI also tries a
+bounded current-source keyword fallback. For example, `zg connection pool` can
+find `connectionPool` without an embedding index. It recognizes code subwords
+and simple plural forms, and requires multiple query words in one source window.
+Verified function boundaries constrain multi-line windows; when structural
+ownership is unavailable, only the original matching line is considered. It
+does not combine distant windows or different files to manufacture a match. Results are marked
+`matchedBy=keyword`, are approximate rather than literal/FTS matches, and retain
+the original query. A code identifier embedded in a Chinese question is not
+treated as several independent question words. This is not Chinese translation
+or semantic retrieval.
+
+The keyword scan is lazy: it does not run or reorder results on the normal warm
+path. When no index is usable, useful keyword hits can return before the initial
+readiness wait; an empty keyword scan preserves that preparation opportunity.
+It keeps at most 200 match-position candidates per configured scope, considers
+at most 64 matching positions per line and 5,000 raw matching lines per scope,
+and has a 600 ms shared scan budget; structural enrichment is
+separately limited to 25 files per scope and 1 MiB per file. These are fallback
+resource limits, not an end-to-end query deadline. Hitting a scan or resource
+limit emits an incomplete-coverage warning. CLI exit does not cancel the
+independently owned background index job. Explicit ripgrep/routes keep their
+existing meanings, including explicit positive globs overriding ignore rules.
+
+When an ordinary query reaches indexed search, the CLI checks current files
+again after retrieval and combines those literal matches with fresh indexed
+results. Current matches come first; the same source location is not repeated
+as a second indexed hit. Known-stale indexed items (including deleted files)
+are omitted, with an incomplete-coverage warning. If nothing current remains,
+the output says `No current matches; index results are incomplete.` rather than
+claiming an exhaustive no-match. Newly edited code without literal query terms
+still needs index refresh for semantic recall. This is a query-time snapshot,
+not a filesystem transaction. Explicit routes, indexed diagnostics, `--mode
+server`, and `--refresh wait` retain their index-only result lists.
+
+If query embedding is unavailable (for example, a model load failure or HTTP
+503) during an ordinary search, the CLI rescans current files and returns any
+live literal or keyword matches with a semantic-unavailable warning.
+Provider response details are not printed by this fallback; `--debug` includes
+the failure code. With no current text matches, the original error still fails
+the command instead of claiming there are no matches. Invalid requests, rejected
+provider credentials, authorization failures, user cancellation, explicit routes,
+and `--refresh wait` are not converted into successful text-only searches.
+This error-based recovery does not impose a new timeout or
+retry embedding, and does not grant permission for remote processing.
+
+A configured local model is respected; a configured remote model is never used
+implicitly. `--refresh wait` waits beyond the initial preparation budget. Explicit `--mode direct`
+keeps indexed work in the foreground; `--mode server` requires a daemon.
+Use `zg --index` to choose a remote model, narrow the indexed paths, rebuild,
+or drop the index. An explicitly disabled index is not implicitly enabled.
+
+For a single indexed lookup, exact symbols and paths rank ahead of references
+and approximate matches; remaining candidates use rank fusion. A single hybrid
+text query also uses bounded lexical support from paths, symbol names and
+individual recalled text windows. This helps code-subword matches without
+requiring an index rebuild or changing the query sent to the model. Mixed
+questions mentioning a symbol are not treated as requests for that symbol's
+definition. Scores and lexical-support values are not confidence estimates.
+Scores need not decrease with final rank after exact-match prioritization.
+Explicit `--fts`, `--vector`, and fused requests with different query strings
+retain their route-only or multi-query ranking. `--trace` distinguishes rank
+fusion from the subsequent lexical-support ranking stage.
 
 Examples:
 

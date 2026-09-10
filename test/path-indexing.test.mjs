@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   symlink,
   unlink,
@@ -234,6 +235,55 @@ test("changedPaths indexes and deletes only the affected paths", async () => {
   } finally {
     await service.close();
     await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("canonical watcher paths update an index created through a directory alias", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "zvec-canonical-watch-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const source = join(temporary, "source");
+  const alias = join(temporary, "alias");
+  await mkdir(source);
+  try {
+    await symlink(source, alias, "dir");
+  } catch (error) {
+    if (error.code === "EPERM") {
+      t.skip("symlink creation is not permitted");
+      return;
+    }
+    throw error;
+  }
+  const canonical = await realpath(source);
+  const target = join(canonical, "example.ts");
+  await writeFile(target, "export const AliasBefore = 1;\n");
+  const rootPaths = [{ absolutePath: alias, recursive: true, globs: ["*.ts"] }];
+  assert.equal(await pathCanAffectIndex(rootPaths, target, false), true);
+  assert.equal(
+    await pathCanAffectIndex(rootPaths, join(canonical, "ignored.md"), false),
+    false,
+  );
+  const service = await createZvecGrep({
+    root: source,
+    embeddingModel: new CountingEmbeddingModel(),
+  });
+  try {
+    await service.index({ rootPaths });
+    assert.equal((await service.info()).status.filesStored, 1);
+    await writeFile(target, "export const AliasAfter = 2;\n");
+    const update = await service.index({ changedPaths: [target] });
+    assert.equal(update.filesModified, 1);
+    const result = await service.context({
+      routes: [{ mode: "fts", query: "AliasAfter" }],
+      autoUpdate: false,
+    });
+    assert.equal(result.items.length, 1);
+    await unlink(target);
+    assert.equal(
+      (await service.index({ changedPaths: [target] })).filesDeleted,
+      1,
+    );
+  } finally {
+    await service.close();
   }
 });
 

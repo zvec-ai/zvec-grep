@@ -10,8 +10,13 @@ import {
   withProgressHeartbeat,
 } from "../mcp/progress-heartbeat.js";
 import { EMBEDDING_ENVIRONMENT_META_KEY } from "../mcp/request-metadata.js";
+import { searchFailureFromMeta } from "../mcp/search-failure.js";
 
 type DaemonToolCallOptions = {
+  /** Total network deadline including handshake, schema discovery and progress. */
+  timeoutMs?: number;
+  /** Cancel only this request; shared daemon work has its own lifetime. */
+  signal?: AbortSignal;
   onProgress?: (progress: Progress) => void;
   embeddingEnvironment?: string;
   toolContract?: {
@@ -20,6 +25,13 @@ type DaemonToolCallOptions = {
     errorMessage: string;
   };
 };
+
+export class DaemonCallTimeoutError extends Error {
+  constructor() {
+    super("Background server request exceeded its time budget.");
+    this.name = "DaemonCallTimeoutError";
+  }
+}
 
 export class DaemonClient {
   constructor(
@@ -58,6 +70,19 @@ export class DaemonClient {
     callOptions: DaemonToolCallOptions,
     resultKind: "structured" | "text",
   ): Promise<Record<string, unknown> | string> {
+    if (
+      callOptions.timeoutMs !== undefined &&
+      (!Number.isFinite(callOptions.timeoutMs) || callOptions.timeoutMs <= 0)
+    ) {
+      throw new Error(
+        "Daemon request timeout must be a positive finite duration.",
+      );
+    }
+    if (callOptions.signal?.aborted) {
+      throw new Error("Operation cancelled by user.", {
+        cause: callOptions.signal.reason,
+      });
+    }
     const abortController = new AbortController();
     let cancelledByCtrlC = false;
     const onInterrupt = (): void => {
@@ -67,7 +92,11 @@ export class DaemonClient {
       home: this.options.home,
       tokenFile: this.options.tokenFile,
     });
-    process.once("SIGINT", onInterrupt);
+    if (callOptions.signal?.aborted) {
+      throw new Error("Operation cancelled by user.", {
+        cause: callOptions.signal.reason,
+      });
+    }
     const client = new Client(
       { name: "zvec-grep-cli", version: "1.0.0" },
       {
@@ -156,10 +185,38 @@ export class DaemonClient {
         },
       },
     );
+    let deadlineError: DaemonCallTimeoutError | undefined;
+    const closeOnAbort = (): void => {
+      void transport.close().catch(() => undefined);
+    };
+    const onExternalAbort = (): void => {
+      abortController.abort(callOptions.signal?.reason);
+    };
+    abortController.signal.addEventListener("abort", closeOnAbort, {
+      once: true,
+    });
+    callOptions.signal?.addEventListener("abort", onExternalAbort, {
+      once: true,
+    });
+    process.once("SIGINT", onInterrupt);
+    const deadlineTimer =
+      callOptions.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            if (abortController.signal.aborted) return;
+            deadlineError = new DaemonCallTimeoutError();
+            abortController.abort(deadlineError);
+          }, callOptions.timeoutMs);
     try {
-      await client.connect(transport);
+      await client.connect(transport, {
+        signal: abortController.signal,
+        timeout: callOptions.timeoutMs,
+      });
       if (callOptions.toolContract) {
-        const listed = await client.listTools();
+        const listed = await client.listTools(undefined, {
+          signal: abortController.signal,
+          timeout: callOptions.timeoutMs,
+        });
         const tool = listed.tools.find((candidate) => candidate.name === name);
         if (!toolSatisfiesContract(tool, callOptions.toolContract)) {
           throw new Error(callOptions.toolContract.errorMessage);
@@ -180,17 +237,21 @@ export class DaemonClient {
         },
         {
           signal: abortController.signal,
-          timeout: LONG_RUNNING_MCP_TIMEOUT_MS,
+          timeout: callOptions.timeoutMs ?? LONG_RUNNING_MCP_TIMEOUT_MS,
           onprogress: callOptions.onProgress ?? (() => undefined),
-          resetTimeoutOnProgress: true,
+          resetTimeoutOnProgress: callOptions.timeoutMs === undefined,
         },
       );
       if (cancelledByCtrlC) {
         throw new Error("Operation cancelled by user.");
       }
+      abortController.signal.throwIfAborted();
       if (result.isError) {
         const text = toolResultText(result.content);
-        throw new Error(text ?? `${name} failed`);
+        const message = text ?? `${name} failed`;
+        throw (
+          searchFailureFromMeta(message, result._meta) ?? new Error(message)
+        );
       }
       if (resultKind === "text") {
         const text = toolResultText(result.content);
@@ -201,11 +262,15 @@ export class DaemonClient {
       }
       return (result.structuredContent ?? {}) as Record<string, unknown>;
     } catch (error) {
+      if (deadlineError) throw deadlineError;
       if (abortController.signal.aborted || isCtrlCError(error)) {
         throw new Error("Operation cancelled by user.", { cause: error });
       }
       throw error;
     } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      abortController.signal.removeEventListener("abort", closeOnAbort);
+      callOptions.signal?.removeEventListener("abort", onExternalAbort);
       process.off("SIGINT", onInterrupt);
       await client.close().catch(() => undefined);
     }

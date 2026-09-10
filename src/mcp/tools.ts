@@ -15,7 +15,10 @@ import type {
   IndexProgress,
   ZvecGrepContextResult,
 } from "../index.js";
-import { formatAgentContextResult } from "../cli/format/context.js";
+import {
+  contextWarningLines,
+  formatAgentContextResult,
+} from "../cli/format/context.js";
 import {
   formatRemoteEmbeddingAuthorizationPrompt,
   remoteEmbeddingDisclosureData,
@@ -45,6 +48,7 @@ import {
 } from "./schemas.js";
 import { embeddingEnvironmentFromRequestMeta } from "./request-metadata.js";
 import { textToolResult, toolResult } from "./result-format.js";
+import { searchFailureResult } from "./search-failure.js";
 import type {
   RemoteEmbeddingAuthorizationPlan,
   RemoteEmbeddingAuthorizationScope,
@@ -205,7 +209,10 @@ export interface ZvecGrepDaemonBackend {
   dropIndex(input: ZvecGrepIndexDropInput): Promise<ZvecGrepIndexDropResult>;
   search(
     input: NormalizedSearchInput,
-    options?: { authorization?: RemoteEmbeddingOperationPermit },
+    options?: {
+      authorization?: RemoteEmbeddingOperationPermit;
+      signal?: AbortSignal;
+    },
   ): Promise<ZvecGrepSearchResult>;
   planIndexAuthorization?(
     input: ZvecGrepIndexRequest,
@@ -234,7 +241,8 @@ function searchRoutingRules(exactTool: string, focusedTools: string): string[] {
     `When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use ${focusedTools} for focused verification.`,
     "For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.",
     "Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.",
-    "`query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.",
+    "With a usable index, `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.",
+    "When a local index is missing, disabled, or not yet usable, an ordinary single primary query with default eventual freshness can return current-file literal and bounded keyword matches without loading a model or creating a persistent index. Read the incomplete-coverage warning: absent text matches do not rule out semantic matches. Explicit routes, fused or symbol-constrained searches, freshness waits, and existing remote-provider indexes keep their indexed behavior and authorization requirements.",
     'For a fused mixed search, use arguments such as {"root":"/absolute/workspace","query":"how are results ranked and fused","fts":["RRF","score"],"fuse":true}.',
     "Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and open only the cited file or range when a required detail falls outside it.",
     `If semantic retrieval remains irrelevant, fall back to ${exactTool}.`,
@@ -254,7 +262,7 @@ const ZVEC_GREP_FULL_SEARCH_MCP_INSTRUCTIONS = searchRoutingRules(
 );
 
 const ZVEC_GREP_SEARCH_TOOL_DESCRIPTION =
-  "Search an existing workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets and query-group metadata; treat sufficient snippets as already-read evidence.";
+  "Search local workspace material for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Uses an existing index when available; an ordinary single primary query with eventual freshness can return current-file literal and bounded keyword matches when no local index is usable, with incomplete semantic coverage and no implicit persistent indexing. Explicit routes and freshness waits retain indexed behavior. Results include bounded source snippets and indexed query-group metadata; treat sufficient snippets as already-read evidence.";
 
 export const ZVEC_GREP_AGENT_MCP_INSTRUCTIONS = formatPromptRules(
   "Use zvec-grep with these workspace retrieval rules:",
@@ -264,7 +272,7 @@ export const ZVEC_GREP_AGENT_MCP_INSTRUCTIONS = formatPromptRules(
     "Every workspace operation requires an absolute root path visible to the daemon.",
     "Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.",
     "When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.",
-    "When an index is missing and literal or regex search can answer the task, use native Grep or rg. Creating or rebuilding a persistent index requires explicit user authorization.",
+    "Creating or rebuilding a persistent index requires explicit user authorization; an ordinary search must not create one.",
   ],
 );
 
@@ -455,8 +463,10 @@ export function registerZvecGrepTools(
       await runWithTraceContext(
         traceContextFromMcpMeta(ctx.mcpReq._meta),
         async () => {
+          ctx.mcpReq.signal.throwIfAborted();
           const normalized = normalizeSearchInput(input);
           const plan = await backend.planSearchAuthorization?.(normalized);
+          ctx.mcpReq.signal.throwIfAborted();
           const resolution = plan
             ? await resolveRemoteEmbeddingAuthorization(
                 backend,
@@ -468,16 +478,28 @@ export function registerZvecGrepTools(
                 options,
               )
             : { kind: "ready" as const };
+          ctx.mcpReq.signal.throwIfAborted();
           if (resolution.kind === "input_required") return resolution.result;
           const effectiveSearch =
             resolution.alternative === "local_search"
               ? ftsFallbackSearch(normalized)
               : normalized;
-          const response = await backend.search(effectiveSearch, {
-            authorization: resolution.authorization,
-          });
+          let response: ZvecGrepSearchResult;
+          try {
+            response = await backend.search(effectiveSearch, {
+              authorization: resolution.authorization,
+              signal: ctx.mcpReq.signal,
+            });
+            ctx.mcpReq.signal.throwIfAborted();
+          } catch (error) {
+            ctx.mcpReq.signal.throwIfAborted();
+            const failure = searchFailureResult(error);
+            if (failure) return failure;
+            throw error;
+          }
           const statusLines = [
             `freshness: ${response.freshness}`,
+            ...contextWarningLines(response.result),
             ...(response.indexing
               ? [
                   "results: served_from_current_index",
@@ -500,11 +522,15 @@ export function registerZvecGrepTools(
                 root: response.root,
                 freshness: response.freshness,
                 indexing: response.indexing,
-                // The CLI renders per-group recall and does not consume the
-                // cross-group list. Avoid serializing every full item twice.
+                // Indexed CLI output uses groups; current-source output uses
+                // top-level items and must not be erased by this optimization.
                 result: {
                   ...response.result,
-                  items: [],
+                  items:
+                    response.result.source === "index" &&
+                    response.result.groupResults !== undefined
+                      ? []
+                      : response.result.items,
                   groupResults: response.result.groupResults?.map((group) => ({
                     ...group,
                     items: group.items.map(

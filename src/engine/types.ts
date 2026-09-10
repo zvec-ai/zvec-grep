@@ -38,6 +38,8 @@ export type FileFormat = string;
 export type FileIndexStatus = {
   indexedTime: number | null;
   entityCount: number;
+  /** Extractor generation for code; absent on legacy indexes and non-code files. */
+  extractionVersion?: number;
   tokenCount?: number;
   truncatedFragmentCount?: number;
   error?: string;
@@ -71,6 +73,50 @@ export type FileInfo = {
   kind: FileKind;
   format: FileFormat;
   indexStatus?: FileIndexStatus;
+};
+
+/** Identity of the exact indexed source checked by a search or repair. */
+export type IndexedSourceVersion = {
+  workspaceIndexId: string;
+  fileId: string;
+  absolutePath: string;
+  rootPath: string;
+  indexedTime: number | null;
+  contentHash?: string;
+  sizeBytes: number;
+};
+
+export type SourceInvalidationReason =
+  | "hash_mismatch"
+  | "size_mismatch"
+  | "missing"
+  | "not_file"
+  | "unreadable"
+  | "unverified";
+
+export type SourceInvalidation = {
+  indexed: IndexedSourceVersion;
+  reason: SourceInvalidationReason;
+  observedHash?: string;
+  observedSizeBytes?: number;
+};
+
+export type WorkspaceSourceFreshnessProof = {
+  workspaceIndexId: string;
+  paths: readonly (
+    | {
+        absolutePath: string;
+        status: "fresh";
+        indexed: IndexedSourceVersion;
+      }
+    | { absolutePath: string; status: "absent" }
+    | {
+        absolutePath: string;
+        status: "unverified";
+        reason: SourceInvalidationReason | "not_indexed" | "out_of_scope";
+        invalidation?: SourceInvalidation;
+      }
+  )[];
 };
 
 export type SkippedFileReason =
@@ -249,6 +295,8 @@ export type IndexOptions = {
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
   changedPaths?: readonly string[];
+  /** Exact paths whose content must be hashed even during a full metadata scan. */
+  verifyContentPaths?: readonly string[];
   signal?: AbortSignal;
 };
 
@@ -270,6 +318,7 @@ export type IndexResult = {
   durationMs: number;
   timings?: readonly TimingEntry[];
   scanDiagnostics?: FileScanDiagnostics;
+  sourceFreshness?: WorkspaceSourceFreshnessProof;
 };
 
 export type WorkspaceIndexStatus = {
@@ -312,6 +361,8 @@ export type SearchStageTrace = {
   rank: number;
   score: number;
   forced?: boolean;
+  /** Bounded lexical ranking hint in [0, 1], not semantic confidence. */
+  lexicalSupport?: number;
 };
 
 export type SearchFinalTrace = {

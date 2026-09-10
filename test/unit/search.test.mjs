@@ -157,6 +157,230 @@ function createFixture() {
   };
 }
 
+test("exact symbol definitions outrank candidates with two weak recall votes", async () => {
+  const fixture = createFixture();
+  const hit = (index, path) => ({
+    fragment: fragment(fixture.entities[index]),
+    file: fixture.files[index],
+    path,
+    score: 1,
+  });
+  fixture.storage.searchFts = () => [hit(0, "fts"), hit(1, "fts")];
+  fixture.storage.searchVector = () => [hit(1, "vector")];
+  const result = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query: "AlphaSymbol" },
+        { mode: "vector", query: "AlphaSymbol" },
+      ],
+    },
+    fixture.context,
+  );
+  assert.equal(result.hits[0].entity.id, "entity-a");
+  assert.equal(result.hits[0].matchedBy, "fts");
+  assert.ok(
+    result.hits[1].score > result.hits[0].score,
+    "RRF remains a rank-fusion score, not confidence",
+  );
+});
+
+test("exact text in a recalled fragment outranks weak dual-route hits even when its entity is an outline", async () => {
+  const fixture = createFixture();
+  const source = fragment(fixture.entities[0]);
+  source.content = { kind: "text", text: 'throw new Error("No index found")' };
+  fixture.storage.searchFts = () => [
+    { fragment: source, file: fixture.files[0], path: "fts", score: 1 },
+    {
+      fragment: fragment(fixture.entities[1]),
+      file: fixture.files[1],
+      path: "fts",
+      score: 1,
+    },
+  ];
+  fixture.storage.searchVector = () => [
+    {
+      fragment: fragment(fixture.entities[1]),
+      file: fixture.files[1],
+      path: "vector",
+      score: 1,
+    },
+  ];
+  const result = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query: "No index found" },
+        { mode: "vector", query: "No index found" },
+      ],
+    },
+    fixture.context,
+  );
+  assert.equal(result.hits[0].entity.id, "entity-a");
+  assert.equal(result.hits[0].matchedBy, "fts");
+});
+
+test("mixed questions retain semantic ranking rather than boosting every mentioned symbol", async () => {
+  const fixture = createFixture();
+  const hit = (index, path) => ({
+    fragment: fragment(fixture.entities[index]),
+    file: fixture.files[index],
+    path,
+    score: 1,
+  });
+  fixture.storage.searchFts = () => [hit(0, "fts"), hit(1, "fts")];
+  fixture.storage.searchVector = () => [hit(1, "vector")];
+  const query = "how does AlphaSymbol retry failed requests";
+  const result = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query },
+        { mode: "vector", query },
+      ],
+    },
+    fixture.context,
+  );
+  assert.equal(result.hits[0].entity.id, "entity-b");
+});
+
+test("hybrid text search uses filename and code-subword support without changing explicit routes", async () => {
+  const fixture = createFixture();
+  fixture.files[0].relativePath = "src/input-budget.ts";
+  fixture.entities[0].metadata.symbolName = "indexChunkOptions";
+  fixture.entities[0].content.text =
+    "function indexChunkOptions(maxInputTokens) { return maxInputTokens; }";
+  const hit = (index, path) => ({
+    fragment: fragment(fixture.entities[index]),
+    file: fixture.files[index],
+    path,
+    score: 1,
+  });
+  fixture.storage.searchFts = () => [hit(1, "fts"), hit(2, "fts")];
+  fixture.storage.searchVector = () => [
+    hit(2, "vector"),
+    hit(0, "vector"),
+    hit(1, "vector"),
+  ];
+  const query = "input token budget";
+  const hybrid = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query },
+        { mode: "vector", query },
+      ],
+      trace: true,
+    },
+    fixture.context,
+  );
+  assert.equal(hybrid.hits[0].entity.id, "entity-a");
+  assert.equal(
+    hybrid.hits[0].matchedBy,
+    "vector",
+    "lexical support is not a fabricated FTS recall",
+  );
+  assert.ok(hybrid.hits[0].trace.ranking.lexicalSupport > 0);
+  assert.ok(
+    hybrid.hits[0].trace.ranking.score > hybrid.hits[0].trace.fusion.score,
+  );
+  for (const mode of ["fts", "vector"]) {
+    const explicit = await searchWorkspaceIndex(
+      { routes: [{ mode, query }], trace: true },
+      fixture.context,
+    );
+    assert.equal(
+      explicit.hits[0].entity.id,
+      mode === "fts" ? "entity-b" : "entity-c",
+    );
+    assert.equal(explicit.hits[0].score, 1 / 61);
+    assert.equal(explicit.hits[0].trace.ranking, undefined);
+  }
+  const separate = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query },
+        { mode: "vector", query: "find shared settings" },
+      ],
+      trace: true,
+    },
+    fixture.context,
+  );
+  assert.equal(separate.hits[0].entity.id, "entity-c");
+  assert.equal(separate.hits[0].trace.ranking, undefined);
+});
+
+test("excluded tracked entities do not change hybrid support or the rank constant", async () => {
+  for (const hasOrdinarySupport of [false, true]) {
+    const fixture = createFixture();
+    fixture.files[2].relativePath = "docs/token-budget.ts";
+    if (hasOrdinarySupport) fixture.entities[0].content.text = "token";
+    const plan = {
+      routes: [
+        { mode: "fts", query: "token budget" },
+        { mode: "vector", query: "token budget" },
+      ],
+      includePaths: ["src"],
+      trace: true,
+    };
+    const ordinary = await searchWorkspaceIndex(plan, fixture.context);
+    const tracked = await searchWorkspaceIndex(
+      { ...plan, trackEntityId: "entity-c" },
+      fixture.context,
+    );
+    assert.ok(
+      tracked.trackedHit.trace.recall.every(
+        (recall) => recall.forced && !recall.found,
+      ),
+    );
+    assert.deepEqual(
+      tracked.hits.filter((hit) => hit.entity.id !== "entity-c"),
+      ordinary.hits,
+      `diagnostic-only support must not affect ordinary hits (${hasOrdinarySupport})`,
+    );
+  }
+});
+
+test("forced route evidence does not enable lexical support on an ordinary candidate", async () => {
+  const fixture = createFixture();
+  const hit = (index, path) => ({
+    fragment: fragment(fixture.entities[index]),
+    file: fixture.files[index],
+    path,
+    score: 1,
+  });
+  fixture.storage.searchFts = () => [hit(0, "fts")];
+  fixture.storage.searchVector = (_vector, _limit, filter) => {
+    if (!filter?.groupIds) return [hit(1, "vector")];
+    return [
+      {
+        ...hit(0, "vector"),
+        fragment: {
+          ...fragment(fixture.entities[0], {
+            id: "diagnostic-fragment",
+            group: "entity-a",
+          }),
+          content: { kind: "text", text: "token" },
+        },
+      },
+    ];
+  };
+  const result = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query: "token budget" },
+        { mode: "vector", query: "token budget" },
+      ],
+      trackEntityId: "entity-a",
+      trace: true,
+    },
+    fixture.context,
+  );
+  assert.ok(result.trackedHit.evidence.some((item) => item.forced));
+  assert.equal(result.trackedHit.trace.ranking, undefined);
+  assert.equal(
+    result.trackedHit.score,
+    1 / 61 + 1 / 261,
+    "existing diagnostic recall votes retain the ordinary RRF constant",
+  );
+});
+
 test("search plan rejects malformed routes, filters, time ranges, and missing models", async () => {
   const { context } = createFixture();
   await assert.rejects(searchWorkspaceIndex({ routes: [] }, context), /route/);

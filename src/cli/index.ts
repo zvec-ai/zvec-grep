@@ -1,9 +1,7 @@
 #!/usr/bin/env -S node --liftoff-only
 
 import { compatibilityWarningForArgs, parseArgs } from "./args.js";
-import { runParsedCommand } from "./commands.js";
 import { colorModeFromArgs, printError } from "./errors.js";
-import { printHelp } from "./help.js";
 import { readPackageVersion } from "./version.js";
 
 const PACKAGE_VERSION = readPackageVersion();
@@ -32,11 +30,13 @@ async function main(): Promise<void> {
     }
 
     if (parsed.command === "help") {
+      const { printHelp } = await import("./help.js");
       printHelp(PACKAGE_VERSION, parsed.helpTopic);
       process.exitCode = 0;
       return;
     }
 
+    const { runParsedCommand } = await import("./commands.js");
     await runParsedCommand(parsed);
     process.exitCode = 0;
   } catch (error) {

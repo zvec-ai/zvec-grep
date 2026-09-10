@@ -19,6 +19,8 @@ export type NormalizedSearchInput = {
   limit?: number;
   freshness: "eventual" | "wait_for_fresh";
   autoUpdate: boolean;
+  /** Internal CLI intent: an explicit hybrid query waits for semantic work. */
+  semanticPolicy?: "wait";
   preferSymbol?: boolean;
   symbolTypes?: CodeSymbolType[];
   globs?: string[];
@@ -48,6 +50,9 @@ export function normalizeSearchInput(
     ...common,
     freshness: input.freshness,
     autoUpdate: input.autoUpdate,
+    ...("semanticPolicy" in input
+      ? { semanticPolicy: input.semanticPolicy }
+      : {}),
   };
 }
 

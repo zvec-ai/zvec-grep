@@ -39,6 +39,7 @@ import {
   matchesRootExcludePatterns,
   matchesRootPatterns,
   normalizeRootPath,
+  pathsForConfiguredRoots,
   validateRootPaths,
 } from "../root-paths.js";
 
@@ -258,6 +259,18 @@ export async function scanFilePath(
 }
 
 export async function pathCanAffectIndex(
+  rootPaths: readonly RootPath[],
+  absolutePath: string,
+  isDirectory: boolean,
+): Promise<boolean> {
+  for (const path of pathsForConfiguredRoots(rootPaths, absolutePath)) {
+    if (await configuredPathCanAffectIndex(rootPaths, path, isDirectory))
+      return true;
+  }
+  return false;
+}
+
+async function configuredPathCanAffectIndex(
   rootPaths: readonly RootPath[],
   absolutePath: string,
   isDirectory: boolean,
