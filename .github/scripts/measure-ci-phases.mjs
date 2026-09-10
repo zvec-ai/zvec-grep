@@ -97,9 +97,20 @@ if (!process.argv.includes("--child")) {
         if (typeof value !== "function") return value;
         if (!methods.has(key))
           methods.set(key, (...args) =>
-            measure(`native.${String(key)}`, () => value.apply(target, args), {
-              collection: label,
-            }),
+            measure(
+              `native.${String(key)}`,
+              () =>
+                value.apply(
+                  target,
+                  process.env.PHASE_OPTIMIZE_CONCURRENCY === "1" &&
+                    ["optimize", "optimizeSync"].includes(String(key))
+                    ? [{ ...args[0], concurrency: 1 }]
+                    : args,
+                ),
+              {
+                collection: label,
+              },
+            ),
           );
         return methods.get(key);
       },

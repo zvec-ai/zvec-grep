@@ -29,9 +29,21 @@ jobs:
         run: node .github/scripts/measure-ci-phases.mjs
         env:
           PHASE_OUTPUT: ${{ runner.temp }}/phase-results.jsonl
+      - name: Measure service with single-thread optimization
+        run: node .github/scripts/measure-ci-phases.mjs
+        env:
+          PHASE_OUTPUT: ${{ runner.temp }}/single-thread-results.jsonl
+          PHASE_OPTIMIZE_CONCURRENCY: "1"
+      - name: Measure native one-document collection
+        run: node .github/scripts/measure-zvec-minimal.mjs
+        env:
+          PHASE_OUTPUT: ${{ runner.temp }}/minimal-results.jsonl
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: phases-${{ matrix.os }}
-          path: ${{ runner.temp }}/phase-results.jsonl
+          path: |
+            ${{ runner.temp }}/phase-results.jsonl
+            ${{ runner.temp }}/single-thread-results.jsonl
+            ${{ runner.temp }}/minimal-results.jsonl
           if-no-files-found: error
