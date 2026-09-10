@@ -2036,7 +2036,7 @@ test("OpenCode installer preserves config and manages a remote MCP server", asyn
   assert.doesNotMatch(uninstalledGuidance, /ZVEC_GREP|## zvec-grep/);
 });
 
-test("OpenCode installer selects an existing JSONC config and preserves comments", async (t) => {
+test("OpenCode install and uninstall accept JSONC comments and trailing commas", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-opencode-jsonc-"),
   );
@@ -2055,8 +2055,8 @@ test("OpenCode installer selects an existing JSONC config and preserves comments
   // Keep this user setting and its comment.
   "model": "custom/model",
   "mcp": {
-    "other": { "type": "remote", "url": "https://example.com/mcp" }
-  }
+    "other": { "type": "remote", "url": "https://example.com/mcp", },
+  },
 }
 `,
   );
@@ -2070,7 +2070,9 @@ test("OpenCode installer selects an existing JSONC config and preserves comments
   await assert.rejects(stat(jsonPath), { code: "ENOENT" });
   const installedSource = await readFile(jsoncPath, "utf8");
   assert.match(installedSource, /Keep this user setting and its comment/);
-  const installed = parseJsonWithComments(installedSource);
+  const installed = parseJsonWithComments(installedSource, [], {
+    allowTrailingComma: true,
+  });
   assert.equal(installed.model, "custom/model");
   assert.equal(installed.mcp.other.url, "https://example.com/mcp");
   assert.equal(installed.mcp.zvec_grep.enabled, true);
@@ -2081,7 +2083,9 @@ test("OpenCode installer selects an existing JSONC config and preserves comments
   });
   const uninstalledSource = await readFile(jsoncPath, "utf8");
   assert.match(uninstalledSource, /Keep this user setting and its comment/);
-  const uninstalled = parseJsonWithComments(uninstalledSource);
+  const uninstalled = parseJsonWithComments(uninstalledSource, [], {
+    allowTrailingComma: true,
+  });
   assert.equal(uninstalled.mcp.zvec_grep, undefined);
   assert.equal(uninstalled.mcp.other.url, "https://example.com/mcp");
 });
@@ -2131,7 +2135,7 @@ test("OpenCode installer leaves an unmanaged JSONC entry byte-identical without 
   assert.deepEqual(await readFile(configPath), original);
 });
 
-test("OpenCode installer explains that JSONC wins when both configs exist", async (t) => {
+test("OpenCode uninstaller removes legacy managed entries from both global configs", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-opencode-both-"),
   );
@@ -2144,7 +2148,17 @@ test("OpenCode installer explains that JSONC wins when both configs exist", asyn
   });
 
   await mkdir(configDirectory, { recursive: true });
-  const originalJson = '{"model":"json/model"}\n';
+  const originalJson = `${JSON.stringify({
+    model: "json/model",
+    mcp: {
+      zvec_grep: {
+        type: "remote",
+        url: "http://127.0.0.1:7999/mcp",
+        enabled: true,
+      },
+      other: { type: "remote", url: "https://example.com/mcp" },
+    },
+  })}\n`;
   await writeFile(jsonPath, originalJson);
   await writeFile(
     jsoncPath,
@@ -2164,6 +2178,20 @@ test("OpenCode installer explains that JSONC wins when both configs exist", asyn
   assert.equal(await readFile(jsonPath, "utf8"), originalJson);
   const jsonc = parseJsonWithComments(await readFile(jsoncPath, "utf8"));
   assert.equal(jsonc.mcp.zvec_grep.enabled, true);
+
+  await uninstallTarget("opencode", {
+    OPENCODE_CONFIG: undefined,
+    XDG_CONFIG_HOME: xdgConfigHome,
+  });
+
+  const uninstalledJson = JSON.parse(await readFile(jsonPath, "utf8"));
+  assert.equal(uninstalledJson.mcp.zvec_grep, undefined);
+  assert.equal(uninstalledJson.mcp.other.url, "https://example.com/mcp");
+  const uninstalledJsonc = parseJsonWithComments(
+    await readFile(jsoncPath, "utf8"),
+  );
+  assert.deepEqual(uninstalledJsonc.mcp, {});
+  assert.equal(uninstalledJsonc.model, "jsonc/model");
 });
 
 test("JSON installers require force before replacing an unmanaged server", async (t) => {

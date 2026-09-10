@@ -312,6 +312,8 @@ async function installOpenCodeIntegration(
   await updateJsoncMcpSettings({
     path: configPath,
     containerKey: "mcp",
+    // OpenCode accepts JSONC trailing commas, so its installer must accept them too.
+    allowTrailingComma: true,
     server:
       options.transport === "stdio"
         ? {
@@ -356,14 +358,21 @@ async function installOpenCodeIntegration(
 }
 
 async function uninstallOpenCodeIntegration(): Promise<InstallAgentResult> {
-  const { path: configPath } = await resolveOpenCodeConfigPath();
+  const resolvedConfig = await resolveOpenCodeConfigPath();
+  const configPath = resolvedConfig.path;
   const guidancePath = resolve(dirname(configPath), "AGENTS.md");
-  await removeJsoncMcpSettings(
-    configPath,
-    "OpenCode",
-    isManagedJsonMcpServer,
-    "mcp",
-  );
+  // OpenCode deep-merges both global files, so legacy managed entries in the
+  // non-selected file must also be removed. An explicit OPENCODE_CONFIG remains scoped.
+  for (const path of resolvedConfig.managedCleanupPaths ?? [configPath]) {
+    await removeJsoncMcpSettings(
+      path,
+      "OpenCode",
+      isManagedJsonMcpServer,
+      "mcp",
+      // Keep uninstall compatible with every configuration accepted by OpenCode.
+      true,
+    );
+  }
   await removeMarkedFile({
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
@@ -867,6 +876,7 @@ function resolveClaudeMcpConfigPath(): string {
 async function resolveOpenCodeConfigPath(): Promise<{
   path: string;
   note?: string;
+  managedCleanupPaths?: readonly string[];
 }> {
   const configured = process.env.OPENCODE_CONFIG?.trim();
   if (configured) return { path: resolve(configured) };
@@ -885,12 +895,16 @@ async function resolveOpenCodeConfigPath(): Promise<{
   if (jsoncExists) {
     return {
       path: jsoncPath,
+      managedCleanupPaths: [jsoncPath, jsonPath],
       note: jsonExists
         ? "both opencode.jsonc and opencode.json exist; selected opencode.jsonc"
         : undefined,
     };
   }
-  return { path: jsonPath };
+  return {
+    path: jsonPath,
+    managedCleanupPaths: [jsoncPath, jsonPath],
+  };
 }
 
 function resolveCursorConfigPath(): string {
@@ -1609,6 +1623,7 @@ function qoderIdeMcpServer(
 type JsoncMcpSettingsOptions = {
   path: string;
   containerKey?: "mcp" | "mcpServers";
+  allowTrailingComma?: boolean;
   force: boolean;
   label: string;
   server: Record<string, unknown>;
@@ -1643,7 +1658,9 @@ async function updateJsoncMcpSettings(
   const containerKey = options.containerKey ?? "mcpServers";
   const existing = await readTextFileIfExists(options.path);
   let source = existing.trim() ? existing : "{}\n";
-  const root = parseJsoncSettings(options.path, source, options.label);
+  const root = parseJsoncSettings(options.path, source, options.label, {
+    allowTrailingComma: options.allowTrailingComma,
+  });
   validateJsoncMcpContainer(options.path, root, containerKey);
 
   const currentContainer = root[containerKey];
@@ -1669,12 +1686,15 @@ async function removeJsoncMcpSettings(
   label: string,
   isManaged: (value: unknown) => boolean,
   containerKey: "mcp" | "mcpServers" = "mcpServers",
+  allowTrailingComma = false,
 ): Promise<void> {
   const existing = await readTextFileIfExists(path);
   if (!existing.trim()) return;
 
   let source = existing;
-  const root = parseJsoncSettings(path, source, label);
+  const root = parseJsoncSettings(path, source, label, {
+    allowTrailingComma,
+  });
   validateJsoncMcpContainer(path, root, containerKey);
   const currentContainer = root[containerKey];
   const container = isJsonObject(currentContainer) ? currentContainer : {};
@@ -1712,10 +1732,11 @@ function parseJsoncSettings(
   path: string,
   source: string,
   label: string,
+  options: { allowTrailingComma?: boolean } = {},
 ): JsonObject {
   const errors: ParseError[] = [];
   const parsed = parseJsonWithComments(source, errors, {
-    allowTrailingComma: false,
+    allowTrailingComma: options.allowTrailingComma ?? false,
     disallowComments: false,
   });
   if (errors.length > 0 || !isJsonObject(parsed)) {
