@@ -70,9 +70,9 @@ impl fmt::Display for ErrorReport {
         if let Some(help) = &self.help {
             write!(formatter, "\nhelp: {help}")?;
         }
-        write!(formatter, "\norigin: {}", self.origin)?;
+        write!(formatter, "\nerror location: {}", self.origin)?;
         if let Some(reported_at) = &self.reported_at {
-            write!(formatter, "\nreported at: {reported_at}")?;
+            write!(formatter, "\nreporting location: {reported_at}")?;
         }
         Ok(())
     }

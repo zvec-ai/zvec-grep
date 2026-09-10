@@ -9,7 +9,7 @@ mod content;
 mod entity;
 mod source;
 
-pub(crate) use content::{Content, ImageContent, TableCell, TableCellKind, TableContent};
+pub(crate) use content::{Content, ImageContent, TableCell, TableCellRole, TableContent};
 pub(crate) use entity::{
     Entity, EntityContent, EntityFragment, EntityId, EntityMetadata, FragmentId, SymbolType,
     WindowFragment, validate_fragments,
