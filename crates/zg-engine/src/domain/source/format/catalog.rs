@@ -19,7 +19,7 @@ file_formats! {
     Avro => (10, "avro", [Binary], ["avro"], []),
     Bash => (11, "bash", [Code], ["bash"], [".bashrc", ".bash_profile", ".bash_login", ".bash_logout"]),
     Batch => (12, "batch", [Code], ["bat", "cmd"], []),
-    Binary => (13, "binary", [Binary], ["exe", "dll", "so", "dylib", "elf", "bin", "msi", "deb", "rpm", "apk"], []),
+    Binary => (13, "binary", [Binary], ["exe", "dll", "so", "dylib", "elf", "bin", "msi", "deb", "rpm", "apk", "a", "o"], []),
     Bmp => (14, "bmp", [Image], ["bmp"], []),
     Bzip2 => (15, "bzip2", [Archive], ["bz2"], []),
     C => (16, "c", [Code], ["c", "h"], []),

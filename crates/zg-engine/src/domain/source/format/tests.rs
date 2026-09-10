@@ -9,12 +9,9 @@ use super::*;
 use FileFormat::*;
 
 fn name_formats(file_name: &str) -> Vec<FileFormat> {
-    // Empty files provide no content evidence beyond the name-based candidates.
-    let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join(file_name);
-    fs::write(&path, []).expect("write empty sample");
-    let mut formats = FileFormat::from_path(&path).expect("name hints");
-    formats.retain(|format| *format != Unknown);
+    let mut formats = catalog::lookup_name(file_name).to_vec();
+    formats.extend_from_slice(match_longest_extension(OsStr::new(file_name)));
+    normalize_formats(&mut formats);
     formats
 }
 
@@ -294,8 +291,16 @@ fn content_refines_ambiguous_formats() {
     let cases: &[(&str, &[u8], &[FileFormat])] = &[
         ("script.pl", b"#!/usr/bin/perl\nprint 1;\n", &[Perl]),
         ("main.ts", b"export const answer = 42;\n", &[TypeScript]),
-        ("source.m", b"\0\xff\x01", &[Matlab, ObjectiveC]),
-        ("document.dot", b"%PDF-1.7\n", &[Pdf]),
+        ("source.m", b"\0\xff\x01", &[Unknown]),
+        (
+            "source.m",
+            b"function example\nend\n",
+            &[Matlab, ObjectiveC],
+        ),
+        ("unknown.ts", b"\0\xff\x01", &[Unknown]),
+        ("empty.ts", b"", &[Unknown]),
+        ("whitespace.ts", b" \t\r\n", &[Unknown]),
+        ("document.dot", b"%PDF-1.7\n", &[Unknown]),
         ("presentation.key", b"PK\x03\x04", &[Keynote]),
         ("private.key", b"-----BEGIN PRIVATE KEY-----\nMIIB", &[Pem]),
     ];
@@ -323,18 +328,17 @@ fn content_refines_ambiguous_formats() {
             "packet size: {packet_size}"
         );
 
-        // A partial or inconsistent stream leaves both candidates possible.
         fs::write(&path, &bytes[..packet_size * 3]).expect("write partial stream");
         assert_eq!(
             FileFormat::from_path(&path).expect("partial stream"),
-            [Mpeg, TypeScript],
+            [Unknown],
             "packet size: {packet_size}"
         );
         bytes[offset + packet_size] = 0;
         fs::write(&path, &bytes).expect("write inconsistent stream");
         assert_eq!(
             FileFormat::from_path(&path).expect("inconsistent stream"),
-            [Mpeg, TypeScript],
+            [Unknown],
             "packet size: {packet_size}"
         );
     }

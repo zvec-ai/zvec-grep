@@ -42,8 +42,7 @@ impl FileFormat {
         let mut formats = Vec::with_capacity(file_name_formats.len() + extension_formats.len());
         formats.extend_from_slice(extension_formats);
         formats.extend_from_slice(file_name_formats);
-        let needs_sniff = formats.is_empty()
-            || (extension_formats.len() > 1 && catalog::needs_sniff(extension_formats));
+        let needs_sniff = formats.is_empty() || catalog::needs_sniff(extension_formats);
         if !needs_sniff {
             normalize_formats(&mut formats);
             return Ok(formats);
@@ -94,6 +93,9 @@ impl FileFormat {
         formats = sniff::refine(formats, &header, complete);
         formats.extend_from_slice(file_name_formats);
         normalize_formats(&mut formats);
+        if formats.is_empty() {
+            formats.push(Self::Unknown);
+        }
         Ok(formats)
     }
 }

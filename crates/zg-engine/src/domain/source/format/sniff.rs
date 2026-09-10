@@ -2,26 +2,27 @@ use std::borrow::Cow;
 
 use super::{FileFormat, normalize_formats};
 
-/// Refines name matches without treating an inconclusive probe as rejection.
+/// Infers a format for empty input; otherwise only filters existing candidates.
 pub(super) fn refine(
-    mut formats: Vec<FileFormat>,
-    bytes: &[u8],
+    mut format_candidates: Vec<FileFormat>,
+    sample_bytes: &[u8],
     complete: bool,
 ) -> Vec<FileFormat> {
-    let detected = detect(bytes, complete);
-    match detected {
-        FileFormat::Unknown => {}
+    let detected_format = detect(sample_bytes, complete);
+    if format_candidates.is_empty() {
+        format_candidates.push(detected_format);
+        return format_candidates;
+    }
+    match detected_format {
+        FileFormat::Unknown => format_candidates.clear(),
         FileFormat::Text => {
             // Text can rule out a transport stream, but does not identify a language.
-            formats.retain(|format| *format != FileFormat::Mpeg);
+            format_candidates.retain(|format| *format != FileFormat::Mpeg);
         }
-        _ => formats.retain(|format| compatible_with(*format, detected)),
+        _ => format_candidates.retain(|format| compatible_with(*format, detected_format)),
     }
-    if formats.is_empty() {
-        formats.push(detected);
-    }
-    normalize_formats(&mut formats);
-    formats
+    normalize_formats(&mut format_candidates);
+    format_candidates
 }
 
 fn compatible_with(format: FileFormat, detected: FileFormat) -> bool {
@@ -48,6 +49,8 @@ fn compatible_with(format: FileFormat, detected: FileFormat) -> bool {
         ),
         FileFormat::Gzip => matches!(format, FileFormat::Tar | FileFormat::Svg),
         FileFormat::Ogg => format == FileFormat::Opus,
+        // A Node shebang also appears in TypeScript source files.
+        FileFormat::JavaScript => format == FileFormat::TypeScript,
         FileFormat::Xml => format == FileFormat::Svg,
         FileFormat::Svg => format == FileFormat::Xml,
         _ => false,
@@ -59,20 +62,25 @@ fn detect(bytes: &[u8], complete: bool) -> FileFormat {
     if let Some(format) = signature(bytes) {
         return format;
     }
-    let Some(text) = decode_text(bytes, complete) else {
-        return FileFormat::Unknown;
-    };
-    if text.trim().is_empty()
-        || text
+    if let Some(text) = decode_text(bytes, complete).filter(|text| is_readable_text(text)) {
+        return shebang(&text, complete)
+            .or_else(|| markup(&text))
+            .or_else(|| pem(&text))
+            .unwrap_or(FileFormat::Text);
+    }
+    // Packet alignment is weaker evidence than a readable text sample.
+    if is_transport_stream(bytes) {
+        FileFormat::Mpeg
+    } else {
+        FileFormat::Unknown
+    }
+}
+
+fn is_readable_text(text: &str) -> bool {
+    !text.trim().is_empty()
+        && !text
             .chars()
             .any(|ch| ch.is_control() && !ch.is_whitespace())
-    {
-        return FileFormat::Unknown;
-    }
-    shebang(&text, complete)
-        .or_else(|| markup(&text))
-        .or_else(|| pem(&text))
-        .unwrap_or(FileFormat::Text)
 }
 
 fn signature(bytes: &[u8]) -> Option<FileFormat> {
@@ -138,9 +146,6 @@ fn signature(bytes: &[u8]) -> Option<FileFormat> {
     }
     if bytes.starts_with(b"FORM") && matches!(bytes.get(8..12), Some(b"AIFF" | b"AIFC")) {
         return Some(FileFormat::Aiff);
-    }
-    if is_transport_stream(bytes) {
-        return Some(FileFormat::Mpeg);
     }
     None
 }
@@ -228,12 +233,26 @@ fn decode_utf32(bytes: &[u8], little_endian: bool, complete: bool) -> Option<Str
 }
 
 fn pem(text: &str) -> Option<FileFormat> {
-    text.split(['\r', '\n']).find_map(|line| {
-        let label = line
-            .trim()
-            .strip_prefix("-----BEGIN ")?
-            .strip_suffix("-----")?;
-        matches!(
+    for line in text.split(['\r', '\n']).map(str::trim) {
+        // Only explicit export metadata may precede the PEM marker.
+        if line.is_empty()
+            || line == "Bag Attributes"
+            || [
+                "Bag Attributes:",
+                "Key Attributes:",
+                "friendlyName:",
+                "localKeyID:",
+                "Microsoft CSP Name:",
+                "subject=",
+                "issuer=",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        {
+            continue;
+        }
+        let label = line.strip_prefix("-----BEGIN ")?.strip_suffix("-----")?;
+        return matches!(
             label,
             "CERTIFICATE"
                 | "X509 CERTIFICATE"
@@ -257,8 +276,9 @@ fn pem(text: &str) -> Option<FileFormat> {
                 | "X9.42 DH PARAMETERS"
                 | "EC PARAMETERS"
         )
-        .then_some(FileFormat::Pem)
-    })
+        .then_some(FileFormat::Pem);
+    }
+    None
 }
 
 fn shebang(text: &str, complete: bool) -> Option<FileFormat> {
@@ -324,8 +344,19 @@ fn markup(text: &str) -> Option<FileFormat> {
         };
         start = rest.trim_start();
     }
-    while let Some(comment) = start.strip_prefix("<!--") {
-        let Some((_, rest)) = comment.split_once("-->") else {
+    loop {
+        let rest = if let Some(comment) = start.strip_prefix("<!--") {
+            comment.split_once("-->").map(|(_, rest)| rest)
+        } else if let Some(instruction) = start.strip_prefix("<?") {
+            instruction.split_once("?>").map(|(_, rest)| rest)
+        } else if markup_token(start, "<!DOCTYPE", false)
+            && !markup_token(start, "<!doctype html", true)
+        {
+            after_doctype(start)
+        } else {
+            break;
+        };
+        let Some(rest) = rest else {
             break;
         };
         start = rest.trim_start();
@@ -341,6 +372,38 @@ fn markup(text: &str) -> Option<FileFormat> {
         .any(|token| markup_token(start, token, true))
     {
         return Some(FileFormat::Html);
+    }
+    None
+}
+
+fn after_doctype(text: &str) -> Option<&str> {
+    let declaration = text.strip_prefix("<!DOCTYPE")?;
+    let bytes = declaration.as_bytes();
+    let mut quote = None;
+    let mut subset_depth = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if bytes[index..].starts_with(b"<!--") {
+            index += 4 + declaration[index + 4..].find("-->")? + 3;
+            continue;
+        } else if bytes[index..].starts_with(b"<?") {
+            index += 2 + declaration[index + 2..].find("?>")? + 2;
+            continue;
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'[' => subset_depth += 1,
+                b']' => subset_depth = subset_depth.checked_sub(1)?,
+                b'>' if subset_depth == 0 => return Some(&declaration[index + 1..]),
+                _ => {}
+            }
+        }
+        index += 1;
     }
     None
 }
@@ -373,8 +436,9 @@ mod tests {
             (&[Tar, Svg], b"\x1f\x8b\x08", &[Svg, Tar]),
             (&[Opus], b"OggS\x00", &[Opus]),
             (&[Mpeg, TypeScript], b"const value = 1;", &[TypeScript]),
-            (&[Word], b"%PDF-1.7", &[Pdf]),
-            (&[Json, TypeScript], b"", &[Json, TypeScript]),
+            (&[Word], b"%PDF-1.7", &[]),
+            (&[Json, TypeScript], b"", &[]),
+            (&[Mpeg, TypeScript], b"\0\xff", &[]),
             (&[], b"\0\xff", &[Unknown]),
         ];
         for &(formats, bytes, expected) in cases {
