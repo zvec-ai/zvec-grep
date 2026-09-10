@@ -5,6 +5,7 @@
 //! public API.
 
 pub mod api;
+mod domain;
 mod error;
 #[allow(dead_code)]
 mod extraction;

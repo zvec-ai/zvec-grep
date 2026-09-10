@@ -3876,7 +3876,17 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "uuid",
+ "zg-engine-macros",
  "zg-host-native",
+]
+
+[[package]]
+name = "zg-engine-macros"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
