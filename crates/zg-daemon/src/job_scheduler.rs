@@ -241,21 +241,41 @@ impl IndexJobScheduler {
     }
 
     pub(crate) async fn wait(&self, id: Uuid) -> Result<IndexJobCompletion, SchedulerError> {
+        self.wait_with_progress(id, None).await
+    }
+
+    pub(crate) async fn wait_with_progress(
+        &self,
+        id: Uuid,
+        reporter: Option<zg_engine::api::index::progress::IndexProgressReporter>,
+    ) -> Result<IndexJobCompletion, SchedulerError> {
         let job = lock(&self.inner.state)
             .jobs
             .get(&id)
             .cloned()
             .ok_or(SchedulerError::UnknownJob(id))?;
+        let mut previous = None;
         loop {
             let notified = job.completed.notified();
             let snapshot = lock(&job.snapshot).clone();
+            if let Some(reporter) = &reporter
+                && snapshot.progress != previous
+            {
+                if let Some(progress) = &snapshot.progress {
+                    reporter.report(progress.clone());
+                }
+                previous.clone_from(&snapshot.progress);
+            }
             if job.finished.load(Ordering::Acquire) {
                 return Ok(IndexJobCompletion {
                     job: snapshot,
                     result: lock(&job.result).clone(),
                 });
             }
-            notified.await;
+            tokio::select! {
+                () = notified => {},
+                () = tokio::time::sleep(std::time::Duration::from_millis(100)), if reporter.is_some() => {},
+            }
         }
     }
 
@@ -419,13 +439,14 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
             .expect("a queued daemon job must retain its index options");
         options.signal = Some(job.cancellation.clone());
         let weak_job = Arc::downgrade(&job);
-        options.on_progress = Some(zg_engine::api::index::progress::IndexProgressReporter::new(
-            move |progress| {
+        options.on_progress = Some(
+            zg_engine::api::index::progress::IndexProgressReporter::new(move |progress| {
                 if let Some(job) = weak_job.upgrade() {
                     lock(&job.snapshot).progress = Some(progress);
                 }
-            },
-        ));
+            })
+            .prioritize_model_progress(),
+        );
         let outcome = inner.executor.index(options).await;
         match outcome {
             Ok(result) => {
@@ -1050,6 +1071,88 @@ mod tests {
                 "authorization: Bearer super-secret api_key=also-secret token = third-secret",
             ))
         }
+    }
+
+    struct DownloadProgressExecutor {
+        finish: Notify,
+    }
+
+    #[async_trait]
+    impl IndexExecutor for DownloadProgressExecutor {
+        async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError> {
+            use zg_engine::api::index::progress::{
+                IndexEmbeddingProgress, IndexEmbeddingStage, IndexProgress, IndexProgressPhase,
+            };
+            let reporter = options.on_progress.expect("reporter");
+            reporter.report(IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: Some(1),
+                files_indexed: Some(0),
+                files_failed: Some(0),
+                detail: None,
+                embedding: Some(IndexEmbeddingProgress {
+                    stage: Some(IndexEmbeddingStage::Downloading),
+                    downloaded_bytes: Some(128),
+                    total_bytes: Some(256),
+                    ..IndexEmbeddingProgress::default()
+                }),
+            });
+            reporter.report(IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: Some(1),
+                files_indexed: Some(0),
+                files_failed: Some(0),
+                detail: None,
+                embedding: None,
+            });
+            self.finish.notified().await;
+            Ok(IndexResult::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_job_streams_download_progress_before_completion() {
+        use zg_engine::api::index::progress::IndexProgressReporter;
+        let executor = Arc::new(DownloadProgressExecutor {
+            finish: Notify::new(),
+        });
+        let scheduler = IndexJobScheduler::new(executor.clone(), SchedulerConfig::default());
+        let root = std::env::temp_dir().join("progress-workspace");
+        let original = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("submit");
+        let reused = scheduler
+            .submit(root, IndexOptions::default(), JobReason::Manual)
+            .expect("reuse");
+        assert_eq!(original.job.id, reused.job.id);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let reporter = IndexProgressReporter::new(move |progress| {
+            let _ = sender.send(progress);
+        });
+        let waiting = scheduler.clone();
+        let task = tokio::spawn(async move {
+            waiting
+                .wait_with_progress(reused.job.id, Some(reporter))
+                .await
+        });
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
+            .await
+            .expect("live progress timeout")
+            .expect("progress");
+        assert_eq!(
+            progress.embedding.expect("download").downloaded_bytes,
+            Some(128)
+        );
+        assert!(!task.is_finished());
+        executor.finish.notify_one();
+        assert_eq!(
+            task.await
+                .expect("wait task")
+                .expect("completion")
+                .job
+                .state,
+            JobState::Succeeded
+        );
     }
 
     #[tokio::test]

@@ -27,6 +27,17 @@ const EVENT_STREAM: &str = "text/event-stream";
 const JSON: &str = "application/json";
 
 pub(crate) async fn post_json(uri: &str, body: Vec<u8>) -> Result<Vec<u8>, DaemonError> {
+    let response = post_response(uri, body).await?;
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|error| DaemonError::McpBridge(error.to_string()))?
+        .to_bytes();
+    Ok(bytes.to_vec())
+}
+
+async fn post_response(uri: &str, body: Vec<u8>) -> Result<http::Response<Incoming>, DaemonError> {
     let mut builder = request_builder(Method::POST, uri)
         .map_err(|error| DaemonError::McpBridge(error.to_string()))?
         .header(CONTENT_TYPE, JSON)
@@ -45,13 +56,41 @@ pub(crate) async fn post_json(uri: &str, body: Vec<u8>) -> Result<Vec<u8>, Daemo
             unexpected_response(response).await.to_string(),
         ));
     }
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|error| DaemonError::McpBridge(error.to_string()))?
-        .to_bytes();
-    Ok(bytes.to_vec())
+    Ok(response)
+}
+
+pub(crate) async fn post_index_stream(
+    uri: &str,
+    body: Vec<u8>,
+    reporter: &zg_engine::api::index::progress::IndexProgressReporter,
+) -> Result<zg_daemon_protocol::ExecutionResult, DaemonError> {
+    use zg_daemon_protocol::IndexStreamEvent;
+    let mut response = post_response(uri, body).await?.into_body();
+    let mut pending = Vec::new();
+    while let Some(frame) = response.frame().await {
+        let frame = frame.map_err(|error| DaemonError::McpBridge(error.to_string()))?;
+        if let Ok(data) = frame.into_data() {
+            for byte in data {
+                if byte == b'\n' {
+                    match serde_json::from_slice::<IndexStreamEvent>(&pending)? {
+                        IndexStreamEvent::Progress(progress) => reporter.report(progress),
+                        IndexStreamEvent::Finished(result) => return Ok(result),
+                    }
+                    pending.clear();
+                } else {
+                    pending.push(byte);
+                    if pending.len() > 16 * 1024 * 1024 {
+                        return Err(DaemonError::McpBridge(
+                            "Index progress event exceeds size limit".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Err(DaemonError::McpBridge(
+        "Index progress stream ended without a result".into(),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -385,6 +424,112 @@ mod tests {
     use rmcp::transport::streamable_http_client::StreamableHttpError;
 
     use super::{PROTOCOL_VERSION, apply_custom_headers, is_loopback_host};
+
+    #[tokio::test]
+    async fn index_stream_delivers_fragmented_progress_before_the_result() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use zg_daemon_protocol::{DaemonReply, ExecutionResult, IndexStreamEvent};
+        use zg_engine::api::index::progress::{
+            IndexProgress, IndexProgressPhase, IndexProgressReporter,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.expect("request header"));
+            }
+            let mut body = [0; 2];
+            stream.read_exact(&mut body).await.expect("request body");
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.expect("response headers");
+            let progress = IndexStreamEvent::Progress(IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: Some(9),
+                files_indexed: Some(2),
+                files_failed: None,
+                detail: None,
+                embedding: None,
+            });
+            let line = serde_json::to_string(&progress).expect("progress") + "\n";
+            for part in line.as_bytes().chunks(7) {
+                stream
+                    .write_all(format!("{:x}\r\n", part.len()).as_bytes())
+                    .await
+                    .expect("chunk length");
+                stream.write_all(part).await.expect("chunk");
+                stream.write_all(b"\r\n").await.expect("chunk end");
+            }
+            released.await.expect("progress observed before completion");
+            let result = IndexStreamEvent::Finished(ExecutionResult::Success(DaemonReply::Index(
+                Box::default(),
+            )));
+            let line = serde_json::to_string(&result).expect("result") + "\n";
+            stream
+                .write_all(format!("{:x}\r\n{line}\r\n0\r\n\r\n", line.len()).as_bytes())
+                .await
+                .expect("result chunk");
+        });
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let reporter = IndexProgressReporter::new(move |progress| {
+            let _ = sender.send(progress);
+        });
+        let client = tokio::spawn(async move {
+            super::post_index_stream(
+                &format!("http://{address}/admin/index"),
+                b"{}".to_vec(),
+                &reporter,
+            )
+            .await
+        });
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
+            .await
+            .expect("live progress timeout")
+            .expect("progress");
+        assert_eq!(progress.files_indexed, Some(2));
+        assert!(!client.is_finished());
+        release.send(()).expect("release server");
+        assert!(matches!(
+            client.await.expect("client").expect("result"),
+            ExecutionResult::Success(DaemonReply::Index(_))
+        ));
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn incomplete_index_stream_is_an_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.expect("header"));
+            }
+            let mut body = [0; 2];
+            stream.read_exact(&mut body).await.expect("body");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{")
+                .await
+                .expect("truncated event");
+        });
+        let reporter = zg_engine::api::index::progress::IndexProgressReporter::new(|_| {});
+        let error = super::post_index_stream(
+            &format!("http://{address}/admin/index"),
+            b"{}".to_vec(),
+            &reporter,
+        )
+        .await
+        .expect_err("missing final result");
+        assert!(error.to_string().contains("without a result"));
+        server.await.expect("server");
+    }
 
     #[test]
     fn custom_headers_reject_transport_owned_values() {

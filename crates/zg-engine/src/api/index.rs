@@ -109,7 +109,10 @@ pub mod options {
 
 /// Progress values emitted while [`crate::ZvecGrep::index`] is running.
 pub mod progress {
-    use std::{fmt, sync::Arc};
+    use std::{
+        fmt,
+        sync::{Arc, Mutex},
+    };
 
     use serde::{Deserialize, Serialize};
 
@@ -123,9 +126,100 @@ pub mod progress {
             Self(Arc::new(reporter))
         }
 
+        /// Keeps model preparation visible until ready, then restores indexing progress.
+        /// Apply before transport snapshot coalescing so a missed ready event cannot
+        /// leave a remote display stuck in the downloading phase.
+        #[must_use]
+        pub fn prioritize_model_progress(self) -> Self {
+            let state = Mutex::new((false, None::<IndexProgress>));
+            Self::new(move |progress| {
+                // Serialize delivery with state changes across concurrent producers.
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let model_stage = progress.embedding.as_ref().and_then(|value| value.stage);
+                match model_stage {
+                    Some(IndexEmbeddingStage::Preparing | IndexEmbeddingStage::Downloading) => {
+                        state.0 = true;
+                    }
+                    Some(IndexEmbeddingStage::Ready) => {
+                        state.0 = false;
+                        self.report(state.1.take().unwrap_or(progress));
+                        return;
+                    }
+                    _ if progress.phase == IndexProgressPhase::Done => {
+                        state.0 = false;
+                        state.1 = None;
+                    }
+                    None if progress.phase == IndexProgressPhase::Indexing => {
+                        state.1 = Some(progress.clone());
+                        if state.0 {
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+                self.report(progress);
+            })
+        }
+
         /// Publishes one progress snapshot to the configured observer.
         pub fn report(&self, progress: IndexProgress) {
             (self.0)(progress);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn model_progress_suppresses_interleaved_indexing_and_restores_latest_counts() {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let reporter = IndexProgressReporter::new(move |event| {
+                captured.lock().unwrap().push(event);
+            })
+            .prioritize_model_progress();
+            let indexing = IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: Some(10),
+                files_indexed: Some(0),
+                files_failed: Some(0),
+                detail: None,
+                embedding: None,
+            };
+            let model = |stage| IndexProgress {
+                embedding: Some(IndexEmbeddingProgress {
+                    stage: Some(stage),
+                    ..Default::default()
+                }),
+                ..indexing.clone()
+            };
+            let preparing = model(IndexEmbeddingStage::Preparing);
+            let downloading = model(IndexEmbeddingStage::Downloading);
+            let latest = IndexProgress {
+                files_indexed: Some(3),
+                ..indexing.clone()
+            };
+            reporter.report(indexing.clone());
+            reporter.report(preparing.clone());
+            reporter.report(downloading.clone());
+            reporter.report(latest.clone());
+            assert_eq!(
+                *events.lock().unwrap(),
+                [indexing.clone(), preparing.clone(), downloading.clone()]
+            );
+            reporter.report(model(IndexEmbeddingStage::Ready));
+            let next = IndexProgress {
+                files_indexed: Some(4),
+                ..indexing.clone()
+            };
+            reporter.report(next.clone());
+            assert_eq!(
+                *events.lock().unwrap(),
+                [indexing, preparing, downloading, latest, next]
+            );
         }
     }
 

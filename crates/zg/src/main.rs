@@ -403,20 +403,23 @@ async fn execute_index(
     match operation {
         IndexOperation::Build(mut request) => {
             authorize_index(&mut request, server, home).await?;
+            let progress = zg_cli::IndexProgressDisplay::new(
+                io::stderr(),
+                io::stderr().is_terminal(),
+                output.color,
+            );
+            let reporter = progress.reporter();
             let result = if server {
                 let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
-                let reply =
-                    zg_daemon::execute_command(&home, DaemonCommand::Index(*request)).await?;
-                let DaemonReply::Index(result) = reply else {
-                    return Err(protocol_mismatch("index"));
-                };
-                *result
+                zg_daemon::index_with_progress(&home, *request, &reporter).await?
             } else {
                 let engine = ZvecGrep::new();
+                request.on_progress = Some(reporter.prioritize_model_progress());
                 let result = engine.index(*request).await?;
                 engine.close();
                 result
             };
+            progress.finish();
             let color = output.color == zg_cli::ColorMode::Always
                 || (output.color == zg_cli::ColorMode::Auto
                     && io::stdout().is_terminal()

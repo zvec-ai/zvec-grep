@@ -202,6 +202,42 @@ pub async fn execute_command(
     }
 }
 
+/// Executes an index operation while forwarding live progress snapshots.
+/// # Errors
+/// Returns connection, protocol, or indexing errors, including a truncated stream.
+pub async fn index_with_progress(
+    home: &std::path::Path,
+    request: zg_engine::api::index::IndexOptions,
+    reporter: &zg_engine::api::index::progress::IndexProgressReporter,
+) -> Result<zg_engine::api::index::IndexResult, DaemonError> {
+    let status = server_status(home).await?;
+    if !status.ready {
+        return Err(DaemonError::NotReady);
+    }
+    let url = status.server_url.ok_or(DaemonError::NotReady)?;
+    let prefix = url
+        .strip_suffix("/mcp")
+        .ok_or_else(|| DaemonError::McpBridge("daemon published an invalid server URL".into()))?;
+    let result = http_client::post_index_stream(
+        &format!("{prefix}/admin/index"),
+        serde_json::to_vec(&request)?,
+        reporter,
+    )
+    .await?;
+    match result {
+        zg_daemon_protocol::ExecutionResult::Success(zg_daemon_protocol::DaemonReply::Index(
+            result,
+        )) => Ok(*result),
+        zg_daemon_protocol::ExecutionResult::Success(_) => Err(DaemonError::McpBridge(
+            "daemon returned a reply other than index".into(),
+        )),
+        zg_daemon_protocol::ExecutionResult::Failure(error) => Err(DaemonError::Remote {
+            report: Box::new(error.report),
+            retryable: error.retryable,
+        }),
+    }
+}
+
 /// Runs the resident HTTP daemon until local shutdown or an OS termination
 /// signal, then releases its instance record.
 ///

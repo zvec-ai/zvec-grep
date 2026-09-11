@@ -4,7 +4,9 @@ mod authorization;
 mod install;
 mod jsonc;
 mod managed_rg;
+mod progress;
 mod render;
+pub use progress::IndexProgressDisplay;
 
 use std::{
     ffi::{OsStr, OsString},

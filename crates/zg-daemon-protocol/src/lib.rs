@@ -12,7 +12,7 @@ use zg_engine::api::{
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 5;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -173,6 +173,14 @@ pub struct ExecuteResult {
 pub enum ExecutionResult {
     Success(DaemonReply),
     Failure(ErrorReply),
+}
+
+/// Bounded, newline-delimited events returned by the streaming index endpoint.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum IndexStreamEvent {
+    Progress(IndexProgress),
+    Finished(ExecutionResult),
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

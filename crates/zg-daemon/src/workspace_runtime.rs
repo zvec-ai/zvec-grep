@@ -166,6 +166,7 @@ impl WorkspaceRuntimeManager {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(WorkspaceRuntimeError::Scheduler(SchedulerError::Closed));
         }
+        let reporter = options.on_progress.take();
         let canonical_root = canonical_root(options.root.as_deref())?;
         options.root = Some(canonical_root.clone());
         let runtime = self.runtime(canonical_root.clone(), &options);
@@ -195,7 +196,11 @@ impl WorkspaceRuntimeManager {
             });
         }
 
-        let completed = self.inner.scheduler.wait(submitted.job.id).await?;
+        let completed = self
+            .inner
+            .scheduler
+            .wait_with_progress(submitted.job.id, reporter)
+            .await?;
         if completed.job.state == JobState::Succeeded
             && let Err(error) = self
                 .on_index_succeeded(completed.job.clone(), target_revision)

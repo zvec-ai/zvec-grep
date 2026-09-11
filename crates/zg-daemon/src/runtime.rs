@@ -103,6 +103,7 @@ pub(crate) async fn run_server(
         .route("/healthz", get(health))
         .route("/control/shutdown", post(request_shutdown))
         .route("/admin/execute", post(execute_command))
+        .route("/admin/index", post(stream_index))
         .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn_with_state(
             token,
@@ -159,6 +160,55 @@ async fn request_shutdown(
     }
     state.shutdown.cancel();
     (StatusCode::ACCEPTED, Json(json!({ "status": "stopping" })))
+}
+
+async fn stream_index(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(mut options): Json<zg_engine::api::index::IndexOptions>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use zg_daemon_protocol::IndexStreamEvent;
+    if !has_loopback_host(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let progress_sender = sender.clone();
+    options.on_progress = Some(zg_engine::api::index::progress::IndexProgressReporter::new(
+        move |progress| {
+            // Slow clients may skip intermediate snapshots; memory stays bounded.
+            let _ = progress_sender.try_send(IndexStreamEvent::Progress(progress));
+        },
+    ));
+    tokio::spawn(async move {
+        let initial = zg_engine::api::index::progress::IndexProgress {
+            phase: zg_engine::api::index::progress::IndexProgressPhase::Indexing,
+            files_total: None,
+            files_indexed: None,
+            files_failed: None,
+            detail: Some("Waiting for index job".into()),
+            embedding: None,
+        };
+        let _ = sender.send(IndexStreamEvent::Progress(initial)).await;
+        let (_, Json(result)) =
+            execute_command(State(state), headers, Json(DaemonCommand::Index(options))).await;
+        let _ = sender.send(IndexStreamEvent::Finished(result)).await;
+    });
+    let stream = futures::stream::unfold(receiver, |mut receiver| async {
+        let event = receiver.recv().await?;
+        let bytes = serde_json::to_vec(&event)
+            .map(|mut bytes| {
+                bytes.push(b'\n');
+                bytes::Bytes::from(bytes)
+            })
+            .map_err(std::io::Error::other);
+        Some((bytes, receiver))
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 async fn execute_command(
