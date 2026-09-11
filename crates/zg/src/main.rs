@@ -50,7 +50,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         _ => {}
     }
     install_darwin_metal_residency_mitigation()?;
-    init_tracing();
+    let debug = match &plan {
+        CliPlan::Query { output, .. }
+        | CliPlan::Index { output, .. }
+        | CliPlan::Status { output, .. } => output.debug,
+        _ => false,
+    };
+    init_tracing(debug);
 
     let runtime = Builder::new_multi_thread().enable_all().build()?;
 
@@ -89,20 +95,52 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
             mode,
             home,
             request,
-            ..
-        } => execute_request(mode, home.as_deref(), *request).await,
+            output,
+        } => execute_request(mode, home.as_deref(), *request, output).await,
         CliPlan::Index {
             mode,
             home,
             operation,
-            ..
-        } => execute_index(mode, home.as_deref(), operation).await,
+            output,
+        } => execute_index(mode, home.as_deref(), operation, output).await,
         CliPlan::Status {
             mode,
             home,
             request,
             check_ready,
-        } => execute_status(mode, home.as_deref(), request, check_ready).await,
+            output,
+        } => execute_status(mode, home.as_deref(), request, check_ready, output).await,
+        CliPlan::Config(args) => {
+            use zg_cli::{ConfigAction, ModelAction, ProviderAction};
+            let (label, reference, path) = match args.action {
+                ConfigAction::Provider {
+                    action: ProviderAction::Set { reference, api_key },
+                } => {
+                    let path = zg_engine::config::set_provider(&reference, &api_key)?;
+                    ("Provider", reference, path)
+                }
+                ConfigAction::Model {
+                    action:
+                        ModelAction::Set {
+                            reference,
+                            endpoint,
+                            device,
+                            default_model,
+                        },
+                } => {
+                    let path = zg_engine::config::set_model(
+                        &reference,
+                        endpoint.as_deref(),
+                        device.map(Into::into),
+                        default_model,
+                    )?;
+                    ("Model", reference, path)
+                }
+            };
+            println!("{label} config: {reference}");
+            println!("Global config: {}", path.display());
+            Ok(())
+        }
         CliPlan::Auth(args) => {
             let root = args
                 .root
@@ -205,12 +243,13 @@ async fn execute_request(
     mode: ClientMode,
     home: Option<&Path>,
     request: ContextOptions,
+    output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
     if request.rg {
         if mode == ClientMode::Server {
             debug!("managed --rg remains local in server mode");
         }
-        return execute_direct_context(request).await;
+        return execute_direct_context(request, output).await;
     }
     if use_server(mode, home).await? {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
@@ -218,17 +257,44 @@ async fn execute_request(
         let DaemonReply::Context(result) = reply else {
             return Err(protocol_mismatch("context"));
         };
-        zg_cli::write_context_result(io::stdout().lock(), &result)?;
+        zg_cli::write_context_with_options(
+            io::stdout().lock(),
+            &result,
+            output,
+            io::stdout().is_terminal(),
+        )?;
+        if output.debug {
+            eprintln!(
+                "Diagnostics: {}",
+                serde_json::to_string(&result.diagnostics)?
+            );
+        }
         return Ok(());
     }
-    execute_direct_context(request).await
+    execute_direct_context(request, output).await
 }
 
-async fn execute_direct_context(request: ContextOptions) -> Result<(), Box<dyn Error>> {
+async fn execute_direct_context(
+    mut request: ContextOptions,
+    output: zg_cli::OutputOptions,
+) -> Result<(), Box<dyn Error>> {
+    // A short-lived direct process cannot retain a background refresh job.
+    zg_cli::finalize_refresh(&mut request, false);
     let engine = ZvecGrep::new();
     let result = engine.context(request).await?;
     engine.close();
-    zg_cli::write_context_result(io::stdout().lock(), &result)?;
+    zg_cli::write_context_with_options(
+        io::stdout().lock(),
+        &result,
+        output,
+        io::stdout().is_terminal(),
+    )?;
+    if output.debug {
+        eprintln!(
+            "Diagnostics: {}",
+            serde_json::to_string(&result.diagnostics)?
+        );
+    }
     Ok(())
 }
 
@@ -236,6 +302,7 @@ async fn execute_index(
     mode: ClientMode,
     home: Option<&Path>,
     operation: IndexOperation,
+    output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
     let root = match &operation {
         IndexOperation::Build(request) => request.root.clone(),
@@ -260,7 +327,20 @@ async fn execute_index(
                 engine.close();
                 result
             };
+            let color = output.color == zg_cli::ColorMode::Always
+                || (output.color == zg_cli::ColorMode::Auto
+                    && io::stdout().is_terminal()
+                    && std::env::var_os("NO_COLOR").is_none());
+            if color {
+                print!("\x1b[36m");
+            }
             zg_cli::write_index_result(io::stdout().lock(), &root, &result)?;
+            if color {
+                print!("\x1b[0m");
+            }
+            if output.debug {
+                eprintln!("Index diagnostics: {}", serde_json::to_string(&result)?);
+            }
         }
         IndexOperation::Drop(request) => {
             let removed = if server {
@@ -364,6 +444,7 @@ async fn execute_status(
     home: Option<&Path>,
     request: zg_engine::api::info::InfoOptions,
     check_ready: bool,
+    output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
     let result = if use_server(mode, home).await? {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
@@ -378,7 +459,15 @@ async fn execute_status(
         engine.close();
         result
     };
-    zg_cli::write_info_result(io::stdout().lock(), &result)?;
+    zg_cli::write_info_with_options(
+        io::stdout().lock(),
+        &result,
+        output,
+        io::stdout().is_terminal(),
+    )?;
+    if output.debug {
+        eprintln!("Status diagnostics: indexed={}", result.indexed);
+    }
     let ready = result.indexed
         && result
             .status
@@ -419,9 +508,13 @@ async fn execute_server_plan(plan: ServerPlan) -> Result<(), Box<dyn Error>> {
             write_server_status(&status);
         }
         ServerPlan::Off(args) => {
-            reject_token_file(args.token_file.as_deref())?;
             let home = zg_daemon::resolve_home(args.home)?;
-            let status = zg_daemon::stop_server(&home, zg_daemon::default_stop_timeout()).await?;
+            let status = zg_daemon::stop_server_with_token(
+                &home,
+                zg_daemon::default_stop_timeout(),
+                args.token_file.as_deref(),
+            )
+            .await?;
             write_server_status(&status);
         }
         ServerPlan::Status(args) => {
@@ -441,26 +534,16 @@ async fn execute_server_plan(plan: ServerPlan) -> Result<(), Box<dyn Error>> {
 }
 
 fn server_config(args: ServerStartArgs) -> Result<ServerConfig, Box<dyn Error>> {
-    reject_token_file(args.token_file.as_deref())?;
+    zg_daemon::resolve_token(args.token_file.as_deref())?;
     let listen = args.listen.parse::<ListenAddress>()?;
     let home = zg_daemon::resolve_home(args.home)?;
     let mut config = ServerConfig::new(listen, home);
+    config.token_file = args.token_file;
     config.mcp_toolset = match args.mcp_toolset {
         McpToolset::Agent => DaemonMcpToolset::Agent,
         McpToolset::Full => DaemonMcpToolset::Full,
     };
     Ok(config)
-}
-
-fn reject_token_file(token_file: Option<&Path>) -> Result<(), Box<dyn Error>> {
-    if token_file.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "--token-file is not yet supported by the Rust daemon",
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn write_server_status(status: &DaemonStatus) {
@@ -483,7 +566,16 @@ fn write_server_status(status: &DaemonStatus) {
     }
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+fn init_tracing(debug: bool) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(if debug {
+            "zg=debug,zg_engine=debug,zg_daemon=debug"
+        } else {
+            "warn"
+        })
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_env_filter(filter)
+        .try_init();
 }

@@ -51,6 +51,10 @@ pub mod options {
         pub api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
+        #[serde(default)]
+        pub device: Option<crate::api::index::options::Device>,
+        #[serde(default)]
+        pub model_cache: Option<PathBuf>,
     }
 
     impl Default for ContextOptions {
@@ -88,6 +92,8 @@ pub mod options {
                 allow_remote: false,
                 api_key: None,
                 endpoint: None,
+                device: None,
+                model_cache: None,
             }
         }
     }

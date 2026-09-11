@@ -27,10 +27,14 @@ const EVENT_STREAM: &str = "text/event-stream";
 const JSON: &str = "application/json";
 
 pub(crate) async fn post_json(uri: &str, body: Vec<u8>) -> Result<Vec<u8>, DaemonError> {
-    let request = request_builder(Method::POST, uri)
+    let mut builder = request_builder(Method::POST, uri)
         .map_err(|error| DaemonError::McpBridge(error.to_string()))?
         .header(CONTENT_TYPE, JSON)
-        .header(ACCEPT, JSON)
+        .header(ACCEPT, JSON);
+    if let Some(token) = crate::resolve_token(None)? {
+        builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let request = builder
         .body(Full::new(Bytes::from(body)))
         .map_err(|error| DaemonError::McpBridge(error.to_string()))?;
     let response = send_http_request(request)

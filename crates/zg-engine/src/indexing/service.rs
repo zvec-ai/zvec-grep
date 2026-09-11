@@ -137,7 +137,7 @@ impl WorkspaceIndexService {
             created_epoch_ms: existing_for_manifest.map_or(now, |manifest| manifest.created_time),
             updated_epoch_ms: now,
         };
-        let runtime = embedding_runtime(existing.as_ref(), &options, &model);
+        let runtime = embedding_runtime(existing.as_ref(), &options, &model)?;
         let mut manifest = WorkspaceManifest::new(info.clone(), runtime)?;
         let storage = factory.open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: location.home.clone(),
@@ -206,6 +206,8 @@ impl WorkspaceIndexService {
                     api_key: options.api_key.clone(),
                     endpoint: options.endpoint.clone(),
                     embedding_concurrency: options.embedding_concurrency,
+                    device: options.device,
+                    model_cache: options.model_cache.clone(),
                     ..IndexOptions::default()
                 },
             )
@@ -395,7 +397,13 @@ fn acquire_model(
         ));
     }
     let reference = embedding_reference(existing, options.embedding.as_ref())?;
+    let config = crate::config::read()?;
     let local = reference.starts_with("local/");
+    if (!local && options.device.is_some()) || (local && options.endpoint.is_some()) {
+        return Err(EngineError::invalid_argument(
+            "device requires a local model; endpoint requires a remote model",
+        ));
+    }
     let existing_runtime = existing.map(|manifest| &manifest.embedding_runtime);
     let api_key = if local {
         None
@@ -404,6 +412,16 @@ fn acquire_model(
             .api_key
             .clone()
             .or_else(|| existing_runtime.and_then(|runtime| runtime.api_key.clone()))
+            .or_else(|| {
+                crate::config::string(
+                    &config,
+                    &[
+                        "providers",
+                        reference.split('/').next().unwrap_or_default(),
+                        "apiKey",
+                    ],
+                )
+            })
             .or_else(environment_api_key)
     };
     let endpoint = options.endpoint.clone().or_else(|| {
@@ -421,27 +439,36 @@ fn acquire_model(
         crate::authorization::require(&root, &reference, &endpoint, options.allow_remote)?;
         Some(endpoint)
     };
-    let device = local.then(|| {
-        options.embedding.as_ref().map_or_else(
-            || {
-                existing_runtime
-                    .and_then(|runtime| runtime.device)
-                    .unwrap_or(Device::Auto)
-            },
-            |embedding| embedding.device,
-        )
-    });
+    let device = if local {
+        crate::config::runtime_device(
+            &config,
+            &reference,
+            options.device.or_else(|| {
+                options
+                    .embedding
+                    .as_ref()
+                    .map(|e| e.device)
+                    .filter(|device| *device != Device::Auto)
+            }),
+            existing_runtime.and_then(|runtime| runtime.device),
+        )?
+    } else {
+        None
+    };
     models
         .acquire(ModelRuntimeRequest::new(
-            reference,
+            reference.clone(),
             CreateEmbeddingModelOptions {
                 api_key,
                 endpoint,
-                model_cache_dir: options
-                    .embedding
-                    .as_ref()
-                    .and_then(|embedding| embedding.cache_dir.clone())
-                    .or_else(|| existing_runtime.and_then(|runtime| runtime.cache_dir.clone())),
+                model_cache_dir: crate::config::model_cache(
+                    &config,
+                    options
+                        .model_cache
+                        .clone()
+                        .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+                    existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
+                ),
                 device,
                 ..CreateEmbeddingModelOptions::default()
             },
@@ -461,7 +488,13 @@ fn acquire_search_model(
         workspace_index_unavailable(&manifest.path, "embedding schema is missing")
     })?;
     let reference = format!("{}/{}", schema.provider, schema.model);
+    let config = crate::config::read()?;
     let local = schema.provider == "local";
+    if !local && options.device.is_some() {
+        return Err(EngineError::invalid_argument(
+            "--device is only supported for local embedding models",
+        ));
+    }
     let endpoint = if local {
         None
     } else {
@@ -477,7 +510,7 @@ fn acquire_search_model(
     };
     models
         .acquire(ModelRuntimeRequest::new(
-            reference,
+            reference.clone(),
             CreateEmbeddingModelOptions {
                 api_key: (!local)
                     .then(|| {
@@ -485,12 +518,31 @@ fn acquire_search_model(
                             .api_key
                             .clone()
                             .or_else(|| manifest.embedding_runtime.api_key.clone())
+                            .or_else(|| {
+                                crate::config::string(
+                                    &config,
+                                    &["providers", &schema.provider, "apiKey"],
+                                )
+                            })
                             .or_else(environment_api_key)
                     })
                     .flatten(),
                 endpoint,
-                device: local.then(|| manifest.embedding_runtime.device.unwrap_or(Device::Auto)),
-                model_cache_dir: manifest.embedding_runtime.cache_dir.clone(),
+                device: if local {
+                    crate::config::runtime_device(
+                        &config,
+                        &reference,
+                        options.device,
+                        manifest.embedding_runtime.device,
+                    )?
+                } else {
+                    None
+                },
+                model_cache_dir: crate::config::model_cache(
+                    &config,
+                    options.model_cache.clone(),
+                    manifest.embedding_runtime.cache_dir.clone(),
+                ),
                 ..CreateEmbeddingModelOptions::default()
             },
             embedding_concurrency,
@@ -507,6 +559,7 @@ pub(crate) fn embedding_reference(
         existing: existing
             .and_then(|manifest| manifest.embedding.as_ref())
             .map(|embedding| format!("{}/{}", embedding.provider, embedding.model)),
+        global_default: crate::config::string(&crate::config::read()?, &["defaults", "embedding"]),
         fallback: Some(DEFAULT_LOCAL_EMBEDDING.to_owned()),
         ..ResolveEmbeddingReferenceOptions::default()
     })
@@ -614,34 +667,43 @@ fn embedding_runtime(
     existing: Option<&WorkspaceManifest>,
     options: &IndexOptions,
     model: &ModelRuntimeLease,
-) -> EmbeddingRuntimeConfig {
+) -> Result<EmbeddingRuntimeConfig, EngineError> {
     let current = existing
         .map(|manifest| manifest.embedding_runtime.clone())
         .unwrap_or_default();
+    let config = crate::config::read()?;
     if model.info().provider == "local" {
-        EmbeddingRuntimeConfig {
-            cache_dir: options
-                .embedding
-                .as_ref()
-                .and_then(|embedding| embedding.cache_dir.clone())
-                .or(current.cache_dir),
-            device: Some(
+        let reference = format!("{}/{}", model.info().provider, model.info().name);
+        Ok(EmbeddingRuntimeConfig {
+            cache_dir: crate::config::model_cache(
+                &config,
                 options
-                    .embedding
-                    .as_ref()
-                    .map_or(current.device.unwrap_or(Device::Auto), |embedding| {
-                        embedding.device
-                    }),
+                    .model_cache
+                    .clone()
+                    .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+                current.cache_dir,
             ),
+            device: crate::config::runtime_device(
+                &config,
+                &reference,
+                options.device.or_else(|| {
+                    options
+                        .embedding
+                        .as_ref()
+                        .map(|e| e.device)
+                        .filter(|device| *device != Device::Auto)
+                }),
+                current.device,
+            )?,
             ..EmbeddingRuntimeConfig::default()
-        }
+        })
     } else {
-        EmbeddingRuntimeConfig {
+        Ok(EmbeddingRuntimeConfig {
             api_key: current.api_key,
             endpoint: model.info().endpoint.clone().or(current.endpoint),
             device: None,
             cache_dir: None,
-        }
+        })
     }
 }
 

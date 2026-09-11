@@ -5,7 +5,12 @@ use std::{
 
 use thiserror::Error;
 use zg_engine::api::{
-    context::{ContextResult, result::ContentRange},
+    context::{
+        ContextResult,
+        result::{
+            ContentRange, ContextContentRole, ContextItem, ContextItemStatus, EntityMetadata,
+        },
+    },
     index::IndexResult,
     info::InfoResult,
 };
@@ -35,6 +40,210 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             start_line(&item.range),
             item.content.trim_end()
         )?;
+    }
+    Ok(())
+}
+
+/// Writes context using the selected terminal presentation.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_context_with_options(
+    mut writer: impl Write,
+    result: &ContextResult,
+    options: crate::OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    use crate::ColorMode;
+    use zg_engine::api::context::result::ContextSource;
+    let color = options.color == ColorMode::Always
+        || (options.color == ColorMode::Auto && terminal && std::env::var_os("NO_COLOR").is_none());
+    let heading = |value: String| {
+        if color {
+            format!("\x1b[1;36m{value}\x1b[0m")
+        } else {
+            value
+        }
+    };
+    if options.human {
+        writeln!(writer, "{}: {:?}", heading("Context".into()), result.source)?;
+        writeln!(writer, "Query: {}", result.query)?;
+        writeln!(writer, "Hits: {}", result.items.len())?;
+    }
+    if result.source == ContextSource::Rg {
+        if color {
+            let mut buffer = Vec::new();
+            write_context_result(&mut buffer, result)?;
+            for line in String::from_utf8_lossy(&buffer).lines() {
+                writeln!(
+                    writer,
+                    "{}",
+                    if line.starts_with("  ") {
+                        line.to_owned()
+                    } else {
+                        heading(line.to_owned())
+                    }
+                )?;
+            }
+            return Ok(());
+        }
+        return write_context_result(writer, result);
+    }
+    if result.items.is_empty() {
+        return writeln!(writer, "No matches.");
+    }
+    for (index, item) in result.items.iter().enumerate() {
+        if index > 0 {
+            writeln!(writer)?;
+        }
+        let range = match &item.range {
+            ContentRange::Text {
+                start_line,
+                end_line,
+                ..
+            } => format!("{start_line}-{end_line}"),
+            _ => start_line(&item.range).to_string(),
+        };
+        let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
+        let label = if options.human {
+            format!("{}. {}:{}", item.rank, item.relative_path.display(), range)
+        } else {
+            format!(
+                "#{} matchedBy={} {}:{}",
+                item.rank,
+                matched_by.as_str().unwrap_or_default(),
+                item.relative_path.display(),
+                range
+            )
+        };
+        writeln!(writer, "{}", heading(label))?;
+        write_item_preview(&mut writer, item, options)?;
+        if options.trace {
+            if let Some(score) = item.score {
+                writeln!(writer, "score: {score:.4}")?;
+            }
+            if let Some(trace) = &item.trace {
+                writeln!(
+                    writer,
+                    "trace: {}",
+                    serde_json::to_string(trace).map_err(io::Error::other)?
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_item_preview(
+    mut writer: impl Write,
+    item: &ContextItem,
+    options: crate::OutputOptions,
+) -> io::Result<()> {
+    use crate::PreviewMode;
+    if item.status == ContextItemStatus::PossiblyStale {
+        writeln!(writer, "status: possibly_stale")?;
+    }
+    if let Some(metadata) = &item.metadata {
+        match metadata {
+            EntityMetadata::Code {
+                symbol_type,
+                symbol_name: Some(name),
+                scope,
+                ..
+            } => {
+                let kind = serde_json::to_value(symbol_type).map_err(io::Error::other)?;
+                write!(
+                    writer,
+                    "symbol: {} {name}",
+                    kind.as_str().unwrap_or_default()
+                )?;
+                if let Some(scope) = scope {
+                    write!(writer, " scope: {scope}")?;
+                }
+                writeln!(writer)?;
+            }
+            EntityMetadata::Markdown {
+                heading,
+                level,
+                scope,
+            } => {
+                if let Some(heading) = heading {
+                    writeln!(writer, "heading: {heading}")?;
+                }
+                if let Some(level) = level {
+                    writeln!(writer, "heading_level: {level}")?;
+                }
+                if let Some(scope) = scope {
+                    writeln!(writer, "scope: {scope}")?;
+                }
+            }
+            EntityMetadata::Code { .. } => {}
+        }
+    }
+    if options.preview != PreviewMode::None
+        && let Some(outline) = &item.outline
+    {
+        writeln!(writer, "{outline}")?;
+    }
+    if item.content_role != Some(ContextContentRole::Outline) {
+        let max_lines = match options.preview {
+            PreviewMode::None => 1,
+            PreviewMode::Short => 10,
+            PreviewMode::Full => usize::MAX,
+        };
+        let first = start_line(item.excerpt_range.as_ref().unwrap_or(&item.range));
+        let lines: Vec<_> = item.content.lines().collect();
+        let anchor = start_line(&item.range)
+            .saturating_sub(first)
+            .min(lines.len().saturating_sub(1));
+        let from = if options.preview == PreviewMode::None {
+            anchor
+        } else if options.preview == PreviewMode::Short {
+            anchor.saturating_sub(3)
+        } else {
+            0
+        };
+        for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
+            let line = if options.preview == PreviewMode::Full {
+                (*line).to_owned()
+            } else {
+                line.chars()
+                    .take(if options.human { 120 } else { 160 })
+                    .collect()
+            };
+            writeln!(writer, "  {}: {line}", first + offset)?;
+        }
+        if options.preview == PreviewMode::Short && lines.len() > from + max_lines {
+            writeln!(writer, "  …")?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes workspace status with the requested presentation and color policy.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_info_with_options(
+    mut writer: impl Write,
+    result: &InfoResult,
+    options: crate::OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    let mut buffer = Vec::new();
+    write_info_result(&mut buffer, result)?;
+    let color = options.color == crate::ColorMode::Always
+        || (options.color == crate::ColorMode::Auto
+            && terminal
+            && std::env::var_os("NO_COLOR").is_none());
+    for line in String::from_utf8_lossy(&buffer).lines() {
+        if color && let Some((key, value)) = line.split_once(':') {
+            writeln!(writer, "\x1b[1;36m{key}\x1b[0m:{value}")?;
+            continue;
+        }
+        if options.human {
+            writeln!(writer, "  {line}")?;
+        } else {
+            writeln!(writer, "{line}")?;
+        }
     }
     Ok(())
 }
@@ -597,5 +806,83 @@ fn start_line(range: &ContentRange) -> usize {
     match range {
         ContentRange::Text { start_line, .. } => *start_line,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use crate::{OutputOptions, PreviewMode};
+    use zg_engine::api::context::result::{
+        ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource, MatchedBy,
+    };
+
+    #[test]
+    fn preview_modes_and_trace_preserve_indexed_result_information() {
+        let result = ContextResult {
+            query: "needle".into(),
+            freshness: None,
+            background_refresh: None,
+            root: std::env::temp_dir(),
+            source: ContextSource::Index,
+            coverage: ContextCoverage::RankedSample,
+            workspace_index: None,
+            group_results: vec![],
+            diagnostics: ContextDiagnostics::default(),
+            items: vec![ContextItem {
+                kind: ContextItemKind::IndexedEntity,
+                rank: 1,
+                absolute_path: std::env::temp_dir().join("sample.rs"),
+                relative_path: "sample.rs".into(),
+                range: ContentRange::Text {
+                    start_line: 1,
+                    end_line: 20,
+                    start_offset: 0,
+                    end_offset: 100,
+                },
+                excerpt_range: None,
+                content: (1..=20)
+                    .map(|n| format!("line{n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                content_role: Some(ContextContentRole::Source),
+                outline: None,
+                status: ContextItemStatus::Fresh,
+                score: Some(0.75),
+                matched_by: MatchedBy::Fts,
+                metadata: None,
+                entity_id: None,
+                container: None,
+                trace: None,
+                query_groups: vec![],
+                selection_reason: None,
+                coverage_group: None,
+            }],
+        };
+        let render = |preview, trace| {
+            let mut buffer = Vec::new();
+            write_context_with_options(
+                &mut buffer,
+                &result,
+                OutputOptions {
+                    trace,
+                    preview,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("render");
+            String::from_utf8(buffer).expect("UTF-8")
+        };
+        let minimal = render(PreviewMode::None, false);
+        assert!(minimal.contains("#1 matchedBy=fts sample.rs:1-20"));
+        assert!(minimal.contains("1: line1"));
+        assert!(!minimal.contains("2: line2"));
+        let short = render(PreviewMode::Short, false);
+        assert!(short.contains("10: line10"));
+        assert!(!short.contains("11: line11"));
+        let full = render(PreviewMode::Full, true);
+        assert!(full.contains("20: line20"));
+        assert!(full.contains("score: 0.7500"));
     }
 }

@@ -686,3 +686,66 @@ fn assert_command_success(output: &Output) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn token_file_protects_daemon_requests_and_is_forwarded_to_child() -> Result<(), Box<dyn Error>> {
+    let home = TempDir::new()?;
+    let token_file = home.path().join("token.txt");
+    std::fs::write(&token_file, "test-token-012345678901234567890123456789\n")?;
+    let listen = format!("127.0.0.1:{}", available_port()?);
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let started = Command::new(&binary)
+        .args(["server", "on", "--home"])
+        .arg(home.path())
+        .args(["--listen", &listen, "--token-file"])
+        .arg(&token_file)
+        .env_remove("ZVEC_GREP_SERVER_TOKEN")
+        .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE")
+        .output()?;
+    let mut guard = ServerGuard {
+        binary: binary.clone(),
+        home: home.path().to_owned(),
+        active: true,
+    };
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let mut connection = TcpStream::connect(&listen)?;
+    connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        connection,
+        "POST /admin/execute HTTP/1.1\r\nHost: {listen}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    connection.read_to_string(&mut response)?;
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    let workspace = TempDir::new()?;
+    let status = Command::new(&binary)
+        .current_dir(workspace.path())
+        .args(["status", "--mode", "server", "--home"])
+        .arg(home.path())
+        .env_remove("ZVEC_GREP_SERVER_TOKEN")
+        .env("ZVEC_GREP_SERVER_TOKEN_FILE", &token_file)
+        .output()?;
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stopped = Command::new(&binary)
+        .args(["server", "off", "--home"])
+        .arg(home.path())
+        .arg("--token-file")
+        .arg(&token_file)
+        .env_remove("ZVEC_GREP_SERVER_TOKEN")
+        .output()?;
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    guard.active = false;
+    Ok(())
+}

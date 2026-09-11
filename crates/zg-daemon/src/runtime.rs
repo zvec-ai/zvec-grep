@@ -59,6 +59,7 @@ pub(crate) async fn run_server(
     config: ServerConfig,
     engine: Arc<ZvecGrep>,
 ) -> Result<(), DaemonError> {
+    let token = crate::resolve_token(config.token_file.as_deref())?;
     let mut instance = InstanceLock::acquire(&config).await?;
     let listener = match tokio::net::TcpListener::bind(config.listen.socket_addr()).await {
         Ok(listener) => listener,
@@ -103,6 +104,10 @@ pub(crate) async fn run_server(
         .route("/control/shutdown", post(request_shutdown))
         .route("/admin/execute", post(execute_command))
         .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn_with_state(
+            token,
+            crate::authentication::authenticate,
+        ))
         .with_state(ControlState {
             shutdown: shutdown.clone(),
             engine: Arc::clone(&engine),

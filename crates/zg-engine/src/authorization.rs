@@ -218,8 +218,10 @@ pub(crate) fn remote_endpoint(
             "Authorization requires a supported remote embedding model",
         ));
     };
+    let config = crate::config::read()?;
     let endpoint = endpoint
         .map(str::to_owned)
+        .or_else(|| crate::config::string(&config, &["models", reference, "endpoint"]))
         .or_else(|| env::var("ZVEC_GREP_ENDPOINT").ok())
         .unwrap_or_else(|| default_endpoint.to_string());
     let url = reqwest::Url::parse(endpoint.trim())
@@ -249,6 +251,7 @@ pub fn grant(
     let root = root_path(root)?;
     let location = workspace_index_location(&root)?;
     let manifest = read_workspace_manifest(&location.home)?;
+    let config = crate::config::read()?;
     let model = model
         .map(str::to_owned)
         .or_else(|| {
@@ -262,6 +265,7 @@ pub fn grant(
                 .ok()
                 .filter(|s| !s.trim().is_empty())
         })
+        .or_else(|| crate::config::string(&config, &["defaults", "embedding"]))
         .ok_or_else(|| {
             EngineError::invalid_argument(
                 "Choose a remote model with --embedding or ZVEC_GREP_EMBEDDING",

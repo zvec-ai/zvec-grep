@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod authorization;
+pub mod config;
 mod domain;
 mod error;
 mod extraction;

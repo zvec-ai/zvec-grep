@@ -4,7 +4,9 @@
 //! full MCP toolset at `/mcp`, a health probe, a local shutdown endpoint, and a
 //! concurrency-safe stdio bootstrap proxy.
 
+mod authentication;
 mod controller;
+pub use authentication::resolve_token;
 mod http_client;
 mod job_scheduler;
 mod runtime;
@@ -13,7 +15,9 @@ mod workspace_runtime;
 
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
-pub use controller::{DaemonInstanceRecord, DaemonStatus, start_server, stop_server};
+pub use controller::{
+    DaemonInstanceRecord, DaemonStatus, start_server, stop_server, stop_server_with_token,
+};
 pub use stdio::run_stdio_bridge;
 use thiserror::Error;
 use zg_engine::ErrorReport;
@@ -78,6 +82,7 @@ pub struct ServerConfig {
     pub listen: ListenAddress,
     pub home: PathBuf,
     pub mcp_toolset: McpToolset,
+    pub token_file: Option<PathBuf>,
 }
 
 impl ServerConfig {
@@ -87,6 +92,7 @@ impl ServerConfig {
             listen,
             home,
             mcp_toolset: McpToolset::Agent,
+            token_file: None,
         }
     }
 }

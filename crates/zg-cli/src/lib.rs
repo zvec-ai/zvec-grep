@@ -35,8 +35,8 @@ pub use install::{
 };
 pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
 pub use render::{
-    HelpTopicError, help_text, print_help, write_context_result, write_index_result,
-    write_info_result,
+    HelpTopicError, help_text, print_help, write_context_result, write_context_with_options,
+    write_index_result, write_info_result, write_info_with_options,
 };
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:7999";
@@ -65,7 +65,7 @@ pub enum CommandLine {
     /// Manage the resident MCP daemon.
     Server(ServerArgs),
     /// Configure provider credentials and model defaults.
-    Config(UnsupportedArgs),
+    Config(ConfigArgs),
     /// Manage workspace Remote Embedding authorization.
     Auth(AuthArgs),
     /// Install agent integrations.
@@ -103,13 +103,43 @@ pub enum AuthAction {
 }
 
 #[derive(Debug, Args)]
-pub struct UnsupportedArgs {
-    #[arg(
-        value_name = "ARG",
-        allow_hyphen_values = true,
-        trailing_var_arg = true
-    )]
-    pub args: Vec<String>,
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub action: ConfigAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    Provider {
+        #[command(subcommand)]
+        action: ProviderAction,
+    },
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProviderAction {
+    Set {
+        reference: String,
+        #[arg(long)]
+        api_key: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelAction {
+    Set {
+        reference: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long, value_enum, ignore_case = true)]
+        device: Option<DeviceArg>,
+        #[arg(long = "default")]
+        default_model: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -358,11 +388,11 @@ pub struct QueryArgs {
     pub modified_before: Option<u64>,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
-    #[arg(long = "api-key", env = "ZVEC_GREP_API_KEY")]
+    #[arg(long = "api-key")]
     pub api_key: Option<String>,
-    #[arg(long = "model-cache", env = "ZVEC_GREP_MODEL_CACHE")]
+    #[arg(long = "model-cache")]
     pub model_cache: Option<PathBuf>,
-    #[arg(long, env = "ZVEC_GREP_DEVICE", value_enum, ignore_case = true)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub device: Option<DeviceArg>,
     #[arg(long = "allow-remote")]
     pub allow_remote: bool,
@@ -394,15 +424,15 @@ pub struct IndexArgs {
     pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
-    #[arg(long, env = "ZVEC_GREP_EMBEDDING")]
+    #[arg(long)]
     pub embedding: Option<String>,
-    #[arg(long = "model-cache", env = "ZVEC_GREP_MODEL_CACHE")]
+    #[arg(long = "model-cache")]
     pub model_cache: Option<PathBuf>,
-    #[arg(long, env = "ZVEC_GREP_DEVICE", value_enum, ignore_case = true)]
+    #[arg(long, value_enum, ignore_case = true)]
     pub device: Option<DeviceArg>,
-    #[arg(long = "api-key", env = "ZVEC_GREP_API_KEY")]
+    #[arg(long = "api-key")]
     pub api_key: Option<String>,
-    #[arg(long, env = "ZVEC_GREP_ENDPOINT")]
+    #[arg(long)]
     pub endpoint: Option<String>,
     #[arg(long = "embedding-concurrency", value_parser = parse_positive_usize)]
     pub embedding_concurrency: Option<usize>,
@@ -413,12 +443,15 @@ pub struct IndexArgs {
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StatusArgs {
     pub root: Option<PathBuf>,
     #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
     pub mode: ClientMode,
     #[arg(long = "check-ready")]
     pub check_ready: bool,
+    #[arg(long)]
+    pub debug: bool,
     #[arg(long)]
     pub human: bool,
     #[arg(long, value_enum)]
@@ -437,7 +470,7 @@ pub struct ServerArgs {
     pub listen: Option<String>,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
-    #[arg(long, env = "ZVEC_GREP_MCP_TOOLSET", value_enum)]
+    #[arg(long, value_enum)]
     pub mcp_toolset: Option<McpToolset>,
     #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
     pub token_file: Option<PathBuf>,
@@ -506,8 +539,10 @@ pub enum CliPlan {
         home: Option<PathBuf>,
         request: InfoOptions,
         check_ready: bool,
+        output: OutputOptions,
     },
     Auth(AuthArgs),
+    Config(ConfigArgs),
     Server(ServerPlan),
     Install(InstallArgs),
     Uninstall(UninstallArgs),
@@ -563,10 +598,10 @@ pub enum CliError {
     MissingServerAction,
     #[error("--stdio cannot be combined with a server action")]
     StdioWithServerAction,
+    #[error("ZVEC_GREP_MCP_TOOLSET must be agent or full")]
+    InvalidToolsetEnvironment,
     #[error("--mcp-token-env requires --mcp-transport http")]
     InstallTokenRequiresHttp,
-    #[error("{0} is parsed by Rust but its handler has not been ported yet")]
-    UnsupportedCommand(&'static str),
     #[error(transparent)]
     ManagedRg(#[from] ManagedRgArgumentError),
 }
@@ -601,8 +636,7 @@ impl Cli {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError`] when options are incompatible or a command handler
-    /// has not yet been ported to Rust.
+    /// Returns [`CliError`] when options are incompatible.
     pub fn into_plan(self, current_dir: PathBuf) -> Result<CliPlan, CliError> {
         let Some(command) = self.command else {
             return Ok(CliPlan::Help(None));
@@ -618,11 +652,21 @@ impl Cli {
                     include_status: true,
                 },
                 check_ready: args.check_ready,
+                output: OutputOptions {
+                    debug: args.debug,
+                    human: args.human,
+                    color: if args.no_color {
+                        ColorMode::Never
+                    } else {
+                        args.color.unwrap_or_default()
+                    },
+                    ..OutputOptions::default()
+                },
             }),
             CommandLine::Server(args) => server_plan(args).map(CliPlan::Server),
             CommandLine::Help(args) => Ok(CliPlan::Help(args.topic)),
             CommandLine::Version => Ok(CliPlan::Version),
-            CommandLine::Config(_) => Err(CliError::UnsupportedCommand("zg config")),
+            CommandLine::Config(args) => Ok(CliPlan::Config(args)),
             CommandLine::Auth(mut args) => {
                 args.root = Some(resolve_from(&current_dir, args.root.as_deref()));
                 Ok(CliPlan::Auth(args))
@@ -827,6 +871,15 @@ fn query_attached_option(value: &str) -> bool {
         || (value.starts_with("-T") && value.len() > 2)
 }
 
+/// Applies refresh semantics after automatic transport selection.
+pub fn finalize_refresh(request: &mut ContextOptions, server: bool) {
+    use zg_engine::api::context::options::RefreshPolicy;
+    if !server && request.refresh == Some(RefreshPolicy::Background) {
+        request.refresh = Some(RefreshPolicy::Off);
+        request.auto_update = false;
+    }
+}
+
 fn context_refresh_policy(
     mode: ClientMode,
     refresh: Option<RefreshMode>,
@@ -844,7 +897,7 @@ fn context_refresh_policy(
     }
 }
 
-fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError> {
+fn validate_query(args: &QueryArgs) -> Result<(), CliError> {
     if args.force_direct && args.mode != ClientMode::Direct {
         return Err(CliError::ForceDirectMode);
     }
@@ -873,13 +926,22 @@ fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError
             return Err(CliError::UnknownQueryOption(option.clone()));
         }
     }
+    Ok(())
+}
+
+fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError> {
+    validate_query(&args)?;
     let mode = args.mode;
     let home = args.home.clone();
     let output = OutputOptions {
         debug: args.debug,
         trace: args.trace,
         human: args.human,
-        preview: args.preview.unwrap_or_default(),
+        preview: args.preview.unwrap_or(if args.human {
+            PreviewMode::Full
+        } else {
+            PreviewMode::None
+        }),
         color: if args.no_color {
             ColorMode::Never
         } else {
@@ -927,6 +989,10 @@ fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError
     };
     request.allow_remote = args.allow_remote;
     request.api_key = args.api_key;
+    request.device = args.device.map(Into::into);
+    request.model_cache = args
+        .model_cache
+        .map(|path| resolve_from(&current_dir, Some(&path)));
     request.limit = args.limit;
     request.modified_after_epoch_ms = args.modified_after;
     request.modified_before_epoch_ms = args.modified_before;
@@ -939,6 +1005,11 @@ fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError
     }
     request.root = Some(current_dir);
     args.files.apply_context(&mut request);
+    request.ignore_files = request
+        .ignore_files
+        .into_iter()
+        .map(|path| resolve_from(request.root.as_deref().expect("query root"), Some(&path)))
+        .collect();
     Ok(CliPlan::Query {
         mode,
         home,
@@ -947,7 +1018,10 @@ fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError
     })
 }
 
-fn index_plan(args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> {
+fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> {
+    args.model_cache = args
+        .model_cache
+        .map(|path| resolve_from(current_dir, Some(&path)));
     let root = resolve_from(current_dir, args.root.as_deref());
     let mode = args.mode;
     let home = args.home.clone();
@@ -969,6 +1043,7 @@ fn index_plan(args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> 
             || args.api_key.is_some()
             || args.endpoint.is_some()
             || args.embedding_concurrency.is_some()
+            || args.allow_remote
             || args.debug
             || !args.files.is_empty()
         {
@@ -987,11 +1062,16 @@ fn index_plan(args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> 
             output,
         });
     }
-    let discovery = args.files.discovery();
+    let mut discovery = args.files.discovery();
+    discovery.ignore_files = discovery
+        .ignore_files
+        .into_iter()
+        .map(|path| resolve_from(current_dir, Some(&path)))
+        .collect();
     let embedding = args.embedding.map(|reference| EmbeddingModelSpec {
         reference,
         revision: None,
-        cache_dir: args.model_cache,
+        cache_dir: args.model_cache.clone(),
         endpoint: args.endpoint.clone(),
         device: args.device.unwrap_or(DeviceArg::Auto).into(),
     });
@@ -1013,6 +1093,8 @@ fn index_plan(args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> 
             allow_remote: args.allow_remote,
             api_key: args.api_key,
             endpoint: args.endpoint.clone(),
+            device: args.device.map(Into::into),
+            model_cache: args.model_cache,
             embedding_concurrency: args.embedding_concurrency,
             ..IndexOptions::default()
         })),
@@ -1028,18 +1110,53 @@ fn server_plan(args: ServerArgs) -> Result<ServerPlan, CliError> {
         return Ok(ServerPlan::Stdio(ServerStartArgs {
             listen: args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned()),
             home: args.home,
-            mcp_toolset: args.mcp_toolset.unwrap_or_default(),
+            mcp_toolset: match args.mcp_toolset {
+                Some(toolset) => toolset,
+                None => std::env::var("ZVEC_GREP_MCP_TOOLSET")
+                    .ok()
+                    .map(|value| {
+                        <McpToolset as ValueEnum>::from_str(&value, false)
+                            .map_err(|_| CliError::InvalidToolsetEnvironment)
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+            },
             token_file: args.token_file,
         }));
     }
-    if args.listen.is_some() || args.mcp_toolset.is_some() || args.token_file.is_some() {
-        return Err(CliError::MissingServerAction);
-    }
-    match args.action.ok_or(CliError::MissingServerAction)? {
-        ServerAction::On(args) => Ok(ServerPlan::On(args)),
-        ServerAction::Off(args) => Ok(ServerPlan::Off(args)),
-        ServerAction::Status(args) => Ok(ServerPlan::Status(args)),
-        ServerAction::Run(args) => Ok(ServerPlan::Run(args)),
+    let action = args.action.ok_or(CliError::MissingServerAction)?;
+    let run = matches!(action, ServerAction::Run(_));
+    match action {
+        ServerAction::On(mut child) | ServerAction::Run(mut child) => {
+            child.home = child.home.or(args.home);
+            child.token_file = child.token_file.or(args.token_file);
+            if let Some(listen) = args.listen {
+                child.listen = listen;
+            }
+            if let Some(toolset) = args.mcp_toolset {
+                child.mcp_toolset = toolset;
+            }
+            Ok(if run {
+                ServerPlan::Run(child)
+            } else {
+                ServerPlan::On(child)
+            })
+        }
+        ServerAction::Off(mut child) => {
+            if args.listen.is_some() || args.mcp_toolset.is_some() {
+                return Err(CliError::MissingServerAction);
+            }
+            child.home = child.home.or(args.home);
+            child.token_file = child.token_file.or(args.token_file);
+            Ok(ServerPlan::Off(child))
+        }
+        ServerAction::Status(mut child) => {
+            if args.listen.is_some() || args.mcp_toolset.is_some() || args.token_file.is_some() {
+                return Err(CliError::MissingServerAction);
+            }
+            child.home = child.home.or(args.home);
+            Ok(ServerPlan::Status(child))
+        }
     }
 }
 
@@ -1144,6 +1261,148 @@ pub fn parse_modified_time(value: &str) -> Result<u64, String> {
 mod tests {
     use super::{Cli, CliPlan, IndexOperation, parse_byte_size, parse_modified_time};
     use std::path::PathBuf;
+
+    #[test]
+    fn server_options_before_the_action_reach_execution() {
+        let plan = Cli::try_parse_from([
+            "zg",
+            "server",
+            "--home",
+            "state",
+            "--listen",
+            "127.0.0.1:8123",
+            "--mcp-toolset",
+            "full",
+            "--token-file",
+            "token",
+            "run",
+        ])
+        .expect("parse")
+        .into_plan(std::env::temp_dir())
+        .expect("plan");
+        let CliPlan::Server(super::ServerPlan::Run(args)) = plan else {
+            panic!("server run")
+        };
+        assert_eq!(args.listen, "127.0.0.1:8123");
+        assert_eq!(args.home, Some("state".into()));
+        assert_eq!(args.token_file, Some("token".into()));
+        assert_eq!(args.mcp_toolset, super::McpToolset::Full);
+    }
+
+    #[test]
+    fn automatic_direct_fallback_uses_explicit_direct_refresh_semantics() {
+        for refresh in [None, Some("background"), Some("wait"), Some("off")] {
+            let make = |mode| {
+                let mut args = vec!["zg", "query", "--mode", mode, "needle"];
+                if let Some(refresh) = refresh {
+                    args.extend(["--refresh", refresh]);
+                }
+                let plan = Cli::try_parse_from(args)
+                    .expect("parse")
+                    .into_plan(std::env::temp_dir())
+                    .expect("plan");
+                let CliPlan::Query { mut request, .. } = plan else {
+                    panic!("query")
+                };
+                super::finalize_refresh(&mut request, false);
+                request
+            };
+            let direct = make("direct");
+            let automatic = make("auto");
+            assert_eq!(direct.refresh, automatic.refresh);
+            assert_eq!(direct.auto_update, automatic.auto_update);
+        }
+    }
+
+    #[test]
+    fn runtime_overrides_survive_planning_and_wire_serialization() {
+        let cwd = std::env::temp_dir().join("cli-runtime");
+        for command in ["query", "index"] {
+            let mut args = vec![
+                "zg",
+                command,
+                "--api-key",
+                "test-key",
+                "--device",
+                "cpu",
+                "--model-cache",
+                "cache",
+                "--allow-remote",
+            ];
+            if command == "query" {
+                args.extend(["--human", "needle"]);
+            }
+            let plan = Cli::try_parse_from(args)
+                .expect("parse")
+                .into_plan(cwd.clone())
+                .expect("plan");
+            let value = match plan {
+                CliPlan::Query {
+                    request, output, ..
+                } => {
+                    assert_eq!(output.preview, super::PreviewMode::Full);
+                    serde_json::to_value(request).expect("serialize query")
+                }
+                CliPlan::Index {
+                    operation: IndexOperation::Build(request),
+                    ..
+                } => {
+                    assert!(request.embedding.is_none());
+                    serde_json::to_value(request).expect("serialize index")
+                }
+                _ => panic!("expected executable request"),
+            };
+            assert_eq!(value["api_key"], "test-key");
+            assert_eq!(value["device"], "cpu");
+            assert_eq!(value["allow_remote"], true);
+            assert_eq!(value["model_cache"], serde_json::json!(cwd.join("cache")));
+        }
+    }
+
+    #[test]
+    fn refresh_plans_preserve_server_wait_and_background() {
+        use zg_engine::api::context::options::RefreshPolicy;
+        for (flag, expected) in [
+            ("wait", RefreshPolicy::Wait),
+            ("background", RefreshPolicy::Background),
+            ("off", RefreshPolicy::Off),
+        ] {
+            let plan = Cli::try_parse_from([
+                "zg",
+                "query",
+                "--mode",
+                "server",
+                "--refresh",
+                flag,
+                "needle",
+            ])
+            .expect("parse")
+            .into_plan(std::env::temp_dir())
+            .expect("plan");
+            let CliPlan::Query { request, .. } = plan else {
+                panic!("query")
+            };
+            assert_eq!(request.refresh, Some(expected));
+        }
+    }
+
+    #[test]
+    fn config_builds_an_executable_plan() {
+        let plan = Cli::try_parse_from([
+            "zg",
+            "config",
+            "model",
+            "set",
+            "local/potion-code-16m-v2",
+            "--default",
+        ])
+        .expect("parse")
+        .into_plan(std::env::temp_dir());
+        assert!(
+            plan.is_ok(),
+            "config must have an executable handler: {plan:?}"
+        );
+    }
 
     #[test]
     fn refresh_policy_preserves_mode_defaults_and_explicit_wait() {

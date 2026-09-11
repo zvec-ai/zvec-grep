@@ -34,6 +34,10 @@ pub mod options {
         pub api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
+        #[serde(default)]
+        pub device: Option<crate::api::index::options::Device>,
+        #[serde(default)]
+        pub model_cache: Option<PathBuf>,
         /// Receives in-process indexing and model download progress.
         ///
         /// Reporters are runtime-only and are deliberately omitted from serialized

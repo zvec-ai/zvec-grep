@@ -65,7 +65,7 @@ pub(crate) fn acquire_home_lock(
     )
 }
 
-fn acquire_read_write_lock(
+pub(crate) fn acquire_read_write_lock(
     lock_path: &Path,
     mode: LockMode,
     operation: &str,

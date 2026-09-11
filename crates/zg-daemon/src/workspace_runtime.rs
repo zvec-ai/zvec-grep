@@ -500,6 +500,8 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             api_key: request.api_key.clone(),
             endpoint: request.endpoint.clone(),
             embedding_concurrency: request.embedding_concurrency,
+            device: request.device,
+            model_cache: request.model_cache.clone(),
             ..IndexOptions::default()
         };
         if policy == RefreshPolicy::Background {

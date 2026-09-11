@@ -275,6 +275,7 @@ async fn start_server_with_lock(
         return Ok(current);
     }
 
+    crate::resolve_token(config.token_file.as_deref())?;
     assert_address_available(&config.listen).await?;
     let daemon_dir = daemon_dir(&config.home);
     create_private_dir(&daemon_dir)?;
@@ -298,6 +299,9 @@ async fn start_server_with_lock(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    if let Some(file) = &config.token_file {
+        command.arg("--token-file").arg(file);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -313,6 +317,18 @@ async fn start_server_with_lock(
 ///
 /// Returns state-record, HTTP control, PID identity, signal, or timeout failures.
 pub async fn stop_server(home: &Path, timeout: Duration) -> Result<DaemonStatus, DaemonError> {
+    stop_server_with_token(home, timeout, None).await
+}
+
+/// Stops the daemon using an explicitly selected token file.
+/// # Errors
+/// Returns credential, lifecycle, or process verification errors.
+pub async fn stop_server_with_token(
+    home: &Path,
+    timeout: Duration,
+    token_file: Option<&Path>,
+) -> Result<DaemonStatus, DaemonError> {
+    let token = crate::resolve_token(token_file)?;
     let Some(record) = read_instance_record(home).await? else {
         return Ok(DaemonStatus::default());
     };
@@ -325,9 +341,15 @@ pub async fn stop_server(home: &Path, timeout: Duration) -> Result<DaemonStatus,
     }
 
     let address = record_address(&record, home)?;
-    let accepted = http_request(&address, "POST", "/control/shutdown", HTTP_TIMEOUT)
-        .await
-        .is_ok_and(|status| status == 202);
+    let accepted = http_request(
+        &address,
+        "POST",
+        "/control/shutdown",
+        HTTP_TIMEOUT,
+        token.as_deref(),
+    )
+    .await
+    .is_ok_and(|status| status == 202);
     if accepted && wait_for_exit(record.pid, timeout).await {
         remove_record_if_same(home, &record).await?;
         return Ok(DaemonStatus::default());
@@ -356,7 +378,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
         return Ok(DaemonStatus::default());
     }
     let address = record_address(&record, home)?;
-    let healthy = http_request(&address, "GET", "/healthz", Duration::from_secs(1))
+    let healthy = http_request(&address, "GET", "/healthz", Duration::from_secs(1), None)
         .await
         .is_ok_and(|status| status == 200);
     Ok(DaemonStatus {
@@ -481,11 +503,13 @@ async fn http_request(
     method: &str,
     path: &str,
     timeout: Duration,
+    token: Option<&str>,
 ) -> Result<u16, DaemonError> {
     tokio::time::timeout(timeout, async {
         let mut stream = TcpStream::connect(address.socket_addr()).await?;
+        let authorization = token.map_or_else(String::new, |token| format!("Authorization: Bearer {token}\r\n"));
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n{authorization}Content-Length: 0\r\n\r\n",
             address.socket_addr()
         );
         stream.write_all(request.as_bytes()).await?;

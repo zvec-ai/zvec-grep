@@ -39,10 +39,11 @@ pub async fn run_stdio_bridge(executable: &Path, config: &ServerConfig) -> Resul
 
     let downstream =
         AsyncRwTransport::<RoleServer, _, _>::new_server(tokio::io::stdin(), tokio::io::stdout());
-    let upstream = StreamableHttpClientTransport::with_client(
-        LoopbackHttpClient,
-        StreamableHttpClientTransportConfig::with_uri(server_url),
-    );
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(server_url);
+    if let Some(token) = crate::resolve_token(config.token_file.as_deref())? {
+        transport_config = transport_config.auth_header(token);
+    }
+    let upstream = StreamableHttpClientTransport::with_client(LoopbackHttpClient, transport_config);
     relay(downstream, upstream, &connected, &config.home).await
 }
 
