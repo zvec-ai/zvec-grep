@@ -436,6 +436,8 @@ async fn watch_loop(
         }
         let target_revision = runtime.dirty_revision.fetch_add(1, Ordering::AcqRel) + 1;
         let mut options = lock(&runtime.index_template).clone();
+        // One-operation consent must never authorize later watcher jobs.
+        options.allow_remote = false;
         options.root = Some(runtime.canonical_root.clone());
         options.rebuild = false;
         options.changes = batch.changes.into_iter().map(map_change).collect();

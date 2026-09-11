@@ -1,4 +1,10 @@
-use std::{error::Error, io, path::Path, process::ExitCode, sync::Arc};
+use std::{
+    error::Error,
+    io::{self, IsTerminal},
+    path::Path,
+    process::ExitCode,
+    sync::Arc,
+};
 
 #[cfg(target_os = "macos")]
 use std::{ffi::OsString, os::unix::process::CommandExt, process::Command};
@@ -97,6 +103,23 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
             request,
             check_ready,
         } => execute_status(mode, home.as_deref(), request, check_ready).await,
+        CliPlan::Auth(args) => {
+            let root = args
+                .root
+                .as_deref()
+                .ok_or_else(|| io::Error::other("auth root is required"))?;
+            let status = match args.action {
+                zg_cli::AuthAction::Grant { .. } => zg_engine::authorization::grant(
+                    root,
+                    args.embedding.as_deref(),
+                    args.endpoint.as_deref(),
+                )?,
+                zg_cli::AuthAction::Status => zg_engine::authorization::status(root)?,
+                zg_cli::AuthAction::Revoke => zg_engine::authorization::revoke(root)?,
+            };
+            println!("{status}");
+            Ok(())
+        }
         CliPlan::Server(plan) => execute_server_plan(plan).await,
         CliPlan::Install(args) => execute_install_plan(&args).await,
         CliPlan::Uninstall(args) => zg_cli::execute_uninstall(&args).map_err(Into::into),
@@ -221,7 +244,8 @@ async fn execute_index(
     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "index root is required"))?;
     let server = use_server(mode, home).await?;
     match operation {
-        IndexOperation::Build(request) => {
+        IndexOperation::Build(mut request) => {
+            authorize_index(&mut request, server, home).await?;
             let result = if server {
                 let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
                 let reply =
@@ -259,6 +283,78 @@ async fn execute_index(
             );
             println!("Root: {}", root.display());
         }
+    }
+    Ok(())
+}
+
+async fn authorize_index(
+    request: &mut zg_engine::api::index::IndexOptions,
+    server: bool,
+    home: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    // Non-interactive callers retain the engine's explicit authorization error.
+    if request.allow_remote || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Ok(());
+    }
+    let server_home = if server {
+        Some(zg_daemon::resolve_home(home.map(Path::to_owned))?)
+    } else {
+        None
+    };
+    let target = if let Some(home) = &server_home {
+        let reply =
+            zg_daemon::execute_command(home, DaemonCommand::IndexAuthorization(request.clone()))
+                .await?;
+        let DaemonReply::IndexAuthorization(target) = reply else {
+            return Err(protocol_mismatch("index_authorization"));
+        };
+        target
+    } else {
+        zg_engine::authorization::index_authorization(request)?
+    };
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let decision =
+        zg_cli::prompt_index_authorization(&target, io::stdin().lock(), io::stderr().lock())?;
+    if decision == zg_cli::AuthorizationDecision::Cancel {
+        return Err(io::Error::other(
+            "Remote Embedding authorization was declined. No remote data was sent.",
+        )
+        .into());
+    }
+    // Bind execution to exactly the model and endpoint shown before user input.
+    request.root = Some(target.root.clone());
+    request.endpoint = Some(target.endpoint.clone());
+    if let Some(embedding) = &mut request.embedding {
+        embedding.reference.clone_from(&target.model);
+        embedding.endpoint = Some(target.endpoint.clone());
+    } else {
+        request.embedding = Some(zg_engine::api::index::options::EmbeddingModelSpec {
+            reference: target.model.clone(),
+            endpoint: Some(target.endpoint.clone()),
+            revision: None,
+            cache_dir: None,
+            device: zg_engine::api::index::options::Device::Auto,
+        });
+    }
+    match decision {
+        zg_cli::AuthorizationDecision::Once => request.allow_remote = true,
+        zg_cli::AuthorizationDecision::Workspace => {
+            if let Some(home) = &server_home {
+                let reply = zg_daemon::execute_command(
+                    home,
+                    DaemonCommand::GrantIndexAuthorization(target),
+                )
+                .await?;
+                if !matches!(reply, DaemonReply::GrantIndexAuthorization) {
+                    return Err(protocol_mismatch("grant_index_authorization"));
+                }
+            } else {
+                zg_engine::authorization::grant_index(&target)?;
+            }
+        }
+        zg_cli::AuthorizationDecision::Cancel => unreachable!(),
     }
     Ok(())
 }

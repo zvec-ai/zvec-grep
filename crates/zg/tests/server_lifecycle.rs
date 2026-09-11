@@ -267,10 +267,30 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         workspace.path().join("sample.txt"),
         "resident workspace manager\n",
     )?;
+    // The mock provider requires the same explicit workspace consent as real providers.
+    let signing_key = home.path().join("authorization.key");
+    let consent = Command::new(&binary)
+        .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
+        .args([
+            "auth",
+            "grant",
+            path_text(workspace.path())?,
+            "--capability",
+            "embedding",
+            "--scope",
+            "workspace",
+            "--embedding",
+            "qwen/text-embedding-v4",
+            "--endpoint",
+            &format!("http://{}/embeddings", embedding.address),
+        ])
+        .output()?;
+    assert_command_success(&consent);
     let port = available_port()?;
     let listen = format!("127.0.0.1:{port}");
     let output = Command::new(&binary)
         .env("ZVEC_GREP_API_KEY", "local-test-key")
+        .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
             "server",
             "on",

@@ -25,6 +25,7 @@ globset.workspace = true
 grep.workspace = true
 half = "2.7.1"
 ignore.workspace = true
+hmac-sha256 = "1.1.14"
 httpdate = "1.0.3"
 llama-cpp-2 = { version = "0.1.154", default-features = false }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-27", "copy-dylibs", "download-binaries", "std", "tls-rustls"] }

@@ -16,6 +16,7 @@ mod transformers;
 use crate::api::index::progress::IndexProgressReporter;
 
 // Interface exposed to the rest of `zg-engine`.
+pub(crate) use catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry};
 pub(crate) use resolution::{ResolveEmbeddingReferenceOptions, resolve_embedding_reference};
 pub(crate) use runtime::ModelRuntimeManager;
 pub(crate) type ModelRuntimeLease = runtime::ModelRuntimeLease;
@@ -23,7 +24,7 @@ pub(crate) type ModelRuntimeRequest = runtime::ModelRuntimeRequest;
 pub(crate) type ModelRuntimeSnapshot = runtime::ModelRuntimeSnapshot;
 
 // Value types required by the runtime interface. Backend traits, factories,
-// catalog entries and validation helpers remain private to `models`.
+// validation helpers remain private to `models`.
 pub(crate) type CreateEmbeddingModelOptions = spi::CreateEmbeddingModelOptions;
 pub(crate) type EmbeddingInput = spi::EmbeddingInput;
 pub(crate) type EmbeddingInputKind = spi::EmbeddingInputKind;

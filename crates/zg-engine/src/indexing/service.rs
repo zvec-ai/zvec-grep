@@ -201,6 +201,9 @@ impl WorkspaceIndexService {
                 models,
                 IndexOptions {
                     root: Some(location.root.clone()),
+                    allow_remote: options.allow_remote,
+                    api_key: options.api_key.clone(),
+                    endpoint: options.endpoint.clone(),
                     embedding_concurrency: options.embedding_concurrency,
                     ..IndexOptions::default()
                 },
@@ -227,7 +230,15 @@ impl WorkspaceIndexService {
             .routes
             .iter()
             .any(|route| route.mode == crate::api::context::options::ContextRouteMode::Vector)
-            .then(|| acquire_search_model(models, &manifest, options.embedding_concurrency))
+            .then(|| {
+                acquire_search_model(
+                    models,
+                    &manifest,
+                    options.embedding_concurrency,
+                    options,
+                    &location.root,
+                )
+            })
             .transpose()?;
         if let Some(model) = &model {
             assert_embedding_compatible(Some(&manifest), model)?;
@@ -388,15 +399,27 @@ fn acquire_model(
     let api_key = if local {
         None
     } else {
-        existing_runtime
-            .and_then(|runtime| runtime.api_key.clone())
+        options
+            .api_key
+            .clone()
+            .or_else(|| existing_runtime.and_then(|runtime| runtime.api_key.clone()))
             .or_else(environment_api_key)
     };
-    let endpoint = options
-        .embedding
-        .as_ref()
-        .and_then(|embedding| embedding.endpoint.clone())
-        .or_else(|| existing_runtime.and_then(|runtime| runtime.endpoint.clone()));
+    let endpoint = options.endpoint.clone().or_else(|| {
+        options
+            .embedding
+            .as_ref()
+            .and_then(|embedding| embedding.endpoint.clone())
+            .or_else(|| existing_runtime.and_then(|runtime| runtime.endpoint.clone()))
+    });
+    let endpoint = if local {
+        endpoint
+    } else {
+        let endpoint = crate::authorization::remote_endpoint(&reference, endpoint.as_deref())?;
+        let root = resolve_root(options.root.as_deref())?;
+        crate::authorization::require(&root, &reference, &endpoint, options.allow_remote)?;
+        Some(endpoint)
+    };
     let device = local.then(|| {
         options.embedding.as_ref().map_or_else(
             || {
@@ -430,28 +453,41 @@ fn acquire_search_model(
     models: &ModelRuntimeManager,
     manifest: &WorkspaceManifest,
     embedding_concurrency: Option<usize>,
+    options: &ContextOptions,
+    root: &Path,
 ) -> Result<ModelRuntimeLease, EngineError> {
     let schema = manifest.embedding.as_ref().ok_or_else(|| {
         workspace_index_unavailable(&manifest.path, "embedding schema is missing")
     })?;
     let reference = format!("{}/{}", schema.provider, schema.model);
     let local = schema.provider == "local";
+    let endpoint = if local {
+        None
+    } else {
+        let endpoint = crate::authorization::remote_endpoint(
+            &reference,
+            options
+                .endpoint
+                .as_deref()
+                .or(manifest.embedding_runtime.endpoint.as_deref()),
+        )?;
+        crate::authorization::require(root, &reference, &endpoint, options.allow_remote)?;
+        Some(endpoint)
+    };
     models
         .acquire(ModelRuntimeRequest::new(
             reference,
             CreateEmbeddingModelOptions {
                 api_key: (!local)
                     .then(|| {
-                        manifest
-                            .embedding_runtime
+                        options
                             .api_key
                             .clone()
+                            .or_else(|| manifest.embedding_runtime.api_key.clone())
                             .or_else(environment_api_key)
                     })
                     .flatten(),
-                endpoint: (!local)
-                    .then(|| manifest.embedding_runtime.endpoint.clone())
-                    .flatten(),
+                endpoint,
                 device: local.then(|| manifest.embedding_runtime.device.unwrap_or(Device::Auto)),
                 model_cache_dir: manifest.embedding_runtime.cache_dir.clone(),
                 ..CreateEmbeddingModelOptions::default()
@@ -461,7 +497,7 @@ fn acquire_search_model(
         .map_err(ModelError::into_engine_error)
 }
 
-fn embedding_reference(
+pub(crate) fn embedding_reference(
     existing: Option<&WorkspaceManifest>,
     requested: Option<&EmbeddingModelSpec>,
 ) -> Result<String, EngineError> {
@@ -511,7 +547,7 @@ fn assert_embedding_compatible(
     ))
 }
 
-fn resolve_root_paths(
+pub(crate) fn resolve_root_paths(
     workspace_root: &Path,
     existing: Option<&WorkspaceManifest>,
     options: &IndexOptions,
@@ -601,12 +637,7 @@ fn embedding_runtime(
     } else {
         EmbeddingRuntimeConfig {
             api_key: current.api_key,
-            endpoint: options
-                .embedding
-                .as_ref()
-                .and_then(|embedding| embedding.endpoint.clone())
-                .or(current.endpoint)
-                .or_else(|| model.info().endpoint.clone()),
+            endpoint: model.info().endpoint.clone().or(current.endpoint),
             device: None,
             cache_dir: None,
         }
@@ -910,7 +941,14 @@ mod tests {
             manifest.embedding_runtime.cache_dir,
             Some(directory.path().join("model-cache"))
         );
-        let lease = super::acquire_search_model(&models, &manifest, None).expect("search model");
+        let lease = super::acquire_search_model(
+            &models,
+            &manifest,
+            None,
+            &crate::api::context::ContextOptions::default(),
+            directory.path(),
+        )
+        .expect("search model");
         assert_eq!(
             models.snapshot().cached_runtimes,
             1,

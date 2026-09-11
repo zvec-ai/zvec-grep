@@ -51,6 +51,7 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 windows-spawn = "0.1.0"
+zvec-rust = "0.7.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

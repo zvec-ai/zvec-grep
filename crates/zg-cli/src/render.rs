@@ -272,6 +272,9 @@ File selection:
   -L, --follow                      Follow symbolic links safely
   --reset-paths                     Clear inherited file-selection settings
 
+Interactive remote indexing asks to allow once, allow for this workspace, or
+cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
+
 New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
 Existing indexes reuse their stored embedding schema.
 
@@ -322,7 +325,11 @@ Manage the signed Remote Embedding grant stored in the Workspace under
 
 --embedding selects the Remote Embedding model to authorize; it does not run
 embedding. If omitted, auth grant uses the existing Workspace index model, then
-ZVEC_GREP_EMBEDDING, then the global default.
+ZVEC_GREP_EMBEDDING.
+
+--endpoint selects the exact provider URL to authorize; otherwise the stored
+index endpoint, ZVEC_GREP_ENDPOINT, or provider default is used. Grants bind the
+canonical workspace root, model, and endpoint. Granting sends no remote data.
 
 Scopes used during operations:
   once                              Current CLI command or Agent tool call only

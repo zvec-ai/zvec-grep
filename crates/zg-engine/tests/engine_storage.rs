@@ -83,6 +83,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
             root: Some(root.to_path_buf()),
             query: Some("orchard authentication".to_owned()),
             auto_update: false,
+            allow_remote: true,
             ..ContextOptions::default()
         })
         .await?;
@@ -130,6 +131,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
                 query: "orchard authentication".to_owned(),
             }],
             auto_update: false,
+            allow_remote: true,
             ..ContextOptions::default()
         })
         .await?;
@@ -185,6 +187,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
                 query: "vineyard session renewal".to_owned(),
             }],
             auto_update: false,
+            allow_remote: true,
             ..ContextOptions::default()
         })
         .await?;
@@ -236,6 +239,7 @@ async fn public_engine_records_failed_files_and_recovers_on_auto_update() -> Tes
                 mode: ContextRouteMode::Fts,
                 query: "nebula".to_owned(),
             }],
+            allow_remote: true,
             ..ContextOptions::default()
         })
         .await?;
@@ -255,6 +259,7 @@ async fn public_engine_records_failed_files_and_recovers_on_auto_update() -> Tes
 fn index_options(root: &Path) -> IndexOptions {
     IndexOptions {
         root: Some(root.to_path_buf()),
+        allow_remote: true,
         ..IndexOptions::default()
     }
 }
@@ -279,6 +284,7 @@ async fn fts_paths(
                 query: query.to_owned(),
             }],
             auto_update: false,
+            allow_remote: true,
             ..ContextOptions::default()
         })
         .await?;

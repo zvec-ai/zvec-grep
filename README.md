@@ -46,6 +46,44 @@ factory is installed in the production composition root.
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
 
+## Remote embedding authorization
+
+In an interactive terminal, `zg index` prompts before sending data to an
+unauthorized remote embedding destination. Choose `1. Allow once`,
+`2. Allow for this workspace`, or `3. Cancel`. Direct and server modes show the
+same prompt; server mode resolves the destination and saves workspace consent
+using the server's configuration. Invalid input, EOF, or cancellation stops
+before indexing. Existing consent and `--allow-remote` skip the prompt.
+Non-interactive commands require existing consent or `--allow-remote`.
+
+You can also authorize a workspace explicitly:
+
+```sh
+zg auth grant /path/to/workspace --capability embedding --scope workspace --embedding qwen/text-embedding-v4
+zg auth status /path/to/workspace
+zg auth revoke /path/to/workspace
+```
+
+Granting consent does not send data, load a model, or build an index. Subsequent
+remote indexing and semantic search may send workspace content and query text
+to the selected endpoint and incur provider charges. API credentials remain
+separate: use `ZVEC_GREP_API_KEY` or `--api-key` for actual operations.
+
+Without `--embedding`, grant uses the existing index model, then
+`ZVEC_GREP_EMBEDDING`. `--endpoint` overrides the stored index endpoint,
+`ZVEC_GREP_ENDPOINT`, and provider default. The signed grant at
+`.zvec-grep/authorization.json` binds the canonical workspace root, model, and
+endpoint. Changing any of them requires a new grant. The signing key lives at
+`$ZVEC_GREP_HOME/authorization.key` (default `~/.zvec-grep/authorization.key`),
+or the path selected by `ZVEC_GREP_AUTHORIZATION_KEY_FILE`.
+
+Direct CLI, server CLI, and MCP read the same authorization on each operation;
+configure them to use the same signing key. Revocation takes effect for new
+operations without restarting the server. `--allow-remote` on `zg index` or
+`zg query` grants consent for that operation only, including its synchronous
+refresh, and never authorizes later watcher jobs. MCP callers use workspace
+grants; interactive consent elicitation is not implemented in this Rust version.
+
 ## Crates
 
 - `zg-engine`: `ZvecGrep`, engine errors, and method-grouped types under `api`;

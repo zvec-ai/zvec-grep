@@ -27,6 +27,13 @@ pub mod options {
         /// Maximum embedding batch tasks for this index operation.
         /// The model default is used when omitted.
         pub embedding_concurrency: Option<usize>,
+        /// Allows remote embedding for this operation without persisting a grant.
+        #[serde(default)]
+        pub allow_remote: bool,
+        #[serde(default)]
+        pub api_key: Option<String>,
+        #[serde(default)]
+        pub endpoint: Option<String>,
         /// Receives in-process indexing and model download progress.
         ///
         /// Reporters are runtime-only and are deliberately omitted from serialized

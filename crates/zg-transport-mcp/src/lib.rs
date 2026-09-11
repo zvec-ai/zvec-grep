@@ -931,10 +931,6 @@ impl SearchInput {
         let root = absolute_root(&self.root)?;
         if let Some(api_key) = &self.api_key {
             validate_text("apiKey", api_key, 1, 8_192)?;
-            return Err(
-                "apiKey is not available until remote embedding authorization is implemented"
-                    .to_owned(),
-            );
         }
         if self.device.is_some() {
             return Err(
@@ -1010,6 +1006,7 @@ impl SearchInput {
             follow: self.follow.unwrap_or(false),
             modified_after_epoch_ms: parse_optional_time(self.modified_after, "modifiedAfter")?,
             modified_before_epoch_ms: parse_optional_time(self.modified_before, "modifiedBefore")?,
+            api_key: self.api_key,
             embedding_concurrency: self.embedding_concurrency,
             ..ContextOptions::default()
         };
@@ -1054,10 +1051,6 @@ impl IndexInput {
         }
         if let Some(api_key) = &self.api_key {
             validate_text("apiKey", api_key, 1, 8_192)?;
-            return Err(
-                "apiKey is not available until remote embedding authorization is implemented"
-                    .to_owned(),
-            );
         }
         if self.embedding_concurrency == Some(0) {
             return Err("embeddingConcurrency must be greater than zero".to_owned());
@@ -1121,6 +1114,7 @@ impl IndexInput {
                 reset_paths: self.reset_paths.unwrap_or(false),
                 discovery,
                 embedding,
+                api_key: self.api_key,
                 embedding_concurrency: self.embedding_concurrency,
                 ..IndexOptions::default()
             }),

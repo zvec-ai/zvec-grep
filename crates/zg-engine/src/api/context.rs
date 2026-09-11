@@ -41,6 +41,13 @@ pub mod options {
         pub modified_after_epoch_ms: Option<u64>,
         pub modified_before_epoch_ms: Option<u64>,
         pub embedding_concurrency: Option<usize>,
+        /// Allows remote embedding for this operation without persisting a grant.
+        #[serde(default)]
+        pub allow_remote: bool,
+        #[serde(default)]
+        pub api_key: Option<String>,
+        #[serde(default)]
+        pub endpoint: Option<String>,
     }
 
     impl Default for ContextOptions {
@@ -74,6 +81,9 @@ pub mod options {
                 modified_after_epoch_ms: None,
                 modified_before_epoch_ms: None,
                 embedding_concurrency: None,
+                allow_remote: false,
+                api_key: None,
+                endpoint: None,
             }
         }
     }

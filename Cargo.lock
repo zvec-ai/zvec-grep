@@ -3895,6 +3895,7 @@ dependencies = [
  "globset",
  "grep",
  "half",
+ "hmac-sha256",
  "httpdate",
  "ignore",
  "llama-cpp-2",

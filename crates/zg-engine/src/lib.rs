@@ -5,6 +5,7 @@
 //! public API.
 
 pub mod api;
+pub mod authorization;
 mod domain;
 mod error;
 mod extraction;

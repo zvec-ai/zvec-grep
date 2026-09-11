@@ -1,5 +1,6 @@
 //! Command-line parsing, validation, request construction, and terminal rendering.
 
+mod authorization;
 mod install;
 mod jsonc;
 mod managed_rg;
@@ -25,6 +26,8 @@ use zg_engine::api::{
     },
     info::InfoOptions,
 };
+
+pub use authorization::{AuthorizationDecision, prompt_index_authorization};
 
 pub use install::{
     InstallError, InstallOutcome, execute_install, execute_uninstall, resolve_server_listen,
@@ -64,7 +67,7 @@ pub enum CommandLine {
     /// Configure provider credentials and model defaults.
     Config(UnsupportedArgs),
     /// Manage workspace Remote Embedding authorization.
-    Auth(UnsupportedArgs),
+    Auth(AuthArgs),
     /// Install agent integrations.
     Install(InstallArgs),
     /// Remove agent integrations.
@@ -73,6 +76,30 @@ pub enum CommandLine {
     Help(HelpArgs),
     /// Print the installed version.
     Version,
+}
+
+#[derive(Debug, Args)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub action: AuthAction,
+    #[arg(global = true)]
+    pub root: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub embedding: Option<String>,
+    #[arg(long, global = true)]
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthAction {
+    Grant {
+        #[arg(long, value_parser = ["embedding"], required = true)]
+        capability: String,
+        #[arg(long, value_parser = ["workspace"], required = true)]
+        scope: String,
+    },
+    Status,
+    Revoke,
 }
 
 #[derive(Debug, Args)]
@@ -480,6 +507,7 @@ pub enum CliPlan {
         request: InfoOptions,
         check_ready: bool,
     },
+    Auth(AuthArgs),
     Server(ServerPlan),
     Install(InstallArgs),
     Uninstall(UninstallArgs),
@@ -595,7 +623,10 @@ impl Cli {
             CommandLine::Help(args) => Ok(CliPlan::Help(args.topic)),
             CommandLine::Version => Ok(CliPlan::Version),
             CommandLine::Config(_) => Err(CliError::UnsupportedCommand("zg config")),
-            CommandLine::Auth(_) => Err(CliError::UnsupportedCommand("zg auth")),
+            CommandLine::Auth(mut args) => {
+                args.root = Some(resolve_from(&current_dir, args.root.as_deref()));
+                Ok(CliPlan::Auth(args))
+            }
             CommandLine::Install(args) => {
                 if args.mcp_token_env.is_some() && args.transport != Some(McpInstallTransport::Http)
                 {
@@ -876,6 +907,8 @@ fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError
             ..ContextOptions::default()
         }
     };
+    request.allow_remote = args.allow_remote;
+    request.api_key = args.api_key;
     request.limit = args.limit;
     request.modified_after_epoch_ms = args.modified_after;
     request.modified_before_epoch_ms = args.modified_before;
@@ -941,7 +974,7 @@ fn index_plan(args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> 
         reference,
         revision: None,
         cache_dir: args.model_cache,
-        endpoint: args.endpoint,
+        endpoint: args.endpoint.clone(),
         device: args.device.unwrap_or(DeviceArg::Auto).into(),
     });
     let root_path = RootPath {
@@ -959,6 +992,9 @@ fn index_plan(args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> 
             reset_paths: args.reset_paths,
             discovery,
             embedding,
+            allow_remote: args.allow_remote,
+            api_key: args.api_key,
+            endpoint: args.endpoint.clone(),
             embedding_concurrency: args.embedding_concurrency,
             ..IndexOptions::default()
         })),

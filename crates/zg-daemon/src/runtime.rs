@@ -173,6 +173,14 @@ async fn execute_command(
         );
     }
     let result = match command {
+        DaemonCommand::IndexAuthorization(request) => engine_execution(
+            zg_engine::authorization::index_authorization(&request)
+                .map(DaemonReply::IndexAuthorization),
+        ),
+        DaemonCommand::GrantIndexAuthorization(target) => engine_execution(
+            zg_engine::authorization::grant_index(&target)
+                .map(|()| DaemonReply::GrantIndexAuthorization),
+        ),
         DaemonCommand::Context(request) => engine_execution(
             state
                 .engine
