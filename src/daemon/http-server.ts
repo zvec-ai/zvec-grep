@@ -105,14 +105,25 @@ export class DaemonHttpServer {
           }
         })
         .finally(() => {
-          this.options.logger?.event("request.completed", {
-            request_id: id,
-            trace_id: this.requestTraceIds.get(id),
-            method: request.method,
-            path: safeRequestPath(request.url),
-            status: response.statusCode,
-            duration_ms: Date.now() - startedAt,
-          });
+          const path = safeRequestPath(request.url);
+          const level =
+            request.method === "GET" &&
+            path === "/healthz" &&
+            response.statusCode === 200
+              ? "debug"
+              : "info";
+          this.options.logger?.event(
+            "request.completed",
+            {
+              request_id: id,
+              trace_id: this.requestTraceIds.get(id),
+              method: request.method,
+              path,
+              status: response.statusCode,
+              duration_ms: Date.now() - startedAt,
+            },
+            level,
+          );
           this.requestTraceIds.delete(id);
         });
     });
