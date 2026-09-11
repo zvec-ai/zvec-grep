@@ -30,8 +30,12 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn public_engine_persists_searches_updates_and_drops_real_storage() -> TestResult {
-    let temporary = tempdir()?;
-    let root = temporary.path();
+    let temporary = tempfile::Builder::new()
+        .prefix("engine storage ")
+        .tempdir()?;
+    // Windows canonical paths have a verbatim prefix; the native boundary must handle it.
+    let canonical_root = fs::canonicalize(temporary.path())?;
+    let root = canonical_root.as_path();
     let server = EmbeddingServer::start()?;
     configure_remote_model(root, server.address)?;
     fs::write(

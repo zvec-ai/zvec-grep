@@ -170,31 +170,7 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
                 "workspace storage is already open",
             ));
         }
-        let lock = acquire_storage_lock(&home, read_only)?;
-        let recovery = path.join(JOURNAL).exists();
-        if recovery && read_only {
-            lock.try_lock()
-                .map_err(|error| storage_lock_error(&home, error))?;
-        }
-        let schema = load_schema(&path, &options)?;
-        if !read_only {
-            fs::create_dir_all(&path)
-                .map_err(|error| io_error("create storage directory", &path, &error))?;
-        }
-        dictionary::prepare(&path.join("dictionary"))?;
-        if recovery {
-            let native = NativeStore::open(&path, &schema, false)?;
-            let journal_path = path.join(JOURNAL);
-            let record: JournalRecord = read_json(&journal_path)?;
-            replay(&native, &schema, record)?;
-            native.flush()?;
-            clear_journal(&path)?;
-            drop(native);
-            if read_only {
-                lock.try_lock_shared()
-                    .map_err(|error| storage_lock_error(&home, error))?;
-            }
-        }
+        let (lock, schema) = prepare_storage(&home, &path, &options)?;
         let native = NativeStore::open(&path, &schema, read_only)?;
         let shared = Arc::new(SharedStore {
             state: Mutex::new(StoreState {
@@ -525,6 +501,42 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
         .state
         .lock()
         .map_err(|_| EngineError::internal("workspace storage lock was poisoned"))
+}
+
+fn prepare_storage(
+    home: &Path,
+    path: &Path,
+    options: &WorkspaceIndexStorageOptions,
+) -> EngineResult<(File, WorkspaceIndexEmbeddingSchema)> {
+    let read_only = options.is_read_only();
+    let mut shared = read_only;
+    loop {
+        let lock = acquire_storage_lock(home, shared)?;
+        let journal = path.join(JOURNAL);
+        if shared && journal.exists() {
+            // Release before changing lock modes; Windows does not convert held locks.
+            shared = false;
+            continue;
+        }
+        let schema = load_schema(path, options)?;
+        if !read_only {
+            fs::create_dir_all(path)
+                .map_err(|error| io_error("create storage directory", path, &error))?;
+        }
+        dictionary::prepare(&path.join("dictionary"))?;
+        if journal.exists() {
+            let native = NativeStore::open(path, &schema, false)?;
+            replay(&native, &schema, read_json(&journal)?)?;
+            native.flush()?;
+            clear_journal(path)?;
+        }
+        if read_only && !shared {
+            // Recheck after reacquiring: another writer may run between locks.
+            shared = true;
+            continue;
+        }
+        return Ok((lock, schema));
+    }
 }
 
 fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {

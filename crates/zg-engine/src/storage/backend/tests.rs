@@ -257,8 +257,27 @@ fn replays_interrupted_writes_before_serving_readers() {
         .expect("partial mutation");
     native.flush().expect("persist partial mutation");
     drop(native);
+    let competing_reader = acquire_storage_lock(home, true).expect("another reader's lock");
+    let recovery_error = ZvecStorageFactory::new()
+        .open(WorkspaceIndexStorageOptions::ReadOnly {
+            storage_path: home.to_owned(),
+        })
+        .err()
+        .expect("recovery requires exclusive access");
+    assert_eq!(recovery_error.code(), EngineError::RESOURCE_BUSY);
+    assert!(path.join(JOURNAL).exists());
+    drop(competing_reader);
     let reader = open(home, true);
     assert!(!path.join(JOURNAL).exists());
+    let shared_lock =
+        acquire_storage_lock(home, true).expect("recovered reader holds a shared lock");
+    assert_eq!(
+        acquire_storage_lock(home, false)
+            .expect_err("recovered reader excludes writers")
+            .code(),
+        EngineError::RESOURCE_BUSY
+    );
+    drop(shared_lock);
     assert!(
         reader
             .search_fts("apple", 10, None)
@@ -280,6 +299,7 @@ fn replays_interrupted_writes_before_serving_readers() {
         1
     );
     reader.close().expect("close recovered reader");
+    drop(acquire_storage_lock(home, false).expect("closing recovered reader releases its lock"));
 
     let record = JournalRecord {
         version: VERSION,

@@ -54,9 +54,7 @@ impl NativeStore {
                 )
             })?;
         let dictionary = path.join("dictionary");
-        let dictionary = dictionary
-            .to_str()
-            .ok_or_else(|| EngineError::invalid_argument("zvec dictionary path must be UTF-8"))?;
+        let dictionary = native_path(&dictionary)?;
         let params = serde_json::json!({"jieba_dict_dir": dictionary}).to_string();
         let files = open_collection(&path.join("files"), &files_schema()?, read_only)?;
         let entities = open_collection(&path.join("entities"), &entities_schema()?, read_only)?;
@@ -363,12 +361,7 @@ fn open_collection(
     schema: &CollectionSchema,
     read_only: bool,
 ) -> EngineResult<Collection> {
-    let text = path.to_str().ok_or_else(|| {
-        EngineError::invalid_argument(format!(
-            "zvec storage path must be UTF-8: {}",
-            path.display()
-        ))
-    })?;
+    let text = native_path(path)?;
     let mut options = native(CollectionOptions::new(), "configure collection")?;
     native(
         options.set_read_only(read_only),
@@ -390,6 +383,17 @@ fn open_collection(
             &format!("create collection {}", path.display()),
         )
     }
+}
+
+fn native_path(path: &Path) -> EngineResult<&str> {
+    // zvec rejects the `?` in Windows verbatim prefixes. Simplify only when
+    // the regular path identifies the same location; retain internal paths.
+    dunce::simplified(path).to_str().ok_or_else(|| {
+        EngineError::invalid_argument(format!(
+            "zvec storage path must be UTF-8: {}",
+            path.display()
+        ))
+    })
 }
 
 fn scalar(

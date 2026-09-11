@@ -18,6 +18,7 @@ vulkan = ["llama-cpp-2/vulkan", "ort/webgpu"]
 [dependencies]
 async-trait.workspace = true
 base64 = "0.23.1"
+dunce = "1.0.5"
 futures-util = "0.3.34"
 flate2 = "1.1.10"
 globset.workspace = true
