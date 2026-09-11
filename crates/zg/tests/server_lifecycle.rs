@@ -657,7 +657,9 @@ fn available_port() -> Result<u16, std::io::Error> {
 
 fn post_json(port: u16, session: Option<&str>, body: &str) -> Result<String, Box<dyn Error>> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // A wait_for_fresh request includes indexing work, which can exceed five
+    // seconds on slower CI runners even with a local embedding provider.
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let session_header = session.map_or_else(String::new, |value| {
         format!("Mcp-Session-Id: {value}\r\nMCP-Protocol-Version: 2025-11-25\r\n")

@@ -178,7 +178,7 @@ pub mod progress {
             let events = Arc::new(Mutex::new(Vec::new()));
             let captured = events.clone();
             let reporter = IndexProgressReporter::new(move |event| {
-                captured.lock().unwrap().push(event);
+                captured.lock().expect("progress events lock").push(event);
             })
             .prioritize_model_progress();
             let indexing = IndexProgress {
@@ -207,7 +207,7 @@ pub mod progress {
             reporter.report(downloading.clone());
             reporter.report(latest.clone());
             assert_eq!(
-                *events.lock().unwrap(),
+                *events.lock().expect("progress events lock"),
                 [indexing.clone(), preparing.clone(), downloading.clone()]
             );
             reporter.report(model(IndexEmbeddingStage::Ready));
@@ -217,7 +217,7 @@ pub mod progress {
             };
             reporter.report(next.clone());
             assert_eq!(
-                *events.lock().unwrap(),
+                *events.lock().expect("progress events lock"),
                 [indexing, preparing, downloading, latest, next]
             );
         }
