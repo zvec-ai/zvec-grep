@@ -270,6 +270,8 @@ test("drop index cancels an active backend index job before dropping", async () 
   });
   let indexSignal;
   let dropCalled = false;
+  let jobAtDropTime;
+  let indexJobId;
   const backend = new DaemonBackend({
     version: "1.0.0",
     watchManagerFactory: noopWatchManagerFactory,
@@ -292,6 +294,7 @@ test("drop index cancels an active backend index job before dropping", async () 
       },
       dropIndex: async () => {
         dropCalled = true;
+        jobAtDropTime = backend.scheduler.get(indexJobId);
         return true;
       },
       close: async () => {},
@@ -303,16 +306,20 @@ test("drop index cancels an active backend index job before dropping", async () 
       embedding: "test/deterministic",
       wait: false,
     });
+    indexJobId = index.jobId;
     await indexStarted;
 
     const drop = await backend.dropIndex({ root });
-    const job = backend.scheduler.get(index.jobId);
 
     assert.equal(indexSignal.aborted, true);
-    assert.equal(job.state, "cancelled");
-    assert.equal(job.error.code, "INDEX_CANCELLED");
+    // The active job was already terminal when the drop itself ran.
+    assert.equal(jobAtDropTime?.state, "cancelled");
+    assert.equal(jobAtDropTime?.error.code, "INDEX_CANCELLED");
     assert.equal(dropCalled, true);
     assert.deepEqual(drop, { root: await realpath(root), removed: true });
+    // Dropping the root also releases its scheduler bookkeeping.
+    assert.equal(backend.scheduler.get(index.jobId), undefined);
+    assert.equal(backend.scheduler.getByRoot(await realpath(root)), undefined);
   } finally {
     await backend.close();
     await rm(temporaryDirectory, { recursive: true, force: true });

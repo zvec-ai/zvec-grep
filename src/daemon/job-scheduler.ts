@@ -52,7 +52,9 @@ export type JobSchedulerOptions = {
 };
 
 type ScheduledJob = IndexJobSnapshot & {
-  run: SubmitIndexJob["run"];
+  // Cleared once the job reaches a terminal state so the closure (which may
+  // capture credentials from the index options) can be garbage collected.
+  run?: SubmitIndexJob["run"];
   abortController: AbortController;
   completion: Promise<IndexJobSnapshot>;
   resolveCompletion: (snapshot: IndexJobSnapshot) => void;
@@ -61,10 +63,15 @@ type ScheduledJob = IndexJobSnapshot & {
   followup?: ScheduledJob;
 };
 
+// How many finished jobs stay queryable via get()/wait() before the oldest
+// ones are evicted. Keeps the jobs Map bounded on long-running daemons.
+const MAX_RETAINED_FINISHED_JOBS = 256;
+
 export class JobScheduler {
   private readonly jobs = new Map<string, ScheduledJob>();
   private readonly activeByRoot = new Map<string, ScheduledJob>();
   private readonly latestByRoot = new Map<string, ScheduledJob>();
+  private readonly finishedJobIds: string[] = [];
   private readonly queue: ScheduledJob[] = [];
   private readonly concurrency: number;
   private readonly maxAttempts: number;
@@ -165,6 +172,36 @@ export class JobScheduler {
     }
   }
 
+  /**
+   * Drop all in-memory bookkeeping for a root: cancels any active job,
+   * removes the last-job record, and evicts the root's finished jobs from
+   * retention. Call when a root is dropped or evicted — without this the
+   * entries outlive the workspace and accumulate without bound on
+   * long-lived daemons. Drain the root first (cancelRoot +
+   * waitForRootIdle) so no job is still running; a running job left behind
+   * finishes into normal retention.
+   */
+  forgetRoot(canonicalRoot: string): void {
+    this.cancelRoot(canonicalRoot);
+    const forgotten = new Set<string>();
+    for (const [jobId, job] of this.jobs) {
+      if (
+        job.canonicalRoot === canonicalRoot &&
+        job.state !== "queued" &&
+        job.state !== "running"
+      ) {
+        forgotten.add(jobId);
+        this.jobs.delete(jobId);
+      }
+    }
+    this.latestByRoot.delete(canonicalRoot);
+    for (let index = this.finishedJobIds.length - 1; index >= 0; index--) {
+      if (forgotten.has(this.finishedJobIds[index])) {
+        this.finishedJobIds.splice(index, 1);
+      }
+    }
+  }
+
   cancelRoot(canonicalRoot: string): boolean {
     const active = this.activeByRoot.get(canonicalRoot);
     if (!active) {
@@ -229,8 +266,11 @@ export class JobScheduler {
   }
 
   private async runJob(job: ScheduledJob): Promise<void> {
+    // Only non-terminal jobs are pumped, and run is only cleared on finish,
+    // so it is always present here.
+    const run = job.run!;
     try {
-      await job.run((progress) => {
+      await run((progress) => {
         job.progress = { ...progress };
         for (const listener of job.progressListeners) {
           try {
@@ -311,6 +351,22 @@ export class JobScheduler {
       this.activate(followup);
     }
     job.resolveCompletion(snapshot(job));
+    // Keep the terminal job for late get()/wait() lookups, but stop pinning
+    // the run closure and any progress listeners, then evict old entries so
+    // the jobs Map stays bounded on long-running daemons.
+    job.run = undefined;
+    job.progressListeners.clear();
+    this.retainFinishedJob(job.id);
+  }
+
+  private retainFinishedJob(jobId: string): void {
+    this.finishedJobIds.push(jobId);
+    while (this.finishedJobIds.length > MAX_RETAINED_FINISHED_JOBS) {
+      const oldest = this.finishedJobIds.shift();
+      if (oldest !== undefined) {
+        this.jobs.delete(oldest);
+      }
+    }
   }
 
   private enqueue(input: SubmitIndexJob): ScheduledJob {
@@ -407,11 +463,11 @@ function mergeQueuedJob(current: ScheduledJob, incoming: SubmitIndexJob): void {
 }
 
 function combineRuns(
-  first: SubmitIndexJob["run"],
+  first: SubmitIndexJob["run"] | undefined,
   second: SubmitIndexJob["run"],
 ): SubmitIndexJob["run"] {
   return async (report, signal) => {
-    await first(report, signal);
+    await first?.(report, signal);
     await second(report, signal);
   };
 }

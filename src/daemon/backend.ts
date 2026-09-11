@@ -145,6 +145,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         this.statusCache.delete(root);
         this.lastScanDiagnostics.delete(root);
         this.workspaceRuntimeCache.delete(root);
+        this.scheduler.forgetRoot(root);
         await this.closeWatcher(root);
       },
     });
