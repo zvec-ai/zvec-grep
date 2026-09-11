@@ -57,3 +57,67 @@ test("structured daemon logs correlate with the active trace", async (t) => {
   );
   assert.equal(record.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
 });
+
+test("rotation preserves queued UTF-8 records and bounds backup count", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "zvec-grep-rotation-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const fields = { message: "日志".repeat(20) };
+  const bytes = Buffer.byteLength(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      event: "entry",
+      level: "info",
+      ...fields,
+      sequence: 0,
+    })}\n`,
+  );
+  const logger = createDaemonLogger(home, { maxBytes: bytes, keep: 2 });
+  for (let sequence = 0; sequence < 5; sequence++) {
+    logger.event("entry", { ...fields, sequence });
+  }
+  await logger.flush();
+  const path = join(home, "daemon", "logs", "server.log");
+  for (const [suffix, sequence] of [
+    ["", 4],
+    [".1", 3],
+    [".2", 2],
+  ]) {
+    const text = await readFile(`${path}${suffix}`, "utf8");
+    assert.equal(Buffer.byteLength(text), bytes);
+    assert.equal(JSON.parse(text).sequence, sequence);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(`${path}${suffix}`)).mode & 0o777, 0o600);
+    }
+  }
+  await assert.rejects(stat(`${path}.3`), { code: "ENOENT" });
+});
+
+test("restart rotates an existing oversized file and keeps whole records", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "zvec-grep-restart-log-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const first = createDaemonLogger(home, { maxBytes: 1, keep: 1 });
+  first.event("before-restart");
+  await first.flush();
+  const path = join(home, "daemon", "logs", "server.log");
+  await assert.rejects(stat(`${path}.1`), { code: "ENOENT" });
+  const second = createDaemonLogger(home, { maxBytes: 1, keep: 1 });
+  second.event("after-restart");
+  await second.flush();
+  assert.equal(JSON.parse(await readFile(path, "utf8")).event, "after-restart");
+  assert.equal(
+    JSON.parse(await readFile(`${path}.1`, "utf8")).event,
+    "before-restart",
+  );
+});
+
+test("keep zero discards old logs without creating backups", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "zvec-grep-no-backup-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const logger = createDaemonLogger(home, { maxBytes: 1, keep: 0 });
+  logger.event("old");
+  logger.event("new");
+  await logger.flush();
+  const path = join(home, "daemon", "logs", "server.log");
+  assert.equal(JSON.parse(await readFile(path, "utf8")).event, "new");
+  await assert.rejects(stat(`${path}.1`), { code: "ENOENT" });
+});
