@@ -301,11 +301,12 @@ pub(super) fn test_source(format: FileFormat, relative_path: &str, text: &str) -
 
 #[cfg(test)]
 pub(super) fn test_file(format: FileFormat, relative_path: &str, size_bytes: u64) -> SourceFile {
+    let root = std::env::current_dir().expect("current directory");
     SourceFile {
         id: crate::domain::FileId::new(format!("file-{}", format.as_str())).expect("file id"),
-        absolute_path: PathBuf::from("/repo").join(relative_path),
+        absolute_path: root.join(relative_path),
         relative_path: PathBuf::from(relative_path),
-        root_path: PathBuf::from("/repo"),
+        root_path: root,
         formats: vec![format],
         snapshot: crate::domain::FileSnapshot {
             size_bytes,
