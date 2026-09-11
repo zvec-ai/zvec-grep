@@ -13,23 +13,20 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    api::index::{
-        options::Device,
-        progress::{
-            IndexEmbeddingProgress, IndexEmbeddingStage, IndexProgress, IndexProgressPhase,
-            IndexProgressReporter,
-        },
+use crate::api::index::{
+    options::Device,
+    progress::{
+        IndexEmbeddingProgress, IndexEmbeddingStage, IndexProgress, IndexProgressPhase,
+        IndexProgressReporter,
     },
-    payload::Content,
 };
 
 use super::{
     compute::ModelComputeRuntime,
     factory::create_embedding_model,
     spi::{
-        CreateEmbeddingModelOptions, EmbeddingInputKind, EmbeddingModel, EmbeddingModelInfo,
-        EmbeddingOptions, EmbeddingResult, ModelError,
+        CreateEmbeddingModelOptions, EmbeddingInput, EmbeddingInputKind, EmbeddingModel,
+        EmbeddingModelInfo, EmbeddingOptions, EmbeddingResult, ModelError,
     },
 };
 
@@ -265,7 +262,7 @@ impl ModelRuntimeLease {
 
     pub(super) async fn embed_impl(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         mut options: EmbeddingOptions,
         index_progress: Option<IndexProgressReporter>,
     ) -> Result<EmbeddingResult, ModelError> {
@@ -284,7 +281,7 @@ impl ModelRuntimeLease {
                 reporter.report(index_progress_from_model(&operation, progress));
             }));
         }
-        self.entry.runtime.model.embed(contents, options).await
+        self.entry.runtime.model.embed(inputs, options).await
     }
 
     async fn acquire_operation_permit(
@@ -474,10 +471,7 @@ mod tests {
     use async_trait::async_trait;
     use tokio::sync::{Barrier, Semaphore as TokioSemaphore};
 
-    use crate::{
-        models::spi::{EmbeddingInputKind, EmbeddingMetric},
-        payload::Content,
-    };
+    use crate::models::spi::{EmbeddingInputKind, EmbeddingMetric};
 
     use super::*;
     use crate::models::spi::{EmbeddingModelLimits, EmbeddingPurpose};
@@ -522,7 +516,7 @@ mod tests {
 
         async fn embed(
             &self,
-            contents: &[Content],
+            inputs: &[EmbeddingInput],
             _options: EmbeddingOptions,
         ) -> Result<EmbeddingResult, ModelError> {
             let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
@@ -530,13 +524,9 @@ mod tests {
             self.barrier.wait().await;
             self.active.fetch_sub(1, Ordering::AcqRel);
             Ok(EmbeddingResult {
-                vectors: contents.iter().map(|_| vec![1.0]).collect(),
+                vectors: inputs.iter().map(|_| vec![1.0]).collect(),
                 truncated: Vec::new(),
             })
-        }
-
-        async fn dispose(&self) -> Result<(), ModelError> {
-            Ok(())
         }
     }
 
@@ -573,7 +563,7 @@ mod tests {
 
         async fn embed(
             &self,
-            contents: &[Content],
+            inputs: &[EmbeddingInput],
             _options: EmbeddingOptions,
         ) -> Result<EmbeddingResult, ModelError> {
             let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
@@ -587,13 +577,9 @@ mod tests {
             permit.forget();
             self.active.fetch_sub(1, Ordering::AcqRel);
             Ok(EmbeddingResult {
-                vectors: contents.iter().map(|_| vec![1.0]).collect(),
+                vectors: inputs.iter().map(|_| vec![1.0]).collect(),
                 truncated: Vec::new(),
             })
-        }
-
-        async fn dispose(&self) -> Result<(), ModelError> {
-            Ok(())
         }
     }
 
@@ -612,7 +598,7 @@ mod tests {
 
         async fn embed(
             &self,
-            contents: &[Content],
+            inputs: &[EmbeddingInput],
             options: EmbeddingOptions,
         ) -> Result<EmbeddingResult, ModelError> {
             if let Some(on_progress) = options.on_progress {
@@ -633,13 +619,9 @@ mod tests {
                 });
             }
             Ok(EmbeddingResult {
-                vectors: contents.iter().map(|_| vec![1.0]).collect(),
+                vectors: inputs.iter().map(|_| vec![1.0]).collect(),
                 truncated: Vec::new(),
             })
-        }
-
-        async fn dispose(&self) -> Result<(), ModelError> {
-            Ok(())
         }
     }
 
@@ -693,8 +675,8 @@ mod tests {
             }
         );
 
-        let first_contents = vec![Content::Text("first".to_owned())];
-        let second_contents = vec![Content::Text("second".to_owned())];
+        let first_contents = vec![EmbeddingInput::text("first".to_owned())];
+        let second_contents = vec![EmbeddingInput::text("second".to_owned())];
         let first_embedding = first.embed(
             &first_contents,
             EmbeddingOptions {
@@ -758,11 +740,11 @@ mod tests {
         let captured_model_events = Arc::clone(&model_events);
         let index_events = Arc::new(StdMutex::new(Vec::new()));
         let captured_index_events = Arc::clone(&index_events);
-        let contents = [Content::Text("fixture".to_owned())];
+        let inputs = [EmbeddingInput::text("fixture".to_owned())];
 
         lease
             .embed(
-                &contents,
+                &inputs,
                 EmbeddingOptions {
                     on_progress: Some(Arc::new(move |progress| {
                         captured_model_events
@@ -850,11 +832,11 @@ mod tests {
                 Some(2),
             ))
             .expect("fixture runtime should be acquired");
-        let contents = [Content::Text("fixture".to_owned())];
+        let inputs = [EmbeddingInput::text("fixture".to_owned())];
 
         let embeddings = async {
             futures_util::future::join_all(
-                (0..4).map(|_| lease.embed(&contents, EmbeddingOptions::default(), None)),
+                (0..4).map(|_| lease.embed(&inputs, EmbeddingOptions::default(), None)),
             )
             .await
         };
@@ -891,10 +873,10 @@ mod tests {
                 Some(1),
             ))
             .expect("fixture runtime should be acquired");
-        let contents = [Content::Text("fixture".to_owned())];
+        let inputs = [EmbeddingInput::text("fixture".to_owned())];
         let signal = CancellationToken::new();
 
-        let first = lease.embed(&contents, EmbeddingOptions::default(), None);
+        let first = lease.embed(&inputs, EmbeddingOptions::default(), None);
         let cancelled = async {
             while fixture.started.load(Ordering::Acquire) < 1 {
                 tokio::task::yield_now().await;
@@ -902,7 +884,7 @@ mod tests {
             signal.cancel();
             let result = lease
                 .embed(
-                    &contents,
+                    &inputs,
                     EmbeddingOptions {
                         signal: Some(signal),
                         ..EmbeddingOptions::default()

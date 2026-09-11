@@ -8,13 +8,15 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use super::TextSource;
 use super::{
-    ChunkOptions, EntityFragment, FileKind, IndexingExtractionFragment, Source, SourceFile, code,
+    ChunkOptions, EntityFragment, IndexingExtractionFragment, Source, SourceFile, SourceKind, code,
     image, markdown, text,
 };
 use crate::{
     EngineError,
-    api::context::{options::SymbolType, result::EntityMetadata},
-    payload::Content,
+    domain::{
+        Content, EntityContent, EntityId, EntityMetadata, FileCategory, FileFormat, SymbolType,
+        TableCellRole,
+    },
 };
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -35,10 +37,10 @@ pub(super) fn extract_for_indexing<'source>(
 ) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
     let fragments = match source.into() {
         Source::Image(source) => image::extract(source),
-        Source::Text(source) if source.file.kind == FileKind::Code => {
+        Source::Text(source) if is_code_source(&source.file) => {
             return code::extract_for_indexing(source, options);
         }
-        Source::Text(source) if source.file.format == "markdown" => {
+        Source::Text(source) if source.file.formats.contains(&FileFormat::Markdown) => {
             markdown::extract(source, options)
         }
         Source::Text(source) => text::extract(source, options),
@@ -53,51 +55,111 @@ pub(super) fn extract_for_indexing<'source>(
         .collect())
 }
 
+pub(super) fn source_kind(file: &SourceFile) -> Option<SourceKind> {
+    if let Some(format) = file
+        .formats
+        .iter()
+        .find(|format| format.categories().contains(&FileCategory::Image))
+    {
+        return Some(SourceKind::Image(*format));
+    }
+    if file.has_category(FileCategory::Code)
+        || file.has_category(FileCategory::Data)
+        || file.formats.iter().any(|format| {
+            matches!(
+                format,
+                FileFormat::AsciiDoc
+                    | FileFormat::Eml
+                    | FileFormat::Markdown
+                    | FileFormat::Mhtml
+                    | FileFormat::Org
+                    | FileFormat::Rst
+                    | FileFormat::Rtf
+                    | FileFormat::Srt
+                    | FileFormat::Text
+                    | FileFormat::WebVtt
+            )
+        })
+    {
+        Some(SourceKind::Text)
+    } else {
+        None
+    }
+}
+
+pub(super) fn is_code_source(file: &SourceFile) -> bool {
+    !file.has_category(FileCategory::Data) && file.has_category(FileCategory::Code)
+}
+
 pub(super) fn vector_content_for_fragment(
     fragment: &EntityFragment,
-    embedding_content: Option<&Content>,
+    embedding_content: Option<&[Content]>,
     max_chars: Option<usize>,
-) -> Content {
-    let content = embedding_content.unwrap_or(&fragment.content);
-    let Content::Text(text) = content else {
-        return content.clone();
+) -> Vec<Content> {
+    let mut contents = if let Some(contents) = embedding_content {
+        contents.to_vec()
+    } else if let Some(EntityContent::Outline(outline)) =
+        fragment.as_entity().map(|entity| &entity.content)
+    {
+        vec![Content::Text(outline.clone())]
+    } else {
+        fragment.contents().to_vec()
     };
-
-    let metadata = vector_metadata_text(fragment.metadata.as_ref(), metadata_budget(max_chars));
-    if metadata.is_empty() {
-        return content.clone();
+    if contents
+        .iter()
+        .any(|content| matches!(content, Content::Table(_)))
+    {
+        let mut projected = Vec::with_capacity(contents.len());
+        for content in contents {
+            project_content(content, &mut projected);
+        }
+        contents = projected;
     }
+    let metadata = vector_metadata_text(fragment.metadata(), metadata_budget(max_chars));
+    if !metadata.is_empty() {
+        if let Some(Content::Text(text)) = contents.first_mut() {
+            *text = format!("{metadata}\n{text}");
+        } else {
+            contents.insert(0, Content::Text(metadata));
+        }
+    }
+    contents
+}
 
-    Content::Text(format!("{metadata}\n{text}"))
+fn project_content(content: Content, output: &mut Vec<Content>) {
+    match content {
+        Content::Table(table) => {
+            for cell in table.cells {
+                let role = match cell.kind {
+                    TableCellRole::Header => "header",
+                    TableCellRole::Data | TableCellRole::Unknown => "cell",
+                };
+                output.push(Content::Text(format!(
+                    "{role} {},{} ({}x{}):",
+                    cell.row, cell.column, cell.row_span, cell.column_span,
+                )));
+                for content in cell.contents {
+                    project_content(content, output);
+                }
+            }
+        }
+        content => output.push(content),
+    }
 }
 
 pub(super) fn validate_source_file(file: &SourceFile) -> Result<(), EngineError> {
-    if file.id.trim().is_empty() {
-        return Err(EngineError::invalid_argument(
-            "extractor source requires a non-empty file id",
-        ));
-    }
-    if file.absolute_path.to_string_lossy().trim().is_empty() {
-        return Err(EngineError::invalid_argument(
-            "extractor source requires a non-empty absolute file path",
-        ));
-    }
-    if file.relative_path.to_string_lossy().trim().is_empty() {
-        return Err(EngineError::invalid_argument(
-            "extractor source requires a non-empty relative file path",
-        ));
-    }
-    Ok(())
+    file.validate()
 }
 
-pub(super) fn make_entity_id(file_id: &str, index: usize) -> String {
+pub(super) fn make_entity_id(file_id: &crate::domain::FileId, index: usize) -> EntityId {
+    let file_id = file_id.as_str();
     let digest = Sha256::digest(format!("{file_id}\0{index}").as_bytes());
     let mut id = String::with_capacity(64);
     for byte in digest {
         id.push(char::from(HEX[usize::from(byte >> 4)]));
         id.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    id
+    EntityId::new(id).expect("SHA-256 digest is a non-empty ID")
 }
 
 pub(super) fn chunk_options_for_metadata(
@@ -230,34 +292,118 @@ pub(super) fn byte_index_at_utf16_ceil(value: &str, utf16_offset: usize) -> usiz
 }
 
 #[cfg(test)]
-pub(super) fn test_source(
-    kind: FileKind,
-    format: &str,
-    relative_path: &str,
-    text: &str,
-) -> TextSource {
+pub(super) fn test_source(format: FileFormat, relative_path: &str, text: &str) -> TextSource {
     TextSource {
-        file: test_file(kind, format, relative_path, text.len() as u64),
+        file: test_file(format, relative_path, text.len() as u64),
         text: text.to_owned(),
     }
 }
 
 #[cfg(test)]
-pub(super) fn test_file(
-    kind: FileKind,
-    format: &str,
-    relative_path: &str,
-    size_bytes: u64,
-) -> SourceFile {
+pub(super) fn test_file(format: FileFormat, relative_path: &str, size_bytes: u64) -> SourceFile {
     SourceFile {
-        id: format!("file-{format}"),
+        id: crate::domain::FileId::new(format!("file-{}", format.as_str())).expect("file id"),
         absolute_path: PathBuf::from("/repo").join(relative_path),
         relative_path: PathBuf::from(relative_path),
         root_path: PathBuf::from("/repo"),
-        size_bytes,
-        modified_epoch_ms: Some(1),
-        content_hash: None,
-        kind,
-        format: format.to_owned(),
+        formats: vec![format],
+        snapshot: crate::domain::FileSnapshot {
+            size_bytes,
+            modified_epoch_ms: Some(1),
+            content_hash: None,
+        },
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_content(fragment: &EntityFragment) -> Content {
+    match fragment {
+        EntityFragment::Standalone(entity) | EntityFragment::Representative(entity) => {
+            match &entity.content {
+                EntityContent::Source(contents) => {
+                    assert_eq!(contents.len(), 1);
+                    contents[0].clone()
+                }
+                EntityContent::Outline(text) => Content::Text(text.clone()),
+            }
+        }
+        EntityFragment::Window(window) => {
+            assert_eq!(window.contents.len(), 1);
+            window.contents[0].clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Entity, SourceRange, TableCell, TableCellRole, TableContent};
+
+    #[test]
+    fn routes_supported_sources_without_confusing_formats_and_reader_capabilities() {
+        for (format, expected) in [
+            (FileFormat::Rust, Some(SourceKind::Text)),
+            (FileFormat::Markdown, Some(SourceKind::Text)),
+            (FileFormat::Json, Some(SourceKind::Text)),
+            (FileFormat::Png, Some(SourceKind::Image(FileFormat::Png))),
+            (FileFormat::Svg, Some(SourceKind::Image(FileFormat::Svg))),
+            (FileFormat::Pdf, None),
+            (FileFormat::Word, None),
+            (FileFormat::Unknown, None),
+            (FileFormat::Binary, None),
+        ] {
+            assert_eq!(source_kind(&test_file(format, "fixture", 1)), expected);
+        }
+        let mut source = test_source(
+            FileFormat::Json,
+            "tsconfig.json",
+            "{\"compilerOptions\": {}}",
+        );
+        source.file.formats.push(FileFormat::TypeScript);
+        assert!(!is_code_source(&source.file));
+        let fragments = extract(&source, ChunkOptions::default()).expect("data extraction");
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(test_content(&fragments[0]), Content::Text(source.text));
+        assert!(fragments[0].metadata().is_none());
+    }
+
+    #[test]
+    fn projects_table_cells_in_order_and_preserves_embedded_images() {
+        let image = Content::Image(
+            crate::domain::ImageContent::new(vec![1], FileFormat::Png).expect("image"),
+        );
+        let source = test_file(FileFormat::Markdown, "fixture.md", 1);
+        let fragment = EntityFragment::Standalone(Entity {
+            id: make_entity_id(&source.id, 0),
+            file_id: source.id,
+            range: SourceRange::File,
+            content: EntityContent::Source(vec![
+                Content::Text("before".to_owned()),
+                Content::Table(TableContent {
+                    row_count: 1,
+                    column_count: 1,
+                    cells: vec![TableCell {
+                        row: 0,
+                        column: 0,
+                        row_span: 1,
+                        column_span: 1,
+                        contents: vec![Content::Text("cell".to_owned()), image.clone()],
+                        kind: TableCellRole::Data,
+                    }],
+                }),
+                Content::Text("after".to_owned()),
+            ]),
+            metadata: None,
+        });
+        assert_eq!(
+            vector_content_for_fragment(&fragment, None, None),
+            vec![
+                Content::Text("before".to_owned()),
+                Content::Text("cell 0,0 (1x1):".to_owned()),
+                Content::Text("cell".to_owned()),
+                image,
+                Content::Text("after".to_owned()),
+            ]
+        );
     }
 }

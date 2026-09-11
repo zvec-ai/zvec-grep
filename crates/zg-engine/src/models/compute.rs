@@ -38,10 +38,6 @@ impl ModelComputeRuntime {
         }
     }
 
-    pub(crate) fn capacity(&self) -> usize {
-        self.inner.capacity
-    }
-
     pub(crate) async fn run<F, T>(&self, task: F) -> Result<T, ModelError>
     where
         F: FnOnce() -> T + Send + 'static,

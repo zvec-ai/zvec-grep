@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -20,12 +20,11 @@ use crate::models::{
     compute::ModelComputeRuntime,
     download_progress::{ArtifactDownloadProgress, ModelDownloadProgressReporter},
     spi::{
-        CreateEmbeddingModelOptions, EmbeddingInputKind, EmbeddingModel, EmbeddingModelInfo,
-        EmbeddingModelLimits, EmbeddingModelProgress, EmbeddingOptions, EmbeddingPurpose,
-        EmbeddingResult, ModelError, validate_contents, validate_result,
+        CreateEmbeddingModelOptions, EmbeddingInput, EmbeddingInputKind, EmbeddingModel,
+        EmbeddingModelInfo, EmbeddingModelLimits, EmbeddingModelProgress, EmbeddingOptions,
+        EmbeddingPurpose, EmbeddingResult, ModelError, validate_inputs, validate_result,
     },
 };
-use crate::payload::Content;
 
 use super::safetensors::{StaticEmbeddingTable, load_static_embedding_table};
 
@@ -38,7 +37,6 @@ pub(crate) struct Model2VecEmbeddingModel {
     compute_runtime: ModelComputeRuntime,
     dependencies: Arc<dyn Model2VecDependencies>,
     state: Mutex<ModelState>,
-    disposed: AtomicBool,
 }
 
 #[derive(Default)]
@@ -91,7 +89,6 @@ impl Model2VecEmbeddingModel {
             compute_runtime,
             dependencies,
             state: Mutex::new(ModelState::default()),
-            disposed: AtomicBool::new(false),
         }
     }
 
@@ -103,9 +100,7 @@ impl Model2VecEmbeddingModel {
         if let Some(loaded) = &state.loaded {
             return Ok(Arc::clone(loaded));
         }
-        self.ensure_not_disposed()?;
         let loaded = Arc::new(self.load_model(on_progress).await?);
-        self.ensure_not_disposed()?;
         state.loaded = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -140,7 +135,6 @@ impl Model2VecEmbeddingModel {
             )
             .await?;
         let tokenizer = self.dependencies.load_tokenizer(&tokenizer_source).await?;
-        self.ensure_not_disposed()?;
         reporter.finish();
         Ok(LoadedModel { tokenizer, table })
     }
@@ -268,17 +262,6 @@ impl Model2VecEmbeddingModel {
             .join(self.entry.repo.replace('/', "--"))
             .join(self.entry.revision)
     }
-
-    fn ensure_not_disposed(&self) -> Result<(), ModelError> {
-        if self.disposed.load(Ordering::Acquire) {
-            return Err(ModelError::new(
-                crate::EngineError::RESOURCE_CLOSED,
-                "Model2Vec embedding model is disposed",
-                Some(format!("model={}", self.entry.reference)),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -289,26 +272,26 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
 
     async fn embed(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_contents(&self.info, contents)?;
-        self.ensure_not_disposed()?;
+        validate_inputs(&self.info, inputs)?;
         let loaded = self.ensure_loaded(options.on_progress).await?;
         let purpose = options.purpose.unwrap_or_default();
         let prefix = match purpose {
             EmbeddingPurpose::Document => self.entry.document_prefix,
             EmbeddingPurpose::Query => self.entry.query_prefix,
         };
-        let texts = contents
+        let texts = inputs
             .iter()
-            .map(|content| match content {
-                Content::Text(text) => {
-                    prefix.map_or_else(|| text.clone(), |prefix| format!("{prefix}{text}"))
-                }
-                Content::Image(_) => unreachable!("content kind was validated"),
+            .map(|input| {
+                let text = input.to_text()?;
+                Ok(match prefix {
+                    Some(prefix) => format!("{prefix}{text}"),
+                    None => text.into_owned(),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, ModelError>>()?;
         let signal = options.signal;
         let entry = self.entry;
         let computation = self
@@ -333,16 +316,8 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
                 )),
             )
         })?;
-        validate_result(&self.info, contents.len(), &result)?;
+        validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
-    }
-
-    async fn dispose(&self) -> Result<(), ModelError> {
-        if self.disposed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        self.state.lock().await.loaded = None;
-        Ok(())
     }
 }
 
@@ -633,6 +608,7 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
 
+    use crate::models::spi::{EmbeddingInput, EmbeddingMetric};
     use crate::models::{
         catalog::Model2VecConfig,
         spi::{
@@ -640,7 +616,6 @@ mod tests {
             EmbeddingPurpose,
         },
     };
-    use crate::{models::spi::EmbeddingMetric, payload::Content};
 
     use super::{
         ArtifactDownloadProgress, Model2VecDependencies, Model2VecEmbeddingModel,
@@ -667,9 +642,9 @@ mod tests {
         let result = model
             .embed(
                 &[
-                    Content::Text("both tokens".to_owned()),
-                    Content::Text("unknown-only".to_owned()),
-                    Content::Text("third token".to_owned()),
+                    EmbeddingInput::text("both tokens".to_owned()),
+                    EmbeddingInput::text("unknown-only".to_owned()),
+                    EmbeddingInput::text("third token".to_owned()),
                 ],
                 EmbeddingOptions {
                     purpose: Some(EmbeddingPurpose::Query),
@@ -733,7 +708,7 @@ mod tests {
 
         model
             .embed(
-                &[Content::Text("cached".to_owned())],
+                &[EmbeddingInput::text("cached".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await
@@ -742,19 +717,15 @@ mod tests {
         assert_eq!(dependencies.tokenizer_loads.load(Ordering::Relaxed), 1);
         assert_eq!(dependencies.table_loads.load(Ordering::Relaxed), 1);
 
-        model.dispose().await.expect("first dispose should succeed");
-        model
-            .dispose()
-            .await
-            .expect("second dispose should succeed");
-        let error = model
-            .embed(
-                &[Content::Text("after dispose".to_owned())],
-                EmbeddingOptions::default(),
-            )
-            .await
-            .expect_err("disposed model should reject embedding");
-        assert_eq!(error.code(), crate::EngineError::RESOURCE_CLOSED);
+        let loaded = {
+            let state = model.state.lock().await;
+            Arc::downgrade(state.loaded.as_ref().expect("loaded model"))
+        };
+        drop(model);
+        assert!(
+            loaded.upgrade().is_none(),
+            "dropping the model releases its loaded resources"
+        );
     }
 
     #[tokio::test]
@@ -769,8 +740,8 @@ mod tests {
             },
             dependencies.clone(),
         );
-        let first = [Content::Text("first".to_owned())];
-        let second = [Content::Text("second".to_owned())];
+        let first = [EmbeddingInput::text("first".to_owned())];
+        let second = [EmbeddingInput::text("second".to_owned())];
 
         let (first_result, second_result) = tokio::join!(
             model.embed(&first, EmbeddingOptions::default()),
@@ -819,7 +790,7 @@ mod tests {
         );
         let result = model
             .embed(
-                &[Content::Text("too many tokens".to_owned())],
+                &[EmbeddingInput::text("too many tokens".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await
@@ -836,7 +807,7 @@ mod tests {
         assert_eq!(empty.code(), crate::EngineError::INVALID_ARGUMENT);
         let blank = model
             .embed(
-                &[Content::Text("  ".to_owned())],
+                &[EmbeddingInput::text("  ".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await
@@ -879,7 +850,7 @@ mod tests {
 
         model
             .embed(
-                &[Content::Text("cached tokenizer".to_owned())],
+                &[EmbeddingInput::text("cached tokenizer".to_owned())],
                 EmbeddingOptions {
                     on_progress: Some(Arc::new(move |event| {
                         captured
@@ -929,7 +900,7 @@ mod tests {
 
         let error = model
             .embed(
-                &[Content::Text("invalid token".to_owned())],
+                &[EmbeddingInput::text("invalid token".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await
@@ -960,7 +931,7 @@ mod tests {
 
         let error = model
             .embed(
-                &[Content::Text("cancelled".to_owned())],
+                &[EmbeddingInput::text("cancelled".to_owned())],
                 EmbeddingOptions {
                     signal: Some(signal),
                     ..EmbeddingOptions::default()
@@ -977,7 +948,7 @@ mod tests {
         );
         model
             .embed(
-                &[Content::Text("after cancellation".to_owned())],
+                &[EmbeddingInput::text("after cancellation".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await

@@ -39,11 +39,6 @@ impl ModelError {
     }
 
     #[track_caller]
-    pub(crate) fn resource_closed(message: impl Into<String>) -> Self {
-        Self::new(EngineError::RESOURCE_CLOSED, message, None)
-    }
-
-    #[track_caller]
     pub(crate) fn storage_failure(message: impl Into<String>) -> Self {
         Self::new(EngineError::STORAGE_FAILURE, message, None)
     }

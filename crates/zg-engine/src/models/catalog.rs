@@ -84,26 +84,7 @@ impl EmbeddingCatalogEntry {
         }
     }
 
-    #[must_use]
-    pub const fn provider(self) -> &'static str {
-        match self {
-            Self::LlamaCpp { provider, .. }
-            | Self::Qwen { provider, .. }
-            | Self::TransformersJs { provider, .. }
-            | Self::Model2Vec { provider, .. } => provider,
-        }
-    }
-
-    #[must_use]
-    pub const fn model(self) -> &'static str {
-        match self {
-            Self::LlamaCpp { model, .. }
-            | Self::Qwen { model, .. }
-            | Self::TransformersJs { model, .. }
-            | Self::Model2Vec { model, .. } => model,
-        }
-    }
-
+    #[cfg(test)]
     #[must_use]
     pub const fn dimension(self) -> usize {
         match self {
@@ -111,16 +92,6 @@ impl EmbeddingCatalogEntry {
             | Self::Qwen { dimension, .. }
             | Self::TransformersJs { dimension, .. }
             | Self::Model2Vec { dimension, .. } => dimension,
-        }
-    }
-
-    #[must_use]
-    pub const fn metric(self) -> EmbeddingMetric {
-        match self {
-            Self::LlamaCpp { metric, .. }
-            | Self::Qwen { metric, .. }
-            | Self::TransformersJs { metric, .. }
-            | Self::Model2Vec { metric, .. } => metric,
         }
     }
 
@@ -527,6 +498,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
     },
 ];
 
+#[cfg(test)]
 #[must_use]
 pub fn list_embedding_models() -> Vec<EmbeddingCatalogEntry> {
     CATALOG.to_vec()

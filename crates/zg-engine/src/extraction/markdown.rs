@@ -1,4 +1,10 @@
-use crate::{EngineError, api::context::result::EntityMetadata, payload::Content};
+use crate::{
+    EngineError,
+    domain::{
+        Content, Entity, EntityContent, EntityId, EntityMetadata, FileFormat, FragmentId,
+        SourceRange, WindowFragment,
+    },
+};
 
 use super::{
     ChunkOptions, EntityFragment, TextRange, TextSource, byte_index_at_utf16_ceil, char_count,
@@ -34,7 +40,7 @@ pub(super) fn extract(
     source: &TextSource,
     options: ChunkOptions,
 ) -> Result<Vec<EntityFragment>, EngineError> {
-    if source.file.format != "markdown" {
+    if !source.file.formats.contains(&FileFormat::Markdown) {
         return Ok(Vec::new());
     }
     validate_source_file(&source.file)?;
@@ -75,17 +81,16 @@ pub(super) fn extract(
                 section.start_index,
                 section.end_index,
             );
-            fragments.push(EntityFragment {
+            fragments.push(EntityFragment::Representative(Entity {
                 id: id.clone(),
-                group: Some(id.clone()),
                 file_id: source.file.id.clone(),
-                range: section_window.range.into(),
-                content: Content::Text(fit_text_to_chars(
+                range: SourceRange::Text(section_window.range),
+                content: EntityContent::Outline(fit_text_to_chars(
                     metadata_heading(&metadata).unwrap_or("markdown section"),
                     content_max,
                 )),
                 metadata: Some(metadata.clone()),
-            });
+            }));
 
             for window in windows {
                 let index = fragments.len();
@@ -147,15 +152,27 @@ fn markdown_window_to_fragment(
     metadata: EntityMetadata,
     window: MarkdownWindow,
     index: usize,
-    group: Option<String>,
+    owner: Option<EntityId>,
 ) -> EntityFragment {
-    EntityFragment {
-        id: make_entity_id(&source.file.id, index),
-        group,
-        file_id: source.file.id.clone(),
-        range: window.range.into(),
-        content: Content::Text(window.text),
-        metadata: Some(metadata),
+    let id = make_entity_id(&source.file.id, index);
+    let range = SourceRange::Text(window.range);
+    let contents = vec![Content::Text(window.text)];
+    match owner {
+        Some(entity_id) => EntityFragment::Window(WindowFragment {
+            id: FragmentId::new(id.as_str()).expect("generated fragment id"),
+            entity_id,
+            file_id: source.file.id.clone(),
+            range,
+            contents,
+            metadata: Some(metadata),
+        }),
+        None => EntityFragment::Standalone(Entity {
+            id,
+            file_id: source.file.id.clone(),
+            range,
+            content: EntityContent::Source(contents),
+            metadata: Some(metadata),
+        }),
     }
 }
 
@@ -400,8 +417,8 @@ fn split_long_line(
             range: TextRange {
                 start_line: line_index + 1,
                 end_line: line_index + 1,
-                start_offset: line_offset + char_count(&line[..byte_offset]),
-                end_offset: line_offset + char_count(&line[..byte_offset + slice_bytes]),
+                start_utf16_offset: line_offset + char_count(&line[..byte_offset]),
+                end_utf16_offset: line_offset + char_count(&line[..byte_offset + slice_bytes]),
             },
         });
         byte_offset += slice_bytes;
@@ -420,8 +437,8 @@ fn lines_to_window(
         range: TextRange {
             start_line: start_index + 1,
             end_line: end_index + 1,
-            start_offset: line_offsets[start_index],
-            end_offset: line_offsets[end_index] + char_count(lines[end_index]),
+            start_utf16_offset: line_offsets[start_index],
+            end_utf16_offset: line_offsets[end_index] + char_count(lines[end_index]),
         },
     }
 }
@@ -520,12 +537,11 @@ fn metadata_heading(metadata: &EntityMetadata) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        api::context::result::{ContentRange, EntityMetadata},
-        payload::Content,
+    use crate::domain::{
+        Content, EntityFragment, EntityMetadata, FileFormat, SourceRange, TextRange,
     };
 
-    use super::super::FileKind;
+    use super::super::test_content;
 
     use super::super::{ChunkOptions, byte_index_at_utf16, test_source};
     use super::extract;
@@ -533,8 +549,7 @@ mod tests {
     #[test]
     fn handles_heading_styles_fences_hierarchy_and_windows() {
         let source = test_source(
-            FileKind::Text,
-            "markdown",
+            FileFormat::Markdown,
             "README.md",
             &[
                 "preface 😀",
@@ -563,11 +578,11 @@ mod tests {
         .expect("markdown extraction");
         assert!(fragments.len() >= 4);
         assert!(fragments.iter().any(|item| matches!(
-            &item.metadata,
+            &item.metadata(),
             Some(EntityMetadata::Markdown { heading: Some(heading), .. }) if heading == "Parent"
         )));
         assert!(fragments.iter().any(|item| matches!(
-            &item.metadata,
+            &item.metadata(),
             Some(EntityMetadata::Markdown {
                 heading: Some(heading),
                 scope: Some(scope),
@@ -575,42 +590,45 @@ mod tests {
             }) if heading == "Child" && scope == "Parent"
         )));
         assert!(!fragments.iter().any(|item| matches!(
-            &item.metadata,
+            &item.metadata(),
             Some(EntityMetadata::Markdown { heading: Some(heading), .. }) if heading == "Not a heading"
         )));
-        assert!(fragments.iter().any(|item| item.group.is_some()));
+        assert!(fragments.iter().any(|item| matches!(
+            item,
+            EntityFragment::Representative(_) | EntityFragment::Window(_)
+        )));
 
         for fragment in fragments {
-            if fragment.group.as_ref() == Some(&fragment.id) {
+            if matches!(fragment, EntityFragment::Representative(_)) {
                 continue;
             }
-            let Content::Text(content) = fragment.content else {
+            let Content::Text(content) = test_content(&fragment) else {
                 panic!("text content expected");
             };
-            let ContentRange::Text {
-                start_offset,
-                end_offset,
+            let SourceRange::Text(TextRange {
+                start_utf16_offset,
+                end_utf16_offset,
                 ..
-            } = fragment.range
+            }) = *fragment.range()
             else {
                 panic!("text range expected");
             };
-            let start_byte = byte_index_at_utf16(&source.text, start_offset);
-            let end_byte = byte_index_at_utf16(&source.text, end_offset);
+            let start_byte = byte_index_at_utf16(&source.text, start_utf16_offset);
+            let end_byte = byte_index_at_utf16(&source.text, end_utf16_offset);
             assert_eq!(content, source.text[start_byte..end_byte]);
         }
     }
 
     #[test]
     fn falls_back_without_headings_and_validates_options() {
-        let source = test_source(FileKind::Text, "markdown", "README.md", "plain markdown");
+        let source = test_source(FileFormat::Markdown, "README.md", "plain markdown");
         let fragments = extract(&source, ChunkOptions::default()).expect("fallback");
         assert_eq!(fragments.len(), 1);
         assert_eq!(
-            fragments[0].content,
+            test_content(&fragments[0]),
             Content::Text("plain markdown".to_owned())
         );
-        assert!(fragments[0].metadata.is_none());
+        assert!(fragments[0].metadata().is_none());
 
         assert!(
             extract(
@@ -636,7 +654,7 @@ mod tests {
 
     #[test]
     fn ignores_non_markdown_sources() {
-        let source = test_source(FileKind::Text, "text", "README.txt", "# Heading");
+        let source = test_source(FileFormat::Text, "README.txt", "# Heading");
         assert!(
             extract(&source, ChunkOptions::default())
                 .expect("non-markdown")

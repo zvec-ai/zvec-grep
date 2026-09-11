@@ -8,7 +8,7 @@ use crate::{EngineError, storage::spi::WorkspaceIndexStorageFactory};
 use super::manifest::{delete_workspace_manifest, workspace_manifest_path};
 
 pub(crate) const ZVEC_GREP_DIRECTORY: &str = ".zvec-grep";
-const WORKSPACE_INDEX_FILE: &str = "index.zvec";
+const WORKSPACE_INDEX_DIRECTORY: &str = "storage";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceIndexLocation {
@@ -45,7 +45,7 @@ pub(crate) fn workspace_index_location(root: &Path) -> Result<WorkspaceIndexLoca
     Ok(WorkspaceIndexLocation {
         root: canonical_root,
         manifest_path: workspace_manifest_path(&home),
-        index_path: home.join(WORKSPACE_INDEX_FILE),
+        index_path: home.join(WORKSPACE_INDEX_DIRECTORY),
         home,
     })
 }
@@ -60,8 +60,8 @@ pub(crate) fn reset_workspace_index(
     location: &WorkspaceIndexLocation,
     storage_factory: &dyn WorkspaceIndexStorageFactory,
 ) -> Result<(), EngineError> {
-    delete_workspace_manifest(&location.home)?;
-    storage_factory.delete(&location.home)
+    storage_factory.delete(&location.home)?;
+    delete_workspace_manifest(&location.home)
 }
 
 fn find_nearest_workspace_location(
@@ -101,14 +101,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creates_main_compatible_workspace_paths() {
+    fn creates_workspace_paths() {
         let directory = tempdir().expect("temporary directory");
         let location = workspace_index_location(directory.path()).expect("workspace location");
 
         assert_eq!(location.root, directory.path());
         assert_eq!(location.home, directory.path().join(".zvec-grep"));
         assert_eq!(location.manifest_path, location.home.join("manifest.json"));
-        assert_eq!(location.index_path, location.home.join("index.zvec"));
+        assert_eq!(location.index_path, location.home.join("storage"));
     }
 
     #[test]

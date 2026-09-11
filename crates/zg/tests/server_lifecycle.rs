@@ -1,10 +1,14 @@
 use std::{
     error::Error,
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Output, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -257,13 +261,16 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
 fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<dyn Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let embedding = EmbeddingServer::start()?;
     std::fs::write(
-        home.path().join("sample.txt"),
+        workspace.path().join("sample.txt"),
         "resident workspace manager\n",
     )?;
     let port = available_port()?;
     let listen = format!("127.0.0.1:{port}");
     let output = Command::new(&binary)
+        .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
             "server",
             "on",
@@ -334,7 +341,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "params": {
             "name": "zvec_grep_rg",
             "arguments": {
-                "root": home.path(),
+                "root": workspace.path(),
                 "command": "rg -F resident sample.txt"
             }
         }
@@ -350,7 +357,12 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "method": "tools/call",
         "params": {
             "name": "zvec_grep_index",
-            "arguments": { "root": home.path(), "wait": false }
+            "arguments": {
+                "root": workspace.path(),
+                "wait": false,
+                "embedding": "qwen/text-embedding-v4",
+                "endpoint": format!("http://{}/embeddings", embedding.address)
+            }
         }
     });
     let response = post_json(port, Some(&session), &index.to_string())?;
@@ -380,16 +392,50 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "method": "tools/call",
         "params": {
             "name": "zvec_grep_index_status",
-            "arguments": { "root": home.path() }
+            "arguments": { "root": workspace.path() }
         }
     });
-    let response = post_json(port, Some(&session), &index_status.to_string())?;
-    assert!(response.contains("\"indexed\":false"));
-    assert!(response.contains("\"index_policy\":\"undecided\""));
-    assert!(response.contains("\"source\":\"unindexed\""));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let response = loop {
+        let response = post_json(port, Some(&session), &index_status.to_string())?;
+        assert!(!response.contains("\"job_state\":\"failed\""), "{response}");
+        if response.contains("\"job_state\":\"succeeded\"") {
+            break response;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "index did not complete: {response}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(response.contains("\"indexed\":true"), "{response}");
+    assert!(response.contains("\"index_policy\":\"enabled\""));
+    assert!(response.contains("\"source\":\"index\""));
     assert!(response.contains("\"runtime\":"));
-    assert!(response.contains("\"job_state\":\"failed\""));
     assert!(response.contains("\"isError\":false"));
+    assert!(response.contains("\"indexed\":1"), "{response}");
+    assert!(response.contains("\"failed\":0"), "{response}");
+
+    let search = json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "zvec_grep_search",
+            "arguments": {
+                "root": workspace.path(),
+                "fts": "resident",
+                "autoUpdate": false
+            }
+        }
+    });
+    let response = post_json(port, Some(&session), &search.to_string())?;
+    assert!(response.contains("sample.txt"), "{response}");
+    assert!(
+        response.contains("resident workspace manager"),
+        "{response}"
+    );
+    assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;
     assert_command_success(&output);
@@ -458,6 +504,90 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
     let output = guard.stop()?;
     assert_command_success(&output);
     Ok(())
+}
+
+struct EmbeddingServer {
+    address: SocketAddr,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl EmbeddingServer {
+    fn start() -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    respond_embedding(stream.expect("mock embedding connection"))
+                        .expect("mock embedding response");
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for EmbeddingServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = TcpStream::connect(self.address);
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !std::thread::panicking() {
+                assert!(result.is_ok(), "mock embedding server failed");
+            }
+        }
+    }
+}
+
+fn respond_embedding(mut stream: TcpStream) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(length) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = Some(length.trim().parse::<usize>().expect("content length"));
+        }
+    }
+    let mut body = vec![0; content_length.expect("request body length")];
+    reader.read_exact(&mut body)?;
+    let request: serde_json::Value = serde_json::from_slice(&body)?;
+    let dimension = usize::try_from(request["dimensions"].as_u64().expect("dimension"))
+        .expect("usize dimension");
+    let mut vector = vec![0.0_f32; dimension];
+    vector[0] = 1.0;
+    let data = request["input"]
+        .as_array()
+        .expect("text inputs")
+        .iter()
+        .enumerate()
+        .map(|(index, _)| json!({ "index": index, "embedding": vector }))
+        .collect::<Vec<_>>();
+    let response = serde_json::to_vec(&json!({ "data": data }))?;
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        response.len()
+    )?;
+    stream.write_all(&response)
 }
 
 fn available_port() -> Result<u16, std::io::Error> {

@@ -7,13 +7,10 @@
 pub mod api;
 mod domain;
 mod error;
-#[allow(dead_code)]
 mod extraction;
 mod indexing;
 mod lexical;
-#[allow(dead_code)]
 mod models;
-mod payload;
 mod search;
 mod service;
 mod storage;

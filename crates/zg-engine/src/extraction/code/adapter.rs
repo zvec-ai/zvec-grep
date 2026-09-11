@@ -1,6 +1,6 @@
 use tree_sitter::Node;
 
-use crate::api::context::options::SymbolType;
+use crate::domain::{FileFormat, SymbolType};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterKind {
@@ -150,16 +150,16 @@ const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
     ],
 };
 
-pub(super) fn resolve_adapter(format: &str) -> Option<&'static LanguageAdapter> {
+pub(super) fn resolve_adapter(format: FileFormat) -> Option<&'static LanguageAdapter> {
     match format {
-        "c" => Some(&C),
-        "cpp" => Some(&CPP),
-        "go" => Some(&GO),
-        "java" => Some(&JAVA),
-        "javascript" | "jsx" => Some(&JAVASCRIPT),
-        "python" => Some(&PYTHON),
-        "rust" => Some(&RUST),
-        "typescript" | "tsx" => Some(&TYPESCRIPT),
+        FileFormat::C => Some(&C),
+        FileFormat::Cpp => Some(&CPP),
+        FileFormat::Go => Some(&GO),
+        FileFormat::Java => Some(&JAVA),
+        FileFormat::JavaScript => Some(&JAVASCRIPT),
+        FileFormat::Python => Some(&PYTHON),
+        FileFormat::Rust => Some(&RUST),
+        FileFormat::TypeScript => Some(&TYPESCRIPT),
         _ => None,
     }
 }

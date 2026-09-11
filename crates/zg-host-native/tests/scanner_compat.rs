@@ -9,8 +9,8 @@ use std::{
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 use zg_host_native::{
-    DiscoveredFile, DiscoveryOptions, KnownSourceFile, NativeScanner, ReadBatchRequest, RootSpec,
-    ScanRequest, ScanSnapshot, SkippedFileReason, TaskControl, WorkspaceScannerPort,
+    DiscoveredFile, DiscoveryOptions, NativeScanner, ReadBatchRequest, RootSpec, ScanRequest,
+    ScanSnapshot, SkippedFileReason, TaskControl, WorkspaceScannerPort,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -47,7 +47,6 @@ async fn scanner_matches_typescript_ignore_hidden_nested_git_and_path_filters() 
             exclude_paths: vec!["**/*.log".to_owned()],
             ..DiscoveryOptions::default()
         },
-        Vec::new(),
     )
     .await?;
     assert_eq!(
@@ -58,7 +57,11 @@ async fn scanner_matches_typescript_ignore_hidden_nested_git_and_path_filters() 
             PathBuf::from("vendor/keep.ts"),
         ])
     );
-    assert_eq!(snapshot.files[0].format_hint.as_deref(), Some("typescript"));
+    assert_eq!(snapshot.files[0].size_bytes, 23);
+    assert_eq!(
+        snapshot.files[0].source_fingerprint,
+        metadata_fingerprint(&root.join("src/main.ts"))?,
+    );
 
     let sources = scanner
         .read_batch(
@@ -92,7 +95,7 @@ async fn scanner_matches_typescript_defaults_and_explicit_includes() -> TestResu
     write(root, ".env.example", "TOKEN=replace-me\n")?;
 
     let scanner = NativeScanner::default();
-    let defaults = discover(&scanner, root, DiscoveryOptions::default(), Vec::new()).await?;
+    let defaults = discover(&scanner, root, DiscoveryOptions::default()).await?;
     assert_eq!(
         relative_paths(&defaults.files),
         BTreeSet::from([PathBuf::from("src/main.ts")])
@@ -110,7 +113,6 @@ async fn scanner_matches_typescript_defaults_and_explicit_includes() -> TestResu
             ],
             ..DiscoveryOptions::default()
         },
-        Vec::new(),
     )
     .await?;
     assert_eq!(
@@ -139,7 +141,6 @@ async fn scanner_limits_discovery_to_requested_scope_paths() -> TestResult {
             &ScanRequest {
                 roots: vec![root_spec(root)],
                 scope_paths: vec![root.join("changed.txt")],
-                known_files: Vec::new(),
             },
             &control(),
         )
@@ -153,7 +154,8 @@ async fn scanner_limits_discovery_to_requested_scope_paths() -> TestResult {
 }
 
 #[tokio::test]
-async fn scanner_matches_typescript_types_depth_size_binary_and_known_files() -> TestResult {
+async fn scanner_applies_path_filters_and_explicit_size_limits_without_classifying_contents()
+-> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();
     mkdir(root, "src/deep")?;
@@ -167,6 +169,8 @@ async fn scanner_matches_typescript_types_depth_size_binary_and_known_files() ->
     write(root, "src/child.ts", "export const child = 1;\n")?;
     write(root, "src/deep/grand.ts", "export const grand = 1;\n")?;
     fs::write(root.join("binary.md"), [0_u8, 1, 2, 0, 3])?;
+    fs::write(root.join("archive.zip"), [0_u8, 1, 2, 3])?;
+    fs::write(root.join("empty.txt"), [])?;
     fs::write(root.join("large.ts"), vec![b'x'; 1024 * 1024 + 1])?;
 
     let scanner = NativeScanner::default();
@@ -179,9 +183,9 @@ async fn scanner_matches_typescript_types_depth_size_binary_and_known_files() ->
             hidden: true,
             no_ignore: true,
             max_depth: Some(2),
+            max_file_size_bytes: Some(1024 * 1024),
             ..DiscoveryOptions::default()
         },
-        Vec::new(),
     )
     .await?;
     assert_eq!(
@@ -195,46 +199,53 @@ async fn scanner_matches_typescript_types_depth_size_binary_and_known_files() ->
     );
     assert_eq!(filtered.diagnostics.skipped_by_reason.too_large, 1);
 
-    let initial = discover(
+    let unrestricted = discover(
         &scanner,
         root,
         DiscoveryOptions {
-            include_paths: vec!["binary.md".to_owned()],
+            include_paths: vec![
+                "binary.md".to_owned(),
+                "archive.zip".to_owned(),
+                "large.ts".to_owned(),
+                "empty.txt".to_owned(),
+            ],
             no_ignore: true,
             ..DiscoveryOptions::default()
         },
-        Vec::new(),
-    )
-    .await?;
-    assert!(initial.files.is_empty());
-    assert_eq!(initial.diagnostics.skipped_by_reason.binary, 1);
-    assert_eq!(
-        initial.diagnostics.skipped_samples[0].reason,
-        SkippedFileReason::Binary
-    );
-
-    let binary_path = root.join("binary.md");
-    let known = KnownSourceFile {
-        root: std::path::absolute(root)?,
-        relative_path: PathBuf::from("binary.md"),
-        source_fingerprint: metadata_fingerprint(&binary_path)?,
-    };
-    let unchanged = discover(
-        &scanner,
-        root,
-        DiscoveryOptions {
-            include_paths: vec!["binary.md".to_owned()],
-            no_ignore: true,
-            ..DiscoveryOptions::default()
-        },
-        vec![known],
     )
     .await?;
     assert_eq!(
-        relative_paths(&unchanged.files),
-        BTreeSet::from([PathBuf::from("binary.md")])
+        relative_paths(&unrestricted.files),
+        BTreeSet::from([
+            PathBuf::from("archive.zip"),
+            PathBuf::from("binary.md"),
+            PathBuf::from("large.ts"),
+        ])
     );
-    assert_eq!(unchanged.diagnostics.skipped_by_reason.binary, 0);
+    assert_eq!(unrestricted.diagnostics.skipped_files, 1);
+    assert_eq!(unrestricted.diagnostics.skipped_by_reason.empty, 1);
+    assert_eq!(
+        unrestricted.diagnostics.skipped_samples[0].reason,
+        SkippedFileReason::Empty,
+    );
+    let binary = unrestricted
+        .files
+        .iter()
+        .find(|file| file.relative_path == Path::new("binary.md"))
+        .expect("binary content is discovered without probing");
+    assert_eq!(
+        binary.source_fingerprint,
+        metadata_fingerprint(&root.join("binary.md"))?
+    );
+    let sources = scanner
+        .read_batch(
+            &ReadBatchRequest {
+                files: vec![binary.clone()],
+            },
+            &control(),
+        )
+        .await?;
+    assert_eq!(sources[0].bytes, [0_u8, 1, 2, 0, 3]);
     Ok(())
 }
 
@@ -249,7 +260,6 @@ async fn scanner_rejects_overlapping_roots() -> TestResult {
             &ScanRequest {
                 roots: vec![root_spec(root), root_spec(&root.join("child"))],
                 scope_paths: Vec::new(),
-                known_files: Vec::new(),
             },
             &control(),
         )
@@ -263,7 +273,6 @@ async fn discover(
     scanner: &NativeScanner,
     root: &Path,
     discovery: DiscoveryOptions,
-    known_files: Vec<KnownSourceFile>,
 ) -> TestResult<ScanSnapshot> {
     Ok(scanner
         .discover(
@@ -274,7 +283,6 @@ async fn discover(
                     discovery,
                 }],
                 scope_paths: Vec::new(),
-                known_files,
             },
             &control(),
         )

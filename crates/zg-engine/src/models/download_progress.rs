@@ -56,15 +56,6 @@ impl ModelDownloadProgressReporter {
         });
     }
 
-    pub(crate) fn register(&self, artifact: impl Into<String>) {
-        self.lock_artifacts()
-            .entry(artifact.into())
-            .or_insert(ArtifactDownloadProgress {
-                downloaded_bytes: 0,
-                total_bytes: None,
-            });
-    }
-
     pub(crate) fn skip(&self, artifact: &str) {
         self.lock_artifacts().remove(artifact);
     }

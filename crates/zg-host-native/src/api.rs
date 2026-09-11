@@ -45,14 +45,6 @@ pub enum SkippedFileReason {
     Binary,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FileKind {
-    Text,
-    Code,
-    Data,
-    Image,
-}
-
 /// Cancellation and deadline state for scanner and watcher operations.
 #[derive(Clone)]
 pub struct TaskControl {
@@ -96,16 +88,6 @@ pub struct ScanRequest {
     /// Absolute file or directory paths that bound discovery within `roots`.
     /// An empty list scans every configured root.
     pub scope_paths: Vec<PathBuf>,
-    /// Previously indexed source fingerprints keyed by root and relative path.
-    /// A scanner may reuse matching metadata without repeating binary sniffing.
-    pub known_files: Vec<KnownSourceFile>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KnownSourceFile {
-    pub root: PathBuf,
-    pub relative_path: PathBuf,
-    pub source_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,8 +97,6 @@ pub struct DiscoveredFile {
     pub size_bytes: u64,
     pub modified_epoch_ms: Option<u64>,
     pub source_fingerprint: String,
-    pub kind_hint: Option<FileKind>,
-    pub format_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -152,8 +132,6 @@ pub struct SourceFile {
     pub relative_path: PathBuf,
     pub bytes: Vec<u8>,
     pub source_fingerprint: String,
-    pub kind_hint: Option<FileKind>,
-    pub format_hint: Option<String>,
 }
 
 /// Metadata-first workspace discovery and bounded source reads.

@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
-    fs::{self, File, Metadata},
-    io::Read,
+    fs::{self, Metadata},
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::{Instant, UNIX_EPOCH},
@@ -14,17 +13,13 @@ use tokio::sync::Semaphore;
 use crate::{
     HostError,
     api::{
-        DiscoveredFile, FileKind, KnownSourceFile, ReadBatchRequest, RootSpec, ScanDiagnostics,
-        ScanRequest, ScanSnapshot, SkippedFile, SkippedFileReason, SourceFile, TaskControl,
-        WorkspaceScannerPort,
+        DiscoveredFile, ReadBatchRequest, RootSpec, ScanDiagnostics, ScanRequest, ScanSnapshot,
+        SkippedFile, SkippedFileReason, SourceFile, TaskControl, WorkspaceScannerPort,
     },
-    file_type::{detect_file_type, max_file_size},
     pattern::normalize_relative_path,
     policy::{FileTypeResolver, IgnoreRule, RootPolicy},
 };
 
-const BINARY_SNIFF_BYTES: usize = 8_192;
-const BINARY_CONTROL_CHAR_PERCENT: usize = 30;
 const MAX_SKIPPED_FILE_SAMPLES: usize = 20;
 
 #[derive(Clone, Debug)]
@@ -191,7 +186,6 @@ fn discover_sync(
     control.check()?;
     let domains = validate_domains(&request.roots, resolver)?;
     let scope = ScanScope::new(&request.scope_paths)?;
-    let known_files = normalize_known_files(&request.known_files);
     let mut files = Vec::new();
     let mut diagnostics = ScanDiagnostics::default();
 
@@ -201,20 +195,12 @@ fn discover_sync(
             scan_root_file(
                 &domain.policy,
                 &scope,
-                &known_files,
                 &mut files,
                 &mut diagnostics,
                 control,
             )?;
         } else if domain.metadata.is_dir() {
-            scan_root_directory(
-                &domain,
-                &scope,
-                &known_files,
-                &mut files,
-                &mut diagnostics,
-                control,
-            )?;
+            scan_root_directory(&domain, &scope, &mut files, &mut diagnostics, control)?;
         }
     }
     files.sort_by(|left, right| {
@@ -353,28 +339,9 @@ fn directory_covers_file(directory: &ScanDomain, file: &Path) -> bool {
         && (directory.policy.root().recursive || file.parent() == Some(&directory.canonical_path))
 }
 
-fn normalize_known_files(known_files: &[KnownSourceFile]) -> HashSet<KnownFileKey> {
-    known_files
-        .iter()
-        .map(|known| KnownFileKey {
-            root: std::path::absolute(&known.root).unwrap_or_else(|_| known.root.clone()),
-            relative_path: known.relative_path.clone(),
-            source_fingerprint: known.source_fingerprint.clone(),
-        })
-        .collect()
-}
-
-#[derive(Debug, Eq, Hash, PartialEq)]
-struct KnownFileKey {
-    root: PathBuf,
-    relative_path: PathBuf,
-    source_fingerprint: String,
-}
-
 fn scan_root_file(
     policy: &RootPolicy,
     scope: &ScanScope,
-    known_files: &HashSet<KnownFileKey>,
     files: &mut Vec<DiscoveredFile>,
     diagnostics: &mut ScanDiagnostics,
     control: &BlockingControl,
@@ -394,7 +361,6 @@ fn scan_root_file(
         policy,
         policy.root_path(),
         &relative_path,
-        known_files,
         diagnostics,
         control,
     )? {
@@ -406,7 +372,6 @@ fn scan_root_file(
 fn scan_root_directory(
     domain: &ScanDomain,
     scope: &ScanScope,
-    known_files: &HashSet<KnownFileKey>,
     files: &mut Vec<DiscoveredFile>,
     diagnostics: &mut ScanDiagnostics,
     control: &BlockingControl,
@@ -430,7 +395,6 @@ fn scan_root_directory(
         0,
         &domain.policy.initial_ignore_rules(),
         &mut visited,
-        known_files,
         files,
         diagnostics,
         control,
@@ -445,7 +409,6 @@ fn walk(
     depth: usize,
     parent_ignore_rules: &[IgnoreRule],
     visited: &mut HashSet<PathBuf>,
-    known_files: &HashSet<KnownFileKey>,
     files: &mut Vec<DiscoveredFile>,
     diagnostics: &mut ScanDiagnostics,
     control: &BlockingControl,
@@ -514,7 +477,6 @@ fn walk(
                 depth + 1,
                 &ignore_rules,
                 visited,
-                known_files,
                 files,
                 diagnostics,
                 control,
@@ -534,14 +496,9 @@ fn walk(
         {
             continue;
         }
-        if let Some(file) = read_file_info(
-            policy,
-            &absolute_path,
-            relative_path,
-            known_files,
-            diagnostics,
-            control,
-        )? {
+        if let Some(file) =
+            read_file_info(policy, &absolute_path, relative_path, diagnostics, control)?
+        {
             files.push(file);
         }
     }
@@ -552,7 +509,6 @@ fn read_file_info(
     policy: &RootPolicy,
     absolute_path: &Path,
     relative_path: &Path,
-    known_files: &HashSet<KnownFileKey>,
     diagnostics: &mut ScanDiagnostics,
     control: &BlockingControl,
 ) -> Result<Option<DiscoveredFile>, HostError> {
@@ -573,18 +529,9 @@ fn read_file_info(
         );
         return Ok(None);
     }
-    let Some(detected) = detect_file_type(absolute_path) else {
-        record_skipped(
-            diagnostics,
-            absolute_path,
-            SkippedFileReason::Unsupported,
-            Some(metadata.len()),
-            None,
-        );
-        return Ok(None);
-    };
-    let maximum = max_file_size(detected.kind, policy.root().discovery.max_file_size_bytes);
-    if metadata.len() > maximum {
+    if let Some(maximum) = policy.root().discovery.max_file_size_bytes
+        && metadata.len() > maximum
+    {
         record_skipped(
             diagnostics,
             absolute_path,
@@ -596,32 +543,12 @@ fn read_file_info(
     }
     let modified_epoch_ms = modified_epoch_ms(&metadata);
     let source_fingerprint = source_fingerprint(metadata.len(), modified_epoch_ms);
-    let known = KnownFileKey {
-        root: policy.root_path().to_path_buf(),
-        relative_path: relative_path.to_path_buf(),
-        source_fingerprint: source_fingerprint.clone(),
-    };
-    if detected.kind != FileKind::Image
-        && !known_files.contains(&known)
-        && is_likely_binary_file(absolute_path)
-    {
-        record_skipped(
-            diagnostics,
-            absolute_path,
-            SkippedFileReason::Binary,
-            Some(metadata.len()),
-            None,
-        );
-        return Ok(None);
-    }
     Ok(Some(DiscoveredFile {
         root: policy.root_path().to_path_buf(),
         relative_path: relative_path.to_path_buf(),
         size_bytes: metadata.len(),
         modified_epoch_ms,
         source_fingerprint,
-        kind_hint: Some(detected.kind),
-        format_hint: Some(detected.format),
     }))
 }
 
@@ -658,8 +585,6 @@ fn read_batch_sync(
             relative_path: file.relative_path.clone(),
             bytes,
             source_fingerprint: source_fingerprint(metadata.len(), modified_epoch_ms(&metadata)),
-            kind_hint: file.kind_hint,
-            format_hint: file.format_hint.clone(),
         });
     }
     Ok(sources)
@@ -693,33 +618,6 @@ fn source_fingerprint(size_bytes: u64, modified_epoch_ms: Option<u64>) -> String
         || format!("metadata-v1:{size_bytes}:unknown"),
         |modified| format!("metadata-v1:{size_bytes}:{modified}"),
     )
-}
-
-fn is_likely_binary_file(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut buffer = [0_u8; BINARY_SNIFF_BYTES];
-    let Ok(bytes_read) = file.read(&mut buffer) else {
-        return false;
-    };
-    if bytes_read == 0 {
-        return false;
-    }
-    let mut suspicious = 0_usize;
-    for value in &buffer[..bytes_read] {
-        if *value == 0 {
-            return true;
-        }
-        if is_suspicious_control_byte(*value) {
-            suspicious += 1;
-        }
-    }
-    suspicious * 100 > bytes_read * BINARY_CONTROL_CHAR_PERCENT
-}
-
-fn is_suspicious_control_byte(value: u8) -> bool {
-    value < 32 && !matches!(value, 7 | 8 | 9 | 10 | 12 | 13 | 27)
 }
 
 fn record_skipped(

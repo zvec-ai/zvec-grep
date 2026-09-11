@@ -359,6 +359,8 @@ pub mod result {
     #[serde(rename_all = "snake_case", tag = "kind")]
     pub enum ContentRange {
         File,
+        /// UTF-16 offsets are source-global for extracted entities and line-local
+        /// columns for lexical match spans.
         Text {
             start_line: usize,
             end_line: usize,
@@ -403,5 +405,200 @@ pub mod result {
             level: Option<usize>,
             scope: Option<String>,
         },
+    }
+}
+
+impl From<crate::domain::SymbolType> for options::SymbolType {
+    fn from(value: crate::domain::SymbolType) -> Self {
+        match value {
+            crate::domain::SymbolType::Module => Self::Module,
+            crate::domain::SymbolType::Class => Self::Class,
+            crate::domain::SymbolType::Interface => Self::Interface,
+            crate::domain::SymbolType::Function => Self::Function,
+            crate::domain::SymbolType::Value => Self::Value,
+            crate::domain::SymbolType::Alias => Self::Alias,
+        }
+    }
+}
+
+impl From<options::SymbolType> for crate::domain::SymbolType {
+    fn from(value: options::SymbolType) -> Self {
+        match value {
+            options::SymbolType::Module => Self::Module,
+            options::SymbolType::Class => Self::Class,
+            options::SymbolType::Interface => Self::Interface,
+            options::SymbolType::Function => Self::Function,
+            options::SymbolType::Value => Self::Value,
+            options::SymbolType::Alias => Self::Alias,
+        }
+    }
+}
+
+impl From<crate::domain::SourceRange> for result::ContentRange {
+    fn from(range: crate::domain::SourceRange) -> Self {
+        use crate::domain::SourceRange;
+        match range {
+            SourceRange::File => Self::File,
+            SourceRange::Text(range) => Self::Text {
+                start_line: range.start_line,
+                end_line: range.end_line,
+                start_offset: range.start_utf16_offset,
+                end_offset: range.end_utf16_offset,
+            },
+            SourceRange::Byte {
+                start_offset,
+                end_offset,
+            } => Self::Byte {
+                start_offset,
+                end_offset,
+            },
+            SourceRange::Page { page } => Self::Page { page },
+            SourceRange::PageText {
+                page,
+                start_utf16_offset,
+                end_utf16_offset,
+            } => Self::PageText {
+                page,
+                start_offset: start_utf16_offset,
+                end_offset: end_utf16_offset,
+            },
+            SourceRange::PageRegion {
+                page,
+                x,
+                y,
+                width,
+                height,
+            } => Self::PageRegion {
+                page,
+                x,
+                y,
+                width,
+                height,
+            },
+        }
+    }
+}
+
+impl From<&crate::domain::SourceRange> for result::ContentRange {
+    fn from(range: &crate::domain::SourceRange) -> Self {
+        (*range).into()
+    }
+}
+
+impl From<crate::domain::LineColumnRange> for result::ContentRange {
+    fn from(range: crate::domain::LineColumnRange) -> Self {
+        Self::Text {
+            start_line: range.start.line,
+            end_line: range.end.line,
+            start_offset: range.start.column_utf16,
+            end_offset: range.end.column_utf16,
+        }
+    }
+}
+
+impl From<&crate::domain::LineColumnRange> for result::ContentRange {
+    fn from(range: &crate::domain::LineColumnRange) -> Self {
+        (*range).into()
+    }
+}
+
+impl From<crate::domain::EntityMetadata> for result::EntityMetadata {
+    fn from(metadata: crate::domain::EntityMetadata) -> Self {
+        match metadata {
+            crate::domain::EntityMetadata::Code {
+                symbol_type,
+                symbol_name,
+                scope,
+                node_type,
+                signature,
+                documentation,
+                modifiers,
+            } => Self::Code {
+                symbol_type: symbol_type.into(),
+                symbol_name,
+                scope,
+                node_type,
+                signature,
+                documentation,
+                modifiers,
+            },
+            crate::domain::EntityMetadata::Markdown {
+                heading,
+                level,
+                scope,
+            } => Self::Markdown {
+                heading,
+                level,
+                scope,
+            },
+        }
+    }
+}
+
+impl From<&crate::domain::EntityMetadata> for result::EntityMetadata {
+    fn from(metadata: &crate::domain::EntityMetadata) -> Self {
+        metadata.clone().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::domain::{
+        EntityMetadata, LineColumnRange, SourceRange, SymbolType, TextPosition, TextRange,
+    };
+
+    use super::result;
+
+    #[test]
+    fn domain_values_preserve_public_wire_coordinates_and_metadata() {
+        let indexed: result::ContentRange = SourceRange::Text(TextRange {
+            start_line: 2,
+            end_line: 3,
+            start_utf16_offset: 12,
+            end_utf16_offset: 24,
+        })
+        .into();
+        assert_eq!(
+            serde_json::to_value(indexed).expect("indexed range"),
+            json!({
+                "kind": "text", "start_line": 2, "end_line": 3, "start_offset": 12, "end_offset": 24,
+            })
+        );
+        let lexical: result::ContentRange = LineColumnRange {
+            start: TextPosition {
+                line: 2,
+                column_utf16: 8,
+            },
+            end: TextPosition {
+                line: 3,
+                column_utf16: 2,
+            },
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_value(lexical).expect("lexical range"),
+            json!({
+                "kind": "text", "start_line": 2, "end_line": 3, "start_offset": 8, "end_offset": 2,
+            })
+        );
+        let metadata: result::EntityMetadata = EntityMetadata::Code {
+            symbol_type: SymbolType::Function,
+            symbol_name: Some("calculate".to_owned()),
+            scope: None,
+            node_type: None,
+            signature: None,
+            documentation: None,
+            modifiers: vec!["public".to_owned()],
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_value(metadata).expect("metadata"),
+            json!({
+                "kind": "code", "symbol_type": "function", "symbol_name": "calculate", "scope": null,
+                "node_type": null, "signature": null, "documentation": null, "modifiers": ["public"],
+            })
+        );
     }
 }

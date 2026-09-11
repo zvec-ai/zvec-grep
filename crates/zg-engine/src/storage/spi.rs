@@ -3,16 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError,
-    api::context::{
-        options::SymbolType,
-        result::{ContentRange, EntityMetadata},
-    },
-    extraction::{EntityFragment, FileKind},
+    domain::{Entity, EntityFragment, EntityId, FileId, SourceFile, SymbolType},
     models::EmbeddingMetric,
-    payload::Content,
 };
 
 pub(crate) type StorageResult<T> = Result<T, EngineError>;
@@ -48,7 +44,7 @@ impl WorkspaceIndexStorageOptions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct FileIndexStatus {
     pub indexed_epoch_ms: Option<u64>,
     pub entity_count: usize,
@@ -58,32 +54,15 @@ pub(crate) struct FileIndexStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FileInfo {
-    pub id: String,
-    pub absolute_path: PathBuf,
-    pub relative_path: PathBuf,
-    pub root_path: PathBuf,
-    pub size_bytes: u64,
-    pub modified_epoch_ms: u64,
-    pub content_hash: Option<String>,
-    pub kind: FileKind,
-    pub format: String,
+pub(crate) struct StoredFile {
+    pub source: SourceFile,
     pub index_status: Option<FileIndexStatus>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Entity {
-    pub id: String,
-    pub file_id: String,
-    pub range: ContentRange,
-    pub content: Content,
-    pub metadata: Option<EntityMetadata>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoredEntity {
     pub entity: Entity,
-    pub file: FileInfo,
+    pub file: StoredFile,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,16 +76,10 @@ pub(crate) struct FileIndexDiagnostics {
     pub truncated_fragment_count: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ListEntitiesOptions {
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StorageSearchFilter {
-    pub file_ids: Option<Vec<String>>,
-    pub group_ids: Option<Vec<String>>,
+    pub file_ids: Option<Vec<FileId>>,
+    pub entity_ids: Option<Vec<EntityId>>,
     pub symbol_names: Option<Vec<String>>,
     pub symbol_types: Option<Vec<SymbolType>>,
 }
@@ -120,7 +93,7 @@ pub(crate) enum StorageSearchPath {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StorageSearchHit {
     pub fragment: EntityFragment,
-    pub file: FileInfo,
+    pub file: StoredFile,
     pub path: StorageSearchPath,
     pub score: f64,
 }
@@ -142,24 +115,9 @@ pub(crate) trait WorkspaceIndexStorageFactory: Send + Sync {
 pub(crate) trait WorkspaceIndexStorage: Send + Sync {
     fn is_read_only(&self) -> bool;
 
-    fn get_file_by_path(&self, absolute_path: &Path) -> StorageResult<Option<FileInfo>>;
+    fn list_files(&self) -> StorageResult<Vec<StoredFile>>;
 
-    fn list_files_by_path_prefix(&self, absolute_path: &Path) -> StorageResult<Vec<FileInfo>>;
-
-    fn list_files_by_path_prefixes(
-        &self,
-        absolute_paths: &[PathBuf],
-    ) -> StorageResult<Vec<FileInfo>>;
-
-    fn list_files(&self) -> StorageResult<Vec<FileInfo>>;
-
-    fn list_entities_by_file(
-        &self,
-        file_id: &str,
-        options: ListEntitiesOptions,
-    ) -> StorageResult<Vec<StoredEntity>>;
-
-    fn get_entity(&self, entity_id: &str) -> StorageResult<Option<StoredEntity>>;
+    fn get_entity(&self, entity_id: &EntityId) -> StorageResult<Option<StoredEntity>>;
 
     fn search_fts(
         &self,
@@ -177,14 +135,14 @@ pub(crate) trait WorkspaceIndexStorage: Send + Sync {
 
     fn replace_file(
         &self,
-        file: &FileInfo,
+        file: &StoredFile,
         entries: &[IndexedFragment],
         diagnostics: Option<&FileIndexDiagnostics>,
     ) -> StorageResult<()>;
 
-    fn mark_file_failed(&self, file: &FileInfo, error: &str) -> StorageResult<()>;
+    fn mark_file_failed(&self, file: &StoredFile, error: &str) -> StorageResult<()>;
 
-    fn delete_file(&self, file_id: &str) -> StorageResult<()>;
+    fn delete_file(&self, file_id: &FileId) -> StorageResult<()>;
 
     async fn finalize_writes(&self) -> StorageResult<()>;
 

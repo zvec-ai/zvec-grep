@@ -16,9 +16,7 @@ use super::{
 ///
 /// # Errors
 ///
-/// Returns the TypeScript catalog-not-found error for unknown references. A
-/// known backend not yet ported to Rust returns the stable model-not-implemented
-/// error.
+/// Returns an error for unknown references or invalid backend options.
 pub fn create_embedding_model(
     reference: &str,
     options: Option<CreateEmbeddingModelOptions>,

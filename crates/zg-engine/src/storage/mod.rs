@@ -1,8 +1,9 @@
-//! Internal persistence contract for workspace indexes.
+//! Durable workspace storage backed by zvec.
 
-#![expect(
-    dead_code,
-    reason = "the storage SPI is intentionally defined before its implementation"
-)]
-
+mod backend;
+mod codec;
+mod dictionary;
 pub(crate) mod spi;
+mod zvec;
+
+pub(crate) use backend::ZvecStorageFactory;

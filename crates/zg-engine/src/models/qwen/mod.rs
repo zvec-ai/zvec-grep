@@ -4,14 +4,14 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::payload::{Content, ImageFormat};
+use crate::domain::{Content, FileFormat};
 
 use super::{
     catalog::QwenConfig,
     spi::{
-        CreateEmbeddingModelOptions, EmbeddingInputKind, EmbeddingModel, EmbeddingModelInfo,
-        EmbeddingModelLimits, EmbeddingOptions, EmbeddingResult, EmbeddingTraceHeaders, ModelError,
-        validate_contents, validate_result,
+        CreateEmbeddingModelOptions, EmbeddingInput, EmbeddingInputKind, EmbeddingModel,
+        EmbeddingModelInfo, EmbeddingModelLimits, EmbeddingOptions, EmbeddingResult,
+        EmbeddingTraceHeaders, ModelError, validate_inputs, validate_result,
     },
 };
 
@@ -92,17 +92,14 @@ impl QwenEmbeddingModel {
 
     async fn embed_text(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         signal: Option<CancellationToken>,
         trace_headers: Option<EmbeddingTraceHeaders>,
     ) -> Result<EmbeddingResult, ModelError> {
-        let texts = contents
+        let texts = inputs
             .iter()
-            .filter_map(|content| match content {
-                Content::Text(text) => Some(text.clone()),
-                Content::Image(_) => None,
-            })
-            .collect::<Vec<_>>();
+            .map(EmbeddingInput::to_text)
+            .collect::<Result<Vec<_>, _>>()?;
         let request = json!({
             "model": self.entry.model,
             "input": texts,
@@ -121,7 +118,7 @@ impl QwenEmbeddingModel {
                 Some(format!("model={}", self.entry.reference)),
             )
         })?;
-        let mut vectors = vec![None; contents.len()];
+        let mut vectors = vec![None; inputs.len()];
         for item in data {
             let object = item
                 .as_object()
@@ -131,9 +128,9 @@ impl QwenEmbeddingModel {
                 .and_then(json_integer)
                 .ok_or_else(|| invalid_text_index(self.entry, "unknown"))?;
             let index = usize::try_from(index)
-                .map_err(|_| index_out_of_range(self.entry, index, contents.len()))?;
-            if index >= contents.len() {
-                return Err(index_out_of_range(self.entry, index, contents.len()));
+                .map_err(|_| index_out_of_range(self.entry, index, inputs.len()))?;
+            if index >= inputs.len() {
+                return Err(index_out_of_range(self.entry, index, inputs.len()));
             }
             let vector = parse_vector(object.get("embedding"), self.entry, index)?;
             vectors[index] = Some(vector);
@@ -146,18 +143,21 @@ impl QwenEmbeddingModel {
 
     async fn embed_multimodal(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         signal: Option<CancellationToken>,
         trace_headers: Option<EmbeddingTraceHeaders>,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_multimodal_contents(self.entry, contents)?;
-        let request_contents = contents
+        validate_multimodal_inputs(self.entry, inputs)?;
+        let request_contents = inputs
             .iter()
-            .map(|content| match content {
-                Content::Text(text) => json!({ "text": text }),
-                Content::Image(image) => json!({ "image": bytes_to_base64(&image.data) }),
+            .map(|input| match input.contents.as_slice() {
+                [Content::Text(text)] => Ok(json!({ "text": text })),
+                [Content::Image(image)] => Ok(json!({ "image": bytes_to_base64(image.data()) })),
+                _ => Err(ModelError::unsupported(
+                    "Qwen multimodal embedding requires one text or image content per input",
+                )),
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let request = json!({
             "model": self.entry.model,
             "input": { "contents": request_contents },
@@ -179,7 +179,7 @@ impl QwenEmbeddingModel {
                     Some(format!("model={}", self.entry.reference)),
                 )
             })?;
-        let mut vectors = vec![None; contents.len()];
+        let mut vectors = vec![None; inputs.len()];
         for (fallback_index, item) in items.iter().enumerate() {
             let object = item.as_object().ok_or_else(|| {
                 ModelError::new(
@@ -196,14 +196,13 @@ impl QwenEmbeddingModel {
                 .and_then(json_integer)
                 .or_else(|| object.get("text_index").and_then(json_integer))
                 .unwrap_or_else(|| i64::try_from(fallback_index).unwrap_or(i64::MAX));
-            let index = usize::try_from(raw_index).map_err(|_| {
-                multimodal_index_out_of_range(self.entry, raw_index, contents.len())
-            })?;
-            if index >= contents.len() {
+            let index = usize::try_from(raw_index)
+                .map_err(|_| multimodal_index_out_of_range(self.entry, raw_index, inputs.len()))?;
+            if index >= inputs.len() {
                 return Err(multimodal_index_out_of_range(
                     self.entry,
                     index,
-                    contents.len(),
+                    inputs.len(),
                 ));
             }
             vectors[index] = Some(parse_vector(object.get("embedding"), self.entry, index)?);
@@ -243,27 +242,22 @@ impl EmbeddingModel for QwenEmbeddingModel {
 
     async fn embed(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_contents(&self.info, contents)?;
+        validate_inputs(&self.info, inputs)?;
         let EmbeddingOptions {
             signal,
             trace_headers,
             ..
         } = options;
         let result = if self.entry.kind == "multimodal" {
-            self.embed_multimodal(contents, signal, trace_headers)
-                .await?
+            self.embed_multimodal(inputs, signal, trace_headers).await?
         } else {
-            self.embed_text(contents, signal, trace_headers).await?
+            self.embed_text(inputs, signal, trace_headers).await?
         };
-        validate_result(&self.info, contents.len(), &result)?;
+        validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
-    }
-
-    async fn dispose(&self) -> Result<(), ModelError> {
-        Ok(())
     }
 }
 
@@ -568,16 +562,26 @@ fn multimodal_index_out_of_range(
     )
 }
 
-fn validate_multimodal_contents(entry: QwenConfig, contents: &[Content]) -> Result<(), ModelError> {
+fn validate_multimodal_inputs(
+    entry: QwenConfig,
+    inputs: &[EmbeddingInput],
+) -> Result<(), ModelError> {
     let mut image_count = 0;
-    for (index, content) in contents.iter().enumerate() {
+    for (index, input) in inputs.iter().enumerate() {
+        let [content] = input.contents.as_slice() else {
+            return Err(ModelError::new(
+                crate::EngineError::UNSUPPORTED,
+                "Qwen multimodal embedding requires one text or image content per input",
+                Some(format!("model={} inputIndex={index}", entry.model)),
+            ));
+        };
         let Content::Image(image) = content else {
             continue;
         };
         image_count += 1;
         if !matches!(
-            image.format,
-            ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::Webp
+            image.format(),
+            FileFormat::Jpeg | FileFormat::Png | FileFormat::Webp
         ) {
             return Err(ModelError::new(
                 crate::EngineError::UNSUPPORTED,
@@ -585,7 +589,7 @@ fn validate_multimodal_contents(entry: QwenConfig, contents: &[Content]) -> Resu
                 Some(format!(
                     "model={} index={index} format={}",
                     entry.model,
-                    image_format_name(image.format)
+                    image.format().as_str()
                 )),
             ));
         }
@@ -601,15 +605,6 @@ fn validate_multimodal_contents(entry: QwenConfig, contents: &[Content]) -> Resu
         ));
     }
     Ok(())
-}
-
-const fn image_format_name(format: ImageFormat) -> &'static str {
-    match format {
-        ImageFormat::Png => "png",
-        ImageFormat::Jpeg => "jpeg",
-        ImageFormat::Webp => "webp",
-        ImageFormat::Gif => "gif",
-    }
 }
 
 fn bytes_to_base64(bytes: &[u8]) -> String {
@@ -644,7 +639,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{models::spi::EmbeddingMetric, payload::ImageContent};
+    use crate::{
+        domain::{ImageContent, TableContent},
+        models::spi::EmbeddingMetric,
+    };
 
     struct MockHttp {
         response: Mutex<Option<QwenHttpResponse>>,
@@ -716,8 +714,11 @@ mod tests {
         let result = model
             .embed(
                 &[
-                    Content::Text("one".to_owned()),
-                    Content::Text("two".to_owned()),
+                    EmbeddingInput::new(vec![
+                        Content::Text("one".to_owned()),
+                        Content::Text("part".to_owned()),
+                    ]),
+                    EmbeddingInput::text("two".to_owned()),
                 ],
                 EmbeddingOptions {
                     trace_headers: Some(EmbeddingTraceHeaders {
@@ -736,7 +737,7 @@ mod tests {
             http.requests.lock().expect("requests lock")[0].0,
             json!({
                 "model": "text-embedding-v4",
-                "input": ["one", "two"],
+                "input": ["one\npart", "two"],
                 "dimensions": 3,
                 "encoding_format": "float"
             })
@@ -752,7 +753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multimodal_request_matches_main_and_rejects_gif() {
+    async fn multimodal_request_preserves_content_and_rejects_unsupported_inputs() {
         let http = Arc::new(MockHttp {
             response: Mutex::new(Some(QwenHttpResponse {
                 status: 200,
@@ -776,11 +777,10 @@ mod tests {
         let result = model
             .embed(
                 &[
-                    Content::Text("query".to_owned()),
-                    Content::Image(ImageContent {
-                        data: vec![1, 2, 3],
-                        format: ImageFormat::Png,
-                    }),
+                    EmbeddingInput::text("query".to_owned()),
+                    EmbeddingInput::new(vec![Content::Image(
+                        ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image"),
+                    )]),
                 ],
                 EmbeddingOptions::default(),
             )
@@ -792,17 +792,44 @@ mod tests {
             "AQID"
         );
 
-        let error = model
-            .embed(
-                &[Content::Image(ImageContent {
-                    data: vec![1],
-                    format: ImageFormat::Gif,
-                })],
-                EmbeddingOptions::default(),
-            )
-            .await
-            .expect_err("GIF must be rejected");
-        assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+        for content in [
+            Content::Image(ImageContent::new(vec![1], FileFormat::Gif).expect("image")),
+            Content::Image(ImageContent::new(vec![1], FileFormat::Svg).expect("image")),
+            Content::Table(TableContent {
+                row_count: 0,
+                column_count: 0,
+                cells: Vec::new(),
+            }),
+        ] {
+            let error = model
+                .embed(
+                    &[
+                        EmbeddingInput::text("query".to_owned()),
+                        EmbeddingInput::new(vec![content]),
+                    ],
+                    EmbeddingOptions::default(),
+                )
+                .await
+                .expect_err("unsupported content must be rejected before dispatch");
+            assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+        }
+        for parts in [
+            vec![
+                Content::Text("first".to_owned()),
+                Content::Text("second".to_owned()),
+            ],
+            vec![
+                Content::Text("query".to_owned()),
+                Content::Image(ImageContent::new(vec![1], FileFormat::Png).expect("image")),
+            ],
+        ] {
+            let error = model
+                .embed(&[EmbeddingInput::new(parts)], EmbeddingOptions::default())
+                .await
+                .expect_err("composed multimodal inputs are unsupported");
+            assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+        }
+        assert_eq!(http.requests.lock().expect("requests lock").len(), 1);
     }
 
     #[tokio::test]
@@ -823,7 +850,7 @@ mod tests {
         .expect("model");
         let error = model
             .embed(
-                &[Content::Text("one".to_owned())],
+                &[EmbeddingInput::text("one".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await
@@ -865,7 +892,7 @@ mod tests {
         .expect("model");
         let error = model
             .embed(
-                &[Content::Text("one".to_owned())],
+                &[EmbeddingInput::text("one".to_owned())],
                 EmbeddingOptions::default(),
             )
             .await

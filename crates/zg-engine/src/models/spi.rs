@@ -1,8 +1,8 @@
 //! Backend contract shared by the model runtime and embedding implementations.
 
-use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, fmt, path::PathBuf, sync::Arc};
 
-use crate::{api::index::options::Device, payload::Content};
+use crate::{api::index::options::Device, domain::Content};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,46 @@ pub(crate) enum EmbeddingMetric {
 pub(crate) enum EmbeddingInputKind {
     Text,
     Image,
+}
+
+/// One document or query that produces one embedding vector.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EmbeddingInput {
+    pub contents: Vec<Content>,
+}
+
+impl EmbeddingInput {
+    pub(crate) fn new(contents: Vec<Content>) -> Self {
+        Self { contents }
+    }
+
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Self::new(vec![Content::Text(text.into())])
+    }
+
+    pub(super) fn to_text(&self) -> Result<Cow<'_, str>, ModelError> {
+        match self.contents.as_slice() {
+            [] => Err(ModelError::invalid_argument(
+                "Embedding input requires at least one content item",
+            )),
+            [Content::Text(text)] => Ok(Cow::Borrowed(text)),
+            contents => {
+                let mut combined = String::new();
+                for (index, content) in contents.iter().enumerate() {
+                    let Content::Text(text) = content else {
+                        return Err(ModelError::unsupported(
+                            "Text embedding requires text content",
+                        ));
+                    };
+                    if index > 0 {
+                        combined.push('\n');
+                    }
+                    combined.push_str(text);
+                }
+                Ok(Cow::Owned(combined))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -126,48 +166,74 @@ pub trait EmbeddingModel: Send + Sync {
 
     async fn embed(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError>;
-
-    async fn dispose(&self) -> Result<(), ModelError>;
 }
 
-pub(crate) fn validate_contents(
+pub(crate) fn validate_inputs(
     info: &EmbeddingModelInfo,
-    contents: &[Content],
+    inputs: &[EmbeddingInput],
 ) -> Result<(), ModelError> {
-    if contents.is_empty() {
+    if inputs.is_empty() {
         return Err(ModelError::new(
             crate::EngineError::INVALID_ARGUMENT,
-            "Embedding requires at least one content item",
+            "Embedding requires at least one input",
             None,
         ));
     }
-    if contents.len() > info.limits.max_batch_size {
+    if inputs.len() > info.limits.max_batch_size {
         return Err(ModelError::new(
             crate::EngineError::INVALID_ARGUMENT,
             "Embedding batch size exceeds model limit",
             Some(format!(
                 "model={} batchSize={} maxBatchSize={}",
                 info.reference,
-                contents.len(),
+                inputs.len(),
                 info.limits.max_batch_size
             )),
         ));
     }
 
-    for (index, content) in contents.iter().enumerate() {
+    for (index, input) in inputs.iter().enumerate() {
+        validate_input(info, index, input)?;
+    }
+    Ok(())
+}
+
+fn validate_input(
+    info: &EmbeddingModelInfo,
+    index: usize,
+    input: &EmbeddingInput,
+) -> Result<(), ModelError> {
+    if input.contents.is_empty() {
+        return Err(ModelError::new(
+            crate::EngineError::INVALID_ARGUMENT,
+            "Embedding input requires at least one content item",
+            Some(format!("model={} inputIndex={index}", info.reference)),
+        ));
+    }
+    for (part_index, content) in input.contents.iter().enumerate() {
         let kind = match content {
             Content::Text(_) => EmbeddingInputKind::Text,
             Content::Image(_) => EmbeddingInputKind::Image,
+            Content::Table(_) => {
+                return Err(ModelError::new(
+                    crate::EngineError::UNSUPPORTED,
+                    "Embedding model does not support table content",
+                    Some(format!(
+                        "model={} inputIndex={index} partIndex={part_index}",
+                        info.reference
+                    )),
+                ));
+            }
         };
         if !info.input_kinds.contains(&kind) {
             return Err(ModelError::new(
                 crate::EngineError::UNSUPPORTED,
                 "Embedding model does not support content kind",
                 Some(format!(
-                    "model={} index={index} kind={}",
+                    "model={} inputIndex={index} partIndex={part_index} kind={}",
                     info.reference,
                     kind_name(kind)
                 )),
@@ -179,34 +245,30 @@ pub(crate) fn validate_contents(
                 return Err(ModelError::new(
                     crate::EngineError::INVALID_ARGUMENT,
                     "Embedding text content must not be empty",
-                    Some(format!("model={} index={index}", info.reference)),
-                ));
-            }
-            Content::Image(image) if image.data.is_empty() => {
-                return Err(ModelError::new(
-                    crate::EngineError::INVALID_ARGUMENT,
-                    "Embedding image content must not be empty",
-                    Some(format!("model={} index={index}", info.reference)),
+                    Some(format!(
+                        "model={} inputIndex={index} partIndex={part_index}",
+                        info.reference
+                    )),
                 ));
             }
             Content::Image(image)
                 if info
                     .limits
                     .max_image_bytes
-                    .is_some_and(|maximum| image.data.len() > maximum) =>
+                    .is_some_and(|maximum| image.data().len() > maximum) =>
             {
                 let maximum = info.limits.max_image_bytes.unwrap_or_default();
                 return Err(ModelError::new(
                     crate::EngineError::INVALID_ARGUMENT,
                     "Embedding image content exceeds model limit",
                     Some(format!(
-                        "model={} index={index} imageBytes={} maxImageBytes={maximum}",
+                        "model={} inputIndex={index} partIndex={part_index} imageBytes={} maxImageBytes={maximum}",
                         info.reference,
-                        image.data.len()
+                        image.data().len()
                     )),
                 ));
             }
-            Content::Text(_) | Content::Image(_) => {}
+            Content::Text(_) | Content::Image(_) | Content::Table(_) => {}
         }
     }
     Ok(())
@@ -222,7 +284,7 @@ pub(crate) fn validate_result(
             crate::EngineError::INTERNAL,
             "Embedding model returned the wrong number of vectors",
             Some(format!(
-                "model={} contentCount={input_count} vectorCount={}",
+                "model={} inputCount={input_count} vectorCount={}",
                 info.reference,
                 result.vectors.len()
             )),
@@ -278,7 +340,7 @@ const fn kind_name(kind: EmbeddingInputKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::payload::{Content, ImageContent, ImageFormat};
+    use crate::domain::{Content, FileFormat, ImageContent, TableContent};
 
     use super::*;
 
@@ -287,54 +349,89 @@ mod tests {
         let mut info = fixture_info();
 
         assert_error_code(
-            validate_contents(&info, &[]),
+            validate_inputs(&info, &[]),
             crate::EngineError::INVALID_ARGUMENT,
         );
         assert_error_code(
-            validate_contents(
+            validate_inputs(
                 &info,
                 &[
-                    Content::Text("one".to_owned()),
-                    Content::Text("two".to_owned()),
-                    Content::Text("three".to_owned()),
+                    EmbeddingInput::text("one".to_owned()),
+                    EmbeddingInput::text("two".to_owned()),
+                    EmbeddingInput::text("three".to_owned()),
                 ],
             ),
             crate::EngineError::INVALID_ARGUMENT,
         );
         assert_error_code(
-            validate_contents(&info, &[Content::Text("  ".to_owned())]),
+            validate_inputs(&info, &[EmbeddingInput::text("  ".to_owned())]),
             crate::EngineError::INVALID_ARGUMENT,
         );
         assert_error_code(
-            validate_contents(
-                &info,
-                &[Content::Image(ImageContent {
-                    data: Vec::new(),
-                    format: ImageFormat::Png,
-                })],
-            ),
+            validate_inputs(&info, &[EmbeddingInput::new(Vec::new())]),
+            crate::EngineError::INVALID_ARGUMENT,
+        );
+        assert_eq!(
+            ImageContent::new(Vec::new(), FileFormat::Png)
+                .expect_err("empty image must be rejected before embedding")
+                .code(),
             crate::EngineError::INVALID_ARGUMENT,
         );
         assert_error_code(
-            validate_contents(
+            validate_inputs(
                 &info,
-                &[Content::Image(ImageContent {
-                    data: vec![1, 2, 3, 4],
-                    format: ImageFormat::Png,
-                })],
+                &[EmbeddingInput::new(vec![Content::Image(
+                    ImageContent::new(vec![1, 2, 3, 4], FileFormat::Png).expect("image"),
+                )])],
             ),
             crate::EngineError::INVALID_ARGUMENT,
         );
 
         info.input_kinds = vec![EmbeddingInputKind::Text];
         assert_error_code(
-            validate_contents(
+            validate_inputs(
                 &info,
-                &[Content::Image(ImageContent {
-                    data: vec![1],
-                    format: ImageFormat::Png,
-                })],
+                &[EmbeddingInput::new(vec![Content::Image(
+                    ImageContent::new(vec![1], FileFormat::Png).expect("image"),
+                )])],
             ),
+            crate::EngineError::UNSUPPORTED,
+        );
+        assert_error_code(
+            validate_inputs(
+                &info,
+                &[EmbeddingInput::new(vec![Content::Table(TableContent {
+                    row_count: 0,
+                    column_count: 0,
+                    cells: Vec::new(),
+                })])],
+            ),
+            crate::EngineError::UNSUPPORTED,
+        );
+    }
+
+    #[test]
+    fn preserves_input_boundaries_when_combining_text_parts() {
+        let mut info = fixture_info();
+        info.limits.max_batch_size = 1;
+        let input = EmbeddingInput::new(vec![
+            Content::Text("first".to_owned()),
+            Content::Text("second".to_owned()),
+            Content::Text("third".to_owned()),
+        ]);
+        validate_inputs(&info, std::slice::from_ref(&input)).expect("one input");
+        assert_eq!(input.to_text().expect("text"), "first\nsecond\nthird");
+        assert!(matches!(
+            EmbeddingInput::text("one").to_text().expect("text"),
+            Cow::Borrowed("one")
+        ));
+        let image = ImageContent::new(vec![1], FileFormat::Png).expect("image");
+        let mixed = EmbeddingInput::new(vec![
+            Content::Text("first".to_owned()),
+            Content::Image(image),
+        ]);
+        assert_eq!(
+            mixed.to_text().expect_err("non-text part").code(),
             crate::EngineError::UNSUPPORTED,
         );
     }

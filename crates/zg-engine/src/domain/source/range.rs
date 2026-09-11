@@ -11,12 +11,16 @@ pub(crate) struct TextRange {
 }
 
 impl TextRange {
+    #[track_caller]
     pub(crate) fn validate(&self) -> EngineResult<()> {
         if self.start_line == 0
             || self.start_line > self.end_line
             || self.start_utf16_offset > self.end_utf16_offset
         {
-            return Err(EngineError::invalid_argument("invalid text range"));
+            return Err(EngineError::invalid_argument(format!(
+                "invalid text range: lines {}..={} must be one-based and ordered; global UTF-16 offsets {}..{} must ascend",
+                self.start_line, self.end_line, self.start_utf16_offset, self.end_utf16_offset
+            )));
         }
         Ok(())
     }
@@ -46,12 +50,16 @@ pub(crate) struct LineColumnRange {
 }
 
 impl LineColumnRange {
+    #[track_caller]
     pub(crate) fn validate(&self) -> EngineResult<()> {
         if self.start.line == 0
             || self.end.line == 0
             || (self.start.line, self.start.column_utf16) > (self.end.line, self.end.column_utf16)
         {
-            return Err(EngineError::invalid_argument("invalid line/column range"));
+            return Err(EngineError::invalid_argument(format!(
+                "invalid line/column range: {:?}..{:?}; lines must be one-based and UTF-16 positions must ascend",
+                self.start, self.end
+            )));
         }
         Ok(())
     }
@@ -93,6 +101,7 @@ pub(crate) enum SourceRange {
 }
 
 impl SourceRange {
+    #[track_caller]
     pub(crate) fn validate(&self) -> EngineResult<()> {
         let valid = match *self {
             Self::File => true,
@@ -124,7 +133,9 @@ impl SourceRange {
         if valid {
             Ok(())
         } else {
-            Err(EngineError::invalid_argument("invalid source range"))
+            Err(EngineError::invalid_argument(format!(
+                "invalid source range: {self:?}"
+            )))
         }
     }
 

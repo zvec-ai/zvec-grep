@@ -1,4 +1,7 @@
-use crate::{EngineError, payload::Content};
+use crate::{
+    EngineError,
+    domain::{Content, Entity, EntityContent, SourceRange},
+};
 
 use super::{
     ChunkOptions, EntityFragment, TextRange, TextSource, byte_index_at_utf16_ceil, char_count,
@@ -29,13 +32,14 @@ pub(super) fn extract_plain_text_fragments(
     chunk_text(&source.text, max_chars, overlap_chars)
         .into_iter()
         .enumerate()
-        .map(|(index, chunk)| EntityFragment {
-            id: make_entity_id(&source.file.id, index),
-            group: None,
-            file_id: source.file.id.clone(),
-            range: chunk.range.into(),
-            content: Content::Text(chunk.text),
-            metadata: None,
+        .map(|(index, chunk)| {
+            EntityFragment::Standalone(Entity {
+                id: make_entity_id(&source.file.id, index),
+                file_id: source.file.id.clone(),
+                range: SourceRange::Text(chunk.range),
+                content: EntityContent::Source(vec![Content::Text(chunk.text)]),
+                metadata: None,
+            })
         })
         .collect()
 }
@@ -106,8 +110,9 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
                 range: TextRange {
                     start_line: start_index + 1,
                     end_line: end_index,
-                    start_offset: line_offsets[start_index],
-                    end_offset: line_offsets[end_line_index] + char_count(lines[end_line_index]),
+                    start_utf16_offset: line_offsets[start_index],
+                    end_utf16_offset: line_offsets[end_line_index]
+                        + char_count(lines[end_line_index]),
                 },
             });
         }
@@ -144,8 +149,8 @@ fn split_long_line(
                 range: TextRange {
                     start_line: line_index + 1,
                     end_line: line_index + 1,
-                    start_offset: line_offset + char_count(&line[..byte_offset]),
-                    end_offset: line_offset + char_count(&line[..byte_offset + slice_bytes]),
+                    start_utf16_offset: line_offset + char_count(&line[..byte_offset]),
+                    end_utf16_offset: line_offset + char_count(&line[..byte_offset + slice_bytes]),
                 },
             });
         }
@@ -223,9 +228,9 @@ fn find_line_cut(line: &str, max_chars: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::{api::context::result::ContentRange, payload::Content};
+    use crate::domain::{Content, FileFormat, SourceRange, TextRange};
 
-    use super::super::FileKind;
+    use super::super::test_content;
 
     use super::super::{ChunkOptions, byte_index_at_utf16, test_source};
     use super::extract;
@@ -233,8 +238,7 @@ mod tests {
     #[test]
     fn validates_chunks_ranges_and_overlap_like_typescript() {
         let source = test_source(
-            FileKind::Text,
-            "text",
+            FileFormat::Text,
             "fixture.txt",
             "alpha beta\ngamma delta\nepsilon zeta\n",
         );
@@ -247,18 +251,18 @@ mod tests {
         )
         .expect("text extraction");
         assert!(chunks.len() >= 2);
-        assert_eq!(chunks[0].id.len(), 64);
+        assert_eq!(chunks[0].document_id().len(), 64);
         assert_eq!(
-            chunks[0].range,
-            ContentRange::Text {
+            *chunks[0].range(),
+            SourceRange::Text(TextRange {
                 start_line: 1,
                 end_line: 1,
-                start_offset: 0,
-                end_offset: 10,
-            }
+                start_utf16_offset: 0,
+                end_utf16_offset: 10,
+            })
         );
         for chunk in &chunks {
-            let Content::Text(text) = &chunk.content else {
+            let Content::Text(text) = &test_content(chunk) else {
                 panic!("text fragment expected");
             };
             assert!(text.chars().count() <= 18);
@@ -268,7 +272,7 @@ mod tests {
     #[test]
     fn splits_long_unicode_lines_on_character_boundaries() {
         let text = format!("prefix {} suffix", "😀".repeat(20));
-        let source = test_source(FileKind::Text, "text", "unicode.txt", &text);
+        let source = test_source(FileFormat::Text, "unicode.txt", &text);
         let chunks = extract(
             &source,
             ChunkOptions {
@@ -279,27 +283,27 @@ mod tests {
         .expect("unicode extraction");
         assert!(chunks.len() >= 3);
         for chunk in chunks {
-            let Content::Text(content) = chunk.content else {
+            let Content::Text(content) = test_content(&chunk) else {
                 panic!("text fragment expected");
             };
             assert!(content.chars().count() <= 10);
-            let ContentRange::Text {
-                start_offset,
-                end_offset,
+            let SourceRange::Text(TextRange {
+                start_utf16_offset,
+                end_utf16_offset,
                 ..
-            } = chunk.range
+            }) = *chunk.range()
             else {
                 panic!("text range expected");
             };
-            let start_byte = byte_index_at_utf16(&source.text, start_offset);
-            let end_byte = byte_index_at_utf16(&source.text, end_offset);
+            let start_byte = byte_index_at_utf16(&source.text, start_utf16_offset);
+            let end_byte = byte_index_at_utf16(&source.text, end_utf16_offset);
             assert_eq!(content, source.text[start_byte..end_byte]);
         }
     }
 
     #[test]
     fn rejects_invalid_options_and_empty_metadata() {
-        let source = test_source(FileKind::Text, "text", "fixture.txt", "value");
+        let source = test_source(FileFormat::Text, "fixture.txt", "value");
         assert!(
             extract(
                 &source,
@@ -321,7 +325,7 @@ mod tests {
             .is_err()
         );
 
-        let blank = test_source(FileKind::Text, "text", "blank.txt", " \n\t");
+        let blank = test_source(FileFormat::Text, "blank.txt", " \n\t");
         assert!(
             extract(&blank, ChunkOptions::default())
                 .expect("blank extraction")

@@ -17,7 +17,9 @@ vulkan = ["llama-cpp-2/vulkan", "ort/webgpu"]
 
 [dependencies]
 async-trait.workspace = true
+base64 = "0.23.1"
 futures-util = "0.3.34"
+flate2 = "1.1.10"
 globset.workspace = true
 grep.workspace = true
 half = "2.7.1"
@@ -48,6 +50,7 @@ tree-sitter-typescript.workspace = true
 uuid.workspace = true
 zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
+zvec-rust = "=0.7.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }

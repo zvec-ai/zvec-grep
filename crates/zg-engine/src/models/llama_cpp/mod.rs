@@ -25,16 +25,16 @@ use llama_cpp_2::{
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
-use crate::{api::index::options::Device, payload::Content};
+use crate::api::index::options::Device;
 
 use super::{
     catalog::LlamaCppConfig,
     compute::ModelComputeRuntime,
     download_progress::{ArtifactDownloadProgress, ModelDownloadProgressReporter},
     spi::{
-        CreateEmbeddingModelOptions, EmbeddingInputKind, EmbeddingModel, EmbeddingModelInfo,
-        EmbeddingModelLimits, EmbeddingModelProgress, EmbeddingOptions, EmbeddingPurpose,
-        EmbeddingResult, ModelError, validate_contents, validate_result,
+        CreateEmbeddingModelOptions, EmbeddingInput, EmbeddingInputKind, EmbeddingModel,
+        EmbeddingModelInfo, EmbeddingModelLimits, EmbeddingModelProgress, EmbeddingOptions,
+        EmbeddingPurpose, EmbeddingResult, ModelError, validate_inputs, validate_result,
     },
 };
 
@@ -49,7 +49,6 @@ pub(crate) struct LlamaCppEmbeddingModel {
     compute_runtime: ModelComputeRuntime,
     client: reqwest::Client,
     state: Mutex<Option<Arc<LoadedLlamaModel>>>,
-    disposed: AtomicBool,
 }
 
 struct LoadedLlamaModel {
@@ -144,7 +143,6 @@ impl LlamaCppEmbeddingModel {
             compute_runtime: options.compute_runtime.unwrap_or_default(),
             client: reqwest::Client::new(),
             state: Mutex::new(None),
-            disposed: AtomicBool::new(false),
         }
     }
 
@@ -156,9 +154,7 @@ impl LlamaCppEmbeddingModel {
         if let Some(model) = &*state {
             return Ok(Arc::clone(model));
         }
-        self.ensure_not_disposed()?;
         let model = Arc::new(self.load_model(on_progress).await?);
-        self.ensure_not_disposed()?;
         *state = Some(Arc::clone(&model));
         Ok(model)
     }
@@ -209,7 +205,6 @@ impl LlamaCppEmbeddingModel {
                 .run(move || load_cpu_model(&path))
                 .await??,
         );
-        self.ensure_not_disposed()?;
         *state = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -300,17 +295,6 @@ impl LlamaCppEmbeddingModel {
                 .with_cause(error)
         })
     }
-
-    fn ensure_not_disposed(&self) -> Result<(), ModelError> {
-        if self.disposed.load(Ordering::Acquire) {
-            return Err(ModelError::new(
-                crate::EngineError::RESOURCE_CLOSED,
-                "llama.cpp embedding model is disposed",
-                Some(format!("model={}", self.entry.reference)),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -321,24 +305,20 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
 
     async fn embed(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_contents(&self.info, contents)?;
-        self.ensure_not_disposed()?;
+        validate_inputs(&self.info, inputs)?;
         let on_progress = options.on_progress.clone();
         let model = self
             .ensure_loaded(options.on_progress)
             .await
             .map_err(|error| embed_error(self.entry, error))?;
         let purpose = options.purpose.unwrap_or_default();
-        let texts = contents
+        let texts = inputs
             .iter()
-            .map(|content| match content {
-                Content::Text(text) => format_text(text, purpose, self.entry.format),
-                Content::Image(_) => unreachable!("content kind was validated"),
-            })
-            .collect::<Vec<_>>();
+            .map(|input| Ok(format_text(&input.to_text()?, purpose, self.entry.format)))
+            .collect::<Result<Vec<_>, ModelError>>()?;
         let entry = self.entry;
         let signal = options.signal;
         let execution_concurrency = options.execution_concurrency.max(1);
@@ -373,16 +353,8 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
             }
             Err(error) => return Err(embed_error(entry, error)),
         };
-        validate_result(&self.info, contents.len(), &result)?;
+        validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
-    }
-
-    async fn dispose(&self) -> Result<(), ModelError> {
-        if self.disposed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        *self.state.lock().await = None;
-        Ok(())
     }
 }
 
@@ -1105,8 +1077,8 @@ mod tests {
         let result = model
             .embed(
                 &[
-                    Content::Text("find authentication middleware".to_owned()),
-                    Content::Text("parse a configuration file".to_owned()),
+                    EmbeddingInput::text("find authentication middleware".to_owned()),
+                    EmbeddingInput::text("parse a configuration file".to_owned()),
                 ],
                 EmbeddingOptions {
                     purpose: Some(EmbeddingPurpose::Query),
@@ -1187,7 +1159,7 @@ mod tests {
         );
         let result = model
             .embed(
-                &[Content::Text("find relevant code".to_owned())],
+                &[EmbeddingInput::text("find relevant code".to_owned())],
                 EmbeddingOptions {
                     execution_concurrency: 2,
                     ..EmbeddingOptions::default()
@@ -1196,8 +1168,8 @@ mod tests {
             .await
             .expect("Metal llama.cpp inference");
         assert_eq!(result.vectors[0].len(), 768);
-        let first_contents = [Content::Text("authentication middleware".to_owned())];
-        let second_contents = [Content::Text("configuration parser".to_owned())];
+        let first_contents = [EmbeddingInput::text("authentication middleware".to_owned())];
+        let second_contents = [EmbeddingInput::text("configuration parser".to_owned())];
         let first = model.embed(
             &first_contents,
             EmbeddingOptions {
@@ -1242,7 +1214,9 @@ mod tests {
         );
         let result = model
             .embed(
-                &[Content::Text("find authentication middleware".to_owned())],
+                &[EmbeddingInput::text(
+                    "find authentication middleware".to_owned(),
+                )],
                 EmbeddingOptions {
                     purpose: Some(EmbeddingPurpose::Query),
                     ..EmbeddingOptions::default()

@@ -1,51 +1,35 @@
 use crate::{
     EngineError,
-    api::context::result::ContentRange,
-    payload::{Content, ImageContent},
+    domain::{Content, Entity, EntityContent, SourceRange},
 };
 
 use super::{EntityFragment, ImageSource, make_entity_id, validate_source_file};
 
 pub(super) fn extract(source: &ImageSource) -> Result<Vec<EntityFragment>, EngineError> {
     validate_source_file(&source.file)?;
-    if source.data.is_empty() {
-        return Err(EngineError::invalid_argument(
-            "image extractor requires non-empty image data",
-        ));
-    }
-
-    Ok(vec![EntityFragment {
+    Ok(vec![EntityFragment::Standalone(Entity {
         id: make_entity_id(&source.file.id, 0),
-        group: None,
         file_id: source.file.id.clone(),
-        range: ContentRange::File,
-        content: Content::Image(ImageContent {
-            data: source.data.clone(),
-            format: source.format,
-        }),
+        range: SourceRange::File,
+        content: EntityContent::Source(vec![Content::Image(source.content.clone())]),
         metadata: None,
-    }])
+    })])
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        api::context::result::ContentRange,
-        payload::{Content, ImageContent, ImageFormat},
-    };
-
-    use super::super::FileKind;
+    use crate::domain::{Content, EntityFragment, FileFormat, ImageContent, SourceRange};
 
     use super::super::{
-        ChunkOptions, ImageSource, extract as extract_source, extract_for_indexing, test_file,
+        ChunkOptions, ImageSource, extract as extract_source, extract_for_indexing, test_content,
+        test_file,
     };
     use super::extract;
 
     fn image_source(data: Vec<u8>) -> ImageSource {
         ImageSource {
-            file: test_file(FileKind::Image, "png", "fixture.png", data.len() as u64),
-            data,
-            format: ImageFormat::Png,
+            file: test_file(FileFormat::Png, "fixture.png", data.len() as u64),
+            content: ImageContent::new(data, FileFormat::Png).expect("image content"),
         }
     }
 
@@ -54,28 +38,16 @@ mod tests {
         let source = image_source(vec![1, 2, 3]);
         let fragments = extract(&source).expect("image extraction");
         assert_eq!(fragments.len(), 1);
-        assert_eq!(fragments[0].id.len(), 64);
-        assert_eq!(fragments[0].file_id, source.file.id);
-        assert_eq!(fragments[0].range, ContentRange::File);
-        assert_eq!(fragments[0].group, None);
-        assert_eq!(fragments[0].metadata, None);
-        assert_eq!(
-            fragments[0].content,
-            Content::Image(ImageContent {
-                data: vec![1, 2, 3],
-                format: ImageFormat::Png,
-            })
-        );
+        assert_eq!(fragments[0].document_id().len(), 64);
+        assert_eq!(fragments[0].file_id(), &source.file.id);
+        assert_eq!(fragments[0].range(), &SourceRange::File);
+        assert!(matches!(fragments[0], EntityFragment::Standalone(_)));
+        assert_eq!(fragments[0].metadata(), None);
+        assert_eq!(test_content(&fragments[0]), Content::Image(source.content));
     }
 
     #[test]
-    fn rejects_empty_data_and_invalid_source_metadata() {
-        assert!(extract(&image_source(Vec::new())).is_err());
-
-        let mut missing_id = image_source(vec![1]);
-        missing_id.file.id.clear();
-        assert!(extract(&missing_id).is_err());
-
+    fn rejects_invalid_source_metadata() {
         let mut missing_absolute_path = image_source(vec![1]);
         missing_absolute_path.file.absolute_path.clear();
         assert!(extract(&missing_absolute_path).is_err());

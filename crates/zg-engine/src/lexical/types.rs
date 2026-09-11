@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::LineColumnRange;
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LexicalSearchRequest {
     pub root: Option<PathBuf>,
@@ -33,22 +35,14 @@ pub(crate) struct LexicalOptions {
     pub modified_before_epoch_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LexicalMatch {
     pub rank: usize,
     pub absolute_path: PathBuf,
     pub relative_path: PathBuf,
-    pub range: TextRange,
-    pub excerpt_range: Option<TextRange>,
+    pub range: LineColumnRange,
+    pub excerpt_range: Option<LineColumnRange>,
     pub content: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct TextRange {
-    pub start_line: usize,
-    pub end_line: usize,
-    pub start_offset: usize,
-    pub end_offset: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -63,7 +57,7 @@ pub(crate) struct LexicalDiagnostics {
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LexicalSearchReply {
     pub root: PathBuf,
     pub coverage: LexicalCoverage,

@@ -27,16 +27,16 @@ use tokenizers::{
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
-use crate::{api::index::options::Device, payload::Content};
+use crate::api::index::options::Device;
 
 use super::{
     catalog::TransformersConfig,
     compute::ModelComputeRuntime,
     download_progress::{ArtifactDownloadProgress, ModelDownloadProgressReporter},
     spi::{
-        CreateEmbeddingModelOptions, EmbeddingInputKind, EmbeddingModel, EmbeddingModelInfo,
-        EmbeddingModelLimits, EmbeddingModelProgress, EmbeddingOptions, EmbeddingPurpose,
-        EmbeddingResult, ModelError, validate_contents, validate_result,
+        CreateEmbeddingModelOptions, EmbeddingInput, EmbeddingInputKind, EmbeddingModel,
+        EmbeddingModelInfo, EmbeddingModelLimits, EmbeddingModelProgress, EmbeddingOptions,
+        EmbeddingPurpose, EmbeddingResult, ModelError, validate_inputs, validate_result,
     },
 };
 
@@ -50,7 +50,6 @@ pub(crate) struct TransformersEmbeddingModel {
     compute_runtime: ModelComputeRuntime,
     client: reqwest::Client,
     state: Mutex<Option<Arc<LoadedTransformersModel>>>,
-    disposed: AtomicBool,
 }
 
 struct LoadedTransformersModel {
@@ -146,7 +145,6 @@ impl TransformersEmbeddingModel {
             compute_runtime: options.compute_runtime.unwrap_or_default(),
             client: reqwest::Client::new(),
             state: Mutex::new(None),
-            disposed: AtomicBool::new(false),
         }
     }
 
@@ -158,9 +156,7 @@ impl TransformersEmbeddingModel {
         if let Some(loaded) = &*state {
             return Ok(Arc::clone(loaded));
         }
-        self.ensure_not_disposed()?;
         let loaded = Arc::new(self.load(on_progress).await?);
-        self.ensure_not_disposed()?;
         *state = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -368,17 +364,6 @@ impl TransformersEmbeddingModel {
             self.entry.repo, self.entry.revision, artifact
         )
     }
-
-    fn ensure_not_disposed(&self) -> Result<(), ModelError> {
-        if self.disposed.load(Ordering::Acquire) {
-            return Err(ModelError::new(
-                crate::EngineError::RESOURCE_CLOSED,
-                "Transformers.js embedding model is disposed",
-                Some(format!("model={}", self.entry.reference)),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -389,11 +374,10 @@ impl EmbeddingModel for TransformersEmbeddingModel {
 
     async fn embed(
         &self,
-        contents: &[Content],
+        inputs: &[EmbeddingInput],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_contents(&self.info, contents)?;
-        self.ensure_not_disposed()?;
+        validate_inputs(&self.info, inputs)?;
         let loaded = self
             .ensure_loaded(options.on_progress.clone())
             .await
@@ -413,15 +397,16 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             EmbeddingPurpose::Document => self.entry.document_prefix,
             EmbeddingPurpose::Query => self.entry.query_prefix,
         };
-        let texts = contents
+        let texts = inputs
             .iter()
-            .map(|content| match content {
-                Content::Text(text) => {
-                    prefix.map_or_else(|| text.clone(), |prefix| format!("{prefix}{text}"))
-                }
-                Content::Image(_) => unreachable!("content kind was validated"),
+            .map(|input| {
+                let text = input.to_text()?;
+                Ok(match prefix {
+                    Some(prefix) => format!("{prefix}{text}"),
+                    None => text.into_owned(),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, ModelError>>()?;
         let tokenizer = loaded.tokenizer.clone();
         let entry = self.entry;
         let signal = options.signal;
@@ -441,16 +426,8 @@ impl EmbeddingModel for TransformersEmbeddingModel {
                 )
             })
             .await??;
-        validate_result(&self.info, contents.len(), &result)?;
+        validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
-    }
-
-    async fn dispose(&self) -> Result<(), ModelError> {
-        if self.disposed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        *self.state.lock().await = None;
-        Ok(())
     }
 }
 
@@ -1634,8 +1611,8 @@ mod tests {
         let result = model
             .embed(
                 &[
-                    Content::Text("find authentication middleware".to_owned()),
-                    Content::Text("parse a configuration file".to_owned()),
+                    EmbeddingInput::text("find authentication middleware".to_owned()),
+                    EmbeddingInput::text("parse a configuration file".to_owned()),
                 ],
                 EmbeddingOptions::default(),
             )
@@ -1736,7 +1713,7 @@ mod tests {
         );
         let result = model
             .embed(
-                &[Content::Text("find relevant code".to_owned())],
+                &[EmbeddingInput::text("find relevant code".to_owned())],
                 EmbeddingOptions {
                     on_progress: Some(Arc::new(move |progress| {
                         if let EmbeddingModelProgress::Warning { message, .. } = progress {

@@ -6,14 +6,17 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use zg_host_native::{FileKind as HostFileKind, detect_file_type, max_file_size};
 
 use crate::{
     api::context::result::{
-        ContentRange, ContextContainer, ContextItem, ContextItemKind, EntityMetadata,
+        ContentRange, ContextContainer, ContextItem, ContextItemKind,
         StructureEnrichmentDiagnostics, StructureEnrichmentSource,
     },
-    extraction::{ChunkOptions, EntityFragment, FileKind, SourceFile, TextSource, extract},
+    domain::{
+        EntityFragment, EntityMetadata, FileCategory, FileFormat, FileId, FileSnapshot, SourceFile,
+        SourceRange, decode_text,
+    },
+    extraction::{ChunkOptions, TextSource, extract},
 };
 
 pub(crate) const RG_STRUCTURE_ENRICH_FILE_LIMIT: usize = 100;
@@ -58,14 +61,11 @@ pub(crate) fn enrich_lexical_items_with_structure(
         {
             enriched_items += 1;
             enriched_files.insert(item.absolute_path.clone());
-            item.metadata = container.metadata.clone().or(item.metadata);
+            item.metadata = container.metadata().map(Into::into).or(item.metadata);
             item.container = Some(ContextContainer {
-                entity_id: container
-                    .group
-                    .clone()
-                    .unwrap_or_else(|| container.id.clone()),
-                range: container.range.clone(),
-                metadata: container.metadata.clone(),
+                entity_id: container.entity_id().as_str().to_owned(),
+                range: container.range().into(),
+                metadata: container.metadata().map(Into::into),
             });
         }
         enriched.push(item);
@@ -106,46 +106,50 @@ fn parse_structural_fragments(
     if !metadata.is_file() || metadata.len() == 0 {
         return None;
     }
-    let detected = detect_file_type(absolute_path)?;
-    if detected.kind != HostFileKind::Code
-        && !(detected.kind == HostFileKind::Text && detected.format == "markdown")
-    {
+    let formats = FileFormat::from_path(absolute_path).ok()?;
+    let code = formats
+        .iter()
+        .any(|format| format.categories().contains(&FileCategory::Code));
+    let markdown = formats.contains(&FileFormat::Markdown);
+    if !code && !markdown {
         return None;
     }
-    if metadata.len() > max_file_size(detected.kind, explicit_max_size) {
+    let maximum = explicit_max_size.unwrap_or(if code { 1_048_576 } else { 268_435_456 });
+    if metadata.len() > maximum {
         return None;
     }
-    let text = fs::read_to_string(absolute_path).ok()?;
-    let relative_path = absolute_path
-        .strip_prefix(root)
-        .map_or_else(|_| absolute_path.to_path_buf(), Path::to_path_buf);
+    let bytes = fs::read(absolute_path).ok()?;
+    let text = decode_text(&bytes, true)?.into_owned();
+    let (source_root, relative_path) = match absolute_path.strip_prefix(root) {
+        Ok(relative) if !relative.as_os_str().is_empty() => (root, relative),
+        _ => (
+            absolute_path.parent()?,
+            Path::new(absolute_path.file_name()?),
+        ),
+    };
     let source = TextSource {
         file: SourceFile {
-            id: structure_file_id(absolute_path),
+            id: FileId::new(structure_file_id(absolute_path)).ok()?,
             absolute_path: absolute_path.to_path_buf(),
-            relative_path,
-            root_path: root.to_path_buf(),
-            size_bytes: metadata.len(),
-            modified_epoch_ms: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .and_then(|duration| duration.as_millis().try_into().ok()),
-            content_hash: None,
-            kind: match detected.kind {
-                HostFileKind::Text => FileKind::Text,
-                HostFileKind::Code => FileKind::Code,
-                HostFileKind::Data => FileKind::Data,
-                HostFileKind::Image => FileKind::Image,
+            relative_path: relative_path.to_path_buf(),
+            root_path: source_root.to_path_buf(),
+            formats,
+            snapshot: FileSnapshot {
+                size_bytes: metadata.len(),
+                modified_epoch_ms: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .and_then(|duration| duration.as_millis().try_into().ok()),
+                content_hash: None,
             },
-            format: detected.format,
         },
         text,
     };
     let structural = extract(&source, ChunkOptions::default())
         .ok()?
         .into_iter()
-        .filter(|fragment| fragment.metadata.is_some())
+        .filter(|fragment| fragment.metadata().is_some())
         .collect::<Vec<_>>();
     (!structural.is_empty()).then_some(structural)
 }
@@ -161,19 +165,19 @@ fn smallest_containing_fragment<'fragment>(
 ) -> Option<&'fragment EntityFragment> {
     fragments
         .iter()
-        .filter(|fragment| text_range_contains(&fragment.range, inner))
+        .filter(|fragment| text_range_contains(fragment.range(), inner))
         .min_by(|left, right| compare_fragment_container(left, right))
 }
 
-fn text_range_contains(outer: &ContentRange, inner: &ContentRange) -> bool {
+fn text_range_contains(outer: &SourceRange, inner: &ContentRange) -> bool {
     matches!(
         (outer, inner),
         (
-            ContentRange::Text {
+            SourceRange::Text(crate::domain::TextRange {
                 start_line: outer_start,
                 end_line: outer_end,
                 ..
-            },
+            }),
             ContentRange::Text {
                 start_line: inner_start,
                 end_line: inner_end,
@@ -187,22 +191,18 @@ fn compare_fragment_container(left: &EntityFragment, right: &EntityFragment) -> 
     fragment_line_span(left)
         .cmp(&fragment_line_span(right))
         .then_with(|| fragment_specificity(right).cmp(&fragment_specificity(left)))
-        .then_with(|| left.id.cmp(&right.id))
+        .then_with(|| left.document_id().cmp(right.document_id()))
 }
 
 fn fragment_line_span(fragment: &EntityFragment) -> usize {
-    match fragment.range {
-        ContentRange::Text {
-            start_line,
-            end_line,
-            ..
-        } => end_line.saturating_sub(start_line),
+    match fragment.range() {
+        SourceRange::Text(range) => range.end_line.saturating_sub(range.start_line),
         _ => usize::MAX,
     }
 }
 
 fn fragment_specificity(fragment: &EntityFragment) -> u8 {
-    match &fragment.metadata {
+    match fragment.metadata() {
         Some(EntityMetadata::Code { symbol_name, .. }) => {
             if symbol_name.is_some() {
                 2
@@ -299,6 +299,23 @@ mod tests {
         assert_eq!(result.diagnostics.enriched_items, 1);
         assert_eq!(result.diagnostics.skipped_files, 3);
         assert!(!result.diagnostics.truncated);
+
+        for root in [
+            directory.path().join("structured.ts"),
+            directory.path().join("elsewhere"),
+        ] {
+            let result = enrich_lexical_items_with_structure(
+                &root,
+                vec![lexical_item(
+                    directory.path(),
+                    "structured.ts",
+                    2,
+                    "  return \"hello\";",
+                )],
+                None,
+            );
+            assert_eq!(result.diagnostics.enriched_items, 1, "{}", root.display());
+        }
     }
 
     #[test]

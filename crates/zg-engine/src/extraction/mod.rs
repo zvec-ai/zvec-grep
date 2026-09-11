@@ -9,11 +9,17 @@ mod text;
 
 // Interface exposed to the rest of `zg-engine`.
 pub(crate) use spi::{
-    ChunkOptions, EntityFragment, FileKind, ImageSource, IndexingExtractionFragment, Source,
-    SourceFile, TextRange, TextSource,
+    ChunkOptions, ImageSource, IndexingExtractionFragment, Source, SourceKind, TextSource,
 };
 
-use crate::{EngineError, payload::Content};
+use crate::{
+    EngineError,
+    domain::{Content, EntityFragment, SourceFile, TextRange},
+};
+
+pub(crate) fn source_kind(file: &SourceFile) -> Option<SourceKind> {
+    service::source_kind(file)
+}
 
 pub(crate) fn extract<'source>(
     source: impl Into<Source<'source>>,
@@ -31,9 +37,9 @@ pub(crate) fn extract_for_indexing<'source>(
 
 pub(crate) fn vector_content_for_fragment(
     fragment: &EntityFragment,
-    embedding_content: Option<&Content>,
+    embedding_content: Option<&[Content]>,
     max_chars: Option<usize>,
-) -> Content {
+) -> Vec<Content> {
     service::vector_content_for_fragment(fragment, embedding_content, max_chars)
 }
 
@@ -44,4 +50,4 @@ use service::{
 };
 
 #[cfg(test)]
-use service::{test_file, test_source};
+use service::{test_content, test_file, test_source};

@@ -43,7 +43,6 @@ impl FragmentId {
 }
 
 /// A logical result unit with source provenance and descriptive metadata.
-// TODO: Model ordered content parts; EntityContent currently holds a single payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Entity {
     pub id: EntityId,
@@ -55,7 +54,7 @@ pub(crate) struct Entity {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EntityContent {
-    Source(Content),
+    Source(Vec<Content>),
     /// Describes the entity's source range without reproducing its original content.
     Outline(String),
 }
@@ -74,7 +73,7 @@ pub(crate) struct WindowFragment {
     pub entity_id: EntityId,
     pub file_id: FileId,
     pub range: SourceRange,
-    pub content: Content,
+    pub contents: Vec<Content>,
     pub metadata: Option<EntityMetadata>,
 }
 
@@ -105,6 +104,24 @@ impl EntityFragment {
         match self {
             Self::Standalone(entity) | Self::Representative(entity) => &entity.range,
             Self::Window(window) => &window.range,
+        }
+    }
+
+    pub(crate) fn metadata(&self) -> Option<&EntityMetadata> {
+        match self {
+            Self::Standalone(entity) | Self::Representative(entity) => entity.metadata.as_ref(),
+            Self::Window(window) => window.metadata.as_ref(),
+        }
+    }
+
+    /// Original content in reading order; outlines have no recorded source content.
+    pub(crate) fn contents(&self) -> &[Content] {
+        match self {
+            Self::Standalone(entity) | Self::Representative(entity) => match &entity.content {
+                EntityContent::Source(contents) => contents,
+                EntityContent::Outline(_) => &[],
+            },
+            Self::Window(window) => &window.contents,
         }
     }
 
@@ -146,14 +163,14 @@ pub(crate) enum EntityMetadata {
 }
 
 /// Checks identities, ownership, and ranges for the fragments of one source file.
-pub(crate) fn validate_fragments(
+pub(crate) fn validate_fragments<'a>(
     file_id: &FileId,
-    fragments: &[EntityFragment],
+    fragments: impl IntoIterator<Item = &'a EntityFragment> + Clone,
 ) -> EngineResult<()> {
-    let mut document_ids = HashSet::with_capacity(fragments.len());
+    let mut document_ids = HashSet::new();
     let mut representatives = HashMap::new();
 
-    for fragment in fragments {
+    for fragment in fragments.clone() {
         if fragment.file_id() != file_id {
             return Err(EngineError::invalid_argument(format!(
                 "fragment {} belongs to a different source file",
@@ -167,6 +184,21 @@ pub(crate) fn validate_fragments(
             )));
         }
         fragment.range().validate()?;
+        let has_content = match fragment {
+            EntityFragment::Standalone(entity) | EntityFragment::Representative(entity) => {
+                match &entity.content {
+                    EntityContent::Source(contents) => !contents.is_empty(),
+                    EntityContent::Outline(outline) => !outline.trim().is_empty(),
+                }
+            }
+            EntityFragment::Window(window) => !window.contents.is_empty(),
+        };
+        if !has_content {
+            return Err(EngineError::invalid_argument(format!(
+                "fragment {} has no content",
+                fragment.document_id()
+            )));
+        }
         if let EntityFragment::Representative(entity) = fragment {
             representatives.insert(&entity.id, entity);
         }
@@ -217,7 +249,7 @@ mod tests {
             id: EntityId::new(id).expect("entity id"),
             file_id: file_id(),
             range: range(0, 20),
-            content: EntityContent::Source(Content::Text("abcdefghijklmnopqrst".to_owned())),
+            content: EntityContent::Source(vec![Content::Text("abcdefghijklmnopqrst".to_owned())]),
             metadata: None,
         }
     }
@@ -228,7 +260,7 @@ mod tests {
             entity_id: EntityId::new(owner).expect("owner id"),
             file_id: file_id(),
             range: range(5, 15),
-            content: Content::Text("fghijklmno".to_owned()),
+            contents: vec![Content::Text("fghijklmno".to_owned())],
             metadata: None,
         }
     }
@@ -344,7 +376,7 @@ mod tests {
         for representative in [source, outline] {
             let mut equal_window = window("window", "group");
             equal_window.range = representative.range;
-            equal_window.content = Content::Text("abcdefghijklmnopqrst".to_owned());
+            equal_window.contents = vec![Content::Text("abcdefghijklmnopqrst".to_owned())];
             let fragments = vec![
                 EntityFragment::Representative(representative),
                 EntityFragment::Window(equal_window),
@@ -353,6 +385,18 @@ mod tests {
             validate_fragments(&file_id(), &fragments[..1]).expect("windows are optional");
         }
         validate_fragments(&file_id(), &[]).expect("empty source produces no fragments");
+        let mut empty = entity("empty");
+        empty.content = EntityContent::Source(Vec::new());
+        assert_invalid(&[EntityFragment::Standalone(empty)], "has no content");
+        let mut empty_outline = entity("empty-outline");
+        empty_outline.content = EntityContent::Outline(" ".to_owned());
+        assert_invalid(
+            &[EntityFragment::Representative(empty_outline)],
+            "has no content",
+        );
+        let mut empty_window = window("empty-window", "group");
+        empty_window.contents.clear();
+        assert_invalid(&[EntityFragment::Window(empty_window)], "has no content");
     }
 
     #[test]

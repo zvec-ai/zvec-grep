@@ -14,7 +14,10 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use crate::EngineError;
+use crate::{
+    EngineError,
+    domain::{LineColumnRange, TextPosition, decode_text},
+};
 use grep::{
     matcher::Matcher,
     regex::{RegexMatcher, RegexMatcherBuilder},
@@ -26,7 +29,6 @@ use tracing::debug;
 
 use self::types::{
     LexicalCoverage, LexicalDiagnostics, LexicalMatch, LexicalSearchReply, LexicalSearchRequest,
-    TextRange,
 };
 
 const EMBEDDED_BACKEND: &str = "grep";
@@ -164,11 +166,20 @@ fn search_sync(
     };
 
     expand_context(&mut lexical_matches, request);
+    debug_assert!(lexical_matches.iter().all(|item| {
+        item.range
+            .contains(item.excerpt_range.as_ref().unwrap_or(&item.range))
+    }));
     lexical_matches.sort_by(|left, right| {
         left.relative_path
             .cmp(&right.relative_path)
-            .then(left.range.start_line.cmp(&right.range.start_line))
-            .then(left.range.start_offset.cmp(&right.range.start_offset))
+            .then(left.range.start.line.cmp(&right.range.start.line))
+            .then(
+                left.range
+                    .start
+                    .column_utf16
+                    .cmp(&right.range.start.column_utf16),
+            )
     });
 
     let truncated = request
@@ -465,11 +476,15 @@ fn search_file(
                 rank: 0,
                 absolute_path: absolute_path.clone(),
                 relative_path: relative_path.clone(),
-                range: TextRange {
-                    start_line: line_number + start.0,
-                    end_line: line_number + end.0,
-                    start_offset: start.1,
-                    end_offset: end.1,
+                range: LineColumnRange {
+                    start: TextPosition {
+                        line: line_number + start.0,
+                        column_utf16: start.1,
+                    },
+                    end: TextPosition {
+                        line: line_number + end.0,
+                        column_utf16: end.1,
+                    },
                 },
                 excerpt_range: None,
                 content: content.to_owned(),
@@ -634,9 +649,10 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
     let mut cache: HashMap<PathBuf, Option<Vec<String>>> = HashMap::new();
     for item in matches {
         let lines = cache.entry(item.absolute_path.clone()).or_insert_with(|| {
-            std::fs::read_to_string(&item.absolute_path)
-                .ok()
-                .map(|content| content.lines().map(str::to_owned).collect())
+            std::fs::read(&item.absolute_path).ok().and_then(|bytes| {
+                decode_text(&bytes, true)
+                    .map(|content| content.lines().map(str::to_owned).collect())
+            })
         });
         let Some(lines) = lines else {
             continue;
@@ -646,16 +662,20 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         }
 
         let excerpt = item.range;
-        let start_line = excerpt.start_line.saturating_sub(before).max(1);
-        let end_line = excerpt.end_line.saturating_add(after).min(lines.len());
+        let start_line = excerpt.start.line.saturating_sub(before).max(1);
+        let end_line = excerpt.end.line.saturating_add(after).min(lines.len());
         let content = lines[start_line - 1..end_line].join("\n");
         let end_offset = lines[end_line - 1].encode_utf16().count();
         item.excerpt_range = Some(excerpt);
-        item.range = TextRange {
-            start_line,
-            end_line,
-            start_offset: 0,
-            end_offset,
+        item.range = LineColumnRange {
+            start: TextPosition {
+                line: start_line,
+                column_utf16: 0,
+            },
+            end: TextPosition {
+                line: end_line,
+                column_utf16: end_offset,
+            },
         };
         item.content = content;
     }
@@ -765,9 +785,9 @@ mod tests {
         assert_eq!(reply.diagnostics.backend, "grep");
         assert_eq!(reply.matches.len(), 1);
         assert_eq!(reply.matches[0].relative_path, Path::new("a.txt"));
-        assert_eq!(reply.matches[0].range.start_line, 2);
-        assert_eq!(reply.matches[0].range.start_offset, 9);
-        assert_eq!(reply.matches[0].range.end_offset, 11);
+        assert_eq!(reply.matches[0].range.start.line, 2);
+        assert_eq!(reply.matches[0].range.start.column_utf16, 9);
+        assert_eq!(reply.matches[0].range.end.column_utf16, 11);
     }
 
     #[tokio::test]
@@ -828,13 +848,14 @@ mod tests {
         let reply = search(&LexicalSearchService::new(), root.path(), &request).await;
         assert_eq!(reply.matches.len(), 1);
         assert!(reply.diagnostics.truncated);
-        assert_eq!(reply.matches[0].range.start_line, 1);
+        assert_eq!(reply.matches[0].range.start.line, 1);
         assert_eq!(
             reply.matches[0]
                 .excerpt_range
                 .as_ref()
                 .expect("excerpt")
-                .start_line,
+                .start
+                .line,
             2
         );
         assert_eq!(
@@ -856,7 +877,7 @@ mod tests {
 
         let reply = search(&LexicalSearchService::new(), root.path(), &request).await;
         assert_eq!(reply.matches.len(), 1);
-        assert_eq!(reply.matches[0].range.start_line, 2);
+        assert_eq!(reply.matches[0].range.start.line, 2);
         assert_eq!(reply.matches[0].content, "foo");
     }
 

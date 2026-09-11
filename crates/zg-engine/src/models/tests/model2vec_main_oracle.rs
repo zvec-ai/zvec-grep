@@ -3,12 +3,9 @@ use std::{env, path::PathBuf};
 use serde::Deserialize;
 use tempfile::TempDir;
 
-use crate::{
-    models::{
-        factory::create_embedding_model,
-        spi::{CreateEmbeddingModelOptions, EmbeddingOptions, EmbeddingPurpose},
-    },
-    payload::Content,
+use crate::models::{
+    factory::create_embedding_model,
+    spi::{CreateEmbeddingModelOptions, EmbeddingInput, EmbeddingOptions, EmbeddingPurpose},
 };
 
 #[derive(Deserialize)]
@@ -43,15 +40,15 @@ async fn model2vec_matches_the_main_typescript_vector_bit_for_bit() {
         }),
     )
     .expect("pinned Model2Vec model must be available");
-    let contents = oracle
+    let inputs = oracle
         .texts
         .iter()
         .cloned()
-        .map(Content::Text)
+        .map(EmbeddingInput::text)
         .collect::<Vec<_>>();
     let result = model
         .embed(
-            &contents,
+            &inputs,
             EmbeddingOptions {
                 purpose: Some(EmbeddingPurpose::Query),
                 ..EmbeddingOptions::default()
@@ -62,5 +59,4 @@ async fn model2vec_matches_the_main_typescript_vector_bit_for_bit() {
 
     assert_eq!(result.truncated, oracle.truncated);
     assert_eq!(result.vectors, oracle.vectors);
-    model.dispose().await.expect("model disposal must succeed");
 }

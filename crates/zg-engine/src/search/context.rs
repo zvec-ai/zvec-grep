@@ -15,12 +15,12 @@ use crate::{
             ContentRange, ContextContentRole, ContextCoverage, ContextDiagnostics,
             ContextGroupResult, ContextItem, ContextItemKind, ContextItemStatus,
             ContextQueryGroupMatch, ContextQueryGroupRole, ContextSelectionReason, ContextSource,
-            ContextWorkspaceIndex, EmptyReason, EntityMetadata, IndexDiagnostics,
-            IndexQueryGroupDiagnostics, IndexRouteDiagnostics, MatchedBy,
+            ContextWorkspaceIndex, EmptyReason, IndexDiagnostics, IndexQueryGroupDiagnostics,
+            IndexRouteDiagnostics, MatchedBy,
         },
     },
-    payload::{Content, ImageFormat},
-    storage::spi::{Entity, FileInfo, WorkspaceIndexStorage},
+    domain::{Content, EntityContent, EntityFragment},
+    storage::spi::{StoredFile, WorkspaceIndexStorage},
 };
 
 use super::pipeline::{
@@ -315,18 +315,18 @@ fn search_plan_to_context_items(
             ContextItem {
                 kind: ContextItemKind::IndexedEntity,
                 rank: hit.rank,
-                absolute_path: hit.file.absolute_path.clone(),
+                absolute_path: hit.file.source.absolute_path.clone(),
                 relative_path: display_relative_path(root, &hit.file),
-                range: hit.entity.range.clone(),
+                range: hit.entity.range.into(),
                 excerpt_range: target.excerpt_range,
-                content: content_to_text(&target.content),
+                content: target.content,
                 content_role: Some(target.content_role),
                 outline: target.outline,
                 status: file_freshness_status(&hit.file),
                 score: Some(hit.score),
                 matched_by: hit.matched_by,
-                metadata: hit.entity.metadata.clone(),
-                entity_id: Some(hit.entity.id.clone()),
+                metadata: hit.entity.metadata.as_ref().map(Into::into),
+                entity_id: Some(hit.entity.id.as_str().to_owned()),
                 container: None,
                 trace: hit.trace.clone(),
                 query_groups: vec![ContextQueryGroupMatch {
@@ -343,13 +343,14 @@ fn search_plan_to_context_items(
         .collect()
 }
 
-fn display_relative_path(root: &Path, file: &FileInfo) -> PathBuf {
-    if file.relative_path.as_os_str().is_empty() {
-        file.absolute_path
+fn display_relative_path(root: &Path, file: &StoredFile) -> PathBuf {
+    if file.source.relative_path.as_os_str().is_empty() {
+        file.source
+            .absolute_path
             .strip_prefix(root)
-            .map_or_else(|_| file.absolute_path.clone(), Path::to_path_buf)
+            .map_or_else(|_| file.source.absolute_path.clone(), Path::to_path_buf)
     } else {
-        file.relative_path.clone()
+        file.source.relative_path.clone()
     }
 }
 
@@ -509,93 +510,52 @@ fn context_item_dedupe_key(item: &ContextItem) -> String {
 }
 
 struct ContextItemTarget {
-    content: Content,
+    content: String,
     content_role: ContextContentRole,
     excerpt_range: Option<ContentRange>,
     outline: Option<String>,
 }
 
 fn context_item_target(hit: &SearchHit) -> ContextItemTarget {
-    let evidence = hit.evidence.iter().find(|evidence| !evidence.is_entity);
-    let separate = evidence.is_some_and(|evidence| {
-        hit.entity.range != evidence.fragment.range
-            || hit.entity.content != evidence.fragment.content
-    });
-    let content = if separate {
-        evidence.map_or_else(
-            || hit.entity.content.clone(),
-            |item| item.fragment.content.clone(),
-        )
-    } else {
-        hit.entity.content.clone()
+    let window = hit
+        .evidence
+        .iter()
+        .find_map(|evidence| match &evidence.fragment {
+            EntityFragment::Window(window) => Some(window),
+            EntityFragment::Standalone(_) | EntityFragment::Representative(_) => None,
+        });
+    if let Some(window) = window {
+        let same_source = hit.entity.range == window.range
+            && matches!(&hit.entity.content, EntityContent::Source(contents) if contents == &window.contents);
+        let content = contents_to_text(&window.contents);
+        let outline = match &hit.entity.content {
+            EntityContent::Outline(outline)
+                if !outline.trim().is_empty() && outline.trim() != content.trim() =>
+            {
+                Some(outline.trim().to_owned())
+            }
+            EntityContent::Source(_) | EntityContent::Outline(_) => None,
+        };
+        return ContextItemTarget {
+            content,
+            content_role: ContextContentRole::Source,
+            excerpt_range: (!same_source).then(|| window.range.into()),
+            outline,
+        };
+    }
+    let (content, content_role) = match &hit.entity.content {
+        EntityContent::Source(contents) => (contents_to_text(contents), ContextContentRole::Source),
+        EntityContent::Outline(outline) => (outline.clone(), ContextContentRole::Outline),
     };
-    let content_role = if separate || entity_content_looks_like_source(&hit.entity) {
-        ContextContentRole::Source
-    } else {
-        ContextContentRole::Outline
-    };
-    let outline = (content_role == ContextContentRole::Source)
-        .then(|| context_item_outline(hit, evidence))
-        .flatten();
     ContextItemTarget {
         content,
         content_role,
-        excerpt_range: separate
-            .then(|| evidence.map(|item| item.fragment.range.clone()))
-            .flatten(),
-        outline,
+        excerpt_range: None,
+        outline: None,
     }
 }
 
-fn entity_content_looks_like_source(entity: &Entity) -> bool {
-    let (
-        Content::Text(text),
-        ContentRange::Text {
-            start_line,
-            end_line,
-            ..
-        },
-    ) = (&entity.content, &entity.range)
-    else {
-        return true;
-    };
-    text.lines().count() > end_line.saturating_sub(*start_line)
-}
-
-fn context_item_outline(
-    hit: &SearchHit,
-    evidence: Option<&super::pipeline::SearchEvidence>,
-) -> Option<String> {
-    let Content::Text(outline) = &hit.entity.content else {
-        return None;
-    };
-    let outline = outline.trim();
-    let evidence = evidence?;
-    if outline.is_empty()
-        || (hit.entity.range == evidence.fragment.range
-            && hit.entity.content == evidence.fragment.content)
-        || !is_useful_outline(hit.entity.metadata.as_ref(), outline)
-        || matches!(&evidence.fragment.content, Content::Text(text) if text.trim() == outline)
-    {
-        None
-    } else {
-        Some(outline.to_owned())
-    }
-}
-
-fn is_useful_outline(metadata: Option<&EntityMetadata>, outline: &str) -> bool {
-    matches!(
-        metadata,
-        Some(EntityMetadata::Code {
-            symbol_type: crate::api::context::options::SymbolType::Class
-                | crate::api::context::options::SymbolType::Interface
-                | crate::api::context::options::SymbolType::Module,
-            ..
-        })
-    ) || outline.contains("\ncalls:")
-}
-
-fn file_freshness_status(file: &FileInfo) -> ContextItemStatus {
+fn file_freshness_status(file: &StoredFile) -> ContextItemStatus {
     let Some(indexed) = file
         .index_status
         .as_ref()
@@ -603,7 +563,7 @@ fn file_freshness_status(file: &FileInfo) -> ContextItemStatus {
     else {
         return ContextItemStatus::PossiblyStale;
     };
-    let Ok(metadata) = fs::metadata(&file.absolute_path) else {
+    let Ok(metadata) = fs::metadata(&file.source.absolute_path) else {
         return ContextItemStatus::PossiblyStale;
     };
     if !metadata.is_file() {
@@ -617,8 +577,8 @@ fn file_freshness_status(file: &FileInfo) -> ContextItemStatus {
     if modified.is_some_and(|modified| indexed >= modified) {
         return ContextItemStatus::Fresh;
     }
-    if let Some(expected) = &file.content_hash
-        && fs::read(&file.absolute_path).is_ok_and(|bytes| sha256_hex(&bytes) == *expected)
+    if let Some(expected) = &file.source.snapshot.content_hash
+        && fs::read(&file.source.absolute_path).is_ok_and(|bytes| sha256_hex(&bytes) == *expected)
     {
         return ContextItemStatus::Fresh;
     }
@@ -640,23 +600,36 @@ fn rank_as_f64(rank: usize) -> f64 {
     f64::from(u32::try_from(rank).unwrap_or(u32::MAX))
 }
 
+fn contents_to_text(contents: &[Content]) -> String {
+    contents
+        .iter()
+        .map(content_to_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn content_to_text(content: &Content) -> String {
     match content {
         Content::Text(text) => text.clone(),
         Content::Image(image) => format!(
             "[image:{} bytes={}]",
-            image_format(image.format),
-            image.data.len()
+            image.format().as_str(),
+            image.data().len()
         ),
-    }
-}
-
-fn image_format(format: ImageFormat) -> &'static str {
-    match format {
-        ImageFormat::Png => "png",
-        ImageFormat::Jpeg => "jpeg",
-        ImageFormat::Webp => "webp",
-        ImageFormat::Gif => "gif",
+        Content::Table(table) => {
+            let mut cells = table.cells.iter().collect::<Vec<_>>();
+            cells.sort_unstable_by_key(|cell| (cell.row, cell.column));
+            let mut output = String::new();
+            let mut previous_row = None;
+            for cell in cells {
+                if let Some(row) = previous_row {
+                    output.push(if row == cell.row { '\t' } else { '\n' });
+                }
+                output.push_str(&contents_to_text(&cell.contents));
+                previous_row = Some(cell.row);
+            }
+            output
+        }
     }
 }
 
@@ -674,6 +647,131 @@ mod tests {
     };
 
     use super::{normalize_context_request, select_and_rank_context_items};
+
+    #[test]
+    fn renders_ordered_content_and_nested_table_cells() {
+        use crate::domain::{
+            Content, FileFormat, ImageContent, TableCell, TableCellRole, TableContent,
+        };
+
+        let image = ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image");
+        let cell = |row, column, column_span, contents| TableCell {
+            row,
+            column,
+            row_span: 1,
+            column_span,
+            contents,
+            kind: TableCellRole::Unknown,
+        };
+        let table = Content::Table(TableContent {
+            row_count: 2,
+            column_count: 2,
+            cells: vec![
+                cell(0, 0, 2, vec![Content::Text("Product".to_owned())]),
+                cell(
+                    1,
+                    0,
+                    1,
+                    vec![Content::Text("Keyboard".to_owned()), Content::Image(image)],
+                ),
+                cell(
+                    1,
+                    1,
+                    1,
+                    vec![Content::Table(TableContent {
+                        row_count: 1,
+                        column_count: 1,
+                        cells: vec![cell(0, 0, 1, vec![Content::Text("299".to_owned())])],
+                    })],
+                ),
+            ],
+        });
+        assert_eq!(
+            super::contents_to_text(&[Content::Text("Catalog".to_owned()), table]),
+            "Catalog\nProduct\nKeyboard\n[image:png bytes=3]\t299"
+        );
+    }
+
+    #[test]
+    fn explicit_content_roles_preserve_source_and_window_provenance() {
+        use crate::{
+            domain::{
+                Content, Entity, EntityContent, EntityFragment, EntityId, FileFormat, FileId,
+                FileSnapshot, FragmentId, SourceFile, SourceRange, TextRange, WindowFragment,
+            },
+            search::pipeline::{SearchEvidence, SearchHit},
+            storage::spi::StoredFile,
+        };
+
+        let file_id = FileId::new("file").expect("file id");
+        let range = SourceRange::Text(TextRange {
+            start_line: 1,
+            end_line: 20,
+            start_utf16_offset: 0,
+            end_utf16_offset: 100,
+        });
+        let mut hit = SearchHit {
+            entity: Entity {
+                id: EntityId::new("entity").expect("entity id"),
+                file_id: file_id.clone(),
+                range,
+                content: EntityContent::Source(vec![Content::Text(
+                    "A short source excerpt".to_owned(),
+                )]),
+                metadata: None,
+            },
+            file: StoredFile {
+                source: SourceFile {
+                    id: file_id.clone(),
+                    absolute_path: PathBuf::from("/workspace/file.txt"),
+                    relative_path: PathBuf::from("file.txt"),
+                    root_path: PathBuf::from("/workspace"),
+                    formats: vec![FileFormat::Text],
+                    snapshot: FileSnapshot {
+                        size_bytes: 100,
+                        modified_epoch_ms: None,
+                        content_hash: None,
+                    },
+                },
+                index_status: None,
+            },
+            evidence: Vec::new(),
+            rank: 1,
+            score: 1.0,
+            matched_by: MatchedBy::Fts,
+            trace: None,
+        };
+        assert_eq!(
+            super::context_item_target(&hit).content_role,
+            ContextContentRole::Source
+        );
+        hit.entity.content = EntityContent::Outline("Function outline".to_owned());
+        assert_eq!(
+            super::context_item_target(&hit).content_role,
+            ContextContentRole::Outline
+        );
+        let window_range = SourceRange::Text(TextRange {
+            start_line: 2,
+            end_line: 2,
+            start_utf16_offset: 10,
+            end_utf16_offset: 20,
+        });
+        hit.evidence.push(SearchEvidence {
+            fragment: EntityFragment::Window(WindowFragment {
+                id: FragmentId::new("window").expect("fragment id"),
+                entity_id: hit.entity.id.clone(),
+                file_id,
+                range: window_range,
+                contents: vec![Content::Text("Exact source".to_owned())],
+                metadata: None,
+            }),
+        });
+        let target = super::context_item_target(&hit);
+        assert_eq!(target.content_role, ContextContentRole::Source);
+        assert_eq!(target.content, "Exact source");
+        assert_eq!(target.outline.as_deref(), Some("Function outline"));
+        assert_eq!(target.excerpt_range, Some(window_range.into()));
+    }
 
     #[test]
     fn normalizes_primary_and_supplemental_query_groups_like_main() {

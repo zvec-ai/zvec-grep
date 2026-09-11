@@ -17,14 +17,13 @@ use crate::{
             TimingEntry,
         },
     },
-    extraction::EntityFragment,
+    domain::{Entity, EntityFragment, FileId},
     models::{
-        EmbeddingModelInfo, EmbeddingOptions, EmbeddingPurpose, ModelError, ModelRuntimeLease,
+        EmbeddingInput, EmbeddingModelInfo, EmbeddingOptions, EmbeddingPurpose, ModelError,
+        ModelRuntimeLease,
     },
-    payload::Content,
     storage::spi::{
-        Entity, FileInfo, StorageSearchFilter, StorageSearchHit, StoredEntity,
-        WorkspaceIndexStorage,
+        StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFile, WorkspaceIndexStorage,
     },
 };
 
@@ -63,13 +62,12 @@ pub(crate) struct ResolvedSearchRoute {
 #[derive(Clone, Debug)]
 pub(crate) struct SearchEvidence {
     pub fragment: EntityFragment,
-    pub is_entity: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SearchHit {
     pub entity: Entity,
-    pub file: FileInfo,
+    pub file: StoredFile,
     pub evidence: Vec<SearchEvidence>,
     pub rank: usize,
     pub score: f64,
@@ -102,7 +100,7 @@ impl SearchEmbeddingRuntime for ModelRuntimeLease {
             &queries
                 .iter()
                 .cloned()
-                .map(Content::Text)
+                .map(EmbeddingInput::text)
                 .collect::<Vec<_>>(),
             EmbeddingOptions {
                 purpose: Some(EmbeddingPurpose::Query),
@@ -125,7 +123,7 @@ struct RecallRoute {
 struct Candidate {
     id: String,
     entity: Entity,
-    file: FileInfo,
+    file: StoredFile,
     sources: HashSet<ContextRouteMode>,
     recall: Vec<SearchRecallTrace>,
     evidence: Vec<InternalEvidence>,
@@ -436,25 +434,19 @@ fn resolve_hit_entity(
     hit: &StorageSearchHit,
     storage: &dyn WorkspaceIndexStorage,
 ) -> Result<Option<StoredEntity>, EngineError> {
-    if let Some(group) = hit.fragment.group.as_deref()
-        && group != hit.fragment.id
-    {
-        return storage.get_entity(group);
+    match &hit.fragment {
+        EntityFragment::Standalone(entity) | EntityFragment::Representative(entity) => {
+            Ok(Some(StoredEntity {
+                entity: entity.clone(),
+                file: hit.file.clone(),
+            }))
+        }
+        EntityFragment::Window(window) => storage.get_entity(&window.entity_id),
     }
-    Ok(Some(StoredEntity {
-        entity: Entity {
-            id: public_entity_id(&hit.fragment).to_owned(),
-            file_id: hit.fragment.file_id.clone(),
-            range: hit.fragment.range.clone(),
-            content: hit.fragment.content.clone(),
-            metadata: hit.fragment.metadata.clone(),
-        },
-        file: hit.file.clone(),
-    }))
 }
 
 fn public_entity_id(fragment: &EntityFragment) -> &str {
-    fragment.group.as_deref().unwrap_or(&fragment.id)
+    fragment.entity_id().as_str()
 }
 
 fn add_or_update_recall(recall: &mut Vec<SearchRecallTrace>, next: SearchRecallTrace) {
@@ -506,7 +498,11 @@ fn candidate_to_hit(candidate: Candidate, limit: usize, trace: bool) -> SearchHi
             .cmp(&right.rank)
             .then_with(|| route_mode_order(left.path).cmp(&route_mode_order(right.path)))
             .then_with(|| left.route_id.cmp(&right.route_id))
-            .then_with(|| left.fragment.id.cmp(&right.fragment.id))
+            .then_with(|| {
+                left.fragment
+                    .document_id()
+                    .cmp(right.fragment.document_id())
+            })
     });
     SearchHit {
         entity: candidate.entity,
@@ -514,7 +510,6 @@ fn candidate_to_hit(candidate: Candidate, limit: usize, trace: bool) -> SearchHi
         evidence: evidence
             .into_iter()
             .map(|evidence| SearchEvidence {
-                is_entity: evidence.fragment.id == public_entity_id(&evidence.fragment),
                 fragment: evidence.fragment,
             })
             .collect(),
@@ -624,7 +619,8 @@ fn search_plan_to_storage_filter(
     let file_ids = needs_file_filter
         .then(|| resolve_filtered_file_ids(plan, &storage.list_files()?))
         .transpose()?;
-    let symbol_types = (!plan.symbol_types.is_empty()).then(|| plan.symbol_types.clone());
+    let symbol_types = (!plan.symbol_types.is_empty())
+        .then(|| plan.symbol_types.iter().copied().map(Into::into).collect());
     if file_ids.is_none() && symbol_types.is_none() {
         Ok(None)
     } else {
@@ -638,8 +634,8 @@ fn search_plan_to_storage_filter(
 
 fn resolve_filtered_file_ids(
     plan: &SearchPlan,
-    files: &[FileInfo],
-) -> Result<Vec<String>, EngineError> {
+    files: &[StoredFile],
+) -> Result<Vec<FileId>, EngineError> {
     let include = plan
         .include_paths
         .iter()
@@ -655,8 +651,8 @@ fn resolve_filtered_file_ids(
     Ok(files
         .iter()
         .filter(|file| {
-            let absolute = normalize_path(&file.absolute_path);
-            let relative = normalize_path(&file.relative_path);
+            let absolute = normalize_path(&file.source.absolute_path);
+            let relative = normalize_path(&file.source.relative_path);
             (include.is_empty()
                 || include.iter().any(|matcher| {
                     matcher.is_match(if matcher.absolute {
@@ -673,15 +669,21 @@ fn resolve_filtered_file_ids(
                     })
                 })
                 && matches_ordered_globs(&relative, &ordered_globs)
-                && !types.matched(&file.relative_path, false).is_ignore()
-                && plan
-                    .modified_after_epoch_ms
-                    .is_none_or(|after| file.modified_epoch_ms >= after)
-                && plan
-                    .modified_before_epoch_ms
-                    .is_none_or(|before| file.modified_epoch_ms <= before)
+                && !types.matched(&file.source.relative_path, false).is_ignore()
+                && plan.modified_after_epoch_ms.is_none_or(|after| {
+                    file.source
+                        .snapshot
+                        .modified_epoch_ms
+                        .is_some_and(|modified| modified >= after)
+                })
+                && plan.modified_before_epoch_ms.is_none_or(|before| {
+                    file.source
+                        .snapshot
+                        .modified_epoch_ms
+                        .is_some_and(|modified| modified <= before)
+                })
         })
-        .map(|file| file.id.clone())
+        .map(|file| file.source.id.clone())
         .collect())
 }
 
@@ -877,18 +879,20 @@ mod tests {
     use crate::{
         api::context::{
             options::{ContextRoute, ContextRouteMode},
-            result::{ContentRange, MatchedBy},
+            result::MatchedBy,
         },
-        extraction::{EntityFragment, FileKind},
+        domain::{
+            Content, Entity, EntityContent, EntityFragment, EntityId, FileFormat, FileId,
+            FileSnapshot, FragmentId, SourceFile, SourceRange, TextRange, WindowFragment,
+        },
         models::{
             EmbeddingInputKind, EmbeddingMetric, EmbeddingModelInfo, EmbeddingModelLimits,
             ModelError,
         },
-        payload::Content,
         storage::spi::{
-            Entity, FileIndexDiagnostics, FileIndexStatus, FileInfo, IndexedFragment,
-            ListEntitiesOptions, StorageResult, StorageSearchFilter, StorageSearchHit,
-            StorageSearchPath, StoredEntity, WorkspaceIndexStorage,
+            FileIndexDiagnostics, FileIndexStatus, IndexedFragment, StorageResult,
+            StorageSearchFilter, StorageSearchHit, StorageSearchPath, StoredEntity, StoredFile,
+            WorkspaceIndexStorage,
         },
     };
 
@@ -950,7 +954,7 @@ mod tests {
     }
 
     struct FixtureStorage {
-        files: Vec<FileInfo>,
+        files: Vec<StoredFile>,
         entities: HashMap<String, StoredEntity>,
         fts: HashMap<String, Vec<StorageSearchHit>>,
         vector: Vec<StorageSearchHit>,
@@ -972,17 +976,12 @@ mod tests {
                 .filter(|hit| {
                     filter
                         .and_then(|filter| filter.file_ids.as_ref())
-                        .is_none_or(|ids| ids.contains(&hit.file.id))
+                        .is_none_or(|ids| ids.contains(&hit.file.source.id))
                 })
                 .filter(|hit| {
                     filter
-                        .and_then(|filter| filter.group_ids.as_ref())
-                        .is_none_or(|ids| {
-                            hit.fragment
-                                .group
-                                .as_ref()
-                                .is_some_and(|group| ids.contains(group))
-                        })
+                        .and_then(|filter| filter.entity_ids.as_ref())
+                        .is_none_or(|ids| ids.contains(hit.fragment.entity_id()))
                 })
                 .take(limit)
                 .cloned()
@@ -996,62 +995,12 @@ mod tests {
             true
         }
 
-        fn get_file_by_path(&self, absolute_path: &Path) -> StorageResult<Option<FileInfo>> {
-            Ok(self
-                .files
-                .iter()
-                .find(|file| file.absolute_path == absolute_path)
-                .cloned())
-        }
-
-        fn list_files_by_path_prefix(&self, absolute_path: &Path) -> StorageResult<Vec<FileInfo>> {
-            Ok(self
-                .files
-                .iter()
-                .filter(|file| file.absolute_path.starts_with(absolute_path))
-                .cloned()
-                .collect())
-        }
-
-        fn list_files_by_path_prefixes(
-            &self,
-            absolute_paths: &[PathBuf],
-        ) -> StorageResult<Vec<FileInfo>> {
-            Ok(self
-                .files
-                .iter()
-                .filter(|file| {
-                    absolute_paths
-                        .iter()
-                        .any(|path| file.absolute_path.starts_with(path))
-                })
-                .cloned()
-                .collect())
-        }
-
-        fn list_files(&self) -> StorageResult<Vec<FileInfo>> {
+        fn list_files(&self) -> StorageResult<Vec<StoredFile>> {
             Ok(self.files.clone())
         }
 
-        fn list_entities_by_file(
-            &self,
-            file_id: &str,
-            options: ListEntitiesOptions,
-        ) -> StorageResult<Vec<StoredEntity>> {
-            let offset = options.offset.unwrap_or(0);
-            let limit = options.limit.unwrap_or(usize::MAX);
-            Ok(self
-                .entities
-                .values()
-                .filter(|stored| stored.file.id == file_id)
-                .skip(offset)
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        fn get_entity(&self, entity_id: &str) -> StorageResult<Option<StoredEntity>> {
-            Ok(self.entities.get(entity_id).cloned())
+        fn get_entity(&self, entity_id: &EntityId) -> StorageResult<Option<StoredEntity>> {
+            Ok(self.entities.get(entity_id.as_str()).cloned())
         }
 
         fn search_fts(
@@ -1078,18 +1027,18 @@ mod tests {
 
         fn replace_file(
             &self,
-            _file: &FileInfo,
+            _file: &StoredFile,
             _entries: &[IndexedFragment],
             _diagnostics: Option<&FileIndexDiagnostics>,
         ) -> StorageResult<()> {
             Ok(())
         }
 
-        fn mark_file_failed(&self, _file: &FileInfo, _error: &str) -> StorageResult<()> {
+        fn mark_file_failed(&self, _file: &StoredFile, _error: &str) -> StorageResult<()> {
             Ok(())
         }
 
-        fn delete_file(&self, _file_id: &str) -> StorageResult<()> {
+        fn delete_file(&self, _file_id: &FileId) -> StorageResult<()> {
             Ok(())
         }
 
@@ -1138,8 +1087,8 @@ mod tests {
         .expect("hybrid search");
 
         assert_eq!(result.hits.len(), 2);
-        assert_eq!(result.hits[0].entity.id, "a");
-        assert_eq!(result.hits[1].entity.id, "b");
+        assert_eq!(result.hits[0].entity.id.as_str(), "a");
+        assert_eq!(result.hits[1].entity.id.as_str(), "b");
         assert!(
             result
                 .hits
@@ -1196,14 +1145,11 @@ mod tests {
             .expect("filtered search");
 
         assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].file.id, "source");
+        assert_eq!(result.hits[0].file.source.id.as_str(), "source");
         let filters = filters.lock().expect("captured filters");
-        assert!(
-            filters
-                .iter()
-                .flatten()
-                .all(|filter| { filter.file_ids.as_deref() == Some(&["source".to_owned()]) })
-        );
+        assert!(filters.iter().flatten().all(|filter| {
+            filter.file_ids.as_deref() == Some(&[FileId::new("source").expect("file id")])
+        }));
         assert!(filters.iter().flatten().any(|filter| {
             filter
                 .symbol_names
@@ -1230,17 +1176,24 @@ mod tests {
         }
     }
 
-    fn file(id: &str, relative: &str, format: &str, modified: u64) -> FileInfo {
-        FileInfo {
-            id: id.to_owned(),
-            absolute_path: PathBuf::from("/workspace").join(relative),
-            relative_path: PathBuf::from(relative),
-            root_path: PathBuf::from("/workspace"),
-            size_bytes: 100,
-            modified_epoch_ms: modified,
-            content_hash: None,
-            kind: FileKind::Code,
-            format: format.to_owned(),
+    fn file(id: &str, relative: &str, format: &str, modified: u64) -> StoredFile {
+        StoredFile {
+            source: SourceFile {
+                id: FileId::new(id).expect("file id"),
+                absolute_path: PathBuf::from("/workspace").join(relative),
+                relative_path: PathBuf::from(relative),
+                root_path: PathBuf::from("/workspace"),
+                formats: vec![match format {
+                    "rust" => FileFormat::Rust,
+                    "markdown" => FileFormat::Markdown,
+                    _ => panic!("unexpected fixture format"),
+                }],
+                snapshot: FileSnapshot {
+                    size_bytes: 100,
+                    modified_epoch_ms: Some(modified),
+                    content_hash: None,
+                },
+            },
             index_status: Some(FileIndexStatus {
                 indexed_epoch_ms: Some(modified),
                 entity_count: 1,
@@ -1251,13 +1204,13 @@ mod tests {
         }
     }
 
-    fn entity(id: &str, file: &FileInfo, content: &str) -> StoredEntity {
+    fn entity(id: &str, file: &StoredFile, content: &str) -> StoredEntity {
         StoredEntity {
             entity: Entity {
-                id: id.to_owned(),
-                file_id: file.id.clone(),
+                id: EntityId::new(id).expect("entity id"),
+                file_id: file.source.id.clone(),
                 range: text_range(1, 8),
-                content: Content::Text(content.to_owned()),
+                content: EntityContent::Source(vec![Content::Text(content.to_owned())]),
                 metadata: None,
             },
             file: file.clone(),
@@ -1271,26 +1224,29 @@ mod tests {
         score: f64,
     ) -> StorageSearchHit {
         StorageSearchHit {
-            fragment: EntityFragment {
-                id: fragment_id.to_owned(),
-                group: Some(stored.entity.id.clone()),
-                file_id: stored.file.id.clone(),
+            fragment: EntityFragment::Window(WindowFragment {
+                id: FragmentId::new(fragment_id).expect("fragment id"),
+                entity_id: stored.entity.id.clone(),
+                file_id: stored.file.source.id.clone(),
                 range: text_range(2, 3),
-                content: Content::Text(format!("{} source", stored.entity.id)),
+                contents: vec![Content::Text(format!(
+                    "{} source",
+                    stored.entity.id.as_str()
+                ))],
                 metadata: None,
-            },
+            }),
             file: stored.file.clone(),
             path,
             score,
         }
     }
 
-    fn text_range(start_line: usize, end_line: usize) -> ContentRange {
-        ContentRange::Text {
+    fn text_range(start_line: usize, end_line: usize) -> SourceRange {
+        SourceRange::Text(TextRange {
             start_line,
             end_line,
-            start_offset: 0,
-            end_offset: 10,
-        }
+            start_utf16_offset: 0,
+            end_utf16_offset: 10,
+        })
     }
 }

@@ -25,7 +25,8 @@ use crate::{
     },
     models::{
         CreateEmbeddingModelOptions, EmbeddingMetric, ModelError, ModelRuntimeLease,
-        ModelRuntimeManager, ModelRuntimeRequest,
+        ModelRuntimeManager, ModelRuntimeRequest, ResolveEmbeddingReferenceOptions,
+        resolve_embedding_reference,
     },
     search::context::{NormalizedContextRequest, context_from_index},
     storage::spi::{
@@ -52,14 +53,14 @@ const CURRENT_INDEX_VERSION: u32 = 1;
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
     scanner: NativeScanner,
-    storage_factory: Option<Arc<dyn WorkspaceIndexStorageFactory>>,
+    storage_factory: Arc<dyn WorkspaceIndexStorageFactory>,
 }
 
 impl WorkspaceIndexService {
     pub(crate) fn new() -> Self {
         Self {
             scanner: NativeScanner::default(),
-            storage_factory: None,
+            storage_factory: Arc::new(crate::storage::ZvecStorageFactory::new()),
         }
     }
 
@@ -69,16 +70,25 @@ impl WorkspaceIndexService {
     ) -> Self {
         Self {
             scanner: NativeScanner::default(),
-            storage_factory: Some(storage_factory),
+            storage_factory,
         }
     }
 
     pub(crate) async fn index(
         &self,
         models: &ModelRuntimeManager,
-        options: IndexOptions,
+        mut options: IndexOptions,
     ) -> Result<IndexResult, EngineError> {
-        let factory = self.storage_factory()?;
+        if let Some(cache_dir) = options
+            .embedding
+            .as_mut()
+            .and_then(|embedding| embedding.cache_dir.as_mut())
+        {
+            *cache_dir = std::path::absolute(&*cache_dir).map_err(|error| {
+                EngineError::from_io("failed to resolve model cache directory", &error)
+            })?;
+        }
+        let factory = &self.storage_factory;
         let location = workspace_index_location_from_option(options.root.as_deref())?;
         let _lock = acquire_home_lock(
             &location.home,
@@ -107,7 +117,7 @@ impl WorkspaceIndexService {
         } else {
             existing.as_ref()
         };
-        let roots = resolve_root_paths(&location.root, existing_for_manifest, &options);
+        let roots = resolve_root_paths(&location.root, existing.as_ref(), &options);
         let now = epoch_millis();
         let info = WorkspaceIndexInfo {
             id: existing_for_manifest.map_or_else(
@@ -127,7 +137,7 @@ impl WorkspaceIndexService {
             created_epoch_ms: existing_for_manifest.map_or(now, |manifest| manifest.created_time),
             updated_epoch_ms: now,
         };
-        let runtime = embedding_runtime(existing_for_manifest, &options, &model);
+        let runtime = embedding_runtime(existing.as_ref(), &options, &model);
         let mut manifest = WorkspaceManifest::new(info.clone(), runtime)?;
         let storage = factory.open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: location.home.clone(),
@@ -150,6 +160,9 @@ impl WorkspaceIndexService {
         })
         .await;
         manifest.updated_time = epoch_millis();
+        if let Ok(indexed) = &result {
+            manifest.generation = Some(indexed.generation);
+        }
         let manifest_result = write_workspace_manifest(&location.home, &manifest);
         let close_result = storage.close();
 
@@ -172,7 +185,7 @@ impl WorkspaceIndexService {
                 "no workspace manifest was found",
             ));
         };
-        let factory = self.storage_factory()?;
+        let factory = &self.storage_factory;
         if !factory.exists(&location.home)? {
             return Err(workspace_index_unavailable(
                 &location.root,
@@ -285,13 +298,10 @@ impl WorkspaceIndexService {
             return Ok(unindexed_info(location, WorkspaceIndexPolicy::Undecided));
         };
         let metadata_indexed = is_indexed(&manifest);
-        let storage_exists = match &self.storage_factory {
-            Some(factory) => factory.exists(&location.home)?,
-            None => false,
-        };
+        let storage_exists = self.storage_factory.exists(&location.home)?;
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
-            let factory = self.storage_factory()?;
+            let factory = &self.storage_factory;
             let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
                 storage_path: location.home.clone(),
             })?;
@@ -329,22 +339,16 @@ impl WorkspaceIndexService {
 
     pub(crate) fn drop_index(&self, options: &InfoOptions) -> Result<bool, EngineError> {
         let location = workspace_index_location_from_option(options.root.as_deref())?;
-        if read_workspace_manifest(&location.home)?.is_none() {
+        let factory = &self.storage_factory;
+        if !location.manifest_path.exists() && !factory.exists(&location.home)? {
             return Ok(false);
         }
         let _lock = acquire_home_lock(&location.home, LockMode::Write, "index.drop")?;
-        if read_workspace_manifest(&location.home)?.is_none() {
+        if !location.manifest_path.exists() && !factory.exists(&location.home)? {
             return Ok(false);
         }
-        let factory = self.storage_factory()?;
         reset_workspace_index(&location, factory.as_ref())?;
         Ok(true)
-    }
-
-    fn storage_factory(&self) -> Result<&Arc<dyn WorkspaceIndexStorageFactory>, EngineError> {
-        self.storage_factory
-            .as_ref()
-            .ok_or_else(|| EngineError::unsupported("workspace storage is not configured"))
     }
 }
 
@@ -359,8 +363,7 @@ impl fmt::Debug for WorkspaceIndexService {
         formatter
             .debug_struct("WorkspaceIndexService")
             .field("scanner", &self.scanner)
-            .field("storage_configured", &self.storage_factory.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -379,7 +382,7 @@ fn acquire_model(
             "embedding revision overrides are not supported by the catalog-backed runtime",
         ));
     }
-    let reference = embedding_reference(existing, options.embedding.as_ref());
+    let reference = embedding_reference(existing, options.embedding.as_ref())?;
     let local = reference.starts_with("local/");
     let existing_runtime = existing.map(|manifest| &manifest.embedding_runtime);
     let api_key = if local {
@@ -413,7 +416,8 @@ fn acquire_model(
                 model_cache_dir: options
                     .embedding
                     .as_ref()
-                    .and_then(|embedding| embedding.cache_dir.clone()),
+                    .and_then(|embedding| embedding.cache_dir.clone())
+                    .or_else(|| existing_runtime.and_then(|runtime| runtime.cache_dir.clone())),
                 device,
                 ..CreateEmbeddingModelOptions::default()
             },
@@ -449,6 +453,7 @@ fn acquire_search_model(
                     .then(|| manifest.embedding_runtime.endpoint.clone())
                     .flatten(),
                 device: local.then(|| manifest.embedding_runtime.device.unwrap_or(Device::Auto)),
+                model_cache_dir: manifest.embedding_runtime.cache_dir.clone(),
                 ..CreateEmbeddingModelOptions::default()
             },
             embedding_concurrency,
@@ -459,24 +464,17 @@ fn acquire_search_model(
 fn embedding_reference(
     existing: Option<&WorkspaceManifest>,
     requested: Option<&EmbeddingModelSpec>,
-) -> String {
-    requested
-        .map(|embedding| embedding.reference.clone())
-        .or_else(|| {
-            existing.and_then(|manifest| {
-                manifest
-                    .embedding
-                    .as_ref()
-                    .map(|embedding| format!("{}/{}", embedding.provider, embedding.model))
-            })
-        })
-        .or_else(|| {
-            env::var("ZVEC_GREP_EMBEDDING")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_LOCAL_EMBEDDING.to_owned())
+) -> Result<String, EngineError> {
+    resolve_embedding_reference(ResolveEmbeddingReferenceOptions {
+        explicit: requested.map(|embedding| embedding.reference.clone()),
+        existing: existing
+            .and_then(|manifest| manifest.embedding.as_ref())
+            .map(|embedding| format!("{}/{}", embedding.provider, embedding.model)),
+        fallback: Some(DEFAULT_LOCAL_EMBEDDING.to_owned()),
+        ..ResolveEmbeddingReferenceOptions::default()
+    })
+    .map_err(ModelError::into_engine_error)?
+    .ok_or_else(|| EngineError::internal("default embedding model is not configured"))
 }
 
 fn environment_api_key() -> Option<String> {
@@ -585,6 +583,11 @@ fn embedding_runtime(
         .unwrap_or_default();
     if model.info().provider == "local" {
         EmbeddingRuntimeConfig {
+            cache_dir: options
+                .embedding
+                .as_ref()
+                .and_then(|embedding| embedding.cache_dir.clone())
+                .or(current.cache_dir),
             device: Some(
                 options
                     .embedding
@@ -605,6 +608,7 @@ fn embedding_runtime(
                 .or(current.endpoint)
                 .or_else(|| model.info().endpoint.clone()),
             device: None,
+            cache_dir: None,
         }
     }
 }
@@ -718,7 +722,7 @@ fn epoch_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::{
-        path::{Path, PathBuf},
+        path::Path,
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -731,13 +735,13 @@ mod tests {
         api::{
             index::{
                 IndexOptions,
-                options::{DiscoveryOptions, RootPath},
+                options::{Device, DiscoveryOptions, EmbeddingModelSpec, RootPath},
             },
             info::InfoOptions,
         },
         storage::spi::{
-            FileIndexDiagnostics, FileInfo, IndexedFragment, ListEntitiesOptions, StorageResult,
-            StorageSearchFilter, StorageSearchHit, StoredEntity, WorkspaceIndexStorage,
+            FileIndexDiagnostics, IndexedFragment, StorageResult, StorageSearchFilter,
+            StorageSearchHit, StoredEntity, StoredFile, WorkspaceIndexStorage,
             WorkspaceIndexStorageFactory, WorkspaceIndexStorageOptions,
         },
     };
@@ -783,34 +787,14 @@ mod tests {
             self.read_only
         }
 
-        fn get_file_by_path(&self, _absolute_path: &Path) -> StorageResult<Option<FileInfo>> {
-            Ok(None)
-        }
-
-        fn list_files_by_path_prefix(&self, _absolute_path: &Path) -> StorageResult<Vec<FileInfo>> {
+        fn list_files(&self) -> StorageResult<Vec<StoredFile>> {
             Ok(Vec::new())
         }
 
-        fn list_files_by_path_prefixes(
+        fn get_entity(
             &self,
-            _absolute_paths: &[PathBuf],
-        ) -> StorageResult<Vec<FileInfo>> {
-            Ok(Vec::new())
-        }
-
-        fn list_files(&self) -> StorageResult<Vec<FileInfo>> {
-            Ok(Vec::new())
-        }
-
-        fn list_entities_by_file(
-            &self,
-            _file_id: &str,
-            _options: ListEntitiesOptions,
-        ) -> StorageResult<Vec<StoredEntity>> {
-            Ok(Vec::new())
-        }
-
-        fn get_entity(&self, _entity_id: &str) -> StorageResult<Option<StoredEntity>> {
+            _entity_id: &crate::domain::EntityId,
+        ) -> StorageResult<Option<StoredEntity>> {
             Ok(None)
         }
 
@@ -834,18 +818,18 @@ mod tests {
 
         fn replace_file(
             &self,
-            _file: &FileInfo,
+            _file: &StoredFile,
             _entries: &[IndexedFragment],
             _diagnostics: Option<&FileIndexDiagnostics>,
         ) -> StorageResult<()> {
             Ok(())
         }
 
-        fn mark_file_failed(&self, _file: &FileInfo, _error: &str) -> StorageResult<()> {
+        fn mark_file_failed(&self, _file: &StoredFile, _error: &str) -> StorageResult<()> {
             Ok(())
         }
 
-        fn delete_file(&self, _file_id: &str) -> StorageResult<()> {
+        fn delete_file(&self, _file_id: &crate::domain::FileId) -> StorageResult<()> {
             Ok(())
         }
 
@@ -859,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_missing_index_does_not_require_a_storage_backend() {
+    fn dropping_a_missing_index_is_an_idempotent_no_op() {
         let directory = tempdir().expect("temporary directory");
 
         assert!(
@@ -891,6 +875,13 @@ mod tests {
                         recursive: true,
                         discovery: DiscoveryOptions::default(),
                     }],
+                    embedding: Some(EmbeddingModelSpec {
+                        reference: "local/potion-code-16m-v2".to_owned(),
+                        revision: None,
+                        cache_dir: Some(directory.path().join("model-cache")),
+                        endpoint: None,
+                        device: Device::Cpu,
+                    }),
                     ..IndexOptions::default()
                 },
             )
@@ -908,6 +899,42 @@ mod tests {
             .expect("workspace info");
         assert!(info.indexed);
         assert_eq!(info.status.expect("index status").files_stored, 0);
+        assert_eq!(
+            info.workspace_index.expect("workspace index").generation,
+            Some(1)
+        );
+        let manifest = super::read_workspace_manifest(&info.home)
+            .expect("manifest read")
+            .expect("manifest");
+        assert_eq!(
+            manifest.embedding_runtime.cache_dir,
+            Some(directory.path().join("model-cache"))
+        );
+        let lease = super::acquire_search_model(&models, &manifest, None).expect("search model");
+        assert_eq!(
+            models.snapshot().cached_runtimes,
+            1,
+            "search reuses the configured model cache"
+        );
+        drop(lease);
+
+        service
+            .index(
+                &models,
+                IndexOptions {
+                    root: Some(directory.path().to_path_buf()),
+                    rebuild: true,
+                    ..IndexOptions::default()
+                },
+            )
+            .await
+            .expect("rebuild preserves configured roots and model runtime");
+        let rebuilt = super::read_workspace_manifest(&info.home)
+            .expect("manifest read")
+            .expect("manifest");
+        assert_eq!(rebuilt.root_paths, manifest.root_paths);
+        assert_eq!(rebuilt.embedding_runtime, manifest.embedding_runtime);
+        assert_eq!(rebuilt.generation, Some(1));
 
         assert!(
             service

@@ -683,12 +683,23 @@ fn ignore_rule_matches(rule: &IgnoreRule, relative_path: &str, is_directory: boo
         return false;
     }
     if rule.flags.contains(IgnoreRuleFlags::DIRECTORY_ONLY) {
+        let directory = if is_directory {
+            path
+        } else {
+            let Some((parent, _)) = path.rsplit_once('/') else {
+                return false;
+            };
+            parent
+        };
         if rule.flags.contains(IgnoreRuleFlags::ANCHORED)
             || rule.flags.contains(IgnoreRuleFlags::HAS_SLASH)
         {
-            return rule.pattern.is_match(path);
+            return rule.pattern.is_match(directory)
+                || directory
+                    .match_indices('/')
+                    .any(|(end, _)| rule.pattern.is_match(&directory[..end]));
         }
-        return path
+        return directory
             .split('/')
             .any(|segment| rule.pattern.is_match(segment));
     }
@@ -837,6 +848,26 @@ mod tests {
             parse_gitignore_rules("vendor/\n!vendor/keep.ts\n", "").expect("gitignore rules");
         assert!(policy.path_can_be_scanned("vendor/keep.ts", "keep.ts", false, &rules));
         assert!(!policy.path_can_be_scanned("vendor/drop.ts", "drop.ts", false, &rules));
+    }
+
+    #[test]
+    fn directory_ignore_rules_do_not_exclude_files_with_the_same_name() {
+        let policy = RootPolicy::new(root(DiscoveryOptions::default()), &FileTypeResolver::new())
+            .expect("policy");
+        let rules = policy.initial_ignore_rules();
+        assert!(policy.path_can_be_scanned("tmp", "tmp", false, &rules));
+        assert!(policy.path_can_be_scanned("notes/tmp", "tmp", false, &rules));
+        assert!(!policy.path_can_be_scanned("tmp", "tmp", true, &rules));
+        assert!(!policy.path_can_be_scanned("tmp/note.txt", "note.txt", false, &rules));
+        let rules =
+            parse_gitignore_rules("/nested/build*/\n", "").expect("anchored directory rule");
+        assert!(policy.path_can_be_scanned("nested/build-output", "build-output", false, &rules));
+        assert!(!policy.path_can_be_scanned(
+            "nested/build-output/deep/note.txt",
+            "note.txt",
+            false,
+            &rules
+        ));
     }
 
     #[test]

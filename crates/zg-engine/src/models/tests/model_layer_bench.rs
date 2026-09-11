@@ -9,7 +9,10 @@ use std::{
 use futures_util::future::join_all;
 use serde_json::json;
 
-use crate::{api::index::options::Device, models::spi::EmbeddingOptions, payload::Content};
+use crate::{
+    api::index::options::Device,
+    models::spi::{EmbeddingInput, EmbeddingOptions},
+};
 
 use super::super::{
     ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest, spi::CreateEmbeddingModelOptions,
@@ -156,7 +159,7 @@ const fn device_name(device: Device) -> &'static str {
     }
 }
 
-async fn run_wave(model: &ModelRuntimeLease, batch: &[Content], concurrency: usize) -> f64 {
+async fn run_wave(model: &ModelRuntimeLease, batch: &[EmbeddingInput], concurrency: usize) -> f64 {
     let results =
         join_all((0..concurrency).map(|_| model.embed(batch, EmbeddingOptions::default(), None)))
             .await;
@@ -176,10 +179,10 @@ async fn run_wave(model: &ModelRuntimeLease, batch: &[Content], concurrency: usi
         .sum()
 }
 
-fn benchmark_batch(batch_size: usize) -> Vec<Content> {
+fn benchmark_batch(batch_size: usize) -> Vec<EmbeddingInput> {
     (0..batch_size)
         .map(|index| {
-            Content::Text(format!(
+            EmbeddingInput::text(format!(
                 "pub fn benchmark_{index}(value: usize) -> usize {{ let adjusted = value.wrapping_mul(31).wrapping_add({index}); adjusted ^ 0x5a5a }}"
             ))
         })

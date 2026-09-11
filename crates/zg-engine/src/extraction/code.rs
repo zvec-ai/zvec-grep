@@ -6,23 +6,22 @@ use tree_sitter::{Language, Node, Parser};
 
 use crate::{
     EngineError,
-    api::context::{
-        options::SymbolType,
-        result::{ContentRange, EntityMetadata},
+    domain::{
+        Content, Entity, EntityContent, EntityFragment, EntityMetadata, FileFormat, FileId,
+        FragmentId, SourceRange, SymbolType, WindowFragment,
     },
-    payload::Content,
 };
 
 use self::adapter::{LanguageAdapter, named_children, resolve_adapter, text};
 use super::{
-    ChunkOptions, EntityFragment, FileKind, IndexingExtractionFragment, TextRange, TextSource,
-    byte_index_at_utf16, byte_index_at_utf16_ceil, char_count, chunk_options_for_metadata,
-    make_entity_id, symbol_type_name, text::extract_plain_text_fragments, validate_source_file,
+    ChunkOptions, IndexingExtractionFragment, TextRange, TextSource, byte_index_at_utf16,
+    byte_index_at_utf16_ceil, char_count, chunk_options_for_metadata, make_entity_id,
+    symbol_type_name, text::extract_plain_text_fragments, validate_source_file,
 };
 
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS: usize = 540;
-const COMPONENT_CODE_FORMATS: [&str; 2] = ["vue", "svelte"];
+const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Svelte];
 const OUTLINE_MAX_MEMBERS: usize = 32;
 const OUTLINE_MAX_CALLS: usize = 24;
 const OUTLINE_MAX_LINE_CHARS: usize = 180;
@@ -79,13 +78,31 @@ pub(super) fn extract_for_indexing(
     source: &TextSource,
     options: ChunkOptions,
 ) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
-    if source.file.kind != FileKind::Code {
+    let jsx = source
+        .file
+        .absolute_path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
+    extract_code(source, options, jsx)
+}
+
+fn extract_code(
+    source: &TextSource,
+    options: ChunkOptions,
+    jsx: bool,
+) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
+    if !super::service::is_code_source(&source.file) {
         return Ok(Vec::new());
     }
     validate_source_file(&source.file)?;
     let (max_chars, overlap_chars) = resolve_options(options)?;
 
-    if COMPONENT_CODE_FORMATS.contains(&source.file.format.as_str()) {
+    if source
+        .file
+        .formats
+        .iter()
+        .any(|format| COMPONENT_CODE_FORMATS.contains(format))
+    {
         let fragments = extract_script_blocks(source, max_chars, overlap_chars)?;
         return if fragments.is_empty() {
             Ok(fallback(source, max_chars, overlap_chars))
@@ -94,10 +111,19 @@ pub(super) fn extract_for_indexing(
         };
     }
 
-    let Some(adapter) = resolve_adapter(&source.file.format) else {
-        return Ok(fallback(source, max_chars, overlap_chars));
+    let format = if source.file.formats.contains(&FileFormat::Cpp) {
+        Some(FileFormat::Cpp)
+    } else {
+        source
+            .file
+            .formats
+            .iter()
+            .copied()
+            .find(|format| resolve_adapter(*format).is_some())
     };
-    let Some(language) = grammar(&source.file.format) else {
+    let Some((adapter, language)) =
+        format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?)))
+    else {
         return Ok(fallback(source, max_chars, overlap_chars));
     };
 
@@ -132,17 +158,17 @@ pub(super) fn extract_for_indexing(
     }
 }
 
-fn grammar(format: &str) -> Option<Language> {
+fn grammar(format: FileFormat, jsx: bool) -> Option<Language> {
     Some(match format {
-        "c" => tree_sitter_c::LANGUAGE.into(),
-        "cpp" => tree_sitter_cpp::LANGUAGE.into(),
-        "go" => tree_sitter_go::LANGUAGE.into(),
-        "java" => tree_sitter_java::LANGUAGE.into(),
-        "javascript" | "jsx" => tree_sitter_javascript::LANGUAGE.into(),
-        "python" => tree_sitter_python::LANGUAGE.into(),
-        "rust" => tree_sitter_rust::LANGUAGE.into(),
-        "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        FileFormat::C => tree_sitter_c::LANGUAGE.into(),
+        FileFormat::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        FileFormat::Go => tree_sitter_go::LANGUAGE.into(),
+        FileFormat::Java => tree_sitter_java::LANGUAGE.into(),
+        FileFormat::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        FileFormat::Python => tree_sitter_python::LANGUAGE.into(),
+        FileFormat::Rust => tree_sitter_rust::LANGUAGE.into(),
+        FileFormat::TypeScript if !jsx => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        FileFormat::TypeScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         _ => return None,
     })
 }
@@ -200,7 +226,7 @@ struct CodeWindow {
 #[derive(Debug)]
 struct CodeFragmentOutput {
     starts_group: bool,
-    range: ContentRange,
+    range: SourceRange,
     content: Content,
     metadata: EntityMetadata,
     embedding_text: Option<String>,
@@ -269,21 +295,40 @@ fn append_entity(
 
     for fragment in fragments {
         let id = make_entity_id(&source.file.id, output.len());
-        let group = if fragment.starts_group {
-            Some(id.clone())
-        } else {
-            major_id.clone()
-        };
-        output.push(IndexingExtractionFragment {
-            embedding_source: fragment.embedding_text.map(Content::Text),
-            fragment: EntityFragment {
+        let entity_fragment = if fragment.starts_group {
+            let Content::Text(outline) = fragment.content else {
+                unreachable!("code outline is text");
+            };
+            EntityFragment::Representative(Entity {
                 id,
-                group,
                 file_id: source.file.id.clone(),
                 range: fragment.range,
-                content: fragment.content,
+                content: EntityContent::Outline(outline),
                 metadata: Some(fragment.metadata),
-            },
+            })
+        } else if let Some(entity_id) = &major_id {
+            EntityFragment::Window(WindowFragment {
+                id: FragmentId::new(id.as_str()).expect("generated fragment id"),
+                entity_id: entity_id.clone(),
+                file_id: source.file.id.clone(),
+                range: fragment.range,
+                contents: vec![fragment.content],
+                metadata: Some(fragment.metadata),
+            })
+        } else {
+            EntityFragment::Standalone(Entity {
+                id,
+                file_id: source.file.id.clone(),
+                range: fragment.range,
+                content: EntityContent::Source(vec![fragment.content]),
+                metadata: Some(fragment.metadata),
+            })
+        };
+        output.push(IndexingExtractionFragment {
+            embedding_source: fragment
+                .embedding_text
+                .map(|text| vec![Content::Text(text)]),
+            fragment: entity_fragment,
         });
     }
 }
@@ -309,9 +354,9 @@ fn code_entity_to_search_fragments(
 
     let major = CodeFragmentOutput {
         starts_group: true,
-        range: node_to_window(entity.node, source.text.as_bytes(), offsets)
-            .range
-            .into(),
+        range: SourceRange::Text(
+            node_to_window(entity.node, source.text.as_bytes(), offsets).range,
+        ),
         content: Content::Text(code_entity_outline(
             entity,
             adapter,
@@ -339,7 +384,7 @@ fn code_entity_to_search_fragments(
 fn window_to_fragment(entity: &CodeEntity<'_>, window: CodeWindow) -> CodeFragmentOutput {
     CodeFragmentOutput {
         starts_group: false,
-        range: window.range.into(),
+        range: SourceRange::Text(window.range),
         content: Content::Text(window.text),
         metadata: code_entity_metadata(entity),
         embedding_text: window.embedding_text,
@@ -353,8 +398,8 @@ fn node_to_window(node: Node<'_>, source: &[u8], offsets: &Utf16LineIndex<'_>) -
         range: TextRange {
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
-            start_offset: offsets.offset(node.start_byte(), node.start_position().row),
-            end_offset: offsets.offset(node.end_byte(), node.end_position().row),
+            start_utf16_offset: offsets.offset(node.start_byte(), node.start_position().row),
+            end_utf16_offset: offsets.offset(node.end_byte(), node.end_position().row),
         },
     }
 }
@@ -470,8 +515,8 @@ fn slice_statements(
         range: TextRange {
             start_line: statements[start_index].start_position().row + 1,
             end_line: statements[end_index].end_position().row + 1,
-            start_offset: offsets.offset(start, statements[start_index].start_position().row),
-            end_offset: offsets.offset(end, statements[end_index].end_position().row),
+            start_utf16_offset: offsets.offset(start, statements[start_index].start_position().row),
+            end_utf16_offset: offsets.offset(end, statements[end_index].end_position().row),
         },
     }
 }
@@ -480,11 +525,11 @@ fn split_text_by_lines(
     value: &str,
     max_chars: usize,
     start_line: usize,
-    start_offset: usize,
+    start_utf16_offset: usize,
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
     let lines = value.split('\n').collect::<Vec<_>>();
-    let line_offsets = line_byte_offsets(&lines);
+    let line_offsets = line_utf16_offsets(&lines);
     let mut windows = Vec::new();
     let mut line_index = 0;
 
@@ -494,7 +539,7 @@ fn split_text_by_lines(
                 lines[line_index],
                 max_chars,
                 start_line + line_index,
-                start_offset + line_offsets[line_index],
+                start_utf16_offset + line_offsets[line_index],
                 overlap_chars,
             ));
             line_index += 1;
@@ -518,8 +563,10 @@ fn split_text_by_lines(
             range: TextRange {
                 start_line: start_line + line_index,
                 end_line: start_line + end_index - 1,
-                start_offset: start_offset + line_offsets[line_index],
-                end_offset: start_offset + line_offsets[line_index] + char_count(&chunk),
+                start_utf16_offset: start_utf16_offset + line_offsets[line_index],
+                end_utf16_offset: start_utf16_offset
+                    + line_offsets[line_index]
+                    + char_count(&chunk),
             },
         });
         if end_index >= lines.len() {
@@ -535,7 +582,7 @@ fn split_long_line_by_chars(
     line: &str,
     max_chars: usize,
     line_number: usize,
-    start_offset: usize,
+    start_utf16_offset: usize,
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
     let total_chars = char_count(line);
@@ -556,8 +603,8 @@ fn split_long_line_by_chars(
             range: TextRange {
                 start_line: line_number,
                 end_line: line_number,
-                start_offset: start_offset + actual_start,
-                end_offset: start_offset + actual_end,
+                start_utf16_offset: start_utf16_offset + actual_start,
+                end_utf16_offset: start_utf16_offset + actual_end,
             },
         });
         if actual_end >= total_chars {
@@ -568,7 +615,7 @@ fn split_long_line_by_chars(
     windows
 }
 
-fn line_byte_offsets(lines: &[&str]) -> Vec<usize> {
+fn line_utf16_offsets(lines: &[&str]) -> Vec<usize> {
     let mut offset = 0;
     lines
         .iter()
@@ -873,9 +920,10 @@ fn normalized_node_type(node_type: &str) -> &str {
 #[derive(Debug)]
 struct ScriptBlock<'source> {
     text: &'source str,
-    format: &'static str,
+    format: FileFormat,
+    jsx: bool,
     start_line: usize,
-    start_offset: usize,
+    start_utf16_offset: usize,
 }
 
 fn extract_script_blocks(
@@ -886,21 +934,22 @@ fn extract_script_blocks(
     let mut fragments = Vec::new();
     for block in find_script_blocks(&source.text) {
         let mut block_source = source.clone();
-        block.format.clone_into(&mut block_source.file.format);
+        block_source.file.formats = vec![block.format];
         block.text.clone_into(&mut block_source.text);
-        let block_fragments = extract_for_indexing(
+        let block_fragments = extract_code(
             &block_source,
             ChunkOptions {
                 max_chunk_chars: Some(max_chars),
                 chunk_overlap_chars: Some(overlap_chars),
             },
+            block.jsx,
         )?;
         let remapped = remap_script_block_fragments(
             &source.file.id,
             block_fragments,
             fragments.len(),
             block.start_line,
-            block.start_offset,
+            block.start_utf16_offset,
         );
         fragments.extend(remapped);
     }
@@ -930,11 +979,13 @@ fn find_script_blocks(value: &str) -> Vec<ScriptBlock<'_>> {
             break;
         };
         let attrs = &value[after_name..tag_end];
+        let (format, jsx) = script_block_format(attrs);
         blocks.push(ScriptBlock {
             text: &value[content_start..close],
-            format: script_block_format(attrs),
+            format,
+            jsx,
             start_line: line_at_offset(bytes, content_start),
-            start_offset: char_count(&value[..content_start]),
+            start_utf16_offset: char_count(&value[..content_start]),
         });
         cursor = close + b"</script>".len();
     }
@@ -959,17 +1010,17 @@ fn line_at_offset(source: &[u8], offset: usize) -> usize {
     line
 }
 
-fn script_block_format(attrs: &str) -> &'static str {
+fn script_block_format(attrs: &str) -> (FileFormat, bool) {
     let bytes = attrs.as_bytes();
     let Some(position) = find_ascii_case_insensitive(bytes, b"lang", 0) else {
-        return "javascript";
+        return (FileFormat::JavaScript, false);
     };
     let mut index = position + 4;
     while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
         index += 1;
     }
     if bytes.get(index) != Some(&b'=') {
-        return "javascript";
+        return (FileFormat::JavaScript, false);
     }
     index += 1;
     while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
@@ -990,26 +1041,26 @@ fn script_block_format(attrs: &str) -> &'static str {
         index += 1;
     }
     match attrs[start..index].to_ascii_lowercase().as_str() {
-        "ts" | "typescript" => "typescript",
-        "tsx" => "tsx",
-        "jsx" => "jsx",
-        _ => "javascript",
+        "ts" | "typescript" => (FileFormat::TypeScript, false),
+        "tsx" => (FileFormat::TypeScript, true),
+        "jsx" => (FileFormat::JavaScript, true),
+        _ => (FileFormat::JavaScript, false),
     }
 }
 
 fn remap_script_block_fragments(
-    file_id: &str,
+    file_id: &FileId,
     fragments: Vec<IndexingExtractionFragment>,
     start_index: usize,
     start_line: usize,
-    start_offset: usize,
+    start_utf16_offset: usize,
 ) -> Vec<IndexingExtractionFragment> {
     let id_map = fragments
         .iter()
         .enumerate()
         .map(|(index, item)| {
             (
-                item.fragment.id.clone(),
+                item.fragment.document_id().to_owned(),
                 make_entity_id(file_id, start_index + index),
             )
         })
@@ -1018,26 +1069,31 @@ fn remap_script_block_fragments(
     fragments
         .into_iter()
         .map(|mut item| {
-            item.fragment.id = id_map
-                .get(&item.fragment.id)
-                .cloned()
-                .unwrap_or(item.fragment.id);
-            item.fragment.group = item
-                .fragment
-                .group
-                .and_then(|group| id_map.get(&group).cloned().or(Some(group)));
-            file_id.clone_into(&mut item.fragment.file_id);
-            if let ContentRange::Text {
-                start_line: range_start_line,
-                end_line,
-                start_offset: range_start_offset,
-                end_offset,
-            } = &mut item.fragment.range
-            {
-                *range_start_line += start_line - 1;
-                *end_line += start_line - 1;
-                *range_start_offset += start_offset;
-                *end_offset += start_offset;
+            let id = id_map
+                .get(item.fragment.document_id())
+                .expect("fragment ID is registered")
+                .clone();
+            let range = match &mut item.fragment {
+                EntityFragment::Standalone(entity) | EntityFragment::Representative(entity) => {
+                    entity.id = id;
+                    entity.file_id = file_id.clone();
+                    &mut entity.range
+                }
+                EntityFragment::Window(window) => {
+                    window.id = FragmentId::new(id.as_str()).expect("generated fragment id");
+                    window.entity_id = id_map
+                        .get(window.entity_id.as_str())
+                        .expect("window owner is registered")
+                        .clone();
+                    window.file_id = file_id.clone();
+                    &mut window.range
+                }
+            };
+            if let SourceRange::Text(range) = range {
+                range.start_line += start_line - 1;
+                range.end_line += start_line - 1;
+                range.start_utf16_offset += start_utf16_offset;
+                range.end_utf16_offset += start_utf16_offset;
             }
             item
         })
@@ -1048,15 +1104,11 @@ fn remap_script_block_fragments(
 mod tests {
     use std::collections::HashSet;
 
-    use crate::{
-        api::context::{
-            options::SymbolType,
-            result::{ContentRange, EntityMetadata},
-        },
-        payload::Content,
+    use crate::domain::{
+        Content, EntityFragment, EntityMetadata, FileFormat, SourceRange, SymbolType, TextRange,
     };
 
-    use super::super::FileKind;
+    use super::super::test_content;
 
     use super::super::{
         ChunkOptions, byte_index_at_utf16, extract, extract_for_indexing, test_source,
@@ -1067,34 +1119,33 @@ mod tests {
         fragments
             .iter()
             .find(|fragment| matches!(
-                &fragment.metadata,
+                &fragment.metadata(),
                 Some(EntityMetadata::Code { symbol_name: Some(candidate), .. }) if candidate == name
             ))
             .unwrap_or_else(|| panic!("expected fragment for {name}"))
     }
 
     fn assert_source_backed(source: &super::TextSource, fragment: &super::EntityFragment) {
-        let Content::Text(content) = &fragment.content else {
+        let Content::Text(content) = &test_content(fragment) else {
             panic!("text fragment expected");
         };
-        let ContentRange::Text {
-            start_offset,
-            end_offset,
+        let SourceRange::Text(TextRange {
+            start_utf16_offset,
+            end_utf16_offset,
             ..
-        } = fragment.range
+        }) = *fragment.range()
         else {
             panic!("text range expected");
         };
-        let start_byte = byte_index_at_utf16(&source.text, start_offset);
-        let end_byte = byte_index_at_utf16(&source.text, end_offset);
+        let start_byte = byte_index_at_utf16(&source.text, start_utf16_offset);
+        let end_byte = byte_index_at_utf16(&source.text, end_utf16_offset);
         assert_eq!(content, &source.text[start_byte..end_byte]);
     }
 
     #[test]
     fn preserves_typescript_metadata_scope_and_source_ranges() {
         let source = test_source(
-            FileKind::Code,
-            "typescript",
+            FileFormat::TypeScript,
             "contract.ts",
             &[
                 "/** Adds one. */",
@@ -1124,7 +1175,7 @@ mod tests {
         assert_source_backed(&source, publish);
         assert_source_backed(&source, create);
         assert_eq!(
-            add.metadata,
+            add.metadata().cloned(),
             Some(EntityMetadata::Code {
                 symbol_type: SymbolType::Function,
                 symbol_name: Some("add".to_owned()),
@@ -1136,11 +1187,11 @@ mod tests {
             })
         );
         assert!(matches!(
-            &publish.metadata,
+            &publish.metadata(),
             Some(EntityMetadata::Code { modifiers, .. }) if modifiers == &["exported"]
         ));
         assert_eq!(
-            create.metadata,
+            create.metadata().cloned(),
             Some(EntityMetadata::Code {
                 symbol_type: SymbolType::Function,
                 symbol_name: Some("create".to_owned()),
@@ -1152,24 +1203,28 @@ mod tests {
             })
         );
         assert!(matches!(
-            add.range,
-            ContentRange::Text { start_line: 2, .. }
+            *add.range(),
+            SourceRange::Text(TextRange { start_line: 2, .. })
         ));
         assert!(matches!(
-            create.range,
-            ContentRange::Text { start_line: 8, .. }
+            *create.range(),
+            SourceRange::Text(TextRange { start_line: 8, .. })
         ));
         assert_eq!(
             fragments
                 .iter()
-                .map(|fragment| &fragment.id)
+                .map(EntityFragment::document_id)
                 .collect::<HashSet<_>>()
                 .len(),
             fragments.len()
         );
-        assert!(fragments.iter().all(|fragment| fragment.id.len() == 64));
+        assert!(
+            fragments
+                .iter()
+                .all(|fragment| fragment.document_id().len() == 64)
+        );
         assert_eq!(
-            fragments[0].id,
+            fragments[0].document_id(),
             "be01deb2fd2d1004f29eef026b65afd85dedebc81db8eb7691e3d88116663b74"
         );
     }
@@ -1177,14 +1232,13 @@ mod tests {
     #[test]
     fn preserves_c_go_and_python_language_specific_metadata() {
         let c_source = test_source(
-            FileKind::Code,
-            "c",
+            FileFormat::C,
             "fixture.c",
             "typedef struct Widget { int value; } Widget;\nstatic int add(int a, int b) { return a + b; }",
         );
         let c = extract(&c_source, ChunkOptions::default()).expect("c extraction");
         assert_eq!(
-            named(&c, "Widget").metadata,
+            named(&c, "Widget").metadata().cloned(),
             Some(EntityMetadata::Code {
                 symbol_type: SymbolType::Class,
                 symbol_name: Some("Widget".to_owned()),
@@ -1196,13 +1250,12 @@ mod tests {
             })
         );
         assert!(matches!(
-            &named(&c, "add").metadata,
+            &named(&c, "add").metadata(),
             Some(EntityMetadata::Code { modifiers, .. }) if modifiers == &["static"]
         ));
 
         let go_source = test_source(
-            FileKind::Code,
-            "go",
+            FileFormat::Go,
             "fixture.go",
             &[
                 "package demo",
@@ -1214,7 +1267,7 @@ mod tests {
         );
         let go = extract(&go_source, ChunkOptions::default()).expect("go extraction");
         assert_eq!(
-            named(&go, "Value").metadata,
+            named(&go, "Value").metadata().cloned(),
             Some(EntityMetadata::Code {
                 symbol_type: SymbolType::Function,
                 symbol_name: Some("Value".to_owned()),
@@ -1226,26 +1279,25 @@ mod tests {
             })
         );
         assert!(matches!(
-            &named(&go, "Reader").metadata,
+            &named(&go, "Reader").metadata(),
             Some(EntityMetadata::Code {
                 symbol_type: SymbolType::Interface,
                 ..
             })
         ));
         assert!(matches!(
-            &named(&go, "Read").metadata,
+            &named(&go, "Read").metadata(),
             Some(EntityMetadata::Code { scope: Some(scope), .. }) if scope == "Reader"
         ));
 
         let python_source = test_source(
-            FileKind::Code,
-            "python",
+            FileFormat::Python,
             "fixture.py",
             "class Service:\n    @staticmethod\n    async def fetch(value: str) -> str:\n        return value",
         );
         let python = extract(&python_source, ChunkOptions::default()).expect("python extraction");
         assert_eq!(
-            named(&python, "fetch").metadata,
+            named(&python, "fetch").metadata().cloned(),
             Some(EntityMetadata::Code {
                 symbol_type: SymbolType::Function,
                 symbol_name: Some("fetch".to_owned()),
@@ -1262,50 +1314,56 @@ mod tests {
     fn supports_the_typescript_language_matrix() {
         let fixtures = [
             (
-                "c",
+                FileFormat::C,
                 "fixture.c",
                 "int add(int a, int b) { return a + b; }",
                 "add",
             ),
             (
-                "cpp",
+                FileFormat::Cpp,
                 "fixture.cpp",
                 "class Widget { public: int value() { return 1; } };",
                 "Widget",
             ),
             (
-                "go",
+                FileFormat::Go,
                 "fixture.go",
                 "package main\nfunc Add(a int, b int) int { return a + b }",
                 "Add",
             ),
             (
-                "java",
+                FileFormat::Java,
                 "fixture.java",
                 "class Widget { public int value() { return 1; } }",
                 "Widget",
             ),
             (
-                "python",
+                FileFormat::Python,
                 "fixture.py",
                 "class Widget:\n    def value(self):\n        return 1",
                 "Widget",
             ),
             (
-                "rust",
+                FileFormat::Rust,
                 "fixture.rs",
                 "pub struct Widget { value: i32 }\nimpl Widget { pub fn value(&self) -> i32 { self.value } }",
                 "Widget",
             ),
             (
-                "javascript",
+                FileFormat::JavaScript,
                 "fixture.js",
                 "/** docs */\nexport class Widget { static value() { return 1; } }",
                 "Widget",
             ),
+            (
+                FileFormat::TypeScript,
+                "fixture.tsx",
+                "export function Widget() { return <div>Hello</div>; }",
+                "Widget",
+            ),
         ];
         for (format, path, source_text, expected) in fixtures {
-            let source = test_source(FileKind::Code, format, path, source_text);
+            let source = test_source(format, path, source_text);
             let fragments = extract(
                 &source,
                 ChunkOptions {
@@ -1313,13 +1371,13 @@ mod tests {
                     chunk_overlap_chars: Some(50),
                 },
             )
-            .unwrap_or_else(|error| panic!("{format}: {error}"));
+            .unwrap_or_else(|error| panic!("{format:?}: {error}"));
             assert!(
                 fragments.iter().any(|fragment| matches!(
-                    &fragment.metadata,
+                    &fragment.metadata(),
                     Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == expected
                 )),
-                "{format} should expose {expected}"
+                "{format:?} should expose {expected}"
             );
         }
     }
@@ -1327,8 +1385,7 @@ mod tests {
     #[test]
     fn large_entities_emit_outlines_grouped_windows_and_compact_embeddings() {
         let source = test_source(
-            FileKind::Code,
-            "typescript",
+            FileFormat::TypeScript,
             "large.ts",
             &[
                 "export class Service {",
@@ -1353,33 +1410,33 @@ mod tests {
         )
         .expect("large extraction");
         let service = prepared.iter().find(|item| {
-            item.fragment.group.as_ref() == Some(&item.fragment.id)
+            matches!(item.fragment, EntityFragment::Representative(_))
                 && matches!(
-                    &item.fragment.metadata,
+                    &item.fragment.metadata(),
                     Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == "Service"
                 )
         }).expect("service outline");
-        let Content::Text(service_text) = &service.fragment.content else {
+        let Content::Text(service_text) = &test_content(&service.fragment) else {
             panic!("outline text expected");
         };
         assert!(service_text.contains("members:"));
         assert!(service_text.contains("function first(value: string)"));
 
         let function = prepared.iter().find(|item| {
-            item.fragment.group.as_ref() == Some(&item.fragment.id)
+            matches!(item.fragment, EntityFragment::Representative(_))
                 && matches!(
-                    &item.fragment.metadata,
+                    &item.fragment.metadata(),
                     Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == "orchestrate"
                 )
         }).expect("function outline");
-        let Content::Text(function_text) = &function.fragment.content else {
+        let Content::Text(function_text) = &test_content(&function.fragment) else {
             panic!("outline text expected");
         };
         assert!(function_text.contains("calls: load, client.fetch, finalize"));
 
         for item in prepared.iter().filter(|item| {
-            item.fragment.group.as_ref() == Some(&service.fragment.id)
-                && item.fragment.id != service.fragment.id
+            item.fragment.entity_id() == service.fragment.entity_id()
+                && matches!(item.fragment, EntityFragment::Window(_))
         }) {
             assert_source_backed(&source, &item.fragment);
         }
@@ -1388,8 +1445,7 @@ mod tests {
     #[test]
     fn compacts_ast_gaps_for_embedding_without_changing_stored_source() {
         let source = test_source(
-            FileKind::Code,
-            "python",
+            FileFormat::Python,
             "spaced.py",
             &[
                 "def spaced() -> str:".to_owned(),
@@ -1416,24 +1472,24 @@ mod tests {
             .iter()
             .find(|item| {
                 matches!(
-                    &item.embedding_source,
-                    Some(Content::Text(value))
+                    item.embedding_source.as_deref(),
+                    Some([Content::Text(value)])
                         if value.contains("first_value = prepare()")
                             && value.contains("second_value = transform(first_value)")
                 )
             })
             .expect("compact embedding window");
         assert_source_backed(&source, &compact.fragment);
-        let Some(Content::Text(embedding)) = compact.embedding_source.as_ref() else {
+        let Some([Content::Text(embedding)]) = compact.embedding_source.as_deref() else {
             panic!("embedding text expected");
         };
         assert!(!embedding.contains("\n\n"));
         let vector = vector_content_for_fragment(
             &compact.fragment,
-            compact.embedding_source.as_ref(),
+            compact.embedding_source.as_deref(),
             Some(120),
         );
-        let Content::Text(vector) = vector else {
+        let [Content::Text(vector)] = vector.as_slice() else {
             panic!("vector text expected");
         };
         assert!(vector.chars().count() <= 120);
@@ -1443,8 +1499,7 @@ mod tests {
     #[test]
     fn remaps_component_script_blocks_and_preserves_fallbacks() {
         let source = test_source(
-            FileKind::Code,
-            "svelte",
+            FileFormat::Svelte,
             "fixture.svelte",
             &[
                 "<h1>Hello 😀</h1>",
@@ -1464,31 +1519,28 @@ mod tests {
         assert_source_backed(&source, first);
         assert_source_backed(&source, second);
         assert!(matches!(
-            first.range,
-            ContentRange::Text { start_line: 3, .. }
+            first.range(),
+            SourceRange::Text(TextRange { start_line: 3, .. })
         ));
         assert!(matches!(
-            second.range,
-            ContentRange::Text { start_line: 7, .. }
+            second.range(),
+            SourceRange::Text(TextRange { start_line: 7, .. })
         ));
 
-        let no_script = test_source(
-            FileKind::Code,
-            "svelte",
-            "plain.svelte",
-            "<h1>No script</h1>",
-        );
+        let no_script = test_source(FileFormat::Svelte, "plain.svelte", "<h1>No script</h1>");
         let fallback = extract(&no_script, ChunkOptions::default()).expect("component fallback");
         assert_eq!(fallback.len(), 1);
-        assert_eq!(fallback[0].content, Content::Text(no_script.text.clone()));
-        assert!(fallback[0].metadata.is_none());
+        assert_eq!(
+            test_content(&fallback[0]),
+            Content::Text(no_script.text.clone())
+        );
+        assert!(fallback[0].metadata().is_none());
     }
 
     #[test]
     fn unicode_windows_are_source_backed_and_character_bounded() {
         let source = test_source(
-            FileKind::Code,
-            "typescript",
+            FileFormat::TypeScript,
             "unicode.ts",
             &format!(
                 "export function emoji() {{ return \"{}\"; }}",
@@ -1507,15 +1559,15 @@ mod tests {
             .iter()
             .filter(|fragment| {
                 matches!(
-                    &fragment.metadata,
+                    &fragment.metadata(),
                     Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == "emoji"
-                ) && fragment.group.as_ref() != Some(&fragment.id)
+                ) && !matches!(fragment, EntityFragment::Representative(_))
             })
             .collect::<Vec<_>>();
         assert!(windows.len() > 2);
         for fragment in windows {
             assert_source_backed(&source, fragment);
-            let Content::Text(content) = &fragment.content else {
+            let Content::Text(content) = &test_content(fragment) else {
                 panic!("text expected");
             };
             assert!(content.chars().count() <= 31);
@@ -1525,19 +1577,21 @@ mod tests {
     #[test]
     fn reports_utf16_offsets_before_structured_entities() {
         let source = test_source(
-            FileKind::Code,
-            "typescript",
+            FileFormat::TypeScript,
             "offsets.ts",
             "const prefix = \"😀\";\nexport function afterEmoji() { return true; }",
         );
         let fragments = extract(&source, ChunkOptions::default()).expect("offset extraction");
         let fragment = named(&fragments, "afterEmoji");
         assert_source_backed(&source, fragment);
-        let ContentRange::Text { start_offset, .. } = fragment.range else {
+        let SourceRange::Text(TextRange {
+            start_utf16_offset, ..
+        }) = *fragment.range()
+        else {
             panic!("text range expected");
         };
         assert_eq!(
-            start_offset,
+            start_utf16_offset,
             "const prefix = \"😀\";\nexport ".encode_utf16().count()
         );
     }
@@ -1545,18 +1599,16 @@ mod tests {
     #[test]
     fn unsupported_and_declaration_free_code_fall_back_to_plain_text() {
         for source in [
-            test_source(FileKind::Code, "unknown", "fixture.rb", "puts 'hello'"),
-            test_source(
-                FileKind::Code,
-                "typescript",
-                "plain.ts",
-                "// no declarations",
-            ),
+            test_source(FileFormat::Ruby, "fixture.rb", "puts 'hello'"),
+            test_source(FileFormat::TypeScript, "plain.ts", "// no declarations"),
         ] {
             let fragments = extract(&source, ChunkOptions::default()).expect("fallback");
             assert_eq!(fragments.len(), 1);
-            assert_eq!(fragments[0].content, Content::Text(source.text.clone()));
-            assert!(fragments[0].metadata.is_none());
+            assert_eq!(
+                test_content(&fragments[0]),
+                Content::Text(source.text.clone())
+            );
+            assert!(fragments[0].metadata().is_none());
         }
     }
 }

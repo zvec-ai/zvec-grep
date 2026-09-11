@@ -243,13 +243,8 @@ fn context_from_lexical(query: String, reply: LexicalSearchReply) -> ContextResu
     }
 }
 
-fn lexical_range(range: crate::lexical::types::TextRange) -> ContentRange {
-    ContentRange::Text {
-        start_line: range.start_line,
-        end_line: range.end_line,
-        start_offset: range.start_offset,
-        end_offset: range.end_offset,
-    }
+fn lexical_range(range: crate::domain::LineColumnRange) -> ContentRange {
+    range.into()
 }
 
 fn resolve_root(root: Option<&Path>) -> Result<PathBuf, EngineError> {

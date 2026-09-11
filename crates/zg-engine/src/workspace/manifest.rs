@@ -29,6 +29,8 @@ pub(crate) struct EmbeddingRuntimeConfig {
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<Device>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -42,6 +44,8 @@ pub(crate) struct WorkspaceManifest {
     pub index_policy: WorkspaceIndexPolicy,
     pub embedding: Option<WorkspaceIndexEmbedding>,
     pub index_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub created_time: u64,
     pub updated_time: u64,
     pub embedding_runtime: EmbeddingRuntimeConfig,
@@ -96,6 +100,7 @@ impl WorkspaceManifest {
             index_policy: info.policy,
             embedding: info.embedding,
             index_version: info.index_version,
+            generation: info.generation,
             created_time: info.created_epoch_ms,
             updated_time: info.updated_epoch_ms,
             embedding_runtime,
@@ -113,7 +118,7 @@ impl WorkspaceManifest {
             policy: self.index_policy,
             embedding: self.embedding.clone(),
             index_version: self.index_version,
-            generation: None,
+            generation: self.generation,
             created_epoch_ms: self.created_time,
             updated_epoch_ms: self.updated_time,
         }
@@ -353,6 +358,7 @@ mod tests {
             },
             EmbeddingRuntimeConfig {
                 device: Some(Device::Cpu),
+                cache_dir: Some(home.join("models")),
                 ..EmbeddingRuntimeConfig::default()
             },
         )
@@ -376,11 +382,28 @@ mod tests {
         );
         assert_eq!(json["rootPaths"][0]["globs"][0], "*.rs");
         assert_eq!(json["embeddingRuntime"]["device"], "cpu");
-        assert!(json.get("generation").is_none());
+        assert_eq!(json["generation"], 7);
+        assert_eq!(
+            json["embeddingRuntime"]["cacheDir"],
+            home.join("models").to_string_lossy().as_ref()
+        );
+        assert_eq!(manifest.index_info().generation, Some(7));
         assert_eq!(
             read_workspace_manifest(&home).expect("read manifest"),
             Some(manifest)
         );
+        let mut legacy = json;
+        legacy
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("generation");
+        legacy["embeddingRuntime"]
+            .as_object_mut()
+            .expect("runtime object")
+            .remove("cacheDir");
+        let legacy: WorkspaceManifest = serde_json::from_value(legacy).expect("legacy manifest");
+        assert_eq!(legacy.generation, None);
+        assert_eq!(legacy.embedding_runtime.cache_dir, None);
     }
 
     #[test]
