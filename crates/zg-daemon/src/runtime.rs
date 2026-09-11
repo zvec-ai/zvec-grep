@@ -183,8 +183,8 @@ async fn execute_command(
         ),
         DaemonCommand::Context(request) => engine_execution(
             state
-                .engine
-                .context(request)
+                .runtimes
+                .search(&state.engine, request)
                 .await
                 .map(|reply| DaemonReply::Context(Box::new(reply))),
         ),

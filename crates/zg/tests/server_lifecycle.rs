@@ -456,6 +456,44 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "{response}"
     );
     assert!(response.contains("\"isError\":false"), "{response}");
+    assert!(response.contains("background_refresh: off"), "{response}");
+
+    std::fs::write(
+        workspace.path().join("fresh.txt"),
+        "freshnessbarrier newly created content\n",
+    )?;
+    let wait_search = json!({
+        "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+        "params": { "name": "zvec_grep_search", "arguments": {
+            "root": workspace.path(), "fts": "freshnessbarrier",
+            "autoUpdate": false, "freshness": "wait_for_fresh",
+            "endpoint": format!("http://{}/embeddings", embedding.address)
+        } }
+    });
+    let response = post_json(port, Some(&session), &wait_search.to_string())?;
+    assert!(response.contains("fresh.txt"), "{response}");
+    assert!(response.contains("freshness: fresh"), "{response}");
+    assert!(response.contains("background_refresh: idle"), "{response}");
+    assert!(response.contains("\"isError\":false"), "{response}");
+
+    let background_search = json!({
+        "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": { "name": "zvec_grep_search", "arguments": {
+            "root": workspace.path(), "fts": "freshnessbarrier",
+            "endpoint": format!("http://{}/embeddings", embedding.address)
+        } }
+    });
+    let response = post_json(port, Some(&session), &background_search.to_string())?;
+    assert!(response.contains("fresh.txt"), "{response}");
+    assert!(
+        response.contains("freshness: served_from_current_index"),
+        "{response}"
+    );
+    assert!(
+        response.contains("background_refresh: scheduled"),
+        "{response}"
+    );
+    assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;
     assert_command_success(&output);

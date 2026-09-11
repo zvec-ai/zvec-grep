@@ -241,6 +241,8 @@ fn build_context_result(
     let hits_returned = items.len();
 
     ContextResult {
+        freshness: None,
+        background_refresh: None,
         query: request.display_query.clone(),
         root: root.to_path_buf(),
         source: ContextSource::Index,

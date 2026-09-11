@@ -1,7 +1,7 @@
 //! MCP transport adapter for the public agent and full toolsets.
 //!
 //! This crate owns MCP schemas and formatting only. It translates tool input
-//! into the typed request accepted directly by [`zg_engine::ZvecGrep`].
+//! into typed requests executed by the engine or the resident workspace provider.
 
 use std::{
     fmt::{self, Write as _},
@@ -29,7 +29,7 @@ use zg_engine::{
     api::{
         context::{
             ContextOptions, ContextResult,
-            options::{ContextRoute, ContextRouteMode, SymbolType},
+            options::{ContextRoute, ContextRouteMode, RefreshPolicy, SymbolType},
             result::{ContentRange, ContextItem, ContextItemStatus, MatchedBy},
         },
         index::{
@@ -176,6 +176,14 @@ pub trait IndexOperationProvider: Send + Sync {
 
     async fn drop_index(&self, options: InfoOptions) -> Result<bool, EngineError>;
 
+    async fn search(
+        &self,
+        engine: &ZvecGrep,
+        request: ContextOptions,
+    ) -> Result<ContextResult, EngineError> {
+        engine.context(request).await
+    }
+
     fn runtime_snapshot(&self, _root: &Path) -> Option<IndexRuntimeSnapshot> {
         None
     }
@@ -299,7 +307,7 @@ impl ZvecGrepMcpServer {
         let request = input
             .into_request()
             .map_err(|message| ErrorData::invalid_params(message, None))?;
-        let result = self.engine.context(request).await;
+        let result = self.index_operations.search(&self.engine, request).await;
 
         Ok(match result {
             Ok(reply) => context_result_to_tool_result(&reply),
@@ -988,6 +996,13 @@ impl SearchInput {
             fuse: self.fuse.unwrap_or(false),
             limit: self.limit,
             auto_update,
+            refresh: Some(if matches!(self.freshness, FreshnessInput::WaitForFresh) {
+                RefreshPolicy::Wait
+            } else if self.auto_update {
+                RefreshPolicy::Background
+            } else {
+                RefreshPolicy::Off
+            }),
             trace: self.trace.unwrap_or(false),
             prefer_symbol: self.prefer_symbol.unwrap_or(false),
             symbol_types: self.symbol_types.into_iter().map(Into::into).collect(),
@@ -1672,7 +1687,11 @@ fn format_context_result(reply: &ContextResult) -> String {
     } else {
         "fresh"
     };
+    let freshness = reply.freshness.as_deref().unwrap_or(freshness);
     let mut output = format!("freshness: {freshness}");
+    if let Some(refresh) = &reply.background_refresh {
+        let _ = write!(output, "\nbackground_refresh: {refresh}");
+    }
     if reply.items.is_empty() {
         let _ = write!(output, "\nNo matches.");
         return output;
@@ -1819,6 +1838,16 @@ mod tests {
         };
         assert!(busy.text.contains("retryable: true"));
         assert!(storage.text.contains("retryable: false"));
+    }
+
+    #[test]
+    fn wait_for_fresh_survives_request_mapping() {
+        let mut search = input();
+        search.freshness = FreshnessInput::WaitForFresh;
+        search.auto_update = false;
+        let request = search.into_request().expect("search input should map");
+        let value = serde_json::to_value(request).expect("request should serialize");
+        assert_eq!(value["refresh"], "wait");
     }
 
     #[test]

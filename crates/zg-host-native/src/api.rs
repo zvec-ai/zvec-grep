@@ -191,6 +191,11 @@ pub trait WorkspaceWatcherFactoryPort: Send + Sync {
 /// Native queue overflow and watcher recovery are normalized into one Rescan.
 #[async_trait]
 pub trait WorkspaceWatchSessionPort: Send + Sync {
+    /// Publishes pending changes before returning. Backends may request a full rescan.
+    async fn flush(&self) -> Result<(), HostError> {
+        Ok(())
+    }
+
     async fn next_changes(&self, control: &TaskControl) -> Result<WorkspaceChangeBatch, HostError>;
 
     async fn close(&self) -> Result<(), HostError>;

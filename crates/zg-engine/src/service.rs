@@ -190,6 +190,8 @@ fn context_from_lexical(query: String, reply: LexicalSearchReply) -> ContextResu
         }
     });
     ContextResult {
+        freshness: None,
+        background_refresh: None,
         query,
         root: reply.root,
         source: ContextSource::Rg,

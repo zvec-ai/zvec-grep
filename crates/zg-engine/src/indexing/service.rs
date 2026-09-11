@@ -192,10 +192,11 @@ impl WorkspaceIndexService {
                 "index storage is missing",
             ));
         }
-        if options.auto_update
-            && self
-                .workspace_needs_refresh(&location, factory.as_ref())
-                .await?
+        if options.refresh.map_or(options.auto_update, |policy| {
+            policy == crate::api::context::options::RefreshPolicy::Wait
+        }) && self
+            .workspace_needs_refresh(&location, factory.as_ref())
+            .await?
         {
             self.index(
                 models,

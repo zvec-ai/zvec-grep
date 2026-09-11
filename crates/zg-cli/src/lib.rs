@@ -827,6 +827,23 @@ fn query_attached_option(value: &str) -> bool {
         || (value.starts_with("-T") && value.len() > 2)
 }
 
+fn context_refresh_policy(
+    mode: ClientMode,
+    refresh: Option<RefreshMode>,
+) -> zg_engine::api::context::options::RefreshPolicy {
+    use zg_engine::api::context::options::RefreshPolicy;
+    if mode == ClientMode::Direct && matches!(refresh, Some(RefreshMode::Background)) {
+        eprintln!(
+            "warning: --refresh background is unavailable in direct mode; falling back to off"
+        );
+    }
+    match (mode, refresh) {
+        (_, Some(RefreshMode::Wait)) => RefreshPolicy::Wait,
+        (ClientMode::Direct, _) | (_, Some(RefreshMode::Off)) => RefreshPolicy::Off,
+        _ => RefreshPolicy::Background,
+    }
+}
+
 fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError> {
     if args.force_direct && args.mode != ClientMode::Direct {
         return Err(CliError::ForceDirectMode);
@@ -899,6 +916,7 @@ fn query_plan(args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError
             routes,
             fuse: args.fuse,
             limit: args.limit,
+            refresh: Some(context_refresh_policy(mode, args.refresh)),
             auto_update: !matches!(args.refresh, Some(RefreshMode::Off))
                 && (mode != ClientMode::Direct || matches!(args.refresh, Some(RefreshMode::Wait))),
             trace: args.trace,
@@ -1126,6 +1144,34 @@ pub fn parse_modified_time(value: &str) -> Result<u64, String> {
 mod tests {
     use super::{Cli, CliPlan, IndexOperation, parse_byte_size, parse_modified_time};
     use std::path::PathBuf;
+
+    #[test]
+    fn refresh_policy_preserves_mode_defaults_and_explicit_wait() {
+        use zg_engine::api::context::options::RefreshPolicy;
+        let current_dir = std::env::current_dir().expect("current directory should resolve");
+        for (mode, flag, expected) in [
+            ("server", None, RefreshPolicy::Background),
+            ("auto", None, RefreshPolicy::Background),
+            ("direct", None, RefreshPolicy::Off),
+            ("direct", Some("background"), RefreshPolicy::Off),
+            ("direct", Some("wait"), RefreshPolicy::Wait),
+            ("server", Some("wait"), RefreshPolicy::Wait),
+            ("server", Some("off"), RefreshPolicy::Off),
+        ] {
+            let mut args = vec!["zg", "query", "example", "--mode", mode];
+            if let Some(flag) = flag {
+                args.extend(["--refresh", flag]);
+            }
+            let CliPlan::Query { request, .. } = Cli::try_parse_from(args)
+                .expect("parse")
+                .into_plan(current_dir.clone())
+                .expect("plan")
+            else {
+                panic!("query")
+            };
+            assert_eq!(request.refresh, Some(expected));
+        }
+    }
 
     #[test]
     fn parses_index_options_into_engine_request() {

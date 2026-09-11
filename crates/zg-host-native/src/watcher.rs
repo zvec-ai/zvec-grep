@@ -13,7 +13,7 @@ use notify::{
     Watcher, event::RemoveKind,
 };
 use tokio::{
-    sync::{Mutex, Notify, mpsc},
+    sync::{Mutex, Notify, mpsc, oneshot},
     task::JoinHandle,
     time::Instant,
 };
@@ -142,7 +142,9 @@ impl WorkspaceWatcherFactoryPort for NativeWatcherFactory {
         )?;
         let (batch_sender, batch_receiver) = mpsc::channel(config.batch_capacity);
         let close = CancellationToken::new();
+        let (flush_sender, flush_receiver) = mpsc::channel(1);
         let task = tokio::spawn(watch_loop(WatchLoop {
+            flush_receiver,
             policy,
             root_is_file: metadata.is_file(),
             config,
@@ -157,6 +159,7 @@ impl WorkspaceWatcherFactoryPort for NativeWatcherFactory {
         Ok(Arc::new(NativeWatchSession {
             inner: Arc::new(WatchSessionInner {
                 receiver: Mutex::new(batch_receiver),
+                flush_sender,
                 close,
                 task: StdMutex::new(Some(task)),
             }),
@@ -171,6 +174,7 @@ struct NativeWatchSession {
 
 #[derive(Debug)]
 struct WatchSessionInner {
+    flush_sender: mpsc::Sender<oneshot::Sender<()>>,
     receiver: Mutex<mpsc::Receiver<WorkspaceChangeBatch>>,
     close: CancellationToken,
     task: StdMutex<Option<JoinHandle<()>>>,
@@ -189,6 +193,18 @@ impl Drop for WatchSessionInner {
 
 #[async_trait]
 impl WorkspaceWatchSessionPort for NativeWatchSession {
+    async fn flush(&self) -> Result<(), HostError> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .flush_sender
+            .send(sender)
+            .await
+            .map_err(|_| HostError::resource_closed("workspace watcher has stopped"))?;
+        receiver
+            .await
+            .map_err(|_| HostError::resource_closed("workspace watcher flush was interrupted"))
+    }
+
     async fn next_changes(&self, control: &TaskControl) -> Result<WorkspaceChangeBatch, HostError> {
         check_control(control)?;
         if self.inner.close.is_cancelled() {
@@ -226,6 +242,7 @@ impl WorkspaceWatchSessionPort for NativeWatchSession {
 }
 
 struct WatchLoop {
+    flush_receiver: mpsc::Receiver<oneshot::Sender<()>>,
     policy: RootPolicy,
     root_is_file: bool,
     config: NativeWatcherConfig,
@@ -260,6 +277,16 @@ async fn watch_loop(mut state: WatchLoop) {
     loop {
         tokio::select! {
             () = state.close.cancelled() => break,
+            Some(acknowledge) = state.flush_receiver.recv() => {
+                // Reconciliation covers native events still pending delivery or normalization.
+                changes.require_full_rescan();
+                if !flush_changes(&mut changes, &state.batch_sender, &state.close).await {
+                    break;
+                }
+                debounce_deadline = None;
+                max_wait_deadline = None;
+                let _ = acknowledge.send(());
+            }
             () = sleep_until_option(debounce_deadline) => {
                 if !flush_changes(&mut changes, &state.batch_sender, &state.close).await {
                     break;

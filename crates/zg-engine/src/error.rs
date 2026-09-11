@@ -209,6 +209,14 @@ impl EngineError {
         *self.report
     }
 
+    /// Restores an error transported through a scheduler or protocol boundary.
+    #[must_use]
+    pub fn from_report(report: ErrorReport) -> Self {
+        Self {
+            report: Box::new(report),
+        }
+    }
+
     // Diagnostic enrichment.
 
     #[must_use]

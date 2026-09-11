@@ -23,6 +23,9 @@ pub mod options {
         pub root: Option<PathBuf>,
         pub limit: Option<usize>,
         pub auto_update: bool,
+        /// Explicit refresh policy; absent preserves the legacy auto-update behavior.
+        #[serde(default)]
+        pub refresh: Option<RefreshPolicy>,
         pub trace: bool,
         pub prefer_symbol: bool,
         pub symbol_types: Vec<SymbolType>,
@@ -63,6 +66,7 @@ pub mod options {
                 root: None,
                 limit: None,
                 auto_update: true,
+                refresh: None,
                 trace: false,
                 prefer_symbol: false,
                 symbol_types: Vec::new(),
@@ -86,6 +90,14 @@ pub mod options {
                 endpoint: None,
             }
         }
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RefreshPolicy {
+        Background,
+        Wait,
+        Off,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,6 +147,10 @@ pub mod result {
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextResult {
         pub query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub freshness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub background_refresh: Option<String>,
         pub root: PathBuf,
         pub source: ContextSource,
         pub coverage: ContextCoverage,

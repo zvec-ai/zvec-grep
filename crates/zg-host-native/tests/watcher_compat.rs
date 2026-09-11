@@ -106,3 +106,33 @@ async fn watcher_close_does_not_wait_for_a_full_batch_queue() -> TestResult {
     tokio::time::timeout(Duration::from_secs(1), session.close()).await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn watcher_flush_publishes_reconciliation_without_waiting_for_debounce() -> TestResult {
+    let temporary = tempdir_in(std::env::current_dir()?)?;
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        debounce: Duration::from_secs(60),
+        max_wait: Duration::from_secs(60),
+        ..NativeWatcherConfig::default()
+    });
+    let control = TaskControl::new(CancellationToken::new());
+    let session = factory
+        .watch(
+            &WatchRequest {
+                root: RootSpec {
+                    path: temporary.path().to_path_buf(),
+                    recursive: true,
+                    discovery: DiscoveryOptions::default(),
+                },
+            },
+            &control,
+        )
+        .await?;
+    fs::write(temporary.path().join("changed.rs"), "fn changed() {}")?;
+    tokio::time::timeout(Duration::from_secs(2), session.flush()).await??;
+    let batch =
+        tokio::time::timeout(Duration::from_secs(2), session.next_changes(&control)).await??;
+    assert!(batch.changes.contains(&WorkspaceChange::Rescan));
+    session.close().await?;
+    Ok(())
+}
