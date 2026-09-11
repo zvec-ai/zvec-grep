@@ -340,6 +340,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.device = parseDevice(readOptionValue(commandArgs, ++index, arg));
     } else if (arg === "--api-key") {
       options.apiKey = readOptionValue(commandArgs, ++index, arg);
+    } else if (arg === "--no-auth") {
+      options.providerNoAuth = true;
     } else if (arg === "--endpoint") {
       options.endpoint = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--limit") {
@@ -347,6 +349,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
         readOptionValue(commandArgs, ++index, arg),
         arg,
       );
+    } else if (arg === "--no-prefetch") {
+      options.noPrefetch = true;
     } else if (arg === "--embedding-concurrency") {
       options.embeddingConcurrency = parsePositiveInteger(
         readOptionValue(commandArgs, ++index, arg),
@@ -780,6 +784,12 @@ function validateCliShape(
         "--api-key",
       ],
       [
+        options.configAction === "model-set"
+          ? options.providerNoAuth
+          : undefined,
+        "--no-auth",
+      ],
+      [
         options.configAction === "provider-set" ? options.endpoint : undefined,
         "--endpoint",
       ],
@@ -804,6 +814,8 @@ function validateCliShape(
     }
   } else if (options.defaultModel) {
     throw new Error("--default can only be used with zg --config model set");
+  } else if (options.providerNoAuth) {
+    throw new Error("--no-auth can only be used with zg --config provider set");
   }
 
   if (command === "server") {
@@ -1011,6 +1023,12 @@ function validateCliShape(
   ) {
     throw new Error(
       "zg --index --drop cannot be combined with indexing options",
+    );
+  }
+
+  if (options.noPrefetch && (command !== "index" || options.drop)) {
+    throw new Error(
+      "--no-prefetch can only be used with --index without --drop",
     );
   }
 

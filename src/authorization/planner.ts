@@ -1,5 +1,6 @@
 import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
 import type { EmbeddingModelInfo } from "../engine/models/index.js";
+import { isRemoteEmbeddingProvider } from "../engine/models/index.js";
 import type { ZvecGrepInfoResult } from "../engine/service/types.js";
 import { createRemoteEmbeddingTarget } from "./target.js";
 import { RemoteEmbeddingAuthorizationStore } from "./store.js";
@@ -12,7 +13,7 @@ export async function planRemoteIndexAuthorization(input: {
   needsUpdate?: boolean;
   store?: RemoteEmbeddingAuthorizationStore;
 }): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
-  if (input.model.provider !== "qwen") return undefined;
+  if (!isRemoteEmbeddingProvider(input.model.provider)) return undefined;
   const needsEmbedding =
     input.rebuild === true ||
     input.needsUpdate === true ||
@@ -57,7 +58,11 @@ export async function planRemoteSearchAuthorization(input: {
   store?: RemoteEmbeddingAuthorizationStore;
 }): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
   const schema = input.info.workspaceIndex?.embedding;
-  if (!input.info.indexed || !schema || schema.provider !== "qwen") {
+  if (
+    !input.info.indexed ||
+    !schema ||
+    !isRemoteEmbeddingProvider(schema.provider)
+  ) {
     return undefined;
   }
   if (

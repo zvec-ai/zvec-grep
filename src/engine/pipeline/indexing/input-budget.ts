@@ -6,6 +6,7 @@ const TOKEN_DENSE_WINDOW_CHARS = 16 * 1024;
 const TOKEN_DENSE_WINDOW_STEP_CHARS = 8 * 1024;
 const TOKEN_DENSE_PERCENT = 30;
 const CHUNK_OVERLAP_PERCENT = 15;
+const RETRIEVAL_CHUNK_CHARS = 3600;
 
 export function indexChunkOptions(
   maxInputTokens: number | undefined,
@@ -18,7 +19,11 @@ export function indexChunkOptions(
   const charsPer100Tokens = isTokenDenseText(text, maxInputTokens)
     ? TOKEN_DENSE_CHARS_PER_100_TOKENS
     : DEFAULT_CHARS_PER_100_TOKENS;
-  const maxChunkChars = Math.floor((maxInputTokens * charsPer100Tokens) / 100);
+  // Model context length is a safety ceiling, not a retrieval passage size.
+  const maxChunkChars = Math.min(
+    RETRIEVAL_CHUNK_CHARS,
+    Math.floor((maxInputTokens * charsPer100Tokens) / 100),
+  );
   const chunkOverlapChars = Math.floor(
     (maxChunkChars * CHUNK_OVERLAP_PERCENT) / 100,
   );

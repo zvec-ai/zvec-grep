@@ -79,6 +79,8 @@ export const EMBEDDING_MODEL_CATALOG = {
     defaultEndpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
     maxBatchSize: 10,
     maxInputTokens: 8192,
+    requestDimensions: true,
+    requestEncodingFormat: true,
   },
 
   "qwen/qwen3.7-text-embedding": {
@@ -92,6 +94,8 @@ export const EMBEDDING_MODEL_CATALOG = {
     defaultEndpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
     maxBatchSize: 20,
     maxInputTokens: 128000,
+    requestDimensions: true,
+    requestEncodingFormat: true,
   },
 
   "qwen/qwen3-vl-embedding": {
@@ -106,6 +110,19 @@ export const EMBEDDING_MODEL_CATALOG = {
     maxBatchSize: 20,
     maxInputTokens: 32000,
     maxImageBytes: 10 * 1024 * 1024,
+  },
+
+  "dgx/qwen3-embedding-0.6b": {
+    backend: "openai-compatible",
+    kind: "text",
+    reference: "dgx/qwen3-embedding-0.6b",
+    provider: "dgx",
+    model: "qwen3-embedding:0.6b",
+    dimension: 1024,
+    metric: "cosine",
+    maxBatchSize: 32,
+    maxBatchChars: 64_000,
+    maxInputTokens: 32768,
   },
 
   "local/bge-small-en-v1.5": {
@@ -587,6 +604,22 @@ export type QwenEmbeddingCatalogEntry = Extract<
   { backend: "qwen" }
 >;
 
+export type OpenAiCompatibleEmbeddingCatalogEntry = Readonly<{
+  backend: "openai-compatible";
+  kind: "text";
+  reference: string;
+  provider: string;
+  model: string;
+  dimension: number;
+  metric: "cosine" | "dot" | "euclidean";
+  defaultEndpoint?: string;
+  maxBatchSize: number;
+  maxBatchChars?: number;
+  maxInputTokens?: number;
+  requestDimensions?: boolean;
+  requestEncodingFormat?: boolean;
+}>;
+
 export type QwenTextEmbeddingCatalogEntry = Extract<
   QwenEmbeddingCatalogEntry,
   { kind: "text" }
@@ -607,4 +640,16 @@ export function getEmbeddingModelCatalogEntry(
   reference: string,
 ): EmbeddingCatalogEntry | undefined {
   return EMBEDDING_MODEL_CATALOG[reference as EmbeddingModelCatalogId];
+}
+
+export function findEmbeddingModelCatalogEntry(
+  provider: string,
+  model: string,
+): EmbeddingCatalogEntry | undefined {
+  return (
+    getEmbeddingModelCatalogEntry(`${provider}/${model}`) ??
+    listEmbeddingModels().find(
+      (entry) => entry.provider === provider && entry.model === model,
+    )
+  );
 }

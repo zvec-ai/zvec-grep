@@ -111,6 +111,11 @@ zg --index [root] --rebuild [options]
 zg --index [root] --drop [--yes]
 ```
 
+An explicit root, including `.`, targets that directory's index. Without a
+root, the CLI updates the nearest existing workspace index, falling back to the
+current directory. To index a nested Git repository separately, run
+`zg --index .` inside it; parent scans skip nested Git repositories by default.
+
 Core options:
 
 | Option | Meaning |
@@ -126,6 +131,7 @@ Core options:
 | `--model-cache <path>` | Local model cache directory |
 | `--device <device>` | `auto`, `cpu`, `metal`, `vulkan`, or `cuda` |
 | `--embedding-concurrency <n>` | Concurrent Embedding tasks |
+| `--no-prefetch` | Wait for an indexing task slot before preparing the next batch |
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
 Local Potion embedding tasks run on worker threads. They default to two workers;
@@ -178,7 +184,7 @@ See [Agent integrations](./01-agents.md) before using `--force`.
 ## `zg --config`
 
 ```text
-zg --config provider set <provider> --api-key <key>
+zg --config provider set <provider> (--api-key <key> | --no-auth)
 zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
 ```
 
@@ -187,8 +193,25 @@ Examples:
 ```bash
 zg --config provider set qwen --api-key "$DASHSCOPE_API_KEY"
 zg --config model set qwen/text-embedding-v4 --default
+zg --config provider set dgx --no-auth
+zg --config model set dgx/qwen3-embedding-0.6b \
+  --endpoint http://dgx-spark:11434/v1/embeddings --default
 zg --config model set local/potion-code-16m-v2 --device metal
 ```
+
+Providers whose credentials are optional can be explicitly configured without
+authentication. This suppresses the generic `ZVEC_GREP_API_KEY` fallback so an
+unrelated credential is not sent to a trusted-network endpoint:
+
+```bash
+zg --config provider set dgx --no-auth
+```
+
+The model endpoint must be the complete OpenAI-compatible Embeddings URL,
+including `/v1/embeddings`; zvec-grep does not append that path.
+
+`--api-key` and `--no-auth` are mutually exclusive. Providers such as Qwen that
+require credentials reject `--no-auth`.
 
 Global configuration is stored in `~/.zvec-grep/config.json`. Existing indexes
 continue to use their stored model until explicitly rebuilt.

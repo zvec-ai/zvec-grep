@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { LlamaCppEmbeddingModel } from "../../../dist/engine/models/backends/llama-cpp.js";
 import { Model2VecEmbeddingModel } from "../../../dist/engine/models/backends/model2vec.js";
+import { OpenAiCompatibleTextEmbeddingModel } from "../../../dist/engine/models/backends/openai-compatible.js";
 import {
   Qwen37TextEmbeddingModel,
   Qwen3VlEmbeddingModel,
@@ -19,6 +20,7 @@ test("embedding factory resolves catalog entries and rejects unknown models", ()
     ["qwen/text-embedding-v4", QwenTextEmbeddingV4Model],
     ["qwen/qwen3.7-text-embedding", Qwen37TextEmbeddingModel],
     ["qwen/qwen3-vl-embedding", Qwen3VlEmbeddingModel],
+    ["dgx/qwen3-embedding-0.6b", OpenAiCompatibleTextEmbeddingModel],
     ["local/bge-small-en-v1.5", TransformersJsEmbeddingModel],
     ["local/all-minilm-l6-v2", TransformersJsEmbeddingModel],
     ["local/potion-retrieval-32m", Model2VecEmbeddingModel],
@@ -49,7 +51,9 @@ test("embedding factory resolves catalog entries and rejects unknown models", ()
     assert.equal(model.info.metric, entry.metric);
     assert.equal(
       model.info.endpoint,
-      entry.backend === "qwen" ? options.endpoint : undefined,
+      entry.backend === "qwen" || entry.backend === "openai-compatible"
+        ? options.endpoint
+        : undefined,
     );
   }
 

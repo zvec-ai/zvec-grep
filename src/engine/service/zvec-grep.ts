@@ -19,6 +19,8 @@ import {
 import {
   createEmbeddingModel,
   EmbeddingPurpose,
+  findEmbeddingModelCatalogEntry,
+  isRemoteEmbeddingProvider,
   resolveEmbeddingReference,
   type CreateEmbeddingModelOptions,
   type EmbeddingModel,
@@ -214,6 +216,20 @@ class ZvecGrepService implements ZvecGrep {
           options.rebuild ? "index.rebuild" : "index",
           async () => {
             const existing = readWorkspaceManifest(location.home);
+            if (
+              !options.rebuild &&
+              isWorkspaceIndexed(existing) &&
+              existing.indexVersion !== CURRENT_INDEX_VERSION
+            ) {
+              throw new EngineError(
+                "Workspace index chunking policy has changed",
+                {
+                  code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.VERSION_MISMATCH",
+                  context:
+                    'Run "zg --index --rebuild" to re-embed existing files with the current chunking policy.',
+                },
+              );
+            }
             const existingRuntime = existing?.embeddingRuntime ?? {};
             const embeddingModel = this.embeddingModelForIndex(
               existing,
@@ -304,6 +320,7 @@ class ZvecGrepService implements ZvecGrep {
                 const result = await workspaceIndex.index({
                   rebuild: false,
                   embeddingConcurrency: options.embeddingConcurrency,
+                  noPrefetch: options.noPrefetch,
                   onProgress: options.onProgress,
                   changedPaths: options.changedPaths,
                   signal: options.signal,
@@ -446,8 +463,15 @@ class ZvecGrepService implements ZvecGrep {
   async info(options: ZvecGrepInfoOptions = {}): Promise<ZvecGrepInfoResult> {
     this.ensureOpen();
     const startRoot = resolveZvecGrepRoot(options.root ?? this.root);
-    assertNearestWorkspaceHomeUnlocked(startRoot, "info");
-    const nearest = findNearestWorkspaceIndex(startRoot);
+    if (options.discoverParents === false) {
+      assertHomeUnlocked(workspaceHome(startRoot), "info");
+    } else {
+      assertNearestWorkspaceHomeUnlocked(startRoot, "info");
+    }
+    const nearest = findNearestWorkspaceIndex(
+      startRoot,
+      options.discoverParents,
+    );
 
     if (!nearest) {
       const location = workspaceIndexLocation(startRoot);
@@ -1113,8 +1137,13 @@ type WorkspaceIndexRecord = {
   info: WorkspaceManifest;
 };
 
-function findNearestWorkspaceIndex(start: string): WorkspaceIndexRecord | null {
-  const location = findNearestWorkspace(start);
+function findNearestWorkspaceIndex(
+  start: string,
+  discoverParents = true,
+): WorkspaceIndexRecord | null {
+  const location = discoverParents
+    ? findNearestWorkspace(start)
+    : workspaceIndexLocation(start);
   if (!location) return null;
   const info = readWorkspaceManifest(location.home);
   return info ? { location, info } : null;
@@ -1431,7 +1460,7 @@ function createServiceEmbeddingModel(
   serviceOptions: CreateZvecGrepOptions,
 ): EmbeddingModel {
   const model = createEmbeddingModel(reference, modelOptions);
-  if (model.info.provider !== "qwen") {
+  if (!isRemoteEmbeddingProvider(model.info.provider)) {
     return model;
   }
 
@@ -1486,7 +1515,10 @@ function parseEmbeddingModelReference(
 }
 
 function embeddingModelReference(identity: EmbeddingModelIdentity): string {
-  return `${identity.provider}/${identity.name}`;
+  return (
+    findEmbeddingModelCatalogEntry(identity.provider, identity.name)
+      ?.reference ?? `${identity.provider}/${identity.name}`
+  );
 }
 
 function providerOptionsFingerprint(options: {

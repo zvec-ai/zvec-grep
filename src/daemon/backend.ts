@@ -15,7 +15,11 @@ import type {
   EmbeddingModel,
   EmbeddingModelInfo,
 } from "../engine/models/index.js";
-import { resolveEmbeddingReference } from "../engine/models/index.js";
+import {
+  findEmbeddingModelCatalogEntry,
+  isRemoteEmbeddingProvider,
+  resolveEmbeddingReference,
+} from "../engine/models/index.js";
 import type {
   FileScanDiagnostics,
   WorkspaceIndexEmbeddingSchema,
@@ -168,6 +172,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       input.root,
       this.options.serviceOptions,
       input.rebuild !== true,
+      false,
     );
     let modelLoadRequest: EmbeddingModelLoadRequest;
     try {
@@ -220,10 +225,8 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   ): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
     const requestedRoot = await resolveRequestedRoot(input.root, false);
     let activeRuntime = this.runtimeManager.getByRequestedRoot(requestedRoot);
-    if (
-      activeRuntime?.embeddingProvider() &&
-      activeRuntime.embeddingProvider() !== "qwen"
-    ) {
+    const activeProvider = activeRuntime?.embeddingProvider();
+    if (activeProvider && !isRemoteEmbeddingProvider(activeProvider)) {
       return undefined;
     }
     let canonicalRoot = activeRuntime?.canonicalRoot;
@@ -235,7 +238,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       const provider =
         activeRuntime?.embeddingProvider() ??
         discoveredInfo.workspaceIndex?.embedding?.provider;
-      if (provider && provider !== "qwen") {
+      if (provider && !isRemoteEmbeddingProvider(provider)) {
         return undefined;
       }
     }
@@ -262,7 +265,11 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       }
     }
     const schema = info.workspaceIndex?.embedding;
-    if (!info.indexed || !schema || schema.provider !== "qwen") {
+    if (
+      !info.indexed ||
+      !schema ||
+      !isRemoteEmbeddingProvider(schema.provider)
+    ) {
       return undefined;
     }
     const modelLoadRequest = this.searchModelLoadRequest(info, input);
@@ -764,6 +771,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const before = await this.inspectRoot(
       runtime.canonicalRoot,
       includeInitialStatus,
+      false,
     );
     if (includeInitialStatus) {
       this.statusCache.set(runtime.canonicalRoot, before);
@@ -820,6 +828,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             maxFileSizeBytes: input.maxFileSizeBytes,
             follow: input.follow,
             embeddingConcurrency: input.embeddingConcurrency,
+            noPrefetch: input.noPrefetch,
             changedPaths: input.changedPaths,
             signal,
             onProgress: report,
@@ -1036,11 +1045,15 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     authorization?: RemoteEmbeddingOperationPermit;
   }> {
     const knownProvider = runtime.embeddingProvider();
-    if (knownProvider && knownProvider !== "qwen") return { allowed: true };
+    if (knownProvider && !isRemoteEmbeddingProvider(knownProvider)) {
+      return { allowed: true };
+    }
     const root = runtime.canonicalRoot;
     const info = await this.inspectRoot(root, false);
     const schema = info.workspaceIndex?.embedding;
-    if (!schema || schema.provider !== "qwen") return { allowed: true };
+    if (!schema || !isRemoteEmbeddingProvider(schema.provider)) {
+      return { allowed: true };
+    }
     const modelInfo = await this.loadEmbeddingModelInfo(
       this.searchModelLoadRequest(info, {}),
     );
@@ -1326,11 +1339,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private async inspectRoot(
     root: string,
     includeStatus: boolean,
+    discoverParents = true,
   ): Promise<ZvecGrepInfoResult> {
     return await (this.options.inspectRoot ?? inspectRoot)(
       root,
       this.options.serviceOptions,
       includeStatus,
+      discoverParents,
     );
   }
 }
@@ -1375,6 +1390,7 @@ function assertDropOnlyInput(input: ZvecGrepIndexInput): void {
     [input.maxFileSizeBytes !== undefined, "maxFileSizeBytes"],
     [input.follow !== undefined, "follow"],
     [input.embeddingConcurrency !== undefined, "embeddingConcurrency"],
+    [input.noPrefetch !== undefined, "noPrefetch"],
     [input.wait !== undefined, "wait"],
   ];
   const names = conflicts
@@ -1416,7 +1432,10 @@ function parseEmbeddingModelReference(
 function embeddingModelReference(
   model: EmbeddingModelLoadRequest["model"],
 ): string {
-  return `${model.provider}/${model.name}`;
+  return (
+    findEmbeddingModelCatalogEntry(model.provider, model.name)?.reference ??
+    `${model.provider}/${model.name}`
+  );
 }
 
 function persistentStatus(

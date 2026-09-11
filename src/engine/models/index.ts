@@ -9,9 +9,15 @@ export {
 } from "./embeddings.js";
 export { createEmbeddingModel } from "./factory.js";
 export {
+  findEmbeddingModelCatalogEntry,
   getEmbeddingModelCatalogEntry,
   listEmbeddingModels,
 } from "./catalog.js";
+export {
+  getRemoteEmbeddingProviderCatalogEntry,
+  isRemoteEmbeddingProvider,
+  listRemoteEmbeddingProviders,
+} from "../remote-embedding-providers.js";
 export {
   resolveEmbeddingReference,
   type ResolveEmbeddingReferenceOptions,

@@ -6,9 +6,30 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { parseArgs } from "../dist/cli/args.js";
+import { resolveAuthorizationSchema } from "../dist/cli/auth.js";
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve("dist/cli/index.js");
+
+test("no-prefetch is accepted only for indexing", () => {
+  for (const mode of ["direct", "server"]) {
+    assert.equal(
+      parseArgs(["--index", "--mode", mode, "--no-prefetch", "."]).options
+        .noPrefetch,
+      true,
+    );
+  }
+  for (const args of [["query"], ["--status"], ["--index", "--drop"]]) {
+    assert.throws(() => parseArgs([...args, "--no-prefetch"]), /--no-prefetch/);
+  }
+});
+
+test("catalog references resolve to served model identities", () => {
+  assert.deepEqual(resolveAuthorizationSchema("dgx/qwen3-embedding-0.6b"), {
+    provider: "dgx",
+    model: "qwen3-embedding:0.6b",
+  });
+});
 
 test("config model set parses local runtime settings", () => {
   const parsed = parseArgs([
@@ -35,6 +56,16 @@ test("config provider and default model settings parse", () => {
   ]);
   assert.equal(provider.options.configAction, "provider-set");
   assert.equal(provider.options.apiKey, "secret");
+
+  const unauthenticatedProvider = parseArgs([
+    "--config",
+    "provider",
+    "set",
+    "dgx",
+    "--no-auth",
+  ]);
+  assert.equal(unauthenticatedProvider.options.configAction, "provider-set");
+  assert.equal(unauthenticatedProvider.options.providerNoAuth, true);
 
   const model = parseArgs([
     "--config",
@@ -69,6 +100,11 @@ test("config model set persists independent local model settings", async (t) => 
       "--device",
       "metal",
     ],
+    { env, cwd: workspace },
+  );
+  await execFileAsync(
+    process.execPath,
+    [cliPath, "config", "provider", "set", "dgx", "--no-auth"],
     { env, cwd: workspace },
   );
   await execFileAsync(
@@ -137,6 +173,7 @@ test("config model set persists independent local model settings", async (t) => 
   });
   assert.deepEqual(config.providers, {
     qwen: { apiKey: "provider-key" },
+    dgx: { auth: "none" },
   });
   assert.equal(config.defaults.embedding, "qwen/text-embedding-v4");
   assert.equal(config.version, 1);
@@ -155,6 +192,30 @@ test("config model set rejects missing and incompatible settings", async () => {
       "local/embeddinggemma-300m",
     ]),
     /requires --endpoint, --device, or --default/,
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      cliPath,
+      "--config",
+      "provider",
+      "set",
+      "qwen",
+      "--no-auth",
+    ]),
+    /requires an API key and does not support --no-auth/,
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      cliPath,
+      "--config",
+      "provider",
+      "set",
+      "dgx",
+      "--api-key",
+      "secret",
+      "--no-auth",
+    ]),
+    /either --api-key or --no-auth, not both/,
   );
   await assert.rejects(
     execFileAsync(process.execPath, [
@@ -210,7 +271,7 @@ test("config model set rejects missing and incompatible settings", async () => {
       assert.match(error.stderr, /Unsupported remote embedding provider/);
       assert.match(
         error.stderr,
-        /Supported remote embedding providers:\s+qwen/,
+        /Supported remote embedding providers:\s+qwen\s+dgx/,
       );
       return true;
     },
@@ -241,5 +302,16 @@ test("config model set rejects missing and incompatible settings", async () => {
         "secret",
       ]),
     /does not accept --api-key/,
+  );
+  assert.throws(
+    () =>
+      parseArgs([
+        "config",
+        "model",
+        "set",
+        "local/embeddinggemma-300m",
+        "--no-auth",
+      ]),
+    /does not accept --no-auth/,
   );
 });

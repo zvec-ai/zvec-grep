@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { EngineError } from "./errors.js";
+import { getRemoteEmbeddingProviderCatalogEntry } from "./remote-embedding-providers.js";
 import { readJsonFileSync, writeJsonFileSync } from "./utils/json.js";
 import { acquireReadWriteLock } from "./utils/lock.js";
 
@@ -11,6 +12,7 @@ export type ZvecGrepGlobalDefaults = {
 
 export type ZvecGrepProviderConfig = {
   apiKey?: string;
+  auth?: "none";
 };
 
 export type EmbeddingDevice = "auto" | "cpu" | "metal" | "vulkan" | "cuda";
@@ -99,13 +101,14 @@ export function resolveEmbeddingRuntimeOptions(
       model?.device ??
       environmentDevice(environment))
     : undefined;
+  const configuredApiKey =
+    explicit.apiKey ?? workspace.apiKey ?? providerConfig?.apiKey;
   return {
     apiKey:
-      explicit.apiKey ??
-      workspace.apiKey ??
-      providerConfig?.apiKey ??
-      environmentApiKey(provider, environment) ??
-      "",
+      configuredApiKey ??
+      (providerConfig?.auth === "none"
+        ? ""
+        : (environmentApiKey(provider, environment) ?? "")),
     ...(endpoint !== undefined ? { endpoint } : {}),
     ...(device !== undefined ? { device } : {}),
   };
@@ -361,15 +364,40 @@ function parseProviders(
         `providers.${provider} must be an object with a valid provider name`,
       );
     }
-    assertKnownFields(providerValue, ["apiKey"], path, `providers.${provider}`);
+    assertKnownFields(
+      providerValue,
+      ["apiKey", "auth"],
+      path,
+      `providers.${provider}`,
+    );
 
     const apiKey = optionalNonEmptyString(
       providerValue.apiKey,
       path,
       `providers.${provider}.apiKey`,
     );
+    const auth = providerValue.auth;
+    if (auth !== undefined && auth !== "none") {
+      throw invalidConfig(path, `providers.${provider}.auth must be none`);
+    }
+    if (apiKey !== undefined && auth === "none") {
+      throw invalidConfig(
+        path,
+        `providers.${provider} cannot set both apiKey and auth none`,
+      );
+    }
+    if (
+      auth === "none" &&
+      getRemoteEmbeddingProviderCatalogEntry(provider)?.apiKey === "required"
+    ) {
+      throw invalidConfig(
+        path,
+        `providers.${provider}.auth none is not supported because the provider requires an API key`,
+      );
+    }
     const config: ZvecGrepProviderConfig = {
       ...(apiKey ? { apiKey } : {}),
+      ...(auth === "none" ? { auth } : {}),
     };
     if (Object.keys(config).length > 0) {
       providers[provider] = config;
@@ -389,10 +417,12 @@ function mergeProviderConfigs(
 
   const merged = { ...current };
   for (const [provider, config] of Object.entries(update ?? {})) {
-    merged[provider] = {
-      ...merged[provider],
-      ...config,
-    };
+    merged[provider] =
+      config.auth === "none"
+        ? { auth: "none" }
+        : config.apiKey !== undefined
+          ? { apiKey: config.apiKey }
+          : { ...merged[provider], ...config };
   }
   return merged;
 }

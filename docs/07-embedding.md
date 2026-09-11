@@ -42,6 +42,7 @@ default. Select and authorize a remote model explicitly with `zg --index`.
 | A lightweight English model | `local/all-minilm-l6-v2` | Small local model for short English text |
 | Long English documents | `local/gte-modernbert-base` or `local/nomic-embed-text-v1.5` | 8,192-token local context |
 | No local model runtime | `qwen/qwen3.7-text-embedding` | Managed text Embedding API |
+| A DGX Spark on the local network | `dgx/qwen3-embedding-0.6b` | Self-hosted OpenAI-compatible Qwen3 Embedding |
 | Text and image retrieval | `qwen/qwen3-vl-embedding` | Managed multimodal Embedding API |
 
 The best model still depends on the repository and its real queries. Start with
@@ -69,6 +70,7 @@ file.
 | `qwen/text-embedding-v4` | Remote text | 8,192 | 1,024 |
 | `qwen/qwen3.7-text-embedding` | Remote text | 128,000 | 1,024 |
 | `qwen/qwen3-vl-embedding` | Remote multimodal | 32,000 | 2,560 |
+| `dgx/qwen3-embedding-0.6b` | DGX OpenAI-compatible | 32,768 | 1,024 |
 
 All catalog entries currently use cosine similarity. Exact model revisions are
 pinned by zvec-grep so the same reference resolves consistently for a given
@@ -95,6 +97,16 @@ An existing index always reuses its stored provider, model, dimensions, and
 metric unless `--embedding` and `--rebuild` explicitly change them. `zg --index`
 forwards the current CLI environment default in server and auto modes; direct
 MCP calls use the environment inherited by the daemon.
+
+Indexing caps retrieval passages at 3,600 characters with a 15% overlap
+target. Smaller model input limits still take precedence, and heading or
+symbol metadata shares the passage budget. A model's maximum context length
+is a safety ceiling, not the target passage size.
+
+Index version 2 records this chunking policy. Existing version 1 indexes
+require an explicit `zg --index --rebuild` (plus `--allow-remote` for remote
+embedding) to regenerate all passages; ordinary incremental indexing will
+report the required rebuild instead of mixing chunking policies.
 
 ## Local runtime and device
 
@@ -126,6 +138,66 @@ zg --index \
 ```
 
 ## Remote Embedding and authorization
+
+### DGX Spark
+
+For an unauthenticated endpoint on a trusted network, configure the provider,
+the complete OpenAI-compatible Embeddings URL, and the catalog model:
+
+```bash
+zg --config provider set dgx --no-auth
+zg --config model set dgx/qwen3-embedding-0.6b \
+  --endpoint http://dgx-spark:11434/v1/embeddings \
+  --default
+zg --index --allow-remote
+```
+
+The server must accept `POST /v1/embeddings` with the OpenAI-compatible
+`model` and `input` fields. zvec-grep sends the served model identifier
+`qwen3-embedding:0.6b` and expects 1,024-number vectors. It deliberately omits
+the optional `dimensions` and `encoding_format` fields for compatibility with
+Ollama-backed endpoints.
+
+If a reverse proxy protects the endpoint, configure its Bearer credential
+instead:
+
+```bash
+zg --config provider set dgx --api-key "$DGX_EMBEDDING_API_KEY"
+```
+
+Provider authentication and data authorization are separate. Even a no-auth
+LAN endpoint requires `--allow-remote` for each CLI command or a signed
+Workspace grant, because repository content and query text leave the
+zvec-grep process.
+
+DGX embedding requests allow up to 30 minutes, including server queue time
+and reading the response. DGX indexing defaults to one in-flight request to
+avoid building a server queue and retrying work that may still be running.
+Requests contain at most 32 fragments and 64,000 total text characters,
+including heading and symbol metadata. Both limits apply to batches spanning
+multiple files and to fragments from a single large file. The text budget is
+a character count, not an exact token count or a JSON/UTF-8 byte limit.
+Indexing prepares the next batch while the current
+batch is in flight.
+Use `zg --index --allow-remote --no-prefetch` to disable this preparation
+overlap when comparing performance.
+Use `--embedding-concurrency` to tune concurrency for your server's capacity:
+
+```bash
+zg --index --allow-remote --embedding-concurrency 2
+```
+
+Explicit concurrency backs off as low as one after transient failures.
+Hosted providers retain their 60-second request timeout. If DGX requests
+still time out, check server logs and inference latency before increasing load.
+
+Common failures have direct causes: `requires an endpoint` means the model URL
+was not configured; connection failures usually mean the DGX hostname, port,
+or `/v1/embeddings` path is wrong; a wrong-dimension response means the server
+is not serving the cataloged 1,024-dimensional model. Changing either the
+model or endpoint for an existing index requires `--rebuild`.
+
+### Managed Qwen
 
 Configure the Qwen provider credential and, optionally, a model endpoint:
 

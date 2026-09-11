@@ -963,6 +963,7 @@ test("CLI exposes stable help, version, and failure behavior", async (t) => {
   assert.match(indexHelp.stdout, /ZVEC_GREP_EMBEDDING/);
   const configHelp = await runCli(["--config", "--help"]);
   assert.match(configHelp.stdout, /Default API key for the provider/);
+  assert.match(configHelp.stdout, /Explicitly use an unauthenticated provider/);
   assert.match(configHelp.stdout, /Existing indexes continue to use/);
   const authHelp = await runCli(["--auth", "--help"]);
   assert.match(

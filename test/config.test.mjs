@@ -29,6 +29,9 @@ test("global config v1 is created securely and merged incrementally", async (t) 
         qwen: {
           apiKey: "first-key",
         },
+        dgx: {
+          auth: "none",
+        },
       },
       models: {
         "qwen/text-embedding-v4": {
@@ -64,6 +67,9 @@ test("global config v1 is created securely and merged incrementally", async (t) 
     providers: {
       qwen: {
         apiKey: "rotated-key",
+      },
+      dgx: {
+        auth: "none",
       },
     },
     models: {
@@ -168,6 +174,69 @@ test("embedding runtime resolver preserves every precedence layer", () => {
   );
 });
 
+test("explicit unauthenticated provider config suppresses only environment credentials", () => {
+  const config = {
+    version: 1,
+    providers: { dgx: { auth: "none" } },
+  };
+  const environment = { ZVEC_GREP_API_KEY: "unrelated-environment-key" };
+
+  assert.deepEqual(
+    resolveEmbeddingRuntimeOptions(
+      "dgx/qwen3-embedding-0.6b",
+      {},
+      {},
+      config,
+      environment,
+    ),
+    { apiKey: "" },
+  );
+  assert.deepEqual(
+    resolveEmbeddingRuntimeOptions(
+      "dgx/qwen3-embedding-0.6b",
+      { apiKey: "explicit-key" },
+      {},
+      config,
+      environment,
+    ),
+    { apiKey: "explicit-key" },
+  );
+  assert.deepEqual(
+    resolveEmbeddingRuntimeOptions(
+      "dgx/qwen3-embedding-0.6b",
+      {},
+      { apiKey: "workspace-key" },
+      config,
+      environment,
+    ),
+    { apiKey: "workspace-key" },
+  );
+});
+
+test("provider authentication updates replace mutually exclusive credentials", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-config-auth-"),
+  );
+  const configPath = join(temporaryDirectory, ".zvec-grep", "config.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  updateGlobalConfig({ providers: { dgx: { apiKey: "secret" } } }, configPath);
+  updateGlobalConfig({ providers: { dgx: { auth: "none" } } }, configPath);
+  assert.deepEqual(readGlobalConfig(configPath).providers?.dgx, {
+    auth: "none",
+  });
+
+  updateGlobalConfig(
+    { providers: { dgx: { apiKey: "replacement" } } },
+    configPath,
+  );
+  assert.deepEqual(readGlobalConfig(configPath).providers?.dgx, {
+    apiKey: "replacement",
+  });
+});
+
 test("embedding reference resolver prefers the environment over the global default", () => {
   assert.equal(
     resolveEmbeddingReference({
@@ -247,6 +316,33 @@ test("global config v1 rejects malformed schemas without echoing secrets", async
     () => readGlobalConfig(configPath),
     (error) => {
       assert.match(error.context, /defaults\.device is not supported/);
+      return true;
+    },
+  );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      version: 1,
+      providers: { dgx: { apiKey: "secret", auth: "none" } },
+    }),
+  );
+  assert.throws(
+    () => readGlobalConfig(configPath),
+    (error) => {
+      assert.match(error.context, /cannot set both apiKey and auth none/);
+      return true;
+    },
+  );
+
+  await writeFile(
+    configPath,
+    JSON.stringify({ version: 1, providers: { qwen: { auth: "none" } } }),
+  );
+  assert.throws(
+    () => readGlobalConfig(configPath),
+    (error) => {
+      assert.match(error.context, /provider requires an API key/);
       return true;
     },
   );

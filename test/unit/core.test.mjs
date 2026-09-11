@@ -26,6 +26,7 @@ import {
 import { makeEntityId } from "../../dist/engine/extraction/ids.js";
 import { detectFileType } from "../../dist/engine/file-type.js";
 import {
+  findEmbeddingModelCatalogEntry,
   getEmbeddingModelCatalogEntry,
   listEmbeddingModels,
 } from "../../dist/engine/models/catalog.js";
@@ -692,7 +693,7 @@ test("file, model, content, and entity helpers classify inputs", () => {
   });
   assert.equal(detectFileType("archive.zip"), null);
   assert.deepEqual(detectFileType("NOTICE"), { kind: "text", format: "text" });
-  assert.equal(listEmbeddingModels().length, 14);
+  assert.equal(listEmbeddingModels().length, 15);
   assert.equal(
     getEmbeddingModelCatalogEntry("local/embeddinggemma-300m")?.dimension,
     768,
@@ -705,6 +706,10 @@ test("file, model, content, and entity helpers classify inputs", () => {
   assert.equal(
     getEmbeddingModelCatalogEntry("local/qwen3-embedding-0.6b")?.reference,
     "local/qwen3-embedding-0.6b",
+  );
+  assert.equal(
+    findEmbeddingModelCatalogEntry("dgx", "qwen3-embedding:0.6b")?.reference,
+    "dgx/qwen3-embedding-0.6b",
   );
   assert.equal(
     getEmbeddingModelCatalogEntry("local/bge-small-en-v1.5")?.backend,
