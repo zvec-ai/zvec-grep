@@ -89,6 +89,57 @@ pub fn index_authorization(
     }))
 }
 
+/// Destination and data categories requiring consent for an indexed query.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QueryAuthorization {
+    pub target: IndexAuthorization,
+    pub query_text: bool,
+    pub workspace_content: bool,
+}
+
+/// Resolves query consent without embedding text or updating the index.
+/// # Errors
+/// Returns invalid request, workspace, endpoint, or signed grant errors.
+pub fn query_authorization(
+    options: &crate::api::context::ContextOptions,
+) -> Result<Option<QueryAuthorization>, EngineError> {
+    use crate::api::context::options::{ContextRouteMode, RefreshPolicy};
+    if options.rg || options.allow_remote {
+        return Ok(None);
+    }
+    let request = crate::search::context::normalize_context_request(options)?;
+    let query_text = request
+        .routes
+        .iter()
+        .any(|route| route.mode == ContextRouteMode::Vector);
+    let workspace_content = options
+        .refresh
+        .map_or(options.auto_update, |refresh| refresh != RefreshPolicy::Off);
+    if !query_text && !workspace_content {
+        return Ok(None);
+    }
+    let root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
+    let Some(location) = find_nearest_workspace(&root)? else {
+        return Ok(None);
+    };
+    let Some(manifest) = read_workspace_manifest(&location.home)? else {
+        return Ok(None);
+    };
+    if manifest.embedding.is_none() {
+        return Ok(None);
+    }
+    let target = index_authorization(&crate::api::index::IndexOptions {
+        root: Some(location.root),
+        endpoint: options.endpoint.clone(),
+        ..crate::api::index::IndexOptions::default()
+    })?;
+    Ok(target.map(|target| QueryAuthorization {
+        target,
+        query_text,
+        workspace_content,
+    }))
+}
+
 /// Persists a destination explicitly approved by the terminal user.
 ///
 /// # Errors
@@ -409,6 +460,85 @@ mod tests {
         IndexOptions,
         options::{Device, DiscoveryOptions, EmbeddingModelSpec, RootPath},
     };
+
+    #[tokio::test]
+    async fn query_disclosure_uses_index_destination_and_actual_refresh_policy() {
+        use crate::api::context::{
+            ContextOptions,
+            options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+        };
+        let directory = tempfile::tempdir().expect("workspace");
+        let engine = crate::ZvecGrep::new();
+        engine
+            .index(IndexOptions {
+                root: Some(directory.path().into()),
+                allow_remote: true,
+                api_key: Some("test-key".into()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "qwen/text-embedding-v4".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Auto,
+                }),
+                endpoint: Some("https://query.test/embeddings".into()),
+                ..IndexOptions::default()
+            })
+            .await
+            .expect("empty index without network");
+        engine.close();
+        let manifest = directory.path().join(".zvec-grep/manifest.json");
+        let before = fs::read(&manifest).expect("manifest");
+        let child = directory.path().join("docs");
+        fs::create_dir(&child).expect("child directory");
+        let mut request = ContextOptions {
+            root: Some(child),
+            query: Some("bookstore".into()),
+            refresh: Some(RefreshPolicy::Off),
+            ..ContextOptions::default()
+        };
+        let plan = query_authorization(&request)
+            .expect("preflight")
+            .expect("consent");
+        assert!(plan.query_text && !plan.workspace_content);
+        assert_eq!(
+            plan.target.root,
+            fs::canonicalize(directory.path()).expect("root")
+        );
+        assert_eq!(plan.target.endpoint_host, "query.test");
+        assert_eq!(fs::read(&manifest).expect("manifest"), before);
+        assert!(
+            !directory
+                .path()
+                .join(".zvec-grep/authorization.json")
+                .exists()
+        );
+        request.refresh = Some(RefreshPolicy::Background);
+        assert!(
+            query_authorization(&request)
+                .expect("background")
+                .expect("consent")
+                .workspace_content
+        );
+        request.query = None;
+        request.routes = vec![ContextRoute {
+            mode: ContextRouteMode::Fts,
+            query: "bookstore".into(),
+        }];
+        request.refresh = Some(RefreshPolicy::Off);
+        assert!(query_authorization(&request).expect("FTS").is_none());
+        request.refresh = Some(RefreshPolicy::Wait);
+        let plan = query_authorization(&request)
+            .expect("wait")
+            .expect("refresh consent");
+        assert!(!plan.query_text && plan.workspace_content);
+        request.allow_remote = true;
+        assert!(
+            query_authorization(&request)
+                .expect("explicit consent")
+                .is_none()
+        );
+    }
 
     #[test]
     fn index_disclosure_matches_destination_without_creating_state() {

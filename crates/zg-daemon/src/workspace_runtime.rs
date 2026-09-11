@@ -502,6 +502,17 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             embedding_concurrency: request.embedding_concurrency,
             device: request.device,
             model_cache: request.model_cache.clone(),
+            embedding: request.authorization_model.as_ref().map(|reference| {
+                zg_engine::api::index::options::EmbeddingModelSpec {
+                    reference: reference.clone(),
+                    revision: None,
+                    cache_dir: request.model_cache.clone(),
+                    endpoint: request.endpoint.clone(),
+                    device: request
+                        .device
+                        .unwrap_or(zg_engine::api::index::options::Device::Auto),
+                }
+            }),
             ..IndexOptions::default()
         };
         if policy == RefreshPolicy::Background {

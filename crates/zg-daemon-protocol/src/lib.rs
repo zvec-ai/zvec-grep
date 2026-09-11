@@ -12,7 +12,7 @@ use zg_engine::api::{
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 4;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -78,6 +78,7 @@ pub enum DaemonCommand {
     Context(ContextOptions),
     Index(IndexOptions),
     IndexAuthorization(IndexOptions),
+    QueryAuthorization(ContextOptions),
     GrantIndexAuthorization(zg_engine::authorization::IndexAuthorization),
     DropIndex(InfoOptions),
     Info(InfoOptions),
@@ -180,6 +181,7 @@ pub enum DaemonReply {
     Context(Box<ContextResult>),
     Index(Box<IndexResult>),
     IndexAuthorization(Option<zg_engine::authorization::IndexAuthorization>),
+    QueryAuthorization(Option<zg_engine::authorization::QueryAuthorization>),
     GrantIndexAuthorization,
     DropIndex(bool),
     Info(Box<InfoResult>),

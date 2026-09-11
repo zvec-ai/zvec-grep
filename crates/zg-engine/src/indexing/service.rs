@@ -208,6 +208,17 @@ impl WorkspaceIndexService {
                     embedding_concurrency: options.embedding_concurrency,
                     device: options.device,
                     model_cache: options.model_cache.clone(),
+                    embedding: options.authorization_model.as_ref().map(|reference| {
+                        crate::api::index::options::EmbeddingModelSpec {
+                            reference: reference.clone(),
+                            revision: None,
+                            cache_dir: options.model_cache.clone(),
+                            endpoint: options.endpoint.clone(),
+                            device: options
+                                .device
+                                .unwrap_or(crate::api::index::options::Device::Auto),
+                        }
+                    }),
                     ..IndexOptions::default()
                 },
             )
@@ -488,6 +499,15 @@ fn acquire_search_model(
         workspace_index_unavailable(&manifest.path, "embedding schema is missing")
     })?;
     let reference = format!("{}/{}", schema.provider, schema.model);
+    if options
+        .authorization_model
+        .as_ref()
+        .is_some_and(|expected| expected != &reference)
+    {
+        return Err(EngineError::permission_denied(
+            "Workspace embedding model changed after authorization; retry the query",
+        ));
+    }
     let config = crate::config::read()?;
     let local = schema.provider == "local";
     if !local && options.device.is_some() {

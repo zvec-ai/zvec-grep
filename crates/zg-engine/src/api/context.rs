@@ -51,6 +51,9 @@ pub mod options {
         pub api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
+        /// Model disclosed by an interactive caller; reject a changed index model.
+        #[serde(default)]
+        pub authorization_model: Option<String>,
         #[serde(default)]
         pub device: Option<crate::api::index::options::Device>,
         #[serde(default)]
@@ -92,6 +95,7 @@ pub mod options {
                 allow_remote: false,
                 api_key: None,
                 endpoint: None,
+                authorization_model: None,
                 device: None,
                 model_cache: None,
             }

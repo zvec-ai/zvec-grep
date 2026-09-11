@@ -27,7 +27,10 @@ use zg_engine::api::{
     info::InfoOptions,
 };
 
-pub use authorization::{AuthorizationDecision, prompt_index_authorization};
+pub use authorization::{
+    AuthorizationDecision, QueryAuthorizationDecision, prompt_index_authorization,
+    prompt_query_authorization, use_fts_only,
+};
 
 pub use install::{
     InstallError, InstallOutcome, execute_install, execute_uninstall, resolve_server_listen,

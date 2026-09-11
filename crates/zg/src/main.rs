@@ -242,7 +242,7 @@ async fn start_installed_server(outcome: &InstallOutcome) -> Result<DaemonStatus
 async fn execute_request(
     mode: ClientMode,
     home: Option<&Path>,
-    request: ContextOptions,
+    mut request: ContextOptions,
     output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
     if request.rg {
@@ -251,7 +251,10 @@ async fn execute_request(
         }
         return execute_direct_context(request, output).await;
     }
-    if use_server(mode, home).await? {
+    let server = use_server(mode, home).await?;
+    zg_cli::finalize_refresh(&mut request, server);
+    authorize_query(&mut request, server, home).await?;
+    if server {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
         let reply = zg_daemon::execute_command(&home, DaemonCommand::Context(request)).await?;
         let DaemonReply::Context(result) = reply else {
@@ -272,6 +275,93 @@ async fn execute_request(
         return Ok(());
     }
     execute_direct_context(request, output).await
+}
+
+async fn authorize_query(
+    request: &mut ContextOptions,
+    server: bool,
+    home: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    // Redirected input must never block waiting for interactive consent.
+    if request.allow_remote || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Ok(());
+    }
+    authorize_query_with_io(
+        request,
+        server,
+        home,
+        io::stdin().lock(),
+        io::stderr().lock(),
+    )
+    .await
+}
+
+async fn authorize_query_with_io(
+    request: &mut ContextOptions,
+    server: bool,
+    home: Option<&Path>,
+    input: impl io::BufRead,
+    output: impl io::Write,
+) -> Result<(), Box<dyn Error>> {
+    use zg_cli::QueryAuthorizationDecision;
+    let server_home = if server {
+        Some(zg_daemon::resolve_home(home.map(Path::to_owned))?)
+    } else {
+        None
+    };
+    let authorization = if let Some(home) = &server_home {
+        let reply =
+            zg_daemon::execute_command(home, DaemonCommand::QueryAuthorization(request.clone()))
+                .await?;
+        let DaemonReply::QueryAuthorization(target) = reply else {
+            return Err(protocol_mismatch("query_authorization"));
+        };
+        target
+    } else {
+        zg_engine::authorization::query_authorization(request)?
+    };
+    let Some(authorization) = authorization else {
+        return Ok(());
+    };
+    let target = authorization.target;
+    let decision = zg_cli::prompt_query_authorization(
+        &target,
+        authorization.query_text,
+        authorization.workspace_content,
+        input,
+        output,
+    )?;
+    match decision {
+        QueryAuthorizationDecision::Cancel => {
+            return Err(io::Error::other(
+                "Remote Embedding authorization was declined. No remote data was sent.",
+            )
+            .into());
+        }
+        QueryAuthorizationDecision::FtsOnly => {
+            zg_cli::use_fts_only(request);
+            return Ok(());
+        }
+        QueryAuthorizationDecision::Once => request.allow_remote = true,
+        QueryAuthorizationDecision::Workspace => {
+            if let Some(home) = &server_home {
+                let reply = zg_daemon::execute_command(
+                    home,
+                    DaemonCommand::GrantIndexAuthorization(target.clone()),
+                )
+                .await?;
+                if !matches!(reply, DaemonReply::GrantIndexAuthorization) {
+                    return Err(protocol_mismatch("grant_index_authorization"));
+                }
+            } else {
+                zg_engine::authorization::grant_index(&target)?;
+            }
+        }
+    }
+    // Bind query and refresh execution to the destination disclosed at the prompt.
+    request.endpoint = Some(target.endpoint);
+    request.authorization_model = Some(target.model);
+    Ok(())
 }
 
 async fn execute_direct_context(
@@ -578,4 +668,104 @@ fn init_tracing(debug: bool) {
         .with_writer(io::stderr)
         .with_env_filter(filter)
         .try_init();
+}
+
+#[cfg(test)]
+mod query_authorization_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn query_choices_apply_to_execution_and_workspace_consent_is_reused() {
+        const FIXTURE_ENV: &str = "ZG_QUERY_AUTHORIZATION_TEST_ROOT";
+        let Some(root) = std::env::var_os(FIXTURE_ENV) else {
+            // Isolate signing and global configuration without mutating process environment.
+            let workspace = tempfile::tempdir().expect("workspace");
+            let state = tempfile::tempdir().expect("state");
+            let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "query_authorization_tests::query_choices_apply_to_execution_and_workspace_consent_is_reused", "--nocapture"])
+                .env(FIXTURE_ENV, workspace.path())
+                .env("HOME", state.path()).env("USERPROFILE", state.path())
+                .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
+                .env_remove("ZVEC_GREP_API_KEY").env_remove("ZVEC_GREP_ENDPOINT")
+                .env_remove("ZVEC_GREP_EMBEDDING").env_remove("DASHSCOPE_API_KEY").env_remove("QWEN_API_KEY")
+                .output().expect("isolated test");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let engine = ZvecGrep::new();
+        engine
+            .index(zg_engine::api::index::IndexOptions {
+                root: Some(root.clone()),
+                allow_remote: true,
+                api_key: Some("test-key".into()),
+                embedding: Some(zg_engine::api::index::options::EmbeddingModelSpec {
+                    reference: "qwen/text-embedding-v4".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: zg_engine::api::index::options::Device::Auto,
+                }),
+                endpoint: Some("https://query.test/embeddings".into()),
+                ..zg_engine::api::index::IndexOptions::default()
+            })
+            .await
+            .expect("empty remote index without network");
+        let make = || ContextOptions {
+            root: Some(root.clone()),
+            query: Some("bookstore".into()),
+            refresh: Some(zg_engine::api::context::options::RefreshPolicy::Off),
+            ..ContextOptions::default()
+        };
+        let mut once = make();
+        let mut prompt = Vec::new();
+        authorize_query_with_io(&mut once, false, None, "1\n".as_bytes(), &mut prompt)
+            .await
+            .expect("once");
+        assert!(once.allow_remote);
+        assert_eq!(
+            once.authorization_model.as_deref(),
+            Some("qwen/text-embedding-v4")
+        );
+        assert!(!root.join(".zvec-grep/authorization.json").exists());
+        assert!(
+            String::from_utf8(prompt)
+                .expect("prompt")
+                .contains("Send query text?")
+        );
+        let mut cancelled = make();
+        assert!(
+            authorize_query_with_io(&mut cancelled, false, None, "4\n".as_bytes(), Vec::new())
+                .await
+                .is_err()
+        );
+        assert!(!cancelled.allow_remote);
+        let mut fts = make();
+        authorize_query_with_io(&mut fts, false, None, "3\n".as_bytes(), Vec::new())
+            .await
+            .expect("FTS");
+        engine
+            .context(fts)
+            .await
+            .expect("FTS executes without remote credentials");
+        assert!(!root.join(".zvec-grep/authorization.json").exists());
+        let mut workspace = make();
+        authorize_query_with_io(&mut workspace, false, None, "2\n".as_bytes(), Vec::new())
+            .await
+            .expect("workspace");
+        assert!(!workspace.allow_remote);
+        assert!(root.join(".zvec-grep/authorization.json").exists());
+        let mut repeated = make();
+        let mut prompt = Vec::new();
+        authorize_query_with_io(&mut repeated, false, None, "".as_bytes(), &mut prompt)
+            .await
+            .expect("existing grant");
+        assert!(prompt.is_empty());
+        engine.close();
+    }
 }
