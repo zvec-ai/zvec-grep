@@ -1,9 +1,8 @@
 use std::{fs, io::Read, path::Path};
 
 use flate2::read::GzDecoder;
-use sha2::{Digest, Sha256};
 
-use crate::{EngineError, EngineResult};
+use crate::{EngineError, EngineResult, utils::sha256_hex};
 
 use super::backend::{atomic_write, io_error};
 
@@ -43,11 +42,5 @@ pub(super) fn prepare(path: &Path) -> EngineResult<()> {
 }
 
 fn checksum_matches(bytes: &[u8], checksum: &str) -> bool {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut actual = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        actual.push(char::from(HEX[usize::from(byte >> 4)]));
-        actual.push(char::from(HEX[usize::from(byte & 15)]));
-    }
-    actual == checksum
+    sha256_hex(bytes) == checksum
 }

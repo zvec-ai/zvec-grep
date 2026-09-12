@@ -1,4 +1,4 @@
-use crate::domain::decode_text;
+use crate::utils::decode_text;
 
 use super::{FileFormat, normalize_formats};
 

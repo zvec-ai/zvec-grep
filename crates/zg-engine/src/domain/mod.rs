@@ -10,5 +10,5 @@ pub(crate) use entity::{
 };
 pub(crate) use source::{
     FileCategory, FileFormat, FileId, FileSnapshot, LineColumnRange, SourceFile, SourceRange,
-    TextPosition, TextRange, decode_text,
+    TextPosition, TextRange,
 };

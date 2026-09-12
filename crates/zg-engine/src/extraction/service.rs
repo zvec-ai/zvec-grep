@@ -3,8 +3,6 @@
 #[cfg(test)]
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
-
 #[cfg(test)]
 use super::TextSource;
 use super::{
@@ -17,9 +15,8 @@ use crate::{
         Content, EntityContent, EntityId, EntityMetadata, FileCategory, FileFormat, SymbolType,
         TableCellRole,
     },
+    utils::sha256_hex,
 };
-
-const HEX: &[u8; 16] = b"0123456789abcdef";
 
 pub(super) fn extract<'source>(
     source: impl Into<Source<'source>>,
@@ -153,12 +150,7 @@ pub(super) fn validate_source_file(file: &SourceFile) -> Result<(), EngineError>
 
 pub(super) fn make_entity_id(file_id: &crate::domain::FileId, index: usize) -> EntityId {
     let file_id = file_id.as_str();
-    let digest = Sha256::digest(format!("{file_id}\0{index}").as_bytes());
-    let mut id = String::with_capacity(64);
-    for byte in digest {
-        id.push(char::from(HEX[usize::from(byte >> 4)]));
-        id.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
+    let id = sha256_hex(format!("{file_id}\0{index}").as_bytes());
     EntityId::new(id).expect("SHA-256 digest is a non-empty ID")
 }
 

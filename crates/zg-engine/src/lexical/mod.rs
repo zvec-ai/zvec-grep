@@ -16,7 +16,8 @@ use std::{
 
 use crate::{
     EngineError,
-    domain::{LineColumnRange, TextPosition, decode_text},
+    domain::{LineColumnRange, TextPosition},
+    utils::decode_text,
 };
 use grep::{
     matcher::Matcher,

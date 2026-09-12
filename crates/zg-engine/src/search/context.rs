@@ -4,8 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
-
 use crate::{
     EngineError,
     api::context::{
@@ -21,6 +19,7 @@ use crate::{
     },
     domain::{Content, EntityContent, EntityFragment},
     storage::spi::{StoredFile, WorkspaceIndexStorage},
+    utils::sha256_hex,
 };
 
 use super::pipeline::{
@@ -585,17 +584,6 @@ fn file_freshness_status(file: &StoredFile) -> ContextItemStatus {
         return ContextItemStatus::Fresh;
     }
     ContextItemStatus::PossiblyStale
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 fn rank_as_f64(rank: usize) -> f64 {

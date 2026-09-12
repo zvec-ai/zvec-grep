@@ -25,6 +25,7 @@ use crate::{
         validate_fragments,
     },
     models::EmbeddingMetric,
+    utils::hex_digest,
 };
 
 const WRITE_BATCH: usize = 1024;
@@ -817,17 +818,11 @@ fn symbol_type_name(value: SymbolType) -> &'static str {
 }
 
 fn primary_key(namespace: &str, value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut digest = Sha256::new();
     digest.update(namespace.as_bytes());
     digest.update([0]);
     digest.update(value.as_bytes());
-    let mut output = String::with_capacity(64);
-    for byte in digest.finalize() {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 15)]));
-    }
-    output
+    hex_digest(digest.finalize())
 }
 
 fn doc_key(doc: &Doc) -> EngineResult<&str> {

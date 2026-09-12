@@ -9,7 +9,6 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zg_host_native::{
@@ -32,7 +31,7 @@ use crate::{
     },
     domain::{
         EntityFragment, FileCategory, FileFormat, FileId, FileSnapshot, ImageContent, SourceFile,
-        decode_text, validate_fragments,
+        validate_fragments,
     },
     extraction::{
         ImageSource, IndexingExtractionFragment, SourceKind, TextSource, extract_for_indexing,
@@ -43,6 +42,7 @@ use crate::{
         EmbeddingResult, ModelError, ModelRuntimeLease,
     },
     storage::spi::{FileIndexDiagnostics, IndexedFragment, StoredFile, WorkspaceIndexStorage},
+    utils::{decode_text, sha256_hex},
 };
 
 use super::input_budget::index_chunk_options;
@@ -516,7 +516,7 @@ async fn resolve_status_modifications(
             continue;
         }
         let source = read_source(scanner, control, &candidate.discovered).await?;
-        let hash = sha256_bytes(&source.bytes);
+        let hash = sha256_hex(&source.bytes);
         if candidate.existing.as_ref().is_some_and(|existing| {
             existing.source.snapshot.size_bytes == candidate.file.source.snapshot.size_bytes
                 && existing.source.snapshot.content_hash.as_deref() == Some(hash.as_str())
@@ -843,7 +843,7 @@ async fn prepare_candidate(
     }
 
     let mut file = candidate.file.clone();
-    file.source.snapshot.content_hash = Some(sha256_bytes(&source.bytes));
+    file.source.snapshot.content_hash = Some(sha256_hex(&source.bytes));
     if candidate.kind == CandidateKind::Modified
         && candidate.existing.as_ref().is_some_and(|existing| {
             existing.source.snapshot.size_bytes == file.source.snapshot.size_bytes
@@ -1859,26 +1859,7 @@ fn skipped_files(snapshot: &ScanSnapshot) -> Vec<SkippedFile> {
 
 fn make_file_id(workspace_index_id: &str, absolute_path: &Path) -> String {
     let normalized = absolute_path.to_string_lossy().replace('\\', "/");
-    sha256_text(&format!("{workspace_index_id}\0{normalized}"))
-}
-
-fn sha256_text(value: &str) -> String {
-    hex_digest(Sha256::digest(value.as_bytes()))
-}
-
-fn sha256_bytes(value: &[u8]) -> String {
-    hex_digest(Sha256::digest(value))
-}
-
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let bytes = digest.as_ref();
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
+    sha256_hex(format!("{workspace_index_id}\0{normalized}").as_bytes())
 }
 
 #[derive(Debug)]
@@ -2423,7 +2404,7 @@ mod tests {
             .iter()
             .find(|file| file.source.absolute_path == second_path)
             .expect("second stored file");
-        let changed_hash = sha256_bytes(b"second changed");
+        let changed_hash = sha256_hex(b"second changed");
         assert_ne!(
             untouched.source.snapshot.content_hash.as_deref(),
             Some(changed_hash.as_str())

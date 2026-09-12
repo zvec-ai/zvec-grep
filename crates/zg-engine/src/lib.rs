@@ -16,6 +16,7 @@ mod models;
 mod search;
 mod service;
 mod storage;
+mod utils;
 mod workspace;
 
 use api::{

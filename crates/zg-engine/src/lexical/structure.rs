@@ -5,8 +5,6 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use sha2::{Digest, Sha256};
-
 use crate::{
     api::context::result::{
         ContentRange, ContextContainer, ContextItem, ContextItemKind,
@@ -14,9 +12,10 @@ use crate::{
     },
     domain::{
         EntityFragment, EntityMetadata, FileCategory, FileFormat, FileId, FileSnapshot, SourceFile,
-        SourceRange, decode_text,
+        SourceRange,
     },
     extraction::{ChunkOptions, TextSource, extract},
+    utils::{decode_text, sha256_hex},
 };
 
 pub(crate) const RG_STRUCTURE_ENRICH_FILE_LIMIT: usize = 100;
@@ -217,18 +216,7 @@ fn fragment_specificity(fragment: &EntityFragment) -> u8 {
 
 fn structure_file_id(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
-    let digest = Sha256::digest(format!("{STRUCTURE_FILE_ID_NAMESPACE}\0{normalized}").as_bytes());
-    hex(&digest)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
+    sha256_hex(format!("{STRUCTURE_FILE_ID_NAMESPACE}\0{normalized}").as_bytes())
 }
 
 fn lexical_item_key(item: &ContextItem) -> String {
