@@ -5,6 +5,7 @@ import { ImageExtractor } from "../../../dist/engine/extraction/image/extractor.
 import { MarkdownExtractor } from "../../../dist/engine/extraction/markdown/extractor.js";
 import { extract } from "../../../dist/engine/extraction/index.js";
 import { TextExtractor } from "../../../dist/engine/extraction/text/extractor.js";
+import { vectorContentForFragment } from "../../../dist/engine/extraction/vector-content.js";
 
 function file(overrides = {}) {
   return {
@@ -240,6 +241,205 @@ test("markdown extractor handles heading styles, fences, hierarchy, and windows"
   assert.equal(plainMarkdown.length, 1);
   assert.equal(plainMarkdown[0].content.text, "plain markdown");
   assert.equal(plainMarkdown[0].metadata, undefined);
+});
+
+test("markdown extractor excludes YAML front matter before Setext heading discovery", async () => {
+  const extractor = new MarkdownExtractor();
+  const source = textSource(
+    [
+      "---",
+      "title: Search configuration",
+      "description: >",
+      "  Configures indexing and",
+      "  retrieval.",
+      "api_name: configureSearch",
+      "tags:",
+      "- indexing",
+      "draft: false",
+      "release.channel: stable",
+      "repository:",
+      "  url: https://example.test/project",
+      "---",
+      "",
+      "# Search configuration",
+      "",
+      "## Options",
+      "",
+      "Controls how documents are indexed.",
+    ].join("\n"),
+    {
+      kind: "text",
+      format: "markdown",
+      relativePath: "docs/search-configuration.md",
+    },
+  );
+
+  const fragments = await extractor.extract(source);
+  assert.deepEqual(
+    fragments.map((fragment) => fragment.metadata?.heading),
+    ["Search configuration", "Options"],
+  );
+  assert.equal(
+    fragments.some((fragment) => fragment.metadata?.heading === "- indexing"),
+    false,
+  );
+  assert.equal(
+    fragments.some(
+      (fragment) =>
+        fragment.content.kind === "text" &&
+        /^(?:---|title:|description:|api_name:|tags:|- indexing)/m.test(
+          fragment.content.text,
+        ),
+    ),
+    false,
+  );
+  assert.equal(fragments[0].range.startLine, 15);
+  assert.equal(
+    fragments[0].range.startOffset,
+    source.text.indexOf("# Search configuration"),
+  );
+
+  for (const fragment of fragments) {
+    assert.deepEqual(fragment.metadata?.frontMatter, {
+      title: "Search configuration",
+      description: "Configures indexing and retrieval.",
+      api_name: "configureSearch",
+      tags: ["indexing"],
+      draft: "false",
+      release_channel: "stable",
+    });
+  }
+
+  const vectorContent = vectorContentForFragment(fragments[1]);
+  assert.equal(vectorContent.kind, "text");
+  assert.match(vectorContent.text, /title: Search configuration/);
+  assert.match(
+    vectorContent.text,
+    /description: Configures indexing and retrieval\./,
+  );
+  assert.match(vectorContent.text, /api_name: configureSearch/);
+});
+
+test("markdown front matter boundaries are conservative and resilient", async () => {
+  const extractor = new MarkdownExtractor();
+  const unterminated = await extractor.extract(
+    textSource("---\ntitle: Still markdown\nplain body", {
+      kind: "text",
+      format: "markdown",
+    }),
+  );
+  assert.match(unterminated[0].content.text, /title: Still markdown/);
+
+  const invalid = await extractor.extract(
+    textSource("---\ntitle: [invalid\n---\n# Body", {
+      kind: "text",
+      format: "markdown",
+    }),
+  );
+  assert.equal(invalid.length, 1);
+  assert.equal(invalid[0].metadata?.heading, "Body");
+  assert.equal(invalid[0].metadata?.frontMatter, undefined);
+  assert.equal(invalid[0].range.startLine, 4);
+
+  const plainBody = await extractor.extract(
+    textSource(
+      "\uFEFF---\ntitle:  Plain   document\napiName: PlainApi\n...\nplain body",
+      { kind: "text", format: "markdown" },
+    ),
+  );
+  assert.equal(plainBody.length, 1);
+  assert.equal(plainBody[0].content.text, "plain body");
+  assert.equal(plainBody[0].range.startLine, 5);
+  assert.deepEqual(plainBody[0].metadata?.frontMatter, {
+    title: "Plain document",
+    api_name: "PlainApi",
+  });
+});
+
+test("markdown extractor follows CommonMark heading and block rules", async () => {
+  const extractor = new MarkdownExtractor();
+  const source = textSource(
+    [
+      "   # Indented heading",
+      "body",
+      "",
+      "# foo#",
+      "body",
+      "",
+      "Foo",
+      "Bar",
+      "---",
+      "body",
+      "",
+      "````md",
+      "# Not a heading in a code fence",
+      "```",
+      "still code",
+      "````",
+      "",
+      "<script>",
+      "# Not a heading in HTML",
+      "</script>",
+      "",
+      "- list item",
+      "---",
+      "",
+      "> # Nested blockquote heading",
+    ].join("\n"),
+    { kind: "text", format: "markdown", relativePath: "docs/commonmark.md" },
+  );
+
+  const fragments = await extractor.extract(source);
+  assert.deepEqual(
+    fragments.map((fragment) => fragment.metadata?.heading),
+    ["Indented heading", "foo#", "Foo Bar"],
+  );
+});
+
+test("markdown chunking keeps a fitting GFM table intact", async () => {
+  const extractor = new MarkdownExtractor();
+  const table = [
+    "| Name | Value |",
+    "| --- | --- |",
+    "| alpha | one |",
+    "| beta | two |",
+  ].join("\n");
+  const source = textSource(
+    [
+      "An introductory paragraph before the structured data.",
+      "",
+      table,
+      "",
+      "A trailing paragraph after the structured data.",
+    ].join("\n"),
+    { kind: "text", format: "markdown", relativePath: "docs/table.md" },
+  );
+
+  const fragments = await extractor.extract(source, {
+    maxChunkChars: 90,
+    chunkOverlapChars: 0,
+  });
+  assert.ok(fragments.length > 1);
+  assert.ok(
+    fragments.some(
+      (fragment) =>
+        fragment.content.kind === "text" &&
+        fragment.content.text.includes(table),
+    ),
+  );
+  assert.equal(
+    fragments.some(
+      (fragment) =>
+        fragment.content.kind === "text" &&
+        fragment.content.text.includes("| Name |") &&
+        !fragment.content.text.includes("| beta | two |"),
+    ),
+    false,
+  );
+  assert.equal(
+    fragments.every((fragment) => fragment.metadata === undefined),
+    true,
+  );
 });
 
 test("code extractor parses TypeScript and script blocks", async () => {
