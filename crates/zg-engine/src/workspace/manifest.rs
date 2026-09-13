@@ -225,13 +225,13 @@ pub(crate) fn write_workspace_manifest(
     manifest: &WorkspaceManifest,
 ) -> Result<(), EngineError> {
     manifest.validate()?;
-    create_directories(home).map_err(|error| manifest_io("create directory", home, &error))?;
+    create_directories(home)?;
     let path = workspace_manifest_path(home);
     let mut bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
         EngineError::internal(format!("failed to encode workspace manifest: {error}"))
     })?;
     bytes.push(b'\n');
-    atomic_write(&path, &bytes).map_err(|error| manifest_io("write", &path, &error))
+    atomic_write(&path, &bytes)
 }
 
 pub(crate) fn delete_workspace_manifest(home: &Path) -> Result<(), EngineError> {

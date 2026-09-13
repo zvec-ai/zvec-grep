@@ -364,7 +364,7 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
         let tokenizer_json = fs::read(&tokenizer_path).await.map_err(|error| {
             ModelError::storage_failure(format!("Unable to read Model2Vec tokenizer: {error}"))
         })?;
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|error| {
+        let tokenizer = Tokenizer::from_bytes(&tokenizer_json).map_err(|error| {
             ModelError::storage_failure("Unable to load Model2Vec tokenizer").with_cause(error)
         })?;
         let unknown_token_id = resolve_unknown_token_id(&tokenizer, &tokenizer_json);

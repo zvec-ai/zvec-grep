@@ -13,7 +13,7 @@ use crate::{
     EngineError, EngineResult,
     domain::{EntityId, FileId, validate_fragments},
     models::EmbeddingMetric,
-    utils,
+    utils::{atomic_write as write_record, create_directories, sync_directory},
 };
 
 use super::{
@@ -157,8 +157,7 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
         }
         let read_only = options.is_read_only();
         if !read_only {
-            utils::create_directories(home)
-                .map_err(|error| io_error("create index directory", home, &error))?;
+            create_directories(home)?;
         }
         let home = fs::canonicalize(home)
             .map_err(|error| io_error("locate index directory", home, &error))?;
@@ -485,8 +484,7 @@ fn load_schema(
             "embedding dimension must be in 1..=20,000",
         ));
     }
-    utils::create_directories(path)
-        .map_err(|error| io_error("create storage directory", path, &error))?;
+    create_directories(path)?;
     write_record(
         &descriptor,
         &serde_json::to_vec(&SchemaRecord::new(embedding)).map_err(|error| json_error(&error))?,
@@ -527,8 +525,7 @@ fn prepare_storage(
         }
         let schema = load_schema(path, options)?;
         if !read_only {
-            utils::create_directories(path)
-                .map_err(|error| io_error("create storage directory", path, &error))?;
+            create_directories(path)?;
         }
         dictionary::prepare(&path.join("dictionary"))?;
         if journal.exists() {
@@ -579,14 +576,6 @@ fn clear_journal(path: &Path) -> EngineResult<()> {
     fs::remove_file(&journal)
         .map_err(|error| io_error("remove committed storage journal", &journal, &error))?;
     sync_directory(path)
-}
-
-fn write_record(path: &Path, bytes: &[u8]) -> EngineResult<()> {
-    utils::atomic_write(path, bytes).map_err(|error| io_error("persist storage file", path, &error))
-}
-
-fn sync_directory(path: &Path) -> EngineResult<()> {
-    utils::sync_directory(path).map_err(|error| io_error("sync storage directory", path, &error))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> EngineResult<T> {

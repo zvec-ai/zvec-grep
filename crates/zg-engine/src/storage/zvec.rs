@@ -388,7 +388,9 @@ fn open_collection(
 fn native_path(path: &Path) -> EngineResult<&str> {
     // zvec rejects the `?` in Windows verbatim prefixes. Simplify only when
     // the regular path identifies the same location; retain internal paths.
-    dunce::simplified(path).to_str().ok_or_else(|| {
+    #[cfg(windows)]
+    let path = dunce::simplified(path);
+    path.to_str().ok_or_else(|| {
         EngineError::invalid_argument(format!(
             "zvec storage path must be UTF-8: {}",
             path.display()

@@ -159,18 +159,17 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| EngineError::invalid_argument("Invalid config path"))?;
-    create_directories(parent).map_err(io_error)?;
+    create_directories(parent)?;
     let _lock = crate::workspace::lock::acquire_read_write_lock(
         &parent.join("locks/config"),
         crate::workspace::lock::LockMode::Write,
         "global-config.update",
-        std::time::Duration::from_secs(21600),
     )?;
     let mut value = read_at(path)?;
     merge(&mut value, changes);
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| EngineError::internal(error.to_string()))?;
-    atomic_write(path, &bytes).map_err(io_error)
+    atomic_write(path, &bytes)
 }
 
 fn merge(target: &mut Value, patch: Value) {
@@ -184,11 +183,6 @@ fn merge(target: &mut Value, patch: Value) {
     } else {
         *target = patch;
     }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn io_error(error: std::io::Error) -> EngineError {
-    EngineError::internal(error.to_string())
 }
 
 #[cfg(test)]

@@ -233,7 +233,7 @@ fn signing_key(create: bool) -> Result<Vec<u8>, EngineError> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        create_directories(parent).map_err(io)?;
+        create_directories(parent)?;
         let temporary = parent.join(format!(".authorization-key-{}", uuid::Uuid::new_v4()));
         let key = [
             uuid::Uuid::new_v4().as_bytes().as_slice(),
@@ -350,9 +350,9 @@ fn persist_grant(grant: Grant) -> Result<(), EngineError> {
         signing_key(true)?,
     )
     .to_vec();
-    create_directories(&location.home).map_err(io)?;
+    create_directories(&location.home)?;
     let bytes = serde_json::to_vec_pretty(&SignedGrant { grant, signature }).map_err(json)?;
-    atomic_write(&location.home.join("authorization.json"), &bytes).map_err(io)
+    atomic_write(&location.home.join("authorization.json"), &bytes)
 }
 
 fn read_grant(root: &Path) -> Result<Option<Grant>, EngineError> {

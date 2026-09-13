@@ -18,7 +18,6 @@ vulkan = ["llama-cpp-2/vulkan", "ort/webgpu"]
 [dependencies]
 async-trait.workspace = true
 base64 = "0.23.1"
-dunce = "1.0.5"
 futures-util = "0.3.34"
 flate2 = "1.1.10"
 globset.workspace = true
@@ -35,7 +34,6 @@ rayon = "1.11.0"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
-sysinfo.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
@@ -63,6 +61,7 @@ rustix = { version = "1.1.4", features = ["fs"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+dunce = "1.0.5"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
 
 [dev-dependencies]

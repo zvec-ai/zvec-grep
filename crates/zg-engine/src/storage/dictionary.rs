@@ -21,8 +21,7 @@ const DICTIONARIES: [(&str, &[u8], &str); 2] = [
 ];
 
 pub(super) fn prepare(path: &Path) -> EngineResult<()> {
-    create_directories(path)
-        .map_err(|error| io_error("create dictionary directory", path, &error))?;
+    create_directories(path)?;
     for (name, compressed, checksum) in DICTIONARIES {
         let destination = path.join(name);
         if fs::read(&destination).is_ok_and(|bytes| checksum_matches(&bytes, checksum)) {
@@ -37,8 +36,7 @@ pub(super) fn prepare(path: &Path) -> EngineResult<()> {
                 "bundled dictionary checksum mismatch",
             ));
         }
-        atomic_write(&destination, &bytes)
-            .map_err(|error| io_error("persist dictionary", &destination, &error))?;
+        atomic_write(&destination, &bytes)?;
     }
     Ok(())
 }
