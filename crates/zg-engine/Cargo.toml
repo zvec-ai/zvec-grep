@@ -24,6 +24,7 @@ flate2 = "1.1.10"
 globset.workspace = true
 grep.workspace = true
 half = "2.7.1"
+hex = "0.4.3"
 ignore.workspace = true
 hmac-sha256 = "1.1.14"
 httpdate = "1.0.3"
@@ -35,6 +36,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -54,6 +56,9 @@ zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
 zvec-rust = "=0.7.0"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
 
@@ -61,7 +66,6 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

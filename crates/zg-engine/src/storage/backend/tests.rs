@@ -245,7 +245,7 @@ fn replays_interrupted_writes_before_serving_readers() {
         version: VERSION,
         operation: replace_operation(&file, &[replacement]).expect("replacement record"),
     };
-    atomic_write(
+    write_record(
         &path.join(JOURNAL),
         &serde_json::to_vec(&record).expect("encode journal"),
     )
@@ -307,7 +307,7 @@ fn replays_interrupted_writes_before_serving_readers() {
             file_id: file.source.id.as_str().to_owned(),
         },
     };
-    atomic_write(
+    write_record(
         &path.join(JOURNAL),
         &serde_json::to_vec(&record).expect("encode delete"),
     )

@@ -15,7 +15,7 @@ use crate::{
         Content, EntityContent, EntityId, EntityMetadata, FileCategory, FileFormat, SymbolType,
         TableCellRole,
     },
-    utils::sha256_hex,
+    utils::{collapse_whitespace, sha256_hex, take_utf16, utf16_len},
 };
 
 pub(super) fn extract<'source>(
@@ -162,20 +162,20 @@ pub(super) fn chunk_options_for_metadata(
     let metadata_text = vector_metadata_text(metadata, metadata_budget(Some(max_chunk_chars)));
     let separator_chars = usize::from(!metadata_text.is_empty());
     let content_max = max_chunk_chars
-        .saturating_sub(char_count(&metadata_text) + separator_chars)
+        .saturating_sub(utf16_len(&metadata_text) + separator_chars)
         .max(1);
     let overlap = chunk_overlap_chars.min(content_max.saturating_sub(1));
     (content_max, overlap)
 }
 
 pub(super) fn fit_text_to_chars(value: &str, max_chars: usize) -> String {
-    if char_count(value) <= max_chars {
+    if utf16_len(value) <= max_chars {
         return value.to_owned();
     }
     if max_chars <= 3 {
         return ".".repeat(max_chars);
     }
-    let prefix = take_chars(value, max_chars - 3).trim_end();
+    let prefix = take_utf16(value, max_chars - 3).trim_end();
     format!("{prefix}...")
 }
 
@@ -201,11 +201,11 @@ fn vector_metadata_text(metadata: Option<&EntityMetadata>, max_chars: Option<usi
             scope.as_ref().map(|value| format!("scope: {value}")),
             signature
                 .as_ref()
-                .map(|value| format!("signature: {}", one_line(value))),
+                .map(|value| format!("signature: {}", collapse_whitespace(value))),
             (!modifiers.is_empty()).then(|| format!("modifiers: {}", modifiers.join(" "))),
             documentation
                 .as_ref()
-                .map(|value| format!("doc: {}", one_line(value))),
+                .map(|value| format!("doc: {}", collapse_whitespace(value))),
         ],
         EntityMetadata::Markdown {
             heading,
@@ -226,10 +226,6 @@ fn metadata_budget(max_chars: Option<usize>) -> Option<usize> {
     max_chars.map(|value| value / 4)
 }
 
-fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 pub(super) fn symbol_type_name(symbol_type: SymbolType) -> &'static str {
     match symbol_type {
         SymbolType::Module => "module",
@@ -239,48 +235,6 @@ pub(super) fn symbol_type_name(symbol_type: SymbolType) -> &'static str {
         SymbolType::Value => "value",
         SymbolType::Alias => "alias",
     }
-}
-
-pub(super) fn char_count(value: &str) -> usize {
-    value.encode_utf16().count()
-}
-
-pub(super) fn take_chars(value: &str, count: usize) -> &str {
-    let mut units = 0;
-    for (index, character) in value.char_indices() {
-        let next = units + character.len_utf16();
-        if next > count {
-            return &value[..index];
-        }
-        units = next;
-    }
-    value
-}
-
-pub(super) fn byte_index_at_utf16(value: &str, utf16_offset: usize) -> usize {
-    let mut units = 0;
-    for (index, character) in value.char_indices() {
-        let next = units + character.len_utf16();
-        if next > utf16_offset {
-            return index;
-        }
-        units = next;
-    }
-    value.len()
-}
-
-pub(super) fn byte_index_at_utf16_ceil(value: &str, utf16_offset: usize) -> usize {
-    let mut units = 0;
-    for (index, character) in value.char_indices() {
-        if units >= utf16_offset {
-            return index;
-        }
-        units += character.len_utf16();
-        if units > utf16_offset {
-            return index + character.len_utf8();
-        }
-    }
-    value.len()
 }
 
 #[cfg(test)]

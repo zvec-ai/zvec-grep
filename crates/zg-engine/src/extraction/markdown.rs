@@ -4,12 +4,12 @@ use crate::{
         Content, Entity, EntityContent, EntityId, EntityMetadata, FileFormat, FragmentId,
         SourceRange, WindowFragment,
     },
+    utils::{byte_offset_at_utf16_ceil, utf16_len, utf16_line_offsets},
 };
 
 use super::{
-    ChunkOptions, EntityFragment, TextRange, TextSource, byte_index_at_utf16_ceil, char_count,
-    chunk_options_for_metadata, fit_text_to_chars, make_entity_id,
-    text::extract_plain_text_fragments, validate_source_file,
+    ChunkOptions, EntityFragment, TextRange, TextSource, chunk_options_for_metadata,
+    fit_text_to_chars, make_entity_id, text::extract_plain_text_fragments, validate_source_file,
 };
 
 const DEFAULT_MARKDOWN_CHUNK_CHARS: usize = 3_600;
@@ -55,7 +55,7 @@ pub(super) fn extract(
         ));
     }
 
-    let line_offsets = compute_line_offsets(&lines);
+    let line_offsets = utf16_line_offsets(&lines);
     let fence_lines = compute_fence_lines(&lines);
     let sections = build_sections(&headings, &lines);
     let mut fragments = Vec::new();
@@ -296,7 +296,7 @@ fn split_markdown_section(
     let mut start_index = section.start_index;
 
     while start_index <= section.end_index {
-        if char_count(lines[start_index]) + 1 > max_chars {
+        if utf16_len(lines[start_index]) + 1 > max_chars {
             windows.extend(split_long_line(
                 lines[start_index],
                 start_index,
@@ -310,7 +310,7 @@ fn split_markdown_section(
         let mut end_index = start_index;
         let mut used_chars = 0;
         while end_index <= section.end_index {
-            let line_length = char_count(lines[end_index]) + 1;
+            let line_length = utf16_len(lines[end_index]) + 1;
             if used_chars + line_length > max_chars && end_index > start_index {
                 break;
             }
@@ -405,20 +405,20 @@ fn split_long_line(
     let mut byte_offset = 0;
     while byte_offset < line.len() {
         let rest = &line[byte_offset..];
-        let slice_chars = if char_count(rest) <= max_chars {
-            char_count(rest)
+        let slice_chars = if utf16_len(rest) <= max_chars {
+            utf16_len(rest)
         } else {
             find_line_cut(rest, max_chars)
         };
-        let slice_bytes = byte_index_at_utf16_ceil(rest, slice_chars);
+        let slice_bytes = byte_offset_at_utf16_ceil(rest, slice_chars);
         let text = &rest[..slice_bytes];
         windows.push(MarkdownWindow {
             text: text.to_owned(),
             range: TextRange {
                 start_line: line_index + 1,
                 end_line: line_index + 1,
-                start_utf16_offset: line_offset + char_count(&line[..byte_offset]),
-                end_utf16_offset: line_offset + char_count(&line[..byte_offset + slice_bytes]),
+                start_utf16_offset: line_offset + utf16_len(&line[..byte_offset]),
+                end_utf16_offset: line_offset + utf16_len(&line[..byte_offset + slice_bytes]),
             },
         });
         byte_offset += slice_bytes;
@@ -438,21 +438,9 @@ fn lines_to_window(
             start_line: start_index + 1,
             end_line: end_index + 1,
             start_utf16_offset: line_offsets[start_index],
-            end_utf16_offset: line_offsets[end_index] + char_count(lines[end_index]),
+            end_utf16_offset: line_offsets[end_index] + utf16_len(lines[end_index]),
         },
     }
-}
-
-fn compute_line_offsets(lines: &[&str]) -> Vec<usize> {
-    let mut offset = 0;
-    lines
-        .iter()
-        .map(|line| {
-            let current = offset;
-            offset += char_count(line) + 1;
-            current
-        })
-        .collect()
 }
 
 fn compute_fence_lines(lines: &[&str]) -> Vec<bool> {
@@ -486,7 +474,7 @@ fn compute_markdown_overlap_lines(
     let mut chars = 0;
     let mut count = 0;
     for index in ((start_index + 1)..end_index).rev() {
-        chars += char_count(lines[index]) + 1;
+        chars += utf16_len(lines[index]) + 1;
         if chars > overlap_chars {
             break;
         }
@@ -543,8 +531,9 @@ mod tests {
 
     use super::super::test_content;
 
-    use super::super::{ChunkOptions, byte_index_at_utf16, test_source};
+    use super::super::{ChunkOptions, test_source};
     use super::extract;
+    use crate::utils::byte_offset_at_utf16_floor;
 
     #[test]
     fn handles_heading_styles_fences_hierarchy_and_windows() {
@@ -613,8 +602,8 @@ mod tests {
             else {
                 panic!("text range expected");
             };
-            let start_byte = byte_index_at_utf16(&source.text, start_utf16_offset);
-            let end_byte = byte_index_at_utf16(&source.text, end_utf16_offset);
+            let start_byte = byte_offset_at_utf16_floor(&source.text, start_utf16_offset);
+            let end_byte = byte_offset_at_utf16_floor(&source.text, end_utf16_offset);
             assert_eq!(content, source.text[start_byte..end_byte]);
         }
     }

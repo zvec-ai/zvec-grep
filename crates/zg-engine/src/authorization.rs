@@ -3,6 +3,7 @@
 use crate::{
     EngineError,
     models::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
+    utils::{atomic_write, create_directories},
     workspace::{
         layout::{find_nearest_workspace, workspace_index_location},
         manifest::read_workspace_manifest,
@@ -232,7 +233,7 @@ fn signing_key(create: bool) -> Result<Vec<u8>, EngineError> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        fs::create_dir_all(parent).map_err(io)?;
+        create_directories(parent).map_err(io)?;
         let temporary = parent.join(format!(".authorization-key-{}", uuid::Uuid::new_v4()));
         let key = [
             uuid::Uuid::new_v4().as_bytes().as_slice(),
@@ -349,20 +350,9 @@ fn persist_grant(grant: Grant) -> Result<(), EngineError> {
         signing_key(true)?,
     )
     .to_vec();
-    fs::create_dir_all(&location.home).map_err(io)?;
-    let temporary = location
-        .home
-        .join(format!(".authorization-{}", uuid::Uuid::new_v4()));
-    private_write(
-        &temporary,
-        &serde_json::to_vec_pretty(&SignedGrant { grant, signature }).map_err(json)?,
-    )?;
-    let result = fs::rename(&temporary, location.home.join("authorization.json")).map_err(io);
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result?;
-    Ok(())
+    create_directories(&location.home).map_err(io)?;
+    let bytes = serde_json::to_vec_pretty(&SignedGrant { grant, signature }).map_err(json)?;
+    atomic_write(&location.home.join("authorization.json"), &bytes).map_err(io)
 }
 
 fn read_grant(root: &Path) -> Result<Option<Grant>, EngineError> {

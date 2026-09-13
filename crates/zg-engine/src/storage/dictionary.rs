@@ -2,9 +2,10 @@ use std::{fs, io::Read, path::Path};
 
 use flate2::read::GzDecoder;
 
-use crate::{EngineError, EngineResult, utils::sha256_hex};
-
-use super::backend::{atomic_write, io_error};
+use crate::{
+    EngineError, EngineResult,
+    utils::{atomic_write, create_directories, sha256_hex},
+};
 
 const DICTIONARIES: [(&str, &[u8], &str); 2] = [
     (
@@ -20,7 +21,7 @@ const DICTIONARIES: [(&str, &[u8], &str); 2] = [
 ];
 
 pub(super) fn prepare(path: &Path) -> EngineResult<()> {
-    fs::create_dir_all(path)
+    create_directories(path)
         .map_err(|error| io_error("create dictionary directory", path, &error))?;
     for (name, compressed, checksum) in DICTIONARIES {
         let destination = path.join(name);
@@ -36,11 +37,16 @@ pub(super) fn prepare(path: &Path) -> EngineResult<()> {
                 "bundled dictionary checksum mismatch",
             ));
         }
-        atomic_write(&destination, &bytes)?;
+        atomic_write(&destination, &bytes)
+            .map_err(|error| io_error("persist dictionary", &destination, &error))?;
     }
     Ok(())
 }
 
 fn checksum_matches(bytes: &[u8], checksum: &str) -> bool {
     sha256_hex(bytes) == checksum
+}
+
+fn io_error(action: &str, path: &Path, error: &std::io::Error) -> EngineError {
+    EngineError::from_io(format!("cannot {action} {}", path.display()), error)
 }

@@ -1,11 +1,11 @@
 use crate::{
     EngineError,
     domain::{Content, Entity, EntityContent, SourceRange},
+    utils::{byte_offset_at_utf16_ceil, utf16_len, utf16_line_offsets},
 };
 
 use super::{
-    ChunkOptions, EntityFragment, TextRange, TextSource, byte_index_at_utf16_ceil, char_count,
-    make_entity_id, validate_source_file,
+    ChunkOptions, EntityFragment, TextRange, TextSource, make_entity_id, validate_source_file,
 };
 
 const DEFAULT_TEXT_CHUNK_CHARS: usize = 3_600;
@@ -74,12 +74,12 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
     }
 
     let lines = text.split('\n').collect::<Vec<_>>();
-    let line_offsets = compute_line_offsets(&lines);
+    let line_offsets = utf16_line_offsets(&lines);
     let mut chunks = Vec::new();
     let mut start_index = 0;
 
     while start_index < lines.len() {
-        if char_count(lines[start_index]) + 1 > max_chars {
+        if utf16_len(lines[start_index]) + 1 > max_chars {
             split_long_line(
                 lines[start_index],
                 start_index,
@@ -94,7 +94,7 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
         let mut used_chars = 0;
         let mut end_index = start_index;
         while end_index < lines.len() {
-            let line_length = char_count(lines[end_index]) + 1;
+            let line_length = utf16_len(lines[end_index]) + 1;
             if used_chars + line_length > max_chars && end_index > start_index {
                 break;
             }
@@ -112,7 +112,7 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
                     end_line: end_index,
                     start_utf16_offset: line_offsets[start_index],
                     end_utf16_offset: line_offsets[end_line_index]
-                        + char_count(lines[end_line_index]),
+                        + utf16_len(lines[end_line_index]),
                 },
             });
         }
@@ -136,12 +136,12 @@ fn split_long_line(
     let mut byte_offset = 0;
     while byte_offset < line.len() {
         let rest = &line[byte_offset..];
-        let slice_chars = if char_count(rest) <= max_chars {
-            char_count(rest)
+        let slice_chars = if utf16_len(rest) <= max_chars {
+            utf16_len(rest)
         } else {
             find_line_cut(rest, max_chars)
         };
-        let slice_bytes = byte_index_at_utf16_ceil(rest, slice_chars);
+        let slice_bytes = byte_offset_at_utf16_ceil(rest, slice_chars);
         let slice = &rest[..slice_bytes];
         if !slice.trim().is_empty() {
             chunks.push(TextChunk {
@@ -149,25 +149,13 @@ fn split_long_line(
                 range: TextRange {
                     start_line: line_index + 1,
                     end_line: line_index + 1,
-                    start_utf16_offset: line_offset + char_count(&line[..byte_offset]),
-                    end_utf16_offset: line_offset + char_count(&line[..byte_offset + slice_bytes]),
+                    start_utf16_offset: line_offset + utf16_len(&line[..byte_offset]),
+                    end_utf16_offset: line_offset + utf16_len(&line[..byte_offset + slice_bytes]),
                 },
             });
         }
         byte_offset += slice_bytes;
     }
-}
-
-fn compute_line_offsets(lines: &[&str]) -> Vec<usize> {
-    let mut offset = 0;
-    lines
-        .iter()
-        .map(|line| {
-            let current = offset;
-            offset += char_count(line) + 1;
-            current
-        })
-        .collect()
 }
 
 fn compute_next_start_line(
@@ -186,7 +174,7 @@ fn compute_next_start_line(
         if overlap_count >= overlap_chars {
             break;
         }
-        overlap_count += char_count(lines[index]) + 1;
+        overlap_count += utf16_len(lines[index]) + 1;
         overlap_lines += 1;
     }
     let next_start = end_index - overlap_lines;
@@ -198,8 +186,8 @@ fn compute_next_start_line(
 }
 
 fn find_line_cut(line: &str, max_chars: usize) -> usize {
-    if char_count(line) <= max_chars {
-        return char_count(line);
+    if utf16_len(line) <= max_chars {
+        return utf16_len(line);
     }
 
     let min_position = max_chars.saturating_mul(7) / 10;
@@ -232,8 +220,9 @@ mod tests {
 
     use super::super::test_content;
 
-    use super::super::{ChunkOptions, byte_index_at_utf16, test_source};
+    use super::super::{ChunkOptions, test_source};
     use super::extract;
+    use crate::utils::byte_offset_at_utf16_floor;
 
     #[test]
     fn validates_chunks_ranges_and_overlap_like_typescript() {
@@ -295,8 +284,8 @@ mod tests {
             else {
                 panic!("text range expected");
             };
-            let start_byte = byte_index_at_utf16(&source.text, start_utf16_offset);
-            let end_byte = byte_index_at_utf16(&source.text, end_utf16_offset);
+            let start_byte = byte_offset_at_utf16_floor(&source.text, start_utf16_offset);
+            let end_byte = byte_offset_at_utf16_floor(&source.text, end_utf16_offset);
             assert_eq!(content, source.text[start_byte..end_byte]);
         }
     }

@@ -1,10 +1,13 @@
 //! Shared global model configuration for CLI and resident execution.
 
-use crate::{EngineError, api::index::options::Device};
+use crate::{
+    EngineError,
+    api::index::options::Device,
+    utils::{atomic_write, create_directories},
+};
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -156,12 +159,7 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| EngineError::invalid_argument("Invalid config path"))?;
-    fs::create_dir_all(parent).map_err(io_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
-    }
+    create_directories(parent).map_err(io_error)?;
     let _lock = crate::workspace::lock::acquire_read_write_lock(
         &parent.join("locks/config"),
         crate::workspace::lock::LockMode::Write,
@@ -170,28 +168,9 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
     )?;
     let mut value = read_at(path)?;
     merge(&mut value, changes);
-    let temporary = parent.join(format!(".config-{}", uuid::Uuid::new_v4()));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = (|| {
-        let mut file = options.open(&temporary).map_err(io_error)?;
-        file.write_all(
-            &serde_json::to_vec_pretty(&value)
-                .map_err(|error| EngineError::internal(error.to_string()))?,
-        )
-        .map_err(io_error)?;
-        file.sync_all().map_err(io_error)?;
-        fs::rename(&temporary, path).map_err(io_error)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
+    let bytes = serde_json::to_vec_pretty(&value)
+        .map_err(|error| EngineError::internal(error.to_string()))?;
+    atomic_write(path, &bytes).map_err(io_error)
 }
 
 fn merge(target: &mut Value, patch: Value) {
@@ -228,6 +207,60 @@ mod tests {
         let value = read_at(&path).expect("read");
         assert_eq!(value["client"]["mode"], "direct");
         assert_eq!(value["models"]["local/test"]["device"], "cpu");
+        assert_eq!(value["defaults"]["embedding"], "local/test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permissions_are_private_on_creation_and_preserved_on_update() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let directory = root.path().join("settings");
+        let path = directory.join("config.json");
+        update_at(&path, json!({"client":{"mode":"direct"}})).expect("initial config");
+        assert_eq!(
+            fs::metadata(&directory)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("config metadata")
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o750))
+            .expect("custom directory permissions");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
+            .expect("custom config permissions");
+        update_at(&path, json!({"defaults":{"embedding":"local/test"}}))
+            .expect("update existing config");
+
+        assert_eq!(
+            fs::metadata(&directory)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        let value = read_at(&path).expect("updated config");
+        assert_eq!(value["client"]["mode"], "direct");
         assert_eq!(value["defaults"]["embedding"], "local/test");
     }
 }

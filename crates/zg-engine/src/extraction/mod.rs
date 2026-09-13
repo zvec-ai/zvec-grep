@@ -45,8 +45,8 @@ pub(crate) fn vector_content_for_fragment(
 
 // Shared implementation helpers used by the format-specific extractors.
 use service::{
-    byte_index_at_utf16, byte_index_at_utf16_ceil, char_count, chunk_options_for_metadata,
-    fit_text_to_chars, make_entity_id, symbol_type_name, take_chars, validate_source_file,
+    chunk_options_for_metadata, fit_text_to_chars, make_entity_id, symbol_type_name,
+    validate_source_file,
 };
 
 #[cfg(test)]

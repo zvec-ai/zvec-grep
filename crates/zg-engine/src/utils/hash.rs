@@ -1,18 +1,7 @@
 use sha2::{Digest, Sha256};
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
-}
-
-pub(crate) fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = digest.as_ref();
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for &byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(test)]

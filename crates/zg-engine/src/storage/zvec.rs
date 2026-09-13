@@ -25,7 +25,6 @@ use crate::{
         validate_fragments,
     },
     models::EmbeddingMetric,
-    utils::hex_digest,
 };
 
 const WRITE_BATCH: usize = 1024;
@@ -822,7 +821,7 @@ fn primary_key(namespace: &str, value: &str) -> String {
     digest.update(namespace.as_bytes());
     digest.update([0]);
     digest.update(value.as_bytes());
-    hex_digest(digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 fn doc_key(doc: &Doc) -> EngineResult<&str> {

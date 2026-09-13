@@ -17,7 +17,7 @@ use std::{
 use crate::{
     EngineError,
     domain::{LineColumnRange, TextPosition},
-    utils::decode_text,
+    utils::{decode_text, utf16_len},
 };
 use grep::{
     matcher::Matcher,
@@ -666,7 +666,7 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         let start_line = excerpt.start.line.saturating_sub(before).max(1);
         let end_line = excerpt.end.line.saturating_add(after).min(lines.len());
         let content = lines[start_line - 1..end_line].join("\n");
-        let end_offset = lines[end_line - 1].encode_utf16().count();
+        let end_offset = utf16_len(&lines[end_line - 1]);
         item.excerpt_range = Some(excerpt);
         item.range = LineColumnRange {
             start: TextPosition {
@@ -697,10 +697,7 @@ fn text_position_at_byte_offset(value: &str, byte_offset: usize) -> (usize, usiz
     let prefix = String::from_utf8_lossy(&value.as_bytes()[..end]);
     let line_offset = prefix.bytes().filter(|byte| *byte == b'\n').count();
     let last = prefix.rsplit('\n').next().unwrap_or_default();
-    (
-        line_offset,
-        last.trim_end_matches('\r').encode_utf16().count(),
-    )
+    (line_offset, utf16_len(last.trim_end_matches('\r')))
 }
 
 #[cfg(test)]

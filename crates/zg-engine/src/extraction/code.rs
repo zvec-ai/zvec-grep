@@ -10,13 +10,16 @@ use crate::{
         Content, Entity, EntityContent, EntityFragment, EntityMetadata, FileFormat, FileId,
         FragmentId, SourceRange, SymbolType, WindowFragment,
     },
+    utils::{
+        byte_offset_at_utf16_ceil, byte_offset_at_utf16_floor, collapse_whitespace, take_utf16,
+        utf16_len, utf16_line_offsets,
+    },
 };
 
 use self::adapter::{LanguageAdapter, named_children, resolve_adapter, text};
 use super::{
-    ChunkOptions, IndexingExtractionFragment, TextRange, TextSource, byte_index_at_utf16,
-    byte_index_at_utf16_ceil, char_count, chunk_options_for_metadata, make_entity_id,
-    symbol_type_name, text::extract_plain_text_fragments, validate_source_file,
+    ChunkOptions, IndexingExtractionFragment, TextRange, TextSource, chunk_options_for_metadata,
+    make_entity_id, symbol_type_name, text::extract_plain_text_fragments, validate_source_file,
 };
 
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
@@ -66,11 +69,7 @@ impl<'source> Utf16LineIndex<'source> {
         };
         let line_byte = self.byte_starts.get(row).copied().unwrap_or(0);
         let line_utf16 = self.utf16_starts.get(row).copied().unwrap_or(0);
-        line_utf16
-            + self
-                .source
-                .get(line_byte..byte_offset)
-                .map_or(0, char_count)
+        line_utf16 + self.source.get(line_byte..byte_offset).map_or(0, utf16_len)
     }
 }
 
@@ -345,7 +344,7 @@ fn code_entity_to_search_fragments(
     let (content_max, content_overlap) =
         chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
     let node_text = text(entity.node, source.text.as_bytes());
-    if char_count(node_text) <= content_max {
+    if utf16_len(node_text) <= content_max {
         return vec![window_to_fragment(
             entity,
             node_to_window(entity.node, source.text.as_bytes(), offsets),
@@ -427,7 +426,7 @@ fn split_large_node(
     let mut group_start = 0;
     let mut group_chars = 0;
     for (index, statement) in statements.iter().copied().enumerate() {
-        let statement_chars = char_count(text(statement, source));
+        let statement_chars = utf16_len(text(statement, source));
         if statement_chars > max_chars {
             if index > group_start {
                 windows.push(slice_statements(
@@ -468,7 +467,7 @@ fn split_large_node(
             };
             let mut candidate_chars = statement_chars;
             for previous in (candidate_start..index).rev() {
-                let added_chars = char_count(text(statements[previous], source)) + 1;
+                let added_chars = utf16_len(text(statements[previous], source)) + 1;
                 if candidate_chars + added_chars > max_chars {
                     candidate_start = previous + 1;
                     break;
@@ -529,12 +528,12 @@ fn split_text_by_lines(
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
     let lines = value.split('\n').collect::<Vec<_>>();
-    let line_offsets = line_utf16_offsets(&lines);
+    let line_offsets = utf16_line_offsets(&lines);
     let mut windows = Vec::new();
     let mut line_index = 0;
 
     while line_index < lines.len() {
-        if char_count(lines[line_index]) > max_chars {
+        if utf16_len(lines[line_index]) > max_chars {
             windows.extend(split_long_line_by_chars(
                 lines[line_index],
                 max_chars,
@@ -549,7 +548,7 @@ fn split_text_by_lines(
         let mut end_index = line_index;
         let mut used_chars = 0;
         while end_index < lines.len() {
-            let line_length = char_count(lines[end_index]) + 1;
+            let line_length = utf16_len(lines[end_index]) + 1;
             if used_chars + line_length > max_chars && end_index > line_index {
                 break;
             }
@@ -564,9 +563,7 @@ fn split_text_by_lines(
                 start_line: start_line + line_index,
                 end_line: start_line + end_index - 1,
                 start_utf16_offset: start_utf16_offset + line_offsets[line_index],
-                end_utf16_offset: start_utf16_offset
-                    + line_offsets[line_index]
-                    + char_count(&chunk),
+                end_utf16_offset: start_utf16_offset + line_offsets[line_index] + utf16_len(&chunk),
             },
         });
         if end_index >= lines.len() {
@@ -585,18 +582,18 @@ fn split_long_line_by_chars(
     start_utf16_offset: usize,
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
-    let total_chars = char_count(line);
+    let total_chars = utf16_len(line);
     let mut windows = Vec::new();
     let mut start_char = 0;
     while start_char < total_chars {
         let end_char = (start_char + max_chars).min(total_chars);
-        let start_byte = byte_index_at_utf16_ceil(line, start_char);
-        let actual_start = char_count(&line[..start_byte]);
-        let mut end_byte = byte_index_at_utf16(line, end_char);
+        let start_byte = byte_offset_at_utf16_ceil(line, start_char);
+        let actual_start = utf16_len(&line[..start_byte]);
+        let mut end_byte = byte_offset_at_utf16_floor(line, end_char);
         if end_byte == start_byte {
-            end_byte = byte_index_at_utf16_ceil(line, end_char);
+            end_byte = byte_offset_at_utf16_ceil(line, end_char);
         }
-        let actual_end = char_count(&line[..end_byte]);
+        let actual_end = utf16_len(&line[..end_byte]);
         windows.push(CodeWindow {
             text: line[start_byte..end_byte].to_owned(),
             embedding_text: None,
@@ -615,18 +612,6 @@ fn split_long_line_by_chars(
     windows
 }
 
-fn line_utf16_offsets(lines: &[&str]) -> Vec<usize> {
-    let mut offset = 0;
-    lines
-        .iter()
-        .map(|line| {
-            let current = offset;
-            offset += char_count(line) + 1;
-            current
-        })
-        .collect()
-}
-
 fn compute_overlap_start(
     source: &[u8],
     statements: &[Node<'_>],
@@ -640,7 +625,7 @@ fn compute_overlap_start(
     let mut chars = 0;
     let mut index = group_end;
     loop {
-        chars += char_count(text(statements[index], source));
+        chars += utf16_len(text(statements[index], source));
         if index < group_end {
             chars += 1;
         }
@@ -663,7 +648,7 @@ fn compute_line_overlap(
     let mut chars = 0;
     let mut count = 0;
     for index in (start_index..end_index).rev() {
-        chars += char_count(lines[index]) + 1;
+        chars += utf16_len(lines[index]) + 1;
         if chars > overlap_chars {
             break;
         }
@@ -721,8 +706,8 @@ fn extract_code_header(value: &str) -> String {
         }
     }
     let header = lines.join("\n").trim().to_owned();
-    if char_count(&header) > 1_200 {
-        format!("{}\n...", super::take_chars(&header, 1_200).trim_end())
+    if utf16_len(&header) > 1_200 {
+        format!("{}\n...", take_utf16(&header, 1_200).trim_end())
     } else {
         header
     }
@@ -804,7 +789,7 @@ fn format_outline_member(member: &OutlineMember) -> String {
     let signature = member
         .signature
         .as_deref()
-        .map(one_line)
+        .map(collapse_whitespace)
         .map(|value| truncate_outline(&value, OUTLINE_MAX_LINE_CHARS))
         .unwrap_or_default();
     let symbol = symbol_type_name(member.symbol_type);
@@ -857,13 +842,10 @@ fn extract_call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         .or_else(|| node.child_by_field_name("constructor"))
         .or_else(|| node.child_by_field_name("type"))
         .or_else(|| named_children(node).first().copied())?;
-    let cleaned = text(target, source)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cleaned = collapse_whitespace(text(target, source));
     let cleaned = cleaned.strip_prefix("new ").unwrap_or(&cleaned).trim();
     if cleaned.is_empty()
-        || char_count(cleaned) > OUTLINE_MAX_LINE_CHARS
+        || utf16_len(cleaned) > OUTLINE_MAX_LINE_CHARS
         || cleaned.contains(['\n', '\r'])
         || !cleaned
             .chars()
@@ -876,17 +858,13 @@ fn extract_call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 fn truncate_outline(value: &str, max_chars: usize) -> String {
-    if char_count(value) <= max_chars {
+    if utf16_len(value) <= max_chars {
         value.to_owned()
     } else if max_chars <= 3 {
         ".".repeat(max_chars)
     } else {
-        format!("{}...", super::take_chars(value, max_chars - 3).trim_end())
+        format!("{}...", take_utf16(value, max_chars - 3).trim_end())
     }
-}
-
-fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn same_node(left: Node<'_>, right: Node<'_>) -> bool {
@@ -985,7 +963,7 @@ fn find_script_blocks(value: &str) -> Vec<ScriptBlock<'_>> {
             format,
             jsx,
             start_line: line_at_offset(bytes, content_start),
-            start_utf16_offset: char_count(&value[..content_start]),
+            start_utf16_offset: utf16_len(&value[..content_start]),
         });
         cursor = close + b"</script>".len();
     }
@@ -1111,9 +1089,9 @@ mod tests {
     use super::super::test_content;
 
     use super::super::{
-        ChunkOptions, byte_index_at_utf16, extract, extract_for_indexing, test_source,
-        vector_content_for_fragment,
+        ChunkOptions, extract, extract_for_indexing, test_source, vector_content_for_fragment,
     };
+    use crate::utils::byte_offset_at_utf16_floor;
 
     fn named<'a>(fragments: &'a [super::EntityFragment], name: &str) -> &'a super::EntityFragment {
         fragments
@@ -1137,8 +1115,8 @@ mod tests {
         else {
             panic!("text range expected");
         };
-        let start_byte = byte_index_at_utf16(&source.text, start_utf16_offset);
-        let end_byte = byte_index_at_utf16(&source.text, end_utf16_offset);
+        let start_byte = byte_offset_at_utf16_floor(&source.text, start_utf16_offset);
+        let end_byte = byte_offset_at_utf16_floor(&source.text, end_utf16_offset);
         assert_eq!(content, &source.text[start_byte..end_byte]);
     }
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use uuid::Uuid;
 
-use crate::EngineError;
+use crate::{EngineError, utils::create_directories};
 
 const LOCK_INFO_FILE: &str = "lock.json";
 const DEFAULT_STALE_LOCK: Duration = Duration::from_hours(6);
@@ -83,7 +83,7 @@ fn acquire_read_lock(
     stale_after: Duration,
 ) -> Result<FileLock, EngineError> {
     let parent = lock_path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| lock_io("create lock parent", parent, &error))?;
+    create_directories(parent).map_err(|error| lock_io("create lock parent", parent, &error))?;
     let write_path = write_lock_path(lock_path);
 
     for _ in 0..2 {
@@ -96,7 +96,7 @@ fn acquire_read_lock(
 
         let info = current_lock_info(operation);
         let reader_path = readers_lock_path(lock_path).join(format!("{}-{}", info.pid, info.token));
-        fs::create_dir_all(reader_path.parent().unwrap_or_else(|| Path::new(".")))
+        create_directories(reader_path.parent().unwrap_or_else(|| Path::new(".")))
             .map_err(|error| lock_io("create readers directory", &reader_path, &error))?;
         match fs::create_dir(&reader_path) {
             Ok(()) => {}
@@ -145,7 +145,7 @@ fn acquire_exclusive_directory_lock(
     stale_after: Duration,
 ) -> Result<FileLock, EngineError> {
     let parent = lock_path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|error| lock_io("create lock parent", parent, &error))?;
+    create_directories(parent).map_err(|error| lock_io("create lock parent", parent, &error))?;
     for _ in 0..2 {
         match fs::create_dir(lock_path) {
             Ok(()) => {

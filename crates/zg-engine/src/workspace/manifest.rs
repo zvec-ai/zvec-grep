@@ -1,11 +1,9 @@
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{BufWriter, Write},
+    fs,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     EngineError,
@@ -13,12 +11,11 @@ use crate::{
         index::options::{Device, DiscoveryOptions, RootPath},
         info::result::{WorkspaceIndexEmbedding, WorkspaceIndexInfo, WorkspaceIndexPolicy},
     },
+    utils::{atomic_write, create_directories},
 };
 
 pub(crate) const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
 pub(crate) const CURRENT_MANIFEST_VERSION: u32 = 1;
-const WORKSPACE_DIRECTORY_MODE: u32 = 0o700;
-const WORKSPACE_MANIFEST_MODE: u32 = 0o600;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,20 +225,13 @@ pub(crate) fn write_workspace_manifest(
     manifest: &WorkspaceManifest,
 ) -> Result<(), EngineError> {
     manifest.validate()?;
-    create_workspace_directory(home)?;
+    create_directories(home).map_err(|error| manifest_io("create directory", home, &error))?;
     let path = workspace_manifest_path(home);
-    let temporary_path = path.with_extension(format!(
-        "json.{}.{}.tmp",
-        std::process::id(),
-        Uuid::new_v4()
-    ));
-    let result = write_manifest_file(&temporary_path, manifest).and_then(|()| {
-        fs::rename(&temporary_path, &path).map_err(|error| manifest_io("rename", &path, &error))
-    });
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    result
+    let mut bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
+        EngineError::internal(format!("failed to encode workspace manifest: {error}"))
+    })?;
+    bytes.push(b'\n');
+    atomic_write(&path, &bytes).map_err(|error| manifest_io("write", &path, &error))
 }
 
 pub(crate) fn delete_workspace_manifest(home: &Path) -> Result<(), EngineError> {
@@ -251,52 +241,6 @@ pub(crate) fn delete_workspace_manifest(home: &Path) -> Result<(), EngineError> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(manifest_io("delete", &path, &error)),
     }
-}
-
-fn create_workspace_directory(home: &Path) -> Result<(), EngineError> {
-    fs::create_dir_all(home).map_err(|error| manifest_io("create directory", home, &error))?;
-    set_mode(home, WORKSPACE_DIRECTORY_MODE)
-        .map_err(|error| manifest_io("set directory permissions", home, &error))
-}
-
-fn write_manifest_file(path: &Path, manifest: &WorkspaceManifest) -> Result<(), EngineError> {
-    let file = create_private_file(path).map_err(|error| manifest_io("create", path, &error))?;
-    set_mode(path, WORKSPACE_MANIFEST_MODE)
-        .map_err(|error| manifest_io("set file permissions", path, &error))?;
-    let mut writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut writer, manifest).map_err(|error| {
-        EngineError::internal(format!("failed to encode workspace manifest: {error}"))
-    })?;
-    writer
-        .write_all(b"\n")
-        .and_then(|()| writer.flush())
-        .map_err(|error| manifest_io("write", path, &error))?;
-    writer
-        .get_ref()
-        .sync_all()
-        .map_err(|error| manifest_io("sync", path, &error))
-}
-
-fn create_private_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(WORKSPACE_MANIFEST_MODE);
-    }
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[expect(
@@ -444,5 +388,45 @@ mod tests {
             & 0o777;
         assert_eq!(directory_mode, 0o700);
         assert_eq!(file_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_manifest_preserves_file_and_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary directory");
+        let home = directory.path().join(".zvec-grep");
+        let mut manifest = fixture_manifest(&home);
+        write_workspace_manifest(&home, &manifest).expect("initial manifest");
+        let path = workspace_manifest_path(&home);
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o750))
+            .expect("custom workspace permissions");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
+            .expect("custom manifest permissions");
+
+        manifest.generation = Some(8);
+        write_workspace_manifest(&home, &manifest).expect("replace manifest");
+
+        assert_eq!(
+            fs::metadata(&home)
+                .expect("workspace metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("manifest metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(
+            read_workspace_manifest(&home).expect("updated manifest"),
+            Some(manifest)
+        );
     }
 }

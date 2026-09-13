@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
@@ -9,12 +8,12 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     EngineError, EngineResult,
     domain::{EntityId, FileId, validate_fragments},
     models::EmbeddingMetric,
+    utils,
 };
 
 use super::{
@@ -152,7 +151,7 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
         }
         let read_only = options.is_read_only();
         if !read_only {
-            fs::create_dir_all(home)
+            utils::create_directories(home)
                 .map_err(|error| io_error("create index directory", home, &error))?;
         }
         let home = fs::canonicalize(home)
@@ -257,7 +256,7 @@ impl ZvecStorage {
         // A durable redo record precedes every native mutation. A failed commit
         // blocks reads until reopen replays it; partial collections are never served.
         state.needs_recovery = true;
-        atomic_write(&shared.path.join(JOURNAL), &encoded)?;
+        write_record(&shared.path.join(JOURNAL), &encoded)?;
         replay(&state.native, &shared.schema, record)?;
         state.native.flush()?;
         clear_journal(&shared.path)?;
@@ -479,8 +478,9 @@ fn load_schema(
             "embedding dimension must be in 1..=20,000",
         ));
     }
-    fs::create_dir_all(path).map_err(|error| io_error("create storage directory", path, &error))?;
-    atomic_write(
+    utils::create_directories(path)
+        .map_err(|error| io_error("create storage directory", path, &error))?;
+    write_record(
         &descriptor,
         &serde_json::to_vec(&SchemaRecord::new(embedding)).map_err(|error| json_error(&error))?,
     )?;
@@ -520,7 +520,7 @@ fn prepare_storage(
         }
         let schema = load_schema(path, options)?;
         if !read_only {
-            fs::create_dir_all(path)
+            utils::create_directories(path)
                 .map_err(|error| io_error("create storage directory", path, &error))?;
         }
         dictionary::prepare(&path.join("dictionary"))?;
@@ -574,39 +574,12 @@ fn clear_journal(path: &Path) -> EngineResult<()> {
     sync_directory(path)
 }
 
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> EngineResult<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| EngineError::invalid_argument("storage file has no parent"))?;
-    let temporary = parent.join(format!("{}.partial", Uuid::new_v4()));
-    let result = (|| {
-        let mut file = File::create_new(&temporary)
-            .map_err(|error| io_error("create storage file", &temporary, &error))?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| io_error("persist storage file", &temporary, &error))?;
-        drop(file);
-        fs::rename(&temporary, path)
-            .map_err(|error| io_error("publish storage file", path, &error))?;
-        sync_directory(parent)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
+fn write_record(path: &Path, bytes: &[u8]) -> EngineResult<()> {
+    utils::atomic_write(path, bytes).map_err(|error| io_error("persist storage file", path, &error))
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> EngineResult<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| io_error("sync storage directory", path, &error))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_: &Path) -> EngineResult<()> {
-    Ok(())
+    utils::sync_directory(path).map_err(|error| io_error("sync storage directory", path, &error))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> EngineResult<T> {

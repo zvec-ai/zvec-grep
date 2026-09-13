@@ -1,6 +1,9 @@
 use tree_sitter::Node;
 
-use crate::domain::{FileFormat, SymbolType};
+use crate::{
+    domain::{FileFormat, SymbolType},
+    utils::collapse_whitespace,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterKind {
@@ -676,7 +679,7 @@ fn extract_generic_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
             node_text[..relative].trim_end().to_owned()
         },
     );
-    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapse_whitespace(&raw);
     let normalized = normalized.trim_end_matches(['{', ';']).trim();
     (!normalized.is_empty()).then(|| normalized.to_owned())
 }

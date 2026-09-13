@@ -42,7 +42,7 @@ use crate::{
         EmbeddingResult, ModelError, ModelRuntimeLease,
     },
     storage::spi::{FileIndexDiagnostics, IndexedFragment, StoredFile, WorkspaceIndexStorage},
-    utils::{decode_text, sha256_hex},
+    utils::{collapse_whitespace, decode_text, sha256_hex},
 };
 
 use super::input_budget::index_chunk_options;
@@ -930,7 +930,7 @@ fn mark_file_failed(
     stage: &str,
     error: &EngineError,
 ) -> Result<String, EngineError> {
-    let reason = one_line(&format!("{stage}: {error}"));
+    let reason = collapse_whitespace(&format!("{stage}: {error}"));
     storage
         .mark_file_failed(file, &reason)
         .map_err(|mark_error| {
@@ -2025,10 +2025,6 @@ impl TimingCollector {
             });
         }
     }
-}
-
-fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
