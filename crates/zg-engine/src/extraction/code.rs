@@ -11,8 +11,8 @@ use crate::{
         FragmentId, SourceRange, SymbolType, WindowFragment,
     },
     utils::{
-        byte_offset_at_utf16_ceil, byte_offset_at_utf16_floor, collapse_whitespace, take_utf16,
-        utf16_len, utf16_line_offsets,
+        byte_offset_at_utf16_ceil, byte_offset_at_utf16_floor, collapse_whitespace,
+        line_byte_offsets, take_utf16, utf16_len,
     },
 };
 
@@ -28,50 +28,6 @@ const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Sv
 const OUTLINE_MAX_MEMBERS: usize = 32;
 const OUTLINE_MAX_CALLS: usize = 24;
 const OUTLINE_MAX_LINE_CHARS: usize = 180;
-
-#[derive(Debug)]
-struct Utf16LineIndex<'source> {
-    source: &'source str,
-    byte_starts: Vec<usize>,
-    utf16_starts: Vec<usize>,
-}
-
-impl<'source> Utf16LineIndex<'source> {
-    fn new(source: &'source str) -> Self {
-        let mut byte_starts = vec![0];
-        let mut utf16_starts = vec![0];
-        let mut utf16_offset = 0;
-        for (byte_offset, character) in source.char_indices() {
-            utf16_offset += character.len_utf16();
-            if character == '\n' {
-                byte_starts.push(byte_offset + character.len_utf8());
-                utf16_starts.push(utf16_offset);
-            }
-        }
-        Self {
-            source,
-            byte_starts,
-            utf16_starts,
-        }
-    }
-
-    fn offset(&self, byte_offset: usize, row_hint: usize) -> usize {
-        let row = if self
-            .byte_starts
-            .get(row_hint)
-            .is_some_and(|start| *start <= byte_offset)
-        {
-            row_hint
-        } else {
-            self.byte_starts
-                .partition_point(|start| *start <= byte_offset)
-                .saturating_sub(1)
-        };
-        let line_byte = self.byte_starts.get(row).copied().unwrap_or(0);
-        let line_utf16 = self.utf16_starts.get(row).copied().unwrap_or(0);
-        line_utf16 + self.source.get(line_byte..byte_offset).map_or(0, utf16_len)
-    }
-}
 
 pub(super) fn extract_for_indexing(
     source: &TextSource,
@@ -134,7 +90,6 @@ fn extract_code(
         return Ok(fallback(source, max_chars, overlap_chars));
     };
     let bytes = source.text.as_bytes();
-    let offsets = Utf16LineIndex::new(&source.text);
     let mut entities = Vec::new();
     walk_code_node(tree.root_node(), adapter, bytes, &[], &mut entities);
 
@@ -144,7 +99,6 @@ fn extract_code(
             source,
             adapter,
             &entity,
-            &offsets,
             max_chars,
             overlap_chars,
             &mut output,
@@ -280,13 +234,12 @@ fn append_entity(
     source: &TextSource,
     adapter: &LanguageAdapter,
     entity: &CodeEntity<'_>,
-    offsets: &Utf16LineIndex<'_>,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<IndexingExtractionFragment>,
 ) {
     let fragments =
-        code_entity_to_search_fragments(source, adapter, entity, offsets, max_chars, overlap_chars);
+        code_entity_to_search_fragments(source, adapter, entity, max_chars, overlap_chars);
     let major_id = fragments
         .first()
         .filter(|fragment| fragment.starts_group)
@@ -336,7 +289,6 @@ fn code_entity_to_search_fragments(
     source: &TextSource,
     adapter: &LanguageAdapter,
     entity: &CodeEntity<'_>,
-    offsets: &Utf16LineIndex<'_>,
     max_chars: usize,
     overlap_chars: usize,
 ) -> Vec<CodeFragmentOutput> {
@@ -347,15 +299,13 @@ fn code_entity_to_search_fragments(
     if utf16_len(node_text) <= content_max {
         return vec![window_to_fragment(
             entity,
-            node_to_window(entity.node, source.text.as_bytes(), offsets),
+            node_to_window(entity.node, source.text.as_bytes()),
         )];
     }
 
     let major = CodeFragmentOutput {
         starts_group: true,
-        range: SourceRange::Text(
-            node_to_window(entity.node, source.text.as_bytes(), offsets).range,
-        ),
+        range: SourceRange::Text(node_to_window(entity.node, source.text.as_bytes()).range),
         content: Content::Text(code_entity_outline(
             entity,
             adapter,
@@ -370,7 +320,6 @@ fn code_entity_to_search_fragments(
         split_large_node(
             entity.node,
             source.text.as_bytes(),
-            offsets,
             content_max,
             content_overlap,
         )
@@ -390,15 +339,15 @@ fn window_to_fragment(entity: &CodeEntity<'_>, window: CodeWindow) -> CodeFragme
     }
 }
 
-fn node_to_window(node: Node<'_>, source: &[u8], offsets: &Utf16LineIndex<'_>) -> CodeWindow {
+fn node_to_window(node: Node<'_>, source: &[u8]) -> CodeWindow {
     CodeWindow {
         text: text(node, source).to_owned(),
         embedding_text: None,
         range: TextRange {
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
-            start_utf16_offset: offsets.offset(node.start_byte(), node.start_position().row),
-            end_utf16_offset: offsets.offset(node.end_byte(), node.end_position().row),
+            start_byte_offset: node.start_byte(),
+            end_byte_offset: node.end_byte(),
         },
     }
 }
@@ -406,7 +355,6 @@ fn node_to_window(node: Node<'_>, source: &[u8], offsets: &Utf16LineIndex<'_>) -
 fn split_large_node(
     node: Node<'_>,
     source: &[u8],
-    offsets: &Utf16LineIndex<'_>,
     max_chars: usize,
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
@@ -417,7 +365,7 @@ fn split_large_node(
             text(node, source),
             max_chars,
             node.start_position().row + 1,
-            offsets.offset(node.start_byte(), node.start_position().row),
+            node.start_byte(),
             overlap_chars,
         );
     }
@@ -431,7 +379,6 @@ fn split_large_node(
             if index > group_start {
                 windows.push(slice_statements(
                     source,
-                    offsets,
                     &statements,
                     group_start,
                     index - 1,
@@ -441,7 +388,7 @@ fn split_large_node(
                 text(statement, source),
                 max_chars,
                 statement.start_position().row + 1,
-                offsets.offset(statement.start_byte(), statement.start_position().row),
+                statement.start_byte(),
                 overlap_chars,
             ));
             group_start = index + 1;
@@ -453,7 +400,6 @@ fn split_large_node(
         if group_chars + separator_chars + statement_chars > max_chars && index > group_start {
             windows.push(slice_statements(
                 source,
-                offsets,
                 &statements,
                 group_start,
                 index - 1,
@@ -484,7 +430,6 @@ fn split_large_node(
     if group_start < statements.len() {
         windows.push(slice_statements(
             source,
-            offsets,
             &statements,
             group_start,
             statements.len() - 1,
@@ -495,7 +440,6 @@ fn split_large_node(
 
 fn slice_statements(
     source: &[u8],
-    offsets: &Utf16LineIndex<'_>,
     statements: &[Node<'_>],
     start_index: usize,
     end_index: usize,
@@ -514,8 +458,8 @@ fn slice_statements(
         range: TextRange {
             start_line: statements[start_index].start_position().row + 1,
             end_line: statements[end_index].end_position().row + 1,
-            start_utf16_offset: offsets.offset(start, statements[start_index].start_position().row),
-            end_utf16_offset: offsets.offset(end, statements[end_index].end_position().row),
+            start_byte_offset: start,
+            end_byte_offset: end,
         },
     }
 }
@@ -524,11 +468,11 @@ fn split_text_by_lines(
     value: &str,
     max_chars: usize,
     start_line: usize,
-    start_utf16_offset: usize,
+    start_byte_offset: usize,
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
     let lines = value.split('\n').collect::<Vec<_>>();
-    let line_offsets = utf16_line_offsets(&lines);
+    let line_offsets = line_byte_offsets(&lines);
     let mut windows = Vec::new();
     let mut line_index = 0;
 
@@ -538,7 +482,7 @@ fn split_text_by_lines(
                 lines[line_index],
                 max_chars,
                 start_line + line_index,
-                start_utf16_offset + line_offsets[line_index],
+                start_byte_offset + line_offsets[line_index],
                 overlap_chars,
             ));
             line_index += 1;
@@ -562,8 +506,8 @@ fn split_text_by_lines(
             range: TextRange {
                 start_line: start_line + line_index,
                 end_line: start_line + end_index - 1,
-                start_utf16_offset: start_utf16_offset + line_offsets[line_index],
-                end_utf16_offset: start_utf16_offset + line_offsets[line_index] + utf16_len(&chunk),
+                start_byte_offset: start_byte_offset + line_offsets[line_index],
+                end_byte_offset: start_byte_offset + line_offsets[line_index] + chunk.len(),
             },
         });
         if end_index >= lines.len() {
@@ -579,7 +523,7 @@ fn split_long_line_by_chars(
     line: &str,
     max_chars: usize,
     line_number: usize,
-    start_utf16_offset: usize,
+    start_byte_offset: usize,
     overlap_chars: usize,
 ) -> Vec<CodeWindow> {
     let total_chars = utf16_len(line);
@@ -600,8 +544,8 @@ fn split_long_line_by_chars(
             range: TextRange {
                 start_line: line_number,
                 end_line: line_number,
-                start_utf16_offset: start_utf16_offset + actual_start,
-                end_utf16_offset: start_utf16_offset + actual_end,
+                start_byte_offset: start_byte_offset + start_byte,
+                end_byte_offset: start_byte_offset + end_byte,
             },
         });
         if actual_end >= total_chars {
@@ -901,7 +845,7 @@ struct ScriptBlock<'source> {
     format: FileFormat,
     jsx: bool,
     start_line: usize,
-    start_utf16_offset: usize,
+    start_byte_offset: usize,
 }
 
 fn extract_script_blocks(
@@ -927,7 +871,7 @@ fn extract_script_blocks(
             block_fragments,
             fragments.len(),
             block.start_line,
-            block.start_utf16_offset,
+            block.start_byte_offset,
         );
         fragments.extend(remapped);
     }
@@ -963,7 +907,7 @@ fn find_script_blocks(value: &str) -> Vec<ScriptBlock<'_>> {
             format,
             jsx,
             start_line: line_at_offset(bytes, content_start),
-            start_utf16_offset: utf16_len(&value[..content_start]),
+            start_byte_offset: content_start,
         });
         cursor = close + b"</script>".len();
     }
@@ -1031,7 +975,7 @@ fn remap_script_block_fragments(
     fragments: Vec<IndexingExtractionFragment>,
     start_index: usize,
     start_line: usize,
-    start_utf16_offset: usize,
+    start_byte_offset: usize,
 ) -> Vec<IndexingExtractionFragment> {
     let id_map = fragments
         .iter()
@@ -1070,8 +1014,8 @@ fn remap_script_block_fragments(
             if let SourceRange::Text(range) = range {
                 range.start_line += start_line - 1;
                 range.end_line += start_line - 1;
-                range.start_utf16_offset += start_utf16_offset;
-                range.end_utf16_offset += start_utf16_offset;
+                range.start_byte_offset += start_byte_offset;
+                range.end_byte_offset += start_byte_offset;
             }
             item
         })
@@ -1091,7 +1035,6 @@ mod tests {
     use super::super::{
         ChunkOptions, extract, extract_for_indexing, test_source, vector_content_for_fragment,
     };
-    use crate::utils::byte_offset_at_utf16_floor;
 
     fn named<'a>(fragments: &'a [super::EntityFragment], name: &str) -> &'a super::EntityFragment {
         fragments
@@ -1108,16 +1051,17 @@ mod tests {
             panic!("text fragment expected");
         };
         let SourceRange::Text(TextRange {
-            start_utf16_offset,
-            end_utf16_offset,
+            start_byte_offset,
+            end_byte_offset,
             ..
         }) = *fragment.range()
         else {
             panic!("text range expected");
         };
-        let start_byte = byte_offset_at_utf16_floor(&source.text, start_utf16_offset);
-        let end_byte = byte_offset_at_utf16_floor(&source.text, end_utf16_offset);
-        assert_eq!(content, &source.text[start_byte..end_byte]);
+        assert_eq!(
+            source.text.get(start_byte_offset..end_byte_offset),
+            Some(content.as_str())
+        );
     }
 
     #[test]
@@ -1480,16 +1424,16 @@ mod tests {
             FileFormat::Svelte,
             "fixture.svelte",
             &[
-                "<h1>Hello 😀</h1>",
+                "<h1>你好 😀</h1>",
                 "<script>",
                 "export const first = () => 1;",
                 "</script>",
-                "<p>Middle</p>",
+                "<p>中间</p>",
                 "<script lang=\"ts\">",
                 "export function second(value: number) { return value; }",
                 "</script>",
             ]
-            .join("\n"),
+            .join("\r\n"),
         );
         let fragments = extract(&source, ChunkOptions::default()).expect("svelte extraction");
         let first = named(&fragments, "first");
@@ -1504,6 +1448,20 @@ mod tests {
             second.range(),
             SourceRange::Text(TextRange { start_line: 7, .. })
         ));
+
+        let plain_script = test_source(
+            FileFormat::Vue,
+            "plain.vue",
+            "<template>你好 😀</template>\r\n<script lang=\"ts\">\r\n// 没有声明\r\n</script>",
+        );
+        let fallback = extract(&plain_script, ChunkOptions::default()).expect("script fallback");
+        assert_eq!(fallback.len(), 1);
+        assert_source_backed(&plain_script, &fallback[0]);
+        assert_eq!(
+            test_content(&fallback[0]),
+            Content::Text("\r\n// 没有声明\r\n".to_owned())
+        );
+        assert!(fallback[0].metadata().is_none());
 
         let no_script = test_source(FileFormat::Svelte, "plain.svelte", "<h1>No script</h1>");
         let fallback = extract(&no_script, ChunkOptions::default()).expect("component fallback");
@@ -1525,52 +1483,54 @@ mod tests {
                 "😀".repeat(80)
             ),
         );
-        let fragments = extract(
-            &source,
-            ChunkOptions {
-                max_chunk_chars: Some(31),
-                chunk_overlap_chars: Some(7),
-            },
-        )
-        .expect("unicode extraction");
-        let windows = fragments
-            .iter()
-            .filter(|fragment| {
-                matches!(
-                    &fragment.metadata(),
-                    Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == "emoji"
-                ) && !matches!(fragment, EntityFragment::Representative(_))
-            })
-            .collect::<Vec<_>>();
-        assert!(windows.len() > 2);
-        for fragment in windows {
-            assert_source_backed(&source, fragment);
-            let Content::Text(content) = &test_content(fragment) else {
-                panic!("text expected");
-            };
-            assert!(content.chars().count() <= 31);
+        for (max_chars, overlap_chars) in [(1, 0), (31, 7)] {
+            let fragments = extract(
+                &source,
+                ChunkOptions {
+                    max_chunk_chars: Some(max_chars),
+                    chunk_overlap_chars: Some(overlap_chars),
+                },
+            )
+            .expect("unicode extraction");
+            let windows = fragments
+                .iter()
+                .filter(|fragment| {
+                    matches!(
+                        &fragment.metadata(),
+                        Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == "emoji"
+                    ) && !matches!(fragment, EntityFragment::Representative(_))
+                })
+                .collect::<Vec<_>>();
+            assert!(windows.len() > 2);
+            for fragment in windows {
+                assert_source_backed(&source, fragment);
+                let Content::Text(content) = &test_content(fragment) else {
+                    panic!("text expected");
+                };
+                assert!(content.chars().count() <= max_chars);
+            }
         }
     }
 
     #[test]
-    fn reports_utf16_offsets_before_structured_entities() {
+    fn reports_utf8_byte_offsets_before_structured_entities() {
         let source = test_source(
             FileFormat::TypeScript,
             "offsets.ts",
-            "const prefix = \"😀\";\nexport function afterEmoji() { return true; }",
+            "const prefix = \"你好 😀\";\r\nexport function afterEmoji() { return true; }",
         );
         let fragments = extract(&source, ChunkOptions::default()).expect("offset extraction");
         let fragment = named(&fragments, "afterEmoji");
         assert_source_backed(&source, fragment);
         let SourceRange::Text(TextRange {
-            start_utf16_offset, ..
+            start_byte_offset, ..
         }) = *fragment.range()
         else {
             panic!("text range expected");
         };
         assert_eq!(
-            start_utf16_offset,
-            "const prefix = \"😀\";\nexport ".encode_utf16().count()
+            start_byte_offset,
+            "const prefix = \"你好 😀\";\r\nexport ".len()
         );
     }
 

@@ -385,6 +385,42 @@ fn rejects_invalid_writes_without_poisoning_storage() {
 }
 
 #[test]
+fn rejects_legacy_coordinate_schemas_before_opening_collections() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let home = directory.path();
+    let path = home.join("storage");
+    fs::create_dir(&path).expect("storage directory");
+    let mut record = SchemaRecord::new(&schema());
+    record.version = 1;
+    fs::write(
+        path.join("schema.json"),
+        serde_json::to_vec(&record).expect("legacy schema"),
+    )
+    .expect("write legacy schema");
+    for options in [
+        WorkspaceIndexStorageOptions::ReadOnly {
+            storage_path: home.to_owned(),
+        },
+        WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: home.to_owned(),
+            embedding: schema(),
+        },
+    ] {
+        let error = ZvecStorageFactory::new()
+            .open(options)
+            .err()
+            .expect("legacy schema is incompatible");
+        assert!(
+            error
+                .message()
+                .contains("unsupported storage schema version 1")
+        );
+        assert!(error.message().contains("rebuild the index"));
+    }
+    assert_eq!(fs::read_dir(path).expect("storage files").count(), 1);
+}
+
+#[test]
 fn writes_fragments_across_native_batch_boundaries() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let home = directory.path();

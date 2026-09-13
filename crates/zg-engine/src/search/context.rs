@@ -697,8 +697,8 @@ mod tests {
         let range = SourceRange::Text(TextRange {
             start_line: 1,
             end_line: 20,
-            start_utf16_offset: 0,
-            end_utf16_offset: 100,
+            start_byte_offset: 0,
+            end_byte_offset: 100,
         });
         let mut hit = SearchHit {
             entity: Entity {
@@ -743,8 +743,8 @@ mod tests {
         let window_range = SourceRange::Text(TextRange {
             start_line: 2,
             end_line: 2,
-            start_utf16_offset: 10,
-            end_utf16_offset: 20,
+            start_byte_offset: 10,
+            end_byte_offset: 20,
         });
         hit.evidence.push(SearchEvidence {
             fragment: EntityFragment::Window(WindowFragment {
@@ -834,8 +834,8 @@ mod tests {
             range: ContentRange::Text {
                 start_line: 1,
                 end_line: 1,
-                start_offset: 0,
-                end_offset: 1,
+                start_byte_offset: 0,
+                end_byte_offset: 1,
             },
             excerpt_range: None,
             content: id.to_owned(),

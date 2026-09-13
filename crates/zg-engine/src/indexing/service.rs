@@ -48,7 +48,7 @@ use crate::{
 use super::pipeline::{IndexingContext, get_workspace_index_status, index_workspace};
 
 const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
-const CURRENT_INDEX_VERSION: u32 = 1;
+const CURRENT_INDEX_VERSION: u32 = 2;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
@@ -100,6 +100,13 @@ impl WorkspaceIndexService {
             },
         )?;
         let existing = read_workspace_manifest(&location.home)?;
+        if !options.rebuild {
+            assert_index_version(
+                existing
+                    .as_ref()
+                    .and_then(|manifest| manifest.index_version),
+            )?;
+        }
         let model = acquire_model(models, existing.as_ref(), &options)?;
         if !options.rebuild {
             assert_embedding_compatible(existing.as_ref(), &model)?;
@@ -240,6 +247,7 @@ impl WorkspaceIndexService {
                 "workspace index has not been built",
             ));
         }
+        assert_index_version(manifest.index_version)?;
         let model = request
             .routes
             .iter()
@@ -289,6 +297,7 @@ impl WorkspaceIndexService {
         if !is_indexed(&manifest) || manifest.index_policy == WorkspaceIndexPolicy::Disabled {
             return Ok(false);
         }
+        assert_index_version(manifest.index_version)?;
         let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
             storage_path: location.home.clone(),
         })?;
@@ -326,6 +335,7 @@ impl WorkspaceIndexService {
         let storage_exists = self.storage_factory.exists(&location.home)?;
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
+            assert_index_version(manifest.index_version)?;
             let factory = &self.storage_factory;
             let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
                 storage_path: location.home.clone(),
@@ -755,6 +765,17 @@ const fn metric_name(metric: EmbeddingMetric) -> &'static str {
     }
 }
 
+fn assert_index_version(version: Option<u32>) -> Result<(), EngineError> {
+    if let Some(version) = version
+        && version != CURRENT_INDEX_VERSION
+    {
+        return Err(EngineError::storage_failure(format!(
+            "unsupported index version {version}; expected {CURRENT_INDEX_VERSION}; rebuild the index"
+        )));
+    }
+    Ok(())
+}
+
 fn is_indexed(manifest: &WorkspaceManifest) -> bool {
     manifest.index_policy == WorkspaceIndexPolicy::Enabled
         && manifest.embedding.is_some()
@@ -953,6 +974,18 @@ mod tests {
 
         fn close(&self) -> StorageResult<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn rejects_incompatible_index_versions() {
+        for version in [None, Some(super::CURRENT_INDEX_VERSION)] {
+            super::assert_index_version(version).expect("supported or unbuilt index");
+        }
+        for version in [1, super::CURRENT_INDEX_VERSION + 1] {
+            let error = super::assert_index_version(Some(version))
+                .expect_err("incompatible text coordinates");
+            assert!(error.message().contains("rebuild the index"));
         }
     }
 

@@ -4,7 +4,7 @@ use crate::{
         Content, Entity, EntityContent, EntityId, EntityMetadata, FileFormat, FragmentId,
         SourceRange, WindowFragment,
     },
-    utils::{byte_offset_at_utf16_ceil, utf16_len, utf16_line_offsets},
+    utils::{byte_offset_at_utf16_ceil, line_byte_offsets, utf16_len},
 };
 
 use super::{
@@ -55,7 +55,7 @@ pub(super) fn extract(
         ));
     }
 
-    let line_offsets = utf16_line_offsets(&lines);
+    let line_offsets = line_byte_offsets(&lines);
     let fence_lines = compute_fence_lines(&lines);
     let sections = build_sections(&headings, &lines);
     let mut fragments = Vec::new();
@@ -417,8 +417,8 @@ fn split_long_line(
             range: TextRange {
                 start_line: line_index + 1,
                 end_line: line_index + 1,
-                start_utf16_offset: line_offset + utf16_len(&line[..byte_offset]),
-                end_utf16_offset: line_offset + utf16_len(&line[..byte_offset + slice_bytes]),
+                start_byte_offset: line_offset + byte_offset,
+                end_byte_offset: line_offset + byte_offset + slice_bytes,
             },
         });
         byte_offset += slice_bytes;
@@ -437,8 +437,8 @@ fn lines_to_window(
         range: TextRange {
             start_line: start_index + 1,
             end_line: end_index + 1,
-            start_utf16_offset: line_offsets[start_index],
-            end_utf16_offset: line_offsets[end_index] + utf16_len(lines[end_index]),
+            start_byte_offset: line_offsets[start_index],
+            end_byte_offset: line_offsets[end_index] + lines[end_index].len(),
         },
     }
 }
@@ -533,7 +533,6 @@ mod tests {
 
     use super::super::{ChunkOptions, test_source};
     use super::extract;
-    use crate::utils::byte_offset_at_utf16_floor;
 
     #[test]
     fn handles_heading_styles_fences_hierarchy_and_windows() {
@@ -541,7 +540,7 @@ mod tests {
             FileFormat::Markdown,
             "README.md",
             &[
-                "preface 😀",
+                "前言 😀",
                 "",
                 "# Parent #",
                 "intro paragraph",
@@ -550,12 +549,12 @@ mod tests {
                 "```",
                 "## Child",
                 "- item one",
-                "- item two with enough text to force another window",
+                "- 项目 😀 with enough text to force another window",
                 "Setext child",
                 "------------",
                 "body",
             ]
-            .join("\n"),
+            .join("\r\n"),
         );
         let fragments = extract(
             &source,
@@ -595,16 +594,17 @@ mod tests {
                 panic!("text content expected");
             };
             let SourceRange::Text(TextRange {
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
                 ..
             }) = *fragment.range()
             else {
                 panic!("text range expected");
             };
-            let start_byte = byte_offset_at_utf16_floor(&source.text, start_utf16_offset);
-            let end_byte = byte_offset_at_utf16_floor(&source.text, end_utf16_offset);
-            assert_eq!(content, source.text[start_byte..end_byte]);
+            assert_eq!(
+                source.text.get(start_byte_offset..end_byte_offset),
+                Some(content.as_str())
+            );
         }
     }
 

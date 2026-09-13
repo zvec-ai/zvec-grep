@@ -1,7 +1,7 @@
 use crate::{
     EngineError,
     domain::{Content, Entity, EntityContent, SourceRange},
-    utils::{byte_offset_at_utf16_ceil, utf16_len, utf16_line_offsets},
+    utils::{byte_offset_at_utf16_ceil, line_byte_offsets, utf16_len},
 };
 
 use super::{
@@ -74,7 +74,7 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
     }
 
     let lines = text.split('\n').collect::<Vec<_>>();
-    let line_offsets = utf16_line_offsets(&lines);
+    let line_offsets = line_byte_offsets(&lines);
     let mut chunks = Vec::new();
     let mut start_index = 0;
 
@@ -110,9 +110,8 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
                 range: TextRange {
                     start_line: start_index + 1,
                     end_line: end_index,
-                    start_utf16_offset: line_offsets[start_index],
-                    end_utf16_offset: line_offsets[end_line_index]
-                        + utf16_len(lines[end_line_index]),
+                    start_byte_offset: line_offsets[start_index],
+                    end_byte_offset: line_offsets[end_line_index] + lines[end_line_index].len(),
                 },
             });
         }
@@ -149,8 +148,8 @@ fn split_long_line(
                 range: TextRange {
                     start_line: line_index + 1,
                     end_line: line_index + 1,
-                    start_utf16_offset: line_offset + utf16_len(&line[..byte_offset]),
-                    end_utf16_offset: line_offset + utf16_len(&line[..byte_offset + slice_bytes]),
+                    start_byte_offset: line_offset + byte_offset,
+                    end_byte_offset: line_offset + byte_offset + slice_bytes,
                 },
             });
         }
@@ -222,7 +221,6 @@ mod tests {
 
     use super::super::{ChunkOptions, test_source};
     use super::extract;
-    use crate::utils::byte_offset_at_utf16_floor;
 
     #[test]
     fn validates_chunks_ranges_and_overlap_like_typescript() {
@@ -246,8 +244,8 @@ mod tests {
             SourceRange::Text(TextRange {
                 start_line: 1,
                 end_line: 1,
-                start_utf16_offset: 0,
-                end_utf16_offset: 10,
+                start_byte_offset: 0,
+                end_byte_offset: 10,
             })
         );
         for chunk in &chunks {
@@ -260,34 +258,49 @@ mod tests {
 
     #[test]
     fn splits_long_unicode_lines_on_character_boundaries() {
-        let text = format!("prefix {} suffix", "😀".repeat(20));
+        let text = format!("前言\r\nprefix {} suffix\r\n尾声", "😀".repeat(20));
         let source = test_source(FileFormat::Text, "unicode.txt", &text);
-        let chunks = extract(
-            &source,
-            ChunkOptions {
-                max_chunk_chars: Some(10),
-                chunk_overlap_chars: Some(0),
-            },
-        )
-        .expect("unicode extraction");
-        assert!(chunks.len() >= 3);
-        for chunk in chunks {
-            let Content::Text(content) = test_content(&chunk) else {
-                panic!("text fragment expected");
-            };
-            assert!(content.chars().count() <= 10);
-            let SourceRange::Text(TextRange {
-                start_utf16_offset,
-                end_utf16_offset,
-                ..
-            }) = *chunk.range()
-            else {
-                panic!("text range expected");
-            };
-            let start_byte = byte_offset_at_utf16_floor(&source.text, start_utf16_offset);
-            let end_byte = byte_offset_at_utf16_floor(&source.text, end_utf16_offset);
-            assert_eq!(content, source.text[start_byte..end_byte]);
+        for max_chars in [1, 10] {
+            let chunks = extract(
+                &source,
+                ChunkOptions {
+                    max_chunk_chars: Some(max_chars),
+                    chunk_overlap_chars: Some(0),
+                },
+            )
+            .expect("unicode extraction");
+            assert!(chunks.len() >= 3);
+            for chunk in chunks {
+                let Content::Text(content) = test_content(&chunk) else {
+                    panic!("text fragment expected");
+                };
+                assert!(content.chars().count() <= max_chars);
+                let SourceRange::Text(TextRange {
+                    start_byte_offset,
+                    end_byte_offset,
+                    ..
+                }) = *chunk.range()
+                else {
+                    panic!("text range expected");
+                };
+                assert_eq!(
+                    source.text.get(start_byte_offset..end_byte_offset),
+                    Some(content.as_str())
+                );
+            }
         }
+
+        let source = test_source(FileFormat::Text, "whitespace.txt", "\t中😀 \r\n\r\n");
+        let chunks = extract(&source, ChunkOptions::default()).expect("whitespace extraction");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(test_content(&chunks[0]), Content::Text(source.text.clone()));
+        let SourceRange::Text(range) = chunks[0].range() else {
+            panic!("text range expected");
+        };
+        assert_eq!(
+            range.slice(&source.text).expect("full source span"),
+            source.text
+        );
     }
 
     #[test]

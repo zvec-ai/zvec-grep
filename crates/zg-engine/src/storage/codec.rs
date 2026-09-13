@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 // Nested tables add several JSON containers; keep records below serde's recursion limit.
 const MAX_TABLE_DEPTH: usize = 16;
 
@@ -55,16 +55,17 @@ fn encode(value: impl Serialize, kind: &str) -> EngineResult<String> {
 }
 
 fn decode<T: DeserializeOwned>(json: &str, kind: &str) -> EngineResult<T> {
-    let record: Record<T> = serde_json::from_str(json).map_err(|error| {
-        EngineError::storage_failure(format!("failed to decode stored {kind}: {error}"))
-    })?;
+    let decode_error =
+        |error| EngineError::storage_failure(format!("failed to decode stored {kind}: {error}"));
+    let record: Record<&serde_json::value::RawValue> =
+        serde_json::from_str(json).map_err(decode_error)?;
     if record.version != VERSION {
         return Err(EngineError::storage_failure(format!(
-            "unsupported stored {kind} version: {}",
+            "unsupported stored {kind} version {}; expected {VERSION}; rebuild the index",
             record.version
         )));
     }
-    Ok(record.value)
+    serde_json::from_str(record.value.get()).map_err(decode_error)
 }
 
 fn invalid_record(kind: &str, error: &EngineError) -> EngineError {
@@ -466,8 +467,8 @@ enum RangeRecord {
     Text {
         start_line: usize,
         end_line: usize,
-        start_utf16_offset: usize,
-        end_utf16_offset: usize,
+        start_byte_offset: usize,
+        end_byte_offset: usize,
     },
     Byte {
         start_offset: u64,
@@ -478,8 +479,8 @@ enum RangeRecord {
     },
     PageText {
         page: usize,
-        start_utf16_offset: usize,
-        end_utf16_offset: usize,
+        start_byte_offset: usize,
+        end_byte_offset: usize,
     },
     PageRegion {
         page: usize,
@@ -497,8 +498,8 @@ impl From<SourceRange> for RangeRecord {
             SourceRange::Text(range) => Self::Text {
                 start_line: range.start_line,
                 end_line: range.end_line,
-                start_utf16_offset: range.start_utf16_offset,
-                end_utf16_offset: range.end_utf16_offset,
+                start_byte_offset: range.start_byte_offset,
+                end_byte_offset: range.end_byte_offset,
             },
             SourceRange::Byte {
                 start_offset,
@@ -510,12 +511,12 @@ impl From<SourceRange> for RangeRecord {
             SourceRange::Page { page } => Self::Page { page },
             SourceRange::PageText {
                 page,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             } => Self::PageText {
                 page,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             },
             SourceRange::PageRegion {
                 page,
@@ -541,13 +542,13 @@ impl From<RangeRecord> for SourceRange {
             RangeRecord::Text {
                 start_line,
                 end_line,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             } => Self::Text(TextRange {
                 start_line,
                 end_line,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             }),
             RangeRecord::Byte {
                 start_offset,
@@ -559,12 +560,12 @@ impl From<RangeRecord> for SourceRange {
             RangeRecord::Page { page } => Self::Page { page },
             RangeRecord::PageText {
                 page,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             } => Self::PageText {
                 page,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             },
             RangeRecord::PageRegion {
                 page,
@@ -805,10 +806,10 @@ mod tests {
 
     fn text_range() -> SourceRange {
         SourceRange::Text(TextRange {
-            start_line: 1,
+            start_line: 2,
             end_line: 2,
-            start_utf16_offset: 0,
-            end_utf16_offset: 20,
+            start_byte_offset: "前言\n".len(),
+            end_byte_offset: "前言\n正文 😀".len(),
         })
     }
 
@@ -905,6 +906,15 @@ mod tests {
     #[test]
     fn fragment_records_preserve_compound_content_ranges_metadata_and_ownership() {
         round_trip(&fragment());
+        let restored = decode_fragment(&encode_fragment(&fragment()).expect("encode fragment"))
+            .expect("decode fragment");
+        let SourceRange::Text(range) = restored.range() else {
+            panic!("text range");
+        };
+        assert_eq!(
+            "前言\n正文 😀".get(range.start_byte_offset..range.end_byte_offset),
+            Some("正文 😀")
+        );
         let encoded: Value =
             serde_json::from_str(&encode_fragment(&fragment()).expect("encode fragment"))
                 .expect("fragment JSON");
@@ -922,8 +932,8 @@ mod tests {
             SourceRange::Page { page: 3 },
             SourceRange::PageText {
                 page: 3,
-                start_utf16_offset: 2,
-                end_utf16_offset: 6,
+                start_byte_offset: 3,
+                end_byte_offset: 7,
             },
             SourceRange::PageRegion {
                 page: 3,
@@ -1016,8 +1026,29 @@ mod tests {
         let original: Value =
             serde_json::from_str(&encode_fragment(&fragment()).expect("encode fragment"))
                 .expect("fragment JSON");
+        for (kind, mut record) in [("source file", file_record), ("fragment", original.clone())] {
+            record["version"] = json!(1);
+            if kind == "fragment" {
+                record["value"]["value"]["range"] = json!({
+                    "kind": "text", "start_line": 2, "end_line": 2,
+                    "start_utf16_offset": 3, "end_utf16_offset": 8,
+                });
+            }
+            let json = record.to_string();
+            let error = if kind == "source file" {
+                decode_file(&json).expect_err("legacy source record")
+            } else {
+                decode_fragment(&json).expect_err("legacy UTF-16 range")
+            };
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("unsupported stored {kind} version 1"))
+            );
+            assert!(error.message().contains("rebuild the index"));
+        }
         let mut record = original.clone();
-        record["version"] = json!(2);
+        record["version"] = json!(VERSION + 1);
         assert_corrupt_fragment(&record);
         for field in ["id", "file_id"] {
             let mut record = original.clone();

@@ -35,14 +35,14 @@ pub(crate) fn byte_offset_at_utf16_ceil(value: &str, utf16_offset: usize) -> usi
     value.len()
 }
 
-/// Returns UTF-16 line starts for lines produced by `split('\n')`, retaining any `\r`.
-pub(crate) fn utf16_line_offsets(lines: &[&str]) -> Vec<usize> {
+/// Returns UTF-8 byte line starts for lines produced by `split('\n')`, retaining any `\r`.
+pub(crate) fn line_byte_offsets(lines: &[&str]) -> Vec<usize> {
     let mut offset = 0;
     lines
         .iter()
         .map(|line| {
             let current = offset;
-            offset += utf16_len(line) + 1;
+            offset += line.len() + 1;
             current
         })
         .collect()
@@ -88,10 +88,10 @@ mod tests {
     #[test]
     fn line_offsets_count_crlf_and_empty_lines() {
         let lines = "A😀\r\n中\n\n".split('\n').collect::<Vec<_>>();
-        assert_eq!(utf16_line_offsets(&lines), [0, 5, 7, 8]);
-        assert_eq!(utf16_line_offsets(&["a", "😀"]), [0, 2]);
-        assert_eq!(utf16_line_offsets(&[""]), [0]);
-        assert!(utf16_line_offsets(&[]).is_empty());
+        assert_eq!(line_byte_offsets(&lines), [0, 7, 11, 12]);
+        assert_eq!(line_byte_offsets(&["a", "😀"]), [0, 2]);
+        assert_eq!(line_byte_offsets(&[""]), [0]);
+        assert!(line_byte_offsets(&[]).is_empty());
     }
 
     #[test]

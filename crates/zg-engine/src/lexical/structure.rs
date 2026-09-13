@@ -15,7 +15,7 @@ use crate::{
         SourceRange,
     },
     extraction::{ChunkOptions, TextSource, extract},
-    utils::{decode_text, sha256_hex},
+    utils::{decode_text, line_byte_offsets, sha256_hex},
 };
 
 pub(crate) const RG_STRUCTURE_ENRICH_FILE_LIMIT: usize = 100;
@@ -26,20 +26,38 @@ pub(crate) struct StructureEnrichmentResult {
     pub diagnostics: StructureEnrichmentDiagnostics,
 }
 
+struct StructuralSource {
+    text: String,
+    line_byte_offsets: Vec<usize>,
+    fragments: Vec<EntityFragment>,
+}
+
+impl StructuralSource {
+    fn byte_offset(&self, line: usize, column: usize) -> Option<usize> {
+        let start = *self.line_byte_offsets.get(line.checked_sub(1)?)?;
+        let end = self
+            .line_byte_offsets
+            .get(line)
+            .map_or(self.text.len(), |next| next - 1);
+        let offset = start.checked_add(column)?;
+        (offset <= end && self.text.is_char_boundary(offset)).then_some(offset)
+    }
+}
+
 pub(crate) fn enrich_lexical_items_with_structure(
     root: &Path,
     items: Vec<ContextItem>,
     max_file_size_bytes: Option<u64>,
 ) -> StructureEnrichmentResult {
     let matched_files = unique_lexical_file_paths(&items);
-    let mut fragments_by_file = HashMap::new();
+    let mut sources_by_file = HashMap::new();
     let mut parsed_files = 0;
     for path in matched_files.iter().take(RG_STRUCTURE_ENRICH_FILE_LIMIT) {
-        let fragments = parse_structural_fragments(root, path, max_file_size_bytes);
-        if fragments.is_some() {
+        let source = parse_structural_source(root, path, max_file_size_bytes);
+        if source.is_some() {
             parsed_files += 1;
         }
-        fragments_by_file.insert(path.clone(), fragments);
+        sources_by_file.insert(path.clone(), source);
     }
 
     let mut enriched_items = 0;
@@ -52,11 +70,11 @@ pub(crate) fn enrich_lexical_items_with_structure(
         }
         item.rank = enriched.len() + 1;
         if item.kind == ContextItemKind::LexicalMatch
-            && let Some(fragments) = fragments_by_file
+            && let Some(source) = sources_by_file
                 .get(&item.absolute_path)
-                .and_then(Option::as_deref)
+                .and_then(Option::as_ref)
             && let Some(range) = lexical_match_range(&item)
-            && let Some(container) = smallest_containing_fragment(fragments, range)
+            && let Some(container) = smallest_containing_fragment(source, range)
         {
             enriched_items += 1;
             enriched_files.insert(item.absolute_path.clone());
@@ -96,11 +114,11 @@ fn unique_lexical_file_paths(items: &[ContextItem]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn parse_structural_fragments(
+fn parse_structural_source(
     root: &Path,
     absolute_path: &Path,
     explicit_max_size: Option<u64>,
-) -> Option<Vec<EntityFragment>> {
+) -> Option<StructuralSource> {
     let metadata = fs::metadata(absolute_path).ok()?;
     if !metadata.is_file() || metadata.len() == 0 {
         return None;
@@ -150,52 +168,64 @@ fn parse_structural_fragments(
         .into_iter()
         .filter(|fragment| fragment.metadata().is_some())
         .collect::<Vec<_>>();
-    (!structural.is_empty()).then_some(structural)
+    if structural.is_empty() {
+        return None;
+    }
+    Some(StructuralSource {
+        line_byte_offsets: line_byte_offsets(&source.text.split('\n').collect::<Vec<_>>()),
+        text: source.text,
+        fragments: structural,
+    })
 }
 
 fn lexical_match_range(item: &ContextItem) -> Option<&ContentRange> {
     let range = item.excerpt_range.as_ref().unwrap_or(&item.range);
-    matches!(range, ContentRange::Text { .. }).then_some(range)
+    matches!(range, ContentRange::LineColumn { .. }).then_some(range)
 }
 
 fn smallest_containing_fragment<'fragment>(
-    fragments: &'fragment [EntityFragment],
+    source: &'fragment StructuralSource,
     inner: &ContentRange,
 ) -> Option<&'fragment EntityFragment> {
-    fragments
+    let ContentRange::LineColumn {
+        start_line,
+        end_line,
+        start_byte_column,
+        end_byte_column,
+    } = inner
+    else {
+        return None;
+    };
+    let start = source.byte_offset(*start_line, *start_byte_column)?;
+    let end = source.byte_offset(*end_line, *end_byte_column)?;
+    source
+        .fragments
         .iter()
-        .filter(|fragment| text_range_contains(fragment.range(), inner))
+        .filter(|fragment| text_range_contains(fragment.range(), start..end))
         .min_by(|left, right| compare_fragment_container(left, right))
 }
 
-fn text_range_contains(outer: &SourceRange, inner: &ContentRange) -> bool {
+fn text_range_contains(outer: &SourceRange, inner: std::ops::Range<usize>) -> bool {
     matches!(
-        (outer, inner),
-        (
-            SourceRange::Text(crate::domain::TextRange {
-                start_line: outer_start,
-                end_line: outer_end,
-                ..
-            }),
-            ContentRange::Text {
-                start_line: inner_start,
-                end_line: inner_end,
-                ..
-            }
-        ) if outer_start <= inner_start && outer_end >= inner_end
+        outer,
+        SourceRange::Text(range) if inner.start <= inner.end
+            && range.start_byte_offset <= inner.start
+            && range.end_byte_offset >= inner.end
     )
 }
 
 fn compare_fragment_container(left: &EntityFragment, right: &EntityFragment) -> std::cmp::Ordering {
-    fragment_line_span(left)
-        .cmp(&fragment_line_span(right))
+    fragment_byte_span(left)
+        .cmp(&fragment_byte_span(right))
         .then_with(|| fragment_specificity(right).cmp(&fragment_specificity(left)))
         .then_with(|| left.document_id().cmp(right.document_id()))
 }
 
-fn fragment_line_span(fragment: &EntityFragment) -> usize {
+fn fragment_byte_span(fragment: &EntityFragment) -> usize {
     match fragment.range() {
-        SourceRange::Text(range) => range.end_line.saturating_sub(range.start_line),
+        SourceRange::Text(range) => range
+            .end_byte_offset
+            .saturating_sub(range.start_byte_offset),
         _ => usize::MAX,
     }
 }
@@ -328,17 +358,43 @@ mod tests {
         assert!(skipped.items[0].container.is_none());
     }
 
+    #[test]
+    fn distinguishes_structures_on_the_same_line_after_unicode() {
+        let directory = tempdir().expect("temporary directory");
+        let text = "const prefix = \"😀\"; function alpha() { return \"one\"; } function beta() { return \"two\"; }\n";
+        fs::write(directory.path().join("same-line.ts"), text).expect("code fixture");
+        let items = ["one", "two"].map(|needle| {
+            let mut item = lexical_item(directory.path(), "same-line.ts", 1, text.trim_end());
+            let start = text.find(needle).expect("matched text");
+            item.range = ContentRange::LineColumn {
+                start_line: 1,
+                end_line: 1,
+                start_byte_column: start,
+                end_byte_column: start + needle.len(),
+            };
+            item
+        });
+        let result = enrich_lexical_items_with_structure(directory.path(), items.into(), None);
+        assert_eq!(result.diagnostics.enriched_items, 2);
+        for (item, expected) in result.items.iter().zip(["alpha", "beta"]) {
+            assert!(matches!(
+                item.container.as_ref().and_then(|container| container.metadata.as_ref()),
+                Some(EntityMetadata::Code { symbol_name: Some(name), .. }) if name == expected
+            ));
+        }
+    }
+
     fn lexical_item(root: &Path, relative: &str, line: usize, content: &str) -> ContextItem {
         ContextItem {
             kind: ContextItemKind::LexicalMatch,
             rank: 0,
             absolute_path: root.join(relative),
             relative_path: relative.into(),
-            range: ContentRange::Text {
+            range: ContentRange::LineColumn {
                 start_line: line,
                 end_line: line,
-                start_offset: 0,
-                end_offset: content.len(),
+                start_byte_column: 0,
+                end_byte_column: content.len(),
             },
             excerpt_range: None,
             content: content.to_owned(),

@@ -100,6 +100,11 @@ pub fn write_context_with_options(
                 start_line,
                 end_line,
                 ..
+            }
+            | ContentRange::LineColumn {
+                start_line,
+                end_line,
+                ..
             } => format!("{start_line}-{end_line}"),
             _ => start_line(&item.range).to_string(),
         };
@@ -804,7 +809,9 @@ environment values.";
 
 fn start_line(range: &ContentRange) -> usize {
     match range {
-        ContentRange::Text { start_line, .. } => *start_line,
+        ContentRange::Text { start_line, .. } | ContentRange::LineColumn { start_line, .. } => {
+            *start_line
+        }
         _ => 0,
     }
 }
@@ -837,8 +844,8 @@ mod output_tests {
                 range: ContentRange::Text {
                     start_line: 1,
                     end_line: 20,
-                    start_offset: 0,
-                    end_offset: 100,
+                    start_byte_offset: 0,
+                    end_byte_offset: 100,
                 },
                 excerpt_range: None,
                 content: (1..=20)

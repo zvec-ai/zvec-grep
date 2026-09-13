@@ -395,13 +395,19 @@ pub mod result {
     #[serde(rename_all = "snake_case", tag = "kind")]
     pub enum ContentRange {
         File,
-        /// UTF-16 offsets are source-global for extracted entities and line-local
-        /// columns for lexical match spans.
+        /// Half-open UTF-8 byte offsets in the complete decoded source text.
         Text {
             start_line: usize,
             end_line: usize,
-            start_offset: usize,
-            end_offset: usize,
+            start_byte_offset: usize,
+            end_byte_offset: usize,
+        },
+        /// One-based lines and zero-based, half-open UTF-8 byte columns.
+        LineColumn {
+            start_line: usize,
+            end_line: usize,
+            start_byte_column: usize,
+            end_byte_column: usize,
         },
         Byte {
             start_offset: u64,
@@ -410,10 +416,11 @@ pub mod result {
         Page {
             page: usize,
         },
+        /// Half-open UTF-8 byte offsets in the page's decoded text.
         PageText {
             page: usize,
-            start_offset: usize,
-            end_offset: usize,
+            start_byte_offset: usize,
+            end_byte_offset: usize,
         },
         PageRegion {
             page: usize,
@@ -478,8 +485,8 @@ impl From<crate::domain::SourceRange> for result::ContentRange {
             SourceRange::Text(range) => Self::Text {
                 start_line: range.start_line,
                 end_line: range.end_line,
-                start_offset: range.start_utf16_offset,
-                end_offset: range.end_utf16_offset,
+                start_byte_offset: range.start_byte_offset,
+                end_byte_offset: range.end_byte_offset,
             },
             SourceRange::Byte {
                 start_offset,
@@ -491,12 +498,12 @@ impl From<crate::domain::SourceRange> for result::ContentRange {
             SourceRange::Page { page } => Self::Page { page },
             SourceRange::PageText {
                 page,
-                start_utf16_offset,
-                end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             } => Self::PageText {
                 page,
-                start_offset: start_utf16_offset,
-                end_offset: end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
             },
             SourceRange::PageRegion {
                 page,
@@ -523,11 +530,11 @@ impl From<&crate::domain::SourceRange> for result::ContentRange {
 
 impl From<crate::domain::LineColumnRange> for result::ContentRange {
     fn from(range: crate::domain::LineColumnRange) -> Self {
-        Self::Text {
+        Self::LineColumn {
             start_line: range.start.line,
             end_line: range.end.line,
-            start_offset: range.start.column_utf16,
-            end_offset: range.end.column_utf16,
+            start_byte_column: range.start.byte_column,
+            end_byte_column: range.end.byte_column,
         }
     }
 }
@@ -592,31 +599,31 @@ mod tests {
         let indexed: result::ContentRange = SourceRange::Text(TextRange {
             start_line: 2,
             end_line: 3,
-            start_utf16_offset: 12,
-            end_utf16_offset: 24,
+            start_byte_offset: 12,
+            end_byte_offset: 24,
         })
         .into();
         assert_eq!(
             serde_json::to_value(indexed).expect("indexed range"),
             json!({
-                "kind": "text", "start_line": 2, "end_line": 3, "start_offset": 12, "end_offset": 24,
+                "kind": "text", "start_line": 2, "end_line": 3, "start_byte_offset": 12, "end_byte_offset": 24,
             })
         );
         let lexical: result::ContentRange = LineColumnRange {
             start: TextPosition {
                 line: 2,
-                column_utf16: 8,
+                byte_column: 8,
             },
             end: TextPosition {
                 line: 3,
-                column_utf16: 2,
+                byte_column: 2,
             },
         }
         .into();
         assert_eq!(
             serde_json::to_value(lexical).expect("lexical range"),
             json!({
-                "kind": "text", "start_line": 2, "end_line": 3, "start_offset": 8, "end_offset": 2,
+                "kind": "line_column", "start_line": 2, "end_line": 3, "start_byte_column": 8, "end_byte_column": 2,
             })
         );
         let metadata: result::EntityMetadata = EntityMetadata::Code {

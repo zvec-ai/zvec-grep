@@ -5,7 +5,7 @@ pub(crate) mod types;
 
 use std::{
     collections::{HashMap, HashSet},
-    io,
+    io::{self, BufRead, Read},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -17,7 +17,7 @@ use std::{
 use crate::{
     EngineError,
     domain::{LineColumnRange, TextPosition},
-    utils::{decode_text, utf16_len},
+    utils::decode_text,
 };
 use grep::{
     matcher::Matcher,
@@ -178,8 +178,8 @@ fn search_sync(
             .then(
                 left.range
                     .start
-                    .column_utf16
-                    .cmp(&right.range.start.column_utf16),
+                    .byte_column
+                    .cmp(&right.range.start.byte_column),
             )
     });
 
@@ -307,6 +307,7 @@ fn search_paths_parallel(
 fn build_searcher() -> grep::searcher::Searcher {
     SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(b'\0'))
+        .bom_sniffing(false)
         .line_number(true)
         .build()
 }
@@ -457,22 +458,40 @@ fn search_file(
     let relative_path = absolute_path
         .strip_prefix(root)
         .map_or_else(|_| absolute_path.clone(), Path::to_path_buf);
-    let search_result = searcher.search_path(
-        matcher,
-        &absolute_path,
-        Bytes(|line_number, bytes| {
+    let search_result = (|| {
+        let mut reader = io::BufReader::new(std::fs::File::open(&absolute_path)?);
+        let header = reader.fill_buf()?;
+        let encoded_unicode = header.starts_with(b"\xff\xfe")
+            || header.starts_with(b"\xfe\xff")
+            || header.starts_with(b"\x00\x00\xfe\xff");
+        let mut decoded = None;
+        if encoded_unicode {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            let Some(text) = decode_text(&bytes, true) else {
+                return Ok(());
+            };
+            decoded = Some(text.into_owned());
+        } else if header.starts_with(b"\xef\xbb\xbf") {
+            reader.consume(3);
+        }
+        let sink = Bytes(|line_number, bytes: &[u8]| {
             let first = matcher.find(bytes).map_err(io::Error::other)?;
             let Some(first) = first else {
                 return Ok(true);
             };
-            let content_bytes = trim_line_terminator(bytes);
-            let Ok(content) = std::str::from_utf8(content_bytes) else {
+            let Ok(text) = std::str::from_utf8(bytes) else {
                 return Ok(true);
             };
             let line_number = usize::try_from(line_number)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let start = text_position_at_byte_offset(content, first.start());
-            let end = text_position_at_byte_offset(content, first.end());
+            let (Some(start), Some(end)) = (
+                text_position_at_byte_offset(text, first.start()),
+                text_position_at_byte_offset(text, first.end()),
+            ) else {
+                return Ok(true);
+            };
+            let content = &text[..trim_line_terminator(bytes).len()];
             results.push(LexicalMatch {
                 rank: 0,
                 absolute_path: absolute_path.clone(),
@@ -480,19 +499,23 @@ fn search_file(
                 range: LineColumnRange {
                     start: TextPosition {
                         line: line_number + start.0,
-                        column_utf16: start.1,
+                        byte_column: start.1,
                     },
                     end: TextPosition {
                         line: line_number + end.0,
-                        column_utf16: end.1,
+                        byte_column: end.1,
                     },
                 },
                 excerpt_range: None,
                 content: content.to_owned(),
             });
             Ok(true)
-        }),
-    );
+        });
+        match decoded {
+            Some(text) => searcher.search_slice(matcher, text.as_bytes(), sink),
+            None => searcher.search_reader(matcher, reader, sink),
+        }
+    })();
     if let Err(error) = search_result {
         return Err(EngineError::from_io(
             format!("failed to search {}", absolute_path.display()),
@@ -502,11 +525,12 @@ fn search_file(
     Ok(())
 }
 
-fn trim_line_terminator(mut bytes: &[u8]) -> &[u8] {
+fn trim_line_terminator(bytes: &[u8]) -> &[u8] {
     if let Some(stripped) = bytes.strip_suffix(b"\n") {
-        bytes = stripped;
+        stripped.strip_suffix(b"\r").unwrap_or(stripped)
+    } else {
+        bytes
     }
-    bytes.strip_suffix(b"\r").unwrap_or(bytes)
 }
 
 fn check_paths(root: &Path, paths: &[PathBuf]) -> CheckedPaths {
@@ -640,6 +664,35 @@ fn matches_modified_time(path: &Path, request: &LexicalSearchRequest) -> bool {
             .is_none_or(|before| modified <= before)
 }
 
+struct ContextSource {
+    text: String,
+    line_starts: Vec<usize>,
+}
+
+impl ContextSource {
+    fn read(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let text = decode_text(&bytes, true)?.into_owned();
+        let mut byte_offset = 0;
+        let line_starts = text
+            .split_inclusive('\n')
+            .map(|line| {
+                let start = byte_offset;
+                byte_offset += line.len();
+                start
+            })
+            .collect();
+        Some(Self { text, line_starts })
+    }
+
+    fn line_end(&self, line: usize) -> usize {
+        self.line_starts
+            .get(line)
+            .copied()
+            .unwrap_or(self.text.len())
+    }
+}
+
 fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) {
     let before = request.options.before_context;
     let after = request.options.after_context;
@@ -647,35 +700,52 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         return;
     }
 
-    let mut cache: HashMap<PathBuf, Option<Vec<String>>> = HashMap::new();
+    let mut cache: HashMap<PathBuf, Option<ContextSource>> = HashMap::new();
     for item in matches {
-        let lines = cache.entry(item.absolute_path.clone()).or_insert_with(|| {
-            std::fs::read(&item.absolute_path).ok().and_then(|bytes| {
-                decode_text(&bytes, true)
-                    .map(|content| content.lines().map(str::to_owned).collect())
-            })
-        });
-        let Some(lines) = lines else {
+        let source = cache
+            .entry(item.absolute_path.clone())
+            .or_insert_with(|| ContextSource::read(&item.absolute_path));
+        let Some(source) = source else {
             continue;
         };
-        if lines.is_empty() {
+        let excerpt = item.range;
+        if excerpt.start.line == 0 || excerpt.end.line > source.line_starts.len() {
+            continue;
+        }
+        let matched_start = source.line_starts[excerpt.start.line - 1];
+        let matched_end = source.line_end(excerpt.end.line);
+        let matched_lines = &source.text[matched_start..matched_end];
+        if trim_line_terminator(matched_lines.as_bytes()) != item.content.as_bytes() {
             continue;
         }
 
-        let excerpt = item.range;
         let start_line = excerpt.start.line.saturating_sub(before).max(1);
-        let end_line = excerpt.end.line.saturating_add(after).min(lines.len());
-        let content = lines[start_line - 1..end_line].join("\n");
-        let end_offset = utf16_len(&lines[end_line - 1]);
+        let end_line = excerpt
+            .end
+            .line
+            .saturating_add(after)
+            .min(source.line_starts.len());
+        let last_start = source.line_starts[end_line - 1];
+        let last_line = &source.text[last_start..source.line_end(end_line)];
+        let mut end_byte_column = trim_line_terminator(last_line.as_bytes()).len();
+        if end_line == excerpt.end.line {
+            end_byte_column = end_byte_column.max(excerpt.end.byte_column);
+        }
+        if last_line.get(..end_byte_column).is_none() {
+            continue;
+        }
+        let start_byte_offset = source.line_starts[start_line - 1];
+        let end_byte_offset = last_start + end_byte_column;
+        let content = source.text[start_byte_offset..end_byte_offset].to_owned();
         item.excerpt_range = Some(excerpt);
         item.range = LineColumnRange {
             start: TextPosition {
                 line: start_line,
-                column_utf16: 0,
+                byte_column: 0,
             },
             end: TextPosition {
                 line: end_line,
-                column_utf16: end_offset,
+                byte_column: end_byte_column,
             },
         };
         item.content = content;
@@ -692,12 +762,11 @@ fn modified_epoch_ms(path: &Path) -> Option<u64> {
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
-fn text_position_at_byte_offset(value: &str, byte_offset: usize) -> (usize, usize) {
-    let end = byte_offset.min(value.len());
-    let prefix = String::from_utf8_lossy(&value.as_bytes()[..end]);
+fn text_position_at_byte_offset(value: &str, byte_offset: usize) -> Option<(usize, usize)> {
+    let prefix = value.get(..byte_offset)?;
     let line_offset = prefix.bytes().filter(|byte| *byte == b'\n').count();
     let last = prefix.rsplit('\n').next().unwrap_or_default();
-    (line_offset, utf16_len(last.trim_end_matches('\r')))
+    Some((line_offset, last.len()))
 }
 
 #[cfg(test)]
@@ -712,7 +781,7 @@ mod tests {
 
     use super::{
         DEFAULT_MAX_SEARCH_THREADS, LexicalSearchService, default_worker_threads,
-        worker_threads_for_search,
+        text_position_at_byte_offset, worker_threads_for_search,
     };
 
     fn request(pattern: &str) -> LexicalSearchRequest {
@@ -771,11 +840,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn searches_in_process_and_reports_utf16_columns() {
+    async fn searches_in_process_and_reports_utf8_byte_columns() {
         let root = TempDir::new().expect("temp dir");
         std::fs::write(
             root.path().join("a.txt"),
-            "before\nlet x = \"你好\";\nafter\n",
+            "before\nlet x = \"😀你好\";\nafter\n",
         )
         .expect("fixture");
         let reply = search(&LexicalSearchService::new(), root.path(), &request("你好")).await;
@@ -784,8 +853,98 @@ mod tests {
         assert_eq!(reply.matches.len(), 1);
         assert_eq!(reply.matches[0].relative_path, Path::new("a.txt"));
         assert_eq!(reply.matches[0].range.start.line, 2);
-        assert_eq!(reply.matches[0].range.start.column_utf16, 9);
-        assert_eq!(reply.matches[0].range.end.column_utf16, 11);
+        assert_eq!(reply.matches[0].range.start.byte_column, 13);
+        assert_eq!(reply.matches[0].range.end.byte_column, 19);
+    }
+
+    #[test]
+    fn byte_positions_preserve_line_endings_and_reject_partial_characters() {
+        let text = "中😀\r\n尾";
+        for (offset, position) in [
+            (0, (0, 0)),
+            (3, (0, 3)),
+            (7, (0, 7)),
+            (8, (0, 8)),
+            (9, (1, 0)),
+            (12, (1, 3)),
+        ] {
+            assert_eq!(text_position_at_byte_offset(text, offset), Some(position));
+        }
+        for offset in [1, 4, 10, 13] {
+            assert_eq!(text_position_at_byte_offset(text, offset), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn decodes_unicode_sources_strictly_and_preserves_context_line_endings() {
+        let root = TempDir::new().expect("temp dir");
+        let text = "前😀\r\nlet x = \"😀你好\";\r\n尾巴\r\n";
+        let fixtures = [
+            [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat(),
+            [
+                b"\xff\xfe".as_slice(),
+                &text
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            ]
+            .concat(),
+            [
+                b"\xfe\xff".as_slice(),
+                &text
+                    .encode_utf16()
+                    .flat_map(u16::to_be_bytes)
+                    .collect::<Vec<_>>(),
+            ]
+            .concat(),
+            [
+                b"\xff\xfe\0\0".as_slice(),
+                &text
+                    .chars()
+                    .flat_map(|character| u32::from(character).to_le_bytes())
+                    .collect::<Vec<_>>(),
+            ]
+            .concat(),
+            [
+                b"\0\0\xfe\xff".as_slice(),
+                &text
+                    .chars()
+                    .flat_map(|character| u32::from(character).to_be_bytes())
+                    .collect::<Vec<_>>(),
+            ]
+            .concat(),
+        ];
+        for (index, bytes) in fixtures.iter().enumerate() {
+            fs::write(root.path().join(format!("source-{index}.txt")), bytes).expect("fixture");
+        }
+        fs::write(
+            root.path().join("invalid.txt"),
+            b"\xff\xfe\x60\x4f\x7d\x59\x00\xd8",
+        )
+        .expect("invalid UTF-16 fixture");
+        let mut request = request("你好");
+        request.options.before_context = 1;
+        request.options.after_context = 1;
+        let reply = search(&LexicalSearchService::new(), root.path(), &request).await;
+        assert_eq!(reply.matches.len(), fixtures.len());
+        for item in reply.matches {
+            assert_eq!(
+                item.content,
+                text.strip_suffix("\r\n").expect("final newline")
+            );
+            assert_eq!(item.range.start.line, 1);
+            assert_eq!(item.range.end.line, 3);
+            assert_eq!(item.range.end.byte_column, "尾巴".len());
+            let excerpt = item.excerpt_range.expect("matched span");
+            assert_eq!(excerpt.start.line, 2);
+            assert_eq!(excerpt.start.byte_column, 13);
+            assert_eq!(excerpt.end.byte_column, 19);
+            let line = text.lines().nth(1).expect("matched line");
+            assert_eq!(
+                &line[excerpt.start.byte_column..excerpt.end.byte_column],
+                "你好"
+            );
+        }
     }
 
     #[tokio::test]

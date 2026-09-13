@@ -1,13 +1,13 @@
 use crate::{EngineError, EngineResult};
 
-/// Lines are one-based and inclusive; source-global UTF-16 offsets are zero-based
-/// and half-open. Empty offset spans are valid.
+/// Lines are one-based and inclusive; offsets span the decoded source's UTF-8 bytes.
+/// Byte spans are zero-based and half-open; empty spans are valid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TextRange {
     pub start_line: usize,
     pub end_line: usize,
-    pub start_utf16_offset: usize,
-    pub end_utf16_offset: usize,
+    pub start_byte_offset: usize,
+    pub end_byte_offset: usize,
 }
 
 impl TextRange {
@@ -15,14 +15,28 @@ impl TextRange {
     pub(crate) fn validate(&self) -> EngineResult<()> {
         if self.start_line == 0
             || self.start_line > self.end_line
-            || self.start_utf16_offset > self.end_utf16_offset
+            || self.start_byte_offset > self.end_byte_offset
         {
             return Err(EngineError::invalid_argument(format!(
-                "invalid text range: lines {}..={} must be one-based and ordered; global UTF-16 offsets {}..{} must ascend",
-                self.start_line, self.end_line, self.start_utf16_offset, self.end_utf16_offset
+                "invalid text range: lines {}..={} must be one-based and ordered; global UTF-8 byte offsets {}..{} must ascend",
+                self.start_line, self.end_line, self.start_byte_offset, self.end_byte_offset
             )));
         }
         Ok(())
+    }
+
+    /// Reads an exact span from the decoded source, rejecting invalid byte boundaries.
+    #[track_caller]
+    pub(crate) fn slice<'a>(&self, source_text: &'a str) -> EngineResult<&'a str> {
+        self.validate()?;
+        source_text
+            .get(self.start_byte_offset..self.end_byte_offset)
+            .ok_or_else(|| {
+                EngineError::invalid_argument(format!(
+                    "cannot read text range {}..{}: offsets must be within the decoded source ({} bytes) and on UTF-8 character boundaries",
+                    self.start_byte_offset, self.end_byte_offset, source_text.len()
+                ))
+            })
     }
 
     pub(crate) fn contains(&self, other: &Self) -> bool {
@@ -30,16 +44,16 @@ impl TextRange {
             && other.validate().is_ok()
             && self.start_line <= other.start_line
             && self.end_line >= other.end_line
-            && self.start_utf16_offset <= other.start_utf16_offset
-            && self.end_utf16_offset >= other.end_utf16_offset
+            && self.start_byte_offset <= other.start_byte_offset
+            && self.end_byte_offset >= other.end_byte_offset
     }
 }
 
-/// A one-based line and zero-based UTF-16 column within that line.
+/// A one-based line and zero-based byte column in the decoded UTF-8 text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TextPosition {
     pub line: usize,
-    pub column_utf16: usize,
+    pub byte_column: usize,
 }
 
 /// A half-open span in line/column coordinates, independent of global offsets.
@@ -54,10 +68,10 @@ impl LineColumnRange {
     pub(crate) fn validate(&self) -> EngineResult<()> {
         if self.start.line == 0
             || self.end.line == 0
-            || (self.start.line, self.start.column_utf16) > (self.end.line, self.end.column_utf16)
+            || (self.start.line, self.start.byte_column) > (self.end.line, self.end.byte_column)
         {
             return Err(EngineError::invalid_argument(format!(
-                "invalid line/column range: {:?}..{:?}; lines must be one-based and UTF-16 positions must ascend",
+                "invalid line/column range: {:?}..{:?}; lines must be one-based and UTF-8 byte positions must ascend",
                 self.start, self.end
             )));
         }
@@ -67,14 +81,14 @@ impl LineColumnRange {
     pub(crate) fn contains(&self, other: &Self) -> bool {
         self.validate().is_ok()
             && other.validate().is_ok()
-            && (self.start.line, self.start.column_utf16)
-                <= (other.start.line, other.start.column_utf16)
-            && (self.end.line, self.end.column_utf16) >= (other.end.line, other.end.column_utf16)
+            && (self.start.line, self.start.byte_column)
+                <= (other.start.line, other.start.byte_column)
+            && (self.end.line, self.end.byte_column) >= (other.end.line, other.end.byte_column)
     }
 }
 
-/// Ranges refer to one source. Pages are one-based; byte and page-local UTF-16
-/// spans are zero-based and half-open. Regions use source-defined page units.
+/// Ranges refer to one source. Pages are one-based; byte spans are zero-based
+/// and half-open. Regions use source-defined page units.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SourceRange {
     File,
@@ -88,8 +102,8 @@ pub(crate) enum SourceRange {
     },
     PageText {
         page: usize,
-        start_utf16_offset: usize,
-        end_utf16_offset: usize,
+        start_byte_offset: usize,
+        end_byte_offset: usize,
     },
     PageRegion {
         page: usize,
@@ -113,9 +127,9 @@ impl SourceRange {
             Self::Page { page } => page > 0,
             Self::PageText {
                 page,
-                start_utf16_offset,
-                end_utf16_offset,
-            } => page > 0 && start_utf16_offset <= end_utf16_offset,
+                start_byte_offset,
+                end_byte_offset,
+            } => page > 0 && start_byte_offset <= end_byte_offset,
             Self::PageRegion {
                 page,
                 x,
@@ -169,18 +183,18 @@ impl SourceRange {
             (
                 Self::PageText {
                     page,
-                    start_utf16_offset,
-                    end_utf16_offset,
+                    start_byte_offset,
+                    end_byte_offset,
                 },
                 Self::PageText {
                     page: other_page,
-                    start_utf16_offset: other_start,
-                    end_utf16_offset: other_end,
+                    start_byte_offset: other_start,
+                    end_byte_offset: other_end,
                 },
             ) => {
                 page == other_page
-                    && start_utf16_offset <= other_start
-                    && end_utf16_offset >= other_end
+                    && start_byte_offset <= other_start
+                    && end_byte_offset >= other_end
             }
             (
                 Self::PageRegion {
@@ -219,8 +233,8 @@ mod tests {
         TextRange {
             start_line: lines.0,
             end_line: lines.1,
-            start_utf16_offset: offsets.0,
-            end_utf16_offset: offsets.1,
+            start_byte_offset: offsets.0,
+            end_byte_offset: offsets.1,
         }
     }
 
@@ -231,11 +245,11 @@ mod tests {
         }
     }
 
-    fn page_text(page: usize, start_utf16_offset: usize, end_utf16_offset: usize) -> SourceRange {
+    fn page_text(page: usize, start_byte_offset: usize, end_byte_offset: usize) -> SourceRange {
         SourceRange::PageText {
             page,
-            start_utf16_offset,
-            end_utf16_offset,
+            start_byte_offset,
+            end_byte_offset,
         }
     }
 
@@ -253,12 +267,55 @@ mod tests {
         LineColumnRange {
             start: TextPosition {
                 line: start.0,
-                column_utf16: start.1,
+                byte_column: start.1,
             },
             end: TextPosition {
                 line: end.0,
-                column_utf16: end.1,
+                byte_column: end.1,
             },
+        }
+    }
+
+    #[test]
+    fn text_spans_read_decoded_sources_and_reject_invalid_boundaries() {
+        let source_text = "A中😀\r\nB";
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(source_text.encode_utf16().flat_map(u16::to_le_bytes));
+        let mut utf16_be = vec![0xfe, 0xff];
+        utf16_be.extend(source_text.encode_utf16().flat_map(u16::to_be_bytes));
+
+        for bytes in [source_text.as_bytes().to_vec(), utf16, utf16_be] {
+            let decoded = crate::utils::decode_text(&bytes, true).expect("valid source encoding");
+            assert_eq!(decoded, source_text);
+            assert_eq!(
+                text((1, 1), (1, 8))
+                    .slice(&decoded)
+                    .expect("valid source span"),
+                "中😀"
+            );
+            assert_eq!(
+                text((1, 2), (8, 11))
+                    .slice(&decoded)
+                    .expect("valid source span"),
+                "\r\nB"
+            );
+            assert_eq!(
+                text((2, 2), (11, 11))
+                    .slice(&decoded)
+                    .expect("valid source span"),
+                ""
+            );
+
+            for offsets in [(2, 8), (1, 6), (8, 1), (0, 12), (usize::MAX, usize::MAX)] {
+                assert_eq!(
+                    text((1, 2), offsets)
+                        .slice(&decoded)
+                        .expect_err("invalid source span")
+                        .code(),
+                    EngineError::INVALID_ARGUMENT,
+                    "{offsets:?}"
+                );
+            }
         }
     }
 

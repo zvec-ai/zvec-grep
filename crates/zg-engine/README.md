@@ -73,6 +73,16 @@ Apply the target platform's signing requirements to distributed binaries and lib
 - `lexical` provides embedded grep retrieval.
 - `service` composes these capabilities behind `ZvecGrep`.
 
+## Text conventions
+
+- Internal text is UTF-8. Decode sources consistently, remove the encoding BOM, and preserve original line endings and whitespace.
+- Text positions count UTF-8 bytes. Distinguish offsets in the full decoded source, columns within a line, and offsets within a page's text.
+- Byte spans are zero-based and half-open (`[start, end)`); line and page numbers are one-based. Exact text reads reject offsets that are out of bounds or split a UTF-8 character.
+- Source positions refer to the same file version and decoded text used during extraction. Outlines, normalized text, and other derived content retain their original source locations.
+- Raw byte ranges and file content hashes refer to the original file bytes, independently of text decoding.
+- Length limits state their units. Chunk budgets count UTF-16 code units; model limits count tokens. Truncation preserves character boundaries.
+- Storage and public APIs preserve coordinate units and their reference points. Changes to these conventions require versioned compatibility handling.
+
 ## Development
 
 Run from the repository root:

@@ -1245,8 +1245,8 @@ mod tests {
         SourceRange::Text(TextRange {
             start_line,
             end_line,
-            start_utf16_offset: 0,
-            end_utf16_offset: 10,
+            start_byte_offset: 0,
+            end_byte_offset: 10,
         })
     }
 }

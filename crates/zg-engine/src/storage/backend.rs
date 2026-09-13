@@ -26,7 +26,7 @@ use super::{
     zvec::NativeStore,
 };
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const JOURNAL: &str = "pending.json";
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -86,9 +86,15 @@ impl SchemaRecord {
     }
 
     fn schema(self) -> EngineResult<WorkspaceIndexEmbeddingSchema> {
-        if self.version != VERSION || !(1..=20_000).contains(&self.dimension) {
+        if self.version != VERSION {
+            return Err(EngineError::storage_failure(format!(
+                "unsupported storage schema version {}; expected {VERSION}; rebuild the index",
+                self.version
+            )));
+        }
+        if !(1..=20_000).contains(&self.dimension) {
             return Err(EngineError::storage_failure(
-                "unsupported or invalid storage schema",
+                "stored embedding dimension must be in 1..=20,000",
             ));
         }
         let metric = match self.metric.as_str() {
@@ -378,9 +384,10 @@ fn replay(
     record: JournalRecord,
 ) -> EngineResult<()> {
     if record.version != VERSION {
-        return Err(EngineError::storage_failure(
-            "unsupported storage journal version",
-        ));
+        return Err(EngineError::storage_failure(format!(
+            "unsupported storage journal version {}; expected {VERSION}; rebuild the index",
+            record.version
+        )));
     }
     match record.operation {
         Operation::Replace {

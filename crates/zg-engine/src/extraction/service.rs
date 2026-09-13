@@ -12,8 +12,8 @@ use super::{
 use crate::{
     EngineError,
     domain::{
-        Content, EntityContent, EntityId, EntityMetadata, FileCategory, FileFormat, SymbolType,
-        TableCellRole,
+        Content, EntityContent, EntityId, EntityMetadata, FileCategory, FileFormat, SourceRange,
+        SymbolType, TableCellRole,
     },
     utils::{collapse_whitespace, sha256_hex, take_utf16, utf16_len},
 };
@@ -32,24 +32,40 @@ pub(super) fn extract_for_indexing<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
 ) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
-    let fragments = match source.into() {
-        Source::Image(source) => image::extract(source),
+    let source = source.into();
+    let source_text = match &source {
+        Source::Text(source) => Some(source.text.as_str()),
+        Source::Image(_) => None,
+    };
+    let fragments = match source {
         Source::Text(source) if is_code_source(&source.file) => {
-            return code::extract_for_indexing(source, options);
+            code::extract_for_indexing(source, options)?
         }
-        Source::Text(source) if source.file.formats.contains(&FileFormat::Markdown) => {
-            markdown::extract(source, options)
+        source => {
+            let fragments = match source {
+                Source::Image(source) => image::extract(source),
+                Source::Text(source) if source.file.formats.contains(&FileFormat::Markdown) => {
+                    markdown::extract(source, options)
+                }
+                Source::Text(source) => text::extract(source, options),
+            }?;
+            fragments
+                .into_iter()
+                .map(|fragment| IndexingExtractionFragment {
+                    fragment,
+                    embedding_source: None,
+                })
+                .collect()
         }
-        Source::Text(source) => text::extract(source, options),
-    }?;
-
-    Ok(fragments
-        .into_iter()
-        .map(|fragment| IndexingExtractionFragment {
-            fragment,
-            embedding_source: None,
-        })
-        .collect())
+    };
+    if let Some(source_text) = source_text {
+        for item in &fragments {
+            if let SourceRange::Text(range) = item.fragment.range() {
+                range.slice(source_text)?;
+            }
+        }
+    }
+    Ok(fragments)
 }
 
 pub(super) fn source_kind(file: &SourceFile) -> Option<SourceKind> {

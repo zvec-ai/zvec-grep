@@ -33,7 +33,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-27"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rayon = "1.11.0"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 sysinfo.workspace = true
 tempfile.workspace = true

@@ -1736,8 +1736,18 @@ fn range_label(range: &ContentRange) -> String {
             start_line,
             end_line,
             ..
+        }
+        | ContentRange::LineColumn {
+            start_line,
+            end_line,
+            ..
         } if start_line == end_line => start_line.to_string(),
         ContentRange::Text {
+            start_line,
+            end_line,
+            ..
+        }
+        | ContentRange::LineColumn {
             start_line,
             end_line,
             ..
