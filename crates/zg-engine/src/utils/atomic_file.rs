@@ -54,11 +54,7 @@ fn atomic_write_with(
         step("check parent directory synchronization")?;
         directory.sync_all()?;
         step("create temporary file")?;
-        temporary = Some(
-            tempfile::Builder::new()
-                .prefix(".atomic-")
-                .tempfile_in(&parent)?,
-        );
+        temporary = Some(create_temporary(&parent)?);
         let file = temporary.as_mut().expect("temporary file was created");
         step("write temporary file")?;
         file.write_all(bytes)?;
@@ -92,8 +88,8 @@ fn atomic_write_with(
             }
         };
         publication = "destination published; durability unconfirmed";
-        // On Windows tempfile removes FILE_ATTRIBUTE_TEMPORARY during publication.
-        // Flush that metadata change as well as the directory entry below.
+        // Windows no-clobber publication resets file attributes. Sync those
+        // metadata updates before synchronizing the directory entry below.
         #[cfg(windows)]
         {
             step("sync published file")?;
@@ -107,7 +103,7 @@ fn atomic_write_with(
         let cleanup = temporary.and_then(|file| file.close().err());
         failure(
             path,
-            format!("atomic file write failed during {stage} ({publication})"),
+            format!("during {stage} ({publication})"),
             source,
             cleanup,
         )
@@ -136,46 +132,72 @@ fn destination_permissions(path: &Path) -> io::Result<Option<Permissions>> {
     }
 }
 
+fn create_temporary(parent: &Path) -> io::Result<NamedTempFile> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".atomic-");
+    #[cfg(windows)]
+    {
+        // std::fs::rename keeps attributes, so create a normal file rather than
+        // leaving FILE_ATTRIBUTE_TEMPORARY on the published destination.
+        builder.make_in(parent, |path| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        builder.tempfile_in(parent)
+    }
+}
+
 fn publish(
     temporary: NamedTempFile,
     destination: &Path,
     overwrite: bool,
 ) -> Result<File, PersistError> {
-    if overwrite {
-        return temporary.persist(destination);
-    }
-    // tempfile's Unix no-clobber operation can fall back to hard-link + unlink.
-    // Require a native rename instead, and preserve a competing creator's file.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        use rustix::fs::{CWD, RenameFlags, renameat_with};
-        if let Err(error) = renameat_with(
-            CWD,
-            temporary.path(),
-            CWD,
-            destination,
-            RenameFlags::NOREPLACE,
-        ) {
-            return Err(PersistError {
-                file: temporary,
-                error: error.into(),
-            });
+    let result = if overwrite {
+        // Rust's Windows rename supports replacing a file held open by readers;
+        // tempfile::persist only uses MoveFileExW, which can return AccessDenied.
+        fs::rename(temporary.path(), destination)
+    } else {
+        // tempfile's Unix no-clobber operation can fall back to hard-link + unlink.
+        // Require a native rename instead, and preserve a competing creator's file.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use rustix::fs::{CWD, RenameFlags, renameat_with};
+            renameat_with(
+                CWD,
+                temporary.path(),
+                CWD,
+                destination,
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(Into::into)
         }
-        let mut temporary = temporary;
-        temporary.disable_cleanup(true);
-        Ok(temporary.into_file())
-    }
-    #[cfg(windows)]
-    {
-        temporary.persist_noclobber(destination)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        Err(PersistError {
+        #[cfg(windows)]
+        {
+            return temporary.persist_noclobber(destination);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic creation is unsupported",
+            ))
+        }
+    };
+    if let Err(error) = result {
+        return Err(PersistError {
             file: temporary,
-            error: io::Error::new(io::ErrorKind::Unsupported, "atomic creation is unsupported"),
-        })
+            error,
+        });
     }
+    let mut temporary = temporary;
+    temporary.disable_cleanup(true);
+    Ok(temporary.into_file())
 }
 
 fn nonempty_directory(path: &Path) -> &Path {
@@ -210,7 +232,7 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
         .map_err(|source| {
             failure(
                 path,
-                "directory synchronization failed".into(),
+                "during directory synchronization".into(),
                 source,
                 None,
             )
@@ -232,7 +254,7 @@ pub(crate) fn create_directories(path: &Path) -> io::Result<()> {
         builder
     };
     create_directories_with(path, &mut |path| builder.create(path), &mut sync_directory)
-        .map_err(|source| failure(path, "directory initialization failed".into(), source, None))
+        .map_err(|source| failure(path, "during directory initialization".into(), source, None))
 }
 
 fn create_directories_with(
@@ -275,7 +297,7 @@ fn create_directories_with(
         };
         failure(
             path,
-            "new directory synchronization failed".into(),
+            "during new directory synchronization".into(),
             source,
             cleanup,
         )
@@ -283,7 +305,7 @@ fn create_directories_with(
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("{operation} for '{}': {source}{cleanup}", path.display())]
+#[error("atomic file write failed {operation} for '{}': {source}{cleanup}", path.display())]
 struct FileOperationError {
     operation: String,
     path: PathBuf,
@@ -339,8 +361,44 @@ mod tests {
         ] {
             atomic_write(&path, &bytes).expect("atomic write");
             assert_eq!(fs::read(&path).expect("published contents"), bytes);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+
+                const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+                assert_eq!(
+                    fs::metadata(&path)
+                        .expect("read published file attributes")
+                        .file_attributes()
+                        & FILE_ATTRIBUTE_TEMPORARY,
+                    0,
+                    "published file must not retain the temporary attribute"
+                );
+            }
             assert_entries(directory.path(), &["设置-🦀.json"]);
         }
+    }
+
+    #[test]
+    fn replacement_preserves_contents_visible_through_an_open_old_handle() {
+        use std::io::Read;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("record");
+        atomic_write(&path, b"original contents").expect("write original contents");
+        let mut old_handle = File::open(&path).expect("open original file");
+
+        atomic_write(&path, b"replacement contents").expect("replace with original handle open");
+        assert_eq!(
+            fs::read(&path).expect("read replacement contents"),
+            b"replacement contents"
+        );
+        let mut original = Vec::new();
+        old_handle
+            .read_to_end(&mut original)
+            .expect("read original contents through open handle");
+        assert_eq!(original, b"original contents");
+        assert_entries(directory.path(), &["record"]);
     }
 
     #[test]
@@ -688,7 +746,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("new directory synchronization failed")
+                    .contains("atomic file write failed during new directory synchronization")
             );
             assert_eq!(path.exists(), racing);
             if !racing {
