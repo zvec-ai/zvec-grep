@@ -527,49 +527,175 @@ test("Transformers.js adapter maps Metal to WebGPU", async () => {
   await model.dispose();
 });
 
-test("Transformers.js adapter falls back to CPU when GPU initialization fails", async (t) => {
-  const providers = [];
-  let artifactResolutions = 0;
+for (const device of [undefined, "auto", "cpu", "cuda", "vulkan"]) {
+  test(`Transformers.js selects the runtime default for auto and honors explicit ${device}`, async () => {
+    const providers = [];
+    const extractor = Object.assign(
+      async () => ({ dims: [1, 3], data: new Float32Array(3) }),
+      { tokenizer: createTokenizer(), async dispose() {} },
+    );
+    const model = new TransformersJsEmbeddingModel(
+      entry(),
+      { device },
+      {
+        resolveArtifacts: createArtifactResolver(),
+        loadRuntime: async () => ({
+          async pipeline(_task, _repo, options) {
+            providers.push(options.session_options?.executionProviders);
+            return extractor;
+          },
+        }),
+      },
+    );
+    await model.embed([{ kind: "text", text: "value" }]);
+    assert.deepEqual(providers, [
+      device === undefined || device === "auto"
+        ? undefined
+        : [device === "vulkan" ? "webgpu" : device],
+    ]);
+    await model.dispose();
+  });
+}
+
+for (const device of ["cuda", "cpu", "auto"]) {
+  test(`Transformers.js caches ${device} initialization failure without retrying CPU or later batches`, async (t) => {
+    const providers = [];
+    const progress = [];
+    const writes = [];
+    let artifactResolutions = 0;
+    const originalFailure = new Error("cannot initialize ONNX session");
+    const runtime = {
+      async pipeline(_task, _repo, options) {
+        providers.push(options.session_options?.executionProviders[0]);
+        throw originalFailure;
+      },
+    };
+    const resolveArtifacts = createArtifactResolver();
+    const dependencies = {
+      async resolveArtifacts(options) {
+        artifactResolutions++;
+        return await resolveArtifacts(options);
+      },
+      loadRuntime: async () => runtime,
+    };
+    t.mock.method(process.stderr, "write", (message) => {
+      writes.push(String(message));
+      return true;
+    });
+    const model = new TransformersJsEmbeddingModel(
+      entry(),
+      { device },
+      dependencies,
+    );
+    const options =
+      device === "cpu" ? {} : { onProgress: (event) => progress.push(event) };
+    const errors = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        model
+          .embed([{ kind: "text", text: "value" }], options)
+          .catch((error) => error),
+      ),
+    );
+    const failure = errors[0];
+    assert.equal(
+      failure.code,
+      "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
+    );
+    assert.equal(failure.cause, originalFailure);
+    assert.match(failure.message, /cannot initialize ONNX session/);
+    assert.match(failure.message, /restart the process or daemon/i);
+    if (device === "cuda") assert.match(failure.message, /--device cpu/);
+    for (const error of errors) assert.equal(error, failure);
+    await assert.rejects(
+      model.embed([{ kind: "text", text: "later" }]),
+      (error) => error === failure,
+    );
+    assert.equal(artifactResolutions, 1);
+    assert.deepEqual(providers, [device === "auto" ? undefined : device]);
+    assert.equal(
+      progress.filter((event) => event.stage === "warning").length,
+      device === "cpu" ? 0 : 1,
+    );
+    assert.equal(writes.length, device === "cpu" ? 1 : 0);
+    await model.dispose();
+  });
+}
+
+test("Transformers.js does not block other models after a pipeline fails before ONNX initialization", async () => {
+  let loads = 0;
   const extractor = Object.assign(
-    async () => ({ dims: [1, 3], data: new Float32Array(3) }),
+    async () => ({ dims: [1, 3], data: new Float32Array([1, 2, 3]) }),
     { tokenizer: createTokenizer(), async dispose() {} },
   );
-  const resolveArtifacts = createArtifactResolver();
-  const dependencies = {
-    async resolveArtifacts(options) {
-      artifactResolutions++;
-      return await resolveArtifacts(options);
+  const runtime = {
+    async pipeline() {
+      if (++loads === 1) throw new Error("invalid tokenizer");
+      return extractor;
     },
-    loadRuntime: async () => ({
-      async pipeline(_task, _repo, options) {
-        const provider = options.session_options?.executionProviders[0];
-        providers.push(provider);
-        if (provider === "webgpu") {
-          throw new Error("GPU unavailable");
-        }
-        return extractor;
-      },
-    }),
   };
+  const dependencies = {
+    resolveArtifacts: createArtifactResolver(),
+    loadRuntime: async () => runtime,
+  };
+  const models = Array.from(
+    { length: 3 },
+    () =>
+      new TransformersJsEmbeddingModel(
+        entry(),
+        { device: "cpu" },
+        dependencies,
+      ),
+  );
+  await assert.rejects(
+    models[0].embed([{ kind: "text", text: "first" }], { onProgress() {} }),
+    { code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED" },
+  );
+  for (const model of [models[1], models[2]]) {
+    assert.deepEqual(await model.embed([{ kind: "text", text: "working" }]), {
+      vectors: [[1, 2, 3]],
+      truncated: [],
+    });
+  }
+  assert.equal(loads, 3);
+  await Promise.all(models.map((model) => model.dispose()));
+});
 
-  const writes = [];
-  t.mock.method(process.stderr, "write", (message) => {
-    writes.push(String(message));
-    return true;
-  });
+test("Transformers.js caches artifact initialization failures without entering the runtime", async () => {
+  let resolutions = 0;
+  let runtimeLoads = 0;
   const model = new TransformersJsEmbeddingModel(
     entry(),
+    {},
     {
-      apiKey: "",
-      device: "metal",
+      async resolveArtifacts() {
+        resolutions++;
+        throw new Error("artifact unavailable");
+      },
+      async loadRuntime() {
+        runtimeLoads++;
+        throw new Error("must not load");
+      },
     },
-    dependencies,
   );
-  await model.embed([{ kind: "text", text: "value" }]);
-
-  assert.deepEqual(providers, ["webgpu", "cpu"]);
-  assert.equal(artifactResolutions, 1);
-  assert.match(writes.join(""), /falling back to CPU/);
+  const failures = await Promise.all(
+    Array.from({ length: 3 }, () =>
+      model.embed([{ kind: "text", text: "value" }]).catch((error) => error),
+    ),
+  );
+  for (const error of failures) {
+    assert.equal(
+      error.code,
+      "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
+    );
+    assert.match(error.message, /artifact unavailable/);
+    assert.equal(error, failures[0]);
+  }
+  await assert.rejects(
+    model.embed([{ kind: "text", text: "later" }]),
+    (error) => error === failures[0],
+  );
+  assert.equal(resolutions, 1);
+  assert.equal(runtimeLoads, 0);
   await model.dispose();
 });
 
@@ -634,6 +760,52 @@ test("Transformers.js adapter retries on CPU when GPU inference returns invalid 
   assert.equal(activeProvider, "cpu");
   assert.equal(gpuDisposals, 1);
   assert.match(writes.join(""), /inference failed.*falling back to CPU/);
+  await model.dispose();
+});
+
+test("Transformers.js preserves a terminal load failure during inference fallback", async () => {
+  const providers = [];
+  const progress = [];
+  const gpu = Object.assign(
+    async () => ({ dims: [1, 3], data: new Float32Array([NaN, 0, 0]) }),
+    { tokenizer: createTokenizer(), async dispose() {} },
+  );
+  const model = new TransformersJsEmbeddingModel(
+    entry(),
+    { device: "cuda" },
+    {
+      resolveArtifacts: createArtifactResolver(),
+      loadRuntime: async () => ({
+        async pipeline(_task, _repo, options) {
+          const provider = options.session_options?.executionProviders[0];
+          providers.push(provider);
+          if (provider === "cpu") throw new Error("CPU replacement failed");
+          return gpu;
+        },
+      }),
+    },
+  );
+  let failure;
+  await assert.rejects(
+    model.embed([{ kind: "text", text: "value" }], {
+      onProgress: (event) => progress.push(event),
+    }),
+    (error) => {
+      failure = error;
+      assert.equal(
+        error.code,
+        "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
+      );
+      assert.match(error.message, /CPU replacement failed/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    model.embed([{ kind: "text", text: "later" }]),
+    (error) => error === failure,
+  );
+  assert.deepEqual(providers, ["cuda", "cpu"]);
+  assert.equal(progress.filter((event) => event.stage === "warning").length, 2);
   await model.dispose();
 });
 

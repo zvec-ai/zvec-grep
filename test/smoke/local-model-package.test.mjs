@@ -8,6 +8,7 @@ import test from "node:test";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "local/potion-code-16m-v2";
+const TRANSFORMERS_SMOKE_MODEL = "local/all-minilm-l6-v2";
 
 function runNpm(args, options) {
   const npmExecPath = process.env.npm_execpath;
@@ -98,26 +99,13 @@ test("packed package runs a real local embedding model end to end", async (t) =>
     ".bin",
     process.platform === "win32" ? "zg.cmd" : "zg",
   );
-  const packageHome = join(temporaryDirectory, "home");
-  const runtimeEnvironment = {
-    ...process.env,
-    HOME: packageHome,
-    USERPROFILE: packageHome,
-    NO_COLOR: "1",
-    ZVEC_GREP_HOME: packageHome,
-    ZVEC_GREP_EMBEDDING: modelReference,
-    // Match the direct embedding check without requiring GPU support on runners.
-    ZVEC_GREP_DEVICE: "cpu",
-    ZVEC_GREP_MODEL_CACHE: modelCache,
-  };
-
   const embeddingSmokeScript = join(consumerDirectory, "embedding-smoke.mjs");
   await writeFile(
     embeddingSmokeScript,
     [
       "import { createEmbeddingModel } from '@zvec/zvec-grep';",
       "const reference = process.env.ZVEC_GREP_SMOKE_MODEL;",
-      "const model = createEmbeddingModel(reference, { modelCacheDir: process.env.ZVEC_GREP_MODEL_CACHE, device: 'cpu' });",
+      "const model = createEmbeddingModel(reference, { modelCacheDir: process.env.ZVEC_GREP_MODEL_CACHE, device: process.env.ZVEC_GREP_SMOKE_DEVICE });",
       "try {",
       "  const result = await model.embed([{ kind: 'text', text: 'CrossPlatformPotionNeedle validates package-local embedding.' }], { purpose: 'query' });",
       "  const vector = result.vectors[0];",
@@ -131,76 +119,111 @@ test("packed package runs a real local embedding model end to end", async (t) =>
       "",
     ].join("\n"),
   );
-  const directEmbedding = await execFileAsync(
-    process.execPath,
-    [embeddingSmokeScript],
-    {
-      cwd: consumerDirectory,
-      env: {
-        ...runtimeEnvironment,
-        ZVEC_GREP_SMOKE_MODEL: modelReference,
-      },
-      timeout: 600_000,
-    },
-  );
-  const resultLine = directEmbedding.stdout
-    .split(/\r?\n/)
-    .find((line) => line.startsWith("ZVEC_GREP_SMOKE_RESULT="));
-  assert.ok(resultLine, "direct embedding did not report a result");
-  const embeddingResult = JSON.parse(resultLine.split("=", 2)[1]);
-  assert.ok(embeddingResult.dimension > 0);
-  assert.ok(embeddingResult.norm > 0);
+  const devices = ["cpu"];
+  // Keep real coverage for the default device on a runner without CUDA. A CPU
+  // override previously hid #135, and mocks cannot reproduce HF session caching.
+  if (
+    process.platform === "linux" &&
+    process.arch === "x64" &&
+    modelReference === TRANSFORMERS_SMOKE_MODEL
+  ) {
+    devices.push("auto");
+  }
 
-  await writeFile(
-    join(consumerDirectory, "fixture.ts"),
-    [
-      "export function CrossPlatformPotionNeedle(token: string): boolean {",
-      "  return token.startsWith('potion-');",
-      "}",
-      "",
-    ].join("\n"),
-  );
-  const queried = await runExecutable(
-    cli,
-    [
-      "--mode",
-      "direct",
-      "--vector",
-      "CrossPlatformPotionNeedle",
-      "--limit",
-      "5",
-      "-g",
-      "fixture.ts",
-      "-t",
-      "ts",
-      ".",
-    ],
-    {
-      cwd: consumerDirectory,
-      env: runtimeEnvironment,
-      timeout: 600_000,
-    },
-  );
-  assert.match(queried.stdout, /CrossPlatformPotionNeedle/);
-  assert.match(queried.stdout, /fixture\.ts/);
-  assert.match(
-    queried.stderr,
-    new RegExp(
-      `No index found; creating one with ${modelReference.replaceAll("/", "\\/")}\\.`,
-    ),
-  );
+  for (const device of devices) {
+    await t.test(`device: ${device}`, async () => {
+      const workspaceDirectory = join(consumerDirectory, `workspace-${device}`);
+      await mkdir(workspaceDirectory, { recursive: true });
+      const packageHome = join(temporaryDirectory, `home-${device}`);
+      const runtimeEnvironment = {
+        ...process.env,
+        HOME: packageHome,
+        USERPROFILE: packageHome,
+        NO_COLOR: "1",
+        ZVEC_GREP_HOME: packageHome,
+        ZVEC_GREP_EMBEDDING: modelReference,
+        ZVEC_GREP_MODEL_CACHE: modelCache,
+      };
+      if (device === "auto") {
+        // Exercise the CLI default even when the caller forced CPU globally.
+        delete runtimeEnvironment.ZVEC_GREP_DEVICE;
+      } else {
+        runtimeEnvironment.ZVEC_GREP_DEVICE = device;
+      }
 
-  const status = await runExecutable(
-    cli,
-    ["--status", "--mode", "direct", "."],
-    {
-      cwd: consumerDirectory,
-      env: runtimeEnvironment,
-      timeout: 120_000,
-    },
-  );
-  assert.match(
-    status.stdout,
-    new RegExp(modelReference.replaceAll("/", "\\/")),
-  );
+      const directEmbedding = await execFileAsync(
+        process.execPath,
+        [embeddingSmokeScript],
+        {
+          cwd: workspaceDirectory,
+          env: {
+            ...runtimeEnvironment,
+            ZVEC_GREP_SMOKE_MODEL: modelReference,
+            ZVEC_GREP_SMOKE_DEVICE: device,
+          },
+          timeout: 600_000,
+        },
+      );
+      const resultLine = directEmbedding.stdout
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("ZVEC_GREP_SMOKE_RESULT="));
+      assert.ok(resultLine, "direct embedding did not report a result");
+      const embeddingResult = JSON.parse(resultLine.split("=", 2)[1]);
+      assert.ok(embeddingResult.dimension > 0);
+      assert.ok(embeddingResult.norm > 0);
+
+      await writeFile(
+        join(workspaceDirectory, "fixture.ts"),
+        [
+          "export function CrossPlatformPotionNeedle(token: string): boolean {",
+          "  return token.startsWith('potion-');",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      const queried = await runExecutable(
+        cli,
+        [
+          "--mode",
+          "direct",
+          "--vector",
+          "CrossPlatformPotionNeedle",
+          "--limit",
+          "5",
+          "-g",
+          "fixture.ts",
+          "-t",
+          "ts",
+          ".",
+        ],
+        {
+          cwd: workspaceDirectory,
+          env: runtimeEnvironment,
+          timeout: 600_000,
+        },
+      );
+      assert.match(queried.stdout, /CrossPlatformPotionNeedle/);
+      assert.match(queried.stdout, /fixture\.ts/);
+      assert.match(
+        queried.stderr,
+        new RegExp(
+          `No index found; creating one with ${modelReference.replaceAll("/", "\\/")}\\.`,
+        ),
+      );
+
+      const status = await runExecutable(
+        cli,
+        ["--status", "--mode", "direct", "."],
+        {
+          cwd: workspaceDirectory,
+          env: runtimeEnvironment,
+          timeout: 120_000,
+        },
+      );
+      assert.match(
+        status.stdout,
+        new RegExp(modelReference.replaceAll("/", "\\/")),
+      );
+    });
+  }
 });

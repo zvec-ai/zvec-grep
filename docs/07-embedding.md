@@ -117,6 +117,20 @@ The equivalent environment override is `ZVEC_GREP_DEVICE`. Model2Vec models
 such as Potion use static vector lookup, so selecting a GPU does not improve
 their runtime.
 
+For ONNX models using Transformers.js, `auto` uses the runtime's Node default
+(CPU). Select a GPU device explicitly when its hardware and runtime libraries
+are available. GGUF models retain their own automatic device selection.
+
+If Transformers.js cannot initialize a model, indexing stops instead of
+retrying the same load for every file. Correct the model or device configuration
+and restart the process or daemon before retrying; a failed first ONNX session
+can leave the runtime unusable for the rest of the process. For a GPU
+initialization error, restart and use `--device cpu` (or configure
+`ZVEC_GREP_DEVICE=cpu` in the daemon environment when no saved device overrides
+it). GPU inference failures after a successful initialization can still fall
+back to CPU. Model warnings are retained in the daemon log as `model.warning`
+events as well as sent through live progress.
+
 Override the download cache with `--model-cache` or `ZVEC_GREP_MODEL_CACHE`:
 
 ```bash

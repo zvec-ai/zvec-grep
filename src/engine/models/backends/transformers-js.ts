@@ -108,6 +108,7 @@ async function defaultTransformersJsLoader(): Promise<TransformersJsModule> {
 }
 
 let defaultRuntimeImport: Promise<TransformersJsModule> | null = null;
+const LOAD_FAILED = "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED";
 
 const defaultDependencies: TransformersJsDependencies = {
   loadRuntime() {
@@ -125,6 +126,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
   private readonly dependencies: TransformersJsDependencies;
   private pipeline: FeatureExtractionPipeline | null = null;
   private pipelineLoadPromise: Promise<FeatureExtractionPipeline> | null = null;
+  private pipelineLoadError: EngineError | null = null;
   private resolvedArtifacts: ResolvedModelArtifacts | null = null;
   private artifactResolutionPromise: Promise<ResolvedModelArtifacts> | null =
     null;
@@ -174,16 +176,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     const texts = (contents as readonly TextContent[]).map((content) =>
       formatText(content.text, options.purpose, this.entry),
     );
-    let pipeline: FeatureExtractionPipeline;
-    try {
-      pipeline = await this.ensurePipeline(options.onProgress);
-    } catch (cause) {
-      throw new EngineError("Transformers.js embedding failed", {
-        code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
-        context: `model=${this.entry.reference} repo=${this.entry.repo}`,
-        cause,
-      });
-    }
+    const pipeline = await this.ensurePipeline(options.onProgress);
     let truncatedInputIndexes: number[];
     try {
       truncatedInputIndexes = await findTruncatedInputIndexes(
@@ -218,6 +211,9 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
       }
     }
 
+    if (failure instanceof EngineError && failure.code === LOAD_FAILED) {
+      throw failure;
+    }
     throw new EngineError("Transformers.js embedding failed", {
       code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
       context: `model=${this.entry.reference} repo=${this.entry.repo}`,
@@ -242,11 +238,29 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     if (this.pipeline) {
       return this.pipeline;
     }
+    if (this.pipelineLoadError) {
+      throw this.pipelineLoadError;
+    }
     if (this.pipelineLoadPromise) {
       return await this.pipelineLoadPromise;
     }
 
-    this.pipelineLoadPromise = this.loadPipeline(onProgress);
+    // Normalize the shared promise itself so concurrent callers also receive
+    // the terminal error for artifact resolution and runtime import failures.
+    this.pipelineLoadPromise = this.loadPipeline(onProgress).catch((cause) => {
+      this.pipelineLoadError =
+        cause instanceof EngineError && cause.code === LOAD_FAILED
+          ? cause
+          : new EngineError(
+              `Transformers.js model initialization failed (${formatErrorMessage(cause)}). Check the model files and runtime configuration, then restart the process or daemon before retrying.`,
+              {
+                code: LOAD_FAILED,
+                context: `model=${this.entry.reference} repo=${this.entry.repo}`,
+                cause,
+              },
+            );
+      throw this.pipelineLoadError;
+    });
     try {
       this.pipeline = await this.pipelineLoadPromise;
       return this.pipeline;
@@ -277,20 +291,26 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
         executionProvider,
       );
     } catch (cause) {
-      if (!executionProvider || executionProvider === "cpu") {
-        throw cause;
-      }
-
-      const warning = `Transformers.js ${executionProvider} embedding initialization failed (${formatErrorMessage(cause)}), falling back to CPU.`;
-      if (!downloadProgress.warning(warning)) {
-        process.stderr.write(`zvec-grep warning: ${warning}\n`);
-      }
-      this.usingCpuFallback = true;
-      pipeline = await this.createPipeline(
-        runtime,
-        resolvedArtifacts.directory,
-        "cpu",
+      const recovery =
+        executionProvider && executionProvider !== "cpu"
+          ? "Restart the process or daemon and retry with --device cpu."
+          : "Check the model files and runtime configuration, then restart the process or daemon before retrying.";
+      const failure = new EngineError(
+        `Transformers.js ${executionProvider ?? "cpu"} model initialization failed (${formatErrorMessage(cause)}). ${recovery}`,
+        {
+          code: LOAD_FAILED,
+          context: `model=${this.entry.reference} repo=${this.entry.repo}`,
+          cause,
+        },
       );
+      // Transformers.js 3.x retains its first session promise even on failure.
+      // A CPU retry cannot recover a runtime whose first session failed. Do not
+      // retry initialization here, or globally block unrelated models: pipeline
+      // failures can also come from a tokenizer before ONNX session creation.
+      if (!downloadProgress.warning(failure.message)) {
+        process.stderr.write(`zvec-grep warning: ${failure.message}\n`);
+      }
+      throw failure;
     }
 
     pipeline.tokenizer.model_max_length = this.entry.maxInputTokens;
@@ -481,7 +501,9 @@ async function findTruncatedInputIndexes(
 function resolveExecutionProvider(
   device: CreateEmbeddingModelOptions["device"],
 ): TransformersJsExecutionProvider | null {
-  if (device === undefined) {
+  if (device === undefined || device === "auto") {
+    // Use the runtime's Node default (CPU). Platform support for an execution
+    // provider does not imply that its hardware or shared libraries exist.
     return null;
   }
   if (device === "cpu") {
@@ -494,13 +516,7 @@ function resolveExecutionProvider(
     return "cuda";
   }
 
-  if (process.platform === "win32") {
-    return "dml";
-  }
-  if (process.platform === "linux" && process.arch === "x64") {
-    return "cuda";
-  }
-  return "webgpu";
+  return null;
 }
 
 function formatErrorMessage(error: unknown): string {

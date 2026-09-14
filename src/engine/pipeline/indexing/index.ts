@@ -1647,7 +1647,8 @@ function classifyEmbeddingRetry(
     (code) =>
       code === "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DOWNLOAD_FAILED" ||
       code === "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_LOAD_FAILED" ||
-      code === "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DISPOSED",
+      code === "ZVEC_GREP.ENGINE.MODELS.MODEL2VEC_DISPOSED" ||
+      code === "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
   );
   const retryable =
     !sharedLocalModelFailure &&

@@ -232,6 +232,18 @@ export class JobScheduler {
     try {
       await job.run((progress) => {
         job.progress = { ...progress };
+        if (progress.embedding?.stage === "warning") {
+          this.logger?.event("model.warning", {
+            root_id: rootIdentity(job.canonicalRoot),
+            job_id: job.id,
+            attempt: job.attempt,
+            model: progress.embedding.model,
+            message: redactErrorText(
+              progress.embedding.message ?? "Embedding model warning",
+              512,
+            ),
+          });
+        }
         for (const listener of job.progressListeners) {
           try {
             listener({ ...progress });

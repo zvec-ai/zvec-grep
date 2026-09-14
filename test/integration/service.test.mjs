@@ -12,9 +12,15 @@ import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
 
 class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
-  constructor() {
+  constructor({
+    provider = "qwen",
+    code = "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR",
+    context = "status=400 providerCode=invalid_input",
+  } = {}) {
     super();
-    this.info = { ...this.info, provider: "qwen" };
+    this.info = { ...this.info, provider };
+    this.code = code;
+    this.context = context;
   }
 
   async doEmbed(contents) {
@@ -25,8 +31,8 @@ class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
       )
     ) {
       throw new EngineError("fixture embedding failure", {
-        code: "ZVEC_GREP.ENGINE.MODELS.QWEN_TEXT_EMBEDDING_API_ERROR",
-        context: "status=400 providerCode=invalid_input",
+        code: this.code,
+        context: this.context,
       });
     }
     return super.doEmbed(contents);
@@ -35,6 +41,7 @@ class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
 
 class SharedFailureEmbeddingModel extends FakeEmbeddingModel {
   calls = 0;
+  batchSizes = [];
 
   constructor({ provider, code, context }) {
     super();
@@ -43,8 +50,9 @@ class SharedFailureEmbeddingModel extends FakeEmbeddingModel {
     this.context = context;
   }
 
-  async doEmbed() {
+  async doEmbed(contents) {
     this.calls++;
+    this.batchSizes.push(contents.length);
     throw new EngineError("shared embedding failure", {
       code: this.code,
       context: this.context,
@@ -344,6 +352,114 @@ test("service fails fast when a shared local embedding model cannot be prepared"
     ),
     false,
   );
+});
+
+test("service does not isolate or retry terminal Transformers.js load failures", async (t) => {
+  for (const layout of ["files", "fragments"]) {
+    for (const scope of ["workspace", "changedPaths"]) {
+      await t.test(`${layout} ${scope}`, async (t) => {
+        const temporaryDirectory = await createTemporaryDirectory(
+          t,
+          "zvec-grep-transformers-load-failure-",
+        );
+        const root = join(temporaryDirectory, "repo");
+        await mkdir(root, { recursive: true });
+        if (layout === "files") {
+          await Promise.all(
+            Array.from({ length: 12 }, (_, index) =>
+              writeFile(
+                join(root, `file-${index}.txt`),
+                `unique content ${index}\n`,
+              ),
+            ),
+          );
+        } else {
+          await writeFile(
+            join(root, "large.ts"),
+            Array.from(
+              { length: 12 },
+              (_, index) =>
+                `export function Fragment${index}() { return ${index}; }\n`,
+            ).join(""),
+          );
+        }
+        const model = new SharedFailureEmbeddingModel({
+          provider: "local",
+          code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
+          context:
+            "model=local/test-transformers device=cuda cause=libcublasLt.so.12 missing",
+        });
+        model.info = { ...model.info, limits: { maxBatchSize: 2 } };
+        const service = await createZvecGrep({ root, embeddingModel: model });
+        t.after(() => service.close());
+        const progressEvents = [];
+
+        await assert.rejects(
+          service.index({
+            embeddingConcurrency: 1,
+            changedPaths: scope === "changedPaths" ? [root] : undefined,
+            onProgress: (progress) => progressEvents.push(progress),
+          }),
+          (error) =>
+            error.code ===
+              "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED" &&
+            error.context === model.context,
+        );
+
+        // The first batch contains multiple inputs. A shared runtime failure
+        // must skip per-input fallback, remaining batches, and the retry pass.
+        assert.deepEqual(model.batchSizes, [2]);
+        assert.equal(model.calls, 1);
+        assert.equal(
+          progressEvents.some((progress) =>
+            progress.detail?.toLowerCase().includes("retry"),
+          ),
+          false,
+        );
+        const status = (await service.info()).status;
+        assert.equal(status.filesFailed, 0);
+        assert.equal(status.filesIndexed, 0);
+      });
+    }
+  }
+});
+
+test("service still isolates Transformers.js input failures and indexes healthy files", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-transformers-input-failure-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "good.ts"), "export const GoodNeedle = 1;\n");
+  const failingPath = join(root, "failing.ts");
+  await writeFile(failingPath, "export const FailureNeedle = 2;\n");
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new SelectivelyFailingEmbeddingModel({
+      provider: "local",
+      code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
+      context: "model=local/test-transformers input=unsupported",
+    }),
+  });
+  t.after(() => service.close());
+
+  await assert.rejects(
+    service.index({ embeddingConcurrency: 1 }),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED" &&
+      /failedFiles=failing\.ts/.test(error.context) &&
+      /TRANSFORMERS_JS_EMBED_FAILED/.test(error.context) &&
+      /Retried failed files once automatically/.test(error.context),
+  );
+  const status = (await service.info()).status;
+  assert.equal(status.filesFailed, 1);
+  assert.equal(status.filesIndexed, 1);
+
+  await writeFile(failingPath, "export const RecoveredNeedle = 3;\n");
+  const result = await service.index();
+  assert.equal(result.filesFailed, 0);
+  assert.equal((await service.info()).status.filesIndexed, 2);
 });
 
 test("service prepares Model2Vec once before queuing a large file and can recover on a later index", async (t) => {

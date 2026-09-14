@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 import { DaemonError } from "../dist/daemon/errors.js";
 import { JobScheduler } from "../dist/daemon/job-scheduler.js";
+import { createDaemonLogger, rootIdentity } from "../dist/daemon/logger.js";
 import { EngineError } from "../dist/engine/errors.js";
+import { createTemporaryDirectory } from "./helpers/fixtures.mjs";
 
 test("scheduler reuses same-root jobs and enforces global concurrency", async () => {
   const scheduler = new JobScheduler({ concurrency: 1 });
@@ -119,6 +123,82 @@ test("scheduler wait observes current and future index progress", async () => {
   assert.equal(observed[1].filesIndexed, 2);
   assert.equal(observed[1].filesTotal, 5);
   await scheduler.close();
+});
+
+test("scheduler persists model warnings while forwarding progress and does not retry model load failures", async (t) => {
+  const home = await createTemporaryDirectory(t, "zvec-grep-model-warning-");
+  const logger = createDaemonLogger(home);
+  const scheduler = new JobScheduler({
+    logger,
+    maxAttempts: 3,
+    retryBaseDelayMs: 1,
+  });
+  t.after(() => scheduler.close());
+  const root = "/repo-model-warning";
+  const providerCause = "libcublasLt.so.12: cannot open shared object file";
+  const warning = {
+    phase: "indexing",
+    embedding: {
+      stage: "warning",
+      model: "local/test-transformers",
+      message: `CUDA initialization failed: ${providerCause}; token=secret-value`,
+    },
+  };
+  const followingProgress = {
+    phase: "indexing",
+    detail: "embedding first.ts",
+  };
+  let start;
+  const ready = new Promise((resolve) => {
+    start = resolve;
+  });
+  let attempts = 0;
+  const submitted = scheduler.submit({
+    canonicalRoot: root,
+    reason: "manual",
+    run: async (report) => {
+      attempts++;
+      await ready;
+      report(warning);
+      report(followingProgress);
+      throw new EngineError("Transformers.js initialization failed", {
+        code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
+        cause: new Error(providerCause),
+      });
+    },
+  });
+  const observed = [];
+  const completed = scheduler.wait(submitted.job.id, (progress) => {
+    observed.push(progress);
+  });
+  start();
+  const result = await completed;
+  await logger.flush();
+
+  assert.equal(result.state, "failed");
+  assert.equal(result.attempt, 1);
+  assert.equal(attempts, 1);
+  assert.deepEqual(observed, [warning, followingProgress]);
+  assert.deepEqual(result.progress, followingProgress);
+  const records = (
+    await readFile(join(home, "daemon", "logs", "server.log"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const warnings = records.filter((record) => record.event === "model.warning");
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].root_id, rootIdentity(root));
+  assert.equal(warnings[0].job_id, submitted.job.id);
+  assert.equal(warnings[0].model, warning.embedding.model);
+  assert.equal(warnings[0].attempt, 1);
+  assert.ok(warnings[0].message.includes(providerCause));
+  assert.match(warnings[0].message, /token=\[redacted\]/);
+  assert.doesNotMatch(JSON.stringify(records), /secret-value/);
+  assert.equal(
+    records.some((record) => record.event === "job.retry"),
+    false,
+  );
 });
 
 test("scheduler keeps one follow-up for changes submitted while a root is running", async () => {
