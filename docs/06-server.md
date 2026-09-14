@@ -85,6 +85,17 @@ Stop the daemon gracefully:
 zg --server off
 ```
 
+The shutdown endpoint accepts native clients without an `Origin` header. When
+`Origin` is present, its scheme, hostname, and port must match the request's
+loopback authority, and that authority must use the daemon's actual listening
+port. Pages on other local ports cannot request shutdown. Opaque (`null`), empty,
+duplicate, and malformed origins are rejected before shutdown runs. Optional
+Bearer authentication still applies to every shutdown request when configured;
+native CLI and agent clients need no additional configuration.
+
+MCP endpoints retain support for other HTTP loopback origins. Both MCP and
+shutdown reject malformed origins and invalid or duplicate Host authorities.
+
 Run it in the foreground for logs or process supervision:
 
 ```bash

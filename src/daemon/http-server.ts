@@ -159,10 +159,8 @@ export class DaemonHttpServer {
     response: ServerResponse,
     id: string,
   ): Promise<void> {
-    const url = new URL(
-      request.url ?? "/",
-      `http://${request.headers.host ?? "localhost"}`,
-    );
+    // Route independently of Host so malformed authorities are rejected below.
+    const url = new URL(request.url ?? "/", "http://localhost");
     if (url.pathname === "/healthz") {
       if (request.method !== "GET") {
         writeJson(response, 405, { error: "method_not_allowed" });
@@ -173,10 +171,14 @@ export class DaemonHttpServer {
     }
 
     if (url.pathname === "/control/shutdown") {
+      if (!validRequestOrigin(request, this.address().port)) {
+        writeJson(response, 403, { error: "forbidden_origin" });
+        return;
+      }
       if (
-        !validHost(request.headers.host) ||
         !validRequestToken(request.headers.authorization, this.options.token)
       ) {
+        response.setHeader("WWW-Authenticate", "Bearer");
         writeJson(response, 401, { error: "unauthorized" });
         return;
       }
@@ -201,10 +203,7 @@ export class DaemonHttpServer {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
-    if (
-      !validHost(request.headers.host) ||
-      !validOrigin(request.headers.origin)
-    ) {
+    if (!validRequestOrigin(request)) {
       writeJson(response, 403, { error: "forbidden_origin" });
       return;
     }
@@ -265,32 +264,43 @@ function attachRequestPrincipal(
   ).auth = requestPrincipal(token);
 }
 
-function validHost(hostHeader: string | undefined): boolean {
-  if (!hostHeader) {
-    return false;
+function parseLoopbackOrigin(value: string): URL | undefined {
+  // An origin has no credentials, path (even '/'), query, or fragment. Validate
+  // its syntax before URL normalization can discard or reinterpret those parts.
+  if (!/^http:\/\/(?:\[[\da-f:.]+\]|[\w.-]+)(?::\d+)?$/i.test(value)) {
+    return undefined;
   }
   try {
-    return isLoopbackHost(
-      new URL(`http://${hostHeader}`).hostname.replace(/^\[|\]$/g, ""),
-    );
+    const origin = new URL(value);
+    return isLoopbackHost(origin.hostname.replace(/^\[|\]$/g, ""))
+      ? origin
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-function validOrigin(originHeader: string | undefined): boolean {
-  if (!originHeader) {
-    return true;
-  }
-  try {
-    const origin = new URL(originHeader);
-    return (
-      origin.protocol === "http:" &&
-      isLoopbackHost(origin.hostname.replace(/^\[|\]$/g, ""))
-    );
-  } catch {
+function validRequestOrigin(
+  request: IncomingMessage,
+  shutdownPort?: number,
+): boolean {
+  if (request.headersDistinct.host?.length !== 1) return false;
+  const target = parseLoopbackOrigin(`http://${request.headers.host}`);
+  if (
+    !target ||
+    (shutdownPort !== undefined && Number(target.port || 80) !== shutdownPort)
+  ) {
     return false;
   }
+  // Native clients omit Origin. An empty or duplicate header is not omission.
+  if (request.headers.origin === undefined) return true;
+  const origin = parseLoopbackOrigin(request.headers.origin);
+  // MCP keeps its existing loopback-origin policy. Shutdown additionally binds
+  // the origin to the request authority and the actual (possibly dynamic) port.
+  return (
+    origin !== undefined &&
+    (shutdownPort === undefined || origin.origin === target.origin)
+  );
 }
 
 function validBearerToken(
