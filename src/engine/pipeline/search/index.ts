@@ -1,3 +1,10 @@
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import {
+  checkGlobLength,
+  checkGlobRuleCount,
+  globWorkNeedsYield,
+  withGlobBudget,
+} from "../../utils/glob-budget.js";
 import {
   workspaceIndexDetail,
   detail,
@@ -105,8 +112,10 @@ export async function searchWorkspaceIndex(
         normalized.excludedFileTypes,
       ),
     );
-    const filter = timings.timeSync("search_filter", () =>
-      searchPlanToStorageFilter(normalized, ctx.storage, fileTypePatterns),
+    const filter = await timings.time("search_filter", () =>
+      withGlobBudget(() =>
+        searchPlanToStorageFilter(normalized, ctx.storage, fileTypePatterns),
+      ),
     );
     const hasSearchableFiles = !filterMatchesNoFiles(filter);
     const candidates = new Map<string, Candidate>();
@@ -364,6 +373,7 @@ function normalizePathFilters(
     });
   }
 
+  checkGlobRuleCount(value.length);
   const patterns: string[] = [];
 
   for (const [index, item] of value.entries()) {
@@ -396,6 +406,7 @@ function normalizeStringFilters(
       context: `field=${field}`,
     });
   }
+  checkGlobRuleCount(value.length);
   const values = value.map((item, index) => {
     if (typeof item !== "string" || !item.trim()) {
       throw new EngineError("Search plan filters must contain strings", {
@@ -403,6 +414,7 @@ function normalizeStringFilters(
         context: `field=${field} index=${index}`,
       });
     }
+    checkGlobLength(item, "pattern");
     return item.trim();
   });
   return values.length > 0 ? values : undefined;
@@ -1033,12 +1045,12 @@ function restrictFilterToFile(
   };
 }
 
-function searchPlanToStorageFilter(
+async function searchPlanToStorageFilter(
   plan: SearchPlan,
   storage: WorkspaceIndexStorage,
   fileTypePatterns: FileTypePatterns,
-): StorageSearchFilter | undefined {
-  const fileIds = resolveFilteredFileIds(
+): Promise<StorageSearchFilter | undefined> {
+  const fileIds = await resolveFilteredFileIds(
     plan,
     storage.listFiles(),
     fileTypePatterns,
@@ -1064,11 +1076,19 @@ function filterMatchesNoFiles(
   return filter?.fileIds !== undefined && filter.fileIds.length === 0;
 }
 
-function resolveFilteredFileIds(
+async function resolveFilteredFileIds(
   plan: SearchPlan,
   files: readonly FileInfo[],
   fileTypePatterns: FileTypePatterns,
-): string[] | undefined {
+): Promise<string[] | undefined> {
+  checkGlobRuleCount(
+    (plan.includePaths?.length ?? 0) +
+      (plan.excludePaths?.length ?? 0) +
+      (plan.globs?.length ?? 0) +
+      (plan.insensitiveGlobs?.length ?? 0) +
+      fileTypePatterns.include.length +
+      fileTypePatterns.exclude.length,
+  );
   const includeMatchers = (plan.includePaths ?? []).map(compilePathFilter);
   const excludeMatchers = (plan.excludePaths ?? []).map(compilePathFilter);
   const hasModifiedFilter =
@@ -1088,21 +1108,25 @@ function resolveFilteredFileIds(
     return undefined;
   }
 
-  return files
-    .filter((file) => {
-      const included =
-        includeMatchers.length === 0 ||
-        includeMatchers.some((matcher) => matcher(file));
-      const excluded = excludeMatchers.some((matcher) => matcher(file));
+  const matched: string[] = [];
+  for (let index = 0; index < files.length; index++) {
+    if (index > 0 && (index % 128 === 0 || globWorkNeedsYield()))
+      await yieldToEventLoop();
+    const file = files[index];
+    const included =
+      includeMatchers.length === 0 ||
+      includeMatchers.some((matcher) => matcher(file));
+    const excluded = excludeMatchers.some((matcher) => matcher(file));
 
-      return (
-        included &&
-        !excluded &&
-        matchesFileSelection(file.relativePath, plan, fileTypePatterns) &&
-        matchesModifiedTimeFilter(file, plan)
-      );
-    })
-    .map((file) => file.id);
+    if (
+      included &&
+      !excluded &&
+      matchesFileSelection(file.relativePath, plan, fileTypePatterns) &&
+      matchesModifiedTimeFilter(file, plan)
+    )
+      matched.push(file.id);
+  }
+  return matched;
 }
 
 function matchesModifiedTimeFilter(file: FileInfo, plan: SearchPlan): boolean {
