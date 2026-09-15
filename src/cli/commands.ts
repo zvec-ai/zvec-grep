@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { normalizePath } from "../engine/utils/path.js";
 import { createInterface } from "node:readline/promises";
 import {
   createZvecGrep,
@@ -1033,7 +1034,7 @@ function resolveIndexRoot(root: string | undefined): string {
 
 function indexRootPath(path: string, options: CliOptions): RootPath {
   return {
-    absolutePath: resolve(path),
+    absolutePath: normalizePath(path),
     recursive: true,
     globs: options.globs,
     insensitiveGlobs: options.insensitiveGlobs,

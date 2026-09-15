@@ -4,7 +4,9 @@ import { EngineError } from "../../errors.js";
 import type { RootPath } from "../../types.js";
 import { pathPatternMatches } from "../../utils/glob.js";
 import {
+  hasConcatenatedWindowsDrive,
   isPathInside,
+  isWindowsAbsolutePath,
   normalizePath,
   toDisplayPath,
 } from "../../utils/path.js";
@@ -39,14 +41,14 @@ export function validateRootPaths(
 export function normalizeRootPath(path: string | RootPath): RootPath {
   if (typeof path === "string") {
     return {
-      absolutePath: normalizePath(path),
+      absolutePath: assertRootPathStyle(normalizePath(path)),
       recursive: true,
     };
   }
 
   return {
     ...path,
-    absolutePath: normalizePath(path.absolutePath),
+    absolutePath: assertRootPathStyle(normalizePath(path.absolutePath)),
     recursive: path.recursive,
   };
 }
@@ -223,6 +225,34 @@ function directoryCoversFile(
   }
 
   return directory.root.recursive || dirname(filePath) === directory.realPath;
+}
+
+function assertRootPathStyle(absolutePath: string): string {
+  if (process.platform === "win32") {
+    return absolutePath;
+  }
+
+  if (hasConcatenatedWindowsDrive(absolutePath)) {
+    throw new EngineError(
+      "Workspace index root path mixes POSIX and Windows path styles",
+      {
+        code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_INVALID",
+        context: `rootPath=${absolutePath}`,
+      },
+    );
+  }
+
+  if (isWindowsAbsolutePath(absolutePath)) {
+    throw new EngineError(
+      "Workspace index root path is not valid on this platform",
+      {
+        code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_INVALID",
+        context: `rootPath=${absolutePath}`,
+      },
+    );
+  }
+
+  return absolutePath;
 }
 
 function matchesAny(

@@ -1039,6 +1039,103 @@ test("service records failed files, retries them, deletes stale records, and reb
   assert.equal(rebuilt.filesAdded, 1);
 });
 
+test("rebuild keeps the existing index when root paths are invalid", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-rebuild-invalid-root-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "kept.ts"), "export const KeptNeedle = 1;\n");
+
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  t.after(() => service.close());
+  await service.index();
+
+  const workspaceHome = join(root, ".zvec-grep");
+  const marker = join(workspaceHome, "files.zvec", "live-marker");
+  await writeFile(marker, "live");
+  const manifestPath = join(workspaceHome, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const windowsRoot = String.raw`C:\Users\user\project`;
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(
+      {
+        ...manifest,
+        rootPaths: [{ absolutePath: windowsRoot, recursive: true }],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await assert.rejects(
+    service.index({ rebuild: true }),
+    (error) =>
+      error.code === "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_INVALID" &&
+      String(error.context).includes(windowsRoot) &&
+      !String(error.context).includes(`${root}/${windowsRoot}`),
+  );
+  assert.equal(await readFile(marker, "utf8"), "live");
+
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const result = await service.context({
+    routes: [{ mode: "fts", query: "KeptNeedle" }],
+    autoUpdate: false,
+  });
+  assert.ok(result.items.length > 0);
+});
+
+test("rebuild keeps the existing index when indexing fails", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-rebuild-keep-live-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "kept.ts"), "export const KeptNeedle = 1;\n");
+
+  const initial = await createZvecGrep({
+    root,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  await initial.index();
+  await initial.close();
+
+  const marker = join(root, ".zvec-grep", "files.zvec", "live-marker");
+  await writeFile(marker, "live");
+  await writeFile(
+    join(root, "failing.ts"),
+    "export const FailureNeedle = 2;\n",
+  );
+
+  const failing = await createZvecGrep({
+    root,
+    embeddingModel: new SelectivelyFailingEmbeddingModel(),
+  });
+  t.after(() => failing.close());
+  await assert.rejects(
+    failing.index({ rebuild: true }),
+    (error) => error.code === "ZVEC_GREP.ENGINE.INDEXING.FILES_FAILED",
+  );
+  assert.equal(await readFile(marker, "utf8"), "live");
+
+  const recovered = await createZvecGrep({
+    root,
+    embeddingModel: new FakeEmbeddingModel(),
+  });
+  t.after(() => recovered.close());
+  const result = await recovered.context({
+    routes: [{ mode: "fts", query: "KeptNeedle" }],
+    autoUpdate: false,
+  });
+  assert.ok(result.items.length > 0);
+});
+
 test("changedPaths preserves request-specific embedding failure details", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
