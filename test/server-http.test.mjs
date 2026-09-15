@@ -325,10 +325,19 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     name: "zvec_grep_search",
     arguments: { root: unindexedRoot, query: "query" },
   });
-  assert.equal(missing.isError, true);
-  assert.match(missing.content[0].text, /INDEX_MISSING/);
-  assert.match(missing.content[0].text, /available exact-search fallback/);
-  assert.match(missing.content[0].text, /explicit user authorization/);
+  assert.equal(missing.isError, undefined, missing.content[0].text);
+  assert.equal(missing.structuredContent.result.source, "rg");
+  assert.deepEqual(missing.structuredContent.result.items, []);
+  assert.deepEqual(missing.structuredContent.result.diagnostics.semantic, {
+    status: "skipped",
+    reason: "index_unavailable",
+  });
+  assert.equal(
+    missing.structuredContent.result.diagnostics.emptyReason,
+    "semantic_incomplete",
+  );
+  assert.match(missing.content[0].text, /incomplete/i);
+  assert.doesNotMatch(missing.content[0].text, /No matches\.|INDEX_MISSING/);
   await assert.rejects(access(join(unindexedRoot, ".zvec-grep")));
 
   await writeFile(

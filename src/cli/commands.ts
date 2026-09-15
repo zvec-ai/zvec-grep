@@ -7,6 +7,7 @@ import {
   type IndexProgress,
   type RootPath,
   type ZvecGrepContextOptions,
+  type ZvecGrepContextResult,
   type ZvecGrepContextRoute,
   type ZvecGrep,
   type ZvecGrepInfoResult,
@@ -18,7 +19,16 @@ import {
   type EngineErrorCode,
 } from "../engine/errors.js";
 import { listEmbeddingModels } from "../engine/models/index.js";
-import { DaemonClient } from "../client/daemon-client.js";
+import {
+  DaemonClient,
+  DaemonCallTimeoutError,
+} from "../client/daemon-client.js";
+import {
+  hasUsableImplicitIndex,
+  implicitPreparationModel,
+  IMPLICIT_INDEX_WAIT_MS,
+  waitForImplicitIndex,
+} from "../client/implicit-index.js";
 import {
   resolveDirectSearchPolicy,
   resolveServerSearchPolicy,
@@ -30,6 +40,7 @@ import {
 } from "../client/mode-router.js";
 import { serverStatus } from "../daemon/server-controller.js";
 import { findNearestWorkspace } from "../engine/service/root.js";
+import { recoverableSearchFailureCode } from "../engine/search-failure.js";
 import type { ParsedArgs, CliOptions } from "./types.js";
 import {
   contextWarningLines,
@@ -57,6 +68,17 @@ import {
 import type { NormalizedSearchInput } from "../mcp/input-normalization.js";
 import { indexProgressFromMessage } from "../index-progress.js";
 import { normalizeManagedRgInput } from "./managed-rg.js";
+import { normalizeCliQueries } from "./query-input.js";
+import { ensureSearchServer } from "../client/ensure-server.js";
+import {
+  liveIndexPathIdentities,
+  mergeLiveAndIndexedResults,
+} from "./live-index-merge.js";
+import { hasStrongLiveMatch, hasCompleteLiveLookup } from "./live-search.js";
+import {
+  searchCurrentSource,
+  type CurrentSourceSearchResult,
+} from "../search/current-source.js";
 import {
   INCOMPATIBLE_SERVER_SEARCH_MESSAGE,
   parseServerSearchResponse,
@@ -78,6 +100,9 @@ import {
 } from "./auth.js";
 
 const DEFAULT_IMPLICIT_EMBEDDING = "local/potion-code-16m-v2";
+type LiveResultSource = (
+  includeKeywords?: boolean,
+) => Promise<ZvecGrepContextResult | undefined>;
 
 export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
   switch (parsed.command) {
@@ -630,14 +655,9 @@ async function runQuery(parsed: ParsedArgs): Promise<void> {
     ? normalizeManagedRgInput(parsed)
     : undefined;
   const commandOptions = rgInput?.options ?? parsed.options;
-  const queries = (
-    rgInput?.queries ?? [
-      ...parsed.positionals,
-      ...(parsed.options.hybridQueries ?? []),
-    ]
-  )
-    .map((query) => query.trim())
-    .filter((query) => query.length > 0);
+  const queries =
+    rgInput?.queries ??
+    normalizeCliQueries(parsed.positionals, parsed.options.hybridQueries);
   const routes = parsed.options.routes ?? [];
   if (
     queries.length === 0 &&
@@ -655,6 +675,114 @@ async function runQuery(parsed: ParsedArgs): Promise<void> {
     return;
   }
   const mode = resolveClientMode(commandOptions.mode);
+  const ordinaryQuery =
+    mode !== "server" &&
+    queries.length === 1 &&
+    routes.length === 0 &&
+    !commandOptions.hybridQueries?.length &&
+    !commandOptions.fuse &&
+    !commandOptions.preferSymbol &&
+    !commandOptions.symbolTypes?.length &&
+    !commandOptions.embedding &&
+    !commandOptions.endpoint &&
+    !commandOptions.trace;
+  const liveSearch = ordinaryQuery
+    ? await queryLiveFiles(commandOptions, queries[0]!)
+    : undefined;
+  if (liveSearch?.kind === "files") {
+    for (const [index, path] of liveSearch.paths.entries()) {
+      console.log(`#${index + 1} matchedBy=path ${path}`);
+    }
+    if (liveSearch.truncated)
+      console.error(
+        "warning: more matching files exist; use --limit to show more",
+      );
+    return;
+  }
+  const liveResult = liveSearch?.result;
+  // The first scan supports the fast/cold path. Rescan after indexed retrieval
+  // so model/startup work cannot make old lexical evidence override new code.
+  // --refresh wait explicitly requests only the refreshed index snapshot.
+  const currentLiveResult: LiveResultSource | undefined =
+    liveResult && commandOptions.refresh !== "wait"
+      ? async (includeKeywords = false) => {
+          const current = await queryLiveFiles(
+            commandOptions,
+            queries[0]!,
+            includeKeywords,
+          );
+          return current.kind === "text" ? current.result : undefined;
+        }
+      : undefined;
+  if (
+    liveResult &&
+    commandOptions.refresh === undefined &&
+    (hasStrongLiveMatch(liveResult) || hasCompleteLiveLookup(liveResult))
+  ) {
+    printCliContextResult(liveResult, commandOptions);
+    return;
+  }
+  if (mode === "auto") {
+    const serverUrl = await ensureSearchServer({
+      cliPath: process.argv[1]!,
+      serverUrl: resolveServerUrl(),
+      home: commandOptions.home,
+      tokenFile: commandOptions.serverTokenFile,
+      modelCacheDir: commandOptions.modelCacheDir,
+      onUnavailable: () =>
+        console.error(
+          "warning: background server unavailable; using direct search",
+        ),
+    });
+    if (serverUrl) {
+      const serverOptions = { ...commandOptions, resolvedServerUrl: serverUrl };
+      const ready = await ensureServerIndex(serverOptions, {
+        background:
+          liveResult !== undefined && commandOptions.refresh !== "wait",
+        waitBudgetMs:
+          liveResult?.items.length === 0 && commandOptions.refresh === undefined
+            ? IMPLICIT_INDEX_WAIT_MS
+            : 0,
+        hasCurrentTextMatches: currentLiveResult
+          ? async () =>
+              (await currentLiveResult(true))?.items.some(
+                (item) => item.status === "fresh",
+              ) === true
+          : undefined,
+      });
+      if (!ready && liveResult) {
+        printIncompleteLiveResult(
+          (await currentLiveResult?.(true)) ?? liveResult,
+          commandOptions,
+        );
+        return;
+      }
+      await runServerQuery(serverOptions, queries, routes, currentLiveResult);
+    } else {
+      if (liveResult) {
+        const service = await createZvecGrep(
+          createServiceOptions(commandOptions, undefined),
+        );
+        try {
+          const info = await directQueryInfo(service);
+          if (!info.indexed) {
+            console.error(
+              "warning: text search only; semantic index is not ready (use zg --index to prepare it)",
+            );
+            printIncompleteLiveResult(
+              (await currentLiveResult?.(true)) ?? liveResult,
+              commandOptions,
+            );
+            return;
+          }
+        } finally {
+          await service.close();
+        }
+      }
+      await runDirectQuery(commandOptions, queries, currentLiveResult);
+    }
+    return;
+  }
   if (mode !== "direct") {
     await routeByMode({
       mode,
@@ -667,7 +795,87 @@ async function runQuery(parsed: ParsedArgs): Promise<void> {
     });
     return;
   }
-  await runDirectQuery(commandOptions, queries);
+  await runDirectQuery(commandOptions, queries, currentLiveResult);
+}
+
+async function printQueryResult(
+  indexed: ZvecGrepContextResult,
+  options: CliOptions,
+  currentLiveResult?: LiveResultSource,
+): Promise<ZvecGrepContextResult> {
+  const recalled = indexed.groupResults?.[0]?.items ?? indexed.items;
+  const includeKeywords =
+    indexed.diagnostics.semantic?.reason === "preparation_budget_exceeded" &&
+    !recalled.some(
+      (item) => item.kind === "indexed_entity" && item.status === "fresh",
+    );
+  const live = await currentLiveResult?.(includeKeywords);
+  const pathIdentities = await liveIndexPathIdentities(indexed, live);
+  const merged = mergeLiveAndIndexedResults(
+    indexed,
+    live,
+    options.limit ?? 10,
+    pathIdentities,
+  );
+  if (merged.staleItemsOmitted > 0 && merged.result.items.length === 0) {
+    console.log("No current matches; index results are incomplete.");
+  } else {
+    printCliContextResult(merged.result, options);
+  }
+  if (merged.staleItemsOmitted > 0) {
+    console.error(
+      `warning: omitted ${merged.staleItemsOmitted} outdated indexed ${merged.staleItemsOmitted === 1 ? "result" : "results"}; search coverage is incomplete until the index refreshes`,
+    );
+  }
+  for (const line of contextWarningLines(merged.result)) console.error(line);
+  return merged.result;
+}
+
+function printIncompleteLiveResult(
+  result: ZvecGrepContextResult,
+  options: CliOptions,
+): void {
+  if (result.items.length) printCliContextResult(result, options);
+  else console.log("No text matches; semantic search is not ready.");
+  for (const line of contextWarningLines(result)) console.error(line);
+  if (options.debug) printDebug(result, { trace: false });
+}
+
+async function printLocalSearchFallback(
+  error: unknown,
+  options: CliOptions,
+  currentLiveResult?: LiveResultSource,
+): Promise<boolean> {
+  const code = recoverableSearchFailureCode(error);
+  if (!currentLiveResult || !code) return false;
+  // The original scan may predate model loading/network work. Only current
+  // evidence can recover this request; an empty scan must not imply absence.
+  const live = await currentLiveResult(true);
+  if (!live?.items.length) return false;
+  console.error(
+    "warning: semantic search unavailable; showing current text matches only (search coverage is incomplete)",
+  );
+  printCliContextResult(live, options);
+  for (const line of contextWarningLines(live)) console.error(line);
+  if (options.debug) {
+    console.error(`fallback: ${code}`);
+    printDebug(live, { trace: false });
+  }
+  return true;
+}
+
+async function queryLiveFiles(
+  options: CliOptions,
+  query: string,
+  includeKeywords = false,
+): Promise<CurrentSourceSearchResult> {
+  return await searchCurrentSource({
+    root: process.cwd(),
+    query,
+    options: contextOptions(options, [query]),
+    includeKeywords,
+    allowFileLookup: options.refresh === undefined,
+  });
 }
 
 async function runDirectRgQuery(
@@ -696,6 +904,7 @@ async function runDirectRgQuery(
 async function runDirectQuery(
   commandOptions: CliOptions,
   queries: readonly string[],
+  currentLiveResult?: LiveResultSource,
 ): Promise<void> {
   if (commandOptions.refresh === "background") {
     console.error(
@@ -753,15 +962,26 @@ async function runDirectQuery(
       authorizationResolution.alternative === "local_search"
         ? ftsFallbackContextRequest(contextRequest)
         : contextRequest;
-    const result = await withRemoteEmbeddingOperationPermit(
-      authorizationResolution.authorization,
-      () => zvecGrep.context(effectiveContextRequest),
-    );
-    progress.finish();
-    printCliContextResult(result, commandOptions);
-    for (const line of contextWarningLines(result)) {
-      console.error(line);
+    let result: ZvecGrepContextResult;
+    try {
+      result = await withRemoteEmbeddingOperationPermit(
+        authorizationResolution.authorization,
+        () => zvecGrep.context(effectiveContextRequest),
+      );
+    } catch (error) {
+      progress.finish();
+      if (
+        await printLocalSearchFallback(error, commandOptions, currentLiveResult)
+      )
+        return;
+      throw error;
     }
+    progress.finish();
+    const displayed = await printQueryResult(
+      result,
+      commandOptions,
+      currentLiveResult,
+    );
     if (
       result.source === "index" &&
       effectiveContextRequest.autoUpdate !== true &&
@@ -771,7 +991,7 @@ async function runDirectQuery(
     }
 
     if (commandOptions.debug) {
-      printDebug(result, {
+      printDebug(displayed, {
         trace: commandOptions.trace === true,
       });
     }
@@ -800,27 +1020,70 @@ async function buildImplicitDirectIndex(
   }
 }
 
-async function ensureServerIndex(options: CliOptions): Promise<void> {
+async function ensureServerIndex(
+  options: CliOptions,
+  preparation: {
+    background?: boolean;
+    waitBudgetMs?: number;
+    hasCurrentTextMatches?: () => Promise<boolean>;
+  } = {},
+): Promise<boolean> {
+  const { background = false, waitBudgetMs = 0 } = preparation;
   const root = resolve(process.cwd());
   const client = daemonClient(options);
-  const status = await client.callTool("zvec_grep_index_status", { root });
-  if (status.indexed === true || status.index_policy === "disabled") return;
-
-  const embedding = implicitEmbeddingReference(options);
-  console.error(`No index found; creating one with ${embedding}.`);
+  let deadline = performance.now() + (waitBudgetMs || 1_000);
+  let waitForReady = background && waitBudgetMs > 0;
+  const callBudget = () =>
+    background ? { timeoutMs: Math.max(1, deadline - performance.now()) } : {};
   const progress = createIndexProgressReporter({ color: options.color });
-  let result: Record<string, unknown>;
   try {
-    result = await client.callTool(
+    const status = await client.callTool(
+      "zvec_grep_index_status",
+      { root },
+      callBudget(),
+    );
+    if (background ? hasUsableImplicitIndex(status) : status.indexed === true)
+      return true;
+    if (status.index_policy === "disabled") {
+      if (background)
+        console.error(
+          "warning: text search only; semantic indexing is disabled for this workspace",
+        );
+      return !background;
+    }
+    const embedding = background
+      ? implicitPreparationModel(status, implicitEmbeddingReference(options))
+      : implicitEmbeddingReference(options);
+    if (!embedding) {
+      console.error(
+        "warning: text search only; the existing remote index is not ready (use zg --index to prepare it with authorization)",
+      );
+      return false;
+    }
+    // Only a cold ordinary query needs this additional bounded keyword scan.
+    // A warm index keeps its normal retrieval/ranking path. Do not cache these
+    // bytes for output: the caller rescans after scheduling to reflect edits.
+    if (waitForReady && (await preparation.hasCurrentTextMatches?.())) {
+      waitForReady = false;
+      // Still submit/reuse the background job, but give its acknowledgment the
+      // same short allowance as other queries with useful current text.
+      deadline = Math.min(deadline, performance.now() + 1_000);
+    }
+    if (!background)
+      console.error(`No index found; creating one with ${embedding}.`);
+    else if (waitForReady)
+      progress.reportLine(`Preparing ${embedding} semantic index...`);
+    const result = await client.callTool(
       "zvec_grep_index",
       {
         root,
         embedding,
         device: options.device,
         embeddingConcurrency: options.embeddingConcurrency,
-        wait: true,
+        wait: !background,
       },
       {
+        ...callBudget(),
         onProgress: (event) => {
           const update = indexProgressFromMessage(event.message);
           if (update) progress.report(update.progress);
@@ -828,10 +1091,45 @@ async function ensureServerIndex(options: CliOptions): Promise<void> {
         embeddingEnvironment: embedding,
       },
     );
+    if (result.state === "failed" && !background)
+      throw serverIndexFailure(result);
+    if (!background) return true;
+    const readiness =
+      result.state === "failed"
+        ? "failed"
+        : waitForReady
+          ? await waitForImplicitIndex({
+              budgetMs: Math.max(0, deadline - performance.now()),
+              status: (timeoutMs) =>
+                client.callTool(
+                  "zvec_grep_index_status",
+                  { root },
+                  { timeoutMs },
+                ),
+              onProgress: () =>
+                progress.reportLine(`Preparing ${embedding} semantic index...`),
+            })
+          : "pending";
+    if (readiness === "ready") return true;
+    progress.finish();
+    console.error(
+      readiness === "failed"
+        ? "warning: text search only; semantic index preparation failed (see zg --status --debug)"
+        : readiness === "disabled"
+          ? "warning: text search only; semantic indexing is disabled for this workspace"
+          : `warning: text search only; preparing ${embedding} index in the background. Semantic results are not ready yet.`,
+    );
+    return false;
+  } catch (error) {
+    if (!background || !(error instanceof DaemonCallTimeoutError)) throw error;
+    progress.finish();
+    console.error(
+      "warning: text search only; semantic readiness is unknown because the background server did not respond in time",
+    );
+    return false;
   } finally {
     progress.finish();
   }
-  if (result.state === "failed") throw serverIndexFailure(result);
 }
 
 function implicitEmbeddingReference(options: CliOptions): string {
@@ -845,55 +1143,65 @@ async function runServerQuery(
   options: CliOptions,
   queries: readonly string[],
   routes: readonly ZvecGrepContextRoute[],
+  currentLiveResult?: LiveResultSource,
 ): Promise<void> {
   const searchPolicy = resolveServerSearchPolicy(options);
-  const structuredContent = await daemonClient(options).callTool(
-    "zvec_grep_search",
-    {
-      root: resolve(process.cwd()),
-      apiKey: options.apiKey,
-      device: options.device,
-      queries: queries.length ? queries : undefined,
-      routes: routes.length ? routes : undefined,
-      fuse: options.fuse,
-      limit: options.limit,
-      trace: options.trace,
-      preferSymbol: options.preferSymbol,
-      symbolTypes: options.symbolTypes,
-      globs: options.globs,
-      insensitiveGlobs: options.insensitiveGlobs,
-      fileTypes: options.fileTypes,
-      excludedFileTypes: options.excludedFileTypes,
-      hidden: options.hidden,
-      noIgnore: options.noIgnore,
-      ignoreFiles: options.ignoreFiles,
-      maxDepth: options.maxDepth,
-      maxFileSizeBytes: options.maxFileSizeBytes,
-      follow: options.follow,
-      embeddingConcurrency: options.embeddingConcurrency,
-      modifiedAfter: options.modifiedAfter,
-      modifiedBefore: options.modifiedBefore,
-      freshness: searchPolicy.freshness,
-      autoUpdate: searchPolicy.autoUpdate,
-    },
-    {
-      toolContract: {
-        inputProperties: ["routes"],
-        outputProperties: ["result"],
-        errorMessage: INCOMPATIBLE_SERVER_SEARCH_MESSAGE,
+  const structuredContent = await daemonClient(options)
+    .callTool(
+      "zvec_grep_search",
+      {
+        root: resolve(process.cwd()),
+        apiKey: options.apiKey,
+        device: options.device,
+        queries: queries.length ? queries : undefined,
+        routes: routes.length ? routes : undefined,
+        semanticPolicy: options.hybridQueries?.length ? "wait" : undefined,
+        fuse: options.fuse,
+        limit: options.limit,
+        trace: options.trace,
+        preferSymbol: options.preferSymbol,
+        symbolTypes: options.symbolTypes,
+        globs: options.globs,
+        insensitiveGlobs: options.insensitiveGlobs,
+        fileTypes: options.fileTypes,
+        excludedFileTypes: options.excludedFileTypes,
+        hidden: options.hidden,
+        noIgnore: options.noIgnore,
+        ignoreFiles: options.ignoreFiles,
+        maxDepth: options.maxDepth,
+        maxFileSizeBytes: options.maxFileSizeBytes,
+        follow: options.follow,
+        embeddingConcurrency: options.embeddingConcurrency,
+        modifiedAfter: options.modifiedAfter,
+        modifiedBefore: options.modifiedBefore,
+        freshness: searchPolicy.freshness,
+        autoUpdate: searchPolicy.autoUpdate,
       },
-    },
-  );
+      {
+        toolContract: {
+          inputProperties: ["routes"],
+          outputProperties: ["result"],
+          errorMessage: INCOMPATIBLE_SERVER_SEARCH_MESSAGE,
+        },
+      },
+    )
+    .catch(async (error: unknown) => {
+      if (await printLocalSearchFallback(error, options, currentLiveResult))
+        return undefined;
+      throw error;
+    });
+  if (structuredContent === undefined) return;
   const response = parseServerSearchResponse(structuredContent);
-  printCliContextResult(response.result, options);
-  for (const line of contextWarningLines(response.result)) {
-    console.error(line);
-  }
+  const displayed = await printQueryResult(
+    response.result,
+    options,
+    currentLiveResult,
+  );
   if (response.freshness === "possibly_stale") {
     printStaleIndexStatus(response.indexing?.state, response.indexing);
   }
   if (options.debug) {
-    printDebug(response.result, { trace: options.trace === true });
+    printDebug(displayed, { trace: options.trace === true });
   }
 }
 
@@ -913,7 +1221,7 @@ function printStaleIndexStatus(
 
 function daemonClient(options: CliOptions): DaemonClient {
   return new DaemonClient({
-    serverUrl: resolveServerUrl(),
+    serverUrl: options.resolvedServerUrl ?? resolveServerUrl(),
     home: options.home,
     tokenFile: options.serverTokenFile,
     allowRemote: options.allowRemote,

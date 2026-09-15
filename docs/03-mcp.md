@@ -23,7 +23,7 @@ refresh, authentication, and logs.
 The default `agent` toolset intentionally exposes only search:
 
 Agents first decide whether the requested answer should be grounded in the
-current indexed workspace, then choose exact or semantic retrieval. The same
+current workspace, then choose exact or semantic retrieval. The same
 rules apply to source code and non-code material such as documentation, books,
 research material, meeting notes, knowledge-base exports, manuals,
 configuration, and data.
@@ -35,7 +35,7 @@ incidental, or comparative workspace mentions do not establish relevance.
 
 | Tool | Use it when | Index required |
 | --- | --- | --- |
-| `zvec_grep_search` | The answer is workspace-grounded and wording or location is unknown, or semantic, fuzzy, relationship, chronology, causality, comparison, or cross-file synthesis is required | Yes |
+| `zvec_grep_search` | The answer is workspace-grounded and wording or location is unknown, or semantic, fuzzy, relationship, chronology, causality, comparison, or cross-file synthesis is required | For indexed routes; ordinary single-query searches can use current files when no local index is usable |
 
 Agents use native grep or rg when locating an exact word, quotation, name, date,
 key, filename, path, source fragment, or regex is sufficient. For mixed tasks,
@@ -52,7 +52,7 @@ Every workspace tool input uses an absolute `root` visible to the daemon.
 
 ## `zvec_grep_search`
 
-The indexed tool supports hybrid, lexical, and vector query groups. At least one
+The tool supports indexed hybrid, lexical, and vector query groups. At least one
 of `query`, `queries`, `fts`, or `vector` is required.
 
 Minimal conceptual search:
@@ -96,8 +96,31 @@ Important inputs:
 | `freshness` | `eventual` or `wait_for_fresh` |
 | `autoUpdate` | Allow an eventual search to schedule a background update |
 
-The response is compact text designed for agent context. It begins with index
-state and then groups ranked results by file:
+With no usable local index (missing, disabled, or still in initial preparation),
+an ordinary single primary query with the default `freshness: "eventual"` reads
+current files using literal lookup and bounded keyword recall. It does not load
+an embedding model, create `.zvec-grep/`, or submit an index job, even when
+`autoUpdate` is true. Existing disabled-index metadata is left unchanged, and an
+already-running index job continues independently. Source edits, deletions,
+workspace scope, path/type filters, and modification-time bounds are respected.
+
+These results are current text evidence, not complete semantic retrieval.
+Keyword hits are labeled `matchedBy=keyword`, and the response warns that
+coverage is incomplete. An empty result says that no text matches were found,
+not that semantic matches do not exist. The structured administrative endpoint
+retains these hits in `result.items` with `source: "rg"` and
+`diagnostics.semantic: {"status":"skipped","reason":"index_unavailable"}`;
+an empty result additionally has `emptyReason: "semantic_incomplete"`.
+
+Multiple primary queries, explicit `fts`/`vector` routes, `fuse`, indexed symbol
+controls, and `freshness: "wait_for_fresh"` retain their indexed behavior.
+Existing remote-provider indexes keep their retrieval and Remote Embedding
+authorization requirements; this local fallback does not replace them or grant
+permission to send source files. Persistent index creation still requires an
+explicit user request. This differs from the CLI's automatic local preparation.
+
+The response is compact text designed for agent context. It begins with freshness
+and any coverage warning, then groups ranked results by file:
 
 ```text
 freshness: fresh
@@ -161,7 +184,7 @@ The `full` toolset exposes six tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `zvec_grep_search` | Indexed retrieval |
+| `zvec_grep_search` | Indexed retrieval or the same read-only current-source fallback |
 | `zvec_grep_rg` | No-index exhaustive search |
 | `zvec_grep_index` | Create, update, rebuild, or explicitly drop an index |
 | `zvec_grep_index_drop` | Explicitly delete an index |

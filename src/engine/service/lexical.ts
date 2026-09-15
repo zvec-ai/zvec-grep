@@ -1,5 +1,15 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { spawn } from "node:child_process";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import { isAbsolute, relative, resolve } from "node:path";
 import { toDisplayPath } from "../utils/path.js";
 import type {
@@ -33,12 +43,58 @@ type RgSearchOptions = {
   modifiedAfter?: number;
   modifiedBefore?: number;
   rgOptions?: ZvecGrepSearchOptions;
+  /** Reject files before context reads and before accepted matches consume limit. */
+  acceptFile?: (absolutePath: string) => boolean;
+  /** Rank expanded matches; non-finite or non-positive scores are rejected. */
+  rankItem?: (item: ZvecGrepContextItem) => number;
+  /** Emit each matched anchor, up to 64 per match event; opt-in only. */
+  matchAllOccurrences?: boolean;
+  /** Maximum raw matches to process, including matches rejected by rankItem. */
+  scanLimit?: number;
+  /** Stop this rg process after the given elapsed time, returning partial results. */
+  timeoutMs?: number;
+  /** Cancel this invocation, draining its owned process before rejecting. */
+  signal?: AbortSignal;
 };
 
 type CommandResult = {
   items: ZvecGrepContextItem[];
   truncated: boolean;
   args: string[];
+};
+
+type CommandOptions = Pick<
+  RgSearchOptions,
+  | "root"
+  | "limit"
+  | "modifiedAfter"
+  | "modifiedBefore"
+  | "rgOptions"
+  | "acceptFile"
+  | "rankItem"
+  | "matchAllOccurrences"
+  | "scanLimit"
+  | "timeoutMs"
+  | "signal"
+> & {
+  command: string;
+  args: string[];
+  parseLine(line: string, rank: number): ZvecGrepContextItem | null;
+  parseMatches(line: string, rank: number): ParsedRipgrepMatchLine | null;
+};
+
+type ParsedRipgrepMatchLine = {
+  items: Iterable<ZvecGrepContextItem, void>;
+  truncated: boolean;
+};
+
+type ContextCacheBudget = {
+  maxFiles: number;
+  maxCharacters: number;
+  maxFileBytes: number;
+  characters: number;
+  truncated: boolean;
+  readBuffer?: Buffer;
 };
 
 type RipgrepRunOptions = RgSearchOptions;
@@ -54,13 +110,30 @@ type RipgrepBackend = {
 };
 
 const HARD_IGNORED_HIDDEN_DIRECTORIES = [".git", ".zvec-grep"] as const;
+const MAX_BOUNDED_CONTEXT_FILE_BYTES = 1_048_576;
+const MAX_BOUNDED_RG_JSON_CHARACTERS = 262_144;
+const MAX_BOUNDED_STDERR_CHARACTERS = 16_384;
+const MAX_BOUNDED_SUBMATCHES = 64;
 
 let bundledRipgrepPath: string | null | undefined;
 
 export async function runRgSearch(
   options: RgSearchOptions,
 ): Promise<RgSearchResult> {
+  options.signal?.throwIfAborted();
+  options = {
+    ...snapshotSelection(options),
+    patterns: [...options.patterns],
+    rgOptions: options.rgOptions
+      ? {
+          ...options.rgOptions,
+          extraArgs: options.rgOptions.extraArgs?.slice(),
+          patternFiles: options.rgOptions.patternFiles?.slice(),
+        }
+      : undefined,
+  };
   const backends = await ripgrepBackends();
+  options.signal?.throwIfAborted();
   const paths = checkSearchPaths(options.root, options.paths);
   if (options.paths && options.paths.length > 0 && !paths.paths?.length) {
     const backend = backends[0]!;
@@ -85,6 +158,7 @@ export async function runRgSearch(
 
   let commandMissing: unknown;
   for (const backend of backends) {
+    options.signal?.throwIfAborted();
     try {
       const result = await runRipgrep(
         {
@@ -93,6 +167,7 @@ export async function runRgSearch(
         },
         backend.command,
       );
+      options.signal?.throwIfAborted();
 
       return {
         items: result.items,
@@ -109,6 +184,7 @@ export async function runRgSearch(
         },
       };
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (!isCommandMissing(error)) {
         throw error;
       }
@@ -119,6 +195,47 @@ export async function runRgSearch(
   throw commandMissing instanceof Error
     ? commandMissing
     : new Error("ripgrep command not found");
+}
+
+function snapshotSelection<T extends Omit<RgSearchOptions, "patterns">>(
+  options: T,
+): T {
+  return {
+    ...options,
+    paths: options.paths?.slice(),
+    includePaths: options.includePaths?.slice(),
+    excludePaths: options.excludePaths?.slice(),
+    globs: options.globs?.slice(),
+    insensitiveGlobs: options.insensitiveGlobs?.slice(),
+    fileTypes: options.fileTypes?.slice(),
+    excludedFileTypes: options.excludedFileTypes?.slice(),
+    ignoreFiles: options.ignoreFiles?.slice(),
+  };
+}
+
+/** Abort belongs to this child only; callers settle after its close event. */
+function ownCommandCancellation(
+  child: ChildProcess,
+  signal?: AbortSignal,
+  onAbort?: () => void,
+): () => void {
+  const abort = () => {
+    onAbort?.();
+    // No grace-period work is useful after cancellation. Killing this owned
+    // process also avoids waiting forever for a child that ignores SIGTERM.
+    child.kill("SIGKILL");
+  };
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  return () => signal?.removeEventListener("abort", abort);
+}
+
+function rejectUnchanged(
+  reject: (reason?: unknown) => void,
+  reason: unknown,
+): void {
+  // AbortSignal.reason may be any value, including a non-Error sentinel.
+  reject(reason);
 }
 
 async function ripgrepBackends(): Promise<RipgrepBackend[]> {
@@ -169,7 +286,15 @@ function runRipgrep(
     modifiedAfter: options.modifiedAfter,
     modifiedBefore: options.modifiedBefore,
     rgOptions: options.rgOptions,
+    acceptFile: options.acceptFile,
+    rankItem: options.rankItem,
+    matchAllOccurrences: options.matchAllOccurrences,
+    scanLimit: options.scanLimit,
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
     parseLine: (line, rank) => parseRipgrepJsonLine(line, options.root, rank),
+    parseMatches: (line, rank) =>
+      parseRipgrepJsonMatches(line, options.root, rank, true),
   });
 }
 
@@ -182,6 +307,20 @@ function buildRipgrepArgs(options: RipgrepRunOptions): string[] {
     "--color",
     "never",
     ...ripgrepSearchArgs(options.rgOptions),
+    ...ripgrepSelectionArgs(options),
+    ...(options.rgOptions?.extraArgs ?? []),
+    ...patternArgs(options.patterns, options.rgOptions?.patternFiles),
+    "--",
+    ...(options.paths && options.paths.length > 0
+      ? options.paths
+      : [options.root]),
+  ];
+}
+
+function ripgrepSelectionArgs(
+  options: Omit<RgSearchOptions, "patterns">,
+): string[] {
+  return [
     ...hiddenSearchArgs(
       options.includePaths,
       options.hidden,
@@ -198,13 +337,136 @@ function buildRipgrepArgs(options: RipgrepRunOptions): string[] {
       type,
     ]),
     ...hardIgnoredHiddenDirectoryArgs(),
-    ...(options.rgOptions?.extraArgs ?? []),
-    ...patternArgs(options.patterns, options.rgOptions?.patternFiles),
-    "--",
-    ...(options.paths && options.paths.length > 0
-      ? options.paths
-      : [options.root]),
   ];
+}
+
+/** Discover file names without reading contents or opening an embedding index. */
+export async function runRgFileSearch(
+  options: Omit<RgSearchOptions, "patterns" | "rgOptions"> & {
+    rankPath(absolutePath: string): number;
+  },
+): Promise<{ paths: string[]; truncated: boolean }> {
+  options.signal?.throwIfAborted();
+  options = snapshotSelection(options);
+  const checked = checkSearchPaths(options.root, options.paths);
+  if (options.paths?.length && !checked.paths?.length)
+    return { paths: [], truncated: false };
+  // Node/rg canonicalize cwd, but configured roots may retain a directory
+  // alias (e.g. /var vs /private/var). Use cwd-relative inputs so anchored
+  // globs refer to the workspace, not to an absolute alias prefix. Only the
+  // supplied roots are resolved; --follow still controls child symlinks.
+  const canonicalRoot = realpathSync(options.root);
+  const searchPaths = (
+    checked.paths?.length ? checked.paths : [options.root]
+  ).map(
+    (path) =>
+      relative(
+        canonicalRoot,
+        realpathSync(resolveSearchPath(options.root, path)),
+      ) || ".",
+  );
+  const args = [
+    "--files",
+    "--null",
+    ...ripgrepSelectionArgs(options),
+    "--",
+    ...searchPaths,
+  ];
+  const limit = options.limit ?? 200;
+  let missing: unknown;
+  for (const backend of await ripgrepBackends()) {
+    options.signal?.throwIfAborted();
+    try {
+      const result = await new Promise<{ paths: string[]; truncated: boolean }>(
+        (resolvePromise, reject) => {
+          const child = spawn(backend.command, args, {
+            cwd: options.root,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          const selected: { path: string; rank: number }[] = [];
+          const mtimeCache = new Map<string, boolean>();
+          let pending = "";
+          let stderr = "";
+          let matches = 0;
+          let failure: { error: unknown } | undefined;
+          const disposeCancellation = ownCommandCancellation(
+            child,
+            options.signal,
+          );
+          child.stdout.setEncoding("utf8");
+          child.stderr.setEncoding("utf8");
+          child.stdout.on("data", (chunk: string) => {
+            if (options.signal?.aborted || failure !== undefined) return;
+            try {
+              pending += chunk;
+              let boundary: number;
+              while ((boundary = pending.indexOf("\0")) >= 0) {
+                const path = resolveSearchPath(
+                  options.root,
+                  pending.slice(0, boundary),
+                );
+                pending = pending.slice(boundary + 1);
+                const rank = options.rankPath(path);
+                options.signal?.throwIfAborted();
+                if (
+                  rank <= 0 ||
+                  !matchesModifiedTime(path, options, mtimeCache)
+                )
+                  continue;
+                matches++;
+                selected.push({ path, rank });
+                selected.sort(
+                  (a, b) => b.rank - a.rank || a.path.localeCompare(b.path),
+                );
+                if (selected.length > limit) selected.pop();
+              }
+            } catch (error) {
+              failure = { error };
+              child.kill();
+            }
+          });
+          child.stderr.on("data", (chunk: string) => {
+            stderr += chunk;
+          });
+          child.on("error", (error) => {
+            failure = { error };
+          });
+          child.on("close", (code) => {
+            disposeCancellation();
+            if (options.signal?.aborted) {
+              rejectUnchanged(reject, options.signal.reason);
+              return;
+            }
+            if (failure !== undefined) {
+              rejectUnchanged(reject, failure.error);
+              return;
+            }
+            if (code === 0 || code === 1) {
+              resolvePromise({
+                paths: selected.map((item) => item.path),
+                truncated: matches > selected.length,
+              });
+            } else {
+              reject(
+                new Error(
+                  `${backend.command} failed with exit code ${code}: ${stderr.trim()}`,
+                ),
+              );
+            }
+          });
+        },
+      );
+      options.signal?.throwIfAborted();
+      return result;
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (!isCommandMissing(error)) throw error;
+      missing = error;
+    }
+  }
+  throw missing instanceof Error
+    ? missing
+    : new Error("ripgrep command not found");
 }
 
 function ripgrepSearchArgs(
@@ -233,7 +495,9 @@ function hiddenSearchArgs(
     : [];
 }
 
-function ripgrepDiscoveryArgs(options: RipgrepRunOptions): string[] {
+function ripgrepDiscoveryArgs(
+  options: Omit<RgSearchOptions, "patterns">,
+): string[] {
   return [
     ...(options.noIgnore ? ["--no-ignore"] : []),
     ...(options.ignoreFiles ?? []).flatMap((path) => ["--ignore-file", path]),
@@ -341,16 +605,32 @@ function resolveSearchPath(root: string, path: string): string {
   return isAbsolute(path) ? path : resolve(root, path);
 }
 
-function runCommand(options: {
-  command: string;
-  args: string[];
-  root: string;
-  limit?: number;
-  modifiedAfter?: number;
-  modifiedBefore?: number;
-  rgOptions?: ZvecGrepSearchOptions;
-  parseLine(line: string, rank: number): ZvecGrepContextItem | null;
-}): Promise<CommandResult> {
+function cachedFileAcceptance(
+  acceptFile: RgSearchOptions["acceptFile"],
+): (path: string) => boolean {
+  const cache = new Map<string, boolean>();
+  return (path) => {
+    if (!acceptFile) return true;
+    const cached = cache.get(path);
+    if (cached !== undefined) return cached;
+    const accepted = acceptFile(path);
+    if (cache.size >= 256) cache.clear();
+    cache.set(path, accepted);
+    return accepted;
+  };
+}
+
+function runCommand(options: CommandOptions): Promise<CommandResult> {
+  options.signal?.throwIfAborted();
+  if (
+    options.rankItem !== undefined ||
+    options.matchAllOccurrences === true ||
+    options.scanLimit !== undefined ||
+    options.timeoutMs !== undefined
+  ) {
+    return runBoundedCommand(options);
+  }
+
   return new Promise((resolvePromise, reject) => {
     const child = spawn(options.command, options.args, {
       cwd: options.root,
@@ -361,39 +641,57 @@ function runCommand(options: {
     let stderr = "";
     let truncated = false;
     let killedAfterLimit = false;
+    let failure: { error: unknown } | undefined;
+    const disposeCancellation = ownCommandCancellation(child, options.signal);
     const hasLimit = options.limit !== undefined;
     const mtimeCache = new Map<string, boolean>();
     const contextCache = new Map<string, string[] | null>();
+    const acceptsFile = cachedFileAcceptance(options.acceptFile);
+    const collect = (line: string) => {
+      const parsedItem = options.parseLine(line, items.length + 1);
+      if (!parsedItem) return;
+      const accepted = acceptsFile(parsedItem.file.absolutePath);
+      options.signal?.throwIfAborted();
+      if (!accepted) return;
+      const item = expandContextItem(
+        parsedItem,
+        options.rgOptions,
+        contextCache,
+      );
+      if (matchesModifiedTime(item.file.absolutePath, options, mtimeCache)) {
+        items.push(item);
+      }
+    };
+    const fail = (error: unknown) => {
+      failure ??= { error };
+      stdoutBuffer = "";
+      child.kill();
+    };
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
 
     child.stdout.on("data", (chunk: string) => {
+      if (options.signal?.aborted || failure) return;
       stdoutBuffer += chunk;
       let newlineIndex = stdoutBuffer.indexOf("\n");
 
-      while (newlineIndex >= 0) {
-        const line = stdoutBuffer.slice(0, newlineIndex);
-        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-        newlineIndex = stdoutBuffer.indexOf("\n");
+      try {
+        while (newlineIndex >= 0) {
+          const line = stdoutBuffer.slice(0, newlineIndex);
+          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+          newlineIndex = stdoutBuffer.indexOf("\n");
+          collect(line);
 
-        const parsedItem = options.parseLine(line, items.length + 1);
-        const item = parsedItem
-          ? expandContextItem(parsedItem, options.rgOptions, contextCache)
-          : null;
-        if (
-          item &&
-          matchesModifiedTime(item.file.absolutePath, options, mtimeCache)
-        ) {
-          items.push(item);
+          if (hasLimit && items.length > options.limit!) {
+            truncated = true;
+            killedAfterLimit = true;
+            child.kill();
+            break;
+          }
         }
-
-        if (hasLimit && items.length > options.limit!) {
-          truncated = true;
-          killedAfterLimit = true;
-          child.kill();
-          break;
-        }
+      } catch (error) {
+        fail(error);
       }
     });
 
@@ -401,26 +699,29 @@ function runCommand(options: {
       stderr += chunk;
     });
 
-    child.on("error", (error) => {
-      reject(error);
-    });
+    child.on("error", fail);
 
     child.on("close", (code) => {
+      disposeCancellation();
+      if (options.signal?.aborted) {
+        rejectUnchanged(reject, options.signal.reason);
+        return;
+      }
       if (
+        !failure &&
         !killedAfterLimit &&
         stdoutBuffer.length > 0 &&
         (!hasLimit || items.length < options.limit!)
       ) {
-        const parsedItem = options.parseLine(stdoutBuffer, items.length + 1);
-        const item = parsedItem
-          ? expandContextItem(parsedItem, options.rgOptions, contextCache)
-          : null;
-        if (
-          item &&
-          matchesModifiedTime(item.file.absolutePath, options, mtimeCache)
-        ) {
-          items.push(item);
+        try {
+          collect(stdoutBuffer);
+        } catch (error) {
+          fail(error);
         }
+      }
+      if (failure !== undefined) {
+        rejectUnchanged(reject, failure.error);
+        return;
       }
 
       if (code === 0 || code === 1 || killedAfterLimit) {
@@ -441,10 +742,236 @@ function runCommand(options: {
   });
 }
 
+/** Keep the original literal-search path above unchanged unless opted in. */
+function runBoundedCommand(options: CommandOptions): Promise<CommandResult> {
+  return new Promise((resolvePromise, reject) => {
+    options.signal?.throwIfAborted();
+    if (
+      options.scanLimit !== undefined &&
+      (!Number.isSafeInteger(options.scanLimit) || options.scanLimit < 0)
+    ) {
+      reject(new RangeError("scanLimit must be a non-negative safe integer"));
+      return;
+    }
+    if (
+      options.timeoutMs !== undefined &&
+      (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)
+    ) {
+      reject(new RangeError("timeoutMs must be a non-negative finite number"));
+      return;
+    }
+
+    const child = spawn(options.command, options.args, {
+      cwd: options.root,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const selected: {
+      item: ZvecGrepContextItem;
+      score: number;
+      sequence: number;
+    }[] = [];
+    const contextCache = new Map<string, string[] | null>();
+    const contextBudget: ContextCacheBudget = {
+      maxFiles: 8,
+      maxCharacters: 1_048_576,
+      maxFileBytes: MAX_BOUNDED_CONTEXT_FILE_BYTES,
+      characters: 0,
+      truncated: false,
+    };
+    const mtimeCache = new Map<string, boolean>();
+    const acceptsFile = cachedFileAcceptance(options.acceptFile);
+    const deadline =
+      options.timeoutMs === undefined
+        ? Infinity
+        : performance.now() + options.timeoutMs;
+    let stdoutBuffer = "";
+    let stderr = "";
+    let stderrTruncated = false;
+    let matches = 0;
+    let anchors = 0;
+    let truncated = false;
+    let stopped = false;
+    let settled = false;
+    let failure: { error: unknown } | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const disposeCancellation = ownCommandCancellation(
+      child,
+      options.signal,
+      () => {
+        stopped = true;
+        stdoutBuffer = "";
+        clearTimeout(timer);
+      },
+    );
+
+    const stop = () => {
+      truncated = true;
+      stopped = true;
+      stdoutBuffer = "";
+      child.kill();
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      failure ??= { error };
+      stopped = true;
+      clearTimeout(timer);
+      child.kill();
+    };
+    const processAnchor = (parsedItem: ZvecGrepContextItem) => {
+      anchors++;
+      if (!acceptsFile(parsedItem.file.absolutePath)) return;
+      options.signal?.throwIfAborted();
+      const item = expandContextItem(
+        parsedItem,
+        options.rgOptions,
+        contextCache,
+        contextBudget,
+      );
+      if (contextBudget.truncated) truncated = true;
+      if (mtimeCache.size >= 256) mtimeCache.clear();
+      if (!matchesModifiedTime(item.file.absolutePath, options, mtimeCache))
+        return;
+      const score = options.rankItem ? options.rankItem(item) : 1;
+      options.signal?.throwIfAborted();
+      if (Number.isFinite(score) && score > 0) {
+        selected.push({ item, score, sequence: anchors });
+        if (options.rankItem) {
+          selected.sort((a, b) => b.score - a.score || a.sequence - b.sequence);
+          if (options.limit !== undefined && selected.length > options.limit) {
+            selected.pop();
+            truncated = true;
+          }
+        } else if (
+          options.limit !== undefined &&
+          selected.length > options.limit
+        ) {
+          stop();
+        }
+      }
+    };
+    const processLine = (line: string) => {
+      if (stopped) return;
+      // A large stdout chunk or synchronous ranker can delay timer callbacks.
+      if (performance.now() >= deadline) {
+        stop();
+        return;
+      }
+      const rank = options.rankItem ? anchors + 1 : selected.length + 1;
+      let parsed: ParsedRipgrepMatchLine | null;
+      if (options.matchAllOccurrences === true) {
+        parsed = options.parseMatches(line, rank);
+      } else {
+        const item = options.parseLine(line, rank);
+        parsed = item ? { items: [item], truncated: false } : null;
+      }
+      if (!parsed) return;
+      matches++;
+      if (options.scanLimit !== undefined && matches > options.scanLimit) {
+        stop();
+        return;
+      }
+      if (parsed.truncated) truncated = true;
+      const iterator = parsed.items[Symbol.iterator]();
+      while (!stopped) {
+        // Position conversion is lazy so the deadline also bounds work on
+        // later anchors inside one JSON event, not just between match lines.
+        if (performance.now() >= deadline) {
+          stop();
+          return;
+        }
+        const next = iterator.next();
+        if (next.done) return;
+        processAnchor(next.value);
+        if (!stopped && performance.now() >= deadline) stop();
+      }
+    };
+
+    if (options.timeoutMs !== undefined && !options.signal?.aborted) {
+      timer = setTimeout(stop, options.timeoutMs);
+      timer.unref();
+    }
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (stopped) return;
+      try {
+        let offset = 0;
+        while (!stopped && offset < chunk.length) {
+          const newlineIndex = chunk.indexOf("\n", offset);
+          const end = newlineIndex < 0 ? chunk.length : newlineIndex;
+          if (
+            stdoutBuffer.length + end - offset >
+            MAX_BOUNDED_RG_JSON_CHARACTERS
+          ) {
+            stop();
+            return;
+          }
+          stdoutBuffer += chunk.slice(offset, end);
+          if (newlineIndex < 0) return;
+          const line = stdoutBuffer;
+          stdoutBuffer = "";
+          processLine(line);
+          offset = newlineIndex + 1;
+        }
+      } catch (error) {
+        fail(error);
+      }
+    });
+    child.stderr.on("data", (chunk: string) => {
+      const remaining = MAX_BOUNDED_STDERR_CHARACTERS - stderr.length;
+      stderr += chunk.slice(0, remaining);
+      if (chunk.length > remaining) stderrTruncated = true;
+    });
+    child.on("error", fail);
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      disposeCancellation();
+      if (settled) return;
+      try {
+        if (!stopped && stdoutBuffer.length > 0) processLine(stdoutBuffer);
+      } catch (error) {
+        fail(error);
+      }
+      settled = true;
+      if (options.signal?.aborted) {
+        rejectUnchanged(reject, options.signal.reason);
+        return;
+      }
+      if (failure) {
+        const error = failure.error;
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      if (
+        code === 0 ||
+        code === 1 ||
+        (stopped && code === null && signal === "SIGTERM")
+      ) {
+        const items = selected.map(({ item }, index) =>
+          options.rankItem ? { ...item, rank: index + 1 } : item,
+        );
+        resolvePromise({
+          items:
+            options.limit === undefined ? items : items.slice(0, options.limit),
+          truncated,
+          args: options.args,
+        });
+      } else {
+        reject(
+          new Error(
+            `${options.command} failed with exit code ${code}: ${stderr.trim()}${stderrTruncated ? "\n[stderr truncated]" : ""}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
 function expandContextItem(
   item: ZvecGrepContextItem,
   options: ZvecGrepSearchOptions | undefined,
   cache: Map<string, string[] | null>,
+  budget?: ContextCacheBudget,
 ): ZvecGrepContextItem {
   if (item.range.kind !== "text") {
     return item;
@@ -456,7 +983,7 @@ function expandContextItem(
     return item;
   }
 
-  const lines = readTextLines(item.file.absolutePath, cache);
+  const lines = readTextLines(item.file.absolutePath, cache, budget);
   if (!lines || lines.length === 0) {
     return item;
   }
@@ -482,6 +1009,7 @@ function expandContextItem(
 function readTextLines(
   path: string,
   cache: Map<string, string[] | null>,
+  budget?: ContextCacheBudget,
 ): string[] | null {
   if (cache.has(path)) {
     return cache.get(path) ?? null;
@@ -489,16 +1017,80 @@ function readTextLines(
 
   let lines: string[] | null = null;
   try {
-    lines = readFileSync(path, "utf8").split(/\r?\n/);
-    if (lines.at(-1) === "") {
+    const text = budget
+      ? readBoundedContextText(path, budget)
+      : readFileSync(path, "utf8");
+    lines = text === null ? null : text.split(/\r?\n/);
+    if (lines?.at(-1) === "") {
       lines = lines.slice(0, -1);
     }
   } catch {
     lines = null;
   }
 
+  if (budget) {
+    const characters = textLineCharacters(lines);
+    if (characters > budget.maxCharacters) {
+      budget.truncated = true;
+      lines = null;
+    }
+    const cachedCharacters = lines === null ? 0 : characters;
+    while (
+      cache.size >= budget.maxFiles ||
+      budget.characters + cachedCharacters > budget.maxCharacters
+    ) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      budget.characters -= textLineCharacters(cache.get(oldest) ?? null);
+      cache.delete(oldest);
+    }
+    budget.characters += cachedCharacters;
+  }
   cache.set(path, lines);
   return lines;
+}
+
+function readBoundedContextText(
+  path: string,
+  budget: ContextCacheBudget,
+): string | null {
+  // Non-blocking open also avoids hanging if a searched file becomes a FIFO.
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.size > budget.maxFileBytes) {
+      budget.truncated = true;
+      return null;
+    }
+    // Reuse one fixed buffer per search. fstat alone cannot bound a file that
+    // grows while being read; one extra byte detects that overflow as well.
+    const buffer = (budget.readBuffer ??= Buffer.allocUnsafe(
+      budget.maxFileBytes + 1,
+    ));
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        length,
+        buffer.length - length,
+        null,
+      );
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > budget.maxFileBytes) {
+      budget.truncated = true;
+      return null;
+    }
+    return buffer.toString("utf8", 0, length);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function textLineCharacters(lines: string[] | null): number {
+  return lines?.reduce((total, line) => total + line.length + 1, 0) ?? 0;
 }
 
 function matchesModifiedTime(
@@ -545,6 +1137,18 @@ function parseRipgrepJsonLine(
   root: string,
   rank: number,
 ): ZvecGrepContextItem | null {
+  const first = parseRipgrepJsonMatches(line, root, rank, false)
+    ?.items[Symbol.iterator]()
+    .next();
+  return first && !first.done ? first.value : null;
+}
+
+function parseRipgrepJsonMatches(
+  line: string,
+  root: string,
+  rank: number,
+  matchAllOccurrences: boolean,
+): ParsedRipgrepMatchLine | null {
   if (line.trim().length === 0) {
     return null;
   }
@@ -575,35 +1179,45 @@ function parseRipgrepJsonLine(
 
   const path = normalizeResultPath(root, data.path.text);
   const lineText = trimTrailingNewline(data.lines.text);
-  const firstSubmatch =
-    Array.isArray(data.submatches) && isRecord(data.submatches[0])
-      ? data.submatches[0]
-      : undefined;
-  const start = textPositionAtByteOffset(
-    lineText,
-    typeof firstSubmatch?.start === "number" ? firstSubmatch.start : 0,
-  );
-  const end = textPositionAtByteOffset(
-    lineText,
-    typeof firstSubmatch?.end === "number"
-      ? firstSubmatch.end
-      : Buffer.byteLength(lineText, "utf8"),
-  );
-
+  const lineNumber = data.line_number;
+  const submatches = Array.isArray(data.submatches) ? data.submatches : [];
+  const selectedSubmatches =
+    matchAllOccurrences && submatches.length > 0
+      ? submatches.slice(0, MAX_BOUNDED_SUBMATCHES)
+      : [submatches[0]];
   return {
-    kind: "lexical_match",
-    rank,
-    file: path,
-    range: {
-      kind: "text",
-      startLine: data.line_number + start.lineOffset,
-      endLine: data.line_number + end.lineOffset,
-      startOffset: start.column,
-      endOffset: end.column,
-    },
-    content: lineText,
-    status: "fresh",
-    matchedBy: "lexical",
+    truncated:
+      matchAllOccurrences && submatches.length > MAX_BOUNDED_SUBMATCHES,
+    items: (function* (): Generator<ZvecGrepContextItem, void> {
+      for (const [index, value] of selectedSubmatches.entries()) {
+        const submatch = isRecord(value) ? value : undefined;
+        const start = textPositionAtByteOffset(
+          lineText,
+          typeof submatch?.start === "number" ? submatch.start : 0,
+        );
+        const end = textPositionAtByteOffset(
+          lineText,
+          typeof submatch?.end === "number"
+            ? submatch.end
+            : Buffer.byteLength(lineText, "utf8"),
+        );
+        yield {
+          kind: "lexical_match",
+          rank: rank + index,
+          file: path,
+          range: {
+            kind: "text",
+            startLine: lineNumber + start.lineOffset,
+            endLine: lineNumber + end.lineOffset,
+            startOffset: start.column,
+            endOffset: end.column,
+          },
+          content: lineText,
+          status: "fresh",
+          matchedBy: "lexical",
+        };
+      }
+    })(),
   };
 }
 

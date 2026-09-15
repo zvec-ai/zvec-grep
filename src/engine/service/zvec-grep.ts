@@ -1,4 +1,3 @@
-import { readFileSync, statSync } from "node:fs";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
@@ -9,7 +8,18 @@ import {
   type ResolvedEmbeddingRuntimeConfig,
   type ZvecGrepGlobalConfig,
 } from "../config.js";
-import { isWorkspaceIndexed, WorkspaceIndex } from "./workspace-index.js";
+import {
+  assertWorkspaceEmbeddingMatchesInfo,
+  isWorkspaceIndexed,
+  WorkspaceIndex,
+} from "./workspace-index.js";
+import {
+  assertPreparedSearchPlanMatches,
+  prepareSearchPlan,
+  resolveSearchPlan,
+  type PreparedSearchPlan,
+  type SearchPlanPreflight,
+} from "../pipeline/search/index.js";
 import {
   workspaceIndexDetail,
   detail,
@@ -34,8 +44,15 @@ import type {
   SearchHit,
   SearchPlan,
   SearchPlanResult,
+  ResolvedSearchPlan,
+  SourceInvalidation,
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
+import {
+  indexedSourceVersion,
+  inspectIndexedSource,
+  type IndexedSourceFreshness,
+} from "../source-freshness.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
 import {
   workspaceIndexInfoFromManifest,
@@ -97,8 +114,174 @@ export async function createZvecGrep(
 export type WorkspaceReadSession = {
   readonly root: string;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  preflight(plan: WorkspaceContextPlan): Promise<WorkspaceContextPreflight>;
+  contextPrepared(
+    prepared: PreparedWorkspaceContext,
+  ): Promise<ZvecGrepContextResult>;
   close(): Promise<void>;
 };
+
+export type WorkspaceContextPlan = {
+  readonly execution: "all" | "fts_only";
+  readonly options: ZvecGrepContextOptions;
+  readonly request: NormalizedContextRequest;
+  readonly groups: readonly NormalizedContextGroup[];
+  readonly searches: readonly ResolvedSearchPlan[];
+};
+
+export type WorkspaceContextPreflight = {
+  readonly plan: WorkspaceContextPlan;
+  readonly searches: readonly SearchPlanPreflight[];
+  readonly requiresEmbedding: boolean;
+  readonly workspaceIndex: WorkspaceIndexInfo;
+  readonly embeddingEndpoint?: string;
+};
+
+export type PreparedWorkspaceContext = {
+  readonly plan: WorkspaceContextPlan;
+  readonly searches: readonly PreparedSearchPlan[];
+};
+
+export function planWorkspaceContext(
+  input: ZvecGrepContextOptions,
+  signal?: AbortSignal,
+  execution: "all" | "fts_only" = "all",
+): WorkspaceContextPlan {
+  signal?.throwIfAborted();
+  const options = snapshotContextOptions(input);
+  const request = normalizeContextRequest(options);
+  const groups: NormalizedContextGroup[] = options.fuse
+    ? [
+        {
+          id: "Q1",
+          query: request.displayQuery,
+          role: request.groups.some((group) => group.role === "primary")
+            ? "primary"
+            : "supplemental",
+          routes: request.routes,
+        },
+      ]
+    : request.groups;
+  const limit = contextGroupLimit(options.limit, groups.length);
+  // Validate every group before the first model can receive a query.
+  const searches = groups.map((group) =>
+    resolveSearchPlan({
+      routes: group.routes,
+      limit,
+      trace: options.trace,
+      preferSymbol: options.preferSymbol,
+      symbolTypes: options.symbolTypes,
+      includePaths: options.includePaths,
+      excludePaths: options.excludePaths,
+      globs: options.globs,
+      insensitiveGlobs: options.insensitiveGlobs,
+      fileTypes: options.fileTypes,
+      excludedFileTypes: options.excludedFileTypes,
+      modifiedAfter: options.modifiedAfter,
+      modifiedBefore: options.modifiedBefore,
+    }),
+  );
+  if (execution === "fts_only") {
+    if (options.routes?.some((route) => route.mode === "vector")) {
+      throw new EngineError(
+        "Local fallback cannot omit an explicitly requested vector route",
+        {
+          code: "ZVEC_GREP.ENGINE.SEARCH.LOCAL_FALLBACK_EXPLICIT_VECTOR",
+        },
+      );
+    }
+    return {
+      execution,
+      options,
+      request,
+      groups: groups.map((group) => ({
+        ...group,
+        routes: group.routes.filter((route) => route.mode === "fts"),
+      })),
+      searches: searches.map((search) =>
+        resolveSearchPlan({
+          ...search,
+          routes: search.routes.filter((route) => route.mode === "fts"),
+        }),
+      ),
+    };
+  }
+  return { execution, options, request, groups, searches };
+}
+
+function snapshotContextOptions(
+  options: ZvecGrepContextOptions,
+): ZvecGrepContextOptions {
+  return {
+    ...options,
+    queries: snapshotArray(options.queries),
+    routes: Array.isArray(options.routes)
+      ? options.routes.map((route: SearchPlan["routes"][number]) => ({
+          ...route,
+        }))
+      : options.routes,
+    rgPaths: snapshotArray(options.rgPaths),
+    symbolTypes: snapshotArray(options.symbolTypes),
+    includePaths: snapshotArray(options.includePaths),
+    excludePaths: snapshotArray(options.excludePaths),
+    globs: snapshotArray(options.globs),
+    insensitiveGlobs: snapshotArray(options.insensitiveGlobs),
+    fileTypes: snapshotArray(options.fileTypes),
+    excludedFileTypes: snapshotArray(options.excludedFileTypes),
+    ignoreFiles: snapshotArray(options.ignoreFiles),
+    rgOptions: options.rgOptions
+      ? {
+          ...options.rgOptions,
+          extraArgs: snapshotArray(options.rgOptions.extraArgs),
+          patternFiles: snapshotArray(options.rgOptions.patternFiles),
+        }
+      : undefined,
+  };
+}
+
+function snapshotArray<T>(
+  value: readonly T[] | undefined,
+): readonly T[] | undefined {
+  // Leave malformed inputs intact so the normal validators report them.
+  return Array.isArray(value) ? [...value] : value;
+}
+
+export async function prepareWorkspaceContext(
+  plan: WorkspaceContextPlan,
+  model: EmbeddingModel | undefined,
+  preflight: WorkspaceContextPreflight,
+  signal?: AbortSignal,
+): Promise<PreparedWorkspaceContext> {
+  signal?.throwIfAborted();
+  if (
+    preflight.plan !== plan ||
+    preflight.searches.length !== plan.searches.length
+  ) {
+    throw new EngineError(
+      "Context preflight does not match the requested plan",
+      {
+        code: "ZVEC_GREP.ENGINE.SEARCH.PREPARED_PLAN_MISMATCH",
+      },
+    );
+  }
+  if (preflight.requiresEmbedding && model) {
+    assertWorkspaceEmbeddingMatchesInfo(preflight.workspaceIndex, model.info);
+    assertPreparedEndpoint(
+      preflight.workspaceIndex,
+      preflight.embeddingEndpoint,
+      model.info.endpoint,
+    );
+  }
+  const searches: PreparedSearchPlan[] = [];
+  for (const [index, search] of plan.searches.entries()) {
+    signal?.throwIfAborted();
+    searches.push(
+      await prepareSearchPlan(search, model, preflight.searches[index], signal),
+    );
+  }
+  signal?.throwIfAborted();
+  return { plan, searches };
+}
 
 export function openWorkspaceReadSession(
   startRoot: string,
@@ -130,6 +313,34 @@ export function openWorkspaceReadSession(
 
   return {
     root: location.root,
+    async preflight(plan) {
+      if (closed) throw readSessionClosedError();
+      return withHomeReadLock(location.home, "daemon.context.preflight", () =>
+        preflightFromOpenWorkspaceIndex(
+          plan,
+          workspaceIndex,
+          info.embeddingRuntime?.endpoint,
+        ),
+      );
+    },
+    async contextPrepared(prepared) {
+      if (closed) throw readSessionClosedError();
+      const timings = new TimingCollector();
+      const result = await timings.time("total", () =>
+        withHomeReadLock(location.home, "daemon.context", () =>
+          contextFromOpenWorkspaceIndex({
+            root: location.root,
+            request: prepared.plan.request,
+            workspaceIndex,
+            options: { ...prepared.plan.options, autoUpdate: false },
+            timings,
+            prepared,
+            embeddingEndpoint: info.embeddingRuntime?.endpoint,
+          }),
+        ),
+      );
+      return withContextTimings(result, timings);
+    },
     async context(options) {
       if (closed) {
         throw new EngineError("Workspace read session is already closed", {
@@ -159,6 +370,12 @@ export function openWorkspaceReadSession(
       closed = true;
     },
   };
+}
+
+function readSessionClosedError(): EngineError {
+  return new EngineError("Workspace read session is already closed", {
+    code: "ZVEC_GREP.ENGINE.SERVICE.READ_SESSION_CLOSED",
+  });
 }
 
 export function createEmbeddingModelForIdentity(
@@ -201,6 +418,9 @@ class ZvecGrepService implements ZvecGrep {
 
   async index(options: ZvecGrepIndexOptions = {}): Promise<IndexResult> {
     this.ensureOpen();
+    const verifySourcePaths = options.verifySourcePaths
+      ? [...options.verifySourcePaths]
+      : undefined;
     const root = resolveZvecGrepRoot(options.root ?? this.root);
     const daemonWritePermit = assertDaemonWriteAllowed(
       root,
@@ -293,11 +513,19 @@ class ZvecGrepService implements ZvecGrep {
 
             try {
               const releaseWriterContext = options.onWriterContext?.(
-                (contextOptions) =>
+                (contextOptions, prepared) =>
                   this.contextFromWriterWorkspaceIndex(
                     root,
                     workspaceIndex,
                     contextOptions,
+                    prepared,
+                    embeddingRuntime.endpoint,
+                  ),
+                (plan) =>
+                  preflightFromOpenWorkspaceIndex(
+                    plan,
+                    workspaceIndex,
+                    embeddingRuntime.endpoint,
                   ),
               );
               try {
@@ -306,14 +534,23 @@ class ZvecGrepService implements ZvecGrep {
                   embeddingConcurrency: options.embeddingConcurrency,
                   onProgress: options.onProgress,
                   changedPaths: options.changedPaths,
+                  verifyContentPaths: verifySourcePaths,
                   signal: options.signal,
                 });
+                const sourceFreshness = verifySourcePaths
+                  ? await workspaceIndex.verifySourceFreshness(
+                      verifySourcePaths,
+                      options.signal,
+                    )
+                  : undefined;
                 writeWorkspaceManifest(location.home, {
                   ...manifest,
                   embeddingRuntime,
                   updatedTime: Date.now(),
                 });
-                return result;
+                return sourceFreshness
+                  ? { ...result, sourceFreshness }
+                  : result;
               } catch (error) {
                 writeWorkspaceManifest(location.home, {
                   ...manifest,
@@ -463,7 +700,7 @@ class ZvecGrepService implements ZvecGrep {
       };
     }
 
-    return await withHomeReadLock(nearest.location.home, "info", async () => {
+    const readInfo = async (): Promise<ZvecGrepInfoResult> => {
       const workspaceIndex = readWorkspaceManifest(nearest.location.home);
       const indexed =
         workspaceIndex !== null &&
@@ -487,7 +724,17 @@ class ZvecGrepService implements ZvecGrep {
             : null,
         suggestion: workspaceInfoSuggestion(workspaceIndex),
       };
-    });
+    };
+    // A disabled workspace's metadata-only inspection never opens storage or
+    // scans files. Keep it usable from read-only source searches without
+    // creating locks/. The writer check above still rejects an active writer.
+    if (
+      options.includeStatus === false &&
+      readWorkspaceManifest(nearest.location.home)?.indexPolicy === "disabled"
+    ) {
+      return await readInfo();
+    }
+    return await withHomeReadLock(nearest.location.home, "info", readInfo);
   }
 
   async close(): Promise<void> {
@@ -625,6 +872,8 @@ class ZvecGrepService implements ZvecGrep {
     root: string,
     workspaceIndex: WorkspaceIndex,
     options: ZvecGrepContextOptions,
+    prepared?: PreparedWorkspaceContext,
+    embeddingEndpoint?: string,
   ): Promise<ZvecGrepContextResult> {
     return await this.withEmbeddingModelOperation(async () => {
       const timings = new TimingCollector();
@@ -636,6 +885,8 @@ class ZvecGrepService implements ZvecGrep {
           workspaceIndex,
           options: { ...options, autoUpdate: false },
           timings,
+          prepared,
+          embeddingEndpoint,
         }),
       );
       return withContextTimings(result, timings);
@@ -933,44 +1184,67 @@ async function contextFromOpenWorkspaceIndex(input: {
   workspaceIndex: WorkspaceIndex;
   options: ZvecGrepContextOptions;
   timings: TimingCollector;
+  prepared?: PreparedWorkspaceContext;
+  embeddingEndpoint?: string;
 }): Promise<ZvecGrepContextResult> {
   const searches: SearchPlanResult[] = [];
-  const groups: NormalizedContextGroup[] = input.options.fuse
-    ? [
+  const plan = planWorkspaceContext(
+    input.options,
+    undefined,
+    input.prepared?.plan.execution,
+  );
+  const groups = plan.groups;
+  if (input.prepared) {
+    if (
+      input.prepared.searches.length !== plan.searches.length ||
+      JSON.stringify(input.prepared.plan.groups) !== JSON.stringify(groups)
+    ) {
+      throw new EngineError(
+        "Prepared context does not match the requested groups",
         {
-          id: "Q1",
-          query: input.request.displayQuery,
-          role: input.request.groups.some((group) => group.role === "primary")
-            ? "primary"
-            : "supplemental",
-          routes: input.request.routes,
+          code: "ZVEC_GREP.ENGINE.SEARCH.PREPARED_PLAN_MISMATCH",
         },
-      ]
-    : input.request.groups;
-  const limit = contextGroupLimit(input.options.limit, groups.length);
-
-  for (const group of groups) {
-    const search = await input.workspaceIndex.searchPlan({
-      routes: group.routes,
-      limit,
-      trace: input.options.trace,
-      preferSymbol: input.options.preferSymbol,
-      symbolTypes: input.options.symbolTypes,
-      includePaths: input.options.includePaths,
-      excludePaths: input.options.excludePaths,
-      globs: input.options.globs,
-      insensitiveGlobs: input.options.insensitiveGlobs,
-      fileTypes: input.options.fileTypes,
-      excludedFileTypes: input.options.excludedFileTypes,
-      modifiedAfter: input.options.modifiedAfter,
-      modifiedBefore: input.options.modifiedBefore,
-    });
+      );
+    }
+    for (const [index, search] of plan.searches.entries()) {
+      const prepared = input.prepared.searches[index]!;
+      assertPreparedSearchPlanMatches(search, prepared);
+      if (prepared.embedding) {
+        assertWorkspaceEmbeddingMatchesInfo(
+          input.workspaceIndex.info,
+          prepared.embedding,
+        );
+        assertPreparedEndpoint(
+          input.workspaceIndex.info,
+          input.embeddingEndpoint,
+          prepared.embedding.endpoint,
+        );
+      }
+    }
+  }
+  for (const [index, searchPlan] of plan.searches.entries()) {
+    const search = input.prepared
+      ? await input.workspaceIndex.searchPreparedPlan(
+          input.prepared.searches[index]!,
+        )
+      : await input.workspaceIndex.searchPlan(searchPlan);
     input.timings.addEntries(search.timings);
     searches.push(search);
   }
 
+  // One source file can appear in several entities and query groups. Verify
+  // each indexed version only once per request, never across requests.
+  const fileFreshness = new Map<string, IndexedSourceFreshness>();
+  const sourceInvalidations = new Map<string, SourceInvalidation>();
   const groupItems = searches.map((search, index) =>
-    searchPlanToContextItems(search, input.root, groups[index]!),
+    searchPlanToContextItems(
+      search,
+      input.root,
+      groups[index]!,
+      input.workspaceIndex.info.id,
+      fileFreshness,
+      sourceInvalidations,
+    ),
   );
   const items = selectAndRankContextItems(
     groupItems.flat(),
@@ -998,6 +1272,9 @@ async function contextFromOpenWorkspaceIndex(input: {
       emptyReason: items.length === 0 ? "no_matches" : undefined,
       index: {
         hitsReturned: items.length,
+        ...(sourceInvalidations.size > 0
+          ? { sourceInvalidations: [...sourceInvalidations.values()] }
+          : {}),
         queryGroups: groups.map((group) => ({
           id: group.id,
           query: group.query,
@@ -1007,6 +1284,52 @@ async function contextFromOpenWorkspaceIndex(input: {
       },
     },
   };
+}
+
+async function preflightFromOpenWorkspaceIndex(
+  plan: WorkspaceContextPlan,
+  workspaceIndex: WorkspaceIndex,
+  embeddingEndpoint?: string,
+): Promise<WorkspaceContextPreflight> {
+  const searches: SearchPlanPreflight[] = [];
+  for (const search of plan.searches) {
+    searches.push(await workspaceIndex.preflightSearchPlan(search));
+  }
+  return {
+    plan,
+    searches,
+    requiresEmbedding: searches.some(
+      (search, index) =>
+        search.hasSearchableFiles &&
+        plan.searches[index]!.routes.some((route) => route.mode === "vector"),
+    ),
+    workspaceIndex: workspaceIndex.info,
+    embeddingEndpoint,
+  };
+}
+
+function assertPreparedEndpoint(
+  info: WorkspaceIndexInfo,
+  expected: string | undefined,
+  actual: string | undefined,
+): void {
+  if (expected === actual) return;
+  throw new EngineError("Prepared query uses a different embedding endpoint", {
+    code: "ZVEC_GREP.ENGINE.SERVICE.SEARCH_ENDPOINT_CHANGE_REQUIRES_REBUILD",
+    context: workspaceIndexOperationDetailsForPrepared(info),
+  });
+}
+
+function workspaceIndexOperationDetailsForPrepared(
+  info: WorkspaceIndexInfo,
+): string | undefined {
+  return errorDetails([
+    workspaceIndexDetail(info.name),
+    detail(
+      "hint",
+      "The index changed while preparing this search; retry the search against its current model.",
+    ),
+  ]);
 }
 
 async function withHomeReadLock<T>(
@@ -1804,6 +2127,9 @@ function searchPlanToContextItems(
   result: SearchPlanResult,
   root: string,
   group: NormalizedContextGroup,
+  workspaceIndexId: string,
+  fileFreshness: Map<string, IndexedSourceFreshness>,
+  sourceInvalidations: Map<string, SourceInvalidation>,
 ): ZvecGrepContextItem[] {
   return result.hits.map((hit) => {
     const target = contextItemTarget(hit);
@@ -1822,7 +2148,12 @@ function searchPlanToContextItems(
       content: contentToText(target.content),
       contentRole: target.contentRole,
       outline: target.outline,
-      status: fileFreshnessStatus(hit.file),
+      status: fileFreshnessStatus(
+        workspaceIndexId,
+        hit.file,
+        fileFreshness,
+        sourceInvalidations,
+      ),
       score: hit.score,
       matchedBy: hit.matchedBy,
       metadata: hit.entity.metadata,
@@ -2138,36 +2469,27 @@ function contentEquals(left: Content, right: Content): boolean {
   return right.kind === "text" && left.text === right.text;
 }
 
-function fileFreshnessStatus(file: FileInfo): "fresh" | "possibly_stale" {
-  if (!file.indexStatus?.indexedTime) {
-    return "possibly_stale";
+const MAX_CONTEXT_FILE_FRESHNESS_CACHE = 256;
+
+function fileFreshnessStatus(
+  workspaceIndexId: string,
+  file: FileInfo,
+  cache: Map<string, IndexedSourceFreshness>,
+  invalidations: Map<string, SourceInvalidation>,
+): "fresh" | "possibly_stale" {
+  const key = JSON.stringify(indexedSourceVersion(workspaceIndexId, file));
+  const cached = cache.get(key);
+  if (cached !== undefined) {
+    return cached.status;
   }
-
-  try {
-    const info = statSync(file.absolutePath, { throwIfNoEntry: false });
-    if (!info || !info.isFile()) {
-      return "possibly_stale";
-    }
-
-    if (file.indexStatus.indexedTime >= info.mtimeMs) {
-      return "fresh";
-    }
-
-    if (
-      file.contentHash &&
-      sha256File(file.absolutePath) === file.contentHash
-    ) {
-      return "fresh";
-    }
-  } catch {
-    return "possibly_stale";
+  const freshness = inspectIndexedSource(workspaceIndexId, file);
+  if (freshness.status === "possibly_stale") {
+    invalidations.set(key, freshness.invalidation);
   }
-
-  return "possibly_stale";
-}
-
-function sha256File(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  if (cache.size < MAX_CONTEXT_FILE_FRESHNESS_CACHE) {
+    cache.set(key, freshness);
+  }
+  return freshness.status;
 }
 
 function contentToText(content: Content): string {

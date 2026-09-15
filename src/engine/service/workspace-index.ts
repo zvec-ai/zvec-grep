@@ -4,13 +4,18 @@ import {
   EngineError,
   errorDetails,
 } from "../errors.js";
-import type { EmbeddingModel } from "../models/index.js";
+import type { EmbeddingModel, EmbeddingModelInfo } from "../models/index.js";
 import {
   getWorkspaceIndexStatus,
   indexWorkspace,
   indexWorkspacePaths,
 } from "../pipeline/indexing/index.js";
-import { searchWorkspaceIndex } from "../pipeline/search/index.js";
+import {
+  preflightSearchPlan,
+  searchWorkspaceIndex,
+  type PreparedSearchPlan,
+  type SearchPlanPreflight,
+} from "../pipeline/search/index.js";
 import {
   createWorkspaceIndexStorage,
   type WorkspaceIndexStorage,
@@ -25,6 +30,7 @@ import type {
   SearchPlanResult,
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
+import { verifyWorkspaceSourceFreshness } from "../source-freshness.js";
 
 export type WorkspaceIndexOptions = {
   mode: "read" | "write";
@@ -83,6 +89,9 @@ export class WorkspaceIndex {
       embeddingConcurrency: options.embeddingConcurrency,
       onProgress: options.onProgress,
       signal: options.signal,
+      verifyContentPaths: options.verifyContentPaths
+        ? [...options.verifyContentPaths]
+        : undefined,
     };
     return options.changedPaths && options.changedPaths.length > 0
       ? indexWorkspacePaths(context, options.changedPaths)
@@ -93,12 +102,42 @@ export class WorkspaceIndex {
     return getWorkspaceIndexStatus(this.info, this.storage.listFiles());
   }
 
+  verifySourceFreshness(paths: readonly string[], signal?: AbortSignal) {
+    return verifyWorkspaceSourceFreshness(
+      this.info,
+      this.storage,
+      paths,
+      signal,
+    );
+  }
+
   searchPlan(plan: SearchPlan): Promise<SearchPlanResult> {
     return searchWorkspaceIndex(plan, {
       workspaceIndex: this.info,
       embeddingModel: this.embeddingModel,
       storage: this.storage,
     });
+  }
+
+  preflightSearchPlan(plan: SearchPlan): Promise<SearchPlanPreflight> {
+    return preflightSearchPlan(plan, {
+      workspaceIndex: this.info,
+      storage: this.storage,
+    });
+  }
+
+  searchPreparedPlan(prepared: PreparedSearchPlan): Promise<SearchPlanResult> {
+    if (prepared.embedding) {
+      assertWorkspaceEmbeddingMatchesInfo(this.info, prepared.embedding);
+    }
+    return searchWorkspaceIndex(
+      prepared.plan,
+      {
+        workspaceIndex: this.info,
+        storage: this.storage,
+      },
+      prepared,
+    );
   }
 
   close(): void {
@@ -129,64 +168,7 @@ export class WorkspaceIndex {
 
   private validateEmbeddingSchema(current: EmbeddingModel): void {
     this.validateIndexVersion();
-
-    const expected = this.embedding;
-
-    if (expected.provider !== current.info.provider) {
-      throw new EngineError(
-        "Workspace index embedding provider does not match current model",
-        {
-          code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.EMBEDDING_PROVIDER_MISMATCH",
-          context: workspaceIndexMismatchDetails(
-            this.name,
-            expected.provider,
-            current.info.provider,
-          ),
-        },
-      );
-    }
-
-    if (expected.model !== current.info.name) {
-      throw new EngineError(
-        "Workspace index embedding model does not match current model",
-        {
-          code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.EMBEDDING_MODEL_MISMATCH",
-          context: workspaceIndexMismatchDetails(
-            this.name,
-            expected.model,
-            current.info.name,
-          ),
-        },
-      );
-    }
-
-    if (expected.dimension !== current.info.dimension) {
-      throw new EngineError(
-        "Workspace index embedding dimension does not match current model",
-        {
-          code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.EMBEDDING_DIMENSION_MISMATCH",
-          context: workspaceIndexMismatchDetails(
-            this.name,
-            expected.dimension,
-            current.info.dimension,
-          ),
-        },
-      );
-    }
-
-    if (expected.metric !== current.info.metric) {
-      throw new EngineError(
-        "Workspace index embedding metric does not match current model",
-        {
-          code: "ZVEC_GREP.ENGINE.WORKSPACE_INDEX.EMBEDDING_METRIC_MISMATCH",
-          context: workspaceIndexMismatchDetails(
-            this.name,
-            expected.metric,
-            current.info.metric,
-          ),
-        },
-      );
-    }
+    assertWorkspaceEmbeddingMatchesInfo(this.info, current.info);
   }
 
   private requireEmbeddingModel(operation: string): EmbeddingModel {
@@ -201,6 +183,32 @@ export class WorkspaceIndex {
     }
 
     return this.embeddingModel;
+  }
+}
+
+export function assertWorkspaceEmbeddingMatchesInfo(
+  info: WorkspaceIndexInfo,
+  current: Pick<
+    EmbeddingModelInfo,
+    "provider" | "name" | "dimension" | "metric"
+  >,
+): void {
+  const expected = requireWorkspaceIndexEmbedding(info, "searchPlan");
+  const fields = [
+    ["PROVIDER", expected.provider, current.provider],
+    ["MODEL", expected.model, current.name],
+    ["DIMENSION", expected.dimension, current.dimension],
+    ["METRIC", expected.metric, current.metric],
+  ] as const;
+  for (const [field, indexed, actual] of fields) {
+    if (indexed === actual) continue;
+    throw new EngineError(
+      `Workspace index embedding ${field.toLowerCase()} does not match current model`,
+      {
+        code: `ZVEC_GREP.ENGINE.WORKSPACE_INDEX.EMBEDDING_${field}_MISMATCH`,
+        context: workspaceIndexMismatchDetails(info.name, indexed, actual),
+      },
+    );
   }
 }
 

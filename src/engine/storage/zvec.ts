@@ -33,6 +33,7 @@ import type {
   WorkspaceIndexStorageOptions,
 } from "./index.js";
 import { resolveWorkspaceIndexStoragePaths } from "./layout.js";
+import { fullTextQuery } from "./fts-query.js";
 
 type FileRecord = FileInfo & {
   entityIds: string[];
@@ -50,6 +51,7 @@ type IndexedFragment = {
 
 type FileIndexDiagnostics = {
   truncatedFragmentCount?: number;
+  extractionVersion?: number;
 };
 
 type StorageSearchFilter = {
@@ -223,6 +225,9 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
         indexedTime: now,
         entityCount: entityIds.length,
         truncatedFragmentCount: diagnostics.truncatedFragmentCount ?? 0,
+        ...(diagnostics.extractionVersion === undefined
+          ? {}
+          : { extractionVersion: diagnostics.extractionVersion }),
       },
       entityIds,
     };
@@ -295,10 +300,12 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
+    const queryString = fullTextQuery(query);
+    if (!queryString) return [];
     const zvecFilter = buildFilter(filter);
     const docs = this.collection.querySync({
       fieldName: ENTITY_TEXT_FIELD,
-      fts: { matchString: query },
+      fts: { queryString },
       ...(zvecFilter ? { filter: zvecFilter } : {}),
       topk: limit,
       includeVector: false,
@@ -489,6 +496,23 @@ class ZvecFileMetaStore {
         ZVecCreateAndOpen(path, createFilesSchema()),
       );
     }
+    // Additive, lazy migration only on a writer. Legacy readers need no schema
+    // changes, and null versions identify exactly which files still need work.
+    if (
+      !readOnly &&
+      !this.collection.schema
+        .fields()
+        .some((field) => field.name === "extraction_version")
+    ) {
+      try {
+        this.collection.addColumnSync({
+          fieldSchema: extractionVersionField(),
+        });
+      } catch (error) {
+        this.collection.closeSync();
+        throw error;
+      }
+    }
   }
 
   list(): FileRecord[] {
@@ -609,6 +633,7 @@ function createFilesSchema(): ZVecCollectionSchema {
         nullable: false,
       },
       indexedStringField("content_hash", true),
+      extractionVersionField(),
       indexedStringField("kind"),
       indexedStringField("format"),
       {
@@ -642,6 +667,14 @@ function createFilesSchema(): ZVecCollectionSchema {
   });
 }
 
+function extractionVersionField() {
+  return {
+    name: "extraction_version",
+    dataType: ZVecDataType.INT32,
+    nullable: true,
+  };
+}
+
 function fileRecordToDoc(file: FileRecord): ZVecDocInput {
   const fields: Record<string, string | number | boolean> = {
     file_id: file.id,
@@ -671,6 +704,9 @@ function fileRecordToDoc(file: FileRecord): ZVecDocInput {
   if (file.indexStatus?.tokenCount !== undefined) {
     fields.token_count = file.indexStatus.tokenCount;
   }
+  if (file.indexStatus?.extractionVersion !== undefined) {
+    fields.extraction_version = file.indexStatus.extractionVersion;
+  }
 
   if (file.indexStatus?.truncatedFragmentCount !== undefined) {
     fields.truncated_fragment_count = file.indexStatus.truncatedFragmentCount;
@@ -691,6 +727,10 @@ function docToFileRecord(doc: ZVecDoc): FileRecord {
   const hasIndexStatus = readBooleanFieldFromFields(fields, "has_index_status");
   const indexedTime = readNullableNumberFieldFromFields(fields, "indexed_time");
   const tokenCount = readNullableNumberFieldFromFields(fields, "token_count");
+  const extractionVersion = readNullableNumberFieldFromFields(
+    fields,
+    "extraction_version",
+  );
   const truncatedFragmentCount = readNullableNumberFieldFromFields(
     fields,
     "truncated_fragment_count",
@@ -713,6 +753,7 @@ function docToFileRecord(doc: ZVecDoc): FileRecord {
           indexedTime,
           entityCount: readNumberFieldFromFields(fields, "entity_count"),
           ...(tokenCount === null ? {} : { tokenCount }),
+          ...(extractionVersion === null ? {} : { extractionVersion }),
           ...(truncatedFragmentCount === null
             ? {}
             : { truncatedFragmentCount }),

@@ -5,6 +5,10 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+  createRemoteEmbeddingTarget,
+  RemoteEmbeddingAuthorizationStore,
+} from "../dist/authorization/index.js";
 import { DaemonBackend } from "../dist/daemon/backend.js";
 import { inspectRoot } from "../dist/daemon/runtime-manager.js";
 import { WatchManager } from "../dist/daemon/watch-manager.js";
@@ -529,8 +533,18 @@ test("eventual search queries while background reconciliation is running", async
   const backgroundReleased = new Promise((resolve) => {
     releaseBackground = resolve;
   });
+  const authorizationStore = new RemoteEmbeddingAuthorizationStore({
+    signingKeyPath: join(temporaryDirectory, "authorization-signing.key"),
+  });
+  const target = await createRemoteEmbeddingTarget({
+    roots: [root],
+    provider: "qwen",
+    model: "text-embedding-v4",
+    endpoint: "https://qwen.test/embeddings",
+  });
   const backend = new DaemonBackend({
     version: "1.0.0",
+    authorizationStore,
     modelPoolOptions: {
       createModel: () =>
         new QwenTestEmbeddingModel(async (contents) => {
@@ -550,6 +564,10 @@ test("eventual search queries while background reconciliation is running", async
     watchManagerFactory: noopWatchManagerFactory,
   });
   try {
+    // Automatic content repair needs a persistent workspace grant even though
+    // this fixture injects a local fake for the actual Qwen model identity.
+    await authorizationStore.grant(target);
+    assert.equal(await authorizationStore.hasGrant(target), true);
     await writeFile(source, "export const changedAnswer = 43;\n");
     blockBackgroundEmbedding = true;
 
@@ -572,6 +590,8 @@ test("eventual search queries while background reconciliation is running", async
       searchInput(root, "answer", "eventual"),
     );
     assert.equal(plan.operation, "query_and_index");
+    assert.equal(plan.target.endpoint, target.endpoint);
+    assert.equal(await authorizationStore.hasGrant(plan.target), true);
 
     const duringReconcile = await backend.search(
       searchInput(root, "answer", "eventual"),
@@ -718,7 +738,7 @@ test("automatic remote watcher authorization reads metadata without a status sca
   }
 });
 
-test("wait_for_fresh consumes a running watch job without a status scan or full reconciliation", async () => {
+test("wait_for_fresh coalesces one proof follow-up for a running watch job without full scans or reembedding", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-fresh-followup-"),
   );
@@ -742,22 +762,28 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
     releaseWatch = resolve;
   });
   let blockWatchEmbedding = false;
+  let changedDocumentEmbeddings = 0;
   const statusInspections = [];
+  const indexRuns = [];
+  const startedJobIds = [];
+  const submissions = [];
   const backend = new DaemonBackend({
     version: "1.0.0",
     modelPoolOptions: {
       createModel: () =>
         new TestEmbeddingModel(async (contents) => {
           if (
-            blockWatchEmbedding &&
             contents.some(
               (content) =>
                 content.kind === "text" &&
                 content.text.includes("changedAnswer"),
             )
           ) {
-            markWatchStarted();
-            await watchReleased;
+            changedDocumentEmbeddings++;
+            if (blockWatchEmbedding) {
+              markWatchStarted();
+              await watchReleased;
+            }
           }
         }),
     },
@@ -766,7 +792,17 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
       return {
         ...created,
         root: created.root,
-        index: (indexOptions) => created.index(indexOptions),
+        index: async (indexOptions) => {
+          indexRuns.push({
+            changedPaths: indexOptions.changedPaths
+              ? [...indexOptions.changedPaths]
+              : undefined,
+            verifySourcePaths: indexOptions.verifySourcePaths
+              ? [...indexOptions.verifySourcePaths]
+              : undefined,
+          });
+          return created.index(indexOptions);
+        },
         disableIndex: (infoOptions) => created.disableIndex(infoOptions),
         info: (infoOptions) => created.info(infoOptions),
         context: (contextOptions) => created.context(contextOptions),
@@ -777,6 +813,12 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
       statusInspections.push(args[2] ?? true);
       return await inspectRoot(...args);
     },
+    logger: {
+      event: (name, fields) => {
+        if (name === "job.started") startedJobIds.push(fields.job_id);
+      },
+      flush: async () => {},
+    },
     watchManagerFactory: (options) => {
       watcherOptions = options;
       return {
@@ -786,8 +828,17 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
       };
     },
   });
+  const submit = backend.scheduler.submit.bind(backend.scheduler);
+  t.mock.method(backend.scheduler, "submit", (input) => {
+    const submitted = submit(input);
+    submissions.push(submitted);
+    return submitted;
+  });
   try {
     await backend.search(searchInput(root, "answer", "eventual"));
+    assert.deepEqual(indexRuns, []);
+    assert.deepEqual(startedJobIds, []);
+    assert.deepEqual(submissions, []);
     statusInspections.length = 0;
     const canonicalRoot = await realpath(root);
     await writeFile(source, "export const changedAnswer = 43;\n");
@@ -809,12 +860,29 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
       autoUpdate: true,
     });
     assert.equal(eventualResult.freshness, "possibly_stale");
-    assert.deepEqual(eventualResult.indexing, {
+    assert.deepEqual(eventualResult.indexing, { state: "queued" });
+    assert.equal(submissions.length, 2);
+    assert.equal(submissions[0].job.id, watchJob.id);
+    const proofJob = submissions[1].job;
+    assert.notEqual(proofJob.id, watchJob.id);
+    assert.equal(proofJob.state, "queued");
+    assert.equal(proofJob.reason, "watch");
+    assert.equal(backend.scheduler.get(watchJob.id).state, "running");
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, watchJob.id);
+    assert.deepEqual(backend.scheduler.snapshot(), { queued: 1, running: 1 });
+    assert.deepEqual(startedJobIds, [watchJob.id]);
+    // Re-observing the same old indexed source must reuse that queued proof.
+    const repeated = await backend.search(
+      searchInput(root, "answer", "eventual"),
+    );
+    assert.deepEqual(repeated.indexing, {
       state: "running",
       completed: 0,
       total: 1,
     });
+    assert.equal(submissions.length, 2);
     assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, watchJob.id);
+    assert.deepEqual(backend.scheduler.snapshot(), { queued: 1, running: 1 });
     let searchSettled = false;
     const search = backend
       .search({
@@ -834,9 +902,17 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
     const result = await search;
     assert.equal(result.freshness, "fresh");
     assert.match(result.result.items[0].content, /changedAnswer/);
-    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, watchJob.id);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, proofJob.id);
     assert.equal(backend.scheduler.getByRoot(canonicalRoot).reason, "watch");
-    assert.deepEqual(statusInspections, [false, false]);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).state, "succeeded");
+    assert.deepEqual(startedJobIds, [watchJob.id, proofJob.id]);
+    assert.equal(submissions.length, 2);
+    assert.equal(changedDocumentEmbeddings, 1);
+    assert.deepEqual(indexRuns, [
+      { changedPaths: [source], verifySourcePaths: undefined },
+      { changedPaths: [source], verifySourcePaths: [source] },
+    ]);
+    assert.deepEqual(statusInspections, [false, false, false, false]);
   } finally {
     releaseWatch();
     await backend.close();
@@ -1606,7 +1682,7 @@ test("unknown drift after a full proof is preserved for a follow-up", async () =
   }
 });
 
-test("wait_for_fresh does not replace a failed path update with a full scan", async () => {
+test("new source evidence retries a failed path update once, without full scans or repeated same-content jobs", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-fresh-path-failure-"),
   );
@@ -1667,21 +1743,39 @@ test("wait_for_fresh does not replace a failed path update with a full scan", as
     const canonicalRoot = await realpath(root);
     await backend.scheduler.waitForRootIdle(canonicalRoot);
     const failedJob = backend.scheduler.getByRoot(canonicalRoot);
+    assert.equal(failedJob.state, "failed");
+    assert.deepEqual(scopes, ["paths"]);
 
     const eventual = await backend.search({
       ...searchInput(root, "answer", "eventual"),
       autoUpdate: true,
     });
     assert.equal(eventual.freshness, "possibly_stale");
-    assert.equal(eventual.indexing.state, "failed");
-    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, failedJob.id);
-    assert.deepEqual(scopes, ["paths"]);
+    assert.equal(eventual.indexing.state, "running");
+    const repairJob = backend.scheduler.getByRoot(canonicalRoot);
+    assert.notEqual(repairJob.id, failedJob.id);
+    await backend.scheduler.waitForRootIdle(canonicalRoot);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, repairJob.id);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).state, "failed");
+    assert.deepEqual(scopes, ["paths", "paths"]);
+
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const sameContent = await backend.search(
+        searchInput(root, "answer", "eventual"),
+      );
+      assert.equal(sameContent.freshness, "possibly_stale");
+      assert.equal(sameContent.indexing.state, "failed");
+      assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, repairJob.id);
+      assert.equal(backend.scheduler.hasActiveRoot(canonicalRoot), false);
+    }
 
     await assert.rejects(
       backend.search(searchInput(root, "answer", "wait_for_fresh")),
       /path update failed/,
     );
-    assert.deepEqual(scopes, ["paths"]);
+    assert.deepEqual(scopes, ["paths", "paths"]);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, repairJob.id);
+    assert.equal(backend.scheduler.hasActiveRoot(canonicalRoot), false);
   } finally {
     await backend.close();
     await rm(temporaryDirectory, { recursive: true, force: true });

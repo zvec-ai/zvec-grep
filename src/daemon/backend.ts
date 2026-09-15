@@ -1,9 +1,11 @@
 import { createZvecGrep } from "../engine/service/index.js";
 import type {
   CreateZvecGrepOptions,
+  ZvecGrepContextOptions,
   ZvecGrepInfoResult,
 } from "../engine/service/types.js";
 import { isEngineError } from "../engine/errors.js";
+import { awaitWithSignal } from "../engine/utils/abort.js";
 import {
   readGlobalConfig,
   resolveEmbeddingRuntimeOptions,
@@ -15,7 +17,10 @@ import type {
   EmbeddingModel,
   EmbeddingModelInfo,
 } from "../engine/models/index.js";
-import { resolveEmbeddingReference } from "../engine/models/index.js";
+import {
+  getEmbeddingModelCatalogEntry,
+  resolveEmbeddingReference,
+} from "../engine/models/index.js";
 import type {
   FileScanDiagnostics,
   WorkspaceIndexEmbeddingSchema,
@@ -70,6 +75,11 @@ import {
 import type { RootRuntime } from "./root-runtime.js";
 import { WatchManager, type WatchManagerOptions } from "./watch-manager.js";
 import { rootIdentity, type DaemonLogger } from "./logger.js";
+import { searchCurrentSource } from "../search/current-source.js";
+import {
+  canUseCurrentSource,
+  isLocalIndexUnavailable,
+} from "../search/default-policy.js";
 import {
   RemoteEmbeddingAuthorizationManager,
   RemoteEmbeddingAuthorizationStore,
@@ -82,6 +92,8 @@ import {
 } from "../authorization/index.js";
 
 const DEFAULT_LOCAL_EMBEDDING = "local/potion-code-16m-v2";
+const DEFAULT_SEMANTIC_PREPARATION_BUDGET_MS = 1_000;
+const MAX_FRESHNESS_ROUNDS = 3;
 
 export type DaemonBackendOptions = {
   version: string;
@@ -90,6 +102,8 @@ export type DaemonBackendOptions = {
   schedulerOptions?: JobSchedulerOptions;
   readSessionIdleTtlMs?: number;
   runtimeIdleTtlMs?: number;
+  /** Internal default-search policy, not a deadline for storage or indexing. */
+  semanticPreparationBudgetMs?: number;
   createService?: typeof createZvecGrep;
   watchManagerFactory?: (options: WatchManagerOptions) => WatchManager;
   logger?: DaemonLogger;
@@ -119,12 +133,26 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   >();
   private readonly watchers = new Map<string, WatchManager>();
   private readonly indexCoordinators = new Map<string, IndexCoordinator>();
+  private readonly retainedIndexJobs = new Set<string>();
+  private readonly sourceSearches = new Set<
+    Promise<ZvecGrepSearchResult | undefined>
+  >();
+  private readonly sourceSearchShutdown = new AbortController();
   private readonly droppingRoots = new Set<string>();
   private readonly authorizationManager: RemoteEmbeddingAuthorizationManager;
   private shuttingDown = false;
   private closePromise?: Promise<void>;
 
   constructor(private readonly options: DaemonBackendOptions) {
+    if (
+      options.semanticPreparationBudgetMs !== undefined &&
+      (!Number.isFinite(options.semanticPreparationBudgetMs) ||
+        options.semanticPreparationBudgetMs <= 0)
+    ) {
+      throw new Error(
+        "Semantic preparation budget must be a positive finite duration.",
+      );
+    }
     this.authorizationManager = new RemoteEmbeddingAuthorizationManager(
       options.authorizationStore ??
         new RemoteEmbeddingAuthorizationStore({
@@ -235,7 +263,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       const provider =
         activeRuntime?.embeddingProvider() ??
         discoveredInfo.workspaceIndex?.embedding?.provider;
-      if (provider && provider !== "qwen") {
+      // Without a remote schema there is nothing to authorize. In particular,
+      // a cold/disabled source-only search must not take a status lock and
+      // create a locks directory just to discover the same absence again.
+      if (provider !== "qwen") {
         return undefined;
       }
     }
@@ -342,6 +373,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           options.authorization,
           signal,
         );
+        signal.throwIfAborted();
         this.lastScanDiagnostics.set(
           runtime.canonicalRoot,
           proof.scanDiagnostics,
@@ -353,6 +385,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         }
       },
     });
+    this.retainIndexJob(runtime, submitted.job);
     const job = input.wait
       ? await this.scheduler.wait(submitted.job.id, options.onProgress)
       : submitted.job;
@@ -431,15 +464,28 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
 
   async search(
     input: NormalizedSearchInput,
-    options: { authorization?: RemoteEmbeddingOperationPermit } = {},
+    options: {
+      authorization?: RemoteEmbeddingOperationPermit;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<ZvecGrepSearchResult> {
+    options.signal?.throwIfAborted();
     const startedAt = Date.now();
     const requestedRoot = await resolveRequestedRoot(input.root, false);
+    options.signal?.throwIfAborted();
     this.assertRootNotDropping(requestedRoot);
+    const currentSource = await this.tryCurrentSource(
+      input,
+      requestedRoot,
+      options.signal,
+    );
+    if (currentSource) return currentSource;
     const runtime = await this.runtimeManager.activate(requestedRoot);
     const releaseRuntimeActivity = runtime.beginActivity();
     try {
+      options.signal?.throwIfAborted();
       const searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
+      options.signal?.throwIfAborted();
       const currentModelLoadRequest = runtime.currentModelLoadRequest();
       const defaultModelLoadRequest = searchInfo.indexed
         ? this.searchModelLoadRequest(searchInfo, {})
@@ -455,21 +501,44 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         : this.overrideActiveModelLoadRequest(defaultModelLoadRequest, input);
       runtime.updateModelLoadRequest(defaultModelLoadRequest);
       this.ensureWatcher(runtime);
-      await runtime.probeInitialFreshness(
-        async () => {
-          const info = await this.inspectRoot(runtime.canonicalRoot, true);
-          this.statusCache.set(runtime.canonicalRoot, info);
-          return indexStatusIsFresh(info);
-        },
-        (initialFreshness) => {
-          this.options.logger?.event(
-            `runtime.initial_probe_${initialFreshness}`,
-            {
-              root_id: rootIdentity(runtime.canonicalRoot),
-            },
-          );
-        },
+      await awaitWithSignal(
+        runtime.probeInitialFreshness(
+          async () => {
+            const info = await this.inspectRoot(runtime.canonicalRoot, true);
+            this.statusCache.set(runtime.canonicalRoot, info);
+            return indexStatusIsFresh(info);
+          },
+          (initialFreshness) => {
+            this.options.logger?.event(
+              `runtime.initial_probe_${initialFreshness}`,
+              {
+                root_id: rootIdentity(runtime.canonicalRoot),
+              },
+            );
+          },
+        ),
+        options.signal,
       );
+      options.signal?.throwIfAborted();
+      // The normal initial probe can reveal an initialized but wholly failed
+      // or pending local index. Reuse that evidence, without another status
+      // scan or any model preparation for the current-source response.
+      const initialSource = await this.tryCurrentSource(
+        input,
+        requestedRoot,
+        options.signal,
+        this.statusCache.get(runtime.canonicalRoot),
+      );
+      if (initialSource) return initialSource;
+      const semanticBudgetMs =
+        searchModelLoadRequest.model.provider === "local" &&
+        input.freshness !== "wait_for_fresh" &&
+        input.semanticPolicy !== "wait" &&
+        (input.queries?.length ?? 0) > 0 &&
+        !input.routes.some((route) => route.mode === "vector")
+          ? (this.options.semanticPreparationBudgetMs ??
+            DEFAULT_SEMANTIC_PREPARATION_BUDGET_MS)
+          : undefined;
       let updateJob: IndexJobSnapshot | undefined;
       const executeSearch = () =>
         withRemoteEmbeddingOperationPermit(options.authorization, () =>
@@ -502,14 +571,19 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
               autoUpdate: false,
             },
             searchModelLoadRequest,
+            { signal: options.signal, semanticBudgetMs },
           ),
         );
       let result;
       if (input.freshness === "wait_for_fresh") {
-        while (true) {
+        for (let round = 0; round < MAX_FRESHNESS_ROUNDS; round++) {
           updateJob =
-            (await this.waitForFresh(runtime, options.authorization, input)) ??
-            updateJob;
+            (await this.waitForFresh(
+              runtime,
+              options.authorization,
+              input,
+              options.signal,
+            )) ?? updateJob;
           const beforeSearch = runtime.snapshot();
           result = await executeSearch();
           const afterSearch = runtime.snapshot();
@@ -520,11 +594,32 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           ) {
             break;
           }
+          if (round === MAX_FRESHNESS_ROUNDS - 1) {
+            throw sourceFreshnessUnverified();
+          }
         }
       } else {
         result = await executeSearch();
       }
+      if (!result) throw sourceFreshnessUnverified();
+      options.signal?.throwIfAborted();
+      if (input.autoUpdate && runtime.sourceInvalidations.hasPending()) {
+        try {
+          updateJob =
+            (await this.scheduleSourceRepair(runtime, options.signal)) ??
+            updateJob;
+        } catch {
+          options.signal?.throwIfAborted();
+          // Background preparation must not discard an already completed
+          // local search. Pending evidence keeps the response possibly_stale;
+          // an explicit freshness wait still reports the underlying failure.
+          this.options.logger?.event("source_repair.preparation_failed", {
+            root_id: rootIdentity(runtime.canonicalRoot),
+          });
+        }
+      }
       if (
+        !runtime.sourceInvalidations.hasPending() &&
         runtime.needsReconciliation() &&
         input.autoUpdate &&
         (runtime.requiresFullReconciliation() ||
@@ -546,6 +641,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             "background_reconcile",
             false,
             options.authorization,
+            options.signal,
           );
         }
       }
@@ -555,6 +651,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         job?.reason !== "background_reconcile" &&
         (job?.state === "queued" || job?.state === "running");
       const freshness =
+        result.items.some((item) => item.status === "possibly_stale") ||
         runtime.hasKnownChanges() ||
         runtimeSnapshot.watcherPending ||
         activeKnownChangeJob
@@ -576,6 +673,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             : undefined,
         result,
       };
+      options.signal?.throwIfAborted();
       this.options.logger?.event("search.completed", {
         root_id: rootIdentity(runtime.canonicalRoot),
         duration_ms: Date.now() - startedAt,
@@ -701,12 +799,126 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
   }
 
+  private async tryCurrentSource(
+    input: NormalizedSearchInput,
+    requestedRoot: string,
+    signal?: AbortSignal,
+    knownInfo?: ZvecGrepInfoResult,
+  ): Promise<ZvecGrepSearchResult | undefined> {
+    if (!canUseCurrentSource(input)) return undefined;
+    const sourceSignal = signal
+      ? AbortSignal.any([signal, this.sourceSearchShutdown.signal])
+      : this.sourceSearchShutdown.signal;
+    sourceSignal.throwIfAborted();
+    const query = input.queries![0]!;
+    const sourceOptions: ZvecGrepContextOptions = {
+      limit: input.limit,
+      globs: normalizePlainStringList(input.globs),
+      insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
+      fileTypes: normalizePlainStringList(input.fileTypes),
+      excludedFileTypes: normalizePlainStringList(input.excludedFileTypes),
+      hidden: input.hidden,
+      noIgnore: input.noIgnore,
+      ignoreFiles: normalizePlainStringList(input.ignoreFiles),
+      maxDepth: input.maxDepth,
+      maxFileSizeBytes: input.maxFileSizeBytes,
+      follow: input.follow,
+      modifiedAfter: input.modifiedAfter,
+      modifiedBefore: input.modifiedBefore,
+    };
+    const operation = Promise.resolve().then(() => {
+      sourceSignal.throwIfAborted();
+      return this.currentSourceIfUnavailable(
+        requestedRoot,
+        query,
+        sourceOptions,
+        sourceSignal,
+        knownInfo,
+      );
+    });
+    // Metadata checks and subprocess work share backend shutdown ownership.
+    // Cancellation drains the actual operation, never detaches a live rg child.
+    this.sourceSearches.add(operation);
+    try {
+      const result = await operation;
+      sourceSignal.throwIfAborted();
+      return result;
+    } catch (error) {
+      sourceSignal.throwIfAborted();
+      throw error;
+    } finally {
+      this.sourceSearches.delete(operation);
+    }
+  }
+
+  private async currentSourceIfUnavailable(
+    requestedRoot: string,
+    query: string,
+    sourceOptions: ZvecGrepContextOptions,
+    signal: AbortSignal,
+    knownInfo?: ZvecGrepInfoResult,
+  ): Promise<ZvecGrepSearchResult | undefined> {
+    const active = this.runtimeManager.getByRequestedRoot(requestedRoot);
+    if (active?.embeddingProvider() && active.embeddingProvider() !== "local")
+      return undefined;
+    const info =
+      knownInfo ??
+      (active ? this.statusCache.get(active.canonicalRoot) : undefined) ??
+      (await this.inspectRoot(requestedRoot, false));
+    signal.throwIfAborted();
+    // Read-only metadata is sufficient for a missing index. For an initialized
+    // one, only an existing initial-probe status can establish zero usable
+    // indexed files; don't add a full-tree scan to ordinary warm queries.
+    if (!isLocalIndexUnavailable(info, active?.embeddingProvider())) return;
+    const canonicalRoot = await resolveRequestedRoot(info.root, false);
+    signal.throwIfAborted();
+    const canonicalRuntime =
+      this.runtimeManager.getByCanonicalRoot(canonicalRoot);
+    if (!isLocalIndexUnavailable(info, canonicalRuntime?.embeddingProvider()))
+      return;
+    this.assertRootNotDropping(canonicalRoot);
+    const startedAt = Date.now();
+    const current = await searchCurrentSource({
+      root: requestedRoot,
+      query,
+      options: sourceOptions,
+      includeKeywords: true,
+      allowFileLookup: false,
+      signal,
+    });
+    signal.throwIfAborted();
+    this.assertRootNotDropping(canonicalRoot);
+    if (current.kind !== "text")
+      throw new Error(
+        "Current-source text search returned a file-only result.",
+      );
+    const result = {
+      ...current.result,
+      diagnostics: {
+        ...current.result.diagnostics,
+        semantic: { status: "skipped", reason: "index_unavailable" } as const,
+        emptyReason: current.result.items.length
+          ? undefined
+          : ("semantic_incomplete" as const),
+      },
+    };
+    this.options.logger?.event("current_source.completed", {
+      root_id: rootIdentity(canonicalRoot),
+      duration_ms: Date.now() - startedAt,
+      result_count: result.items.length,
+    });
+    return { root: result.root, freshness: "fresh", result };
+  }
+
   async close(): Promise<void> {
     if (this.closePromise) {
       return this.closePromise;
     }
     this.shuttingDown = true;
-    this.closePromise = (async () => {
+    // Install single-flight ownership before synchronous abort listeners can
+    // request shutdown again. All actual source work must drain before teardown.
+    this.closePromise = Promise.resolve().then(async () => {
+      await Promise.allSettled(this.sourceSearches);
       await Promise.all(
         [...this.watchers.values()].map((watcher) => watcher.close()),
       );
@@ -720,7 +932,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       await this.modelPool.close();
       this.lastScanDiagnostics.clear();
       this.workspaceRuntimeCache.clear();
-    })();
+    });
+    this.sourceSearchShutdown.abort(
+      new DaemonError("DAEMON_SHUTTING_DOWN", "The daemon is shutting down."),
+    );
     return this.closePromise;
   }
 
@@ -801,33 +1016,64 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         device: input.runtimeOverridesAreEphemeral ? undefined : input.device,
         daemonInstanceToken: this.runtimeManager.instanceToken,
       });
-      const result = await runtime.withWrite(() =>
-        withRemoteEmbeddingOperationPermit(authorization, () =>
-          service!.index({
-            root: runtime.canonicalRoot,
-            rebuild: input.rebuild,
-            resetPaths: input.resetPaths,
-            globs: normalizePlainStringList(input.globs),
-            insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
-            fileTypes: normalizePlainStringList(input.fileTypes),
-            excludedFileTypes: normalizePlainStringList(
-              input.excludedFileTypes,
-            ),
-            hidden: input.hidden,
-            noIgnore: input.noIgnore,
-            ignoreFiles: normalizePlainStringList(input.ignoreFiles),
-            maxDepth: input.maxDepth,
-            maxFileSizeBytes: input.maxFileSizeBytes,
-            follow: input.follow,
-            embeddingConcurrency: input.embeddingConcurrency,
-            changedPaths: input.changedPaths,
-            signal,
-            onProgress: report,
-            onWriterContext: (context) =>
-              runtime.setWriterContext(context, lease.key),
-          }),
-        ),
-      );
+      const result = await runtime.withWrite(async () => {
+        // Capture after model preparation, once this operation owns the write
+        // generation. Keep exact paths independently of collapsed watcher
+        // batches and verify them even in a full metadata-based reconcile.
+        const invalidations = runtime.sourceInvalidations.pending();
+        runtime.sourceInvalidations.claim(invalidations);
+        const verifySourcePaths = invalidations.map(
+          ({ evidence }) => evidence.indexed.absolutePath,
+        );
+        const changedPaths = input.changedPaths
+          ? [...new Set([...input.changedPaths, ...verifySourcePaths])]
+          : undefined;
+        const indexed = await withRemoteEmbeddingOperationPermit(
+          authorization,
+          () =>
+            service!.index({
+              root: runtime.canonicalRoot,
+              rebuild: input.rebuild,
+              resetPaths: input.resetPaths,
+              globs: normalizePlainStringList(input.globs),
+              insensitiveGlobs: normalizePlainStringList(
+                input.insensitiveGlobs,
+              ),
+              fileTypes: normalizePlainStringList(input.fileTypes),
+              excludedFileTypes: normalizePlainStringList(
+                input.excludedFileTypes,
+              ),
+              hidden: input.hidden,
+              noIgnore: input.noIgnore,
+              ignoreFiles: normalizePlainStringList(input.ignoreFiles),
+              maxDepth: input.maxDepth,
+              maxFileSizeBytes: input.maxFileSizeBytes,
+              follow: input.follow,
+              embeddingConcurrency: input.embeddingConcurrency,
+              changedPaths,
+              verifySourcePaths:
+                verifySourcePaths.length > 0 ? verifySourcePaths : undefined,
+              signal,
+              onProgress: report,
+              onWriterContext: (context, preflight) =>
+                runtime.setWriterContext(context, lease.key, preflight),
+            }),
+        );
+        // index() has finalized writes and drained actual writer readers here.
+        // Never acknowledge a canceled operation or a newer observed version.
+        signal?.throwIfAborted();
+        if (indexed.sourceFreshness) {
+          runtime.sourceInvalidations.recordUnverified(
+            invalidations,
+            indexed.sourceFreshness,
+          );
+          runtime.sourceInvalidations.acknowledge(
+            invalidations,
+            indexed.sourceFreshness,
+          );
+        }
+        return indexed;
+      });
       scanDiagnostics = result.scanDiagnostics;
     } finally {
       try {
@@ -879,12 +1125,16 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     reason: "background_reconcile" | "fresh_query",
     wait: boolean,
     authorization?: RemoteEmbeddingOperationPermit,
+    waitSignal?: AbortSignal,
   ): Promise<IndexJobSnapshot> {
+    waitSignal?.throwIfAborted();
     const createsWork =
       !this.scheduler.hasActiveRoot(runtime.canonicalRoot) ||
       input.rebuild === true;
     const probeBeforeUpdate =
-      reason === "background_reconcile" && runtime.canProbeFullReconciliation();
+      reason === "background_reconcile" &&
+      !runtime.sourceInvalidations.hasPending() &&
+      runtime.canProbeFullReconciliation();
     let targetRevision =
       createsWork && !probeBeforeUpdate
         ? runtime.markDirty()
@@ -911,6 +1161,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           authorization,
           signal,
         );
+        signal.throwIfAborted();
         if (proof.reconciled) {
           runtime.markReconciled(targetRevision, proof.reconciliationEpoch);
         } else {
@@ -918,9 +1169,16 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         }
       },
     });
+    this.retainIndexJob(runtime, submitted.job);
     if (!wait) return submitted.job;
-    const job = await this.scheduler.wait(submitted.job.id);
-    await this.scheduler.waitForRootIdle(runtime.canonicalRoot);
+    const job = await awaitWithSignal(
+      this.scheduler.wait(submitted.job.id),
+      waitSignal,
+    );
+    await awaitWithSignal(
+      this.scheduler.waitForRootIdle(runtime.canonicalRoot),
+      waitSignal,
+    );
     return job;
   }
 
@@ -931,6 +1189,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const coordinator = new IndexCoordinator({
       runtime,
       scheduler: this.scheduler,
+      onSubmitted: (job) => this.retainIndexJob(runtime, job),
       run: async (changes, report, signal) => {
         const changedPaths = [
           ...changes.touchedFiles,
@@ -945,7 +1204,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         if (!automaticAuthorization.allowed) {
           throw new DaemonError(
             "REMOTE_EMBEDDING_AUTH_REQUIRED",
-            "A Workspace Remote Embedding grant is required for file-watcher index updates.",
+            "A Workspace Remote Embedding grant is required for automatic source index updates.",
           );
         }
         return await this.runIndex(
@@ -1014,6 +1273,66 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     runtime.setWatcherActive(true);
   }
 
+  private retainIndexJob(runtime: RootRuntime, job: IndexJobSnapshot): void {
+    if (this.retainedIndexJobs.has(job.id)) return;
+    const release = runtime.beginActivity();
+    this.retainedIndexJobs.add(job.id);
+    const finish = () => {
+      this.retainedIndexJobs.delete(job.id);
+      release();
+    };
+    // Submission and registration are synchronous: a queued job, a scheduler
+    // retry or a coalesced follow-up must retain its runtime until terminal.
+    void this.scheduler.wait(job.id).then(finish, finish);
+  }
+
+  private async scheduleSourceRepair(
+    runtime: RootRuntime,
+    signal?: AbortSignal,
+    required = false,
+  ): Promise<IndexJobSnapshot | undefined> {
+    signal?.throwIfAborted();
+    if (runtime.sourceInvalidations.unattempted().length === 0) return;
+    // A query-only one-shot authorization never permits automatic source
+    // upload. Reuse the watcher policy and recheck it in the actual job.
+    const authorization = await this.automaticIndexAuthorization(runtime);
+    signal?.throwIfAborted();
+    if (!authorization.allowed) {
+      if (required) {
+        throw new DaemonError(
+          "REMOTE_EMBEDDING_AUTH_REQUIRED",
+          "A Workspace Remote Embedding grant is required to repair changed source files.",
+        );
+      }
+      return;
+    }
+    const coordinator = this.indexCoordinators.get(runtime.canonicalRoot);
+    if (!coordinator)
+      throw new DaemonError(
+        "DAEMON_SHUTTING_DOWN",
+        "Source repair is unavailable while the daemon is shutting down.",
+      );
+    // Re-read after the asynchronous authorization check; another search may
+    // have claimed the same evidence. No await separates claim and enqueue.
+    const claimed = runtime.sourceInvalidations.claim(
+      runtime.sourceInvalidations.unattempted(),
+    );
+    if (claimed.length === 0) return;
+    try {
+      return coordinator.enqueue({
+        touchedFiles: claimed.map(
+          ({ evidence }) => evidence.indexed.absolutePath,
+        ),
+        rescanDirectories: [],
+        deletedPrefixes: [],
+        forceFullReconcile: false,
+      });
+    } catch (error) {
+      runtime.sourceInvalidations.releaseClaims(claimed);
+      throw error;
+    }
+  }
+
   private async settleKnownChanges(runtime: RootRuntime): Promise<void> {
     const watcher = this.watchers.get(runtime.canonicalRoot);
     while (true) {
@@ -1041,12 +1360,23 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const info = await this.inspectRoot(root, false);
     const schema = info.workspaceIndex?.embedding;
     if (!schema || schema.provider !== "qwen") return { allowed: true };
-    const modelInfo = await this.loadEmbeddingModelInfo(
-      this.searchModelLoadRequest(info, {}),
-    );
+    // Authorization depends on the configured destination, not a loaded model
+    // or API key. In particular, local FTS must not start/await remote model
+    // construction just to decide whether background source repair is allowed.
+    const request = this.searchModelLoadRequest(info, {});
+    const reference = embeddingModelReference(request.model);
+    const catalog = getEmbeddingModelCatalogEntry(reference);
+    const endpoint =
+      request.runtime?.endpoint?.trim() ??
+      (catalog?.backend === "qwen" ? catalog.defaultEndpoint : undefined);
     const plan = await planRemoteIndexAuthorization({
       info,
-      model: modelInfo,
+      model: {
+        reference,
+        provider: request.model.provider,
+        name: request.model.name,
+        endpoint,
+      },
       needsUpdate: true,
       store: this.authorizationManager.store,
     });
@@ -1062,12 +1392,45 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     runtime: RootRuntime,
     authorization?: RemoteEmbeddingOperationPermit,
     runtimeOverrides: Pick<NormalizedSearchInput, "apiKey" | "device"> = {},
+    signal?: AbortSignal,
   ): Promise<IndexJobSnapshot | undefined> {
     let updateJob: IndexJobSnapshot | undefined;
-    while (true) {
-      await this.settleKnownChanges(runtime);
+    for (let round = 0; round < MAX_FRESHNESS_ROUNDS; round++) {
+      signal?.throwIfAborted();
+      await awaitWithSignal(this.settleKnownChanges(runtime), signal);
       if (!runtime.needsReconciliation()) {
         return updateJob;
+      }
+      if (runtime.sourceInvalidations.hasPending()) {
+        const repairJob = await this.scheduleSourceRepair(
+          runtime,
+          signal,
+          true,
+        );
+        if (!repairJob) {
+          if (this.scheduler.hasActiveRoot(runtime.canonicalRoot)) continue;
+          const current = this.scheduler.getByRoot(runtime.canonicalRoot);
+          if (current?.state === "failed" || current?.state === "cancelled") {
+            throw new DaemonError(
+              current.error?.code ?? "INDEX_FAILED",
+              current.error?.message ??
+                "Source repair did not complete successfully.",
+            );
+          }
+          throw sourceFreshnessUnverified();
+        }
+        updateJob = await awaitWithSignal(
+          this.scheduler.wait(repairJob.id),
+          signal,
+        );
+        if (updateJob.state !== "succeeded") {
+          throw new DaemonError(
+            updateJob.error?.code ?? "INDEX_FAILED",
+            updateJob.error?.message ??
+              "Source repair did not complete successfully.",
+          );
+        }
+        continue;
       }
       if (
         !runtime.requiresFullReconciliation() ||
@@ -1075,7 +1438,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         this.scheduler.getByRoot(runtime.canonicalRoot)?.state === "failed" ||
         this.scheduler.getByRoot(runtime.canonicalRoot)?.state === "cancelled"
       ) {
-        const freshness = await this.probeCurrentFreshness(runtime);
+        const freshness = await awaitWithSignal(
+          this.probeCurrentFreshness(runtime),
+          signal,
+        );
         if (freshness === "fresh") {
           return updateJob;
         }
@@ -1102,6 +1468,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         "fresh_query",
         true,
         authorization,
+        signal,
       );
       if (updateJob.state !== "succeeded") {
         throw new DaemonError(
@@ -1111,6 +1478,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         );
       }
     }
+    if (!runtime.needsReconciliation() && !runtime.snapshot().watcherPending) {
+      return updateJob;
+    }
+    throw sourceFreshnessUnverified();
   }
 
   private async loadEmbeddingModelInfo(
@@ -1333,6 +1704,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       includeStatus,
     );
   }
+}
+
+function sourceFreshnessUnverified(): DaemonError {
+  return new DaemonError(
+    "INDEX_FRESHNESS_UNVERIFIED",
+    "Source freshness could not be verified after bounded reconciliation. Files may still be changing or could not be indexed; inspect index status and retry with --index.",
+  );
 }
 
 function readWorkspaceEmbeddingRuntime(

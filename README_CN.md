@@ -66,6 +66,10 @@
 
 ## 🚀 动手体验
 
+以下快速开始使用已发布的 npm 版本。本源码工作区的开发版采用不同的搜索优先 CLI；
+源码安装用户请先阅读下方[开发版](#development-build)，不要直接套用已发布版本的命令。
+可以通过 `zg --help` 确认已安装版本的接口。
+
 ### 1. 准备示例书架
 
 ```bash
@@ -144,6 +148,32 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `alice-in-wonderland.txt` 前面。
+
+<a id="development-build"></a>
+
+### 开发版
+
+本源码工作区使用 `zg <query>` 搜索，维护操作使用长选项，不把已发布版本的子命令保留为兼容别名：
+`zg query connection pool` 会向 stderr 警告，并搜索完整的 `query connection pool`。
+终端默认自动采用可读格式，`--compact` 可选择管道输出格式。构建并安装本源码工作区后：
+
+```bash
+zg connection pool
+zg --index                 # 可选的显式索引维护
+zg --install --target opencode --yes
+```
+
+精确文件名和代码符号查找无需索引或模型。其他普通 `auto` 查询可以在后台准备缺失的本地索引时，
+先返回当前文件的字面或有界关键词命中。关键词结果是近似匹配，以 `matchedBy=keyword` 标记，
+并提示覆盖不完整。没有本地证据时，初次就绪等待最多 8 秒；已有本地模型索引另有 1,000 毫秒的
+查询模型准备预算，超出后返回本地证据并提示语义覆盖不完整。这些都不是端到端耗时保证。
+显式检索路由和新鲜度等待保持索引工作流，不扩大远程授权。
+
+普通单查询 MCP 搜索也可以不依赖索引或模型读取当前文件，但不会隐式创建持久索引。
+默认 embedding 模型不变。Workspace watcher 默认在空闲四小时后释放；
+模型池另有独立的 15 分钟空闲超时。完整边界与控制项请见开发版
+[CLI 指南](./docs/02-cli.md)、[MCP 合同](./docs/03-mcp.md#zvec_grep_search)及
+[Server 生命周期](./docs/06-server.md#server-lifecycle)。
 
 <a id="benchmarks"></a>
 
