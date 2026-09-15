@@ -134,12 +134,30 @@ function globPatternMatches(
   return globToRegExp(pattern, caseInsensitive).test(path);
 }
 
+const GLOB_REGEXP_CACHE_LIMIT = 1024;
+const globRegExpCache = new Map<string, RegExp>();
+
 function globToRegExp(pattern: string, caseInsensitive = false): RegExp {
+  const cacheKey = `${caseInsensitive ? "i:" : "s:"}${pattern}`;
+  const cached = globRegExpCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   let expression = pattern.includes("/") ? "^" : "^(?:.*/)?";
-
   expression += globFragmentToRegExp(pattern);
+  const regex = new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined);
 
-  return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined);
+  // Evict the oldest entry when cache limit is exceeded to prevent unbounded memory growth
+  if (globRegExpCache.size >= GLOB_REGEXP_CACHE_LIMIT) {
+    const oldestKey = globRegExpCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      globRegExpCache.delete(oldestKey);
+    }
+  }
+  globRegExpCache.set(cacheKey, regex);
+
+  return regex;
 }
 
 function globFragmentToRegExp(pattern: string): string {
