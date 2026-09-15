@@ -83,7 +83,7 @@ test("daemon index limits never enter query models or persisted runtime", async 
   );
 });
 
-test("daemon resolves index defaults for local models before loading or scheduling", async (t) => {
+test("daemon resolves index defaults for local and remote models before loading or scheduling", async (t) => {
   setEnvironment(t, {
     ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "12",
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
@@ -125,12 +125,12 @@ test("daemon resolves index defaults for local models before loading or scheduli
   const remote = { embedding: "qwen/text-embedding-v4", apiKey: "test-key" };
   assert.equal(
     backend.indexModelLoadRequest(info, remote).embeddingConcurrency,
-    undefined,
+    12,
   );
   assert.equal(
-    backend.indexModelLoadRequest(info, { ...remote, embeddingConcurrency: 12 })
+    backend.indexModelLoadRequest(info, { ...remote, embeddingConcurrency: 3 })
       .embeddingConcurrency,
-    12,
+    3,
   );
 });
 

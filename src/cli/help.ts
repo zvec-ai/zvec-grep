@@ -41,7 +41,7 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_MODEL_CACHE: "Local embedding model cache directory",
   ZVEC_GREP_DEVICE: "Local embedding device: auto, cpu, metal, vulkan, or cuda",
   ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY:
-    "Local index-build/update embedding concurrency; explicit index CLI option takes precedence",
+    "Local/remote index-build/update embedding concurrency; explicit index CLI option takes precedence",
   DASHSCOPE_API_KEY: "Qwen credential fallback after ZVEC_GREP_API_KEY",
   QWEN_API_KEY: "Qwen credential fallback after DASHSCOPE_API_KEY",
   ZVEC_GREP_AUTHORIZATION_KEY_FILE:

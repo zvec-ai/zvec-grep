@@ -131,9 +131,9 @@ Core options:
 
 `--index-embedding-concurrency` controls embedding concurrency during index
 construction and updates. It is accepted only with `--index`, including under
-its compatibility name; search and `--rg` reject both names. For local models,
-`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` supplies the default for explicit and
-automatic indexing, including refresh. Query-vector inference is unaffected.
+its compatibility name; search and `--rg` reject both names. For local and remote
+models, `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` supplies the default for explicit
+and automatic indexing, including refresh. Query-vector inference is unaffected.
 
 The explicit CLI/API index option takes precedence over the index environment
 variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),
@@ -144,10 +144,11 @@ then the automatic default. Values must be positive integers.
 | llama.cpp | Contexts per indexing model instance, capped at 8; outer batches remain serial |
 | Transformers.js | Calls in flight on one cached pipeline, capped at 8; simultaneous native/GPU execution is not guaranteed |
 | Potion/model2vec | Concurrent batches, default 2, without the cap of 8; the worker pool has a separate limit based on available CPU parallelism |
-| Remote models | CLI option controls concurrent batches; the index environment variable does not apply |
+| Remote models | Both controls set the maximum concurrent batches without the cap of 8; existing adaptive scheduling and its defaults remain unchanged |
 
 For Potion/model2vec, requesting N concurrent batches does not guarantee N worker
-threads.
+threads. For remote models, rate limits or retryable failures may reduce batch
+concurrency below the configured maximum.
 
 Without an override, llama.cpp on CPU and Transformers.js use 1. llama.cpp uses
 `floor(freeVRAM × 0.25 / 150 MiB)` when its GPU runtime provides free VRAM,
@@ -277,6 +278,7 @@ refresh, authentication, and logs. See [MCP](./03-mcp.md) for the tool contract.
 | `ZVEC_GREP_ENDPOINT` | Remote Embedding endpoint |
 | `ZVEC_GREP_MODEL_CACHE` | Local model cache directory |
 | `ZVEC_GREP_DEVICE` | Local model device |
+| `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` | Default embedding concurrency for local and remote index construction/update, including automatic indexing and refresh |
 | `DASHSCOPE_API_KEY` | Qwen API-key fallback after `ZVEC_GREP_API_KEY` |
 | `QWEN_API_KEY` | Qwen API-key fallback after `DASHSCOPE_API_KEY` |
 | `QWEN_HOME` | Qwen Code configuration directory used by `zg --install` |

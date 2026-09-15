@@ -22,7 +22,7 @@ import {
   getEmbeddingModelCatalogEntry,
   normalizeLocalEmbeddingConcurrency,
   resolveEmbeddingReference,
-  resolveLocalEmbeddingParallelismOverride,
+  resolveIndexEmbeddingConcurrencyOverride,
   type CreateEmbeddingModelOptions,
   type EmbeddingModel,
   type EmbeddingModelInfo,
@@ -1529,11 +1529,10 @@ export function resolveIndexEmbeddingConcurrency(
   identity: EmbeddingModelIdentity,
   requested?: number,
 ): number | undefined {
-  if (identity.provider !== "local") return requested;
   const backend = getEmbeddingModelCatalogEntry(
     embeddingModelReference(identity),
   )?.backend;
-  return resolveLocalEmbeddingParallelismOverride({
+  return resolveIndexEmbeddingConcurrencyOverride({
     embeddingConcurrency: requested,
     legacyLlama: backend === "llama-cpp",
   });

@@ -20,7 +20,7 @@ export function normalizeLocalEmbeddingConcurrency(
 }
 
 /** Resolve index-stage configuration; individual backends apply their own cap. */
-export function resolveLocalEmbeddingParallelismOverride(
+export function resolveIndexEmbeddingConcurrencyOverride(
   options: { embeddingConcurrency?: number; legacyLlama?: boolean } = {},
 ): number | undefined {
   if (options.embeddingConcurrency !== undefined) {

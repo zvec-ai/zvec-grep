@@ -154,9 +154,9 @@ zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 
 `zg --index --index-embedding-concurrency <n>` and
 `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` control embedding concurrency while
-building or updating an index. The environment variable also applies to
-automatic indexing and refresh. These controls do not change query-vector
-inference. The CLI option is accepted only with `--index`;
+building or updating an index, for both local and remote models. The environment
+variable also applies to automatic indexing and refresh. These controls do not
+change query-vector inference. The CLI option is accepted only with `--index`;
 `--embedding-concurrency` remains a compatibility alias.
 
 For llama.cpp, the limit controls contexts per indexing model instance. For
@@ -164,8 +164,9 @@ Transformers.js, it controls calls in flight on one cached pipeline and does not
 guarantee simultaneous native/GPU execution. Both cap positive integer values
 at **8**. For Potion/model2vec, it controls concurrent embedding batches without
 that cap; the default is **2** and the CPU worker pool has its own capacity limit.
-For remote models, the CLI option controls concurrent batches; the environment
-variable does not apply.
+For remote models, both controls set the maximum concurrent batches without the
+cap of 8. Existing adaptive scheduling and its defaults remain unchanged; it may
+reduce concurrency after rate limits or retryable failures.
 
 The priority is the explicit CLI/API index option, then the index environment
 variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),

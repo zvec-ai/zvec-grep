@@ -149,14 +149,16 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 
 `zg --index --index-embedding-concurrency <n>` 和
 `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
-并发。环境变量也适用于自动建索引和刷新；这些设置不影响查询文本的向量推理。
+并发，对本地和远程模型均生效。环境变量也适用于自动建索引和刷新；这些设置
+不影响查询文本的向量推理。
 CLI 参数仅与 `--index` 一起使用，`--embedding-concurrency` 保留为兼容别名。
 
 对于 llama.cpp，上限控制索引模型实例的 context 数；对于 Transformers.js，
 控制同一缓存 pipeline 中尚未完成的调用数，不保证原生运行时或 GPU 同时执行。
 这两个后端取正整数，超过 **8** 按 8 处理。对于 Potion/model2vec，上限控制
 并发 Embedding 批次数，没有该 8 路限制；默认为 **2**，CPU worker 池还有独立
-容量上限。对于远程模型，CLI 参数控制并发批次数，环境变量不生效。
+容量上限。对于远程模型，CLI 参数和环境变量均控制并发批次数，也不额外限制为
+8；原有自适应调度及默认值保持不变，遇到限流或可重试错误时可能降低并发。
 
 优先级为：显式 CLI/API 索引参数 > 索引环境变量 >
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`（仅 llama.cpp 索引阶段）> 自动默认值。

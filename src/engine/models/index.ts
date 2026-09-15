@@ -10,7 +10,7 @@ export {
 export { createEmbeddingModel } from "./factory.js";
 export {
   normalizeLocalEmbeddingConcurrency,
-  resolveLocalEmbeddingParallelismOverride,
+  resolveIndexEmbeddingConcurrencyOverride,
 } from "./local-embedding-parallelism.js";
 export {
   getEmbeddingModelCatalogEntry,
