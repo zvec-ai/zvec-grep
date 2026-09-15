@@ -76,6 +76,15 @@ File-type filters narrow the result after glob rules. For example,
 `-g "docs/**" -t ts` selects TypeScript files inside `docs`, not every file in
 that directory.
 
+Path filtering uses bounded glob matching for both search filters and ignore
+rules. Engine limits are 4,096 characters per pattern, 32 levels of brace
+alternation, 32,768 characters per matched path, 10,000 rules per effective rule
+set, and 1 MiB per ignore file. MCP request limits may be stricter. Matching also
+has per-pattern and per-operation work limits; unusually expensive selections
+fail with an error instead of blocking indefinitely. Ignore-file validation
+errors identify the file and line. An invalid ignore rule stops the operation;
+it is never silently dropped. These protections require no client configuration.
+
 Without an explicit `--max-filesize`, indexing uses type-aware safety limits:
 1 MiB for code, 256 MiB for text and Markdown, 16 MiB for structured data, and
 10 MiB for images. An explicit value replaces the type-aware defaults for every

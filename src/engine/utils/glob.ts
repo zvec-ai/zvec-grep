@@ -1,4 +1,9 @@
+import { chargeGlobWork, checkGlobLength } from "./glob-budget.js";
+import { compileGlob } from "./glob-matcher.js";
+
 export function normalizePathPattern(pattern: string): string {
+  checkGlobLength(pattern, "pattern");
+  chargeGlobWork(pattern.length);
   let normalized = pattern.trim().replaceAll("\\", "/").replace(/\/+/g, "/");
 
   if (isAbsolutePathPattern(normalized)) {
@@ -13,6 +18,8 @@ export function normalizePathPattern(pattern: string): string {
 }
 
 export function normalizePathForMatch(path: string): string {
+  checkGlobLength(path, "path");
+  chargeGlobWork(path.length);
   return path.replaceAll("\\", "/").replace(/\/+/g, "/");
 }
 
@@ -126,125 +133,12 @@ function globPatternMatches(
 ): boolean {
   if (pattern.endsWith("/**")) {
     const directoryPattern = pattern.slice(0, -3);
-    if (globToRegExp(directoryPattern, caseInsensitive).test(path)) {
+    if (compileGlob(directoryPattern, caseInsensitive).test(path)) {
       return true;
     }
   }
 
-  return globToRegExp(pattern, caseInsensitive).test(path);
-}
-
-function globToRegExp(pattern: string, caseInsensitive = false): RegExp {
-  let expression = pattern.includes("/") ? "^" : "^(?:.*/)?";
-
-  expression += globFragmentToRegExp(pattern);
-
-  return new RegExp(`${expression}$`, caseInsensitive ? "i" : undefined);
-}
-
-function globFragmentToRegExp(pattern: string): string {
-  let expression = "";
-
-  for (let index = 0; index < pattern.length; index++) {
-    const char = pattern[index];
-    const next = pattern[index + 1];
-    const afterNext = pattern[index + 2];
-
-    if (char === "*" && next === "*" && afterNext === "/") {
-      expression += "(?:.*/)?";
-      index += 2;
-    } else if (char === "*" && next === "*") {
-      expression += ".*";
-      index++;
-    } else if (char === "*") {
-      expression += "[^/]*";
-    } else if (char === "?") {
-      expression += "[^/]";
-    } else if (char === "[") {
-      const characterClass = readGlobCharacterClass(pattern, index);
-      if (characterClass) {
-        expression += characterClass.expression;
-        index = characterClass.endIndex;
-      } else {
-        expression += "\\[";
-      }
-    } else if (char === "{") {
-      const alternation = readGlobAlternation(pattern, index);
-      if (alternation) {
-        expression += `(?:${alternation.alternatives
-          .map(globFragmentToRegExp)
-          .join("|")})`;
-        index = alternation.endIndex;
-      } else {
-        expression += "\\{";
-      }
-    } else {
-      expression += escapeRegExp(char);
-    }
-  }
-
-  return expression;
-}
-
-function readGlobAlternation(
-  pattern: string,
-  startIndex: number,
-): { alternatives: string[]; endIndex: number } | undefined {
-  const alternatives: string[] = [];
-  let depth = 0;
-  let alternativeStart = startIndex + 1;
-
-  for (let index = startIndex + 1; index < pattern.length; index++) {
-    const char = pattern[index];
-    if (char === "{") {
-      depth++;
-      continue;
-    }
-    if (char === "}" && depth > 0) {
-      depth--;
-      continue;
-    }
-    if (char === "," && depth === 0) {
-      alternatives.push(pattern.slice(alternativeStart, index));
-      alternativeStart = index + 1;
-      continue;
-    }
-    if (char === "}" && depth === 0) {
-      if (alternatives.length === 0) {
-        return undefined;
-      }
-      alternatives.push(pattern.slice(alternativeStart, index));
-      return { alternatives, endIndex: index };
-    }
-  }
-
-  return undefined;
-}
-
-function readGlobCharacterClass(
-  pattern: string,
-  startIndex: number,
-): { expression: string; endIndex: number } | undefined {
-  const endIndex = pattern.indexOf("]", startIndex + 1);
-  if (endIndex < 0) {
-    return undefined;
-  }
-
-  let content = pattern.slice(startIndex + 1, endIndex);
-  if (!content || content === "!" || content === "^") {
-    return undefined;
-  }
-
-  const negated = content.startsWith("!") || content.startsWith("^");
-  if (negated) {
-    content = content.slice(1);
-  }
-  content = content.replaceAll("\\", "\\\\").replaceAll("/", "\\/");
-
-  return {
-    expression: `[${negated ? "^" : ""}${content}]`,
-    endIndex,
-  };
+  return compileGlob(pattern, caseInsensitive).test(path);
 }
 
 function patternPrefixMightMatchDescendant(
@@ -286,8 +180,4 @@ function literalPrefixBeforeFirstGlob(pattern: string): string {
   }
 
   return pattern.slice(0, Math.min(...indexes));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
 }

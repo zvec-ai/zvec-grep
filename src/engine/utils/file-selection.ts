@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { checkGlobLength, checkGlobRuleCount } from "./glob-budget.js";
 import {
   ripgrepGlobMatches,
   ripgrepGlobMatchesCaseInsensitive,
@@ -66,6 +67,12 @@ export function matchesFileSelection(
   selection: FileSelection,
   types: FileTypePatterns,
 ): boolean {
+  checkGlobRuleCount(
+    (selection.globs?.length ?? 0) +
+      (selection.insensitiveGlobs?.length ?? 0) +
+      types.include.length +
+      types.exclude.length,
+  );
   const includedByGlob = matchesOrderedGlobs(path, selection);
   const includedByType =
     types.include.length === 0 ||
@@ -88,7 +95,10 @@ function matchesOrderedGlobs(path: string, selection: FileSelection): boolean {
       caseInsensitive: true,
     })),
   ]
-    .map((rule) => ({ ...rule, pattern: rule.pattern.trim() }))
+    .map((rule) => {
+      checkGlobLength(rule.pattern, "pattern");
+      return { ...rule, pattern: rule.pattern.trim() };
+    })
     .filter((rule) => rule.pattern.length > 0);
   const hasPositiveRule = rules.some((rule) => !rule.pattern.startsWith("!"));
   let included = !hasPositiveRule;
