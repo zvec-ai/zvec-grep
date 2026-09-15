@@ -347,10 +347,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
         readOptionValue(commandArgs, ++index, arg),
         arg,
       );
-    } else if (
-      arg === "--index-embedding-concurrency" ||
-      arg === "--embedding-concurrency"
-    ) {
+    } else if (arg === "--index-embedding-concurrency") {
       options.embeddingConcurrency = parsePositiveInteger(
         readOptionValue(commandArgs, ++index, arg),
         arg,
@@ -879,7 +876,7 @@ function validateCliShape(
   }
   if (options.embeddingConcurrency !== undefined && command !== "index") {
     throw new Error(
-      "--index-embedding-concurrency (alias: --embedding-concurrency) can only be used with zg --index",
+      "--index-embedding-concurrency can only be used with zg --index",
     );
   }
   if (!options.rg && (options.rgCompatibilityOptions?.length ?? 0) > 0) {

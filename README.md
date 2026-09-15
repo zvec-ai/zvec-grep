@@ -156,8 +156,7 @@ zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` control embedding concurrency while
 building or updating an index, for both local and remote models. The environment
 variable also applies to automatic indexing and refresh. These controls do not
-change query-vector inference. The CLI option is accepted only with `--index`;
-`--embedding-concurrency` remains a compatibility alias.
+change query-vector inference. The CLI option is accepted only with `--index`.
 
 For llama.cpp, the limit controls contexts per indexing model instance. For
 Transformers.js, it controls calls in flight on one cached pipeline and does not

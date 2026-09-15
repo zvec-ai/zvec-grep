@@ -125,49 +125,11 @@ Core options:
 | `--endpoint <url>` | Remote provider endpoint |
 | `--model-cache <path>` | Local model cache directory |
 | `--device <device>` | `auto`, `cpu`, `metal`, `vulkan`, or `cuda` |
-| `--index-embedding-concurrency <n>` | Index embedding concurrency; backend behavior below |
-| `--embedding-concurrency <n>` | Compatibility alias for `--index-embedding-concurrency` |
+| `--embedding-concurrency <n>` | Concurrent Embedding tasks |
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
-`--index-embedding-concurrency` controls embedding concurrency during index
-construction and updates. It is accepted only with `--index`, including under
-its compatibility name; search and `--rg` reject both names. For local and remote
-models, `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` supplies the default for explicit
-and automatic indexing, including refresh. Query-vector inference is unaffected.
-
-The explicit CLI/API index option takes precedence over the index environment
-variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),
-then the automatic default. Values must be positive integers.
-
-| Backend | Index concurrency limit |
-| --- | --- |
-| llama.cpp | Contexts per indexing model instance, capped at 8; outer batches remain serial |
-| Transformers.js | Calls in flight on one cached pipeline, capped at 8; simultaneous native/GPU execution is not guaranteed |
-| Potion/model2vec | Concurrent batches, default 2, without the cap of 8; the worker pool has a separate limit based on available CPU parallelism |
-| Remote models | Both controls set the maximum concurrent batches without the cap of 8; existing adaptive scheduling and its defaults remain unchanged |
-
-For Potion/model2vec, requesting N concurrent batches does not guarantee N worker
-threads. For remote models, rate limits or retryable failures may reduce batch
-concurrency below the configured maximum.
-
-Without an override, llama.cpp on CPU and Transformers.js use 1. llama.cpp uses
-`floor(freeVRAM × 0.25 / 150 MiB)` when its GPU runtime provides free VRAM,
-clamped to 1–8; a failed or invalid VRAM query uses 2. This heuristic does not
-guarantee that the model fits in memory. See [index embedding concurrency and GPU
-errors](../README.md#index-embedding-concurrency-and-gpu-errors) for troubleshooting.
-
-The CLI option applies to the current index operation in both direct and server
-mode.
-For example, this uses a limit of 1 even if the environment default is 8, without
-restarting the daemon:
-
-```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
-zg --index --index-embedding-concurrency 1
-```
-
-Changing the daemon's environment-variable default requires updating its startup
-environment and restarting it with `zg --server off` followed by `zg --server on`.
+Local Potion embedding tasks run on worker threads. They default to two workers;
+`--embedding-concurrency` can override that value for larger machines.
 
 File discovery accepts `-g/--glob`, `--iglob`, `-t/--type`, `-T/--type-not`,
 `--hidden`, `--no-ignore`, `--ignore-file`, `--max-depth`, `--max-filesize`, and
@@ -278,7 +240,6 @@ refresh, authentication, and logs. See [MCP](./03-mcp.md) for the tool contract.
 | `ZVEC_GREP_ENDPOINT` | Remote Embedding endpoint |
 | `ZVEC_GREP_MODEL_CACHE` | Local model cache directory |
 | `ZVEC_GREP_DEVICE` | Local model device |
-| `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` | Default embedding concurrency for local and remote index construction/update, including automatic indexing and refresh |
 | `DASHSCOPE_API_KEY` | Qwen API-key fallback after `ZVEC_GREP_API_KEY` |
 | `QWEN_API_KEY` | Qwen API-key fallback after `DASHSCOPE_API_KEY` |
 | `QWEN_HOME` | Qwen Code configuration directory used by `zg --install` |

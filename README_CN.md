@@ -151,7 +151,7 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
 并发，对本地和远程模型均生效。环境变量也适用于自动建索引和刷新；这些设置
 不影响查询文本的向量推理。
-CLI 参数仅与 `--index` 一起使用，`--embedding-concurrency` 保留为兼容别名。
+CLI 参数仅与 `--index` 一起使用。
 
 对于 llama.cpp，上限控制索引模型实例的 context 数；对于 Transformers.js，
 控制同一缓存 pipeline 中尚未完成的调用数，不保证原生运行时或 GPU 同时执行。
