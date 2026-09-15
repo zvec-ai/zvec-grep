@@ -794,7 +794,11 @@ async function buildImplicitDirectIndex(
     createServiceOptions({ ...options, embedding }, root),
   );
   try {
-    await service.index({ root, onProgress });
+    await service.index({
+      root,
+      onProgress,
+      embeddingConcurrency: options.embeddingConcurrency,
+    });
   } finally {
     await service.close();
   }
@@ -870,7 +874,6 @@ async function runServerQuery(
       maxDepth: options.maxDepth,
       maxFileSizeBytes: options.maxFileSizeBytes,
       follow: options.follow,
-      embeddingConcurrency: options.embeddingConcurrency,
       modifiedAfter: options.modifiedAfter,
       modifiedBefore: options.modifiedBefore,
       freshness: searchPolicy.freshness,
@@ -1003,7 +1006,6 @@ function contextOptions(
     modifiedAfter: options.modifiedAfter,
     modifiedBefore: options.modifiedBefore,
     symbolTypes: options.symbolTypes,
-    embeddingConcurrency: options.embeddingConcurrency,
   };
 }
 

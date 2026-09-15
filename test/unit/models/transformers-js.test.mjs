@@ -113,6 +113,313 @@ function createArtifactResolver(
   });
 }
 
+function setParallelismEnvironment(t, value, legacyValue) {
+  for (const [name, next] of [
+    ["ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY", value],
+    ["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM", legacyValue],
+  ]) {
+    const previous = process.env[name];
+    if (next === undefined) delete process.env[name];
+    else process.env[name] = next;
+    t.after(() => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    });
+  }
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function nextTurn() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function controlledExtractor() {
+  const state = { calls: [], active: 0, peak: 0, disposals: 0 };
+  state.pipeline = Object.assign(
+    async (texts) => {
+      const completion = deferred();
+      state.calls.push({ texts, ...completion });
+      state.active++;
+      state.peak = Math.max(state.peak, state.active);
+      try {
+        await completion.promise;
+        return {
+          dims: [texts.length, 3],
+          data: Float32Array.from(texts.flatMap(() => [1, 2, 3])),
+        };
+      } finally {
+        state.active--;
+      }
+    },
+    {
+      tokenizer: createTokenizer(),
+      async dispose() {
+        assert.equal(state.active, 0, "pipeline disposed during inference");
+        state.disposals++;
+      },
+    },
+  );
+  return state;
+}
+
+for (const { name, value, legacyValue, embeddingConcurrency, limit } of [
+  {
+    name: "query automatic limit ignores index and legacy environment",
+    value: "8",
+    legacyValue: "8",
+    limit: 1,
+  },
+  {
+    name: "explicit limit overrides a higher environment limit",
+    value: "8",
+    embeddingConcurrency: 1,
+    limit: 1,
+  },
+  {
+    name: "explicit limit overrides a lower environment limit",
+    value: "1",
+    embeddingConcurrency: 2,
+    limit: 2,
+  },
+  {
+    name: "explicit limit is capped at eight",
+    value: "1",
+    embeddingConcurrency: 99,
+    limit: 8,
+  },
+  {
+    name: "automatic limit ignores the llama-only override",
+    legacyValue: "8",
+    limit: 1,
+  },
+]) {
+  test(`Transformers.js ${name} bounds calls on the same pipeline`, async (t) => {
+    setParallelismEnvironment(t, value, legacyValue);
+    const extractor = controlledExtractor();
+    let loads = 0;
+    const model = new TransformersJsEmbeddingModel(
+      entry(),
+      { device: "cuda", embeddingConcurrency },
+      {
+        resolveArtifacts: createArtifactResolver(),
+        loadRuntime: async () => ({
+          async pipeline() {
+            loads++;
+            return extractor.pipeline;
+          },
+        }),
+      },
+    );
+    const requests = Array.from(
+      { length: Math.max(4, limit + 1) },
+      (_, index) => `request-${index}`,
+    ).map((text) =>
+      model.embed([{ kind: "text", text }], { purpose: "query" }),
+    );
+
+    assert.equal(model.info.defaultConcurrency, limit);
+    await nextTurn();
+    assert.equal(extractor.calls.length, limit);
+    assert.equal(extractor.active, limit);
+    assert.equal(loads, 1);
+
+    for (let completed = 0; completed < requests.length; completed++) {
+      extractor.calls[completed].resolve();
+      await nextTurn();
+      assert.equal(
+        extractor.active,
+        Math.min(limit, requests.length - completed - 1),
+      );
+      assert.equal(extractor.peak, limit);
+    }
+    assert.deepEqual(
+      await Promise.all(requests),
+      requests.map(() => ({ vectors: [[1, 2, 3]], truncated: [] })),
+    );
+    assert.equal(extractor.calls.length, requests.length);
+    assert.equal(loads, 1);
+    await model.dispose();
+    assert.equal(extractor.disposals, 1);
+  });
+}
+
+test("Transformers.js drains concurrent GPU calls before sharing one CPU fallback", async (t) => {
+  setParallelismEnvironment(t, "2");
+  const gpu = controlledExtractor();
+  const cpuLoad = deferred();
+  const providers = [];
+  const cpuCalls = [];
+  const progress = [];
+  const cpu = Object.assign(
+    async (texts) => {
+      cpuCalls.push(texts);
+      return { dims: [1, 3], data: Float32Array.from([4, 5, 6]) };
+    },
+    { tokenizer: createTokenizer(), async dispose() {} },
+  );
+  const model = new TransformersJsEmbeddingModel(
+    entry(),
+    { device: "cuda", embeddingConcurrency: 2 },
+    {
+      resolveArtifacts: createArtifactResolver(),
+      loadRuntime: async () => ({
+        async pipeline(_task, _repo, options) {
+          const provider = options.session_options?.executionProviders[0];
+          providers.push(provider);
+          return provider === "cuda" ? gpu.pipeline : await cpuLoad.promise;
+        },
+      }),
+    },
+  );
+  const requests = ["first", "second"].map((text) =>
+    model.embed([{ kind: "text", text }], {
+      onProgress: (event) => progress.push(event),
+    }),
+  );
+
+  await nextTurn();
+  assert.equal(gpu.active, 2);
+  gpu.calls[0].reject(new Error("CUDA out of memory"));
+  await nextTurn();
+  assert.equal(gpu.active, 1);
+  assert.equal(gpu.disposals, 0);
+  assert.deepEqual(providers, ["cuda"]);
+  assert.deepEqual(cpuCalls, []);
+
+  gpu.calls[1].reject(new Error("CUDA evaluation failed"));
+  await nextTurn();
+  assert.equal(gpu.active, 0);
+  assert.equal(gpu.disposals, 1);
+  assert.deepEqual(providers, ["cuda", "cpu"]);
+  assert.deepEqual(cpuCalls, []);
+
+  cpuLoad.resolve(cpu);
+  assert.deepEqual(await Promise.all(requests), [
+    { vectors: [[4, 5, 6]], truncated: [] },
+    { vectors: [[4, 5, 6]], truncated: [] },
+  ]);
+  assert.deepEqual(cpuCalls, [["passage: first"], ["passage: second"]]);
+  assert.deepEqual(providers, ["cuda", "cpu"]);
+  assert.equal(gpu.disposals, 1);
+  assert.equal(progress.filter((event) => event.stage === "warning").length, 1);
+  await model.dispose();
+});
+
+test("Transformers.js shares a terminal CPU replacement failure across concurrent retries", async (t) => {
+  setParallelismEnvironment(t, "2");
+  const gpu = controlledExtractor();
+  const cpuLoad = deferred();
+  const providers = [];
+  const progress = [];
+  const originalFailure = new Error("CPU replacement failed");
+  const model = new TransformersJsEmbeddingModel(
+    entry(),
+    { device: "cuda", embeddingConcurrency: 2 },
+    {
+      resolveArtifacts: createArtifactResolver(),
+      loadRuntime: async () => ({
+        async pipeline(_task, _repo, options) {
+          const provider = options.session_options?.executionProviders[0];
+          providers.push(provider);
+          return provider === "cuda" ? gpu.pipeline : await cpuLoad.promise;
+        },
+      }),
+    },
+  );
+  const requests = ["first", "second"].map((text) =>
+    model
+      .embed([{ kind: "text", text }], {
+        onProgress: (event) => progress.push(event),
+      })
+      .catch((error) => error),
+  );
+
+  await nextTurn();
+  assert.equal(gpu.active, 2);
+  gpu.calls[0].reject(new Error("CUDA out of memory"));
+  gpu.calls[1].reject(new Error("CUDA evaluation failed"));
+  await nextTurn();
+  assert.equal(gpu.disposals, 1);
+  assert.deepEqual(providers, ["cuda", "cpu"]);
+
+  cpuLoad.reject(originalFailure);
+  const errors = await Promise.all(requests);
+  const failure = errors[0];
+  assert.equal(
+    failure.code,
+    "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_LOAD_FAILED",
+  );
+  assert.equal(failure.cause, originalFailure);
+  assert.equal(errors[1], failure);
+  await assert.rejects(
+    model.embed([{ kind: "text", text: "later" }]),
+    (error) => error === failure,
+  );
+  assert.deepEqual(providers, ["cuda", "cpu"]);
+  assert.equal(gpu.disposals, 1);
+  assert.equal(progress.filter((event) => event.stage === "warning").length, 2);
+  await model.dispose();
+});
+
+test("Transformers.js disposal drains active calls and rejects queued requests", async (t) => {
+  setParallelismEnvironment(t, "2");
+  const extractor = controlledExtractor();
+  const model = new TransformersJsEmbeddingModel(
+    entry(),
+    { device: "cuda", embeddingConcurrency: 2 },
+    {
+      resolveArtifacts: createArtifactResolver(),
+      loadRuntime: async () => ({
+        async pipeline() {
+          return extractor.pipeline;
+        },
+      }),
+    },
+  );
+  const first = model.embed([{ kind: "text", text: "first" }]);
+  const second = model.embed([{ kind: "text", text: "second" }]);
+  const queued = assert.rejects(
+    model.embed([{ kind: "text", text: "queued" }]),
+    /disposed/,
+  );
+  await nextTurn();
+  assert.equal(extractor.active, 2);
+
+  let disposalFinished = false;
+  const disposal = model.dispose().then(() => {
+    disposalFinished = true;
+  });
+  const afterDispose = assert.rejects(
+    model.embed([{ kind: "text", text: "after dispose" }]),
+    /disposed/,
+  );
+  await nextTurn();
+  assert.equal(extractor.disposals, 0);
+  assert.equal(disposalFinished, false);
+
+  extractor.calls[0].resolve();
+  await nextTurn();
+  assert.equal(extractor.active, 1);
+  assert.equal(extractor.calls.length, 2);
+  assert.equal(extractor.disposals, 0);
+  assert.equal(disposalFinished, false);
+
+  extractor.calls[1].resolve();
+  await Promise.all([first, second, queued, afterDispose, disposal]);
+  assert.equal(extractor.calls.length, 2);
+  assert.equal(extractor.disposals, 1);
+  assert.equal(disposalFinished, true);
+});
+
 test("Transformers.js resolves artifacts before loading a local-only pipeline", async () => {
   const loads = [];
   const resolutions = [];
@@ -584,7 +891,7 @@ for (const device of ["cuda", "cpu", "auto"]) {
     });
     const model = new TransformersJsEmbeddingModel(
       entry(),
-      { device },
+      { device, embeddingConcurrency: 2 },
       dependencies,
     );
     const options =

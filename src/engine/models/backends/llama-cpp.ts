@@ -24,6 +24,12 @@ import {
 } from "../artifact-downloader.js";
 import type { LlamaCppEmbeddingCatalogEntry } from "../catalog.js";
 import {
+  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  normalizeLocalEmbeddingConcurrency,
+  resolveLocalEmbeddingParallelism,
+} from "../local-embedding-parallelism.js";
+import { LocalEmbeddingQueue } from "../local-embedding-queue.js";
+import {
   createModelDownloadProgressReporter,
   type ModelDownloadProgressReporter,
 } from "../download-progress.js";
@@ -81,7 +87,6 @@ type LlamaCppDependencies = {
 
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
 const GGUF_MAGIC = Buffer.from("GGUF");
-const DEFAULT_PARALLELISM_CAP = 8;
 const DEFAULT_DARWIN_CMAKE_OPTIONS = {
   GGML_OPENMP: "OFF",
 } as const;
@@ -142,6 +147,9 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
   private readonly gpu: LlamaGpuSelection;
   private readonly parallelism?: number;
   private readonly dependencies: LlamaCppDependencies;
+  // Each batch uses the context pool internally. Serialize batches so a context
+  // is never shared by two zg requests, including during CPU fallback.
+  private readonly embeddingQueue = new LocalEmbeddingQueue(async () => 1);
 
   private runtimeImport: Promise<NodeLlamaCppModule> | null = null;
   private llama: Llama | null = null;
@@ -172,6 +180,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
       inputKinds: ["text"],
       limits: {
         maxBatchSize: entry.maxBatchSize,
+        maxConcurrentBatches: 1,
         maxInputTokens: entry.contextSize,
       },
     };
@@ -181,8 +190,8 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
         DEFAULT_MODEL_CACHE_DIR,
     );
     this.gpu = embeddingDeviceToLlamaGpuSelection(options.device ?? "cpu");
-    this.parallelism = resolveParallelismOverride(
-      process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM,
+    this.parallelism = normalizeLocalEmbeddingConcurrency(
+      options.embeddingConcurrency,
     );
     this.dependencies = { ...defaultDependencies, ...dependencies };
   }
@@ -191,7 +200,9 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     contents: readonly Content[],
     options: NormalizedEmbeddingOptions,
   ): Promise<EmbeddingResult> {
-    return await this.embedBatch(contents, options);
+    return await this.embeddingQueue.run(() =>
+      this.embedBatch(contents, options),
+    );
   }
 
   private async embedBatch(
@@ -208,7 +219,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     } catch (cause) {
       throw new EngineError("llama.cpp embedding failed", {
         code: "ZVEC_GREP.ENGINE.MODELS.LLAMA_CPP_EMBED_FAILED",
-        context: `model=${this.entry.reference}`,
+        context: `model=${this.entry.reference}${this.gpu !== false ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --index-embedding-concurrency 1 (environment fallback: ${INDEX_EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
         cause,
       });
     }
@@ -220,9 +231,11 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     }
     this.disposed = true;
 
-    await this.disposeLoadedRuntime();
-    this.modelLoadPromise = null;
-    this.contextsCreatePromise = null;
+    await this.embeddingQueue.run(async () => {
+      await this.disposeLoadedRuntime();
+      this.modelLoadPromise = null;
+      this.contextsCreatePromise = null;
+    }, true);
   }
 
   private async embedTexts(
@@ -249,7 +262,9 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
       }))
       .filter((chunk) => chunk.texts.length > 0);
 
-    const results = await Promise.all(
+    // A rejected context must not release the batch queue while another context
+    // is still running, otherwise a retry/dispose could reuse or free it.
+    const results = await Promise.allSettled(
       chunks.map(async (chunk) => {
         const vectors: number[][] = [];
         for (const text of chunk.texts) {
@@ -260,8 +275,13 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
       }),
     );
 
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) throw failure.reason;
+
     return {
-      vectors: results.flat(),
+      vectors: results.flatMap((result) =>
+        result.status === "fulfilled" ? result.value : [],
+      ),
       truncated: truncatedInputIndexes,
     };
   }
@@ -485,6 +505,9 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     onProgress?: (progress: EmbeddingModelProgress) => void,
   ): Promise<LlamaEmbeddingContext[]> {
     const model = await this.ensureModel(onProgress);
+    if (this.shouldDisableModelGpuOffload() && this.parallelism === undefined) {
+      targetParallelism = 1;
+    }
     const threads = await this.resolveThreadsPerContext(targetParallelism);
     const initialContextCount = this.contexts.length;
 
@@ -628,24 +651,10 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     }
 
     const llama = await this.ensureLlama();
-    if (
-      !this.shouldDisableModelGpuOffload() &&
-      llama.gpu &&
-      llama.getVramState
-    ) {
-      try {
-        const vram = await llama.getVramState();
-        const freeMb = vram.free / (1024 * 1024);
-        return Math.max(
-          1,
-          Math.min(DEFAULT_PARALLELISM_CAP, Math.floor((freeMb * 0.25) / 150)),
-        );
-      } catch {
-        return 2;
-      }
-    }
-
-    return 1;
+    return await resolveLocalEmbeddingParallelism({
+      gpu: !this.shouldDisableModelGpuOffload() && Boolean(llama.gpu),
+      getVramState: llama.getVramState?.bind(llama),
+    });
   }
 
   private async resolveEffectiveParallelism(
@@ -774,25 +783,6 @@ function embeddingDeviceToLlamaGpuSelection(
   device: NonNullable<CreateEmbeddingModelOptions["device"]>,
 ): LlamaGpuSelection {
   return device === "cpu" ? false : device;
-}
-
-function resolveParallelismOverride(
-  envValue: string | undefined,
-): number | undefined {
-  const normalized = envValue?.trim() ?? "";
-  if (!normalized) {
-    return undefined;
-  }
-
-  const parsed = Number.parseInt(normalized, 10);
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    process.stderr.write(
-      `zvec-grep warning: invalid ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM="${envValue}", using automatic parallelism.\n`,
-    );
-    return undefined;
-  }
-
-  return Math.min(DEFAULT_PARALLELISM_CAP, parsed);
 }
 
 function validateGgufFile(filePath: string, modelUri: string): void {

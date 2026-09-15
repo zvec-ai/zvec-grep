@@ -16,6 +16,12 @@ import {
   type ModelArtifactSource,
 } from "../artifact-downloader.js";
 import {
+  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  normalizeLocalEmbeddingConcurrency,
+  resolveLocalEmbeddingParallelism,
+} from "../local-embedding-parallelism.js";
+import { LocalEmbeddingQueue } from "../local-embedding-queue.js";
+import {
   createModelDownloadProgressReporter,
   type ModelDownloadProgressReporter,
 } from "../download-progress.js";
@@ -90,6 +96,10 @@ type TransformersJsDependencies = {
   resolveArtifacts: ModelArtifactResolver;
 };
 
+type EmbeddingAttempt =
+  | { ok: true; result: EmbeddingResult }
+  | { ok: false; cause: unknown; canRetryOnCpu: boolean };
+
 const DEFAULT_MODEL_CACHE_DIR = join(defaultHome(), "models");
 
 async function defaultTransformersJsLoader(): Promise<TransformersJsModule> {
@@ -124,6 +134,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
   private readonly modelCacheDir: string;
   private readonly executionProvider: TransformersJsExecutionProvider | null;
   private readonly dependencies: TransformersJsDependencies;
+  private readonly embeddingQueue: LocalEmbeddingQueue;
   private pipeline: FeatureExtractionPipeline | null = null;
   private pipelineLoadPromise: Promise<FeatureExtractionPipeline> | null = null;
   private pipelineLoadError: EngineError | null = null;
@@ -140,15 +151,20 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     dependencies: Partial<TransformersJsDependencies> = {},
   ) {
     super();
+    const parallelism = normalizeLocalEmbeddingConcurrency(
+      options.embeddingConcurrency,
+    );
     this.info = {
       reference: entry.reference,
       provider: entry.provider,
       name: entry.model,
       dimension: entry.dimension,
       metric: entry.metric,
+      defaultConcurrency: parallelism ?? 1,
       inputKinds: ["text"],
       limits: {
         maxBatchSize: entry.maxBatchSize,
+        maxConcurrentBatches: parallelism ?? 1,
         maxInputTokens: entry.maxInputTokens,
       },
     };
@@ -159,6 +175,13 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     );
     this.executionProvider = resolveExecutionProvider(options.device);
     this.dependencies = { ...defaultDependencies, ...dependencies };
+    this.embeddingQueue = new LocalEmbeddingQueue(() =>
+      resolveLocalEmbeddingParallelism({
+        override: parallelism,
+        gpu:
+          this.executionProvider !== null && this.executionProvider !== "cpu",
+      }),
+    );
   }
 
   protected async doEmbed(
@@ -172,6 +195,47 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     contents: readonly Content[],
     options: NormalizedEmbeddingOptions,
   ): Promise<EmbeddingResult> {
+    let attempt = await this.embeddingQueue.run(() =>
+      this.runEmbeddingAttempt(contents, options),
+    );
+    if (attempt.ok) return attempt.result;
+
+    let failure = attempt.cause;
+    if (attempt.canRetryOnCpu) {
+      try {
+        // The failed attempt has released its slot. Wait for all other users of
+        // the GPU pipeline before disposing it. Concurrent failures share one
+        // CPU replacement and each retry their own batch once.
+        await this.embeddingQueue.run(async () => {
+          this.ensureNotDisposed();
+          if (!this.usingCpuFallback) {
+            await this.fallbackToCpu(failure, options.onProgress);
+          }
+        }, true);
+        attempt = await this.embeddingQueue.run(() =>
+          this.runEmbeddingAttempt(contents, options),
+        );
+        if (attempt.ok) return attempt.result;
+        failure = attempt.cause;
+      } catch (cause) {
+        failure = cause;
+      }
+    }
+
+    if (failure instanceof EngineError && failure.code === LOAD_FAILED) {
+      throw failure;
+    }
+    throw new EngineError("Transformers.js embedding failed", {
+      code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
+      context: `model=${this.entry.reference} repo=${this.entry.repo}${this.executionProvider && this.executionProvider !== "cpu" ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --index-embedding-concurrency 1 (environment fallback: ${INDEX_EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
+      cause: failure,
+    });
+  }
+
+  private async runEmbeddingAttempt(
+    contents: readonly Content[],
+    options: NormalizedEmbeddingOptions,
+  ): Promise<EmbeddingAttempt> {
     this.ensureNotDisposed();
     const texts = (contents as readonly TextContent[]).map((content) =>
       formatText(content.text, options.purpose, this.entry),
@@ -192,33 +256,21 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
       });
     }
 
-    let failure: unknown;
     try {
-      return await this.embedTexts(pipeline, texts, truncatedInputIndexes);
+      return {
+        ok: true,
+        result: await this.embedTexts(pipeline, texts, truncatedInputIndexes),
+      };
     } catch (cause) {
-      failure = cause;
+      return {
+        ok: false,
+        cause,
+        canRetryOnCpu:
+          !this.usingCpuFallback &&
+          this.executionProvider !== null &&
+          this.executionProvider !== "cpu",
+      };
     }
-
-    if (await this.fallbackToCpu(failure, options.onProgress)) {
-      try {
-        return await this.embedTexts(
-          await this.ensurePipeline(options.onProgress),
-          texts,
-          truncatedInputIndexes,
-        );
-      } catch (cause) {
-        failure = cause;
-      }
-    }
-
-    if (failure instanceof EngineError && failure.code === LOAD_FAILED) {
-      throw failure;
-    }
-    throw new EngineError("Transformers.js embedding failed", {
-      code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
-      context: `model=${this.entry.reference} repo=${this.entry.repo}`,
-      cause: failure,
-    });
   }
 
   override async dispose(): Promise<void> {
@@ -226,10 +278,12 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
       return;
     }
     this.disposed = true;
-    const pipeline = this.pipeline;
-    this.pipeline = null;
-    this.pipelineLoadPromise = null;
-    await pipeline?.dispose();
+    await this.embeddingQueue.run(async () => {
+      const pipeline = this.pipeline;
+      this.pipeline = null;
+      this.pipelineLoadPromise = null;
+      await pipeline?.dispose();
+    }, true);
   }
 
   private async ensurePipeline(

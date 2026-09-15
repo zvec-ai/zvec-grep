@@ -145,6 +145,59 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `alice-in-wonderland.txt` 前面。
 
+### 索引 Embedding 并发与 GPU 错误
+
+`zg --index --index-embedding-concurrency <n>` 和
+`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
+并发，对本地和远程模型均生效。环境变量也适用于自动建索引和刷新；这些设置
+不影响查询文本的向量推理。
+CLI 参数仅与 `--index` 一起使用。
+
+对于 llama.cpp，上限控制索引模型实例的 context 数；对于 Transformers.js，
+控制同一缓存 pipeline 中尚未完成的调用数，不保证原生运行时或 GPU 同时执行。
+这两个后端取正整数，超过 **8** 按 8 处理。对于 Potion/model2vec，上限控制
+并发 Embedding 批次数，没有该 8 路限制；默认为 **2**，CPU worker 池还有独立
+容量上限。对于远程模型，CLI 参数和环境变量均控制并发批次数，也不额外限制为
+8；原有自适应调度及默认值保持不变，遇到限流或可重试错误时可能降低并发。
+
+优先级为：显式 CLI/API 索引参数 > 索引环境变量 >
+`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`（仅 llama.cpp 索引阶段）> 自动默认值。
+
+对于 llama.cpp 和 Transformers.js，未显式设置时，CPU 或没有显存查询接口的
+运行时使用 1。Transformers.js 目前没有该接口，因此自动上限为 1。
+GPU 运行时提供空闲显存时，按
+`floor(空闲显存 × 0.25 / 150 MiB)` 计算，并限制在 1–8；查询失败或返回
+无效值时使用 2。这里沿用原有的 150 MiB 启发式估算，不保证模型一定能装入显存。
+
+遇到 CUDA 错误、内存不足或原生运行时崩溃时，可将上限设为 1 后重试索引。
+以下示例使用直接执行模式，使新的环境变量立即生效：
+
+```bash
+export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1
+zg --index --mode direct
+```
+
+Windows PowerShell：
+
+```powershell
+$env:ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "1"
+zg --index --mode direct
+```
+
+显式 CLI 参数会在本次索引操作中覆盖环境变量，使用后台服务时也会生效，
+无需为 CLI 参数重启后台服务：
+
+```bash
+export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
+zg --index --index-embedding-concurrency 1
+```
+
+若要修改后台服务的环境变量默认值，需更新其启动环境，然后在该环境中运行
+`zg --server off` 和 `zg --server on`。如果由 Agent 启动 zg，还需更新其环境并重启
+Agent/MCP 连接。JavaScript 异常可以捕获，但原生 abort 可能在 CPU 回退之前
+直接结束进程。将上限设为 1 可以降低并发，但不能避免所有 GPU 故障；也可使用
+`--device cpu` 重试。
+
 <a id="benchmarks"></a>
 
 ## 📊 性能测试

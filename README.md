@@ -150,6 +150,66 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
 
+### Index embedding concurrency and GPU errors
+
+`zg --index --index-embedding-concurrency <n>` and
+`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` control embedding concurrency while
+building or updating an index, for both local and remote models. The environment
+variable also applies to automatic indexing and refresh. These controls do not
+change query-vector inference. The CLI option is accepted only with `--index`.
+
+For llama.cpp, the limit controls contexts per indexing model instance. For
+Transformers.js, it controls calls in flight on one cached pipeline and does not
+guarantee simultaneous native/GPU execution. Both cap positive integer values
+at **8**. For Potion/model2vec, it controls concurrent embedding batches without
+that cap; the default is **2** and the CPU worker pool has its own capacity limit.
+For remote models, both controls set the maximum concurrent batches without the
+cap of 8. Existing adaptive scheduling and its defaults remain unchanged; it may
+reduce concurrency after rate limits or retryable failures.
+
+The priority is the explicit CLI/API index option, then the index environment
+variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),
+then the automatic default.
+
+For llama.cpp and Transformers.js, CPU execution or a runtime without a VRAM
+query uses 1 unless overridden. Transformers.js currently has no VRAM query, so
+its automatic limit is 1. When a GPU runtime provides free VRAM, the limit is
+`floor(freeVRAM × 0.25 / 150 MiB)`, clamped to 1–8; a failed or invalid VRAM
+query uses 2. This retains the existing 150 MiB heuristic, which is not a
+guarantee that a model will fit in memory.
+
+For CUDA errors, memory exhaustion, or native crashes, try a limit of 1 and
+retry the index. These examples run directly so the new environment takes
+effect immediately:
+
+```bash
+export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1
+zg --index --mode direct
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "1"
+zg --index --mode direct
+```
+
+An explicit CLI option overrides the environment for that index operation,
+including when using the daemon; no daemon restart is needed for the CLI option:
+
+```bash
+export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
+zg --index --index-embedding-concurrency 1
+```
+
+To change the daemon's environment-variable default, update its startup
+environment, then run `zg --server off` and `zg --server on` from that environment.
+If an agent launches zg, update its environment and restart the agent/MCP
+connection too. JavaScript exceptions can be caught, but native aborts can
+terminate the process before any CPU fallback runs. A limit of 1 reduces
+concurrency; it does not prevent every GPU failure. You can also retry with
+`--device cpu`.
+
 <a id="benchmarks"></a>
 
 ## 📊 Benchmarks

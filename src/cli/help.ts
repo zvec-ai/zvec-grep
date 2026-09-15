@@ -40,6 +40,8 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_ENDPOINT: "Remote Embedding endpoint fallback",
   ZVEC_GREP_MODEL_CACHE: "Local embedding model cache directory",
   ZVEC_GREP_DEVICE: "Local embedding device: auto, cpu, metal, vulkan, or cuda",
+  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY:
+    "Local/remote index-build/update embedding concurrency; explicit index CLI option takes precedence",
   DASHSCOPE_API_KEY: "Qwen credential fallback after ZVEC_GREP_API_KEY",
   QWEN_API_KEY: "Qwen credential fallback after DASHSCOPE_API_KEY",
   ZVEC_GREP_AUTHORIZATION_KEY_FILE:
@@ -47,7 +49,7 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_METAL_KEEP_RESIDENCY:
     "Set to 1 to keep llama.cpp Metal residency enabled (advanced)",
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM:
-    "Positive llama.cpp context parallelism override (advanced)",
+    "Legacy llama.cpp index limit; index CLI option and environment take precedence",
   NO_COLOR: "Disable terminal colors",
   CODEX_HOME: "Codex configuration directory used by zg --install",
   CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg --install",
@@ -194,8 +196,12 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>       Embedding task concurrency
+  --index-embedding-concurrency <n> Index embedding concurrency limit
   --allow-remote                    Allow Remote Embedding for this command only
+
+Index concurrency limits llama.cpp contexts, Transformers.js calls in flight,
+or concurrent batches for other models. llama.cpp/Transformers.js cap it at 8.
+It does not change query-vector inference.
 
 File selection:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
@@ -221,6 +227,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY",
 ])}
 
 See zg --help environment for precedence and Server-mode scope.`;
@@ -548,6 +555,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY",
 ])}
 
 Qwen credential aliases:
@@ -580,12 +588,16 @@ ${formatEnvironmentVariables([
 
 Precedence:
   Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  Index embedding concurrency      Index CLI option > index environment > legacy llama variable > auto
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config > Built-in local
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY
 
 Server scope:
   zg --index forwards its ZVEC_GREP_EMBEDDING default to Server and auto modes.
+  Explicit --index-embedding-concurrency is forwarded without restarting the daemon.
+  The index concurrency environment also applies to automatic indexing and refresh.
+  Index concurrency controls do not affect query-vector inference.
   Direct MCP calls use the embedding environment inherited by the daemon.
   Restart the daemon after changing its embedding runtime environment.
 

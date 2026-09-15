@@ -9,6 +9,10 @@ export {
 } from "./embeddings.js";
 export { createEmbeddingModel } from "./factory.js";
 export {
+  normalizeLocalEmbeddingConcurrency,
+  resolveIndexEmbeddingConcurrencyOverride,
+} from "./local-embedding-parallelism.js";
+export {
   getEmbeddingModelCatalogEntry,
   listEmbeddingModels,
 } from "./catalog.js";

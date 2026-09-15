@@ -27,6 +27,8 @@ export type CreateZvecGrepOptions = {
   endpoint?: string;
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+  /** Default for index construction and refresh, never for query embeddings. */
+  embeddingConcurrency?: number;
   authorizationSigningKeyPath?: string;
 };
 

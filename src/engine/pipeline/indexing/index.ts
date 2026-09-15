@@ -1444,11 +1444,15 @@ function resolveEmbeddingConcurrencyPolicy(
     Number.isInteger(requestedConcurrency) &&
     requestedConcurrency > 0
   ) {
+    const concurrency = Math.min(
+      requestedConcurrency,
+      model.info.limits.maxConcurrentBatches ?? requestedConcurrency,
+    );
     return {
-      initial: requestedConcurrency,
+      initial: concurrency,
       min: 1,
-      max: requestedConcurrency,
-      adaptive: requestedConcurrency > 1,
+      max: concurrency,
+      adaptive: concurrency > 1,
     };
   }
 

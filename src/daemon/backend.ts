@@ -1,4 +1,7 @@
-import { createZvecGrep } from "../engine/service/index.js";
+import {
+  createZvecGrep,
+  resolveIndexEmbeddingConcurrency,
+} from "../engine/service/index.js";
 import type {
   CreateZvecGrepOptions,
   ZvecGrepInfoResult,
@@ -443,7 +446,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       const currentModelLoadRequest = runtime.currentModelLoadRequest();
       const defaultModelLoadRequest = searchInfo.indexed
         ? this.searchModelLoadRequest(searchInfo, {})
-        : currentModelLoadRequest;
+        : currentModelLoadRequest
+          ? this.overrideActiveModelLoadRequest(currentModelLoadRequest, {})
+          : undefined;
       if (!defaultModelLoadRequest) {
         throw new DaemonError(
           "INDEX_MISSING",
@@ -496,7 +501,6 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
               maxDepth: input.maxDepth,
               maxFileSizeBytes: input.maxFileSizeBytes,
               follow: input.follow,
-              embeddingConcurrency: input.embeddingConcurrency,
               modifiedAfter: input.modifiedAfter,
               modifiedBefore: input.modifiedBefore,
               autoUpdate: false,
@@ -541,6 +545,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
               root: runtime.canonicalRoot,
               apiKey: input.apiKey,
               device: input.device,
+              embeddingConcurrency: input.embeddingConcurrency,
               runtimeOverridesAreEphemeral: true,
             },
             "background_reconcile",
@@ -799,6 +804,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           ? undefined
           : input.endpoint,
         device: input.runtimeOverridesAreEphemeral ? undefined : input.device,
+        embeddingConcurrency: modelLoadRequest.embeddingConcurrency,
         daemonInstanceToken: this.runtimeManager.instanceToken,
       });
       const result = await runtime.withWrite(() =>
@@ -819,7 +825,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             maxDepth: input.maxDepth,
             maxFileSizeBytes: input.maxFileSizeBytes,
             follow: input.follow,
-            embeddingConcurrency: input.embeddingConcurrency,
+            embeddingConcurrency: modelLoadRequest.embeddingConcurrency,
             changedPaths: input.changedPaths,
             signal,
             onProgress: report,
@@ -1061,7 +1067,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private async waitForFresh(
     runtime: RootRuntime,
     authorization?: RemoteEmbeddingOperationPermit,
-    runtimeOverrides: Pick<NormalizedSearchInput, "apiKey" | "device"> = {},
+    runtimeOverrides: Pick<
+      NormalizedSearchInput,
+      "apiKey" | "device" | "embeddingConcurrency"
+    > = {},
   ): Promise<IndexJobSnapshot | undefined> {
     let updateJob: IndexJobSnapshot | undefined;
     while (true) {
@@ -1097,6 +1106,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           root: runtime.canonicalRoot,
           apiKey: runtimeOverrides.apiKey,
           device: runtimeOverrides.device,
+          embeddingConcurrency: runtimeOverrides.embeddingConcurrency,
           runtimeOverridesAreEphemeral: true,
         },
         "fresh_query",
@@ -1198,6 +1208,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       | "endpoint"
       | "device"
       | "rebuild"
+      | "embeddingConcurrency"
     >,
   ): EmbeddingModelLoadRequest {
     const model = this.indexModel(info, input);
@@ -1216,7 +1227,16 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         "The requested embedding endpoint differs from the workspace snapshot; use rebuild to change endpoints.",
       );
     }
-    return { model, runtime };
+    const embeddingConcurrency = resolveIndexEmbeddingConcurrency(
+      model,
+      input.embeddingConcurrency ??
+        this.options.serviceOptions?.embeddingConcurrency,
+    );
+    return {
+      model,
+      runtime,
+      ...(embeddingConcurrency !== undefined ? { embeddingConcurrency } : {}),
+    };
   }
 
   private searchModelLoadRequest(
@@ -1275,7 +1295,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       request.runtime ?? {},
       readGlobalConfig(),
     );
-    return { model: request.model, runtime };
+    return {
+      model: request.model,
+      runtime,
+    };
   }
 
   private readWorkspaceEmbeddingRuntime(
