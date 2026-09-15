@@ -15,6 +15,7 @@ import {
   detail,
   EngineError,
   errorDetails,
+  isEngineError,
 } from "../errors.js";
 import {
   createEmbeddingModel,
@@ -27,6 +28,7 @@ import {
 import type {
   WorkspaceIndexEmbeddingSchema,
   WorkspaceIndexInfo,
+  WorkspaceIndexStatus,
   Content,
   FileInfo,
   IndexResult,
@@ -45,6 +47,7 @@ import {
   writeWorkspaceManifest,
 } from "../manifest.js";
 import { validateRootPaths } from "../pipeline/indexing/root-paths.js";
+import { probeWorkspaceIndexStorage } from "../storage/index.js";
 import {
   findNearestWorkspace,
   hasWorkspaceIndex,
@@ -465,11 +468,43 @@ class ZvecGrepService implements ZvecGrep {
 
     return await withHomeReadLock(nearest.location.home, "info", async () => {
       const workspaceIndex = readWorkspaceManifest(nearest.location.home);
-      const indexed =
+      const isConfiguredIndexed =
         workspaceIndex !== null &&
         workspaceIndex.indexPolicy !== "disabled" &&
-        isWorkspaceIndexed(workspaceIndex) &&
-        hasWorkspaceIndex(nearest.location);
+        isWorkspaceIndexed(workspaceIndex);
+
+      let storageError: unknown = null;
+      if (isConfiguredIndexed) {
+        try {
+          probeWorkspaceIndexStorage(nearest.location.home);
+        } catch (error) {
+          storageError = error;
+        }
+      }
+
+      const indexed = isConfiguredIndexed && storageError === null;
+      let status: WorkspaceIndexStatus | null = null;
+      if (indexed && workspaceIndex && options.includeStatus !== false) {
+        status = await workspaceIndexStatus(workspaceIndex, nearest.location);
+      }
+
+      let errorInfo: ZvecGrepInfoResult["error"];
+      if (storageError) {
+        if (isEngineError(storageError)) {
+          errorInfo = {
+            code: storageError.code,
+            message: storageError.message,
+            context: storageError.context,
+            cause: storageError.cause ? String(storageError.cause) : undefined,
+          };
+        } else if (storageError instanceof Error) {
+          errorInfo = {
+            code: "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED",
+            message: storageError.message,
+            cause: storageError.cause ? String(storageError.cause) : undefined,
+          };
+        }
+      }
 
       return {
         root: nearest.location.root,
@@ -481,11 +516,9 @@ class ZvecGrepService implements ZvecGrep {
         workspaceIndex: workspaceIndex
           ? workspaceIndexInfoFromManifest(workspaceIndex)
           : undefined,
-        status:
-          indexed && options.includeStatus !== false
-            ? await workspaceIndexStatus(workspaceIndex, nearest.location)
-            : null,
-        suggestion: workspaceInfoSuggestion(workspaceIndex),
+        status,
+        suggestion: workspaceInfoSuggestion(workspaceIndex, storageError),
+        error: errorInfo,
       };
     });
   }
@@ -1122,7 +1155,12 @@ function findNearestWorkspaceIndex(start: string): WorkspaceIndexRecord | null {
 
 function workspaceInfoSuggestion(
   workspaceIndex: WorkspaceIndexInfo | null,
+  storageError?: unknown,
 ): string | undefined {
+  if (storageError) {
+    return "re-run zg index (or zg index --rebuild) to rebuild the index";
+  }
+
   if (!workspaceIndex) {
     return "zg --index or zg --rg";
   }
