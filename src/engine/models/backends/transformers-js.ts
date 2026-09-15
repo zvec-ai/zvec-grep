@@ -16,9 +16,9 @@ import {
   type ModelArtifactSource,
 } from "../artifact-downloader.js";
 import {
-  LOCAL_EMBEDDING_CONCURRENCY_ENV,
+  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  normalizeLocalEmbeddingConcurrency,
   resolveLocalEmbeddingParallelism,
-  resolveLocalEmbeddingParallelismOverride,
 } from "../local-embedding-parallelism.js";
 import { LocalEmbeddingQueue } from "../local-embedding-queue.js";
 import {
@@ -151,9 +151,9 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     dependencies: Partial<TransformersJsDependencies> = {},
   ) {
     super();
-    const parallelism = resolveLocalEmbeddingParallelismOverride({
-      embeddingConcurrency: options.embeddingConcurrency,
-    });
+    const parallelism = normalizeLocalEmbeddingConcurrency(
+      options.embeddingConcurrency,
+    );
     this.info = {
       reference: entry.reference,
       provider: entry.provider,
@@ -227,7 +227,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     }
     throw new EngineError("Transformers.js embedding failed", {
       code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
-      context: `model=${this.entry.reference} repo=${this.entry.repo}${this.executionProvider && this.executionProvider !== "cpu" ? `; for GPU errors, retry with --embedding-concurrency 1 (environment fallback: ${LOCAL_EMBEDDING_CONCURRENCY_ENV}=1) or --device cpu` : ""}`,
+      context: `model=${this.entry.reference} repo=${this.entry.repo}${this.executionProvider && this.executionProvider !== "cpu" ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --index-embedding-concurrency 1 (environment fallback: ${INDEX_EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
       cause: failure,
     });
   }

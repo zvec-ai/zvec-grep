@@ -1,7 +1,7 @@
 import { EngineError } from "../errors.js";
 
-export const LOCAL_EMBEDDING_CONCURRENCY_ENV =
-  "ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY";
+export const INDEX_EMBEDDING_CONCURRENCY_ENV =
+  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY";
 
 const LEGACY_LLAMA_PARALLELISM_ENV = "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM";
 const DEFAULT_PARALLELISM_CAP = 8;
@@ -9,24 +9,24 @@ const BYTES_PER_MIB = 1024 * 1024;
 const CONTEXT_VRAM_MB = 150;
 const GPU_VRAM_BUDGET_RATIO = 0.25;
 
+/** Validate an explicit backend limit without consulting the environment. */
+export function normalizeLocalEmbeddingConcurrency(
+  value?: number,
+): number | undefined {
+  const concurrency = validateEmbeddingConcurrency(value);
+  return concurrency === undefined
+    ? undefined
+    : Math.min(DEFAULT_PARALLELISM_CAP, concurrency);
+}
+
+/** Resolve index-stage configuration; individual backends apply their own cap. */
 export function resolveLocalEmbeddingParallelismOverride(
   options: { embeddingConcurrency?: number; legacyLlama?: boolean } = {},
 ): number | undefined {
   if (options.embeddingConcurrency !== undefined) {
-    if (
-      !Number.isSafeInteger(options.embeddingConcurrency) ||
-      options.embeddingConcurrency < 1
-    ) {
-      throw new EngineError(
-        "Embedding concurrency requires a positive integer",
-        {
-          code: "ZVEC_GREP.ENGINE.MODELS.INVALID_EMBEDDING_CONCURRENCY",
-        },
-      );
-    }
-    return Math.min(DEFAULT_PARALLELISM_CAP, options.embeddingConcurrency);
+    return validateEmbeddingConcurrency(options.embeddingConcurrency);
   }
-  let name = LOCAL_EMBEDDING_CONCURRENCY_ENV;
+  let name = INDEX_EMBEDDING_CONCURRENCY_ENV;
   let value = process.env[name]?.trim() ?? "";
   if (!value && options.legacyLlama) {
     name = LEGACY_LLAMA_PARALLELISM_ENV;
@@ -36,14 +36,24 @@ export function resolveLocalEmbeddingParallelismOverride(
     return undefined;
   }
 
-  if (!/^0*[1-9]\d*$/.test(value)) {
+  const concurrency = Number(value);
+  if (!/^0*[1-9]\d*$/.test(value) || !Number.isSafeInteger(concurrency)) {
     process.stderr.write(
       `zvec-grep warning: invalid ${name}="${value}", using automatic parallelism.\n`,
     );
     return undefined;
   }
 
-  return Math.min(DEFAULT_PARALLELISM_CAP, Number(value));
+  return concurrency;
+}
+
+function validateEmbeddingConcurrency(value?: number): number | undefined {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+    throw new EngineError("Embedding concurrency requires a positive integer", {
+      code: "ZVEC_GREP.ENGINE.MODELS.INVALID_EMBEDDING_CONCURRENCY",
+    });
+  }
+  return value;
 }
 
 export async function resolveLocalEmbeddingParallelism(options: {

@@ -23,7 +23,11 @@ function localRequest(embeddingConcurrency) {
   };
 }
 
-test("daemon model requests retain explicit concurrency outside persisted runtime", async (t) => {
+test("daemon index limits never enter query models or persisted runtime", async (t) => {
+  setEnvironment(t, {
+    ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "7",
+    ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
+  });
   const backend = new DaemonBackend({ version: "test" });
   t.after(() => backend.close());
   t.mock.method(backend, "readWorkspaceEmbeddingRuntime", () => ({
@@ -52,7 +56,7 @@ test("daemon model requests retain explicit concurrency outside persisted runtim
   const search = backend.searchModelLoadRequest(info, {
     embeddingConcurrency: 3,
   });
-  assert.equal(search.embeddingConcurrency, 3);
+  assert.equal(search.embeddingConcurrency, undefined);
   assert.equal(search.runtime.embeddingConcurrency, undefined);
   assert.equal(
     backend.searchModelLoadRequest(info, {}).embeddingConcurrency,
@@ -62,13 +66,72 @@ test("daemon model requests retain explicit concurrency outside persisted runtim
   const active = backend.overrideActiveModelLoadRequest(index, {
     embeddingConcurrency: 4,
   });
-  assert.equal(active.embeddingConcurrency, 4);
+  assert.equal(active.embeddingConcurrency, undefined);
   assert.equal(active.runtime.embeddingConcurrency, undefined);
   assert.equal(
     backend.overrideActiveModelLoadRequest(index, {}).embeddingConcurrency,
-    2,
+    undefined,
   );
   assert.equal(index.embeddingConcurrency, 2);
+  assert.notEqual(
+    backend.modelPool.keyFor(index),
+    backend.modelPool.keyFor(search),
+  );
+  assert.equal(
+    backend.modelPool.keyFor(active),
+    backend.modelPool.keyFor(search),
+  );
+});
+
+test("daemon resolves index defaults for local models before loading or scheduling", async (t) => {
+  setEnvironment(t, {
+    ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "12",
+    ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
+  });
+  const backend = new DaemonBackend({ version: "test" });
+  const configured = new DaemonBackend({
+    version: "test",
+    serviceOptions: { embeddingConcurrency: 5 },
+  });
+  t.after(async () => {
+    await backend.close();
+    await configured.close();
+  });
+  const info = { root: "/tmp/zvec-grep-concurrency-test", indexed: false };
+
+  for (const embedding of [
+    "local/qwen3-embedding-0.6b",
+    "local/bge-small-en-v1.5",
+    "local/potion-code-16m-v2",
+  ]) {
+    assert.equal(
+      backend.indexModelLoadRequest(info, { embedding }).embeddingConcurrency,
+      12,
+    );
+    assert.equal(
+      configured.indexModelLoadRequest(info, { embedding })
+        .embeddingConcurrency,
+      5,
+    );
+    assert.equal(
+      configured.indexModelLoadRequest(info, {
+        embedding,
+        embeddingConcurrency: 3,
+      }).embeddingConcurrency,
+      3,
+    );
+  }
+
+  const remote = { embedding: "qwen/text-embedding-v4", apiKey: "test-key" };
+  assert.equal(
+    backend.indexModelLoadRequest(info, remote).embeddingConcurrency,
+    undefined,
+  );
+  assert.equal(
+    backend.indexModelLoadRequest(info, { ...remote, embeddingConcurrency: 12 })
+      .embeddingConcurrency,
+    12,
+  );
 });
 
 test("fresh search reconciliation forwards the request concurrency", async (t) => {
@@ -113,9 +176,65 @@ test("fresh search reconciliation forwards the request concurrency", async (t) =
   ]);
 });
 
-test("model pool partitions local runtime limits and honors request precedence", async (t) => {
+test("daemon uses one resolved index limit for the model and batch scheduler", async (t) => {
+  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "12" });
+  let createdOptions;
+  let indexedOptions;
+  const backend = new DaemonBackend({
+    version: "test",
+    createService: async (options) => {
+      createdOptions = options;
+      return {
+        index: async (indexOptions) => {
+          indexedOptions = indexOptions;
+          return {};
+        },
+        close: async () => {},
+      };
+    },
+  });
+  t.after(() => backend.close());
+  const info = {
+    root: "/tmp/zvec-grep-concurrency-test",
+    indexed: true,
+    workspaceIndex: {
+      embedding: {
+        provider: "local",
+        model: "bge-small-en-v1.5",
+        dimension: 384,
+        metric: "cosine",
+      },
+    },
+  };
+  t.mock.method(backend, "inspectRoot", async () => info);
+  t.mock.method(backend, "readWorkspaceEmbeddingRuntime", () => ({}));
+  let loadedRequest;
+  t.mock.method(backend.modelPool, "acquire", async (request) => {
+    loadedRequest = request;
+    process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "3";
+    return { model: {}, key: "test-key", release() {} };
+  });
+  const requests = [];
+  const runtime = {
+    canonicalRoot: info.root,
+    updateModelLoadRequest: (request) => requests.push(request),
+    withWrite: (operation) => operation(),
+    reconciliationEpoch: () => 1,
+  };
+  await backend.runIndexOperation(
+    runtime,
+    { changedPaths: ["fixture.ts"] },
+    () => {},
+  );
+  assert.equal(loadedRequest.embeddingConcurrency, 12);
+  assert.equal(createdOptions.embeddingConcurrency, 12);
+  assert.equal(indexedOptions.embeddingConcurrency, 12);
+  assert.equal(requests.at(-1).embeddingConcurrency, undefined);
+});
+
+test("model pool isolates query defaults from index settings and model instances", async (t) => {
   setEnvironment(t, {
-    ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY: "1",
+    ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "7",
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
   });
   const pool = new EmbeddingModelPool({
@@ -132,14 +251,14 @@ test("model pool partitions local runtime limits and honors request precedence",
     return lease;
   };
 
-  const inherited = await acquire(localRequest());
-  assert.equal(inherited.model.info.defaultConcurrency, 2);
+  const query = await acquire(localRequest());
+  assert.equal(query.model.info.defaultConcurrency, 1);
   const explicit = await acquire(localRequest(3));
   assert.equal(explicit.model.info.defaultConcurrency, 3);
-  assert.notEqual(explicit.key, inherited.key);
-  assert.notEqual(explicit.model, inherited.model);
+  assert.notEqual(explicit.key, query.key);
+  assert.notEqual(explicit.model, query.model);
   assert.equal((await acquire(localRequest(3))).model, explicit.model);
-  assert.equal((await acquire(localRequest(2))).model, inherited.model);
+  assert.equal((await acquire(localRequest())).model, query.model);
   assert.equal(pool.snapshot().loaded, 2);
 });
 

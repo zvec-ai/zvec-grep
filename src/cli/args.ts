@@ -347,7 +347,10 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
         readOptionValue(commandArgs, ++index, arg),
         arg,
       );
-    } else if (arg === "--embedding-concurrency") {
+    } else if (
+      arg === "--index-embedding-concurrency" ||
+      arg === "--embedding-concurrency"
+    ) {
       options.embeddingConcurrency = parsePositiveInteger(
         readOptionValue(commandArgs, ++index, arg),
         arg,
@@ -871,11 +874,13 @@ function validateCliShape(
   if (options.rg && (options.preferSymbol || options.symbolTypes?.length)) {
     throw new Error("--rg cannot be combined with indexed symbol options");
   }
-  if (
-    options.rg &&
-    (options.refresh || options.embeddingConcurrency !== undefined)
-  ) {
+  if (options.rg && options.refresh) {
     throw new Error("--rg cannot be combined with indexed refresh options");
+  }
+  if (options.embeddingConcurrency !== undefined && command !== "index") {
+    throw new Error(
+      "--index-embedding-concurrency (alias: --embedding-concurrency) can only be used with zg --index",
+    );
   }
   if (!options.rg && (options.rgCompatibilityOptions?.length ?? 0) > 0) {
     const [option] = options.rgCompatibilityOptions!;
@@ -960,7 +965,6 @@ function validateCliShape(
       [options.maxDepth, "--max-depth"],
       [options.maxFileSizeBytes, "--max-filesize"],
       [options.follow, "--follow"],
-      [options.embeddingConcurrency, "--embedding-concurrency"],
     ]);
     if (unsupported) {
       throw new Error(`${unsupported} is not supported with zg --${command}`);

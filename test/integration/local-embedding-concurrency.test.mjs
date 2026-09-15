@@ -8,11 +8,12 @@ import {
   runParsedCommand,
 } from "../../dist/cli/commands.js";
 import { TransformersJsEmbeddingModel } from "../../dist/engine/models/backends/transformers-js.js";
+import { Model2VecEmbeddingModel } from "../../dist/engine/models/backends/model2vec.js";
 import { createZvecGrep } from "../../dist/index.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 import { deterministicVector } from "../helpers/fake-embedding.mjs";
 
-test("Direct first-query indexing forwards concurrency to the default Potion model", async (t) => {
+test("Direct automatic indexing applies the index environment to Potion batches", async (t) => {
   const directory = await createTemporaryDirectory(
     t,
     "zg-implicit-concurrency-",
@@ -22,64 +23,75 @@ test("Direct first-query indexing forwards concurrency to the default Potion mod
   const previousCwd = process.cwd();
   const previousHome = process.env.ZVEC_GREP_HOME;
   const previousEmbedding = process.env.ZVEC_GREP_EMBEDDING;
+  const previousConcurrency = process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
   const service = await createZvecGrep({ root });
   const calls = [];
-  const sentinel = new Error("Implicit indexing reached");
-  // Keep parsing, dispatch, missing-index detection and model selection real;
-  // stop before indexing can load Potion or download any model artifacts.
+  const progress = [];
+  const servicePrototype = Object.getPrototypeOf(service);
+  const index = servicePrototype.index;
+  // Keep the CLI, missing-index detection, model selection and scheduler real.
+  // Replace only model preparation/inference to avoid downloads and native work.
+  t.mock.method(Model2VecEmbeddingModel.prototype, "prepare", async () => {});
   t.mock.method(
-    Object.getPrototypeOf(service),
-    "index",
-    async function (options) {
+    Model2VecEmbeddingModel.prototype,
+    "doEmbed",
+    async function (contents, options) {
       calls.push({
-        embedding: this.options.embedding,
-        root: options.root,
-        concurrency: options.embeddingConcurrency,
+        purpose: options.purpose,
+        defaultConcurrency: this.info.defaultConcurrency,
       });
-      throw sentinel;
+      return {
+        vectors: contents.map((content) =>
+          deterministicVector(content.text, this.info.dimension),
+        ),
+        truncated: [],
+      };
     },
   );
+  t.mock.method(servicePrototype, "index", async function (options) {
+    assert.equal(this.options.embedding, "local/potion-code-16m-v2");
+    return await index.call(this, {
+      ...options,
+      onProgress(event) {
+        progress.push(event);
+        options.onProgress?.(event);
+      },
+    });
+  });
   t.mock.method(console, "error", () => {});
+  t.mock.method(console, "log", () => {});
   try {
     process.env.ZVEC_GREP_HOME = join(directory, "home");
+    process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "12";
     delete process.env.ZVEC_GREP_EMBEDDING;
+    await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
     process.chdir(root);
-    await assert.rejects(
-      runParsedCommand(
-        parseArgs([
-          "--mode",
-          "direct",
-          "--embedding-concurrency",
-          "3",
-          "answer",
-        ]),
-      ),
-      (error) => error === sentinel,
-    );
-    assert.deepEqual(calls, [
-      {
-        embedding: "local/potion-code-16m-v2",
-        root: process.cwd(),
-        concurrency: 3,
-      },
-    ]);
+    await runParsedCommand(parseArgs(["--mode", "direct", "answer"]));
+    assert.ok(progress.some((event) => event.embedding?.maxConcurrency === 12));
+    assert.ok(calls.some((call) => call.purpose === "document"));
+    assert.ok(calls.some((call) => call.purpose === "query"));
+    assert.ok(calls.every((call) => call.defaultConcurrency === 2));
   } finally {
     process.chdir(previousCwd);
     if (previousHome === undefined) delete process.env.ZVEC_GREP_HOME;
     else process.env.ZVEC_GREP_HOME = previousHome;
     if (previousEmbedding === undefined) delete process.env.ZVEC_GREP_EMBEDDING;
     else process.env.ZVEC_GREP_EMBEDDING = previousEmbedding;
+    if (previousConcurrency === undefined)
+      delete process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
+    else
+      process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = previousConcurrency;
     await service.close();
   }
 });
 
-test("CLI and per-operation concurrency reach local model construction, search, and refresh", async (t) => {
-  const previous = process.env.ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY;
-  process.env.ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY = "8";
+test("index concurrency controls indexing and refresh without changing query embeddings", async (t) => {
+  const previous = process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
+  process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "8";
   t.after(() => {
     if (previous === undefined)
-      delete process.env.ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY;
-    else process.env.ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY = previous;
+      delete process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
+    else process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = previous;
   });
   // Keep the real CLI, factory, model configuration, scheduler and index. Only
   // replace native inference so the test needs neither a GPU nor a model download.
@@ -110,7 +122,7 @@ test("CLI and per-operation concurrency reach local model construction, search, 
     "local/all-minilm-l6-v2",
     "--device",
     "cpu",
-    "--embedding-concurrency",
+    "--index-embedding-concurrency",
     "2",
   ]);
   const service = await createZvecGrep(
@@ -118,7 +130,10 @@ test("CLI and per-operation concurrency reach local model construction, search, 
   );
   t.after(() => service.close());
   const progress = [];
-  await service.index({ onProgress: (event) => progress.push(event) });
+  await service.index({
+    embeddingConcurrency: parsed.options.embeddingConcurrency,
+    onProgress: (event) => progress.push(event),
+  });
   assert.ok(calls.some((call) => call.purpose === "document"));
   assert.ok(calls.every((call) => call.concurrency === 2));
   assert.ok(progress.some((event) => event.embedding?.maxConcurrency === 2));
@@ -126,7 +141,7 @@ test("CLI and per-operation concurrency reach local model construction, search, 
   calls.length = 0;
   await service.context({
     query: "answer",
-    embeddingConcurrency: 1,
+    embeddingConcurrency: 7,
     autoUpdate: false,
   });
   assert.deepEqual(calls, [{ concurrency: 1, purpose: "query" }]);
@@ -143,7 +158,16 @@ test("CLI and per-operation concurrency reach local model construction, search, 
   });
   assert.ok(calls.some((call) => call.purpose === "document"));
   assert.ok(calls.some((call) => call.purpose === "query"));
-  assert.ok(calls.every((call) => call.concurrency === 3));
+  assert.ok(
+    calls
+      .filter((call) => call.purpose === "document")
+      .every((call) => call.concurrency === 3),
+  );
+  assert.ok(
+    calls
+      .filter((call) => call.purpose === "query")
+      .every((call) => call.concurrency === 1),
+  );
 
   calls.length = 0;
   progress.length = 0;

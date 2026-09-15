@@ -3,6 +3,7 @@ export {
   createZvecGrep,
   embeddingModelPoolKeyForIdentity,
   openWorkspaceReadSession,
+  resolveIndexEmbeddingConcurrency,
 } from "./zvec-grep.js";
 export type {
   WorkspaceReadSession,

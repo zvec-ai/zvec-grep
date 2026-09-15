@@ -115,7 +115,7 @@ function createArtifactResolver(
 
 function setParallelismEnvironment(t, value, legacyValue) {
   for (const [name, next] of [
-    ["ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY", value],
+    ["ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY", value],
     ["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM", legacyValue],
   ]) {
     const previous = process.env[name];
@@ -172,8 +172,12 @@ function controlledExtractor() {
 }
 
 for (const { name, value, legacyValue, embeddingConcurrency, limit } of [
-  { name: "unified limit 1", value: "1", legacyValue: "8", limit: 1 },
-  { name: "unified limit 2", value: "2", limit: 2 },
+  {
+    name: "query automatic limit ignores index and legacy environment",
+    value: "8",
+    legacyValue: "8",
+    limit: 1,
+  },
   {
     name: "explicit limit overrides a higher environment limit",
     value: "8",
@@ -187,7 +191,7 @@ for (const { name, value, legacyValue, embeddingConcurrency, limit } of [
     limit: 2,
   },
   {
-    name: "explicit limit uses the same cap as the environment",
+    name: "explicit limit is capped at eight",
     value: "1",
     embeddingConcurrency: 99,
     limit: 8,
@@ -218,7 +222,9 @@ for (const { name, value, legacyValue, embeddingConcurrency, limit } of [
     const requests = Array.from(
       { length: Math.max(4, limit + 1) },
       (_, index) => `request-${index}`,
-    ).map((text) => model.embed([{ kind: "text", text }]));
+    ).map((text) =>
+      model.embed([{ kind: "text", text }], { purpose: "query" }),
+    );
 
     assert.equal(model.info.defaultConcurrency, limit);
     await nextTurn();
@@ -262,7 +268,7 @@ test("Transformers.js drains concurrent GPU calls before sharing one CPU fallbac
   );
   const model = new TransformersJsEmbeddingModel(
     entry(),
-    { device: "cuda" },
+    { device: "cuda", embeddingConcurrency: 2 },
     {
       resolveArtifacts: createArtifactResolver(),
       loadRuntime: async () => ({
@@ -317,7 +323,7 @@ test("Transformers.js shares a terminal CPU replacement failure across concurren
   const originalFailure = new Error("CPU replacement failed");
   const model = new TransformersJsEmbeddingModel(
     entry(),
-    { device: "cuda" },
+    { device: "cuda", embeddingConcurrency: 2 },
     {
       resolveArtifacts: createArtifactResolver(),
       loadRuntime: async () => ({
@@ -369,7 +375,7 @@ test("Transformers.js disposal drains active calls and rejects queued requests",
   const extractor = controlledExtractor();
   const model = new TransformersJsEmbeddingModel(
     entry(),
-    { device: "cuda" },
+    { device: "cuda", embeddingConcurrency: 2 },
     {
       resolveArtifacts: createArtifactResolver(),
       loadRuntime: async () => ({

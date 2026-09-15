@@ -24,9 +24,9 @@ import {
 } from "../artifact-downloader.js";
 import type { LlamaCppEmbeddingCatalogEntry } from "../catalog.js";
 import {
-  LOCAL_EMBEDDING_CONCURRENCY_ENV,
+  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  normalizeLocalEmbeddingConcurrency,
   resolveLocalEmbeddingParallelism,
-  resolveLocalEmbeddingParallelismOverride,
 } from "../local-embedding-parallelism.js";
 import { LocalEmbeddingQueue } from "../local-embedding-queue.js";
 import {
@@ -190,10 +190,9 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
         DEFAULT_MODEL_CACHE_DIR,
     );
     this.gpu = embeddingDeviceToLlamaGpuSelection(options.device ?? "cpu");
-    this.parallelism = resolveLocalEmbeddingParallelismOverride({
-      embeddingConcurrency: options.embeddingConcurrency,
-      legacyLlama: true,
-    });
+    this.parallelism = normalizeLocalEmbeddingConcurrency(
+      options.embeddingConcurrency,
+    );
     this.dependencies = { ...defaultDependencies, ...dependencies };
   }
 
@@ -220,7 +219,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     } catch (cause) {
       throw new EngineError("llama.cpp embedding failed", {
         code: "ZVEC_GREP.ENGINE.MODELS.LLAMA_CPP_EMBED_FAILED",
-        context: `model=${this.entry.reference}${this.gpu !== false ? `; for GPU errors, retry with --embedding-concurrency 1 (environment fallback: ${LOCAL_EMBEDDING_CONCURRENCY_ENV}=1) or --device cpu` : ""}`,
+        context: `model=${this.entry.reference}${this.gpu !== false ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --index-embedding-concurrency 1 (environment fallback: ${INDEX_EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
         cause,
       });
     }

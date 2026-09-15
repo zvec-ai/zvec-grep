@@ -6,7 +6,7 @@ export type CreateEmbeddingModelOptions = {
   endpoint?: string;
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
-  /** Local Transformer/llama inference limit; overrides the environment. */
+  /** Explicit local Transformer/llama instance limit; index callers resolve configuration. */
   embeddingConcurrency?: number;
 };
 

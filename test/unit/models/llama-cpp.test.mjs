@@ -196,21 +196,13 @@ async function captureStderr(callback) {
 test("local embedding loads GGUF, formats and truncates text, parallelizes, caches, and disposes", async (t) => {
   const modelFile = await ggufFile(t);
   const setup = createDependencies(modelFile.path);
-  const previousParallelism = process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM;
-  process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM = "2";
-  t.after(() => {
-    if (previousParallelism === undefined) {
-      delete process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM;
-    } else {
-      process.env.ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM = previousParallelism;
-    }
-  });
 
   const model = new LlamaCppEmbeddingModel(
     entry(),
     {
       modelCacheDir: modelFile.root,
       device: "cpu",
+      embeddingConcurrency: 2,
     },
     setup.dependencies,
   );
@@ -577,7 +569,7 @@ test("local embedding reports context and embedding runtime failures", async (t)
 
 function setParallelism(t, shared, legacy) {
   for (const [name, value] of [
-    ["ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY", shared],
+    ["ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY", shared],
     ["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM", legacy],
   ]) {
     const previous = process.env[name];
@@ -590,13 +582,24 @@ function setParallelism(t, shared, legacy) {
   }
 }
 
-for (const { name, shared, legacy, embeddingConcurrency } of [
-  { name: "shared parallelism overrides legacy", shared: "2", legacy: "1" },
+for (const { name, shared, legacy, embeddingConcurrency, limit } of [
+  {
+    name: "query automatic parallelism ignores index and legacy environment",
+    shared: "8",
+    legacy: "8",
+    limit: 1,
+  },
+  {
+    name: "query automatic parallelism ignores the legacy-only environment",
+    legacy: "8",
+    limit: 1,
+  },
   {
     name: "explicit parallelism overrides both environment variables",
     shared: "1",
     legacy: "8",
     embeddingConcurrency: 2,
+    limit: 2,
   },
 ]) {
   test(`${name} and bounds llama contexts across simultaneous batches`, async (t) => {
@@ -612,7 +615,7 @@ for (const { name, shared, legacy, embeddingConcurrency } of [
         assert.equal(activeContexts.has(contextIndex), false);
         activeContexts.add(contextIndex);
         maximum = Math.max(maximum, ++active);
-        if (active === 2) entered.resolve();
+        if (active === limit) entered.resolve();
         await release.promise;
         active--;
         activeContexts.delete(contextIndex);
@@ -624,24 +627,29 @@ for (const { name, shared, legacy, embeddingConcurrency } of [
       { modelCacheDir: modelFile.root, device: "cpu", embeddingConcurrency },
       setup.dependencies,
     );
-    // Overrides are captured when the model is constructed, as in a daemon.
-    process.env.ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY = "1";
-    const first = model.embed([
-      { kind: "text", text: "one" },
-      { kind: "text", text: "two" },
-    ]);
-    const second = model.embed([{ kind: "text", text: "three" }]);
+    // The environment is not consulted at construction or during query calls.
+    process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "7";
+    const first = model.embed(
+      [
+        { kind: "text", text: "one" },
+        { kind: "text", text: "two" },
+      ],
+      { purpose: "query" },
+    );
+    const second = model.embed([{ kind: "text", text: "three" }], {
+      purpose: "query",
+    });
     await entered.promise;
     await setImmediate();
-    assert.equal(setup.calls.contexts.length, 2);
-    assert.equal(setup.calls.texts.length, 2);
+    assert.equal(setup.calls.contexts.length, limit);
+    assert.equal(setup.calls.texts.length, limit);
     release.resolve();
     const results = await Promise.all([first, second]);
     assert.deepEqual(
       results.map((result) => result.vectors.length),
       [2, 1],
     );
-    assert.equal(maximum, 2);
+    assert.equal(maximum, limit);
     await model.dispose();
   });
 }
@@ -667,7 +675,7 @@ test("catchable CUDA failures preserve the cause and drain other contexts before
   });
   const model = new LlamaCppEmbeddingModel(
     entry(),
-    { modelCacheDir: modelFile.root, device: "cuda" },
+    { modelCacheDir: modelFile.root, device: "cuda", embeddingConcurrency: 2 },
     setup.dependencies,
   );
   let settled = false;
@@ -683,8 +691,8 @@ test("catchable CUDA failures preserve the cause and drain other contexts before
         error.code,
         "ZVEC_GREP.ENGINE.MODELS.LLAMA_CPP_EMBED_FAILED",
       );
-      assert.match(error.context, /ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=1/);
-      assert.match(error.context, /--embedding-concurrency 1/);
+      assert.match(error.context, /ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1/);
+      assert.match(error.context, /--index-embedding-concurrency 1/);
       return true;
     },
   );

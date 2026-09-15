@@ -93,7 +93,7 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     "/tmp/models",
     "--device",
     "CUDA",
-    "--embedding-concurrency",
+    "--index-embedding-concurrency",
     "4",
   ]);
   assert.equal(index.options.embedding, "qwen/text-embedding-v4");
@@ -132,6 +132,39 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(rg.options.rgOptions?.beforeContext, 2);
   assert.equal(rg.options.rgOptions?.afterContext, 2);
   assert.deepEqual(rg.options.globs, ["*.ts"]);
+});
+
+test("CLI index concurrency accepts its compatibility alias only for indexing", () => {
+  for (const flag of [
+    "--index-embedding-concurrency",
+    "--embedding-concurrency",
+  ]) {
+    assert.equal(
+      parseArgs(["--index", flag, "12"]).options.embeddingConcurrency,
+      12,
+    );
+    for (const value of ["0", "-1", "1.5", "invalid"]) {
+      assert.throws(
+        () => parseArgs(["--index", flag, value]),
+        /positive integer/,
+      );
+    }
+    for (const command of [
+      ["query text"],
+      ["--vector", "query text"],
+      ["--refresh", "wait", "query text"],
+      ["--rg", "query text"],
+      ["--status"],
+      ["--server", "on"],
+      ["--install"],
+    ]) {
+      assert.throws(
+        () => parseArgs([...command, flag, "2"]),
+        /only be used with zg --index/,
+        [...command, flag, "2"].join(" "),
+      );
+    }
+  }
 });
 
 test("CLI parsers reject invalid values and normalize supported values", () => {
@@ -594,7 +627,7 @@ test("CLI shape validation rejects every incompatible command family", () => {
     [["--rg", "query", "--refresh", "off"], /indexed refresh options/],
     [
       ["--rg", "query", "--embedding-concurrency", "2"],
-      /indexed refresh options/,
+      /only be used with zg --index/,
     ],
     [["--reset-paths", "query"], /only be used with zg --index/],
     [["--ignore-case", "query"], /only be used with --rg/],

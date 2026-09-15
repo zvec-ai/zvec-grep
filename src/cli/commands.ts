@@ -874,7 +874,6 @@ async function runServerQuery(
       maxDepth: options.maxDepth,
       maxFileSizeBytes: options.maxFileSizeBytes,
       follow: options.follow,
-      embeddingConcurrency: options.embeddingConcurrency,
       modifiedAfter: options.modifiedAfter,
       modifiedBefore: options.modifiedBefore,
       freshness: searchPolicy.freshness,
@@ -1007,7 +1006,6 @@ function contextOptions(
     modifiedAfter: options.modifiedAfter,
     modifiedBefore: options.modifiedBefore,
     symbolTypes: options.symbolTypes,
-    embeddingConcurrency: options.embeddingConcurrency,
   };
 }
 
@@ -1023,7 +1021,6 @@ export function createServiceOptions(
     endpoint: options.endpoint,
     modelCacheDir: options.modelCacheDir,
     device: options.device,
-    embeddingConcurrency: options.embeddingConcurrency,
     authorizationSigningKeyPath: process.env.ZVEC_GREP_AUTHORIZATION_KEY_FILE,
   };
 }

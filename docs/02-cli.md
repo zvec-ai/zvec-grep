@@ -65,7 +65,6 @@ Result controls:
 | `--compact` | Force compact output intended for pipes |
 | `--preview none\|short\|full` | Indexed source preview size |
 | `--refresh background\|wait\|off` | Index refresh policy |
-| `--embedding-concurrency <n>` | Embedding concurrency for indexed search, automatic indexing, and refresh; backend behavior below |
 | `--mode direct\|server\|auto` | Execution transport |
 | `--debug` | Print diagnostics to stderr |
 | `--trace` | Add per-hit indexed search trace |
@@ -126,37 +125,44 @@ Core options:
 | `--endpoint <url>` | Remote provider endpoint |
 | `--model-cache <path>` | Local model cache directory |
 | `--device <device>` | `auto`, `cpu`, `metal`, `vulkan`, or `cuda` |
-| `--embedding-concurrency <n>` | llama.cpp/Transformers.js runtime concurrency limit; concurrent batches for other models |
+| `--index-embedding-concurrency <n>` | Index embedding concurrency; backend behavior below |
+| `--embedding-concurrency <n>` | Compatibility alias for `--index-embedding-concurrency` |
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
-Local Potion embedding defaults to two concurrent batches, processed by worker
-threads. `--embedding-concurrency` changes the batch concurrency; the worker pool
-has a separate limit based on available CPU parallelism, so requesting N
-concurrent batches does not guarantee N worker threads.
+`--index-embedding-concurrency` controls embedding concurrency during index
+construction and updates. It is accepted only with `--index`, including under
+its compatibility name; search and `--rg` reject both names. For local models,
+`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` supplies the default for explicit and
+automatic indexing, including refresh. Query-vector inference is unaffected.
 
-For llama.cpp and Transformers.js, `--embedding-concurrency` sets the same
-per-model-instance limit as `ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY`: llama.cpp
-contexts or calls in flight on one Transformers.js pipeline. Values must be
-positive integers and are capped at 8. The explicit CLI option takes precedence
-over the shared environment variable, then the legacy
-`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp only), then the automatic default.
-The shared environment variable does not affect Potion/model2vec or remote models.
+The explicit CLI/API index option takes precedence over the index environment
+variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),
+then the automatic default. Values must be positive integers.
+
+| Backend | Index concurrency limit |
+| --- | --- |
+| llama.cpp | Contexts per indexing model instance, capped at 8; outer batches remain serial |
+| Transformers.js | Calls in flight on one cached pipeline, capped at 8; simultaneous native/GPU execution is not guaranteed |
+| Potion/model2vec | Concurrent batches, default 2, without the cap of 8; the worker pool has a separate limit based on available CPU parallelism |
+| Remote models | CLI option controls concurrent batches; the index environment variable does not apply |
+
+For Potion/model2vec, requesting N concurrent batches does not guarantee N worker
+threads.
 
 Without an override, llama.cpp on CPU and Transformers.js use 1. llama.cpp uses
 `floor(freeVRAM × 0.25 / 150 MiB)` when its GPU runtime provides free VRAM,
 clamped to 1–8; a failed or invalid VRAM query uses 2. This heuristic does not
-guarantee that the model fits in memory. See [local embedding concurrency and GPU
-errors](../README.md#local-embedding-concurrency-and-gpu-errors) for troubleshooting.
+guarantee that the model fits in memory. See [index embedding concurrency and GPU
+errors](../README.md#index-embedding-concurrency-and-gpu-errors) for troubleshooting.
 
-The CLI option applies to the current operation in both direct and server mode.
-It is also accepted by indexed search, including automatic indexing and refresh,
-but cannot be combined with `--rg`.
+The CLI option applies to the current index operation in both direct and server
+mode.
 For example, this uses a limit of 1 even if the environment default is 8, without
 restarting the daemon:
 
 ```bash
-export ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=8
-zg --index --embedding-concurrency 1
+export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
+zg --index --index-embedding-concurrency 1
 ```
 
 Changing the daemon's environment-variable default requires updating its startup
