@@ -794,7 +794,11 @@ async function buildImplicitDirectIndex(
     createServiceOptions({ ...options, embedding }, root),
   );
   try {
-    await service.index({ root, onProgress });
+    await service.index({
+      root,
+      onProgress,
+      embeddingConcurrency: options.embeddingConcurrency,
+    });
   } finally {
     await service.close();
   }
@@ -1019,6 +1023,7 @@ export function createServiceOptions(
     endpoint: options.endpoint,
     modelCacheDir: options.modelCacheDir,
     device: options.device,
+    embeddingConcurrency: options.embeddingConcurrency,
     authorizationSigningKeyPath: process.env.ZVEC_GREP_AUTHORIZATION_KEY_FILE,
   };
 }

@@ -541,6 +541,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
               root: runtime.canonicalRoot,
               apiKey: input.apiKey,
               device: input.device,
+              embeddingConcurrency: input.embeddingConcurrency,
               runtimeOverridesAreEphemeral: true,
             },
             "background_reconcile",
@@ -799,6 +800,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           ? undefined
           : input.endpoint,
         device: input.runtimeOverridesAreEphemeral ? undefined : input.device,
+        embeddingConcurrency:
+          input.embeddingConcurrency ??
+          this.options.serviceOptions?.embeddingConcurrency,
         daemonInstanceToken: this.runtimeManager.instanceToken,
       });
       const result = await runtime.withWrite(() =>
@@ -1061,7 +1065,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private async waitForFresh(
     runtime: RootRuntime,
     authorization?: RemoteEmbeddingOperationPermit,
-    runtimeOverrides: Pick<NormalizedSearchInput, "apiKey" | "device"> = {},
+    runtimeOverrides: Pick<
+      NormalizedSearchInput,
+      "apiKey" | "device" | "embeddingConcurrency"
+    > = {},
   ): Promise<IndexJobSnapshot | undefined> {
     let updateJob: IndexJobSnapshot | undefined;
     while (true) {
@@ -1097,6 +1104,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           root: runtime.canonicalRoot,
           apiKey: runtimeOverrides.apiKey,
           device: runtimeOverrides.device,
+          embeddingConcurrency: runtimeOverrides.embeddingConcurrency,
           runtimeOverridesAreEphemeral: true,
         },
         "fresh_query",
@@ -1198,6 +1206,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       | "endpoint"
       | "device"
       | "rebuild"
+      | "embeddingConcurrency"
     >,
   ): EmbeddingModelLoadRequest {
     const model = this.indexModel(info, input);
@@ -1216,12 +1225,21 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         "The requested embedding endpoint differs from the workspace snapshot; use rebuild to change endpoints.",
       );
     }
-    return { model, runtime };
+    return {
+      model,
+      runtime,
+      ...(input.embeddingConcurrency !== undefined
+        ? { embeddingConcurrency: input.embeddingConcurrency }
+        : {}),
+    };
   }
 
   private searchModelLoadRequest(
     info: ZvecGrepInfoResult,
-    overrides: Pick<NormalizedSearchInput, "apiKey" | "device">,
+    overrides: Pick<
+      NormalizedSearchInput,
+      "apiKey" | "device" | "embeddingConcurrency"
+    >,
   ): EmbeddingModelLoadRequest {
     const schema = info.workspaceIndex?.embedding;
     if (!info.indexed || !schema) {
@@ -1240,7 +1258,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       workspaceRuntime,
       overrides,
     );
-    return { model, runtime };
+    return {
+      model,
+      runtime,
+      ...(overrides.embeddingConcurrency !== undefined
+        ? { embeddingConcurrency: overrides.embeddingConcurrency }
+        : {}),
+    };
   }
 
   private resolveModelRuntime(
@@ -1267,7 +1291,10 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
 
   private overrideActiveModelLoadRequest(
     request: EmbeddingModelLoadRequest,
-    overrides: Pick<NormalizedSearchInput, "apiKey" | "device">,
+    overrides: Pick<
+      NormalizedSearchInput,
+      "apiKey" | "device" | "embeddingConcurrency"
+    >,
   ): EmbeddingModelLoadRequest {
     const runtime = resolveEmbeddingRuntimeOptions(
       embeddingModelReference(request.model),
@@ -1275,7 +1302,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       request.runtime ?? {},
       readGlobalConfig(),
     );
-    return { model: request.model, runtime };
+    const embeddingConcurrency =
+      overrides.embeddingConcurrency ?? request.embeddingConcurrency;
+    return {
+      model: request.model,
+      runtime,
+      ...(embeddingConcurrency !== undefined ? { embeddingConcurrency } : {}),
+    };
   }
 
   private readWorkspaceEmbeddingRuntime(

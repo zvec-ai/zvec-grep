@@ -12,6 +12,7 @@ import type { DaemonLogger } from "./logger.js";
 export type EmbeddingModelLoadRequest = {
   model: EmbeddingModelIdentity;
   runtime?: EmbeddingRuntimeConfig;
+  embeddingConcurrency?: number;
 };
 
 export type ModelLease = {
@@ -70,6 +71,9 @@ export class EmbeddingModelPool {
         createEmbeddingModelForIdentity(request.model, {
           ...options.serviceOptions,
           ...request.runtime,
+          embeddingConcurrency:
+            request.embeddingConcurrency ??
+            options.serviceOptions?.embeddingConcurrency,
         }));
     this.keyForRequest =
       options.keyForRequest ??
@@ -77,6 +81,9 @@ export class EmbeddingModelPool {
         embeddingModelPoolKeyForIdentity(request.model, {
           ...options.serviceOptions,
           ...request.runtime,
+          embeddingConcurrency:
+            request.embeddingConcurrency ??
+            options.serviceOptions?.embeddingConcurrency,
         }));
     this.logger = options.logger;
   }

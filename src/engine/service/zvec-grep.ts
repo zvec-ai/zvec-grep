@@ -19,7 +19,9 @@ import {
 import {
   createEmbeddingModel,
   EmbeddingPurpose,
+  getEmbeddingModelCatalogEntry,
   resolveEmbeddingReference,
+  resolveLocalEmbeddingParallelismOverride,
   type CreateEmbeddingModelOptions,
   type EmbeddingModel,
   type EmbeddingModelInfo,
@@ -219,6 +221,7 @@ class ZvecGrepService implements ZvecGrep {
               existing,
               "index",
               existingRuntime,
+              options.embeddingConcurrency,
             );
             const effectiveRuntime = effectiveEmbeddingRuntime(
               this.options,
@@ -526,6 +529,7 @@ class ZvecGrepService implements ZvecGrep {
       info,
       request,
       info.embeddingRuntime,
+      options.embeddingConcurrency,
     );
     try {
       return await contextFromOpenWorkspaceIndex({
@@ -584,6 +588,7 @@ class ZvecGrepService implements ZvecGrep {
             existing,
             "context.refresh",
             workspaceRuntime,
+            options.embeddingConcurrency,
           );
           assertWorkspaceEndpointMatchesCurrentRuntime(
             existing,
@@ -715,6 +720,7 @@ class ZvecGrepService implements ZvecGrep {
     info: WorkspaceIndexInfo,
     request: NormalizedContextRequest,
     workspaceRuntime: EmbeddingRuntimeConfig,
+    embeddingConcurrency?: number,
   ): WorkspaceIndex {
     return new WorkspaceIndex(info, {
       mode: "read",
@@ -723,6 +729,7 @@ class ZvecGrepService implements ZvecGrep {
         request,
         workspaceRuntime,
         info,
+        embeddingConcurrency,
       ),
     });
   }
@@ -732,6 +739,7 @@ class ZvecGrepService implements ZvecGrep {
     request: NormalizedContextRequest,
     workspaceRuntime: EmbeddingRuntimeConfig,
     info: WorkspaceIndexInfo,
+    embeddingConcurrency?: number,
   ): EmbeddingModel | undefined {
     if (!request.routes.some((route) => route.mode === "vector")) {
       return undefined;
@@ -757,20 +765,29 @@ class ZvecGrepService implements ZvecGrep {
       return this.embeddingModel;
     }
 
-    return this.recoverEmbeddingModel(schema, workspaceRuntime);
+    return this.recoverEmbeddingModel(
+      schema,
+      workspaceRuntime,
+      embeddingConcurrency,
+    );
   }
 
   private embeddingModelForIndex(
     existing: WorkspaceIndexInfo | null,
     operation: string,
     workspaceRuntime: EmbeddingRuntimeConfig = {},
+    embeddingConcurrency?: number,
   ): EmbeddingModel {
     if (
       isWorkspaceIndexed(existing) &&
       !this.embeddingModel &&
       !this.options.embedding
     ) {
-      return this.recoverEmbeddingModel(existing.embedding, workspaceRuntime);
+      return this.recoverEmbeddingModel(
+        existing.embedding,
+        workspaceRuntime,
+        embeddingConcurrency,
+      );
     }
 
     const config = readGlobalConfig();
@@ -795,6 +812,7 @@ class ZvecGrepService implements ZvecGrep {
             reference,
             config,
             selectedWorkspaceRuntime,
+            embeddingConcurrency,
           )
         : undefined) ??
       this.requireEmbeddingModel(operation)
@@ -804,6 +822,7 @@ class ZvecGrepService implements ZvecGrep {
   private recoverEmbeddingModel(
     schema: WorkspaceIndexEmbeddingSchema,
     workspaceRuntime: EmbeddingRuntimeConfig = {},
+    embeddingConcurrency?: number,
   ): EmbeddingModel {
     const config = readGlobalConfig();
     const identity = {
@@ -816,6 +835,7 @@ class ZvecGrepService implements ZvecGrep {
       identity,
       config,
       workspaceRuntime,
+      embeddingConcurrency,
     );
     const key = `${reference}/${providerOptionsFingerprint(options)}`;
     return this.cachedEmbeddingModel(key, () =>
@@ -827,6 +847,7 @@ class ZvecGrepService implements ZvecGrep {
     reference: string,
     config: ZvecGrepGlobalConfig = readGlobalConfig(),
     workspaceRuntime: EmbeddingRuntimeConfig = {},
+    embeddingConcurrency?: number,
   ): EmbeddingModel {
     const identity = parseEmbeddingModelReference(reference);
     const options = providerOptions(
@@ -834,6 +855,7 @@ class ZvecGrepService implements ZvecGrep {
       identity,
       config,
       workspaceRuntime,
+      embeddingConcurrency,
     );
     const key = `configured/${reference}/${providerOptionsFingerprint(options)}`;
     return this.cachedEmbeddingModel(key, () =>
@@ -1405,8 +1427,17 @@ function providerOptions(
   identity: EmbeddingModelIdentity,
   config: ZvecGrepGlobalConfig = readGlobalConfig(),
   workspaceRuntime: EmbeddingRuntimeConfig = {},
+  embeddingConcurrency = options.embeddingConcurrency,
 ): CreateEmbeddingModelOptions & { apiKey: string } {
   const reference = embeddingModelReference(identity);
+  const backend = getEmbeddingModelCatalogEntry(reference)?.backend;
+  const parallelism =
+    backend === "llama-cpp" || backend === "transformers-js"
+      ? resolveLocalEmbeddingParallelismOverride({
+          embeddingConcurrency,
+          legacyLlama: backend === "llama-cpp",
+        })
+      : undefined;
   const runtime = resolveEmbeddingRuntimeOptions(
     reference,
     options,
@@ -1422,6 +1453,7 @@ function providerOptions(
       process.env.ZVEC_GREP_MODEL_CACHE ??
       join(options.home ?? defaultHome(), "models"),
     device: runtime.device,
+    ...(parallelism !== undefined ? { embeddingConcurrency: parallelism } : {}),
   };
 }
 
@@ -1494,10 +1526,16 @@ function providerOptionsFingerprint(options: {
   endpoint?: string;
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+  embeddingConcurrency?: number;
 }): string {
   const publicOptionsFingerprint = createHash("sha256")
     .update(
-      JSON.stringify([options.endpoint, options.modelCacheDir, options.device]),
+      JSON.stringify([
+        options.endpoint,
+        options.modelCacheDir,
+        options.device,
+        options.embeddingConcurrency,
+      ]),
     )
     .digest("hex");
   return `${providerApiKeyIdentity(options.apiKey)}:${publicOptionsFingerprint}`;

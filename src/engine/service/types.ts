@@ -27,6 +27,7 @@ export type CreateZvecGrepOptions = {
   endpoint?: string;
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+  embeddingConcurrency?: number;
   authorizationSigningKeyPath?: string;
 };
 

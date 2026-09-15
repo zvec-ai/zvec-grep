@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { LlamaCppEmbeddingModel } from "../../../dist/engine/models/backends/llama-cpp.js";
 import { createTemporaryDirectory } from "../../helpers/fixtures.mjs";
@@ -64,6 +65,7 @@ function createDependencies(modelPath, options = {}) {
     detokenize: (tokens) => tokens.join(""),
     createEmbeddingContext: async (contextOptions) => {
       calls.contexts.push(contextOptions);
+      const contextIndex = calls.contexts.length - 1;
       if (
         options.failContextAfter !== undefined &&
         calls.contexts.length > options.failContextAfter
@@ -73,6 +75,7 @@ function createDependencies(modelPath, options = {}) {
       return {
         getEmbeddingFor: async (text) => {
           calls.texts.push(text);
+          if (options.embed) return await options.embed(text, contextIndex);
           if (options.failEmbedding) throw new Error("embedding failed");
           return { vector: [text.length, 1] };
         },
@@ -570,4 +573,130 @@ test("local embedding reports context and embedding runtime failures", async (t)
     model.embed([{ kind: "text", text: "value" }]),
     /embedding failed/,
   );
+});
+
+function setParallelism(t, shared, legacy) {
+  for (const [name, value] of [
+    ["ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY", shared],
+    ["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM", legacy],
+  ]) {
+    const previous = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+    t.after(() => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    });
+  }
+}
+
+for (const { name, shared, legacy, embeddingConcurrency } of [
+  { name: "shared parallelism overrides legacy", shared: "2", legacy: "1" },
+  {
+    name: "explicit parallelism overrides both environment variables",
+    shared: "1",
+    legacy: "8",
+    embeddingConcurrency: 2,
+  },
+]) {
+  test(`${name} and bounds llama contexts across simultaneous batches`, async (t) => {
+    setParallelism(t, shared, legacy);
+    const modelFile = await ggufFile(t);
+    const entered = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    let active = 0;
+    let maximum = 0;
+    const activeContexts = new Set();
+    const setup = createDependencies(modelFile.path, {
+      embed: async (_text, contextIndex) => {
+        assert.equal(activeContexts.has(contextIndex), false);
+        activeContexts.add(contextIndex);
+        maximum = Math.max(maximum, ++active);
+        if (active === 2) entered.resolve();
+        await release.promise;
+        active--;
+        activeContexts.delete(contextIndex);
+        return { vector: [contextIndex + 1, 1] };
+      },
+    });
+    const model = new LlamaCppEmbeddingModel(
+      entry(),
+      { modelCacheDir: modelFile.root, device: "cpu", embeddingConcurrency },
+      setup.dependencies,
+    );
+    // Overrides are captured when the model is constructed, as in a daemon.
+    process.env.ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY = "1";
+    const first = model.embed([
+      { kind: "text", text: "one" },
+      { kind: "text", text: "two" },
+    ]);
+    const second = model.embed([{ kind: "text", text: "three" }]);
+    await entered.promise;
+    await setImmediate();
+    assert.equal(setup.calls.contexts.length, 2);
+    assert.equal(setup.calls.texts.length, 2);
+    release.resolve();
+    const results = await Promise.all([first, second]);
+    assert.deepEqual(
+      results.map((result) => result.vectors.length),
+      [2, 1],
+    );
+    assert.equal(maximum, 2);
+    await model.dispose();
+  });
+}
+
+test("catchable CUDA failures preserve the cause and drain other contexts before disposal", async (t) => {
+  setParallelism(t, "2");
+  const modelFile = await ggufFile(t);
+  const entered = Promise.withResolvers();
+  const fail = Promise.withResolvers();
+  const remaining = Promise.withResolvers();
+  const cudaError = new Error("CUDA out of memory");
+  let calls = 0;
+  const setup = createDependencies(modelFile.path, {
+    embed: async (_text, contextIndex) => {
+      if (++calls === 2) entered.resolve();
+      if (contextIndex === 0) {
+        await fail.promise;
+        throw cudaError;
+      }
+      await remaining.promise;
+      return { vector: [1, 1] };
+    },
+  });
+  const model = new LlamaCppEmbeddingModel(
+    entry(),
+    { modelCacheDir: modelFile.root, device: "cuda" },
+    setup.dependencies,
+  );
+  let settled = false;
+  const result = assert.rejects(
+    model.embed([
+      { kind: "text", text: "one" },
+      { kind: "text", text: "two" },
+    ]),
+    (error) => {
+      settled = true;
+      assert.equal(error.cause, cudaError);
+      assert.equal(
+        error.code,
+        "ZVEC_GREP.ENGINE.MODELS.LLAMA_CPP_EMBED_FAILED",
+      );
+      assert.match(error.context, /ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=1/);
+      assert.match(error.context, /--embedding-concurrency 1/);
+      return true;
+    },
+  );
+  await entered.promise;
+  fail.resolve();
+  await setImmediate();
+  assert.equal(settled, false);
+  const disposal = model.dispose();
+  await setImmediate();
+  assert.equal(setup.calls.disposedContexts, 0);
+  remaining.resolve();
+  await Promise.all([result, disposal]);
+  assert.equal(setup.calls.disposedContexts, 2);
+  assert.equal(setup.calls.model.length, 1);
 });

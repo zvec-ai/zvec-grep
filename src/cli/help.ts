@@ -40,6 +40,8 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_ENDPOINT: "Remote Embedding endpoint fallback",
   ZVEC_GREP_MODEL_CACHE: "Local embedding model cache directory",
   ZVEC_GREP_DEVICE: "Local embedding device: auto, cpu, metal, vulkan, or cuda",
+  ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY:
+    "llama.cpp/Transformers.js concurrency limit (1-8); CLI option takes precedence",
   DASHSCOPE_API_KEY: "Qwen credential fallback after ZVEC_GREP_API_KEY",
   QWEN_API_KEY: "Qwen credential fallback after DASHSCOPE_API_KEY",
   ZVEC_GREP_AUTHORIZATION_KEY_FILE:
@@ -47,7 +49,7 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_METAL_KEEP_RESIDENCY:
     "Set to 1 to keep llama.cpp Metal residency enabled (advanced)",
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM:
-    "Positive llama.cpp context parallelism override (advanced)",
+    "Legacy llama.cpp limit; CLI option and shared local variable take precedence",
   NO_COLOR: "Disable terminal colors",
   CODEX_HOME: "Codex configuration directory used by zg --install",
   CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg --install",
@@ -146,6 +148,7 @@ Embedding runtime:
   --api-key <key>                   Embedding provider API key
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
+  --embedding-concurrency <n>       llama.cpp/Transformers.js limit; batch concurrency for other models
   --allow-remote                    Allow Remote Embedding for this command only
 
 File filters:
@@ -169,6 +172,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY",
 ])}
 
 If no index exists, zg creates one with a local embedding model before searching.
@@ -194,7 +198,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>       Embedding task concurrency
+  --embedding-concurrency <n>       llama.cpp/Transformers.js limit; batch concurrency for other models
   --allow-remote                    Allow Remote Embedding for this command only
 
 File selection:
@@ -221,6 +225,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY",
 ])}
 
 See zg --help environment for precedence and Server-mode scope.`;
@@ -548,6 +553,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY",
 ])}
 
 Qwen credential aliases:
@@ -580,12 +586,14 @@ ${formatEnvironmentVariables([
 
 Precedence:
   Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  llama.cpp/Transformers.js limit   CLI > shared local variable > legacy llama variable > auto
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config > Built-in local
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY
 
 Server scope:
   zg --index forwards its ZVEC_GREP_EMBEDDING default to Server and auto modes.
+  Explicit --embedding-concurrency is forwarded without restarting the daemon.
   Direct MCP calls use the embedding environment inherited by the daemon.
   Restart the daemon after changing its embedding runtime environment.
 

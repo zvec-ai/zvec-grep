@@ -145,6 +145,52 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `alice-in-wonderland.txt` 前面。
 
+### 本地 Embedding 并发与 GPU 错误
+
+`--embedding-concurrency <n>` 和 `ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY`
+设置相同的模型实例并发上限，适用于 llama.cpp 的 context 数和 Transformers.js
+同一 pipeline 中尚未完成的调用数，不保证原生运行时会并行执行。
+取值为正整数，超过 **8** 按 8 处理。优先级为：显式 CLI 参数 > 新共享环境变量 >
+旧变量 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`（仅 llama.cpp）> 自动默认值。
+
+对于 Potion/model2vec 和远程模型，`--embedding-concurrency` 继续控制并发的
+Embedding 批次数；新共享环境变量不影响这些模型。
+
+对于 llama.cpp 和 Transformers.js，未显式设置时，CPU 或没有显存查询接口的
+运行时使用 1。Transformers.js 目前没有该接口，因此自动上限为 1。
+GPU 运行时提供空闲显存时，按
+`floor(空闲显存 × 0.25 / 150 MiB)` 计算，并限制在 1–8；查询失败或返回
+无效值时使用 2。这里沿用原有的 150 MiB 启发式估算，不保证模型一定能装入显存。
+
+遇到 CUDA 错误、内存不足或原生运行时崩溃时，可将上限设为 1 后重试索引。
+以下示例使用直接执行模式，使新的环境变量立即生效：
+
+```bash
+export ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=1
+zg --index --mode direct
+```
+
+Windows PowerShell：
+
+```powershell
+$env:ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY = "1"
+zg --index --mode direct
+```
+
+显式 CLI 参数会在本次索引操作中覆盖环境变量，使用后台服务时也会生效，
+无需为 CLI 参数重启后台服务：
+
+```bash
+export ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=8
+zg --index --embedding-concurrency 1
+```
+
+若要修改后台服务的环境变量默认值，需更新其启动环境，然后在该环境中运行
+`zg --server off` 和 `zg --server on`。如果由 Agent 启动 zg，还需更新其环境并重启
+Agent/MCP 连接。JavaScript 异常可以捕获，但原生 abort 可能在 CPU 回退之前
+直接结束进程。将上限设为 1 可以降低并发，但不能避免所有 GPU 故障；也可使用
+`--device cpu` 重试。
+
 <a id="benchmarks"></a>
 
 ## 📊 性能测试

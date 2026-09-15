@@ -1018,7 +1018,6 @@ function validateCliShape(
     const unsupported = firstEnabledOption([
       [options.embedding, "--embedding"],
       [options.endpoint, "--endpoint"],
-      [options.embeddingConcurrency, "--embedding-concurrency"],
     ]);
     if (unsupported) {
       throw new Error(`${unsupported} is not supported while searching`);

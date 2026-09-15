@@ -150,6 +150,59 @@ zg query --human "An unseen creature left a few marks. What did the detective in
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
 
+### Local embedding concurrency and GPU errors
+
+`--embedding-concurrency <n>` and `ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY` set the
+same per-model-instance concurrency limit for llama.cpp contexts and calls in
+flight on a Transformers.js pipeline. This does not guarantee parallel execution
+in the native runtime. Use a positive integer; values above **8** are capped at 8.
+The priority is the explicit CLI option, then the shared environment variable,
+then the older `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp only), then the
+automatic default.
+
+For Potion/model2vec and remote models, `--embedding-concurrency` continues to
+control concurrent embedding batches. The shared environment variable does not
+affect these models.
+
+For llama.cpp and Transformers.js, CPU execution or a runtime without a VRAM
+query uses 1 unless overridden. Transformers.js currently has no VRAM query, so
+its automatic limit is 1. When a GPU runtime provides free VRAM, the limit is
+`floor(freeVRAM × 0.25 / 150 MiB)`, clamped to 1–8; a failed or invalid VRAM
+query uses 2. This retains the existing 150 MiB heuristic, which is not a
+guarantee that a model will fit in memory.
+
+For CUDA errors, memory exhaustion, or native crashes, try a limit of 1 and
+retry the index. These examples run directly so the new environment takes
+effect immediately:
+
+```bash
+export ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=1
+zg --index --mode direct
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY = "1"
+zg --index --mode direct
+```
+
+An explicit CLI option overrides the environment for that index operation,
+including when using the daemon; no daemon restart is needed for the CLI option:
+
+```bash
+export ZVEC_GREP_LOCAL_EMBEDDING_CONCURRENCY=8
+zg --index --embedding-concurrency 1
+```
+
+To change the daemon's environment-variable default, update its startup
+environment, then run `zg --server off` and `zg --server on` from that environment.
+If an agent launches zg, update its environment and restart the agent/MCP
+connection too. JavaScript exceptions can be caught, but native aborts can
+terminate the process before any CPU fallback runs. A limit of 1 reduces
+concurrency; it does not prevent every GPU failure. You can also retry with
+`--device cpu`.
+
 <a id="benchmarks"></a>
 
 ## 📊 Benchmarks
