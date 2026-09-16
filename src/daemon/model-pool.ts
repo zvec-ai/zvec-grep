@@ -224,7 +224,8 @@ export class EmbeddingModelPool {
     entry.idleTimer.unref?.();
   }
 
-  private async trimIdleEntries(exceptKey: string): Promise<void> {
+  /** Recheck capacity after a cached read generation releases its lease. */
+  async trimIdleEntries(exceptKey: string): Promise<void> {
     const loaded = [...this.entries.values()].filter((entry) => entry.model);
     if (loaded.length <= this.maxLoadedModels) {
       return;

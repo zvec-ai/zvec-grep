@@ -790,6 +790,15 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
     let service: Awaited<ReturnType<typeof createZvecGrep>> | undefined;
     let scanDiagnostics: FileScanDiagnostics | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const cleanup = (): Promise<void> =>
+      (cleanupPromise ??= (async () => {
+        try {
+          await service?.close();
+        } finally {
+          lease.release();
+        }
+      })());
     try {
       service = await (this.options.createService ?? createZvecGrep)({
         ...this.options.serviceOptions,
@@ -807,40 +816,46 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         embeddingConcurrency: modelLoadRequest.embeddingConcurrency,
         daemonInstanceToken: this.runtimeManager.instanceToken,
       });
-      const result = await runtime.withWrite(() =>
-        withRemoteEmbeddingOperationPermit(authorization, () =>
-          service!.index({
-            root: runtime.canonicalRoot,
-            rebuild: input.rebuild,
-            resetPaths: input.resetPaths,
-            globs: normalizePlainStringList(input.globs),
-            insensitiveGlobs: normalizePlainStringList(input.insensitiveGlobs),
-            fileTypes: normalizePlainStringList(input.fileTypes),
-            excludedFileTypes: normalizePlainStringList(
-              input.excludedFileTypes,
-            ),
-            hidden: input.hidden,
-            noIgnore: input.noIgnore,
-            ignoreFiles: normalizePlainStringList(input.ignoreFiles),
-            maxDepth: input.maxDepth,
-            maxFileSizeBytes: input.maxFileSizeBytes,
-            follow: input.follow,
-            embeddingConcurrency: modelLoadRequest.embeddingConcurrency,
-            changedPaths: input.changedPaths,
-            signal,
-            onProgress: report,
-            onWriterContext: (context) =>
-              runtime.setWriterContext(context, lease.key),
-          }),
-        ),
-      );
+      const result = await runtime.withWrite(async () => {
+        try {
+          // The closed read generation has now released its lease. Recheck
+          // capacity before lazy inference loads a different native model.
+          await this.modelPool.trimIdleEntries(lease.key);
+          return await withRemoteEmbeddingOperationPermit(authorization, () =>
+            service!.index({
+              root: runtime.canonicalRoot,
+              rebuild: input.rebuild,
+              resetPaths: input.resetPaths,
+              globs: normalizePlainStringList(input.globs),
+              insensitiveGlobs: normalizePlainStringList(
+                input.insensitiveGlobs,
+              ),
+              fileTypes: normalizePlainStringList(input.fileTypes),
+              excludedFileTypes: normalizePlainStringList(
+                input.excludedFileTypes,
+              ),
+              hidden: input.hidden,
+              noIgnore: input.noIgnore,
+              ignoreFiles: normalizePlainStringList(input.ignoreFiles),
+              maxDepth: input.maxDepth,
+              maxFileSizeBytes: input.maxFileSizeBytes,
+              follow: input.follow,
+              embeddingConcurrency: modelLoadRequest.embeddingConcurrency,
+              changedPaths: input.changedPaths,
+              signal,
+              onProgress: report,
+              onWriterContext: (context) =>
+                runtime.setWriterContext(context, lease.key),
+            }),
+          );
+        } finally {
+          // Release the writer model before queued query models can acquire.
+          await cleanup();
+        }
+      });
       scanDiagnostics = result.scanDiagnostics;
     } finally {
-      try {
-        await service?.close();
-      } finally {
-        lease.release();
-      }
+      await cleanup();
     }
 
     if (includeFinalStatus) {

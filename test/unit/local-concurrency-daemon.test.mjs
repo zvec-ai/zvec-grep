@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DaemonBackend } from "../../dist/daemon/backend.js";
 import { EmbeddingModelPool } from "../../dist/daemon/model-pool.js";
+import { RootRuntime } from "../../dist/daemon/root-runtime.js";
 
 function setEnvironment(t, values) {
   for (const [name, value] of Object.entries(values)) {
@@ -21,6 +22,279 @@ function localRequest(embeddingConcurrency) {
     runtime: { device: "cpu" },
     ...(embeddingConcurrency !== undefined ? { embeddingConcurrency } : {}),
   };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function daemonLifecycle(t, hooks = {}) {
+  const events = [];
+  const resident = new Set();
+  const name = hooks.name ?? "bge-small-en-v1.5";
+  const info = {
+    root: "/tmp/zvec-grep-concurrency-test",
+    indexed: true,
+    workspaceIndex: {
+      embedding: {
+        provider: "local",
+        model: name,
+        dimension: 384,
+        metric: "cosine",
+      },
+    },
+  };
+  const backend = new DaemonBackend({
+    version: "test",
+    modelPoolOptions: {
+      maxLoadedModels: 1,
+      idleTtlMs: 60_000,
+      createModel: (request) => {
+        const concurrency = request.embeddingConcurrency ?? 1;
+        events.push(`create:${concurrency}`);
+        hooks.createModel?.(concurrency);
+        const model = {
+          async embedQuery() {
+            load();
+            await hooks.query?.();
+            return [1];
+          },
+          async embedDocuments() {
+            load();
+            return [[1]];
+          },
+          async dispose() {
+            events.push(`dispose:start:${concurrency}`);
+            await hooks.dispose?.(concurrency);
+            resident.delete(model);
+            events.push(`dispose:end:${concurrency}`);
+          },
+        };
+        function load() {
+          if (resident.has(model)) return;
+          assert.equal(resident.size, 0, "old native model is still resident");
+          resident.add(model);
+          events.push(`load:${concurrency}`);
+        }
+        return model;
+      },
+    },
+    createService: async (options) => {
+      await hooks.createService?.();
+      return {
+        index: async () => {
+          hooks.index?.();
+          await options.embeddingModel.embedDocuments(["document"]);
+          return {};
+        },
+        close: async () => {
+          events.push("service.close");
+          await hooks.serviceClose?.();
+        },
+      };
+    },
+  });
+  t.mock.method(backend, "inspectRoot", async () => info);
+  t.mock.method(backend, "readWorkspaceEmbeddingRuntime", () => ({
+    device: "cpu",
+  }));
+  const queryRequest = backend.searchModelLoadRequest(info, {});
+  const runtime = new RootRuntime({
+    canonicalRoot: info.root,
+    modelPool: backend.modelPool,
+    modelLoadRequest: queryRequest,
+    readSessionIdleTtlMs: 60_000,
+    openSession: (lease) => ({
+      root: info.root,
+      context: async () => {
+        await lease.model.embedQuery("query");
+        return { items: [] };
+      },
+      close: async () => {
+        events.push("session.close");
+      },
+    }),
+  });
+  t.after(async () => {
+    await runtime.close();
+    await backend.close();
+  });
+  return {
+    backend,
+    runtime,
+    events,
+    resident,
+    query: () => runtime.search({ query: "query" }, queryRequest),
+    index: (input = {}) =>
+      backend.runIndexOperation(
+        runtime,
+        { changedPaths: ["fixture.ts"], ...input },
+        () => {},
+      ),
+  };
+}
+
+for (const name of ["bge-small-en-v1.5", "qwen3-embedding-0.6b"]) {
+  for (const source of ["explicit", "environment"]) {
+    test(`daemon releases cached query model before ${source} indexing (${name})`, async (t) => {
+      setEnvironment(t, {
+        ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY:
+          source === "environment" ? "3" : undefined,
+        ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: undefined,
+      });
+      const disposing = deferred();
+      const releaseDisposal = deferred();
+      t.after(() => releaseDisposal.resolve());
+      let blockDisposal = true;
+      const fixture = daemonLifecycle(t, {
+        name,
+        dispose: async () => {
+          if (!blockDisposal) return;
+          blockDisposal = false;
+          disposing.resolve();
+          await releaseDisposal.promise;
+        },
+      });
+      await fixture.query();
+      assert.equal(fixture.runtime.snapshot().readSessionOpen, true);
+      assert.equal(fixture.backend.modelPool.snapshot().activeLeases, 1);
+
+      const indexInput =
+        source === "explicit" ? { embeddingConcurrency: 3 } : {};
+      const indexing = fixture.index(indexInput);
+      await Promise.race([
+        disposing.promise,
+        indexing.then(() => assert.fail("indexing bypassed model disposal")),
+      ]);
+      assert.equal(fixture.runtime.snapshot().readSessionOpen, false);
+      assert.equal(fixture.runtime.snapshot().writerPending, true);
+      assert.equal(fixture.events.includes("load:3"), false);
+      assert.equal(fixture.resident.size, 1);
+      releaseDisposal.resolve();
+      await indexing;
+      assert.equal(fixture.backend.modelPool.snapshot().activeLeases, 0);
+
+      await fixture.query();
+      await fixture.index(indexInput);
+      await fixture.query();
+      assert.equal(fixture.resident.size, 1);
+      assert.equal(fixture.backend.modelPool.snapshot().loaded, 1);
+      assert.deepEqual(
+        fixture.events.filter((event) => event.startsWith("load:")),
+        ["load:1", "load:3", "load:1", "load:3", "load:1"],
+      );
+    });
+  }
+}
+
+test("daemon waits for an active query before loading the indexing model", async (t) => {
+  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+  const queryStarted = deferred();
+  const releaseQuery = deferred();
+  t.after(() => releaseQuery.resolve());
+  const fixture = daemonLifecycle(t, {
+    query: async () => {
+      queryStarted.resolve();
+      await releaseQuery.promise;
+    },
+  });
+  const querying = fixture.query();
+  await queryStarted.promise;
+  const indexing = fixture.index();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.runtime.snapshot().writerPending, true);
+  assert.equal(fixture.events.includes("load:3"), false);
+  releaseQuery.resolve();
+  await querying;
+  await indexing;
+  assert.equal(fixture.backend.modelPool.snapshot().activeLeases, 0);
+  assert.equal(fixture.resident.size, 1);
+});
+
+test("daemon keeps cached queries available during index service preparation", async (t) => {
+  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+  const preparing = deferred();
+  const releasePreparation = deferred();
+  t.after(() => releasePreparation.resolve());
+  const fixture = daemonLifecycle(t, {
+    createService: async () => {
+      preparing.resolve();
+      await releasePreparation.promise;
+    },
+  });
+  await fixture.query();
+  const indexing = fixture.index();
+  await preparing.promise;
+  assert.equal(fixture.runtime.snapshot().writerPending, false);
+  await fixture.query();
+  assert.equal(fixture.events.includes("load:3"), false);
+  releasePreparation.resolve();
+  await indexing;
+});
+
+test("daemon releases the index model lease before a queued query can load", async (t) => {
+  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+  const closing = deferred();
+  const releaseClose = deferred();
+  t.after(() => releaseClose.resolve());
+  const fixture = daemonLifecycle(t, {
+    serviceClose: async () => {
+      closing.resolve();
+      await releaseClose.promise;
+    },
+  });
+  await fixture.query();
+  const indexing = fixture.index();
+  await closing.promise;
+  const querying = fixture.query();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.runtime.snapshot().writerPending, true);
+  assert.deepEqual(
+    fixture.events.filter((event) => event.startsWith("load:")),
+    ["load:1", "load:3"],
+  );
+  releaseClose.resolve();
+  await indexing;
+  await querying;
+  assert.equal(fixture.backend.modelPool.snapshot().loaded, 1);
+  assert.equal(fixture.backend.modelPool.snapshot().activeLeases, 1);
+  assert.equal(fixture.resident.size, 1);
+});
+
+for (const failingStage of [
+  "createModel",
+  "createService",
+  "index",
+  "serviceClose",
+]) {
+  test(`daemon releases its writer and model lease after ${failingStage} fails`, async (t) => {
+    setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+    let fail = false;
+    const fixture = daemonLifecycle(t, {
+      [failingStage]: () => {
+        if (fail) throw new Error(`${failingStage} failed`);
+      },
+    });
+    await fixture.query();
+    fail = true;
+    await assert.rejects(fixture.index(), new RegExp(`${failingStage} failed`));
+    assert.equal(fixture.runtime.snapshot().writerPending, false);
+    assert.equal(
+      fixture.backend.modelPool.snapshot().activeLeases,
+      ["index", "serviceClose"].includes(failingStage) ? 0 : 1,
+    );
+
+    fail = false;
+    await fixture.query();
+    await fixture.index();
+    await fixture.query();
+    assert.equal(fixture.backend.modelPool.snapshot().loaded, 1);
+    assert.equal(fixture.resident.size, 1);
+  });
 }
 
 test("daemon index limits never enter query models or persisted runtime", async (t) => {
