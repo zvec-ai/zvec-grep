@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, chmod, mkdir, rename, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm } from "node:fs/promises";
+import { finished } from "node:stream/promises";
+import { createStream, type RotatingFileStream } from "rotating-file-stream";
 import { dirname, join } from "node:path";
 import type { ZvecGrepLogConfig } from "../engine/config.js";
 import { daemonHome } from "./config.js";
@@ -21,6 +23,30 @@ export function createDaemonLogger(
   const level = options.level ?? "info";
   const path = join(daemonHome(home), "logs", "server.log");
   let tail = Promise.resolve();
+  let stream: RotatingFileStream | undefined;
+
+  async function openStream(): Promise<RotatingFileStream> {
+    if (stream && !stream.destroyed) return stream;
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    // Classical rotation does not remove backups beyond a reduced retention limit.
+    for (const name of await readdir(dirname(path))) {
+      const match = /^server\.log\.([1-9]\d*)$/.exec(name);
+      if (match && Number(match[1]) > keep) await rm(join(dirname(path), name));
+    }
+    await chmod(path, 0o600).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    stream = createStream("server.log", {
+      path: dirname(path),
+      size: `${maxBytes}B`,
+      rotate: Math.max(1, keep),
+      mode: 0o600,
+    });
+    // Logging failures must not become unhandled stream errors in the daemon.
+    stream.on("error", () => undefined);
+    return stream;
+  }
+
   return {
     event(name, fields = {}, eventLevel = "info") {
       if (eventLevel === "debug" && level !== "debug") return;
@@ -34,39 +60,31 @@ export function createDaemonLogger(
       });
       tail = tail
         .then(async () => {
-          await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-          const line = `${record}\n`;
-          const size = await stat(path)
-            .then((entry) => entry.size)
-            .catch((error) => {
-              if (error.code === "ENOENT") return 0;
-              throw error;
-            });
-          // Keep each JSON record intact, even when one record exceeds the limit.
-          if (size > 0 && size + Buffer.byteLength(line, "utf8") > maxBytes) {
-            if (keep === 0) {
-              await rm(path);
-            } else {
-              await rm(`${path}.${keep}`, { force: true });
-              for (let index = keep - 1; index >= 1; index--) {
-                await rename(`${path}.${index}`, `${path}.${index + 1}`).catch(
-                  (error) => {
-                    if (error.code !== "ENOENT") throw error;
-                  },
-                );
-              }
-              await rename(path, `${path}.1`);
-            }
-          }
-          await appendFile(path, line, {
-            encoding: "utf8",
-            mode: 0o600,
+          const output = await openStream();
+          // One write per JSON record keeps oversized and UTF-8 records intact.
+          await new Promise<void>((resolve, reject) => {
+            output.write(`${record}\n`, (error) =>
+              error ? reject(error) : resolve(),
+            );
           });
-          await chmod(path, 0o600);
+          // The library requires at least one backup; zero retention discards it.
+          if (keep === 0) await rm(`${path}.1`, { force: true });
         })
         .catch(() => undefined);
     },
-    flush: () => tail,
+    flush() {
+      tail = tail
+        .then(async () => {
+          const output = stream;
+          stream = undefined;
+          if (!output) return;
+          const completion = finished(output, { cleanup: true });
+          output.end();
+          await completion;
+        })
+        .catch(() => undefined);
+      return tail;
+    },
   };
 }
 
