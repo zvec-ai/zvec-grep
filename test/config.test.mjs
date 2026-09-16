@@ -281,3 +281,44 @@ test("global config v1 rejects malformed schemas without echoing secrets", async
     assert.throws(() => readGlobalConfig(configPath));
   }
 });
+
+test("log configuration validates values and survives unrelated updates", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "zvec-grep-log-config-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, "config.json");
+  updateGlobalConfig(
+    { log: { maxBytes: 1024, keep: 0, level: "debug" } },
+    path,
+  );
+  updateGlobalConfig({ server: { port: 8123 } }, path);
+  updateGlobalConfig({ log: { keep: 3 } }, path);
+  assert.deepEqual(readGlobalConfig(path).log, {
+    maxBytes: 1024,
+    keep: 3,
+    level: "debug",
+  });
+  for (const log of [
+    null,
+    [],
+    "info",
+    { maxBytes: 0 },
+    { maxBytes: -1 },
+    { maxBytes: 1.5 },
+    { maxBytes: Number.MAX_SAFE_INTEGER + 1 },
+    { keep: -1 },
+    { keep: 0.5 },
+    { keep: "5" },
+    { level: "trace" },
+    { max_bytes: 1024 },
+  ]) {
+    await writeFile(path, JSON.stringify({ version: 1, log }));
+    assert.throws(
+      () => readGlobalConfig(path),
+      (error) => {
+        assert.equal(error.code, "ZVEC_GREP.ENGINE.CONFIG.INVALID");
+        assert.match(error.context, /log/);
+        return true;
+      },
+    );
+  }
+});

@@ -242,3 +242,38 @@ raw paths where identity is sufficient.
 
 Use `ZVEC_GREP_HOME` to relocate Server state. Check `zg --server status` before
 reading logs; routine searches do not need a status preflight.
+
+## Daemon logs
+
+The daemon writes JSON lines to `~/.zvec-grep/daemon/logs/server.log`.
+Size-based rotation is enabled by default: 10 MiB per file and five backups,
+numbered `server.log.1` (newest) through `server.log.5` (oldest). The oldest
+backup is removed on rotation. File writes and rotation use `rotating-file-stream`.
+Surplus numbered backups are removed when the logger opens after reducing `keep`.
+Existing logs are checked on the first write
+following a restart. Rotation happens after a complete record brings the file to
+or above the limit; the new active file may therefore be empty. Each JSON record
+is kept intact, so a rotated file may exceed the limit by one record.
+
+Configure logging in `~/.zvec-grep/config.json`, preserving your other settings:
+
+```json
+{
+  "version": 1,
+  "log": {
+    "maxBytes": 10485760,
+    "keep": 5,
+    "level": "info"
+  }
+}
+```
+
+`maxBytes` must be a positive safe integer; `keep` must be a non-negative safe
+integer and counts backups in addition to the active file. Setting `keep` to
+`0` removes the temporary backup after rotation completes.
+Restart the daemon after changing these settings.
+
+Successful `GET /healthz` completion events have level `debug` and are omitted
+at the default `info` level. Set `level` to `debug` to include them for diagnostics.
+Unsuccessful health checks and other requests continue to be logged at `info`.
+Each record includes a `level` field alongside the existing event fields.

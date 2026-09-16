@@ -1,3 +1,4 @@
+import { readGlobalConfig } from "../engine/config.js";
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
 import { DaemonBackend } from "./backend.js";
 import {
@@ -38,12 +39,12 @@ export async function runDaemonForeground(
   const runtimeIdleTtlMs = configuredWatcherIdleTimeoutMs();
   const listen = configuredListenAddress(options.listen);
   const displayAddress = `http://${displayHost(listen.host)}:${listen.port}/mcp`;
+  const logger = createDaemonLogger(options.home, readGlobalConfig().log);
   const instanceLock = await DaemonInstanceLock.acquire(
     options.home,
     displayAddress,
     mcpToolset,
   );
-  const logger = createDaemonLogger(options.home);
   let auth;
   try {
     auth = await resolveServerToken({
@@ -97,9 +98,9 @@ export async function runDaemonForeground(
       void (async () => {
         await backend.close();
         await httpServer.close();
-        await instanceLock.release();
         logger.event("server.stopped", { pid: process.pid });
         await logger.flush();
+        await instanceLock.release();
       })().finally(resolve);
     };
     requestStop = stop;
