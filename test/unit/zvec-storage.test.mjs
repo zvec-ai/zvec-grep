@@ -140,6 +140,63 @@ test("file metadata supports one batched path-prefix lookup", async (t) => {
   ]);
 });
 
+test("markdown front matter metadata survives storage round trips", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-markdown-meta-"));
+  const root = join(parent, "repo");
+  const storage = createWorkspaceIndexStorage({
+    storagePath: join(parent, "storage"),
+    readOnly: false,
+    embedding: {
+      provider: "local",
+      model: "test",
+      dimension: 2,
+      metric: "cosine",
+    },
+  });
+  t.after(async () => {
+    storage.close();
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  const file = fileInfo("a", root, "docs/api.md");
+  const metadata = {
+    kind: "markdown",
+    heading: "Search configuration",
+    level: 1,
+    scope: null,
+    frontMatter: {
+      title: "Search configuration",
+      description: "Configures indexing and retrieval.",
+      api_name: ["configureSearch"],
+      tags: ["indexing", "search"],
+    },
+  };
+  storage.replaceFile(file, [
+    {
+      fragment: {
+        id: "b".repeat(64),
+        fileId: file.id,
+        range: {
+          kind: "text",
+          startLine: 11,
+          endLine: 15,
+          startOffset: 160,
+          endOffset: 240,
+        },
+        content: {
+          kind: "text",
+          text: "# Search configuration",
+        },
+        metadata,
+      },
+      vector: [1, 0],
+    },
+  ]);
+
+  const [stored] = storage.listEntitiesByFile(file.id);
+  assert.deepEqual(stored.entity.metadata, metadata);
+});
+
 function fileInfo(id, root, relativePath) {
   return {
     id: id.repeat(64),

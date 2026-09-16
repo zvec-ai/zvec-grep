@@ -25,6 +25,8 @@ import type {
   EntityMetadata,
   FileInfo,
   ImageFormat,
+  MarkdownFrontMatterMetadata,
+  MarkdownFrontMatterValue,
   Range,
 } from "../types.js";
 import { normalizePath } from "../utils/path.js";
@@ -912,6 +914,7 @@ function createSchema(
         dataType: ZVecDataType.INT32,
         nullable: true,
       },
+      stringField("markdown_front_matter", true),
       {
         name: ENTITY_TEXT_FIELD,
         dataType: ZVecDataType.STRING,
@@ -1043,6 +1046,9 @@ function metadataToFields(
       symbol_scope: metadata.scope,
       heading: metadata.heading,
       heading_level: metadata.level,
+      markdown_front_matter: metadata.frontMatter
+        ? JSON.stringify(metadata.frontMatter)
+        : null,
     }),
   };
 }
@@ -1112,11 +1118,15 @@ function parseMetadata(
   }
 
   if (kind === "markdown") {
+    const frontMatter = parseMarkdownFrontMatterMetadata(
+      readNullableStringFieldFromFields(fields, "markdown_front_matter"),
+    );
     return {
       kind: "markdown",
       heading: readNullableStringFieldFromFields(fields, "heading"),
       level: readNullableNumberFieldFromFields(fields, "heading_level"),
       scope: readNullableStringFieldFromFields(fields, "symbol_scope"),
+      ...(frontMatter ? { frontMatter } : {}),
     };
   }
 
@@ -1278,6 +1288,32 @@ function parseStringArray(value: string): string[] {
   } catch {
     return [];
   }
+}
+
+function parseMarkdownFrontMatterMetadata(
+  value: string | null,
+): MarkdownFrontMatterMetadata | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(parsed).filter(
+    (entry): entry is [string, MarkdownFrontMatterValue] =>
+      typeof entry[1] === "string" ||
+      (Array.isArray(entry[1]) &&
+        entry[1].every((item) => typeof item === "string")),
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function assertZvecStatus(

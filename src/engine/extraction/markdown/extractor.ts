@@ -6,21 +6,23 @@ import type {
 } from "../../types.js";
 import { makeEntityId } from "../ids.js";
 import { validateSourceFile, type Source, type TextSource } from "../source.js";
-import { extractPlainTextFragments } from "../text/extractor.js";
 import type { ChunkOptions } from "../types.js";
 import { chunkOptionsForMetadata, fitTextToChars } from "../vector-content.js";
+import {
+  parseMarkdownFrontMatter,
+  type MarkdownDocumentMetadata,
+} from "./front-matter.js";
+import {
+  parseMarkdownStructure,
+  type MarkdownBlock,
+  type MarkdownHeading,
+} from "./structure.js";
 
 const DEFAULT_MARKDOWN_CHUNK_CHARS = 3600;
 const DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS = 540;
 
-type Heading = {
-  level: number;
-  text: string;
-  lineIndex: number;
-};
-
 type Section = {
-  heading: Heading | null;
+  heading: MarkdownHeading | null;
   startIndex: number;
   endIndex: number;
   breadcrumb: readonly string[];
@@ -29,6 +31,11 @@ type Section = {
 type MarkdownWindow = {
   text: string;
   range: TextRange;
+};
+
+type MarkdownBlockLayout = {
+  starts: ReadonlySet<number>;
+  protectedBlockByLine: readonly (MarkdownBlock | undefined)[];
 };
 
 export class MarkdownExtractor {
@@ -44,18 +51,29 @@ export class MarkdownExtractor {
     const chunkOptions = resolveMarkdownChunkOptions(options);
 
     const lines = source.text.split("\n");
-    const headings = scanHeadings(lines);
-    if (headings.length === 0) {
-      return this.fallback(source, chunkOptions);
-    }
+    const frontMatter = parseMarkdownFrontMatter(lines);
+    const bodyStartIndex = frontMatter?.bodyStartIndex ?? 0;
+    const structure = parseMarkdownStructure(
+      lines.slice(bodyStartIndex).join("\n"),
+      bodyStartIndex,
+    );
 
     const lineOffsets = computeLineOffsets(lines);
-    const fenceLines = computeFenceLines(lines);
-    const sections = buildSections(headings, lines);
+    const blockLayout = createMarkdownBlockLayout(
+      lines.length,
+      structure.blocks,
+    );
+    const sections =
+      structure.headings.length > 0
+        ? buildSections(structure.headings, lines, bodyStartIndex)
+        : unheadedBodySection(lines, bodyStartIndex);
     const fragments: EntityFragment[] = [];
 
     for (const section of sections) {
-      const metadata = markdownMetadata(section);
+      const metadata =
+        section.heading || frontMatter
+          ? markdownMetadata(section, frontMatter?.metadata ?? {})
+          : undefined;
       const contentChunkOptions = chunkOptionsForMetadata(
         chunkOptions,
         metadata,
@@ -63,13 +81,13 @@ export class MarkdownExtractor {
       const windows = splitMarkdownSection({
         lines,
         lineOffsets,
-        fenceLines,
+        blockLayout,
         section,
         maxChars: contentChunkOptions.maxChunkChars,
         overlapChars: contentChunkOptions.chunkOverlapChars,
       });
 
-      if (windows.length > 1) {
+      if (windows.length > 1 && metadata) {
         const id = makeEntityId(source.file.id, fragments.length);
         fragments.push({
           id,
@@ -115,25 +133,12 @@ export class MarkdownExtractor {
             kind: "text",
             text: window.text,
           },
-          metadata,
+          ...(metadata ? { metadata } : {}),
         });
       }
     }
 
-    return fragments.length > 0
-      ? fragments
-      : this.fallback(source, chunkOptions);
-  }
-
-  private fallback(
-    source: TextSource,
-    options: Required<ChunkOptions>,
-  ): EntityFragment[] {
-    return extractPlainTextFragments(
-      source,
-      options.maxChunkChars,
-      options.chunkOverlapChars,
-    );
+    return fragments;
   }
 }
 
@@ -195,70 +200,23 @@ function markdownOutline(metadata: MarkdownEntityMetadata): string {
   return metadata.heading ?? "markdown section";
 }
 
-function scanHeadings(lines: readonly string[]): Heading[] {
-  const headings: Heading[] = [];
-  let fence: "```" | "~~~" | null = null;
-
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    const trimmed = line.trimStart();
-
-    if (fence) {
-      if (trimmed.startsWith(fence)) {
-        fence = null;
-      }
-      continue;
-    }
-
-    if (trimmed.startsWith("```")) {
-      fence = "```";
-      continue;
-    }
-
-    if (trimmed.startsWith("~~~")) {
-      fence = "~~~";
-      continue;
-    }
-
-    const atx = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (atx) {
-      headings.push({
-        level: atx[1].length,
-        text: atx[2].trim(),
-        lineIndex: index,
-      });
-      continue;
-    }
-
-    const next = lines[index + 1]?.trim();
-    if (line.trim().length > 0 && next && /^(=+|-+)\s*$/.test(next)) {
-      headings.push({
-        level: next.startsWith("=") ? 1 : 2,
-        text: line.trim(),
-        lineIndex: index,
-      });
-      index++;
-    }
-  }
-
-  return headings;
-}
-
 function buildSections(
-  headings: readonly Heading[],
+  headings: readonly MarkdownHeading[],
   lines: readonly string[],
+  contentStartIndex = 0,
 ): Section[] {
-  const stack: Heading[] = [];
+  const stack: MarkdownHeading[] = [];
   const sections: Section[] = [];
   const firstHeading = headings[0];
 
   if (
-    firstHeading.lineIndex > 0 &&
-    lines.slice(0, firstHeading.lineIndex).join("\n").trim().length > 0
+    firstHeading.lineIndex > contentStartIndex &&
+    lines.slice(contentStartIndex, firstHeading.lineIndex).join("\n").trim()
+      .length > 0
   ) {
     sections.push({
       heading: null,
-      startIndex: 0,
+      startIndex: contentStartIndex,
       endIndex: firstHeading.lineIndex - 1,
       breadcrumb: [],
     });
@@ -286,10 +244,31 @@ function buildSections(
   return sections;
 }
 
+function unheadedBodySection(
+  lines: readonly string[],
+  bodyStartIndex: number,
+): Section[] {
+  if (
+    bodyStartIndex >= lines.length ||
+    lines.slice(bodyStartIndex).join("\n").trim().length === 0
+  ) {
+    return [];
+  }
+
+  return [
+    {
+      heading: null,
+      startIndex: bodyStartIndex,
+      endIndex: lines.length - 1,
+      breadcrumb: [],
+    },
+  ];
+}
+
 function splitMarkdownSection(input: {
   lines: readonly string[];
   lineOffsets: readonly number[];
-  fenceLines: readonly boolean[];
+  blockLayout: MarkdownBlockLayout;
   section: Section;
   maxChars: number;
   overlapChars: number;
@@ -326,7 +305,7 @@ function splitMarkdownSection(input: {
     if (endIndex <= input.section.endIndex && endIndex - startIndex > 1) {
       endIndex = chooseMarkdownBreak(
         input.lines,
-        input.fenceLines,
+        input.blockLayout,
         startIndex,
         endIndex,
       );
@@ -346,7 +325,11 @@ function splitMarkdownSection(input: {
       endIndex,
       input.overlapChars,
     );
-    const nextStart = endIndex - overlapLines;
+    const nextStart = adjustMarkdownOverlapStart(
+      input.blockLayout,
+      endIndex - overlapLines,
+      endIndex,
+    );
     startIndex = nextStart > startIndex ? nextStart : endIndex;
   }
 
@@ -355,17 +338,22 @@ function splitMarkdownSection(input: {
 
 function chooseMarkdownBreak(
   lines: readonly string[],
-  fenceLines: readonly boolean[],
+  blockLayout: MarkdownBlockLayout,
   startIndex: number,
   endIndex: number,
 ): number {
+  const containingBlock = blockLayout.protectedBlockByLine[endIndex];
+  if (containingBlock && containingBlock.startIndex > startIndex) {
+    return containingBlock.startIndex;
+  }
+
   const minBreak =
     startIndex + Math.max(1, Math.floor((endIndex - startIndex) * 0.7));
   let bestBreak = endIndex;
-  let bestScore = markdownBreakScore(lines, fenceLines, endIndex);
+  let bestScore = markdownBreakScore(lines, blockLayout, endIndex);
 
   for (let index = minBreak; index <= endIndex; index++) {
-    const score = markdownBreakScore(lines, fenceLines, index);
+    const score = markdownBreakScore(lines, blockLayout, index);
     if (score > bestScore) {
       bestBreak = index;
       bestScore = score;
@@ -377,17 +365,22 @@ function chooseMarkdownBreak(
 
 function markdownBreakScore(
   lines: readonly string[],
-  fenceLines: readonly boolean[],
+  blockLayout: MarkdownBlockLayout,
   breakIndex: number,
 ): number {
-  if (breakIndex <= 0 || breakIndex >= lines.length || fenceLines[breakIndex]) {
+  if (breakIndex <= 0 || breakIndex >= lines.length) {
+    return 0;
+  }
+
+  const containingBlock = blockLayout.protectedBlockByLine[breakIndex];
+  if (containingBlock && containingBlock.startIndex < breakIndex) {
     return 0;
   }
 
   const current = lines[breakIndex].trim();
   const previous = lines[breakIndex - 1].trim();
 
-  if (/^#{1,6}\s+/.test(current)) {
+  if (blockLayout.starts.has(breakIndex)) {
     return 100;
   }
 
@@ -473,29 +466,40 @@ function computeLineOffsets(lines: readonly string[]): number[] {
   return offsets;
 }
 
-function computeFenceLines(lines: readonly string[]): boolean[] {
-  const inFence = new Array<boolean>(lines.length).fill(false);
-  let fence: "```" | "~~~" | null = null;
+function createMarkdownBlockLayout(
+  lineCount: number,
+  blocks: readonly MarkdownBlock[],
+): MarkdownBlockLayout {
+  const starts = new Set<number>();
+  const protectedBlockByLine = new Array<MarkdownBlock | undefined>(lineCount);
 
-  for (let index = 0; index < lines.length; index++) {
-    const trimmed = lines[index].trimStart();
-
-    if (fence) {
-      inFence[index] = true;
-      if (trimmed.startsWith(fence)) {
-        fence = null;
-      }
+  for (const block of blocks) {
+    starts.add(block.startIndex);
+    if (!isProtectedMarkdownBlock(block.type)) {
       continue;
     }
-
-    if (trimmed.startsWith("```")) {
-      fence = "```";
-    } else if (trimmed.startsWith("~~~")) {
-      fence = "~~~";
+    for (let index = block.startIndex; index <= block.endIndex; index++) {
+      protectedBlockByLine[index] = block;
     }
   }
 
-  return inFence;
+  return { starts, protectedBlockByLine };
+}
+
+function isProtectedMarkdownBlock(type: string): boolean {
+  return type === "code" || type === "html" || type === "table";
+}
+
+function adjustMarkdownOverlapStart(
+  blockLayout: MarkdownBlockLayout,
+  startIndex: number,
+  endIndex: number,
+): number {
+  const containingBlock = blockLayout.protectedBlockByLine[startIndex];
+  if (!containingBlock || containingBlock.startIndex === startIndex) {
+    return startIndex;
+  }
+  return Math.min(endIndex, containingBlock.endIndex + 1);
 }
 
 function computeMarkdownOverlapLines(
@@ -550,11 +554,15 @@ function findLineCut(line: string, maxChars: number): number {
   return bestPosition > 0 ? bestPosition : maxChars;
 }
 
-function markdownMetadata(section: Section): MarkdownEntityMetadata {
+function markdownMetadata(
+  section: Section,
+  document: MarkdownDocumentMetadata,
+): MarkdownEntityMetadata {
   return {
     kind: "markdown",
     heading: section.heading?.text ?? null,
     level: section.heading?.level ?? null,
     scope: section.breadcrumb.length > 0 ? section.breadcrumb.join("::") : null,
+    ...document,
   };
 }

@@ -51,6 +51,8 @@ export type {
   IndexProgressPhase,
   IndexResult,
   MarkdownEntityMetadata,
+  MarkdownFrontMatterMetadata,
+  MarkdownFrontMatterValue,
   RootPath,
   SkippedFile,
   SkippedFileReason,

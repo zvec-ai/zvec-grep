@@ -58,6 +58,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/conformance": "0.1.16",
+    "@types/mdast": "^4.0.4",
     "@types/node": "^22.20.1",
     "c8": "^11.0.0",
     "eslint": "^10.7.0",
@@ -76,8 +77,13 @@
     "@vscode/ripgrep": "^1.18.0",
     "@zvec/zvec": "^0.7.0",
     "jsonc-parser": "^3.3.1",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-to-string": "^4.0.0",
+    "micromark-extension-gfm": "^3.0.0",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.20.8",
+    "yaml": "^2.9.0",
     "zod": "4.2.0"
   },
   "optionalDependencies": {

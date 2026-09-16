@@ -164,11 +164,18 @@ export type CodeEntityMetadata = {
   modifiers: readonly CodeEntityModifier[];
 };
 
+export type MarkdownFrontMatterValue = string | readonly string[];
+
+export type MarkdownFrontMatterMetadata = Readonly<
+  Record<string, MarkdownFrontMatterValue>
+>;
+
 export type MarkdownEntityMetadata = {
   kind: "markdown";
   heading: string | null;
   level: number | null;
   scope: string | null;
+  frontMatter?: MarkdownFrontMatterMetadata;
 };
 
 export type EntityMetadata = CodeEntityMetadata | MarkdownEntityMetadata;
@@ -194,7 +201,7 @@ export type EntityFragment = {
 // Workspace index types
 // -----------------------------------------------------------------------------
 
-export const CURRENT_INDEX_VERSION = 1;
+export const CURRENT_INDEX_VERSION = 2;
 
 export type WorkspaceIndexEmbeddingSchema = {
   provider: string;
