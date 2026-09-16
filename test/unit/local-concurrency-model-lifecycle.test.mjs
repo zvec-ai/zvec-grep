@@ -274,3 +274,89 @@ test("concurrent query-index-query calls reuse both active variants and retire t
   assert.equal(state.disposed.has(firstModel), false);
   assert.equal(state.live.size, 1);
 });
+
+test("a failed variant disposal reaches its caller without poisoning later model selection or close", async (t) => {
+  const state = await setup(t);
+  const index = await state.operation(async () => {
+    const model = await state.indexModel(2);
+    await state.embed(model, "document");
+    return model;
+  });
+  const failure = new Error("pipeline disposal failed");
+  const dispose = t.mock.method(index, "dispose", async () => {
+    throw failure;
+  });
+
+  await assert.rejects(
+    state.operation(() => state.queryModel()),
+    (error) => error === failure,
+  );
+  const query = await state.operation(async () => {
+    const model = await state.queryModel();
+    await state.embed(model, "query");
+    return model;
+  });
+  assert.notEqual(query, index);
+  assert.equal(query.info.defaultConcurrency, 1);
+  assert.equal(dispose.mock.callCount(), 1);
+
+  await state.service.close();
+  assert.equal(state.disposed.has(query), true);
+});
+
+test("retired model cleanup attempts every disposal and reports all failures", async (t) => {
+  const state = await setup(t);
+  const active = Promise.withResolvers();
+  const operation = state.operation(() => active.promise);
+  const models = await state.operation(async () => {
+    const models = [];
+    for (const concurrency of [2, 3, 4, 5]) {
+      const model = await state.indexModel(concurrency);
+      await state.embed(model, "document");
+      models.push(model);
+    }
+    return models;
+  });
+  const firstFailure = new Error("first retired pipeline failed to dispose");
+  const lastFailure = new Error("last retired pipeline failed to dispose");
+  // Retirement visits older variants from most to least recently used. A
+  // failure must not skip the models still waiting behind it in that batch.
+  t.mock.method(models[2], "dispose", async () => {
+    throw firstFailure;
+  });
+  t.mock.method(models[0], "dispose", async () => {
+    throw lastFailure;
+  });
+  const rejected = assert.rejects(operation, (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.deepEqual(error.errors, [firstFailure, lastFailure]);
+    return true;
+  });
+  active.resolve();
+  await rejected;
+  assert.equal(state.disposed.has(models[1]), true);
+  assert.equal(state.disposed.has(models[3]), false);
+
+  await state.service.close();
+  assert.equal(state.disposed.has(models[3]), true);
+});
+
+test("close disposes remaining cached models even when an earlier disposal fails", async (t) => {
+  const state = await setup(t);
+  const [first, second] = await state.operation(async () => {
+    const first = await state.queryModel();
+    const second = await state.service.embeddingModelFromReference(
+      "local/bge-small-en-v1.5",
+    );
+    await state.embed(first, "query");
+    await state.embed(second, "query");
+    return [first, second];
+  });
+  const failure = new Error("cached pipeline disposal failed");
+  t.mock.method(first, "dispose", async () => {
+    throw failure;
+  });
+
+  await assert.rejects(state.service.close(), (error) => error === failure);
+  assert.equal(state.disposed.has(second), true);
+});

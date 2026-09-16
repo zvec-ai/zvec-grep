@@ -529,9 +529,7 @@ class ZvecGrepService implements ZvecGrep {
     this.retiredEmbeddingModels.clear();
     this.localEmbeddingVariants.clear();
 
-    for (const model of models) {
-      await model.dispose();
-    }
+    await disposeEmbeddingModels(models);
   }
 
   private async contextFromWorkspaceIndex(
@@ -1013,12 +1011,16 @@ class ZvecGrepService implements ZvecGrep {
   private disposeRetiredEmbeddingModels(): Promise<void> {
     const models = [...this.retiredEmbeddingModels];
     this.retiredEmbeddingModels.clear();
-    this.modelDisposalPromise = this.modelDisposalPromise.then(async () => {
-      for (const model of models) {
-        await model.dispose();
-      }
-    });
-    return this.modelDisposalPromise;
+    const disposal = this.modelDisposalPromise.then(() =>
+      disposeEmbeddingModels(models),
+    );
+    // Report this batch's failures to its caller, but let later cleanup and
+    // model selection continue after every disposal in the batch settles.
+    this.modelDisposalPromise = disposal.then(
+      () => undefined,
+      () => undefined,
+    );
+    return disposal;
   }
 
   private requireEmbeddingModel(operation: string): EmbeddingModel {
@@ -1048,6 +1050,23 @@ class ZvecGrepService implements ZvecGrep {
         code: "ZVEC_GREP.ENGINE.SERVICE.CLOSED",
       });
     }
+  }
+}
+
+async function disposeEmbeddingModels(
+  models: Iterable<EmbeddingModel>,
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const model of models) {
+    try {
+      await model.dispose();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, "Failed to dispose embedding models");
   }
 }
 
