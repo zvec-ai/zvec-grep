@@ -316,6 +316,9 @@ export class JobScheduler {
           root_id: rootIdentity(job.canonicalRoot),
           job_id: job.id,
           error_code: job.error.code,
+          error_message: job.error.message,
+          error_context: job.error.context,
+          error_cause: job.error.cause,
           retry_after_ms: delay,
         });
         job.retryTimer = setTimeout(() => {
@@ -349,6 +352,9 @@ export class JobScheduler {
       state,
       attempt: job.attempt,
       error_code: job.error?.code,
+      error_message: job.error?.message,
+      error_context: job.error?.context,
+      error_cause: job.error?.cause,
       duration_ms: job.startedAt ? job.finishedAt - job.startedAt : 0,
     });
     if (this.activeByRoot.get(job.canonicalRoot) === job) {
