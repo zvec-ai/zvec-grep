@@ -5,7 +5,10 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { createFakeEmbeddingServer } from "../helpers/fake-embedding.mjs";
-import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
+import {
+  createTemporaryDirectory,
+  removeTemporaryDirectory,
+} from "../helpers/fixtures.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,7 +33,13 @@ test("npm package contains and exposes the supported public surface", async (t) 
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-grep-package-",
+    { cleanup: false },
   );
+  let stopDaemon = async () => {};
+  t.after(async () => {
+    await stopDaemon();
+    await removeTemporaryDirectory(temporaryDirectory);
+  });
   const packDirectory = join(temporaryDirectory, "pack");
   const consumerDirectory = join(temporaryDirectory, "consumer");
   const npmCache = join(temporaryDirectory, "npm-cache");
@@ -152,6 +161,12 @@ test("npm package contains and exposes the supported public surface", async (t) 
     NO_COLOR: "1",
     ZVEC_GREP_HOME: packageHome,
   };
+  stopDaemon = () =>
+    runExecutable(cli, ["--server", "off"], {
+      cwd: consumerDirectory,
+      env: cliEnvironment,
+      timeout: 40_000,
+    }).catch(() => undefined);
   await runExecutable(
     cli,
     [

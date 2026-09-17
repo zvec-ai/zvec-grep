@@ -1,5 +1,10 @@
 import type { EmbeddingModel } from "../models/index.js";
 import type {
+  PreparedWorkspaceContext,
+  WorkspaceContextPlan,
+  WorkspaceContextPreflight,
+} from "./zvec-grep.js";
+import type {
   CodeSymbolType,
   WorkspaceIndexPolicy,
   WorkspaceIndexStatus,
@@ -13,6 +18,7 @@ import type {
   SearchPlanRoute,
   SearchHitTrace,
   SearchMatchedBy,
+  SourceInvalidation,
   TimingEntry,
 } from "../types.js";
 
@@ -50,15 +56,23 @@ export type ZvecGrepIndexOptions = {
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
   changedPaths?: readonly string[];
+  /** Force exact-path content checks and return a post-index committed proof. */
+  verifySourcePaths?: readonly string[];
   signal?: AbortSignal;
   onWriterContext?: (
     context: ZvecGrepWriterContext,
+    preflight: ZvecGrepWriterPreflight,
   ) => void | (() => void | Promise<void>);
 };
 
 export type ZvecGrepWriterContext = (
   options: ZvecGrepContextOptions,
+  prepared?: PreparedWorkspaceContext,
 ) => Promise<ZvecGrepContextResult>;
+
+export type ZvecGrepWriterPreflight = (
+  plan: WorkspaceContextPlan,
+) => Promise<WorkspaceContextPreflight>;
 
 export type ZvecGrepInfoOptions = {
   root?: string;
@@ -163,7 +177,7 @@ export type ZvecGrepContextItem = {
   outline?: string;
   status: "fresh" | "possibly_stale";
   score?: number;
-  matchedBy: SearchMatchedBy | "lexical";
+  matchedBy: SearchMatchedBy | "lexical" | "keyword";
   metadata?: EntityMetadata;
   entityId?: string;
   container?: ZvecGrepContextContainer;
@@ -210,6 +224,8 @@ export type ZvecGrepStructureEnrichmentDiagnostics = {
 
 export type ZvecGrepIndexDiagnostics = {
   hitsReturned: number;
+  /** Failed byte checks for indexed sources actually returned by this search. */
+  sourceInvalidations?: readonly SourceInvalidation[];
   queryGroups?: readonly {
     id: string;
     query: string;
@@ -223,9 +239,26 @@ export type ZvecGrepIndexDiagnostics = {
 };
 
 export type ZvecGrepContextDiagnostics = {
-  emptyReason?: "no_matches" | "no_searchable_files";
+  emptyReason?: "no_matches" | "no_searchable_files" | "semantic_incomplete";
+  /** Local results are usable, but omitted semantic recall is not no-match evidence. */
+  semantic?:
+    | {
+        status: "skipped";
+        reason: "preparation_budget_exceeded";
+        budgetMs: number;
+      }
+    | {
+        status: "skipped";
+        reason: "index_unavailable";
+      };
   index?: ZvecGrepIndexDiagnostics;
   rg?: ZvecGrepRgDiagnostics;
+  /** Bounded, approximate current-source fallback, not literal/FTS evidence. */
+  keywords?: {
+    terms: readonly string[];
+    candidates: number;
+    truncated: boolean;
+  };
   structure?: ZvecGrepStructureEnrichmentDiagnostics;
   timings?: readonly TimingEntry[];
 };

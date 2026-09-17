@@ -48,6 +48,13 @@ export function printDebug(
     );
   }
 
+  if (result.diagnostics.keywords) {
+    const keywords = result.diagnostics.keywords;
+    console.error(
+      `keyword_terms=${keywords.terms.join(",")} candidates=${keywords.candidates} truncated=${keywords.truncated}`,
+    );
+  }
+
   if (result.diagnostics.timings && result.diagnostics.timings.length > 0) {
     console.error(
       `timings=${result.diagnostics.timings.map(formatTiming).join(" ")}`,

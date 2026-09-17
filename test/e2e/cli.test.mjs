@@ -603,6 +603,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-grep-e2e-",
+    { cleanup: false },
   );
   const root = join(temporaryDirectory, "repo");
   const home = join(temporaryDirectory, "home");
@@ -618,7 +619,14 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
     USERPROFILE: home,
     NO_COLOR: "1",
     ZVEC_GREP_EMBEDDING: "qwen/qwen3.7-text-embedding",
+    ZVEC_GREP_SERVER_URL: `http://127.0.0.1:${await availablePort()}/mcp`,
   };
+  t.after(async () => {
+    await runCli(["--server", "off"], { cwd: root, env }).catch(
+      () => undefined,
+    );
+    await removeTemporaryDirectory(temporaryDirectory);
+  });
   await mkdir(join(home, ".zvec-grep"), { recursive: true });
   await writeFile(
     join(home, ".zvec-grep", "config.json"),
@@ -660,6 +668,12 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
     { cwd: root, env, timeout: 120_000 },
   );
   assert.match(first.stdout, /example\.ts/);
+  assert.doesNotMatch(first.stderr, /No index found|text search only/);
+  const fileLookup = await runCli(
+    ["src/example.ts", "-g", "src/**", "-t", "ts"],
+    { cwd: root, env },
+  );
+  assert.equal(fileLookup.stdout, "#1 matchedBy=path src/example.ts\n");
 
   const warnedOldQuery = await runCli(
     [
@@ -689,7 +703,7 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
     ["--mode", "direct", "--fts", "RefreshedWorkflowSymbol", "--limit", "5"],
     { cwd: root, env, timeout: 120_000 },
   );
-  assert.match(stale.stdout, /hits: 0/);
+  assert.match(stale.stdout, /^No matches\./);
   assert.doesNotMatch(stale.stdout, /example\.ts:/);
   assert.match(stale.stderr, /status: possibly_stale/);
   assert.match(stale.stderr, /results: served_from_current_index/);
@@ -736,6 +750,13 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
       timeout: 120_000,
     },
   );
+  if (!refreshed.stdout.includes("RefreshedWorkflowSymbol")) {
+    const diagnostics = await runCli(["--status", root, "--debug"], {
+      cwd: root,
+      env,
+    });
+    t.diagnostic(JSON.stringify({ refreshed, diagnostics }));
+  }
   assert.match(refreshed.stdout, /RefreshedWorkflowSymbol/);
   assert.doesNotMatch(refreshed.stdout, /FirstWorkflowSymbol/);
 
@@ -781,8 +802,10 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
     env,
     timeout: 120_000,
   });
-  assert.match(reindexed.stdout, /glob=src\/\*\*/);
-  assert.match(reindexed.stdout, /type=ts/);
+  assert.match(reindexed.stdout, /Workspace index/);
+  const reindexedStatus = await runCli(["--status", root], { cwd: root, env });
+  assert.match(reindexedStatus.stdout, /glob=src\/\*\*/);
+  assert.match(reindexedStatus.stdout, /type=ts/);
   const outside = await runCli(
     ["--fts", "OutsideStoredFilterSymbol", "--refresh", "off"],
     { cwd: root, env },

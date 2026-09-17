@@ -6,6 +6,7 @@ import type { RootRuntime } from "./root-runtime.js";
 export type IndexCoordinatorOptions = {
   runtime: RootRuntime;
   scheduler: JobScheduler;
+  onSubmitted?: (job: IndexJobSnapshot) => void;
   run: (
     changes: ChangeSetSnapshot,
     report: (progress: IndexProgress) => void,
@@ -58,6 +59,7 @@ export class IndexCoordinator {
           return;
         }
         const proof = await this.options.run(jobChanges, report, signal);
+        signal.throwIfAborted();
         if (jobChanges.forceFullReconcile) {
           if (proof?.reconciled === true) {
             this.options.runtime.markReconciled(
@@ -72,6 +74,7 @@ export class IndexCoordinator {
         }
       },
     });
+    this.options.onSubmitted?.(submitted.job);
     return submitted.job;
   }
 

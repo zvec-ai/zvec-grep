@@ -25,10 +25,13 @@ import type {
   IndexResult,
 } from "../../types.js";
 import { sha256Bytes } from "../../utils/hash.js";
+import { pathsForConfiguredRoots } from "./root-paths.js";
+import { snapshotSourceVerificationPaths } from "../../source-freshness.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
   extractForIndexing,
+  currentCodeExtractionVersion,
   type Source,
   vectorContentForFragment,
 } from "../../extraction/index.js";
@@ -46,6 +49,7 @@ export type IndexContext = {
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
   signal?: AbortSignal;
+  verifyContentPaths?: readonly string[];
 };
 
 type DiffResult = {
@@ -151,6 +155,15 @@ type EmbeddingConcurrencyPolicy = {
 
 export async function indexWorkspace(ctx: IndexContext): Promise<IndexResult> {
   try {
+    ctx = {
+      ...ctx,
+      verifyContentPaths: ctx.verifyContentPaths
+        ? snapshotSourceVerificationPaths(
+            ctx.workspaceIndex,
+            ctx.verifyContentPaths,
+          )
+        : undefined,
+    };
     return await indexWorkspaceUnchecked(ctx);
   } catch (error) {
     throw toEngineError(error, "Indexing workspace failed", {
@@ -290,7 +303,13 @@ async function indexWorkspacePathsUnchecked(
   const start = Date.now();
   const report = ctx.onProgress ?? (() => undefined);
   const timings = new TimingCollector();
-  const normalizedPaths = [...new Set(changedPaths.map(normalizePath))];
+  const normalizedPaths = [
+    ...new Set(
+      changedPaths.flatMap((path) =>
+        pathsForConfiguredRoots(ctx.workspaceIndex.rootPaths, path),
+      ),
+    ),
+  ];
   throwIfIndexCancelled(ctx);
   const firstPass = await runPathIndexPass(
     ctx,
@@ -421,6 +440,7 @@ async function runPathIndexPass(
     timings,
     progressBase,
     scanned.diagnostics,
+    true,
   );
 }
 
@@ -448,6 +468,7 @@ async function runIndexPass(
     timings,
     progressBase,
     scan.diagnostics,
+    ctx.verifyContentPaths?.length ? new Set(ctx.verifyContentPaths) : false,
   );
 }
 
@@ -459,9 +480,10 @@ async function runDiffPass(
   timings: TimingCollector,
   progressBase?: IndexProgressBase,
   scanDiagnostics: FileScanDiagnostics = emptyScanDiagnostics(),
+  verifyContent: boolean | ReadonlySet<string> = false,
 ): Promise<IndexPassResult> {
   const diff = await timings.time("index_diff", () =>
-    computeDiffFromFiles(scannedFiles, existingFiles),
+    computeDiffFromFiles(scannedFiles, existingFiles, verifyContent),
   );
   throwIfIndexCancelled(ctx);
   const pending = [...diff.added, ...diff.modified, ...diff.pending];
@@ -663,6 +685,7 @@ async function optimizeStorage(ctx: IndexContext): Promise<void> {
 async function computeDiffFromFiles(
   scannedFiles: readonly FileInfo[],
   existingFiles: readonly FileInfo[],
+  verifyContent: boolean | ReadonlySet<string> = false,
 ): Promise<DiffResult> {
   const existingById = new Map(existingFiles.map((file) => [file.id, file]));
   const seen = new Set<string>();
@@ -686,6 +709,20 @@ async function computeDiffFromFiles(
     }
 
     if (
+      file.kind === "code" &&
+      (existing.indexStatus?.extractionVersion ?? 0) <
+        currentCodeExtractionVersion(file.format)
+    ) {
+      modified.push(await withContentHash(file));
+      continue;
+    }
+
+    if (
+      verifyContent !== true &&
+      !(
+        typeof verifyContent !== "boolean" &&
+        verifyContent.has(normalizePath(file.absolutePath))
+      ) &&
       existing.sizeBytes === file.sizeBytes &&
       existing.lastModifiedTime === file.lastModifiedTime &&
       existing.contentHash
@@ -922,7 +959,7 @@ async function prepareFile(
         ),
       }));
 
-    return { file, fragments };
+    return { file: source.file, fragments };
   } catch (error) {
     if (indexIsCancelled(ctx)) {
       throw indexCancellationError(ctx);
@@ -1091,6 +1128,10 @@ function commitFile(
       })),
       {
         truncatedFragmentCount,
+        extractionVersion:
+          file.file.kind === "code"
+            ? currentCodeExtractionVersion(file.file.format)
+            : undefined,
       },
     );
     stats.filesIndexed++;
@@ -1176,10 +1217,18 @@ async function readSource(file: FileInfo): Promise<Source> {
     });
   }
 
+  // The diff hash may predate this read. Bind the committed hash and size to
+  // the exact byte snapshot supplied to extraction, including intervening edits.
+  const sourceFile = {
+    ...file,
+    sizeBytes: bytes.byteLength,
+    contentHash: sha256Bytes(bytes),
+  };
+
   if (file.kind === "image") {
     return {
       kind: "image",
-      file,
+      file: sourceFile,
       data: bytes,
       format: file.format as ImageFormat,
     };
@@ -1187,7 +1236,7 @@ async function readSource(file: FileInfo): Promise<Source> {
 
   return {
     kind: "text",
-    file,
+    file: sourceFile,
     text: bytes.toString("utf8"),
   };
 }

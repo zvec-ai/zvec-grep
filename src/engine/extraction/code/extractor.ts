@@ -48,7 +48,7 @@ export class CodeExtractor {
     if (isScriptBlockFormat(source.file.format)) {
       const fragments = await this.extractScriptBlocks(source, chunkOptions);
       return fragments.length > 0
-        ? fragments
+        ? withSourceCoverage(source, fragments, chunkOptions)
         : this.fallback(source, chunkOptions);
     }
 
@@ -106,7 +106,7 @@ export class CodeExtractor {
       return this.fallback(source, chunkOptions);
     }
 
-    return extracted;
+    return withSourceCoverage(source, extracted, chunkOptions);
   }
 
   private fallback(
@@ -155,6 +155,60 @@ export class CodeExtractor {
   }
 }
 
+/** Structured symbols supplement source coverage; they must not replace it. */
+function withSourceCoverage(
+  source: TextSource,
+  fragments: readonly PreparedCodeFragment[],
+  options: Required<ChunkOptions>,
+): PreparedCodeFragment[] {
+  const ranges = fragments
+    .flatMap(({ fragment }) =>
+      fragment.range.kind === "text" &&
+      fragment.content.kind === "text" &&
+      fragment.content.text ===
+        source.text.slice(fragment.range.startOffset, fragment.range.endOffset)
+        ? [fragment.range]
+        : [],
+    )
+    .sort((left, right) => left.startOffset - right.startOffset);
+  const output = [...fragments];
+  let line = 1;
+  let lineOffset = 0;
+  const appendGap = (start: number, end: number): void => {
+    const text = source.text.slice(start, end);
+    // Braces/whitespace between recognized nodes carry no standalone evidence.
+    if (!/[\p{L}\p{N}_$]/u.test(text)) return;
+    for (; lineOffset < start; lineOffset++) {
+      if (source.text[lineOffset] === "\n") line++;
+    }
+    for (const window of splitTextByLines(
+      text,
+      options.maxChunkChars,
+      line,
+      start,
+      options.chunkOverlapChars,
+    )) {
+      if (!/[\p{L}\p{N}_$]/u.test(window.text)) continue;
+      output.push({
+        fragment: {
+          id: makeEntityId(source.file.id, output.length),
+          fileId: source.file.id,
+          range: window.range,
+          content: { kind: "text", text: window.text },
+        },
+      });
+    }
+  };
+  let coveredUntil = 0;
+  for (const range of ranges) {
+    if (range.startOffset > coveredUntil)
+      appendGap(coveredUntil, range.startOffset);
+    coveredUntil = Math.max(coveredUntil, range.endOffset);
+  }
+  appendGap(coveredUntil, source.text.length);
+  return output;
+}
+
 function resolveCodeChunkOptions(
   options: ChunkOptions,
 ): Required<ChunkOptions> {
@@ -191,6 +245,7 @@ function resolveCodeChunkOptions(
 
 type CodeEntity = {
   node: TSNode;
+  sourceNode?: TSNode;
   name?: string;
   symbolType: CodeSymbolType;
   breadcrumb: readonly string[];
@@ -250,6 +305,7 @@ function walkCodeNode(
 
         out.push({
           node: entity,
+          sourceNode: adapter.sourceNode?.(entity),
           name,
           symbolType,
           breadcrumb: entityBreadcrumb,
@@ -292,9 +348,10 @@ function codeEntityToSearchFragments(
   );
   const contentMaxChars = contentChunkOptions.maxChunkChars;
 
-  if (entity.node.text.length <= contentMaxChars) {
+  const sourceNode = entity.sourceNode ?? entity.node;
+  if (sourceNode.text.length <= contentMaxChars) {
     return [
-      codeEntityWindowToFragment(source, entity, nodeToWindow(entity.node)),
+      codeEntityWindowToFragment(source, entity, nodeToWindow(sourceNode)),
     ];
   }
 

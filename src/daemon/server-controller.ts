@@ -179,6 +179,7 @@ export async function startServer(options: {
   home?: string;
   timeoutMs?: number;
   mcpToolset?: McpToolset;
+  modelCacheDir?: string;
 }): Promise<DaemonControlStatus> {
   const environmentToolset = process.env[MCP_TOOLSET_ENV];
   const requestedToolset = resolveMcpToolset(
@@ -216,6 +217,7 @@ export async function startServer(options: {
   if (options.listen) args.push("--listen", options.listen);
   if (options.tokenFile) args.push("--token-file", options.tokenFile);
   if (options.home) args.push("--home", options.home);
+  if (options.modelCacheDir) args.push("--model-cache", options.modelCacheDir);
   const child = spawn(process.execPath, args, {
     detached: true,
     stdio: "ignore",
