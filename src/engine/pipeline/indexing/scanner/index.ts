@@ -391,6 +391,9 @@ async function hasExcludedNestedGitAncestor(
   absolutePath: string,
   includeTarget: boolean,
 ): Promise<boolean> {
+  if (rootPath.noIgnore) {
+    return false;
+  }
   const pathFromRoot = relative(rootPath.absolutePath, absolutePath);
   const segments = pathFromRoot.split(sep).filter(Boolean);
   const directorySegments = includeTarget ? segments : segments.slice(0, -1);
@@ -627,6 +630,7 @@ async function walk(
       }
 
       if (
+        !rootPath.noIgnore &&
         (await isNestedGitRepositoryDirectory(absolutePath)) &&
         !nestedGitRepositoryExplicitlyIncluded(relativePath, rootPath)
       ) {
