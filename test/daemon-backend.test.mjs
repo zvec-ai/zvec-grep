@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -259,6 +267,52 @@ test("drop index closes the active runtime and removes the persisted index", asy
 
     const repeated = await backend.dropIndex({ root });
     assert.deepEqual(repeated, { root: await realpath(root), removed: false });
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("index status reports failed when the manifest path no longer holds the index storage", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-status-moved-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const service = await createZvecGrep({
+    root,
+    embeddingModel: new TestEmbeddingModel(),
+  });
+  await service.index();
+  await service.close();
+
+  const movedRoot = join(temporaryDirectory, "moved-repo");
+  await rename(root, movedRoot);
+  const manifest = JSON.parse(
+    await readFile(join(movedRoot, ".zvec-grep", "manifest.json"), "utf8"),
+  );
+  assert.notEqual(manifest.path, join(movedRoot, ".zvec-grep"));
+
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    const status = await backend.indexStatus({ root: movedRoot });
+    assert.equal(status.indexed, false);
+    assert.equal(status.source, "unindexed");
+    assert.equal(status.persistent.files, undefined);
+    assert.equal(status.persistent.suggestion, "zg --index --rebuild");
+    assert.equal(
+      status.runtime.error.code,
+      "ZVEC_GREP.ENGINE.STORAGE.ZVEC_FILE_META_MISSING",
+    );
+    assert.equal(
+      status.runtime.error.context,
+      `path=${join(manifest.path, "files.zvec")}`,
+    );
   } finally {
     await backend.close();
     await rm(temporaryDirectory, { recursive: true, force: true });

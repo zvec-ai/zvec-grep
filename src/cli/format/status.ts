@@ -255,6 +255,7 @@ export function printWorkspaceInfo(
     failedReasons: status
       ? summarizeFailedFileReasons(status.failedFiles, "zg --index")
       : undefined,
+    error: info.error,
   });
   return state;
 }
@@ -631,6 +632,10 @@ function workspaceState(
 
   if (!info.workspaceIndex) {
     return "undecided";
+  }
+
+  if (info.error) {
+    return "failed";
   }
 
   if (!info.indexed) {
