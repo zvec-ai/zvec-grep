@@ -9,6 +9,10 @@ import {
   toDisplayPath,
 } from "../../utils/path.js";
 
+// A drive letter followed by a backslash only shows up in Windows paths, so a
+// POSIX directory named "C:" keeps working.
+const WINDOWS_DRIVE_PATH = /(?:^|\/)[A-Za-z]:\\/;
+
 export function validateRootPaths(
   paths: readonly (string | RootPath)[],
 ): RootPath[] {
@@ -39,14 +43,14 @@ export function validateRootPaths(
 export function normalizeRootPath(path: string | RootPath): RootPath {
   if (typeof path === "string") {
     return {
-      absolutePath: normalizePath(path),
+      absolutePath: normalizeIndexRootPath(path),
       recursive: true,
     };
   }
 
   return {
     ...path,
-    absolutePath: normalizePath(path.absolutePath),
+    absolutePath: normalizeIndexRootPath(path.absolutePath),
     recursive: path.recursive,
   };
 }
@@ -223,6 +227,20 @@ function directoryCoversFile(
   }
 
   return directory.root.recursive || dirname(filePath) === directory.realPath;
+}
+
+function normalizeIndexRootPath(path: string): string {
+  if (process.platform !== "win32" && WINDOWS_DRIVE_PATH.test(path)) {
+    throw new EngineError(
+      "Workspace index root path is a Windows path and cannot be used on this platform",
+      {
+        code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_INVALID",
+        context: `rootPath=${path}`,
+      },
+    );
+  }
+
+  return normalizePath(path);
 }
 
 function matchesAny(
