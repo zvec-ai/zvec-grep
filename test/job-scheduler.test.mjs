@@ -702,3 +702,36 @@ async function waitFor(predicate) {
   }
   throw new Error("Condition was not reached.");
 }
+
+test("scheduler persists the native failure message and context", async (t) => {
+  const home = await createTemporaryDirectory(t, "zvec-grep-job-error-");
+  const logger = createDaemonLogger(home);
+  const scheduler = new JobScheduler({ logger });
+  t.after(() => scheduler.close());
+  const message =
+    "FtsRocksdbReducer: source postings is not BitPacked. field=text";
+  const submitted = scheduler.submit({
+    canonicalRoot: "/repo-fts-failure",
+    reason: "manual",
+    run: async () => {
+      throw new EngineError(message, {
+        code: "ZVEC_INTERNAL_ERROR",
+        context: "segment=1",
+        cause: new Error("merge failed"),
+      });
+    },
+  });
+  await scheduler.wait(submitted.job.id);
+  await logger.flush();
+  const records = (
+    await readFile(join(home, "daemon", "logs", "server.log"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const finished = records.find((record) => record.event === "job.finished");
+  assert.equal(finished.error_code, "ZVEC_INTERNAL_ERROR");
+  assert.equal(finished.error_message, message);
+  assert.equal(finished.error_context, "segment=1");
+  assert.match(finished.error_cause, /merge failed/);
+});
