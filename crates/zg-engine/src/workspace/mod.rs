@@ -7,4 +7,4 @@ pub(crate) mod manifest;
 pub(crate) mod registry;
 
 /// Compatibility version of the workspace index contents.
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 5;
+pub(crate) const CURRENT_INDEX_VERSION: u32 = 6;

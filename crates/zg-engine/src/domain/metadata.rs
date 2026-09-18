@@ -47,15 +47,27 @@ pub struct CodeMetadata {
     pub scope: Option<String>,
     pub signature: Option<String>,
     pub documentation: Option<String>,
+    pub visibility: Option<String>,
+    pub parameter: Option<String>,
+    pub language: Option<String>,
 }
 
 impl CodeMetadata {
     pub(crate) const SYMBOL_NAME: IndexField = IndexField::String("symbol_name");
     pub(crate) const SYMBOL_TYPE: IndexField = IndexField::String("symbol_type");
+    pub(crate) const VISIBILITY: IndexField = IndexField::String("visibility");
+    pub(crate) const PARAMETER: IndexField = IndexField::String("parameter");
+    pub(crate) const LANGUAGE: IndexField = IndexField::String("language");
 }
 
 impl IndexedMetadata for CodeMetadata {
-    const INDEX_FIELDS: &'static [IndexField] = &[Self::SYMBOL_NAME, Self::SYMBOL_TYPE];
+    const INDEX_FIELDS: &'static [IndexField] = &[
+        Self::SYMBOL_NAME,
+        Self::SYMBOL_TYPE,
+        Self::VISIBILITY,
+        Self::PARAMETER,
+        Self::LANGUAGE,
+    ];
 }
 
 // Keep variants in alphabetical order.

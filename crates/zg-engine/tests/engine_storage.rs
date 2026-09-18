@@ -780,7 +780,7 @@ async fn version_four_requires_explicit_rebuild_to_version_five() -> TestResult 
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(5)
+        Some(6)
     );
     let manifest_path = before.home.join("manifest.json");
     let mut old: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
@@ -830,7 +830,7 @@ async fn version_four_requires_explicit_rebuild_to_version_five() -> TestResult 
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(5)
+        Some(6)
     );
     assert_eq!(after.status.as_ref().expect("status").files_indexed, 2);
     assert_ne!(after.index_path, before.index_path);

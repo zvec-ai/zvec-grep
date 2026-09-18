@@ -916,7 +916,7 @@ async fn prepare_candidate(
         };
         extract_for_indexing(&text, chunk_options)?
     };
-    let fragments = prepare_fragments(file.id, extracted, chunk_options.max_chunk_chars);
+    let fragments = prepare_fragments(file.id, extracted.fragments, chunk_options.max_chunk_chars);
     validate_fragments(file.id, fragments.iter().map(|item| &item.fragment))?;
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
@@ -2072,7 +2072,7 @@ mod tests {
         };
         let extracted = extract_for_indexing(&source, options).expect("extract markdown");
         let file_id = FileId::new(42);
-        let prepared = prepare_fragments(file_id, extracted, options.max_chunk_chars);
+        let prepared = prepare_fragments(file_id, extracted.fragments, options.max_chunk_chars);
         let fragments: Vec<_> = prepared.iter().map(|item| &item.fragment).collect();
         assert!(matches!(fragments[0], EntityFragment::Standalone(_)));
         assert!(matches!(fragments[1], EntityFragment::Representative(_)));

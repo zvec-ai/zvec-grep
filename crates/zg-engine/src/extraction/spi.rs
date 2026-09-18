@@ -1,7 +1,8 @@
 //! Prepared inputs and indexing options for extraction.
 
 use crate::domain::{
-    Content, EntityContent, EntityMetadata, FileFormat, ImageContent, SourcePath, SourceRange,
+    Content, EntityContent, EntityMetadata, FileFormat, FileGraphResult, ImageContent, SourcePath,
+    SourceRange,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +52,17 @@ pub(crate) struct IndexingExtractionFragment {
     pub fragment: ExtractedFragment,
     /// Optional compacted content used only for embedding.
     pub embedding_source: Option<Vec<Content>>,
+}
+
+/// Per-source extraction result: search fragments plus an optional code graph.
+///
+/// The graph is produced by the code path once the walk-time edge collection
+/// and file-local partition are implemented; every other source kind returns
+/// `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexingExtractionOutput {
+    pub fragments: Vec<IndexingExtractionFragment>,
+    pub graph: Option<FileGraphResult>,
 }
 
 /// Source fragments whose indices and ownership are local to one extraction.

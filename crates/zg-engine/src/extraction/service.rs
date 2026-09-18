@@ -3,8 +3,8 @@
 #[cfg(test)]
 use super::TextSource;
 use super::{
-    ChunkOptions, ExtractedFragment, IndexingExtractionFragment, Source, SourceKind, code, image,
-    markdown, text,
+    ChunkOptions, ExtractedFragment, IndexingExtractionFragment, IndexingExtractionOutput,
+    Source, SourceKind, code, image, markdown, text,
 };
 use crate::{
     EngineError,
@@ -20,6 +20,7 @@ pub(super) fn extract<'source>(
     options: ChunkOptions,
 ) -> Result<Vec<ExtractedFragment>, EngineError> {
     Ok(extract_for_indexing(source, options)?
+        .fragments
         .into_iter()
         .map(|item| item.fragment)
         .collect())
@@ -28,13 +29,13 @@ pub(super) fn extract<'source>(
 pub(super) fn extract_for_indexing<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
-) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
+) -> Result<IndexingExtractionOutput, EngineError> {
     let source = source.into();
     let source_text = match &source {
         Source::Text(source) => Some(source.text.as_str()),
         Source::Image(_) => None,
     };
-    let fragments = match source {
+    let output = match source {
         Source::Text(source) if is_code_source(&source.formats) => {
             code::extract_for_indexing(source, options)?
         }
@@ -46,23 +47,26 @@ pub(super) fn extract_for_indexing<'source>(
                 }
                 Source::Text(source) => text::extract(source, options),
             }?;
-            fragments
-                .into_iter()
-                .map(|fragment| IndexingExtractionFragment {
-                    fragment,
-                    embedding_source: None,
-                })
-                .collect()
+            IndexingExtractionOutput {
+                fragments: fragments
+                    .into_iter()
+                    .map(|fragment| IndexingExtractionFragment {
+                        fragment,
+                        embedding_source: None,
+                    })
+                    .collect(),
+                graph: None,
+            }
         }
     };
     if let Some(source_text) = source_text {
-        for item in &fragments {
+        for item in &output.fragments {
             if let SourceRange::Text(range) = item.fragment.range() {
                 range.slice(source_text)?;
             }
         }
     }
-    Ok(fragments)
+    Ok(output)
 }
 
 pub(super) fn source_kind(formats: &[FileFormat]) -> Option<SourceKind> {
@@ -215,6 +219,7 @@ fn vector_metadata_text(metadata: Option<&EntityMetadata>, max_chars: Option<usi
             scope,
             signature,
             documentation,
+            ..
         }) => vec![
             match (symbol_type, symbol_name) {
                 (Some(kind), Some(name)) => Some(format!("symbol: {} {name}", kind.as_str())),

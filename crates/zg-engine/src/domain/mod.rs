@@ -1,6 +1,7 @@
 mod content;
 mod entity;
 mod file_filter;
+mod graph;
 mod metadata;
 pub(crate) mod model;
 mod source;
@@ -27,6 +28,14 @@ pub(crate) use entity::{Entity, EntityContent, EntityId};
 // Metadata.
 pub(crate) use metadata::IndexField;
 pub use metadata::{CodeMetadata, EntityMetadata, MarkdownMetadata, SymbolType};
+
+// Graph extraction contracts. The walk-time collectors and the persistence
+// layer are still pending, so most types have no consumers yet.
+#[allow(unused_imports)]
+pub(crate) use graph::{
+    EdgeProvenance, FileEdge, FileGraphNode, FileGraphResult, GraphEdgeKind, GraphRefKind,
+    PendingRef, PendingRefStatus,
+};
 
 // Fragments.
 pub(crate) use entity::{EntityFragment, FragmentId, WindowFragment, validate_fragments};

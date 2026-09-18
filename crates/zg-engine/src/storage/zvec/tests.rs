@@ -278,6 +278,9 @@ fn metadata_fragments(entity_id: &str, window_id: &str) -> (FileRecord, Vec<Inde
             symbol_name: Some("harvest 春'\\crop".into()),
             scope: Some("Garden".into()),
             signature: Some("pub async fn harvest() -> Crop".into()),
+            visibility: None,
+            parameter: None,
+            language: None,
             documentation: Some("Produces the seasonal crop.".into()),
         })),
     };

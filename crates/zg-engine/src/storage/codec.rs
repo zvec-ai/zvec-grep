@@ -938,6 +938,9 @@ mod tests {
                 symbol_name: Some("symbol".to_owned()),
                 scope: Some("module".to_owned()),
                 signature: Some("pub async fn symbol()".to_owned()),
+                visibility: None,
+                parameter: None,
+                language: None,
                 documentation: Some("documentation".to_owned()),
             }));
             let fragment = EntityFragment::Standalone(entity);

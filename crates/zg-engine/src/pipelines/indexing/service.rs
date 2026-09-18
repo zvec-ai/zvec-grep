@@ -2330,7 +2330,7 @@ mod tests {
         let rebuilt = super::read_workspace_manifest(&info.home)
             .expect("manifest read")
             .expect("manifest");
-        assert_eq!(rebuilt.index_version, Some(5));
+        assert_eq!(rebuilt.index_version, Some(super::CURRENT_INDEX_VERSION));
         assert_eq!(rebuilt.workspace.root, manifest.workspace.root);
         assert_eq!(rebuilt.workspace.filter, manifest.workspace.filter);
         assert_eq!(rebuilt.embedding_runtime, manifest.embedding_runtime);
