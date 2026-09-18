@@ -1,0 +1,453 @@
+name: SWE-QA Bench
+run-name: SWE-QA Bench / ${{ inputs.model || 'glm-5.2' }} / ${{ inputs.scope || 'repro-3' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Run the low/medium/high variability trio, all 20 tasks, or smoke
+        required: true
+        default: repro-3
+        type: choice
+        options:
+          - repro-3
+          - all-full
+          - smoke
+      model:
+        description: Use this model for both execution and self-judging
+        required: true
+        default: glm-5.2
+        type: choice
+        options:
+          - glm-5.2
+          - qwen3.8-max
+
+permissions: {}
+
+env:
+  SWE_QA_TRIALS_PER_PROFILE: "5"
+  SWE_QA_MAX_RETRIES: "2"
+  SWE_QA_MODEL: ${{ inputs.model || 'glm-5.2' }}
+
+concurrency:
+  group: swe-qa-bench-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate locked selection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      task-matrix: ${{ steps.task-matrix.outputs.tasks }}
+      task-count: ${{ steps.task-matrix.outputs.count }}
+      task_ids_json: ${{ steps.task-matrix.outputs.task_ids_json }}
+    permissions:
+      contents: read
+    steps:
+      # Repeat authorization in every job so individual job re-runs cannot bypass it.
+      - &authorize-benchmark
+        name: Authorize manual benchmark run
+        id: authorize
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BENCH_REPOSITORY: ${{ github.repository }}
+          BENCH_EVENT_NAME: ${{ github.event_name }}
+          BENCH_ACTOR: ${{ github.actor }}
+          BENCH_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          if [[ "$BENCH_EVENT_NAME" != "workflow_dispatch" ]]; then
+            echo "::error::SWE-QA Bench only accepts manual workflow_dispatch runs."
+            exit 1
+          fi
+          if [[ -z "$BENCH_ACTOR" || -z "$BENCH_TRIGGERING_ACTOR" ]]; then
+            echo "::error::Both the original actor and the current triggering actor are required."
+            exit 1
+          fi
+          for actor in "$BENCH_ACTOR" "$BENCH_TRIGGERING_ACTOR"; do
+            # The legacy permission field maps maintain to write; use role_name.
+            role="$(gh api "repos/$BENCH_REPOSITORY/collaborators/$actor/permission" --jq '.role_name')"
+            case "$role" in
+              admin|maintain)
+                echo "Authorized $actor with repository role $role."
+                ;;
+              *)
+                echo "::error::SWE-QA Bench requires the admin or maintain repository role; $actor has $role."
+                exit 1
+                ;;
+            esac
+          done
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install locked benchmark environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.9.17
+          uv sync --project benchmarks/swe-qa-bench --frozen
+      - name: Validate tasks, hashes, commits, and reference isolation
+        run: >-
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa validate
+          --selection benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json
+          --references benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json
+          --dataset benchmarks/swe-qa-bench/datasets
+      - name: Build this run's task matrix from the locked selection
+        id: task-matrix
+        env:
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          selection = json.loads(
+              Path(
+                  "benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json"
+              ).read_text(encoding="utf-8")
+          )
+          tasks = selection["tasks"]
+          tasks_by_id = {task["task_id"]: task for task in tasks}
+          scope = os.environ["SCOPE"]
+          if scope == "smoke":
+              task_ids = selection["gate"]["auto_tasks"]
+          elif scope == "repro-3":
+              # Relative low / medium / high variability in run 35206585943.
+              task_ids = ["reflex:6", "requests:16", "conan:39"]
+          elif scope in {"all-full", "gate-20"}:
+              # gate-20 remains accepted for legacy API/CLI dispatches.
+              task_ids = [task["task_id"] for task in tasks]
+          else:
+              raise SystemExit(f"unsupported SWE-QA scope: {scope}")
+          if not task_ids:
+              raise SystemExit(f"SWE-QA scope {scope} selected no tasks")
+          if len(task_ids) != len(set(task_ids)):
+              raise SystemExit(f"SWE-QA scope {scope} selected duplicate tasks")
+          missing = sorted(set(task_ids) - tasks_by_id.keys())
+          if missing:
+              raise SystemExit(
+                  f"SWE-QA scope {scope} selected unknown tasks: {missing}"
+              )
+          selected = [tasks_by_id[task_id] for task_id in task_ids]
+          slugs = [task["task_slug"] for task in selected]
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"tasks={json.dumps(slugs, separators=(',', ':'))}\n")
+              output.write(f"count={len(slugs)}\n")
+              output.write(
+                  f"task_ids_json={json.dumps(task_ids, separators=(',', ':'))}\n"
+              )
+          PY
+      - name: Install pinned OpenCode for local request verification
+        run: npm install --global opencode-ai@1.18.4
+      - name: Run benchmark tests and verify sampling and web-tool restrictions
+        env:
+          OPENCODE_BENCHMARK_TEST_BINARY: opencode
+        run: >-
+          uv run --project benchmarks/swe-qa-bench python -m unittest discover
+          -s benchmarks/swe-qa-bench/tests -v
+      - name: Verify the Harbor command without credentials
+        run: >-
+          uv run --project benchmarks/swe-qa-bench zg-bench run
+          swe-qa-bench
+          --tier full
+          --agent opencode
+          --model "custom-openai/$SWE_QA_MODEL"
+          --profile all
+          --n-attempts "$SWE_QA_TRIALS_PER_PROFILE"
+          --max-retries "$SWE_QA_MAX_RETRIES"
+          --embedding-model local/potion-code-16m-v2
+          --zvec-grep-package "$GITHUB_WORKSPACE"
+          --job-name preflight
+          --dry-run
+
+  run-pair:
+    name: Pair + judge / ${{ matrix.task }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        task: ${{ fromJSON(needs.validate.outputs.task-matrix) }}
+    steps:
+      - *authorize-benchmark
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Restore this task's zvec index seed
+        id: zvec-index-seed-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/swe-qa-index-seed
+          key: swe-qa-zvec-index-seed-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-bench-${{ hashFiles('benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json', format('benchmarks/swe-qa-bench/datasets/{0}/environment/Dockerfile', matrix.task)) }}-npm-${{ hashFiles('package-lock.json') }}-zvec-${{ hashFiles('src/**', 'package.json', 'tsconfig.json', 'eslint.config.js', 'README.md', 'README_CN.md', 'LICENSE', 'docs/**', '.opencode/opencode.json', 'benchmarks/swe-qa-bench/pyproject.toml', 'benchmarks/swe-qa-bench/uv.lock', 'benchmarks/swe-qa-bench/suites/swe-qa-bench.yaml', 'benchmarks/swe-qa-bench/zg_bench/agents/zvec_grep.py', 'benchmarks/swe-qa-bench/zg_bench/runner.py', 'benchmarks/swe-qa-bench/zg_bench/settings.py') }}
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.9.17
+          uv sync --project benchmarks/swe-qa-bench --frozen
+          npm ci
+      - name: Run baseline and zvec-grep on the same runner
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          TASK_NAME: ${{ matrix.task }}
+          ZG_BENCH_INDEX_SEED_DIR: ${{ runner.temp }}/swe-qa-index-seed
+        run: |
+          set -euo pipefail
+          if [[ -z "${GLM_API_KEY:-}" ]]; then
+            echo "GLM_API_KEY Actions secret is not configured" >&2
+            exit 2
+          fi
+          runs_dir="$RUNNER_TEMP/swe-qa-runs/$TASK_NAME"
+          uv run --project benchmarks/swe-qa-bench zg-bench run \
+            swe-qa-bench \
+            --tier full \
+            --task "$TASK_NAME" \
+            --agent opencode \
+            --model "custom-openai/$SWE_QA_MODEL" \
+            --profile all \
+            --n-attempts "$SWE_QA_TRIALS_PER_PROFILE" \
+            --max-retries "$SWE_QA_MAX_RETRIES" \
+            --embedding-model local/potion-code-16m-v2 \
+            --zvec-grep-package "$GITHUB_WORKSPACE" \
+            --jobs-dir "$runs_dir" \
+            --job-name "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${TASK_NAME}"
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa collect \
+            --runs-dir "$runs_dir" \
+            --task "$TASK_NAME" \
+            --expected-trials "$SWE_QA_TRIALS_PER_PROFILE" \
+            --output "$RUNNER_TEMP/pair-${TASK_NAME}.json"
+      - name: Judge this pair and write its independent report
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          TASK_NAME: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa judge \
+            --pairs-root "$RUNNER_TEMP/pair-${TASK_NAME}.json" \
+            --references benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json \
+            --model "$SWE_QA_MODEL" \
+            --output-dir "$RUNNER_TEMP/swe-qa-task-report/${TASK_NAME}" \
+            --expected "$TASK_NAME"
+      - name: Summarize trial retries
+        if: always() && steps.authorize.outcome == 'success'
+        env:
+          TASK_NAME: ${{ matrix.task }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "swe-qa-runs" / os.environ["TASK_NAME"]
+          trials = int(os.environ["SWE_QA_TRIALS_PER_PROFILE"])
+          retries = int(os.environ["SWE_QA_MAX_RETRIES"])
+          lines = [
+              "## Trial retries",
+              "",
+              f"Each profile has {trials} independent trials. Failed trials receive at most {retries} additional attempts within the job deadline; successful trials and low scores are not retried.",
+              "Report metrics cover the final successful attempt of each trial and exclude failed-attempt overhead. Failed attempts are preserved in the Harbor evidence artifact under `.retry-history/`.",
+              "",
+              "| Profile | Successful trials | Retry attempts | Final errors |",
+              "|---|---:|---:|---:|",
+          ]
+          for profile in ("baseline", "zvec-grep"):
+              paths = list(root.glob(f"*-{profile}/result.json"))
+              if len(paths) != 1:
+                  lines.append(f"| {profile} | unavailable | unavailable | unavailable |")
+                  continue
+              result = json.loads(paths[0].read_text())
+              stats = result["stats"]
+              errors = stats["n_errored_trials"]
+              successes = stats["n_completed_trials"] - errors
+              lines.append(
+                  f"| {profile} | {successes}/{result['n_total_trials']} | {stats['n_retries']} | {errors} |"
+              )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
+              output.write("\n".join(lines) + "\n")
+          PY
+      - name: Reject secret leakage in artifacts
+        id: secret-scan
+        if: always() && steps.authorize.outcome == 'success'
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          TASK_NAME: ${{ matrix.task }}
+          ZG_BENCH_INDEX_SEED_DIR: ${{ runner.temp }}/swe-qa-index-seed
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          def contains_secret(path: Path, secret: bytes) -> bool:
+              overlap = max(len(secret) - 1, 0)
+              tail = b""
+              with path.open("rb") as source:
+                  while chunk := source.read(1024 * 1024):
+                      window = tail + chunk
+                      if secret in window:
+                          return True
+                      tail = window[-overlap:] if overlap else b""
+              return False
+
+          secret = os.environ.get("GLM_API_KEY", "").encode()
+          roots = [
+              Path(os.environ["RUNNER_TEMP"]) / "swe-qa-runs" / os.environ["TASK_NAME"],
+              Path(os.environ["RUNNER_TEMP"]) / f"pair-{os.environ['TASK_NAME']}.json",
+              Path(os.environ["RUNNER_TEMP"]) / "swe-qa-task-report" / os.environ["TASK_NAME"],
+              Path(os.environ["ZG_BENCH_INDEX_SEED_DIR"]),
+          ]
+          if secret:
+              for root in roots:
+                  files = [root] if root.is_file() else root.rglob("*") if root.exists() else []
+                  for path in files:
+                      if path.is_file() and contains_secret(path, secret):
+                          raise SystemExit(f"secret material detected in artifact: {path}")
+          PY
+      - name: Upload paired Harbor evidence
+        if: always() && steps.authorize.outcome == 'success' && steps.secret-scan.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: swe-qa-pair-${{ matrix.task }}-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/pair-${{ matrix.task }}.json
+            ${{ runner.temp }}/swe-qa-runs/${{ matrix.task }}/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Upload independent task report
+        if: always() && steps.authorize.outcome == 'success' && steps.secret-scan.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: swe-qa-task-report-${{ matrix.task }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/swe-qa-task-report/${{ matrix.task }}/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Save this task's populated zvec index seed
+        if: success() && steps.zvec-index-seed-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/swe-qa-index-seed
+          key: ${{ steps.zvec-index-seed-restore.outputs.cache-primary-key }}
+
+  aggregate-report:
+    name: Aggregate completed task reports
+    needs: [validate, run-pair]
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.run-pair.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - *authorize-benchmark
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install locked report environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.9.17
+          uv sync --project benchmarks/swe-qa-bench --frozen
+      - name: Download this attempt's independent task reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swe-qa-task-report-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-reports
+      - name: Detect report scope and show partial task reports
+        id: report-set
+        env:
+          EXPECTED_COUNT: ${{ needs.validate.outputs.task-count }}
+        run: |
+          set -euo pipefail
+          expected_count="$EXPECTED_COUNT"
+          if [[ ! "$expected_count" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid expected report count: $expected_count"
+            exit 1
+          fi
+
+          report_root="$RUNNER_TEMP/task-reports"
+          mapfile -d '' -t json_reports < <(
+            find "$report_root" -type f -name report.json -print0 | LC_ALL=C sort -z
+          )
+          actual_count="${#json_reports[@]}"
+          if (( actual_count == 0 )); then
+            echo "::error::No independent task reports were downloaded for this attempt."
+            exit 1
+          fi
+
+          if [[ "$actual_count" == "$expected_count" ]]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -d '' -t markdown_reports < <(
+            find "$report_root" -type f -name report.md -print0 | LC_ALL=C sort -z
+          )
+          if (( ${#markdown_reports[@]} != actual_count )); then
+            echo "::error::Expected one report.md for each downloaded report.json."
+            exit 1
+          fi
+
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "## SWE-QA Aggregate"
+            echo
+            echo "**Incomplete report set:** attempt ${GITHUB_RUN_ATTEMPT} contains ${actual_count} of ${expected_count} task reports. The cross-task Aggregate was skipped, and no partial Aggregate artifact was generated."
+            echo
+            echo "The independent task report(s) produced by this attempt are shown below. Any Aggregate row inside an embedded report covers that task only."
+
+            shown=0
+            for report in "${markdown_reports[@]}"; do
+              if (( shown > 0 )); then
+                echo
+                echo "---"
+              fi
+              shown=$((shown + 1))
+              echo
+              sed '1s/^# /### /' "$report"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Combine reports without re-judging
+        if: steps.report-set.outputs.complete == 'true'
+        env:
+          EXPECTED_TASKS_JSON: ${{ needs.validate.outputs.task_ids_json }}
+        run: |
+          set -euo pipefail
+          mapfile -t expected_tasks < <(
+            python -c 'import json, os; print(*json.loads(os.environ["EXPECTED_TASKS_JSON"]), sep="\n")'
+          )
+          if (( ${#expected_tasks[@]} == 0 )); then
+            echo "::error::Locked selection produced no expected task IDs."
+            exit 1
+          fi
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa aggregate \
+            --reports-root "$RUNNER_TEMP/task-reports" \
+            --output-dir "$RUNNER_TEMP/swe-qa-aggregate-report" \
+            --expected "${expected_tasks[@]}"
+      - name: Upload aggregate report
+        if: steps.report-set.outputs.complete == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: swe-qa-aggregate-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/swe-qa-aggregate-report/
+          if-no-files-found: warn
+          retention-days: 90

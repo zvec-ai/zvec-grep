@@ -160,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="independent Harbor trials per task and profile (default: 1)",
     )
     run.add_argument(
+        "--max-retries",
+        type=int,
+        default=0,
+        help="additional attempts per failed trial, including timeouts (default: 0)",
+    )
+    run.add_argument(
         "--jobs-dir",
         type=Path,
         default=DEFAULT_RUNS_DIR,
@@ -275,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
                     jobs_dir=args.jobs_dir,
                     job_name=job_name,
                     n_attempts=args.n_attempts,
+                    max_retries=args.max_retries,
                     zvec_grep_package=zvec_grep_package_install_spec(
                         args.zvec_grep_package
                     ),
@@ -307,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Tier:    {suite.tier}")
     print(f"Profile: {args.profile}")
     print(f"Trials:  {args.n_attempts} per task/profile")
+    print(f"Retries: up to {args.max_retries} additional attempts per failed trial")
     if "zvec-grep" in profiles and args.embedding_model.startswith("qwen/"):
         print(
             f"Embedding: {args.embedding_model} "
@@ -343,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 jobs_dir=args.jobs_dir,
                 job_name=job_name,
                 n_attempts=args.n_attempts,
+                max_retries=args.max_retries,
                 zvec_grep_package=(
                     prepared_cache.zvec_grep_package
                     if prepared_cache is not None

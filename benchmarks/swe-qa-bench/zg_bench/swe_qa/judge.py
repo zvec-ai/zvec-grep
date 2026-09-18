@@ -1,4 +1,4 @@
-"""GLM-5.2 self-judge and report generation for SWE-QA pairs."""
+"""Same-model self-judge and report generation for SWE-QA pairs."""
 
 from __future__ import annotations
 
@@ -10,11 +10,32 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from ..settings import OPENCODE_CUSTOM_GLM_BASE_URL
-from . import SELF_JUDGE_LABEL, SweQaError
+from ..settings import (
+    BENCHMARK_MAX_OUTPUT_TOKENS,
+    BENCHMARK_SEED,
+    BENCHMARK_TEMPERATURE,
+    OPENCODE_CUSTOM_GLM_BASE_URL,
+    OPENCODE_GLM_ENABLE_THINKING,
+    OPENCODE_GLM_REASONING_EFFORT,
+    OPENCODE_CUSTOM_QWEN_BASE_URL,
+    OPENCODE_QWEN_ENABLE_THINKING,
+    OPENCODE_QWEN_REASONING_EFFORT,
+    OPENCODE_QWEN_TEMPERATURE,
+)
+from . import SweQaError
+from .collect import (
+    LEGACY_USAGE_SCOPE,
+    SESSION_USAGE_METRICS,
+    SESSION_USAGE_SCOPE,
+    _compatible_usage_scope,
+    _same_metric,
+    _usage_scope,
+    _validate_usage_metrics,
+)
 
 SCORE_KEYS = ("correctness", "completeness", "relevance", "clarity", "coherence")
 JUDGE_MODEL = "openai/glm-5.2"
+JUDGE_MODELS = ("glm-5.2", "qwen3.8-max")
 PROFILE_NAMES = ("baseline", "zvec-grep")
 COMPARISON_KEYS = (
     "judge_delta",
@@ -26,8 +47,52 @@ COMPARISON_KEYS = (
 DEFAULT_JUDGE_CONCURRENCY = 3
 MAX_JUDGE_CONCURRENCY = 8
 JUDGE_CONCURRENCY_ENV = "SWE_QA_JUDGE_CONCURRENCY"
+JUDGE_GENERATION_METADATA_KEYS = (
+    "enable_thinking", "reasoning_effort", "max_tokens", "response_format",
+)
 
 Completion = Callable[..., Any]
+
+
+def _judge_label(model: str) -> str:
+    if model not in JUDGE_MODELS:
+        raise SweQaError(f"unsupported judge model: {model}")
+    return f"{model}-self-judge-v1"
+
+
+def _judge_temperature(model: str) -> float:
+    return OPENCODE_QWEN_TEMPERATURE if model == "qwen3.8-max" else BENCHMARK_TEMPERATURE
+
+
+def _judge_generation_metadata(model: str = "glm-5.2") -> dict[str, Any]:
+    _judge_label(model)
+    is_qwen = model == "qwen3.8-max"
+    return {
+        "enable_thinking": OPENCODE_QWEN_ENABLE_THINKING if is_qwen else OPENCODE_GLM_ENABLE_THINKING,
+        "reasoning_effort": OPENCODE_QWEN_REASONING_EFFORT if is_qwen else OPENCODE_GLM_REASONING_EFFORT,
+        "max_tokens": BENCHMARK_MAX_OUTPUT_TOKENS,
+        # The rubric prompt requests JSON; no API-enforced format is enabled.
+        # Parsing and retries enforce valid scores for both supported models.
+        "response_format": None,
+    }
+
+
+def _validate_judge_generation_metadata(judge: dict[str, Any], prefix: str) -> None:
+    present = [key in judge for key in JUDGE_GENERATION_METADATA_KEYS]
+    if not any(present):
+        return  # Legacy reports remain readable, but cannot mix with new ones.
+    effort = judge.get("reasoning_effort")
+    tokens = judge.get("max_tokens")
+    if (
+        not all(present)
+        or not isinstance(judge.get("enable_thinking"), bool)
+        or (effort is not None and (not isinstance(effort, str) or not effort.strip()))
+        or isinstance(tokens, bool)
+        or not isinstance(tokens, int)
+        or tokens <= 0
+        or judge.get("response_format") not in (None, {"type": "json_object"})
+    ):
+        raise SweQaError(f"{prefix}: invalid judge generation metadata")
 
 
 def _judge_concurrency(value: int | None = None) -> int:
@@ -154,6 +219,7 @@ def _validate_trial(
         raise SweQaError(f"{task} {profile} has invalid trial_index")
     normalized = dict(trial)
     normalized["trial_index"] = trial_index
+    normalized["usage_scope"] = _validate_usage_metrics(normalized, integer=True)
     return normalized
 
 
@@ -231,10 +297,21 @@ def _load_pairs(root: Path, expected: Sequence[str]) -> dict[str, dict[str, Any]
             raise SweQaError(f"{task_id} pair trial count does not match profiles")
         pair["expected_trials"] = expected_trials
         pair["actual_trials"] = actual_trials
+        scope = _compatible_usage_scope([
+            trial for profile in profiles.values() for trial in profile["trials"]
+        ])
+        if "usage_scope" in pair and pair["usage_scope"] != scope:
+            raise SweQaError(f"{task_id} pair usage_scope disagrees with trials")
         pairs[task_id] = pair
     missing = [task for task in expected if task not in pairs]
     if missing:
         raise SweQaError(f"hard gate is missing valid pair(s): {', '.join(missing)}")
+    _compatible_usage_scope([
+        trial
+        for pair in pairs.values()
+        for profile in pair["profiles"].values()
+        for trial in profile["trials"]
+    ])
     return pairs
 
 
@@ -343,20 +420,27 @@ def _judge_candidate(
     reference: str,
     candidate: str,
     attempts: int,
+    model: str = "glm-5.2",
 ) -> dict[str, Any]:
+    generation = _judge_generation_metadata(model)
     prompt = _judge_prompt(question=question, reference=reference, candidate=candidate)
     last_failure = "unknown"
     for attempt in range(1, attempts + 1):
         started = time.monotonic()
         try:
             response = completion_fn(
-                model=JUDGE_MODEL,
+                model=f"openai/{model}",
                 api_key=api_key,
                 api_base=api_base,
-                temperature=0,
+                temperature=_judge_temperature(model),
+                seed=BENCHMARK_SEED,
+                reasoning_effort=generation["reasoning_effort"],
+                # LiteLLM's OpenAI model registry may not know this provider.
+                # Explicitly forward it rather than silently dropping it.
+                allowed_openai_params=["reasoning_effort"],
+                max_tokens=BENCHMARK_MAX_OUTPUT_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                extra_body={"enable_thinking": False},
+                extra_body={"enable_thinking": generation["enable_thinking"]},
             )
         except Exception as error:  # Provider errors have no shared stable base.
             last_failure = f"transport error ({type(error).__name__})"
@@ -367,8 +451,9 @@ def _judge_candidate(
                 last_failure = str(error)
             else:
                 return {
-                    "label": SELF_JUDGE_LABEL,
-                    "model": "glm-5.2",
+                    "label": _judge_label(model),
+                    "model": model,
+                    **generation,
                     "scores": scores,
                     "total": sum(scores.values()),
                     "latency_seconds": time.monotonic() - started,
@@ -388,6 +473,7 @@ def _judge_task_trials(
     api_base: str,
     attempts: int,
     concurrency: int,
+    model: str = "glm-5.2",
 ) -> dict[str, list[dict[str, Any]]]:
     work_items = [
         (profile_name, trial)
@@ -410,6 +496,7 @@ def _judge_task_trials(
                     reference=str(reference["reference_answer"]),
                     candidate=str(trial["answer"]),
                     attempts=attempts,
+                    model=model,
                 )
             )
         try:
@@ -432,6 +519,12 @@ def _judge_task_trials(
                     "tool_calls": trial["tool_calls"],
                     "agent_wall_seconds": trial["agent_wall_seconds"],
                     "cost_usd": trial["cost_usd"],
+                    "usage_scope": _usage_scope(trial),
+                    **{
+                        key: trial[key]
+                        for key in (*SESSION_USAGE_METRICS, "session_usage", "usage_collection_wall_seconds")
+                        if key in trial
+                    },
                 },
             }
         )
@@ -488,16 +581,43 @@ def _mean_available(
     return sum(available) / len(available), len(available)
 
 
+def _summarize_usage(
+    rows: Sequence[dict[str, Any]], *, average: bool
+) -> dict[str, Any]:
+    scope = _compatible_usage_scope(list(rows))
+    result: dict[str, Any] = {"usage_scope": scope}
+    if scope == LEGACY_USAGE_SCOPE:
+        return result
+    combine = _mean_or_none if average else _sum_or_none
+    split = {
+        part: {
+            key: combine([row["session_usage"][part][key] for row in rows])
+            for key in SESSION_USAGE_METRICS
+        }
+        for part in ("root", "descendants", "total")
+    }
+    result.update(split["total"])
+    result["session_usage"] = {
+        "scope": scope, "complete": True, **split,
+    }
+    return result
+
+
 def _summarize_profile(trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
     count = len(trials)
+    identity = {key: trials[0]["judge"][key] for key in ("label", "model")}
+    if any(
+        trial["judge"].get(key) != value
+        for trial in trials for key, value in identity.items()
+    ):
+        raise SweQaError("profile trials use incompatible judge identities")
     scores = {
         key: sum(trial["judge"]["scores"][key] for trial in trials) / count
         for key in SCORE_KEYS
     }
     usages = [trial["judge"]["usage"] for trial in trials]
     judge = {
-        "label": SELF_JUDGE_LABEL,
-        "model": "glm-5.2",
+        **identity,
         "scores": scores,
         "total": sum(trial["judge"]["total"] for trial in trials) / count,
         "latency_seconds": sum(
@@ -525,6 +645,7 @@ def _summarize_profile(trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
         )
         / count,
         "cost_usd": _mean_or_none([row["cost_usd"] for row in metric_rows]),
+        **_summarize_usage(metric_rows, average=True),
     }
     return {
         "trial_count": count,
@@ -600,13 +721,79 @@ def _case_comparison(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def _aggregate(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    count = len(cases)
+    # Validate every case before filtering. An excluded task must not hide a
+    # mixture of legacy root-only and complete session-tree accounting.
+    usage_scope = _compatible_usage_scope([
+        case["profiles"][profile]["metrics"]
+        for case in cases for profile in PROFILE_NAMES
+    ])
+    included: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for case in cases:
+        baseline_input = case["profiles"]["baseline"]["metrics"]["input_tokens"]
+        zvec_input = case["profiles"]["zvec-grep"]["metrics"]["input_tokens"]
+        if baseline_input == 0:
+            change = 0.0 if zvec_input == 0 else None
+        else:
+            change = (zvec_input - baseline_input) / baseline_input * 100.0
+        baseline_judge = case["profiles"]["baseline"]["judge"]["total"]
+        zvec_judge = case["profiles"]["zvec-grep"]["judge"]["total"]
+        judge_delta = zvec_judge - baseline_judge
+        reasons = []
+        if change is None:
+            reasons.append("undefined_baseline")
+        elif change < -100.0 or change > 100.0:
+            reasons.append("input_token_change_outside_range")
+        # Profile means can introduce floating-point noise at exactly 10 points.
+        # Check both criteria so an overlap retains both reasons in the evidence.
+        if abs(judge_delta) > 10.0 and not math.isclose(
+            abs(judge_delta), 10.0, rel_tol=0.0, abs_tol=1e-9
+        ):
+            reasons.append("judge_delta_outside_range")
+        if reasons:
+            excluded.append({
+                "task_id": case["task_id"],
+                "baseline_input_tokens": baseline_input,
+                "zvec_grep_input_tokens": zvec_input,
+                "change_pct": change,
+                "baseline_judge": baseline_judge,
+                "zvec_grep_judge": zvec_judge,
+                "judge_delta": judge_delta,
+                "reasons": reasons,
+            })
+        else:
+            included.append(case)
+
+    count = len(included)
     profiles: dict[str, dict[str, Any]] = {}
     for profile in PROFILE_NAMES:
-        profile_rows = [case["profiles"][profile] for case in cases]
+        profile_rows = [case["profiles"][profile] for case in included]
+        if not profile_rows:
+            # A single-task report can legitimately have no included tasks.
+            # Keep its raw case available for merging, but do not present zero
+            # usage or zero quality as a measurement of an empty population.
+            profiles[profile] = {
+                key: None for key in (
+                    "judge", "input_tokens", "output_tokens", "tool_calls",
+                    "agent_wall_seconds", "cost_usd",
+                )
+            }
+            profiles[profile]["usage_scope"] = usage_scope
+            if usage_scope == SESSION_USAGE_SCOPE:
+                profiles[profile].update({key: None for key in SESSION_USAGE_METRICS})
+                profiles[profile]["session_usage"] = {
+                    "scope": usage_scope,
+                    "complete": True,
+                    **{
+                        part: {key: None for key in SESSION_USAGE_METRICS}
+                        for part in ("root", "descendants", "total")
+                    },
+                }
+            continue
         profiles[profile] = {
             "judge": sum(row["judge"]["total"] for row in profile_rows) / count,
             "input_tokens": sum(row["metrics"]["input_tokens"] for row in profile_rows),
+            "output_tokens": _sum_or_none([row["metrics"].get("output_tokens") for row in profile_rows]),
             "tool_calls": sum(row["metrics"]["tool_calls"] for row in profile_rows),
             "agent_wall_seconds": sum(
                 row["metrics"]["agent_wall_seconds"] for row in profile_rows
@@ -614,20 +801,37 @@ def _aggregate(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "cost_usd": _sum_or_none(
                 [row["metrics"]["cost_usd"] for row in profile_rows]
             ),
+            **_summarize_usage([row["metrics"] for row in profile_rows], average=False),
         }
-    task_comparisons = [_case_comparison(case) for case in cases]
-    comparison: dict[str, float | None] = {}
-    comparison_samples: dict[str, int] = {}
-    for key in COMPARISON_KEYS:
-        value, sample_count = _mean_available(
-            [task_comparison[key] for task_comparison in task_comparisons]
+    # Efficiency percentages must describe the displayed aggregate sums, not
+    # an average of task percentages that can disagree even in direction.
+    if count:
+        comparison = _comparison(
+            profiles["baseline"], profiles["zvec-grep"],
+            profiles["baseline"]["judge"], profiles["zvec-grep"]["judge"],
         )
-        comparison[key] = value
-        comparison_samples[key] = sample_count
+    else:
+        comparison = {key: None for key in COMPARISON_KEYS}
+    comparison_samples = {
+        key: count if value is not None else 0
+        for key, value in comparison.items()
+    }
     return {
         "profiles": profiles,
         "comparison": comparison,
         "comparison_samples": comparison_samples,
+        "comparison_basis": "ratio_of_aggregate_profile_means",
+        "filter": {
+            "criteria": [
+                {"metric": "input_tokens", "comparison": "change_pct", "min": -100.0, "max": 100.0},
+                {"metric": "judge", "comparison": "delta", "min": -10.0, "max": 10.0, "unit": "points"},
+            ],
+            "total_count": len(cases),
+            "included_count": count,
+            "excluded_count": len(excluded),
+            "included_task_ids": [case["task_id"] for case in included],
+            "excluded_tasks": excluded,
+        },
     }
 
 
@@ -663,109 +867,185 @@ def _metric_cell(
 
 
 def _render_report(report: dict[str, Any]) -> str:
+    usage_scope = report.get("usage_scope", LEGACY_USAGE_SCOPE)
+    aggregate = report["aggregate"]
+    filtering = aggregate.get("filter", {})
+    included = set(filtering.get(
+        "included_task_ids", [case["task_id"] for case in report["cases"]]
+    ))
+
+    def table_row(
+        label: str, baseline: dict[str, Any], zvec: dict[str, Any],
+        judge_b: float | None, judge_z: float | None,
+        comparison: dict[str, Any],
+    ) -> str:
+        judge_cell = (
+            "N/A" if judge_b is None or judge_z is None else
+            f"{judge_b:.2f} / {judge_z:.2f} / {_fmt_delta(comparison['judge_delta'])}"
+        )
+        cells = [label, judge_cell]
+        for metric, change in (
+            ("input_tokens", "input_token_reduction_pct"),
+            ("tool_calls", "toolcall_reduction_pct"),
+            ("agent_wall_seconds", "time_reduction_pct"),
+        ):
+            cells.append(_metric_cell(baseline[metric], zvec[metric], comparison[change]))
+        return "| " + " | ".join(cells) + " |"
+
+    baseline = aggregate["profiles"]["baseline"]
+    zvec = aggregate["profiles"]["zvec-grep"]
     lines = [
         "# SWE-QA-Bench CI report",
         "",
-        f"Judge: **{SELF_JUDGE_LABEL}** (GLM-5.2 self-judge).",
-        "",
-        "This run is **report-only**. Numeric scores and deltas are not code-review or merge gates. The hard gate only requires every expected pair and every judge call to succeed.",
-        "",
-        "All cells use `baseline / zvec-grep / change`. Judge change is `zvec-grep - baseline`, so a gain is positive. Efficiency change is the percentage change from baseline, so lower token, tool-call, or time usage is negative.",
-        "",
-        "Each task's baseline and zvec-grep values are arithmetic means across that profile's trials. Its third value is calculated directly from those two displayed profile means.",
-        "",
-        "In the Aggregate row, baseline and zvec-grep efficiency values are sums of the per-task profile means (Judge is the equal-weight task mean), while the third value is the equal-weight arithmetic mean of task changes, not a ratio of totals. A task whose baseline denominator is zero has an N/A percentage change and is excluded only from that Aggregate metric.",
+        "All cells use `baseline / zvec-grep / change`. Resource savings are negative; Judge gains are positive.",
         "",
         "| Case | Judge self-judge | input_token | toolcall | time (s) |",
         "|---|---:|---:|---:|---:|",
+        table_row(
+            "**Aggregate**", baseline, zvec,
+            baseline["judge"], zvec["judge"], aggregate["comparison"],
+        ),
     ]
     for case in report["cases"]:
+        if case["task_id"] not in included:
+            continue
         baseline = case["profiles"]["baseline"]
         zvec = case["profiles"]["zvec-grep"]
-        comparison = case["comparison"]
-        judge_cell = (
-            f"{baseline['judge']['total']:.2f} / {zvec['judge']['total']:.2f} / "
-            f"{_fmt_delta(comparison['judge_delta'])}"
-        )
-        lines.append(
-            "| "
-            + " | ".join(
-                (
-                    str(case["task_id"]),
-                    judge_cell,
-                    _metric_cell(
-                        baseline["metrics"]["input_tokens"],
-                        zvec["metrics"]["input_tokens"],
-                        comparison["input_token_reduction_pct"],
-                        decimals=2,
-                    ),
-                    _metric_cell(
-                        baseline["metrics"]["tool_calls"],
-                        zvec["metrics"]["tool_calls"],
-                        comparison["toolcall_reduction_pct"],
-                        decimals=2,
-                    ),
-                    _metric_cell(
-                        baseline["metrics"]["agent_wall_seconds"],
-                        zvec["metrics"]["agent_wall_seconds"],
-                        comparison["time_reduction_pct"],
-                        decimals=2,
-                    ),
-                )
-            )
-            + " |"
-        )
-
-    aggregate = report["aggregate"]
-    baseline = aggregate["profiles"]["baseline"]
-    zvec = aggregate["profiles"]["zvec-grep"]
-    comparison = aggregate["comparison"]
-    judge_cell = (
-        f"{baseline['judge']:.2f} / {zvec['judge']:.2f} / "
-        f"{_fmt_delta(comparison['judge_delta'])}"
-    )
-    lines.append(
-        "| "
-        + " | ".join(
-            (
-                "**Aggregate**",
-                judge_cell,
-                _metric_cell(
-                    baseline["input_tokens"],
-                    zvec["input_tokens"],
-                    comparison["input_token_reduction_pct"],
-                    decimals=2,
-                ),
-                _metric_cell(
-                    baseline["tool_calls"],
-                    zvec["tool_calls"],
-                    comparison["toolcall_reduction_pct"],
-                    decimals=2,
-                ),
-                _metric_cell(
-                    baseline["agent_wall_seconds"],
-                    zvec["agent_wall_seconds"],
-                    comparison["time_reduction_pct"],
-                    decimals=2,
-                ),
-            )
-        )
-        + " |"
-    )
+        lines.append(table_row(
+            str(case["task_id"]), baseline["metrics"], zvec["metrics"],
+            baseline["judge"]["total"], zvec["judge"]["total"], case["comparison"],
+        ))
     lines.append("")
+    if filtering:
+        lines.extend((
+            f"Aggregate includes **{filtering['included_count']}/{filtering['total_count']} tasks**. "
+            "A task is excluded from every Aggregate metric and the table above if either its input-token change "
+            "`(zvec-grep mean - baseline mean) / baseline mean` is strictly outside **[-100%, +100%]**, "
+            "or its Judge difference `zvec-grep mean - baseline mean` is strictly outside **[-10, +10] score points**. "
+            "Exactly +/-10 Judge points and +/-100% input-token changes are retained. "
+            "Both filters use each profile's trial mean and are applied independently to each workflow run; "
+            "tasks matching both are excluded only once. "
+            "All tasks are still executed, judged, and retained in the JSON evidence.",
+            "",
+        ))
+        excluded = filtering.get("excluded_tasks", [])
+        judge_excluded = [
+            row for row in excluded if "judge_delta_outside_range" in row.get("reasons", [])
+        ]
+        if judge_excluded:
+            lines.extend((
+                "### Tasks excluded for Judge differences",
+                "",
+                "These are differences between the two profiles' mean scores, in points, not percentages. "
+                "Positive values favor zvec-grep; negative values favor baseline. "
+                "Every task below is excluded from all Aggregate metrics, including resource totals.",
+                "",
+                "| Task | Baseline Judge | zvec-grep Judge | Judge change (points) | Exclusion reason |",
+                "|---|---:|---:|---:|---|",
+            ))
+            for row in judge_excluded:
+                reason = (
+                    "Judge gain exceeds +10 points"
+                    if row["judge_delta"] > 0 else "Judge decline exceeds -10 points"
+                )
+                if "undefined_baseline" in row["reasons"]:
+                    reason += "; input baseline is zero while zvec-grep is positive"
+                elif "input_token_change_outside_range" in row["reasons"]:
+                    reason += f"; input change {_fmt_delta(row['change_pct'], suffix='%')} is outside [-100%, +100%]"
+                lines.append(
+                    f"| {row['task_id']} | {row['baseline_judge']:.2f} | {row['zvec_grep_judge']:.2f} "
+                    f"| {_fmt_delta(row['judge_delta'])} | {reason} |"
+                )
+            lines.append("")
+        elif any(rule.get("metric") == "judge" for rule in filtering.get("criteria", [])):
+            lines.extend(("No tasks were excluded for Judge differences outside [-10, +10] points.", ""))
+        input_excluded = [
+            row for row in excluded
+            if set(row.get("reasons", [row.get("reason")])) & {
+                "undefined_baseline", "input_token_change_outside_range"
+            }
+        ]
+        if input_excluded:
+            descriptions = []
+            for row in input_excluded:
+                change = row["change_pct"]
+                descriptions.append(
+                    f"`{row['task_id']}` (input "
+                    + (
+                        "N/A: baseline is zero, zvec-grep is positive"
+                        if change is None else _fmt_delta(change, suffix="%")
+                    )
+                    + ")"
+                )
+            lines.extend(("Tasks excluded for input-token changes: " + "; ".join(descriptions) + ".", ""))
+        if not included:
+            lines.extend(("No tasks remain after filtering; Aggregate is N/A. This does not invalidate completed trials.", ""))
+
+    lines.extend((
+        "Each task's baseline and zvec-grep values are arithmetic means across its trials. "
+        "Aggregate resource values are sums of the included task means; Judge values are equal-weight means across included tasks. "
+        "Every Aggregate change is calculated directly from the displayed Aggregate values, not an average of task percentages. "
+        "A zero Aggregate baseline denominator produces N/A; zero-baseline tasks in other metrics still contribute to the sums. "
+        "For the input filter, two zero means are retained, while a zero baseline with positive zvec-grep is excluded.",
+        "",
+        "Nonnegative input tokens cannot decrease by more than 100%; this threshold therefore removes high-overhead tasks. "
+        "Filtered statistics are a sensitivity analysis and do not imply the excluded results are invalid.",
+        "",
+    ))
     samples = aggregate.get("comparison_samples")
     if isinstance(samples, dict):
-        task_count = len(report["cases"])
-        lines.extend(
-            (
-                "Aggregate comparison sample counts: "
-                f"Judge n={samples.get('judge_delta', 0)}/{task_count}, "
-                f"input_token n={samples.get('input_token_reduction_pct', 0)}/{task_count}, "
-                f"toolcall n={samples.get('toolcall_reduction_pct', 0)}/{task_count}, "
-                f"time n={samples.get('time_reduction_pct', 0)}/{task_count}.",
-                "",
-            )
-        )
+        task_count = len(included)
+        lines.extend((
+            "Aggregate comparison sample counts: "
+            f"Judge n={samples.get('judge_delta', 0)}/{task_count}, "
+            f"input_token n={samples.get('input_token_reduction_pct', 0)}/{task_count}, "
+            f"toolcall n={samples.get('toolcall_reduction_pct', 0)}/{task_count}, "
+            f"time n={samples.get('time_reduction_pct', 0)}/{task_count}.",
+            "",
+        ))
+    judge_metadata = report["judge"]
+    generation_description = (
+        "Judge generation: "
+        f"`temperature={judge_metadata['temperature']}`, "
+        f"`seed={judge_metadata.get('seed', 'unrecorded')}`, "
+        f"`enable_thinking={str(judge_metadata['enable_thinking']).lower()}`, "
+        f"`reasoning_effort={judge_metadata['reasoning_effort']}`, "
+        f"`max_tokens={judge_metadata['max_tokens']}`, "
+        f"`response_format={(judge_metadata['response_format'] or {}).get('type', 'unset')}`."
+        if "enable_thinking" in judge_metadata else
+        "Legacy report: judge thinking, reasoning effort, and output limit were not recorded."
+    )
+    lines.extend((
+        f"Judge: **{judge_metadata['label']}** ({judge_metadata['model']} self-judge).",
+        "",
+        generation_description,
+        "",
+    ))
+    if judge_metadata["model"] == "qwen3.8-max" and judge_metadata.get("enable_thinking") is True:
+        lines.extend((
+            "Qwen thinking-mode parameter interpretation: the metadata above records requested values. "
+            "The [provider documentation](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions) "
+            "specifies that temperatures below 0.6 are raised to 0.6 and `reasoning_effort=high` maps to `xhigh`; "
+            "`max_tokens` limits the final answer and excludes reasoning tokens. "
+            "These are documented provider behaviors, not effective values observed in the response.",
+            "",
+        ))
+    lines.extend((
+        "This run is **report-only**. Numeric scores and the Aggregate filter are not code-review or merge gates. "
+        "The hard gate still requires every expected pair and every judge call to succeed, including excluded tasks.",
+        "",
+        f"Usage scope: **`{usage_scope}`**. " + (
+            "Tokens and tool calls include the root session and every recursively linked subagent session. "
+            "Input includes uncached, cache-read, and cache-write tokens; output includes text and reasoning tokens. "
+            "Per-session detail remains in JSON evidence. "
+            "Agent wall time already includes awaited subagents and excludes usage-export overhead; child durations are not added. "
+            "The judge evaluates only the root final answer. Background title/summary calls not persisted in the session database are outside this scope, so this is not a complete provider bill."
+            if usage_scope == SESSION_USAGE_SCOPE else
+            "Legacy evidence covers the root trajectory only; subagent usage is unknown and may be omitted. "
+            "Do not interpret these resource comparisons as complete agent usage or combine them with session-tree reports."
+        ),
+        "",
+    ))
     return "\n".join(lines)
 
 
@@ -823,9 +1103,21 @@ def _valid_number(value: Any, *, allow_none: bool = False) -> bool:
     )
 
 
-def _validate_report_judge(value: Any, *, prefix: str) -> None:
+def _validate_report_judge(
+    value: Any, *, prefix: str, expected_model: str | None = None
+) -> None:
     if not isinstance(value, dict):
         raise SweQaError(f"{prefix}: missing judge result")
+    # Some legacy evidence omitted trial identities. If present, both fields
+    # must agree with the report identity instead of silently mixing models.
+    if "model" in value or "label" in value:
+        model = value.get("model")
+        if (
+            model not in JUDGE_MODELS
+            or value.get("label") != _judge_label(model)
+            or (expected_model is not None and model != expected_model)
+        ):
+            raise SweQaError(f"{prefix}: incompatible judge identity")
     total = value.get("total")
     if not _valid_number(total) or not 5 <= float(total) <= 100:
         raise SweQaError(f"{prefix}: invalid judge total")
@@ -856,9 +1148,12 @@ def _validate_report_metrics(value: Any, *, prefix: str) -> None:
         cost is not None and float(cost) < 0
     ):
         raise SweQaError(f"{prefix}: invalid cost_usd")
+    value["usage_scope"] = _validate_usage_metrics(value, integer=False)
 
 
-def _report_profile_trial_count(profile: dict[str, Any], *, prefix: str) -> int:
+def _report_profile_trial_count(
+    profile: dict[str, Any], *, prefix: str, expected_model: str | None = None
+) -> int:
     raw_trials = profile.get("trials")
     if raw_trials is None:
         return 1
@@ -877,13 +1172,32 @@ def _report_profile_trial_count(profile: dict[str, Any], *, prefix: str) -> int:
             raise SweQaError(f"{prefix}: invalid trial_index")
         indexes.append(trial_index)
         trial_prefix = f"{prefix} trial {trial_index}"
-        _validate_report_judge(trial.get("judge"), prefix=trial_prefix)
+        _validate_report_judge(
+            trial.get("judge"), prefix=trial_prefix, expected_model=expected_model
+        )
         _validate_report_metrics(trial.get("metrics"), prefix=trial_prefix)
     if sorted(indexes) != list(range(1, len(raw_trials) + 1)):
         raise SweQaError(f"{prefix}: trial_index values are not contiguous")
     declared = profile.get("trial_count", len(raw_trials))
     if declared != len(raw_trials):
         raise SweQaError(f"{prefix}: trial_count does not match evidence")
+    scope = _compatible_usage_scope([
+        profile["metrics"], *[trial["metrics"] for trial in raw_trials]
+    ])
+    if scope == SESSION_USAGE_SCOPE:
+        rows = [trial["metrics"] for trial in raw_trials]
+        expected = _summarize_usage(rows, average=True)
+        expected["agent_wall_seconds"] = sum(row["agent_wall_seconds"] for row in rows) / len(rows)
+        for key in (*SESSION_USAGE_METRICS, "agent_wall_seconds"):
+            if not _same_metric(profile["metrics"][key], expected[key]):
+                raise SweQaError(f"{prefix}: profile mean {key} disagrees with trials")
+        for part in ("root", "descendants", "total"):
+            for key in SESSION_USAGE_METRICS:
+                if not _same_metric(
+                    profile["metrics"]["session_usage"][part][key],
+                    expected["session_usage"][part][key],
+                ):
+                    raise SweQaError(f"{prefix}: profile session split disagrees with trials")
     return len(raw_trials)
 
 
@@ -905,13 +1219,19 @@ def _validate_task_report(report: dict[str, Any], path: Path) -> dict[str, Any]:
 
     judge = report.get("judge")
     if not isinstance(judge, dict) or (
-        judge.get("label") != SELF_JUDGE_LABEL
-        or judge.get("model") != "glm-5.2"
+        judge.get("model") not in JUDGE_MODELS
+        or judge.get("label") != _judge_label(judge["model"])
         or judge.get("self_judge") is not True
-        or judge.get("temperature") != 0
+        or not _valid_number(judge.get("temperature"))
+        or judge["temperature"] < 0
         or judge.get("rubric") != list(SCORE_KEYS)
     ):
         raise SweQaError(f"{prefix}: incompatible judge metadata")
+    if "seed" in judge and (
+        isinstance(judge["seed"], bool) or not isinstance(judge["seed"], int)
+    ):
+        raise SweQaError(f"{prefix}: invalid judge seed")
+    _validate_judge_generation_metadata(judge, prefix)
     usage = judge.get("usage")
     if not isinstance(usage, dict):
         raise SweQaError(f"{prefix}: missing judge usage")
@@ -951,16 +1271,23 @@ def _validate_task_report(report: dict[str, Any], path: Path) -> dict[str, Any]:
         if not isinstance(profile, dict):
             raise SweQaError(f"{prefix}: case has no {profile_name} profile")
         profile_prefix = f"{prefix} {profile_name}"
-        _validate_report_judge(profile.get("judge"), prefix=profile_prefix)
+        _validate_report_judge(
+            profile.get("judge"), prefix=profile_prefix, expected_model=judge["model"]
+        )
         _validate_report_metrics(profile.get("metrics"), prefix=profile_prefix)
         trial_count = _report_profile_trial_count(
-            profile, prefix=profile_prefix
+            profile, prefix=profile_prefix, expected_model=judge["model"]
         )
         trial_counts.append(trial_count)
         judgement_count += trial_count
 
     if len(set(trial_counts)) != 1:
         raise SweQaError(f"{prefix}: profile trial counts do not match")
+    usage_scope = _compatible_usage_scope([
+        profiles[name]["metrics"] for name in PROFILE_NAMES
+    ])
+    if report.get("usage_scope", LEGACY_USAGE_SCOPE) != usage_scope:
+        raise SweQaError(f"{prefix}: report usage_scope disagrees with metrics")
     declared_case_count = case.get("trial_count", trial_counts[0])
     if declared_case_count != trial_counts[0]:
         raise SweQaError(f"{prefix}: case trial_count does not match evidence")
@@ -986,9 +1313,21 @@ def _combined_judge(reports: Sequence[dict[str, Any]]) -> dict[str, Any]:
     first = reports[0]["judge"]
     metadata_keys = ("label", "model", "self_judge", "temperature", "rubric")
     metadata = {key: first[key] for key in metadata_keys}
+    # Legacy reports without a seed remain readable, but must not be mixed
+    # with seeded reports or reports produced with a different seed.
+    optional_keys = ("seed", *JUDGE_GENERATION_METADATA_KEYS)
+    for key in optional_keys:
+        if key in first:
+            metadata[key] = first[key]
     for report in reports[1:]:
         judge = report["judge"]
-        if any(judge.get(key) != metadata[key] for key in metadata_keys):
+        if (
+            any(judge.get(key) != metadata[key] for key in metadata_keys)
+            or any(
+                (key in judge) != (key in first) or judge.get(key) != first.get(key)
+                for key in optional_keys
+            )
+        ):
             raise SweQaError("per-task reports use incompatible judge metadata")
 
     usages = [report["judge"]["usage"] for report in reports]
@@ -1054,6 +1393,10 @@ def aggregate_reports(
     report = {
         "schema_version": 2,
         "benchmark": "peng-weihan/SWE-QA-Bench",
+        "usage_scope": _compatible_usage_scope([
+            case["profiles"][profile]["metrics"]
+            for case in cases for profile in PROFILE_NAMES
+        ]),
         "judge": _combined_judge(source_reports),
         "gate": {
             "kind": "completion-only",
@@ -1089,8 +1432,10 @@ def judge_pairs(
     completion_fn: Completion | None = None,
     attempts: int = 3,
     concurrency: int | None = None,
+    model: str = "glm-5.2",
 ) -> dict[str, Any]:
     """Apply the same-model judge and emit JSON/Markdown reports."""
+    label = _judge_label(model)
     if attempts < 1 or attempts > 5:
         raise SweQaError("judge attempts must be between 1 and 5")
     concurrency = _judge_concurrency(concurrency)
@@ -1102,12 +1447,20 @@ def judge_pairs(
             "hard gate is missing reference(s): " + ", ".join(missing_references)
         )
 
-    api_key = os.environ.get("GLM_API_KEY", "").strip()
+    # Both models use the same custom OpenAI-compatible deployment by default.
+    # Preserve legacy GLM settings, with shared OpenAI settings as a fallback.
+    api_key = (
+        os.environ.get("GLM_API_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
     if not api_key:
-        raise SweQaError("GLM_API_KEY is required for the self-judge")
-    api_base = os.environ.get("GLM_BASE_URL", OPENCODE_CUSTOM_GLM_BASE_URL).strip()
+        raise SweQaError("OPENAI_API_KEY or GLM_API_KEY is required for the self-judge")
+    default_base = OPENCODE_CUSTOM_QWEN_BASE_URL if model == "qwen3.8-max" else OPENCODE_CUSTOM_GLM_BASE_URL
+    api_base = os.environ.get(
+        "GLM_BASE_URL", os.environ.get("OPENAI_BASE_URL", default_base)
+    ).strip()
     if not api_base:
-        raise SweQaError("GLM_BASE_URL must not be empty")
+        raise SweQaError("self-judge API base URL must not be empty")
     completion_fn = completion_fn or _default_completion()
 
     cases: list[dict[str, Any]] = []
@@ -1129,6 +1482,7 @@ def judge_pairs(
             api_base=api_base,
             attempts=attempts,
             concurrency=concurrency,
+            model=model,
         )
         profile_results: dict[str, dict[str, Any]] = {}
         for profile_name in PROFILE_NAMES:
@@ -1161,11 +1515,17 @@ def judge_pairs(
     report = {
         "schema_version": 2,
         "benchmark": "peng-weihan/SWE-QA-Bench",
+        "usage_scope": _compatible_usage_scope([
+            case["profiles"][profile]["metrics"]
+            for case in cases for profile in PROFILE_NAMES
+        ]),
         "judge": {
-            "label": SELF_JUDGE_LABEL,
-            "model": "glm-5.2",
+            "label": label,
+            "model": model,
             "self_judge": True,
-            "temperature": 0,
+            "temperature": _judge_temperature(model),
+            "seed": BENCHMARK_SEED,
+            **_judge_generation_metadata(model),
             "rubric": list(SCORE_KEYS),
             "usage": judge_usage,
         },

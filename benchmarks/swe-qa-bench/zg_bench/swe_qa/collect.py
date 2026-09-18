@@ -11,6 +11,100 @@ from typing import Any
 from . import SweQaError
 
 PROFILES = ("baseline", "zvec-grep")
+LEGACY_USAGE_SCOPE = "legacy-root"
+SESSION_USAGE_SCOPE = "opencode-session-tree-v1"
+SESSION_USAGE_METRICS = (
+    "input_tokens", "output_tokens", "text_output_tokens", "reasoning_tokens",
+    "cache_read_tokens", "cache_write_tokens", "uncached_input_tokens",
+    "tool_calls", "llm_calls", "cost_usd",
+)
+
+
+def _usage_scope(value: dict[str, Any]) -> str:
+    scope = value.get("usage_scope", LEGACY_USAGE_SCOPE)
+    if scope not in (LEGACY_USAGE_SCOPE, SESSION_USAGE_SCOPE):
+        raise SweQaError(f"unsupported usage_scope: {scope!r}")
+    return scope
+
+
+def _compatible_usage_scope(rows: list[dict[str, Any]]) -> str:
+    scopes = {_usage_scope(row) for row in rows}
+    if len(scopes) != 1:
+        raise SweQaError("cannot mix legacy-root and session-tree usage scopes")
+    return next(iter(scopes))
+
+
+def _same_metric(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is right
+    return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def _validate_session_usage(
+    usage: Any, *, integer: bool = True, require_identity: bool = False
+) -> dict[str, Any]:
+    """Validate measured session-tree totals, including averaged report rows."""
+    if (
+        not isinstance(usage, dict)
+        or usage.get("scope") != SESSION_USAGE_SCOPE
+        or usage.get("complete") is not True
+        or usage.get("errors", []) != []
+    ):
+        raise SweQaError("session usage is missing, incomplete, or has errors")
+    if require_identity and (
+        usage.get("schema_version") != 1
+        or not isinstance(usage.get("root_session_id"), str)
+        or not usage["root_session_id"].strip()
+        or not isinstance(usage.get("sessions"), list)
+        or not usage["sessions"]
+    ):
+        raise SweQaError("session usage has invalid session identity/evidence")
+    for scope in ("root", "descendants", "total"):
+        metrics = usage.get(scope)
+        if not isinstance(metrics, dict):
+            raise SweQaError(f"session usage has no {scope} metrics")
+        for key in SESSION_USAGE_METRICS:
+            if key not in metrics:
+                raise SweQaError(f"session usage {scope} is missing {key}")
+            _number(
+                metrics[key], label=f"session usage {scope}.{key}",
+                integer=integer and key != "cost_usd",
+                allow_none=key == "cost_usd",
+            )
+        if not _same_metric(
+            metrics["input_tokens"],
+            sum(metrics[key] for key in (
+                "uncached_input_tokens", "cache_read_tokens", "cache_write_tokens"
+            )),
+        ):
+            raise SweQaError(f"session usage {scope} input token components disagree")
+        if not _same_metric(
+            metrics["output_tokens"],
+            metrics["text_output_tokens"] + metrics["reasoning_tokens"],
+        ):
+            raise SweQaError(f"session usage {scope} output token components disagree")
+    for key in SESSION_USAGE_METRICS:
+        parts = [usage[scope][key] for scope in ("root", "descendants")]
+        expected = None if any(value is None for value in parts) else sum(parts)
+        if not _same_metric(usage["total"][key], expected):
+            raise SweQaError(f"session usage total.{key} disagrees with session split")
+    return usage
+
+
+def _validate_usage_metrics(metrics: dict[str, Any], *, integer: bool) -> str:
+    scope = _usage_scope(metrics)
+    if scope == SESSION_USAGE_SCOPE:
+        usage = _validate_session_usage(metrics.get("session_usage"), integer=integer)
+        for key in SESSION_USAGE_METRICS:
+            _number(
+                metrics.get(key), label=f"reported {key}",
+                integer=integer and key != "cost_usd", allow_none=key == "cost_usd",
+            )
+            if key not in metrics or not _same_metric(metrics[key], usage["total"][key]):
+                raise SweQaError(f"reported {key} disagrees with session usage total")
+    elif metrics.get("session_usage") is not None:
+        raise SweQaError("legacy-root metrics cannot contain session-tree usage")
+    return scope
 
 
 def _load_json(path: Path, *, label: str) -> dict[str, Any]:
@@ -199,6 +293,46 @@ def _trajectory_metrics(trajectory: dict[str, Any]) -> dict[str, Any]:
     return {"answer": answer, "tool_calls": tool_calls}
 
 
+def _session_usage_for_trial(
+    trial_dir: Path, result: dict[str, Any], context: dict[str, Any]
+) -> dict[str, Any] | None:
+    configs = [result.get("config", {})]
+    config_path = trial_dir / "config.json"
+    if config_path.is_file():
+        configs.append(_load_json(config_path, label="Harbor trial config"))
+    required = False
+    for config in configs:
+        if not isinstance(config, dict):
+            continue
+        agent = config.get("agent", {})
+        kwargs = agent.get("kwargs", {}) if isinstance(agent, dict) else {}
+        flag = kwargs.get("collect_session_usage") if isinstance(kwargs, dict) else None
+        if flag is not None and not isinstance(flag, bool):
+            raise SweQaError("collect_session_usage must be a boolean")
+        required = required or flag is True
+    metadata = context.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("session_usage") is not None:
+        required = True
+    path = trial_dir / "agent" / "session-usage.json"
+    if not required and not path.exists():
+        return None
+    usage = _validate_session_usage(
+        _load_json(path, label="required session usage"), require_identity=True
+    )
+    for context_key, usage_key in (
+        ("n_input_tokens", "input_tokens"),
+        ("n_output_tokens", "output_tokens"),
+        ("cost_usd", "cost_usd"),
+    ):
+        if not _same_metric(context.get(context_key), usage["total"][usage_key]):
+            raise SweQaError(f"AgentContext {context_key} disagrees with session usage")
+    cache_tokens = usage["total"]["cache_read_tokens"] + usage["total"]["cache_write_tokens"]
+    if not _same_metric(context.get("n_cache_tokens"), cache_tokens):
+        raise SweQaError("AgentContext n_cache_tokens disagrees with session usage")
+    _number(usage.get("collection_wall_seconds"), label="session usage collection time")
+    return usage
+
+
 def _profile_result(
     *,
     profile: str,
@@ -266,6 +400,25 @@ def _profile_result(
         trial_dir / "agent" / "trajectory.json", label="agent trajectory"
     )
     trajectory_values = _trajectory_metrics(trajectory)
+    session_usage = _session_usage_for_trial(trial_dir, result, context)
+    usage_metrics: dict[str, Any] = {"usage_scope": LEGACY_USAGE_SCOPE}
+    if session_usage is not None:
+        collection_seconds = session_usage["collection_wall_seconds"]
+        wall_seconds -= collection_seconds
+        if wall_seconds <= 0:
+            raise SweQaError("session usage collection time exceeds agent execution time")
+        usage_metrics = {
+            **session_usage["total"],
+            "usage_scope": SESSION_USAGE_SCOPE,
+            "usage_collection_wall_seconds": collection_seconds,
+            "session_usage": {
+                key: session_usage[key]
+                for key in (
+                    "schema_version", "scope", "complete", "root_session_id",
+                    "root", "descendants", "total", "collection_wall_seconds",
+                )
+            },
+        }
     model_info = result.get("agent_info")
     model_name: str | None = None
     if isinstance(model_info, dict):
@@ -285,6 +438,7 @@ def _profile_result(
         "tool_calls": trajectory_values["tool_calls"],
         "agent_wall_seconds": wall_seconds,
         "cost_usd": cost_usd,
+        **usage_metrics,
     }
 
 
@@ -348,6 +502,9 @@ def collect_pair(
             "trials": trial_results,
         }
 
+    usage_scope = _compatible_usage_scope([
+        trial for profile in profiles.values() for trial in profile["trials"]
+    ])
     pair = {
         "schema_version": 2,
         "task_id": task,
@@ -356,6 +513,7 @@ def collect_pair(
         "expected_trials": expected_trials,
         "actual_trials": expected_trials,
         "profiles": profiles,
+        "usage_scope": usage_scope,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(

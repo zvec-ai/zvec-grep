@@ -112,6 +112,7 @@ class CliTests(unittest.TestCase):
         listing = output.getvalue()
         self.assertNotIn("qwen-coder", listing)
         self.assertIn("qwen3.7-max", listing)
+        self.assertIn("custom-openai/qwen3.8-max", listing)
         self.assertIn("opencode", listing)
         self.assertIn("aliyun-glm-5.2", listing)
         self.assertIn("claude-code", listing)
@@ -134,7 +135,8 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(error.exception.code, 2)
         self.assertIn(
-            "supported models: aliyun-glm-5.2, custom-openai/glm-5.2, qwen3.7-max",
+            "supported models: aliyun-glm-5.2, custom-openai/glm-5.2, qwen3.7-max, "
+            "custom-openai/qwen3.8-max",
             stderr.getvalue(),
         )
 
@@ -168,6 +170,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.agent, "claude-code")
         self.assertEqual(args.model, "claude-opus-5")
 
+    def test_accepts_custom_qwen_38_configuration(self) -> None:
+        args = build_parser().parse_args(
+            ["run", self.suite_name, "--agent", "opencode", "--model", "custom-openai/qwen3.8-max"]
+        )
+        self.assertEqual(args.agent, "opencode")
+        self.assertEqual(args.model, "custom-openai/qwen3.8-max")
+
     def test_accepts_independent_trial_count(self) -> None:
         args = build_parser().parse_args(
             [
@@ -183,6 +192,55 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.n_attempts, 3)
+        self.assertEqual(args.max_retries, 0)
+
+    def test_retry_limit_is_forwarded_to_dry_run_and_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch("zg_bench.cli.collect_checks", return_value=[]),
+                patch("zg_bench.cli.print_report", return_value=0),
+                patch("zg_bench.cli.prepare_setup_cache", return_value=None),
+                patch(
+                    "zg_bench.cli.build_harbor_command", return_value=["harbor"]
+                ) as build,
+                patch("zg_bench.cli.execute", return_value=0),
+                patch("zg_bench.cli.job_has_exceptions", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                return_code = main(
+                    [
+                        "run", self.suite_name,
+                        "--agent", "opencode",
+                        "--model", "aliyun-glm-5.2",
+                        "--profile", "baseline",
+                        "--n-attempts", "5",
+                        "--max-retries", "2",
+                        "--jobs-dir", temp_dir,
+                    ]
+                )
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(len(build.call_args_list), 2)
+        for call in build.call_args_list:
+            self.assertEqual(call.kwargs["n_attempts"], 5)
+            self.assertEqual(call.kwargs["max_retries"], 2)
+
+    def test_negative_retry_limit_fails_before_preflight(self) -> None:
+        with (
+            patch("zg_bench.cli.collect_checks") as preflight,
+            self.assertRaisesRegex(SystemExit, "non-negative integer"),
+        ):
+            main(
+                [
+                    "run", self.suite_name,
+                    "--agent", "opencode",
+                    "--model", "aliyun-glm-5.2",
+                    "--profile", "baseline",
+                    "--max-retries", "-1",
+                ]
+            )
+
+        preflight.assert_not_called()
 
     def test_legacy_package_fails_before_harbor(self) -> None:
         with self.assertRaisesRegex(SystemExit, "does not support"):

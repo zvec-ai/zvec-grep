@@ -496,6 +496,45 @@ class RunValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(command[command.index("--n-attempts") + 1], "3")
+        self.assertEqual(command[command.index("--max-retries") + 1], "0")
+        self.assertNotIn("--plugin", command)
+
+    def test_failed_trial_retries_include_timeouts_and_preserve_evidence(self) -> None:
+        suite = runner.load_suite(self.suite_name, tier="smoke")
+
+        command = runner.build_harbor_command(
+            suite,
+            profile="baseline",
+            agent="opencode",
+            model="custom-openai/glm-5.2",
+            job_name="five-trials-with-retries",
+            n_attempts=5,
+            max_retries=2,
+        )
+
+        self.assertEqual(command[command.index("--n-attempts") + 1], "5")
+        self.assertEqual(command[command.index("--max-retries") + 1], "2")
+        self.assertEqual(command[command.index("--retry-exclude") + 1], "ApiUsageLimitError")
+        self.assertEqual(
+            command[command.index("--plugin") + 1],
+            "zg_bench.retries:FailedTrialArchivePlugin",
+        )
+        self.assertNotIn("--retry-include", command)
+
+    def test_retry_limit_rejects_invalid_values(self) -> None:
+        suite = runner.load_suite(self.suite_name, tier="smoke")
+        for invalid in (-1, True, 1.5, "2"):
+            with self.subTest(value=invalid), self.assertRaisesRegex(
+                ValueError, "non-negative integer"
+            ):
+                runner.build_harbor_command(
+                    suite,
+                    profile="baseline",
+                    agent="opencode",
+                    model="custom-openai/glm-5.2",
+                    job_name="invalid-retries",
+                    max_retries=invalid,
+                )
 
     def test_harbor_command_rejects_non_positive_trial_count(self) -> None:
         suite = runner.load_suite(self.suite_name, tier="smoke")
@@ -650,6 +689,103 @@ class RunValidationTests(unittest.TestCase):
         self.assertNotIn("GLM_API_KEY", json.dumps(config))
         self.assertIn("mcp", config)
 
+    def test_opencode_profiles_use_identical_sampling_and_web_restrictions(self) -> None:
+        suite = runner.load_suite(self.suite_name, tier="smoke")
+        for model, provider_id, model_id in (
+            ("custom-openai/glm-5.2", "custom-openai", "glm-5.2"),
+            ("custom-openai/qwen3.8-max", "custom-openai", "qwen3.8-max"),
+            ("aliyun-glm-5.2", "dashscope", "glm-5.2"),
+            ("qwen3.7-max", "dashscope", "qwen3.7-max"),
+        ):
+            configs = []
+            for profile in runner.PROFILES:
+                with self.subTest(model=model, profile=profile):
+                    command = runner.build_harbor_command(
+                        suite,
+                        profile=profile,
+                        agent="opencode",
+                        model=model,
+                        job_name="fixed-sampling-test",
+                    )
+                    config = json.loads(
+                        next(
+                            value.removeprefix("opencode_config=")
+                            for value in command
+                            if value.startswith("opencode_config=")
+                        )
+                    )
+                    self.assertTrue(
+                        config["provider"][provider_id]["models"][model_id]["temperature"]
+                    )
+                    self.assertIs(
+                        config["provider"][provider_id]["models"][model_id]
+                        ["options"]["enable_thinking"],
+                        (
+                            runner.OPENCODE_QWEN_ENABLE_THINKING
+                            if model_id == "qwen3.8-max"
+                            else model_id == "glm-5.2"
+                        ),
+                    )
+                    model_options = (
+                        config["provider"][provider_id]["models"][model_id]["options"]
+                    )
+                    if model_id in ("glm-5.2", "qwen3.8-max"):
+                        # The compatible SDK maps this option to the API's
+                        # snake_case reasoning_effort field on the wire.
+                        self.assertEqual(
+                            model_options["reasoningEffort"],
+                            runner.OPENCODE_QWEN_REASONING_EFFORT
+                            if model_id == "qwen3.8-max"
+                            else "high",
+                        )
+                        self.assertEqual(
+                            config["provider"][provider_id]["models"][model_id]
+                            ["limit"]["output"],
+                            32000,
+                        )
+                        self.assertEqual(
+                            config["provider"][provider_id]["models"][model_id]
+                            ["limit"]["context"],
+                            0,
+                        )
+                    else:
+                        self.assertNotIn("reasoningEffort", model_options)
+                    self.assertNotIn("reasoning_effort", model_options)
+                    self.assertNotIn("response_format", model_options)
+                    if model_id == "qwen3.8-max":
+                        self.assertEqual(
+                            config["provider"][provider_id]["models"][model_id]["interleaved"],
+                            {"field": "reasoning_content"},
+                        )
+                        self.assertEqual(
+                            config["provider"][provider_id]["options"]["baseURL"],
+                            runner.OPENCODE_CUSTOM_QWEN_BASE_URL,
+                        )
+                    self.assertEqual(
+                        config["permission"],
+                        {"websearch": "deny", "webfetch": "deny"},
+                    )
+                    for name in (
+                        "build", "plan", "general", "explore",
+                        "compaction", "title", "summary",
+                    ):
+                        self.assertEqual(
+                            config["agent"][name]["temperature"],
+                            runner.OPENCODE_QWEN_TEMPERATURE
+                            if model_id == "qwen3.8-max"
+                            else 0,
+                        )
+                        self.assertEqual(config["agent"][name]["options"]["seed"], 42)
+                        self.assertEqual(
+                            config["agent"][name]["permission"],
+                            {"websearch": "deny", "webfetch": "deny"},
+                        )
+                    self.assertEqual("mcp" in config, profile == "zvec-grep")
+                    configs.append(config)
+            self.assertEqual(configs[0]["provider"], configs[1]["provider"])
+            self.assertEqual(configs[0]["agent"], configs[1]["agent"])
+            self.assertEqual(configs[0]["permission"], configs[1]["permission"])
+
     def test_custom_glm_environment_normalizes_and_scrubs_source_key(self) -> None:
         with patch.dict(
             runner.os.environ,
@@ -665,6 +801,41 @@ class RunValidationTests(unittest.TestCase):
         self.assertNotIn("GLM_API_KEY", environment)
         self.assertEqual(environment["UNRELATED"], "kept")
 
+    def test_all_opencode_profiles_forward_provider_key_as_harbor_template(self) -> None:
+        suite = runner.load_suite(self.suite_name, tier="smoke")
+        models = (
+            model
+            for support in runner.AGENT_MODEL_SUPPORT
+            if support.agent == "opencode"
+            for model in (support.model, *support.aliases)
+        )
+        fixture_key = "offline-fixture-not-a-real-key"
+        with patch.dict(
+            runner.os.environ,
+            {"OPENAI_API_KEY": fixture_key},
+            clear=True,
+        ):
+            for model in models:
+                for profile in runner.PROFILES:
+                    with self.subTest(model=model, profile=profile):
+                        command = runner.build_harbor_command(
+                            suite,
+                            profile=profile,
+                            agent="opencode",
+                            model=model,
+                            embedding_model="local/potion-code-16m-v2",
+                            job_name="provider-auth-test",
+                        )
+                        forwarded = [
+                            command[index + 1]
+                            for index, value in enumerate(command)
+                            if value == "--agent-env"
+                        ]
+                        self.assertEqual(
+                            forwarded, ["OPENAI_API_KEY=${OPENAI_API_KEY}"]
+                        )
+                        self.assertNotIn(fixture_key, " ".join(command))
+
     def test_local_embedding_does_not_require_embedding_key(self) -> None:
         with patch.dict(
             runner.os.environ,
@@ -676,6 +847,34 @@ class RunValidationTests(unittest.TestCase):
                 agent="opencode",
                 model="custom-openai/glm-5.2",
                 embedding_model="local/potion-code-16m-v2",
+            )
+
+    def test_custom_qwen_normalizes_shared_endpoint_credentials(self) -> None:
+        for credential_name in ("GLM_API_KEY", "OPENAI_API_KEY"):
+            with self.subTest(credential=credential_name), patch.dict(
+                runner.os.environ,
+                {credential_name: "shared-endpoint-secret", "UNRELATED": "kept"},
+                clear=True,
+            ):
+                runner.validate_profile_credentials(
+                    ("baseline", "zvec-grep"),
+                    agent="opencode",
+                    model="custom-openai/qwen3.8-max",
+                    embedding_model="local/potion-code-16m-v2",
+                )
+                environment = runner.execution_environment(
+                    agent="opencode", model="custom-openai/qwen3.8-max"
+                )
+                self.assertEqual(environment["OPENAI_API_KEY"], "shared-endpoint-secret")
+                self.assertEqual(environment["OPENAI_BASE_URL"], runner.OPENCODE_CUSTOM_QWEN_BASE_URL)
+                self.assertNotIn("GLM_API_KEY", environment)
+                self.assertEqual(environment["UNRELATED"], "kept")
+
+        with patch.dict(runner.os.environ, {}, clear=True), self.assertRaisesRegex(
+            ValueError, "export GLM_API_KEY or OPENAI_API_KEY"
+        ):
+            runner.validate_profile_credentials(
+                ("baseline",), agent="opencode", model="custom-openai/qwen3.8-max"
             )
 
     def test_qwen_code_agent_is_not_supported(self) -> None:
