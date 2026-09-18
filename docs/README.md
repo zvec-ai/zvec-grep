@@ -13,7 +13,7 @@ interfaces.
 
 | I want to… | Read |
 | --- | --- |
-| Connect Codex, Claude Code, Qwen Code, Cursor, or OpenCode | [Agent integrations](./01-agents.md) |
+| Connect Codex, Claude Code, Qwen Code, Cursor, GitHub Copilot, VS Code, or OpenCode | [Agent integrations](./01-agents.md) |
 | Use zg directly from a terminal | [CLI guide](./02-cli.md) |
 | Understand the tools exposed to an agent | [MCP guide](./03-mcp.md) |
 | Understand indexing, updates, and search routes | [Retrieval pipeline](./04-pipeline.md) |

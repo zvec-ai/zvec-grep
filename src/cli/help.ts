@@ -60,6 +60,10 @@ const ENVIRONMENT_VARIABLES = {
     "Qoder IDE executable used by automatic install-target detection",
   OPENCODE_CONFIG: "OpenCode configuration file used by zg --install",
   CURSOR_CONFIG_DIR: "Cursor configuration directory used by zg --install",
+  COPILOT_HOME: "GitHub Copilot configuration directory used by zg --install",
+  VSCODE_USER_DIR: "VS Code User profile directory used by zg --install",
+  VSCODE_PORTABLE: "VS Code portable-mode directory honored by zg --install",
+  VSCODE_APPDATA: "VS Code application data directory honored by zg --install",
 } as const;
 
 type EnvironmentVariableName = keyof typeof ENVIRONMENT_VARIABLES;
@@ -320,10 +324,11 @@ ${formatEnvironmentVariables([
 See zg --help environment for daemon startup scope.`;
     case "install":
       return `Usage:
-  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
 
 Options:
-  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, auto, or all; repeatable
+  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, auto, or all;
+                                    repeatable
   --mcp-transport <stdio|http>      MCP connection mode (default: stdio)
   --mcp-toolset <agent|full>        Daemon MCP toolset (default: agent)
   --mcp-tool-timeout <seconds>      MCP tool timeout where supported (default: 600)
@@ -331,14 +336,18 @@ Options:
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
 
-The qoder target configures Qoder CLI and Qoder IDE together.
+The qoder target configures Qoder CLI and Qoder IDE together. The copilot
+target configures GitHub Copilot CLI and Agent Host. The vscode target
+configures every detected VS Code profile and shares the Copilot user
+instructions, so it also registers the server for Agent Host and the Copilot
+CLI.
 
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
-Codex, Claude Code, Qwen Code, Qoder CLI, and OpenCode also receive managed
-guidance. Qoder IDE has no supported global Rules file, so only its MCP
-configuration is managed.
+Codex, Claude Code, Qwen Code, Qoder CLI, OpenCode, GitHub Copilot, and VS Code
+also receive managed guidance. Qoder IDE has no supported global Rules file, so
+only its MCP configuration is managed.
 Codex and Claude Code receive local tool pre-approval. Qoder's CLI-backed
 runtime receives exact pre-approval for zvec_grep_search and zvec_grep_rg. Remote Embedding
 authorization remains separate and is requested by zvec-grep on first remote
@@ -346,7 +355,7 @@ use. Restart the agent or open a new session after installation. This does not
 install the npm package.`;
     case "uninstall":
       return `Usage:
-  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
 guidance. The qoder target removes the managed Qoder CLI and IDE integration

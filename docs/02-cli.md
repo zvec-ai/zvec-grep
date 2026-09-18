@@ -158,18 +158,21 @@ scripts.
 ## `zg --install` and `zg --uninstall`
 
 ```text
-zg --install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
-zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|all|auto] [--yes]
 ```
 
 `--target` is repeatable. `qoder` is the single Qoder target and configures
-Qoder CLI and Qoder IDE together. `zg --install` also accepts:
+Qoder CLI and Qoder IDE together. `copilot` configures GitHub Copilot CLI and
+Agent Host; `vscode` configures every detected VS Code profile and shares the
+Copilot user instructions, so it also registers the server for Agent Host and
+the Copilot CLI. `zg --install` also accepts:
 
 | Option | Meaning |
 | --- | --- |
 | `--mcp-transport <stdio\|http>` | MCP connection mode; default `stdio` |
 | `--mcp-toolset <agent\|full>` | Daemon MCP surface; default `agent` |
-| `--mcp-tool-timeout <seconds>` | Codex, Qwen Code, both Qoder clients, and OpenCode MCP timeout; default 600 seconds |
+| `--mcp-tool-timeout <seconds>` | Codex, Qwen Code, both Qoder clients, OpenCode, and GitHub Copilot MCP timeout; default 600 seconds |
 | `--mcp-token-env <name>` | Environment variable containing the server token |
 | `--force` | Replace a conflicting unmanaged `zvec_grep` entry |
 
