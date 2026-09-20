@@ -125,11 +125,11 @@ Core options:
 | `--endpoint <url>` | Remote provider endpoint |
 | `--model-cache <path>` | Local model cache directory |
 | `--device <device>` | `auto`, `cpu`, `metal`, `vulkan`, or `cuda` |
-| `--embedding-concurrency <n>` | Concurrent Embedding tasks |
+| `--index-embedding-concurrency <n>` | Concurrent Embedding tasks |
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
 Local Potion embedding tasks run on worker threads. They default to two workers;
-`--embedding-concurrency` can override that value for larger machines.
+`--index-embedding-concurrencyy` can override that value for larger machines.
 
 File discovery accepts `-g/--glob`, `--iglob`, `-t/--type`, `-T/--type-not`,
 `--hidden`, `--no-ignore`, `--ignore-file`, `--max-depth`, `--max-filesize`, and
