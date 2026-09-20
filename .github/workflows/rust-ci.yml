@@ -1,4 +1,4 @@
-name: CI
+name: Rust CI
 
 on:
   push:
@@ -16,8 +16,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: rust
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,7 +29,7 @@ env:
 
 jobs:
   quality:
-    name: quality
+    name: rust quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -43,8 +47,8 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+            rust/target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - name: Check formatting
@@ -61,7 +65,7 @@ jobs:
         run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
 
   test:
-    name: test (${{ matrix.os }})
+    name: rust test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -83,11 +87,11 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+            rust/target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - name: Run workspace tests
         run: cargo test --locked --workspace --all-targets
       - name: Smoke test the CLI
-        run: cargo run --locked -p zg -- query --rg "standalone clean-room Rust implementation" README.md
+        run: cargo run --locked -p zg -- query --rg "zvec-grep Rust rewrite" README.md
