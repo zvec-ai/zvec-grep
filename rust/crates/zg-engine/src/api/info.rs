@@ -124,13 +124,8 @@ pub mod result {
         pub root: PathBuf,
         pub scan: ScanRules,
         pub policy: WorkspaceIndexPolicy,
-        /// First configured model, retained for older clients. Use `embeddings` for all models.
+        /// The workspace's text embedding model.
         pub embedding: Option<WorkspaceIndexEmbedding>,
-        #[serde(default)]
-        pub embeddings: Vec<WorkspaceIndexEmbedding>,
-        #[serde(default)]
-        pub embedding_routes:
-            std::collections::BTreeMap<crate::api::index::options::ContentKind, String>,
         pub fts: Option<WorkspaceIndexFts>,
         pub index_version: Option<u32>,
         pub created_epoch_ms: u64,
@@ -203,15 +198,6 @@ impl result::WorkspaceIndexInfo {
                 .index
                 .descriptor()
                 .and_then(|index| index.embeddings.first().map(Into::into)),
-            embeddings: workspace.index.descriptor().map_or_else(Vec::new, |index| {
-                index.embeddings.iter().map(Into::into).collect()
-            }),
-            embedding_routes: workspace
-                .index
-                .descriptor()
-                .map_or_else(std::collections::BTreeMap::new, |index| {
-                    index.routes.clone()
-                }),
             fts: workspace
                 .index
                 .descriptor()

@@ -8,8 +8,8 @@ use zg_engine::api::{
     context::{
         ContextResult,
         result::{
-            CodeMetadata, ContentRange, ContextContentRole, ContextItem, ContextItemStatus,
-            EntityMetadata, MarkdownMetadata,
+            CodeMetadata, ContentRange, ContextItem, ContextItemStatus, EntityMetadata,
+            MarkdownMetadata,
         },
     },
     index::IndexResult,
@@ -190,42 +190,35 @@ fn write_item_preview(
             EntityMetadata::Code(_) => {}
         }
     }
-    if options.preview != PreviewMode::None
-        && let Some(outline) = &item.outline
-    {
-        writeln!(writer, "{outline}")?;
-    }
-    if item.content_role != Some(ContextContentRole::Outline) {
-        let max_lines = match options.preview {
-            PreviewMode::None => 1,
-            PreviewMode::Short => 10,
-            PreviewMode::Full => usize::MAX,
-        };
-        let first = start_line(item.excerpt_range.as_ref().unwrap_or(&item.range));
-        let lines: Vec<_> = item.content.lines().collect();
-        let anchor = start_line(&item.range)
-            .saturating_sub(first)
-            .min(lines.len().saturating_sub(1));
-        let from = if options.preview == PreviewMode::None {
-            anchor
-        } else if options.preview == PreviewMode::Short {
-            anchor.saturating_sub(3)
+    let max_lines = match options.preview {
+        PreviewMode::None => 1,
+        PreviewMode::Short => 10,
+        PreviewMode::Full => usize::MAX,
+    };
+    let first = start_line(item.excerpt_range.as_ref().unwrap_or(&item.range));
+    let lines: Vec<_> = item.content.lines().collect();
+    let anchor = start_line(&item.range)
+        .saturating_sub(first)
+        .min(lines.len().saturating_sub(1));
+    let from = if options.preview == PreviewMode::None {
+        anchor
+    } else if options.preview == PreviewMode::Short {
+        anchor.saturating_sub(3)
+    } else {
+        0
+    };
+    for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
+        let line = if options.preview == PreviewMode::Full {
+            (*line).to_owned()
         } else {
-            0
+            line.chars()
+                .take(if options.human { 120 } else { 160 })
+                .collect()
         };
-        for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
-            let line = if options.preview == PreviewMode::Full {
-                (*line).to_owned()
-            } else {
-                line.chars()
-                    .take(if options.human { 120 } else { 160 })
-                    .collect()
-            };
-            writeln!(writer, "  {}: {line}", first + offset)?;
-        }
-        if options.preview == PreviewMode::Short && lines.len() > from + max_lines {
-            writeln!(writer, "  …")?;
-        }
+        writeln!(writer, "  {}: {line}", first + offset)?;
+    }
+    if options.preview == PreviewMode::Short && lines.len() > from + max_lines {
+        writeln!(writer, "  …")?;
     }
     Ok(())
 }
@@ -307,15 +300,12 @@ pub fn write_info_result(mut writer: impl Write, result: &InfoResult) -> io::Res
                 "excluded"
             }
         )?;
-        for embedding in &index.embeddings {
+        if let Some(embedding) = &index.embedding {
             writeln!(
                 writer,
                 "Embedding: {}/{}",
                 embedding.provider, embedding.model
             )?;
-        }
-        for (kind, model) in &index.embedding_routes {
-            writeln!(writer, "Content route: {} -> {model}", kind.as_str())?;
         }
         if let Some(fts) = &index.fts {
             writeln!(
@@ -508,8 +498,7 @@ Index options:
   --mode <direct|server|auto>       Select indexing transport
 
 Embedding options:
-  --embedding <model>               One model for supported content kinds
-  --embedding-route <kind=model>    Explicit text/image/table routing (repeatable)
+  --embedding <model>               Single text embedding model for this workspace
   --api-key <key>                   Embedding provider API key
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
@@ -536,10 +525,10 @@ A new workspace name defaults to root directory name; use --name if it is taken.
 Names are case-sensitive and unique within the per-user registry. Naming an
 existing workspace renames it while preserving file IDs and active storage.
 
-New indexes require --embedding, --embedding-route, ZVEC_GREP_EMBEDDING, or a configured default.
-Model or content-route changes require --rebuild. Failed files are recorded;
-successful files remain searchable after a rebuild.
-Existing indexes reuse their stored embedding schema.
+This version indexes text only with one embedding model per workspace.
+New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
+Model changes require --rebuild. Failed files are recorded; successful files
+remain searchable after a rebuild. Existing indexes reuse their stored model.
 
 Environment:
   ZVEC_GREP_MODE         Default client mode: direct, server, or auto
@@ -554,7 +543,7 @@ See zg help environment for precedence and Server-mode scope.";
 const STATUS_HELP: &str = r"Usage:
   zg status [root] [--mode <direct|server|auto>] [--check-ready]
 
-Shows the nearest workspace root, index policy, index state, embedding schema,
+Shows the nearest workspace root, index policy, index state, embedding model,
 stored paths, refresh status, and suggested next action.
 
 --check-ready preserves the normal output and exits non-zero unless the
@@ -563,7 +552,6 @@ Workspace index is ready.";
 const CONFIG_HELP: &str = r"Usage:
   zg config provider set <provider> --api-key <key>
   zg config model set <model> [--endpoint <url> | --device <device>] [--default]
-  zg config model set <model> --content <text|image|table> [--content ...]
 
 Provider options:
   --api-key <key>                   Default API key for the provider
@@ -575,7 +563,8 @@ Model options:
 
 Remote models support --endpoint; local models support --device. At least one
 model option is required. --default may be used alone or with a runtime option.
-Existing indexes continue to use their stored model.
+Each workspace uses one model for text content. Existing indexes continue to
+use their stored model.
 
 Global configuration is stored in ~/.zvec-grep/config.json.";
 
@@ -689,7 +678,7 @@ const VERSION_HELP: &str = r"Usage:
 const MODELS_HELP: &str = r"Usage:
   zg help models
 
-Supported embedding models:
+Supported text embedding models (one per workspace):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers-js
@@ -703,13 +692,13 @@ Supported embedding models:
   local/potion-multilingual-128m      local    text         256    1024  model2vec
   local/potion-retrieval-32m          local    text         512    1024  model2vec
   local/qwen3-embedding-0.6b          local    text        1024    8192  llama-cpp
-  qwen/qwen3-vl-embedding             remote   text,image  2560   32000  qwen
+  qwen/qwen3-vl-embedding             remote   text        2560   32000  qwen
   qwen/qwen3.7-text-embedding         remote   text        1024  128000  qwen
   qwen/text-embedding-v4              remote   text        1024    8192  qwen
 
 Local models are downloaded to the model cache on first use. Remote models
 require provider credentials plus --allow-remote or a Workspace authorization.
-Only qwen/qwen3-vl-embedding accepts image input.
+This version uses text input only, including for models with image capabilities.
 
 Existing indexes keep their stored model. See zg help environment for
 new-index model selection and runtime precedence.";
@@ -768,14 +757,7 @@ Documents and data:
   yaml      .yaml, .yml
   Markdown preserves heading structure; other formats use text chunks.
 
-Images (multimodal embedding required):
-  TYPE  FILES
-  ----  -----------
-  gif   .gif
-  jpeg  .jpeg, .jpg
-  png   .png
-  webp  .webp
-  Images are ignored by default and must be explicitly selected.
+Images and other non-text content are not indexed in this version.
 
 Other text:
   Unknown non-binary extensions and extensionless files use text chunks.
@@ -869,7 +851,8 @@ mod output_tests {
     use super::*;
     use crate::{OutputOptions, PreviewMode};
     use zg_engine::api::context::result::{
-        ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource, MatchedBy,
+        ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource,
+        MatchedBy,
     };
 
     fn indexed_item() -> ContextItem {
@@ -892,7 +875,6 @@ mod output_tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
             content_role: Some(ContextContentRole::Source),
-            outline: None,
             status: ContextItemStatus::Fresh,
             score: Some(0.75),
             matched_by: MatchedBy::Fts,

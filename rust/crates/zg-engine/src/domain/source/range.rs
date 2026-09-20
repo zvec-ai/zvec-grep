@@ -1,35 +1,62 @@
 use crate::{EngineError, EngineResult};
 
-/// Locates content within its original source file.
+use super::Content;
+
+/// Locates an entity in its source or a fragment within its entity's content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SourceRange {
-    File,
+pub(crate) enum Range {
+    Full,
     Byte(ByteRange),
     Text(TextRange),
 }
 
-impl SourceRange {
+impl Range {
     #[track_caller]
     pub(crate) fn validate(&self) -> EngineResult<()> {
         match self {
-            Self::File => Ok(()),
+            Self::Full => Ok(()),
             Self::Byte(range) => range.validate(),
             Self::Text(range) => range.validate(),
         }
     }
 
-    /// Assumes both ranges refer to the same source file.
-    pub(crate) fn contains(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::File, _) => other.validate().is_ok(),
-            (Self::Byte(outer), Self::Byte(inner)) => outer.contains(inner),
-            (Self::Text(outer), Self::Text(inner)) => outer.contains(inner),
-            _ => false,
+    /// Checks whether this selector can read a nonempty region of stored content.
+    pub(crate) fn validate_content(&self, content: &Content) -> EngineResult<()> {
+        self.validate()?;
+        match (self, content) {
+            (Self::Full, _) => Ok(()),
+            (Self::Byte(range), Content::Text(text)) => {
+                if range.slice(text)?.is_empty() {
+                    return Err(EngineError::invalid_argument(
+                        "fragment byte range must not be empty",
+                    ));
+                }
+                Ok(())
+            }
+            (Self::Byte(_), _) => Err(EngineError::invalid_argument(
+                "fragment byte ranges require text content; images and tables require Full",
+            )),
+            (Self::Text(_), _) => Err(EngineError::invalid_argument(
+                "text ranges locate source text; fragments use Full or entity-relative byte ranges",
+            )),
+        }
+    }
+
+    pub(crate) fn extract(&self, content: &Content) -> EngineResult<Content> {
+        self.validate_content(content)?;
+        match (self, content) {
+            (Self::Full, _) => Ok(content.clone()),
+            (Self::Byte(range), Content::Text(text)) => {
+                Ok(Content::Text(range.slice(text)?.to_owned()))
+            }
+            _ => unreachable!("validated content selector"),
         }
     }
 }
 
-/// Zero-based, half-open offsets in the original file bytes; empty spans are valid.
+/// Zero-based, half-open byte offsets in the containing source or content.
+/// Text fragments address their entity's stored UTF-8 text, not the file's encoding.
+/// Empty spans are valid for source locations only.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ByteRange {
     pub start_offset: u64,
@@ -41,22 +68,46 @@ impl ByteRange {
     pub(crate) fn validate(&self) -> EngineResult<()> {
         if self.start_offset > self.end_offset {
             return Err(EngineError::invalid_argument(format!(
-                "invalid byte range: raw file offsets {}..{} must be ordered",
+                "invalid byte range: offsets {}..{} must be ordered",
                 self.start_offset, self.end_offset
             )));
         }
         Ok(())
     }
 
-    pub(crate) fn contains(&self, other: &Self) -> bool {
-        self.validate().is_ok()
-            && other.validate().is_ok()
-            && self.start_offset <= other.start_offset
-            && self.end_offset >= other.end_offset
+    /// Reads stored UTF-8 text, rejecting out-of-bounds offsets and split characters.
+    pub(crate) fn slice<'a>(&self, text: &'a str) -> EngineResult<&'a str> {
+        usize::try_from(self.start_offset)
+            .ok()
+            .zip(usize::try_from(self.end_offset).ok())
+            .and_then(|(start, end)| text.get(start..end))
+            .ok_or_else(|| {
+                EngineError::invalid_argument(format!(
+                    "cannot read byte range {}..{}: offsets must be ordered, within the stored text ({} bytes), and on UTF-8 character boundaries",
+                    self.start_offset, self.end_offset, text.len()
+                ))
+            })
+    }
+
+    /// Derives line and column coordinates only when source mapping is needed.
+    pub(crate) fn text_range(&self, text: &str, line_starts: &[usize]) -> EngineResult<TextRange> {
+        let offset = |value| {
+            usize::try_from(value).map_err(|_| {
+                EngineError::invalid_argument("byte range offset exceeds platform limits")
+            })
+        };
+        TextRange::from_offsets(
+            text,
+            line_starts,
+            offset(self.start_offset)?,
+            offset(self.end_offset)?,
+        )
     }
 }
 
-/// A half-open span in decoded UTF-8 text, with global and line-relative byte positions.
+/// A half-open location in decoded UTF-8 source text, with one-based lines and
+/// zero-based byte offsets and columns. Persisted entity locations use file coordinates;
+/// fragment coordinates are derived from their byte ranges when needed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TextRange {
     start: TextPosition,
@@ -71,6 +122,41 @@ struct TextPosition {
 }
 
 impl TextRange {
+    /// Maps entity-local coordinates into an enclosing source text range.
+    pub(crate) fn within(&self, origin: Self) -> EngineResult<Self> {
+        self.validate()?;
+        origin.validate()?;
+        let translate = |position: TextPosition| {
+            Some(TextPosition {
+                byte_offset: origin.start.byte_offset.checked_add(position.byte_offset)?,
+                line: origin
+                    .start
+                    .line
+                    .checked_add(position.line.checked_sub(1)?)?,
+                byte_column: if position.line == 1 {
+                    origin.start.byte_column.checked_add(position.byte_column)?
+                } else {
+                    position.byte_column
+                },
+            })
+        };
+        let mapped = translate(self.start)
+            .zip(translate(self.end))
+            .map(|(start, end)| Self { start, end })
+            .ok_or_else(|| EngineError::invalid_argument("text range coordinate overflow"))?;
+        mapped.validate()?;
+        if !origin.contains(&mapped)
+            || mapped.end.line > origin.end.line
+            || (mapped.end.line == origin.end.line
+                && mapped.end.byte_column > origin.end.byte_column)
+        {
+            return Err(EngineError::invalid_argument(
+                "fragment lies outside entity source range",
+            ));
+        }
+        Ok(mapped)
+    }
+
     /// Creates a range from zero-based, half-open UTF-8 byte offsets in `source_text`.
     /// `line_starts` lists every line's zero-based byte offset, sorted and starting with 0.
     /// Returned line numbers are one-based; byte columns are zero-based.

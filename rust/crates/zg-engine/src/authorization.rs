@@ -37,15 +37,12 @@ pub fn index_authorization(
     Ok(index_authorizations(options)?.into_iter().next())
 }
 
-/// Resolve every remote destination used by the configured content routes.
+/// Resolve the remote destination used by the workspace embedding model.
 /// # Errors
 /// Returns invalid configuration, workspace or authorization errors.
 pub fn index_authorizations(
     options: &crate::api::index::IndexOptions,
 ) -> Result<Vec<IndexAuthorization>, EngineError> {
-    if options.allow_remote {
-        return Ok(Vec::new());
-    }
     let requested_root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
     let location = match find_nearest_workspace(&requested_root)? {
         Some(location) => location,
@@ -60,26 +57,9 @@ fn authorizations_for_manifest(
     root: &Path,
     existing: Option<&WorkspaceManifest>,
 ) -> Result<Vec<IndexAuthorization>, EngineError> {
-    let Some(routes) = crate::pipelines::indexing::service::embedding_specs(existing, options)?
-    else {
-        return Ok(authorization_for_manifest(options, root, existing)?
-            .into_iter()
-            .collect());
-    };
-    let mut seen = std::collections::BTreeSet::new();
-    let mut targets = Vec::new();
-    for spec in routes.values() {
-        if !seen.insert(&spec.reference) {
-            continue;
-        }
-        let mut request = options.clone();
-        request.embedding_routes = None;
-        request.embedding = Some(spec.clone());
-        if let Some(target) = authorization_for_manifest(&request, root, existing)? {
-            targets.push(target);
-        }
-    }
-    Ok(targets)
+    Ok(authorization_for_manifest(options, root, existing)?
+        .into_iter()
+        .collect())
 }
 
 fn authorization_for_manifest(
@@ -91,7 +71,7 @@ fn authorization_for_manifest(
         existing,
         options.embedding.as_ref(),
     )?;
-    if model.starts_with("local/") {
+    if options.allow_remote || model.starts_with("local/") {
         return Ok(None);
     }
     let endpoint = remote_endpoint(
@@ -152,14 +132,14 @@ pub fn query_authorization(
     Ok(query_authorizations(options)?.into_iter().next())
 }
 
-/// Resolve all query and optional refresh destinations before sending data.
+/// Resolve the query and optional refresh destination before sending data.
 /// # Errors
 /// Returns invalid request, workspace or consent errors.
 pub fn query_authorizations(
     options: &crate::api::context::ContextOptions,
 ) -> Result<Vec<QueryAuthorization>, EngineError> {
     use crate::api::context::options::{ContextRouteMode, RefreshPolicy};
-    if options.rg || options.allow_remote {
+    if options.rg {
         return Ok(Vec::new());
     }
     let request = crate::pipelines::indexed_search::context::normalize_context_request(options)?;
@@ -170,9 +150,6 @@ pub fn query_authorizations(
     let workspace_content = options
         .refresh
         .map_or(options.auto_update, |refresh| refresh != RefreshPolicy::Off);
-    if !query_text && !workspace_content {
-        return Ok(Vec::new());
-    }
     let root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
     let Some(location) = find_nearest_workspace(&root)? else {
         return Ok(Vec::new());
@@ -180,7 +157,10 @@ pub fn query_authorizations(
     let Some(manifest) = read_workspace_manifest(&location.home)? else {
         return Ok(Vec::new());
     };
-    if manifest.embedding().is_none() {
+    if manifest.workspace.index.descriptor().is_none() {
+        return Ok(Vec::new());
+    }
+    if options.allow_remote || (!query_text && !workspace_content) {
         return Ok(Vec::new());
     }
     let targets = authorizations_for_manifest(
@@ -621,10 +601,7 @@ mod tests {
     };
 
     #[test]
-    fn content_routes_disclose_each_remote_destination_once() {
-        use crate::domain::ContentKind;
-        use std::collections::BTreeMap;
-
+    fn single_model_discloses_one_remote_destination() {
         let directory = tempfile::tempdir().expect("workspace");
         let spec = |reference: &str, endpoint: &str| EmbeddingModelSpec {
             reference: reference.into(),
@@ -633,36 +610,21 @@ mod tests {
             endpoint: Some(endpoint.into()),
             device: Device::Auto,
         };
-        let text = spec(
-            "qwen/text-embedding-v4",
-            "https://text.example.test/embeddings",
-        );
-        let image = spec(
-            "qwen/qwen3-vl-embedding",
-            "https://image.example.test/embeddings",
-        );
         let options = IndexOptions {
             root: Some(directory.path().into()),
-            embedding_routes: Some(BTreeMap::from([
-                (ContentKind::Text, text.clone()),
-                (ContentKind::Table, text),
-                (ContentKind::Image, image),
-            ])),
+            embedding: Some(spec(
+                "qwen/text-embedding-v4",
+                "https://text.example.test/embeddings",
+            )),
             ..IndexOptions::default()
         };
-        let targets = index_authorizations(&options).expect("all destinations");
-        assert_eq!(targets.len(), 2);
+        let targets = index_authorizations(&options).expect("destination");
+        assert_eq!(targets.len(), 1);
         assert!(
             targets
                 .iter()
                 .any(|target| target.model == "qwen/text-embedding-v4"
                     && target.endpoint_host == "text.example.test")
-        );
-        assert!(
-            targets
-                .iter()
-                .any(|target| target.model == "qwen/qwen3-vl-embedding"
-                    && target.endpoint_host == "image.example.test")
         );
         assert!(
             !directory.path().join(".zvec-grep").exists(),
@@ -808,7 +770,7 @@ mod tests {
         };
         let directory = tempfile::tempdir().expect("workspace");
         let home = directory.path().join(".zvec-grep");
-        let active = WorkspaceManifest::new(
+        let mut active = WorkspaceManifest::new(
             Workspace {
                 name: "workspace".to_owned(),
                 root: directory.path().to_path_buf(),
@@ -839,6 +801,8 @@ mod tests {
             )]),
         )
         .expect("manifest");
+        active.storage_generation = Some(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(active.storage_home()).expect("active generation");
         write_workspace_manifest(&home, &active).expect("write active");
         let mut target = active.clone();
         target

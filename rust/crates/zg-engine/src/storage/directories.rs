@@ -1,5 +1,5 @@
 //! Compact directory IDs derived from source membership, scoped to one index.
-//! The optional snapshot speeds reader startup; source records can rebuild it.
+//! Native directory records restore this lookup when it is first needed.
 use std::collections::HashMap;
 
 use crate::{

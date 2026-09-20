@@ -1,11 +1,11 @@
 use crate::{
     EngineError,
-    domain::{Content, EntityContent, SourceRange},
+    domain::{Content, Range},
     utils::{byte_offset_at_utf16_ceil, line_byte_offsets, utf16_len},
 };
 
 use super::{
-    ChunkOptions, ExtractedEntity, ExtractedFragment, TextRange, TextSource,
+    ChunkOptions, ExtractedEntity, ExtractedEntityFragment, TextRange, TextSource,
     chunking::find_line_cut, validate_formats,
 };
 
@@ -15,31 +15,30 @@ const DEFAULT_TEXT_CHUNK_OVERLAP_CHARS: usize = 540;
 pub(super) fn extract(
     source: &TextSource,
     options: ChunkOptions,
-) -> Result<Vec<ExtractedFragment>, EngineError> {
+) -> Result<Vec<ExtractedEntity>, EngineError> {
     validate_formats(&source.formats)?;
     let (max_chars, overlap_chars) = resolve_options(options)?;
-    Ok(extract_plain_text_fragments(
+    Ok(extract_plain_text_entities(
         source,
         max_chars,
         overlap_chars,
     ))
 }
 
-pub(super) fn extract_plain_text_fragments(
+pub(super) fn extract_plain_text_entities(
     source: &TextSource,
     max_chars: usize,
     overlap_chars: usize,
-) -> Vec<ExtractedFragment> {
+) -> Vec<ExtractedEntity> {
     chunk_text(&source.text, max_chars, overlap_chars)
         .into_iter()
         .enumerate()
-        .map(|(index, chunk)| {
-            ExtractedFragment::Standalone(ExtractedEntity {
-                index,
-                range: SourceRange::Text(chunk.range),
-                content: EntityContent::Source(Content::Text(chunk.text)),
-                metadata: None,
-            })
+        .map(|(index, chunk)| ExtractedEntity {
+            index,
+            source_range: Range::Text(chunk.range),
+            content: Content::Text(chunk.text),
+            metadata: None,
+            fragments: vec![ExtractedEntityFragment { range: Range::Full }],
         })
         .collect()
 }
@@ -188,7 +187,7 @@ fn compute_next_start_line(
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::{Content, FileFormat, SourceRange, TextRange};
+    use crate::domain::{Content, FileFormat, Range, TextRange};
 
     use super::super::test_content;
 
@@ -213,8 +212,8 @@ mod tests {
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0].index(), 0);
         assert_eq!(
-            *chunks[0].range(),
-            SourceRange::Text(TextRange::from_coordinates(0, 10, 1, 1, 0, 10).expect("first line"))
+            *chunks[0].source_range(),
+            Range::Text(TextRange::from_coordinates(0, 10, 1, 1, 0, 10).expect("first line"))
         );
         for chunk in &chunks {
             let Content::Text(text) = &test_content(chunk) else {
@@ -244,7 +243,7 @@ mod tests {
                     panic!("text fragment expected");
                 };
                 assert!(content.chars().count() <= max_chars);
-                let SourceRange::Text(range) = *chunk.range() else {
+                let Range::Text(range) = *chunk.source_range() else {
                     panic!("text range expected");
                 };
                 assert_eq!(
@@ -268,7 +267,7 @@ mod tests {
         let chunks = extract(&source, ChunkOptions::default()).expect("whitespace extraction");
         assert_eq!(chunks.len(), 1);
         assert_eq!(test_content(&chunks[0]), Content::Text(source.text.clone()));
-        let SourceRange::Text(range) = chunks[0].range() else {
+        let Range::Text(range) = chunks[0].source_range() else {
             panic!("text range expected");
         };
         assert_eq!(

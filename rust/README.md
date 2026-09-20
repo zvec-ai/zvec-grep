@@ -46,10 +46,23 @@ embedding calls may execute concurrently against those shared resources.
 surfaces model downloads through `IndexProgress::embedding`. The reporter is
 runtime-only and is omitted from serialized daemon requests.
 
-`zg query --rg`, workspace discovery, `info`, and idempotent `drop_index` are
-wired end to end. Indexed search and indexing are assembled around the private
-storage SPI; they become available to the public engine once a concrete storage
-factory is installed in the production composition root.
+The native engine supports indexing, indexed FTS and vector search, `zg query
+--rg`, workspace discovery, `info`, and idempotent `drop_index`.
+
+This version indexes text with one embedding model per workspace. Choose it with
+`zg index --embedding <model>` or set a default with
+`zg config model set <model> --default`. Code, documents and structured text use
+that same model. Images and other unsupported sources are reported as skipped;
+multimodal content and per-content model routing are not supported. Changing the
+model requires `zg index --rebuild --embedding <model>`.
+
+Each entity stores one complete source content object, its location in the source
+file, metadata, and its fragments. Each text fragment has a unique ID and selects
+either full content or UTF-8 byte offsets relative to the entity's content. Source
+locations, including line and column numbers, are calculated when needed;
+fragments do not duplicate content or source coordinates.
+Model collections store the text and vectors needed for retrieval, with entity
+metadata included in search projections. Index format 5 uses this layout.
 
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
@@ -93,8 +106,9 @@ to the selected endpoint and incur provider charges. API credentials remain
 separate: use `ZVEC_GREP_API_KEY` or `--api-key` for actual operations.
 
 Without `--embedding`, grant uses the existing index model, then
-`ZVEC_GREP_EMBEDDING`. `--endpoint` overrides the stored index endpoint,
-`ZVEC_GREP_ENDPOINT`, and provider default. The signed grant at
+`ZVEC_GREP_EMBEDDING`, then the configured default model. `--endpoint` overrides
+the stored index endpoint, per-model endpoint configuration, `ZVEC_GREP_ENDPOINT`,
+and provider default. The signed grant at
 `.zvec-grep/authorization.json` binds the canonical workspace root, model, and
 endpoint. Changing any of them requires a new grant. The signing key lives at
 `$ZVEC_GREP_HOME/authorization.key` (default `~/.zvec-grep/authorization.key`),
@@ -189,9 +203,12 @@ smoke test with:
 npm run test:package
 ```
 
-The build stages zvec 0.7.1's shared library and `data/jieba_dict` resources
-beside the executable. Both local and release packages include these SDK assets;
-the engine no longer extracts its own dictionary cache.
+The build uses the published `zvec-rust` and `zvec-rust-build` 0.7.2 crates,
+without a local wrapper patch. Their bundled native library tracks upstream zvec
+at [`1ab7975`](https://github.com/alibaba/zvec/commit/1ab7975dfc2d2160054bafff614831b7099cd930)
+(53 commits after v0.7.0). The build stages the shared library and
+`data/jieba_dict` resources beside the executable. Both local and release
+packages include these SDK assets; the engine uses the bundled dictionary.
 
 Pass `--no-build` after `--` to reuse an existing `target/release/zg`, or pass
 `--prefix <path>` to install or smoke-test under a custom npm prefix:

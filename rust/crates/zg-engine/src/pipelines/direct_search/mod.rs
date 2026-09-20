@@ -198,7 +198,6 @@ fn context_from_lexical(
                     excerpt_range: item.excerpt_range.map(Into::into),
                     content: item.content,
                     content_role: Some(ContextContentRole::Source),
-                    outline: None,
                     status: ContextItemStatus::Fresh,
                     score: None,
                     matched_by: MatchedBy::Lexical,

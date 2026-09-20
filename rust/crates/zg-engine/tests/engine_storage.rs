@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
@@ -22,143 +22,84 @@ use zg_engine::{
             options::{ContextRoute, ContextRouteMode, QueryFilter, SymbolType},
             result::{ContextItemStatus, EntityMetadata},
         },
-        index::{
-            IndexOptions,
-            options::{ContentKind, Device, EmbeddingModelSpec, WorkspaceChange},
-        },
+        index::{IndexOptions, options::WorkspaceChange},
     },
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn content_routes_partition_canonical_fragments_into_one_index_per_model() -> TestResult {
+async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -> TestResult {
+    use zg_engine::api::index::result::SkippedFileReason;
+
     let temporary = tempdir()?;
     let root = temporary.path();
     let server = EmbeddingServer::start()?;
     configure_remote_model(root, server.address)?;
     fs::write(root.join("note.txt"), "Orchard textual documentation.")?;
+    fs::write(root.join("diagram.png"), [137, 80, 78, 71, 13, 10, 26, 10])?;
+    fs::write(
+        root.join("diagram.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )?;
     let engine = ZvecGrep::new();
-    engine
+    let indexed = engine
         .index(IndexOptions {
+            // Exercise unsupported-content handling even for files normally ignored.
             scan: zg_engine::api::index::options::ScanRulesUpdate {
-                globs: Some(vec!["*.txt".into(), "*.png".into()]),
+                globs: Some(vec!["*.txt".into(), "*.png".into(), "*.svg".into()]),
                 ..Default::default()
             },
             ..index_options(root)
         })
         .await?;
-    let original = engine.info(info_options(root)).await?;
-    assert_eq!(model_collections(&original.index_path)?.len(), 1);
-    for name in ["directories", "files", "entities"] {
-        assert!(original.index_path.join(name).is_dir());
-    }
-    // A complete PNG resource; the fixture provider embeds bytes without decoding them.
-    fs::write(
-        root.join("diagram.png"),
-        [
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
-            8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15,
-            0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-        ],
-    )?;
-    let unsupported = engine.index(index_options(root)).await?;
-    assert_eq!(unsupported.files_failed, 1);
-    assert_eq!(unsupported.failed_files[0].path, Path::new("diagram.png"));
+    assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+    assert_eq!(indexed.skipped.len(), 2);
+    assert!(
+        indexed
+            .skipped
+            .iter()
+            .all(|file| file.reason == SkippedFileReason::Unsupported)
+    );
+    assert_eq!(server.inputs.load(Ordering::Acquire), 1);
     assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 0);
 
-    let spec = |reference: &str| EmbeddingModelSpec {
-        reference: reference.to_owned(),
-        revision: None,
-        cache_dir: None,
-        endpoint: Some(format!("http://{}/embeddings", server.address)),
-        device: Device::Auto,
-    };
-    let routes = BTreeMap::from([
-        (ContentKind::Text, spec("qwen/text-embedding-v4")),
-        (ContentKind::Image, spec("qwen/qwen3-vl-embedding")),
-    ]);
-    let inputs = server.inputs.load(Ordering::Acquire);
-    let error = engine
-        .index(IndexOptions {
-            embedding_routes: Some(routes.clone()),
-            api_key: Some("local-test-key".into()),
-            ..index_options(root)
-        })
-        .await
-        .expect_err("model additions require explicit rebuild");
-    assert!(error.message().contains("rebuild"), "{error}");
-    assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
+    let info = engine.info(info_options(root)).await?;
     assert_eq!(
-        engine.info(info_options(root)).await?.index_path,
-        original.index_path
+        info.workspace_index
+            .as_ref()
+            .expect("workspace")
+            .index_version,
+        Some(5)
     );
-
-    let rebuilt = engine
-        .index(IndexOptions {
-            rebuild: true,
-            embedding_routes: Some(routes),
-            api_key: Some("local-test-key".into()),
-            ..index_options(root)
-        })
-        .await?;
-    assert_eq!((rebuilt.files_added, rebuilt.files_failed), (2, 0));
-    assert_eq!(server.inputs.load(Ordering::Acquire), inputs + 2);
-    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 1);
-    let published = engine.info(info_options(root)).await?;
-    assert_ne!(published.index_path, original.index_path);
-    let collections = model_collections(&published.index_path)?;
-    assert_eq!(collections.len(), 2);
-    assert!(!published.index_path.join("fragments").exists());
-    assert!(!published.index_path.join("directories.json").exists());
-    let mut indexed_ids = BTreeSet::new();
-    for collection in collections {
-        let documents = native_documents(&collection)?;
-        assert_eq!(
-            documents.len(),
-            1,
-            "each content belongs to exactly one model"
-        );
-        assert!(documents[0].get_string("text")?.is_some());
-        assert!(
-            indexed_ids.insert(
-                documents[0]
-                    .get_string("document_id")?
-                    .expect("fragment ID")
-            )
-        );
-    }
-    let entities = native_documents(&published.index_path.join("entities"))?;
-    assert_eq!(entities.len(), 2);
-    let mut canonical_ids = BTreeSet::new();
-    for entity in entities {
-        let payload: Value =
-            serde_json::from_str(&entity.get_string("payload")?.expect("entity payload"))?;
-        for fragment in payload["value"]
-            .as_array()
-            .expect("canonical fragment bundle")
-        {
-            let id = fragment["value"]["id"].as_str().expect("fragment ID");
-            assert!(canonical_ids.insert(hex::encode(id)));
-        }
-    }
-    assert_eq!(canonical_ids, indexed_ids);
+    let collections = model_collections(&info.index_path)?;
+    assert_eq!(collections.len(), 1);
+    assert_eq!(native_documents(&collections[0])?.len(), 1);
+    assert_eq!(
+        native_documents(&info.index_path.join("entities"))?.len(),
+        1
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
+    assert_eq!(manifest["manifestVersion"], 5);
+    assert_eq!(manifest["indexVersion"], 5);
+    assert_eq!(manifest["embeddings"].as_array().expect("models").len(), 1);
+    assert_eq!(
+        manifest["embeddingRoutes"],
+        json!({"text":"qwen/text-embedding-v4"})
+    );
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
         [PathBuf::from("note.txt")]
     );
+
     let result = engine
         .context(ContextOptions {
             root: Some(root.to_path_buf()),
             routes: vec![ContextRoute {
                 mode: ContextRouteMode::Vector,
-                query: "image".into(),
+                query: "orchard".into(),
             }],
-            filter: QueryFilter {
-                formats: vec![zg_engine::api::context::options::FileFormat::Png],
-                ..QueryFilter::default()
-            },
             auto_update: false,
             allow_remote: true,
             api_key: Some("local-test-key".into()),
@@ -166,7 +107,217 @@ async fn content_routes_partition_canonical_fragments_into_one_index_per_model()
         })
         .await?;
     assert_eq!(result.items.len(), 1);
-    assert_eq!(result.items[0].relative_path, Path::new("diagram.png"));
+    assert_eq!(result.items[0].relative_path, Path::new("note.txt"));
+    assert_eq!(server.inputs.load(Ordering::Acquire), 2);
+    let unchanged = engine.index(index_options(root)).await?;
+    assert_eq!((unchanged.files_unchanged, unchanged.files_failed), (1, 0));
+    assert_eq!(server.inputs.load(Ordering::Acquire), 2);
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 0);
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn whitespace_only_ranges_do_not_fail_complete_file_indexing() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    let preamble = format!(
+        "intro 中文\r\n{}tail punctuation!\r",
+        " \t\r\n".repeat(5_000)
+    );
+    fs::write(
+        root.join("README.md"),
+        format!("{preamble}\n# Heading\r\nbody"),
+    )?;
+    let engine = ZvecGrep::new();
+    let indexed = engine.index(index_options(root)).await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+    let info = engine.info(info_options(root)).await?;
+    let entities = native_documents(&info.index_path.join("entities"))?;
+    let payloads = entities
+        .iter()
+        .map(|doc| {
+            serde_json::from_str::<Value>(
+                &doc.get_string("payload")
+                    .expect("payload field")
+                    .expect("payload"),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let entity = payloads
+        .iter()
+        .map(|payload| &payload["value"])
+        .find(|entity| entity["content"]["value"] == preamble)
+        .expect("canonical content preserves every whitespace byte");
+    let mut covered = vec![false; preamble.len()];
+    for fragment in entity["fragments"].as_array().expect("fragments") {
+        let selected = &fragment["range"];
+        let start = usize::try_from(selected["start_offset"].as_u64().expect("start"))?;
+        let end = usize::try_from(selected["end_offset"].as_u64().expect("end"))?;
+        assert!(!preamble[start..end].trim().is_empty());
+        covered[start..end].fill(true);
+    }
+    for (offset, character) in preamble.char_indices() {
+        if !character.is_whitespace() {
+            assert!(
+                covered[offset..offset + character.len_utf8()]
+                    .iter()
+                    .all(|value| *value)
+            );
+        }
+    }
+    assert!(covered.iter().any(|value| !value));
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn long_entities_store_original_content_once_and_project_fragment_metadata() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    let source = format!(
+        "pub fn orchard_process() {{\r\n{}\r\n}}",
+        "    let _ = \"果园 orchard 😀\";\r\n".repeat(700)
+    );
+    let bytes = [0xff, 0xfe]
+        .into_iter()
+        .chain(source.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+    fs::write(root.join("orchard.rs"), bytes)?;
+    let engine = ZvecGrep::new();
+    let indexed = engine.index(index_options(root)).await?;
+    assert_eq!(
+        (
+            indexed.files_added,
+            indexed.files_failed,
+            indexed.entities_created
+        ),
+        (1, 0, 1)
+    );
+    let info = engine.info(info_options(root)).await?;
+    let entities = native_documents(&info.index_path.join("entities"))?;
+    assert_eq!(entities.len(), 1);
+    let payload: Value = serde_json::from_str(
+        &entities[0]
+            .get_string("payload")?
+            .expect("canonical entity"),
+    )?;
+    let entity = &payload["value"];
+    assert_eq!(entity["content"], json!({"kind": "text", "value": source}));
+    assert_eq!(entity["source_range"]["kind"], "text");
+    assert!(entity.get("range").is_none());
+    let metadata: Value = serde_json::from_str(
+        &entities[0]
+            .get_string("metadata")?
+            .expect("entity metadata"),
+    )?;
+    assert_eq!(metadata["symbol_name"], "orchard_process");
+    let fragments = entity["fragments"]
+        .as_array()
+        .expect("fragment definitions");
+    assert!(fragments.len() > 1);
+    let mut coverage = vec![false; source.len()];
+    let mut ids = BTreeSet::new();
+    for fragment in fragments {
+        let id = fragment["id"].as_str().expect("fragment ID");
+        assert_ne!(Some(id), entity["id"].as_str());
+        assert!(ids.insert(hex::encode(id)));
+        assert!(fragment.get("content").is_none());
+        assert!(fragment.get("metadata").is_none());
+        assert_eq!(fragment.as_object().expect("fragment object").len(), 2);
+        assert!(fragment.get("content_range").is_none());
+        let selected = &fragment["range"];
+        assert_eq!(selected["kind"], "byte");
+        assert_eq!(selected.as_object().expect("range object").len(), 3);
+        let start = usize::try_from(selected["start_offset"].as_u64().expect("start"))?;
+        let end = usize::try_from(selected["end_offset"].as_u64().expect("end"))?;
+        assert!(source.get(start..end).is_some());
+        coverage[start..end].fill(true);
+    }
+    assert!(coverage.into_iter().all(|covered| covered));
+    assert_eq!(server.inputs.load(Ordering::Acquire), fragments.len());
+    let collections = model_collections(&info.index_path)?;
+    assert_eq!(collections.len(), 1);
+    let projected = native_documents(&collections[0])?;
+    assert_eq!(projected.len(), fragments.len());
+    let mut projected_ids = BTreeSet::new();
+    for doc in projected {
+        projected_ids.insert(doc.get_string("document_id")?.expect("fragment ID"));
+        assert_eq!(doc.get_string("symbol_type")?.as_deref(), Some("function"));
+        assert!(doc.get_string("symbol_name")?.is_some());
+        assert!(
+            doc.get_string("text")?
+                .expect("FTS projection")
+                .contains("orchard_process")
+        );
+        assert!(!doc.has_field("metadata"));
+        assert!(!doc.has_field("payload"));
+    }
+    assert_eq!(projected_ids, ids);
+    engine.close();
+    fs::remove_file(root.join("orchard.rs"))?;
+    let engine = ZvecGrep::new();
+    for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
+        let result = engine
+            .context(ContextOptions {
+                root: Some(root.to_path_buf()),
+                routes: vec![ContextRoute {
+                    mode,
+                    query: "orchard".into(),
+                }],
+                filter: QueryFilter {
+                    symbol_types: vec![zg_engine::api::context::options::SymbolType::Function],
+                    ..Default::default()
+                },
+                auto_update: false,
+                allow_remote: true,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(result.items.len(), 1);
+        let item = &result.items[0];
+        let Some(zg_engine::api::context::result::ContentRange::Text {
+            start_line,
+            end_line,
+            start_byte_offset,
+            end_byte_offset,
+            start_byte_column,
+            end_byte_column,
+        }) = &item.excerpt_range
+        else {
+            panic!("text source excerpt");
+        };
+        assert_eq!(
+            source.get(*start_byte_offset..*end_byte_offset),
+            Some(item.content.as_str())
+        );
+        for (offset, line, column) in [
+            (*start_byte_offset, *start_line, *start_byte_column),
+            (*end_byte_offset, *end_line, *end_byte_column),
+        ] {
+            let prefix = &source[..offset];
+            assert_eq!(
+                line,
+                prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+            );
+            assert_eq!(
+                column,
+                prefix.rfind('\n').map_or(offset, |last| offset - last - 1)
+            );
+        }
+        assert_eq!(
+            item.content_role,
+            Some(zg_engine::api::context::result::ContextContentRole::Source)
+        );
+        assert!(serde_json::to_value(item)?.get("outline").is_none());
+    }
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())
@@ -899,91 +1050,6 @@ async fn fts_paths(
     paths.sort();
     paths.dedup();
     Ok(paths)
-}
-
-#[tokio::test]
-async fn version_four_requires_explicit_rebuild_to_version_five() -> TestResult {
-    let temporary = tempdir()?;
-    let root = temporary.path();
-    let server = EmbeddingServer::start()?;
-    configure_remote_model(root, server.address)?;
-    fs::write(root.join("one.txt"), "Orchard first source.")?;
-    fs::write(root.join("two.txt"), "Orchard second source.")?;
-    let engine = ZvecGrep::new();
-    engine.index(index_options(root)).await?;
-    let before = engine.info(info_options(root)).await?;
-    assert_eq!(
-        before
-            .workspace_index
-            .as_ref()
-            .expect("workspace")
-            .index_version,
-        Some(5)
-    );
-    let manifest_path = before.home.join("manifest.json");
-    let mut old: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-    old["indexVersion"] = json!(4);
-    let old_manifest = serde_json::to_vec(&old)?;
-    fs::write(&manifest_path, &old_manifest)?;
-    // The index version must be checked before attempting to decode old storage.
-    fs::write(
-        before.index_path.join("schema.json"),
-        b"obsolete storage format",
-    )?;
-    let inputs = server.inputs.load(Ordering::Acquire);
-    let error = engine
-        .index(index_options(root))
-        .await
-        .expect_err("no automatic upgrade");
-    assert!(error.message().contains("zg index --rebuild"));
-    let error = engine
-        .context(ContextOptions {
-            root: Some(root.to_path_buf()),
-            routes: vec![ContextRoute {
-                mode: ContextRouteMode::Fts,
-                query: "orchard".into(),
-            }],
-            auto_update: true,
-            allow_remote: true,
-            ..ContextOptions::default()
-        })
-        .await
-        .expect_err("query refresh must not upgrade the format");
-    assert!(error.message().contains("zg index --rebuild"));
-    assert_eq!(fs::read(&manifest_path)?, old_manifest);
-    assert!(before.index_path.exists());
-    assert!(!before.home.join("build.json").exists());
-    assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
-    let result = engine
-        .index(IndexOptions {
-            rebuild: true,
-            ..index_options(root)
-        })
-        .await?;
-    assert_eq!(result.files_added, 2);
-    let after = engine.info(info_options(root)).await?;
-    assert_eq!(
-        after
-            .workspace_index
-            .as_ref()
-            .expect("workspace")
-            .index_version,
-        Some(5)
-    );
-    assert_eq!(after.status.as_ref().expect("status").files_indexed, 2);
-    assert_ne!(after.index_path, before.index_path);
-    assert!(!before.index_path.exists());
-    let current: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-    for field in ["name", "root", "scan", "embeddingRuntimes", "createdTime"] {
-        assert_eq!(current[field], old[field], "{field}");
-    }
-    assert_eq!(engine.index(index_options(root)).await?.files_unchanged, 2);
-    assert_eq!(
-        engine.info(info_options(root)).await?.index_path,
-        after.index_path
-    );
-    engine.close();
-    Ok(())
 }
 
 fn model_collections(index_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {

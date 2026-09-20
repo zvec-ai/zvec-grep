@@ -9,7 +9,9 @@ use async_trait::async_trait;
 
 use crate::{
     EngineError,
-    domain::{Entity, EntityFragment, EntityId, FileId, FileRecord, SourcePath, SymbolType},
+    domain::{
+        Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, SourcePath, SymbolType,
+    },
 };
 
 pub(crate) type StorageResult<T> = Result<T, EngineError>;
@@ -67,7 +69,8 @@ impl From<&FileRecord> for StoredFileAttributes {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct IndexedFragment {
-    pub fragment: EntityFragment,
+    pub entity_id: EntityId,
+    pub fragment_id: FragmentId,
     /// Unique configured embedding model reference (provider/name).
     pub model: String,
     pub vector: Vec<f32>,
@@ -194,7 +197,12 @@ pub(crate) trait WorkspaceIndexStorage: Send + Sync {
     /// Applies a complete file replacement to the current writer. Durability is
     /// confirmed by a batch checkpoint, `finalize_writes`, or successful `close`.
     /// An interrupted batch is discarded and its files are marked for reindexing.
-    fn replace_file(&self, file: &FileRecord, entries: &[IndexedFragment]) -> StorageResult<()>;
+    fn replace_file(
+        &self,
+        file: &FileRecord,
+        entities: &[Entity],
+        entries: &[IndexedFragment],
+    ) -> StorageResult<()>;
 
     /// Optionally persists recovery intent for upcoming file replacements together.
     /// This does not publish replacements or confirm durability of previous writes.

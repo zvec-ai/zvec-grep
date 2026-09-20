@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -75,66 +72,34 @@ pub(crate) const FTS_CONFIG: FtsConfig = FtsConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IndexDescriptor {
     pub embeddings: Vec<EmbeddingModelInfo>,
-    /// Each content kind has exactly one owning embedding model reference.
+    /// The text route references the workspace's single embedding model.
     pub routes: BTreeMap<ContentKind, String>,
     pub fts: FtsConfig,
 }
 
 impl IndexDescriptor {
-    /// Normalize the legacy single-model selection into explicit content routes.
+    /// Configure the single text embedding model supported by this version.
     pub(crate) fn single(embedding: EmbeddingModelInfo) -> Self {
         let reference = embedding.model.reference();
-        let mut routes = BTreeMap::from([
-            (ContentKind::Text, reference.clone()),
-            (ContentKind::Table, reference.clone()),
-        ]);
-        if embedding.max_image_bytes.is_some() {
-            routes.insert(ContentKind::Image, reference);
-        }
         Self {
             embeddings: vec![embedding],
-            routes,
+            routes: BTreeMap::from([(ContentKind::Text, reference)]),
             fts: FTS_CONFIG,
         }
     }
 
     pub(crate) fn validate(&self) -> EngineResult<()> {
-        if self.embeddings.is_empty() || self.routes.is_empty() {
+        let [embedding] = self.embeddings.as_slice() else {
             return Err(EngineError::invalid_argument(
-                "enabled index requires embedding models and content routes",
+                "enabled index requires exactly one text embedding model",
             ));
-        }
-        let mut references = BTreeSet::new();
-        for embedding in &self.embeddings {
-            embedding.validate()?;
-            if !references.insert(embedding.model.reference()) {
-                return Err(EngineError::invalid_argument(
-                    "embedding model references must be unique",
-                ));
-            }
-        }
-        for (kind, reference) in &self.routes {
-            let model = self
-                .embeddings
-                .iter()
-                .find(|embedding| embedding.model.reference() == *reference)
-                .ok_or_else(|| {
-                    EngineError::invalid_argument(format!(
-                        "content route {kind:?} references an unconfigured model: {reference}"
-                    ))
-                })?;
-            if *kind == ContentKind::Image && model.max_image_bytes.is_none() {
-                return Err(EngineError::invalid_argument(format!(
-                    "image content route requires an image-capable embedding model: {reference}"
-                )));
-            }
-        }
-        if references
-            .iter()
-            .any(|reference| !self.routes.values().any(|route| route == reference))
+        };
+        embedding.validate()?;
+        if self.routes.len() != 1
+            || self.routes.get(&ContentKind::Text) != Some(&embedding.model.reference())
         {
             return Err(EngineError::invalid_argument(
-                "every embedding model must own at least one content route",
+                "enabled index requires exactly one text content route referencing its embedding model",
             ));
         }
         Ok(())
@@ -157,27 +122,14 @@ impl IndexDescriptor {
     }
 
     pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        if self.routes != other.routes
-            || self.fts != other.fts
-            || self.embeddings.len() != other.embeddings.len()
-        {
+        self.validate()?;
+        other.validate()?;
+        if self.routes != other.routes || self.fts != other.fts {
             return Err(EngineError::invalid_argument(
-                "existing index uses different embedding models, content routes or FTS configuration; rebuild the index",
+                "existing index uses a different embedding model or FTS configuration; rebuild the index",
             ));
         }
-        for embedding in &self.embeddings {
-            let other = other
-                .embeddings
-                .iter()
-                .find(|candidate| candidate.model.reference() == embedding.model.reference())
-                .ok_or_else(|| {
-                    EngineError::invalid_argument(
-                        "existing index uses different embedding models; rebuild the index",
-                    )
-                })?;
-            embedding.ensure_index_compatible(other)?;
-        }
-        Ok(())
+        self.embeddings[0].ensure_index_compatible(&other.embeddings[0])
     }
 }
 
@@ -251,40 +203,48 @@ mod tests {
     }
 
     #[test]
-    fn content_routes_have_one_owner_and_shared_models_are_stored_once() {
-        let text = model("text", false);
-        let image = model("vl", true);
-        let mut index = IndexDescriptor::single(text.clone());
-        index.embeddings.push(image.clone());
-        index
-            .routes
-            .insert(ContentKind::Image, image.model.reference());
-        index.validate().expect("valid partition");
+    fn single_model_embeds_only_text_even_when_the_model_accepts_images() {
+        let index = IndexDescriptor::single(model("vl", true));
+        index.validate().expect("single text model");
+        assert_eq!(index.embeddings.len(), 1);
         assert_eq!(
-            index.model_for(ContentKind::Text).expect("text route"),
-            &text
+            index.routes,
+            BTreeMap::from([(ContentKind::Text, "test/vl".into())])
         );
-        assert_eq!(
-            index.model_for(ContentKind::Table).expect("table route"),
-            &text
-        );
-        assert_eq!(
-            index.model_for(ContentKind::Image).expect("image route"),
-            &image
-        );
-        assert_eq!(index.embeddings.len(), 2);
+        assert!(index.model_for(ContentKind::Table).is_err());
+        assert!(index.model_for(ContentKind::Image).is_err());
+    }
 
-        index
-            .routes
-            .insert(ContentKind::Image, text.model.reference());
-        assert!(
-            index.validate().is_err(),
-            "text-only model cannot own images"
+    #[test]
+    fn index_descriptor_requires_one_model_and_its_text_route() {
+        let valid = IndexDescriptor::single(model("text", false));
+        assert_eq!(
+            valid.model_for(ContentKind::Text).expect("text model"),
+            &valid.embeddings[0]
         );
-        index
+        let mut invalid = valid.clone();
+        invalid.embeddings.clear();
+        assert!(invalid.validate().is_err());
+        invalid = valid.clone();
+        invalid.embeddings.push(model("second", false));
+        assert!(invalid.validate().is_err());
+        for kind in [ContentKind::Table, ContentKind::Image] {
+            invalid = valid.clone();
+            invalid.routes.insert(kind, "test/text".into());
+            assert!(invalid.validate().is_err());
+            invalid.routes.remove(&ContentKind::Text);
+            assert!(invalid.validate().is_err());
+        }
+        invalid = valid.clone();
+        invalid.routes.clear();
+        assert!(invalid.validate().is_err());
+        invalid
             .routes
-            .insert(ContentKind::Image, "missing/model".into());
-        assert!(index.validate().is_err(), "every route must resolve");
+            .insert(ContentKind::Text, "test/missing".into());
+        assert!(invalid.validate().is_err());
+        invalid = valid;
+        invalid.embeddings[0].dimension = 0;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
@@ -296,7 +256,7 @@ mod tests {
         index
             .ensure_index_compatible(&changed)
             .expect("runtime configuration");
-        changed.routes.remove(&ContentKind::Table);
+        changed.routes.insert(ContentKind::Table, "test/vl".into());
         assert!(index.ensure_index_compatible(&changed).is_err());
         changed = index.clone();
         changed.embeddings[0].max_input_tokens = Some(256);

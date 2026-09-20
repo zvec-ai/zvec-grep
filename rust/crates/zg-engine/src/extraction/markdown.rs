@@ -1,13 +1,12 @@
 use crate::{
     EngineError,
-    domain::{Content, EntityContent, EntityMetadata, FileFormat, MarkdownMetadata, SourceRange},
-    utils::{byte_offset_at_utf16_ceil, line_byte_offsets, utf16_len},
+    domain::{Content, EntityMetadata, FileFormat, MarkdownMetadata, Range},
+    utils::line_byte_offsets,
 };
 
 use super::{
-    ChunkOptions, ExtractedEntity, ExtractedFragment, ExtractedWindow, TextRange, TextSource,
-    chunk_options_for_metadata, chunking::find_line_cut, fit_text_to_chars,
-    text::extract_plain_text_fragments, validate_formats,
+    ChunkOptions, ExtractedEntity, TextRange, TextSource, chunk_options_for_metadata,
+    chunking::text_fragments, text::extract_plain_text_entities, validate_formats,
 };
 
 const DEFAULT_MARKDOWN_CHUNK_CHARS: usize = 3_600;
@@ -28,16 +27,10 @@ struct Section {
     breadcrumb: Vec<String>,
 }
 
-#[derive(Debug)]
-struct MarkdownWindow {
-    text: String,
-    range: TextRange,
-}
-
 pub(super) fn extract(
     source: &TextSource,
     options: ChunkOptions,
-) -> Result<Vec<ExtractedFragment>, EngineError> {
+) -> Result<Vec<ExtractedEntity>, EngineError> {
     if !source.formats.contains(&FileFormat::Markdown) {
         return Ok(Vec::new());
     }
@@ -46,75 +39,47 @@ pub(super) fn extract(
     let lines = source.text.split('\n').collect::<Vec<_>>();
     let headings = scan_headings(&lines);
     if headings.is_empty() {
-        return Ok(extract_plain_text_fragments(
+        return Ok(extract_plain_text_entities(
             source,
             max_chars,
             overlap_chars,
         ));
     }
-
     let line_offsets = line_byte_offsets(&lines);
-    let fence_lines = compute_fence_lines(&lines);
-    let sections = build_sections(&headings, &lines);
-    let mut fragments = Vec::new();
-
-    for section in sections {
-        let metadata = markdown_metadata(&section);
-        let (content_max, content_overlap) =
-            chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
-        let windows = split_markdown_section(
-            &lines,
-            &line_offsets,
-            &fence_lines,
-            &section,
-            content_max,
-            content_overlap,
-        );
-
-        if windows.len() > 1 {
-            let entity_index = fragments.len();
-            let section_window = lines_to_window(
+    let entities = build_sections(&headings, &lines)
+        .into_iter()
+        .enumerate()
+        .map(|(index, section)| {
+            let metadata = markdown_metadata(&section);
+            let (content_max, content_overlap) =
+                chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
+            let range = section_range(
                 &lines,
                 &line_offsets,
                 section.start_index,
                 section.end_index,
             );
-            fragments.push(ExtractedFragment::Representative(ExtractedEntity {
-                index: entity_index,
-                range: SourceRange::Text(section_window.range),
-                content: EntityContent::Outline(fit_text_to_chars(
-                    metadata_heading(&metadata).unwrap_or("markdown section"),
-                    content_max,
-                )),
+            let content = range
+                .slice(&source.text)
+                .expect("section range refers to source")
+                .to_owned();
+            ExtractedEntity {
+                index,
+                source_range: Range::Text(range),
+                fragments: text_fragments(&content, content_max, content_overlap),
+                content: Content::Text(content),
                 metadata: Some(metadata),
-            }));
-
-            for window in windows {
-                fragments.push(ExtractedFragment::Window(ExtractedWindow {
-                    index: fragments.len(),
-                    entity_index,
-                    range: SourceRange::Text(window.range),
-                    content: Content::Text(window.text),
-                }));
             }
-        } else if let Some(window) = windows.into_iter().next() {
-            fragments.push(ExtractedFragment::Standalone(ExtractedEntity {
-                index: fragments.len(),
-                range: SourceRange::Text(window.range),
-                content: EntityContent::Source(Content::Text(window.text)),
-                metadata: Some(metadata),
-            }));
-        }
-    }
-
-    if fragments.is_empty() {
-        Ok(extract_plain_text_fragments(
+        })
+        .collect::<Vec<_>>();
+    if entities.is_empty() {
+        Ok(extract_plain_text_entities(
             source,
             max_chars,
             overlap_chars,
         ))
     } else {
-        Ok(fragments)
+        Ok(entities)
     }
 }
 
@@ -246,205 +211,21 @@ fn build_sections(headings: &[Heading], lines: &[&str]) -> Vec<Section> {
     sections
 }
 
-fn split_markdown_section(
-    lines: &[&str],
-    line_offsets: &[usize],
-    fence_lines: &[bool],
-    section: &Section,
-    max_chars: usize,
-    overlap_chars: usize,
-) -> Vec<MarkdownWindow> {
-    let mut windows = Vec::new();
-    let mut start_index = section.start_index;
-
-    while start_index <= section.end_index {
-        if utf16_len(lines[start_index]) + 1 > max_chars {
-            windows.extend(split_long_line(
-                lines[start_index],
-                start_index,
-                line_offsets[start_index],
-                max_chars,
-            ));
-            start_index += 1;
-            continue;
-        }
-
-        let mut end_index = start_index;
-        let mut used_chars = 0;
-        while end_index <= section.end_index {
-            let line_length = utf16_len(lines[end_index]) + 1;
-            if used_chars + line_length > max_chars && end_index > start_index {
-                break;
-            }
-            used_chars += line_length;
-            end_index += 1;
-        }
-
-        if end_index <= section.end_index && end_index - start_index > 1 {
-            end_index = choose_markdown_break(lines, fence_lines, start_index, end_index);
-        }
-        windows.push(lines_to_window(
-            lines,
-            line_offsets,
-            start_index,
-            end_index - 1,
-        ));
-        if end_index > section.end_index {
-            break;
-        }
-
-        let overlap_lines =
-            compute_markdown_overlap_lines(lines, start_index, end_index, overlap_chars);
-        let next_start = end_index - overlap_lines;
-        start_index = if next_start > start_index {
-            next_start
-        } else {
-            end_index
-        };
-    }
-
-    windows
-        .into_iter()
-        .filter(|window| !window.text.trim().is_empty())
-        .collect()
-}
-
-fn choose_markdown_break(
-    lines: &[&str],
-    fence_lines: &[bool],
-    start_index: usize,
-    end_index: usize,
-) -> usize {
-    let min_break = start_index + ((end_index - start_index) * 7 / 10).max(1);
-    let mut best_break = end_index;
-    let mut best_score = markdown_break_score(lines, fence_lines, end_index);
-    for index in min_break..=end_index {
-        let score = markdown_break_score(lines, fence_lines, index);
-        if score > best_score {
-            best_break = index;
-            best_score = score;
-        }
-    }
-    best_break
-}
-
-fn markdown_break_score(lines: &[&str], fence_lines: &[bool], index: usize) -> usize {
-    if index == 0 || index >= lines.len() || fence_lines[index] {
-        return 0;
-    }
-    let current = lines[index].trim();
-    let previous = lines[index - 1].trim();
-    if parse_atx_heading(current).is_some() {
-        100
-    } else if previous.is_empty() && current.is_empty() {
-        70
-    } else if previous.is_empty() {
-        60
-    } else if is_list_item(current) {
-        35
-    } else if current.starts_with("> ") {
-        25
-    } else {
-        10
-    }
-}
-
-fn is_list_item(line: &str) -> bool {
-    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
-        return true;
-    }
-    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    digits > 0 && line[digits..].starts_with(". ")
-}
-
-fn split_long_line(
-    line: &str,
-    line_index: usize,
-    line_offset: usize,
-    max_chars: usize,
-) -> Vec<MarkdownWindow> {
-    let mut windows = Vec::new();
-    let mut byte_offset = 0;
-    while byte_offset < line.len() {
-        let rest = &line[byte_offset..];
-        let slice_chars = find_line_cut(rest, max_chars);
-        let slice_bytes = byte_offset_at_utf16_ceil(rest, slice_chars);
-        let text = &rest[..slice_bytes];
-        windows.push(MarkdownWindow {
-            text: text.to_owned(),
-            range: TextRange::from_coordinates(
-                line_offset + byte_offset,
-                line_offset + byte_offset + slice_bytes,
-                line_index + 1,
-                line_index + 1,
-                byte_offset,
-                byte_offset + slice_bytes,
-            )
-            .expect("window coordinates refer to a source line"),
-        });
-        byte_offset += slice_bytes;
-    }
-    windows
-}
-
-fn lines_to_window(
+fn section_range(
     lines: &[&str],
     line_offsets: &[usize],
     start_index: usize,
     end_index: usize,
-) -> MarkdownWindow {
-    MarkdownWindow {
-        text: lines[start_index..=end_index].join("\n"),
-        range: TextRange::from_coordinates(
-            line_offsets[start_index],
-            line_offsets[end_index] + lines[end_index].len(),
-            start_index + 1,
-            end_index + 1,
-            0,
-            lines[end_index].len(),
-        )
-        .expect("window coordinates refer to source lines"),
-    }
-}
-
-fn compute_fence_lines(lines: &[&str]) -> Vec<bool> {
-    let mut in_fence = vec![false; lines.len()];
-    let mut fence = None;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        if let Some(marker) = fence {
-            in_fence[index] = true;
-            if trimmed.starts_with(marker) {
-                fence = None;
-            }
-        } else if trimmed.starts_with("```") {
-            fence = Some("```");
-        } else if trimmed.starts_with("~~~") {
-            fence = Some("~~~");
-        }
-    }
-    in_fence
-}
-
-fn compute_markdown_overlap_lines(
-    lines: &[&str],
-    start_index: usize,
-    end_index: usize,
-    overlap_chars: usize,
-) -> usize {
-    if overlap_chars == 0 {
-        return 0;
-    }
-    let mut chars = 0;
-    let mut count = 0;
-    for index in ((start_index + 1)..end_index).rev() {
-        chars += utf16_len(lines[index]) + 1;
-        if chars > overlap_chars {
-            break;
-        }
-        count += 1;
-    }
-    count.min((end_index - start_index) / 2)
+) -> TextRange {
+    TextRange::from_coordinates(
+        line_offsets[start_index],
+        line_offsets[end_index] + lines[end_index].len(),
+        start_index + 1,
+        end_index + 1,
+        0,
+        lines[end_index].len(),
+    )
+    .expect("section coordinates refer to source lines")
 }
 
 fn markdown_metadata(section: &Section) -> EntityMetadata {
@@ -455,22 +236,13 @@ fn markdown_metadata(section: &Section) -> EntityMetadata {
     })
 }
 
-fn metadata_heading(metadata: &EntityMetadata) -> Option<&str> {
-    match metadata {
-        EntityMetadata::Markdown(MarkdownMetadata { heading, .. }) => heading.as_deref(),
-        EntityMetadata::Code(_) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::domain::{
-        Content, EntityMetadata, FileFormat, MarkdownMetadata, SourceRange, TextRange,
-    };
+    use crate::domain::{Content, EntityMetadata, FileFormat, MarkdownMetadata, Range, TextRange};
 
     use super::super::{test_content, test_metadata};
 
-    use super::super::{ChunkOptions, ExtractedFragment, test_source};
+    use super::super::{ChunkOptions, test_source};
     use super::extract;
 
     #[test]
@@ -521,40 +293,59 @@ mod tests {
             &test_metadata(item),
             Some(EntityMetadata::Markdown(MarkdownMetadata { heading: Some(heading), .. })) if heading == "Not a heading"
         )));
-        assert!(fragments.iter().any(|item| matches!(
-            item,
-            ExtractedFragment::Representative(_) | ExtractedFragment::Window(_)
-        )));
+        assert!(fragments.iter().any(|entity| entity.fragments.len() > 1));
         assert_eq!(
-            *fragments[0].range(),
-            SourceRange::Text(
+            *fragments[0].source_range(),
+            Range::Text(
                 TextRange::from_coordinates(0, "前言 😀\r\n\r".len(), 1, 2, 0, 1)
                     .expect("preamble coordinates")
             )
         );
 
-        for (index, fragment) in fragments.iter().enumerate() {
-            assert_eq!(fragment.index(), index);
-            if let ExtractedFragment::Window(window) = fragment {
-                let owner = &fragments[window.entity_index];
-                assert!(matches!(owner, ExtractedFragment::Representative(_)));
-                assert!(test_metadata(owner).is_some());
-                assert!(owner.range().contains(fragment.range()));
-            }
-            if matches!(fragment, ExtractedFragment::Representative(_)) {
-                continue;
-            }
-            let Content::Text(content) = test_content(fragment) else {
-                panic!("text content expected");
+        for (index, entity) in fragments.iter().enumerate() {
+            assert_eq!(entity.index, index);
+            let Content::Text(content) = &entity.content else {
+                panic!("text entity expected");
             };
-            let SourceRange::Text(range) = *fragment.range() else {
+            let Range::Text(range) = entity.source_range else {
                 panic!("text range expected");
             };
-            assert_eq!(
-                source
-                    .text
-                    .get(range.start_byte_offset()..range.end_byte_offset()),
-                Some(content.as_str())
+            assert_eq!(range.slice(&source.text).expect("source range"), content);
+            let mut covered = vec![false; content.len()];
+            for fragment in &entity.fragments {
+                let fragment_content = fragment
+                    .range
+                    .extract(&entity.content)
+                    .expect("fragment content");
+                let (start, end) = match fragment.range {
+                    Range::Full => (0, content.len()),
+                    Range::Byte(local) => (
+                        usize::try_from(local.start_offset).expect("fragment start"),
+                        usize::try_from(local.end_offset).expect("fragment end"),
+                    ),
+                    Range::Text(_) => panic!("fragments must store byte offsets"),
+                };
+                assert!(start < end && end <= content.len());
+                assert_eq!(
+                    fragment_content,
+                    Content::Text(
+                        source
+                            .text
+                            .get(range.start_byte_offset() + start..range.start_byte_offset() + end)
+                            .expect("fragment source")
+                            .to_owned()
+                    )
+                );
+                covered[start..end].fill(true);
+            }
+            assert!(
+                content.char_indices().all(|(offset, character)| {
+                    character.is_whitespace()
+                        || covered[offset..offset + character.len_utf8()]
+                            .iter()
+                            .all(|value| *value)
+                }),
+                "every non-whitespace source byte belongs to a fragment"
             );
         }
     }

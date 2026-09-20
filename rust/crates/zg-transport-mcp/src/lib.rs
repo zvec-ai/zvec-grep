@@ -7,7 +7,6 @@ mod consent;
 mod request;
 
 use std::{
-    collections::BTreeMap,
     fmt::{self, Write as _},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -42,7 +41,7 @@ use zg_engine::{
         index::{
             IndexOptions,
             options::{
-                ContentKind, Device, EmbeddingModelSpec, GlobRule, ScanRules, ScanRulesUpdate,
+                Device, EmbeddingModelSpec, GlobRule, ScanRules, ScanRulesUpdate,
                 deserialize_optional_update,
             },
         },
@@ -93,7 +92,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Read freshness and background_refresh from zvec_grep_search without a status preflight. Call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
     "- Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.\n",
-    "- For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.\n",
+    "- This version indexes text only with one embedding model per workspace. For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.\n",
     "- zvec_grep_index wait defaults to false. Poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.\n",
     "- Use zvec_grep_index with drop: true, or zvec_grep_index_drop, only when index deletion is explicitly requested.\n",
     "- Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.\n",
@@ -647,11 +646,9 @@ pub struct IndexInput {
     pub endpoint: Option<String>,
     /// Permanently remove the workspace index.
     pub drop: Option<bool>,
-    /// Embedding model reference for a new index.
+    /// Single embedding model for this workspace; this version indexes text only.
     #[schemars(length(min = 1, max = 256))]
     pub embedding: Option<String>,
-    /// Explicit text/image/table to model-reference map; mutually exclusive with embedding.
-    pub embedding_routes: Option<BTreeMap<String, String>>,
     /// Explicitly rebuild the existing index.
     pub rebuild: Option<bool>,
     /// Replace the index root-path configuration.
@@ -835,8 +832,6 @@ struct WorkspaceIndexOutput {
     root_paths: Vec<RootSpecOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     embedding: Option<IndexedEmbeddingOutput>,
-    embeddings: Vec<IndexedEmbeddingOutput>,
-    embedding_routes: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fts: Option<IndexedFtsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1192,39 +1187,6 @@ impl From<DeviceInput> for Device {
     }
 }
 
-fn normalize_embedding_routes(
-    routes: Option<BTreeMap<String, String>>,
-) -> Result<Option<BTreeMap<ContentKind, EmbeddingModelSpec>>, String> {
-    routes
-        .map(|routes| {
-            if routes.is_empty() {
-                return Err("embeddingRoutes requires at least one content route".to_owned());
-            }
-            routes
-                .into_iter()
-                .map(|(kind, reference)| {
-                    let kind: ContentKind = serde_json::from_value(serde_json::json!(kind))
-                        .map_err(|_| {
-                            "embeddingRoutes keys must be text, image or table".to_owned()
-                        })?;
-                    let reference = reference.trim().to_owned();
-                    validate_text("embeddingRoutes model", &reference, 1, 256)?;
-                    Ok((
-                        kind,
-                        EmbeddingModelSpec {
-                            reference,
-                            revision: None,
-                            cache_dir: None,
-                            endpoint: None,
-                            device: Device::Auto,
-                        },
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>, String>>()
-        })
-        .transpose()
-}
-
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
         let root = absolute_root(&self.root)?;
@@ -1249,16 +1211,13 @@ impl IndexInput {
         if self.max_file_size_bytes == Some(Some(0)) {
             return Err("maxFileSizeBytes must be greater than zero".to_owned());
         }
-        if self.embedding.is_some() && self.embedding_routes.is_some() {
-            return Err("embedding and embeddingRoutes are mutually exclusive".to_owned());
-        }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
-            if self.embedding.is_none() && self.embedding_routes.is_none() {
+            if self.embedding.is_none() {
                 return Err("endpoint requires an explicit embedding model".to_owned());
             }
         }
-        if self.device.is_some() && self.embedding.is_none() && self.embedding_routes.is_none() {
+        if self.device.is_some() && self.embedding.is_none() {
             return Err("device requires an explicit embedding model".to_owned());
         }
 
@@ -1281,7 +1240,6 @@ impl IndexInput {
         if let Some(paths) = &scan.ignore_files {
             validate_scoped_paths(&root, paths, "ignore file")?;
         }
-        let embedding_routes = normalize_embedding_routes(self.embedding_routes)?;
         let embedding = if let Some(reference) = self.embedding {
             let reference = reference.trim().to_owned();
             validate_text("embedding", &reference, 1, 256)?;
@@ -1303,7 +1261,6 @@ impl IndexInput {
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
-                embedding_routes,
                 endpoint: self.endpoint,
                 device: self.device.map(Into::into),
                 api_key: self.api_key,
@@ -1321,7 +1278,6 @@ impl IndexInput {
             || self.device.is_some()
             || self.endpoint.is_some()
             || self.embedding.is_some()
-            || self.embedding_routes.is_some()
             || self.rebuild.is_some()
             || self.reset_paths.is_some()
             || self.globs.is_some()
@@ -1717,21 +1673,6 @@ impl From<InfoResult> for IndexStatusOutput {
                 dimension: embedding.dimension,
                 metric: embedding.metric,
             }),
-            embeddings: info
-                .embeddings
-                .into_iter()
-                .map(|embedding| IndexedEmbeddingOutput {
-                    provider: embedding.provider,
-                    model: embedding.model,
-                    dimension: embedding.dimension,
-                    metric: embedding.metric,
-                })
-                .collect(),
-            embedding_routes: info
-                .embedding_routes
-                .into_iter()
-                .map(|(kind, model)| (kind.as_str().to_owned(), model))
-                .collect(),
             fts: info.fts.map(|fts| IndexedFtsOutput {
                 tokenizer: fts.tokenizer,
                 filters: fts.filters,
@@ -1925,11 +1866,6 @@ fn format_context_result(reply: &ContextResult) -> String {
             item.relative_path.display(),
             range_label(&item.range)
         );
-        if let Some(outline) = &item.outline {
-            for line in outline.lines().take(7) {
-                let _ = write!(output, "\noutline: {}", truncate_line(line));
-            }
-        }
         output.push_str("\nsource:");
         for line in item.content.lines().take(10) {
             let _ = write!(output, "\n  {}", truncate_line(line));
@@ -2082,14 +2018,11 @@ mod tests {
                 scan: super::ScanRules::default(),
                 policy: super::WorkspaceIndexPolicy::Enabled,
                 embedding: None,
-                embeddings: Vec::new(),
-                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),
-                index_version: Some(1),
-
+                index_version: Some(5),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
             }),
@@ -2112,6 +2045,8 @@ mod tests {
             serde_json::json!(["lowercase"])
         );
         assert!(workspace.get("id").is_none());
+        assert!(workspace.get("embeddings").is_none());
+        assert!(workspace.get("embedding_routes").is_none());
         assert_eq!(files["entities"], count);
         assert_eq!(files["indexed_size_bytes"], count + 3);
         assert!(files.get("truncated_fragments").is_none());
@@ -2244,48 +2179,37 @@ mod tests {
     }
 
     #[test]
-    fn explicit_content_routes_reach_the_engine_and_reject_invalid_maps() {
+    fn index_input_accepts_one_model_and_rejects_model_routes() {
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
-            "root": test_root(), "device": "cpu", "endpoint": "https://runtime.example.test/embeddings", "embeddingRoutes": {
-                "text":"local/potion-code-16m-v2", "table":"local/potion-code-16m-v2", "image":"qwen/qwen3-vl-embedding"
-            }
-        })).expect("routing input");
+            "root": test_root(),
+            "embedding": "local/potion-code-16m-v2",
+            "device": "cpu"
+        }))
+        .expect("single model input");
         let IndexToolRequest::Index { options, .. } =
-            parsed.into_request().expect("routing request")
+            parsed.into_request().expect("single model request")
         else {
             panic!("index");
         };
-        assert_eq!(options.device, Some(super::Device::Cpu));
-        assert_eq!(
-            options.endpoint.as_deref(),
-            Some("https://runtime.example.test/embeddings")
-        );
-        let routes = options.embedding_routes.expect("explicit routes");
-        assert!(
-            routes
-                .values()
-                .all(|spec| spec.endpoint.is_none() && spec.device == super::Device::Auto)
-        );
-        assert_eq!(routes.len(), 3);
-        assert_eq!(
-            routes[&super::ContentKind::Text].reference,
-            routes[&super::ContentKind::Table].reference
-        );
+        let model = options.embedding.expect("selected model");
+        assert_eq!(model.reference, "local/potion-code-16m-v2");
+        assert_eq!(model.device, super::Device::Cpu);
+
         for patch in [
+            serde_json::json!({"embeddingRoutes": {"text":"one"}}),
             serde_json::json!({"embeddingRoutes": {}}),
-            serde_json::json!({"embeddingRoutes": {"video":"model"}}),
-            serde_json::json!({"embeddingRoutes": {"text":" "}}),
             serde_json::json!({"embedding":"one", "embeddingRoutes":{"text":"two"}}),
+            serde_json::json!({"embedding":["one", "two"]}),
         ] {
             let mut value = patch;
             value["root"] = serde_json::json!(test_root());
-            assert!(
-                serde_json::from_value::<IndexInput>(value)
-                    .expect("input schema")
-                    .into_request()
-                    .is_err()
-            );
+            assert!(serde_json::from_value::<IndexInput>(value).is_err());
         }
+        let schema =
+            serde_json::to_value(schemars::schema_for!(IndexInput)).expect("index input schema");
+        assert!(schema["properties"].get("embedding").is_some());
+        assert!(schema["properties"].get("embeddingRoutes").is_none());
+        assert_eq!(schema["additionalProperties"], false);
     }
 
     #[test]
@@ -2537,7 +2461,6 @@ mod tests {
             endpoint: None,
             drop: None,
             embedding: Some("potion-base-8M".to_owned()),
-            embedding_routes: None,
             rebuild: Some(false),
             reset_paths: None,
             globs: Some(vec![super::GlobInput {

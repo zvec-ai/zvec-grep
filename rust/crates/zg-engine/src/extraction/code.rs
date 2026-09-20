@@ -1,38 +1,27 @@
 mod adapter;
 
-use std::collections::HashSet;
-
 use tree_sitter::{Language, Node, Parser};
 
 use crate::{
     EngineError,
-    domain::{
-        CodeMetadata, Content, EntityContent, EntityMetadata, FileFormat, SourceRange, SymbolType,
-    },
-    utils::{
-        byte_offset_at_utf16_ceil, byte_offset_at_utf16_floor, collapse_whitespace,
-        line_byte_offsets, take_utf16, utf16_len,
-    },
+    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType},
+    utils::line_byte_offsets,
 };
 
-use self::adapter::{LanguageAdapter, named_children, resolve_adapter, text};
+use self::adapter::{LanguageAdapter, named_children, resolve_adapter};
 use super::{
-    ChunkOptions, ExtractedEntity, ExtractedFragment, ExtractedWindow, IndexingExtractionFragment,
-    TextRange, TextSource, chunk_options_for_metadata, fit_text_to_chars,
-    text::extract_plain_text_fragments, validate_formats,
+    ChunkOptions, ExtractedEntity, TextRange, TextSource, chunk_options_for_metadata,
+    chunking::text_fragments, text::extract_plain_text_entities, validate_formats,
 };
 
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
 const DEFAULT_CODE_CHUNK_OVERLAP_CHARS: usize = 540;
 const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Svelte];
-const OUTLINE_MAX_MEMBERS: usize = 32;
-const OUTLINE_MAX_CALLS: usize = 24;
-const OUTLINE_MAX_LINE_CHARS: usize = 180;
 
 pub(super) fn extract_for_indexing(
     source: &TextSource,
     options: ChunkOptions,
-) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
+) -> Result<Vec<ExtractedEntity>, EngineError> {
     let jsx = source
         .relative_path
         .extension()
@@ -44,7 +33,7 @@ fn extract_code(
     source: &TextSource,
     options: ChunkOptions,
     jsx: bool,
-) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
+) -> Result<Vec<ExtractedEntity>, EngineError> {
     if !super::service::is_code_source(&source.formats) {
         return Ok(Vec::new());
     }
@@ -92,14 +81,7 @@ fn extract_code(
 
     let mut output = Vec::new();
     for entity in entities {
-        append_entity(
-            source,
-            adapter,
-            &entity,
-            max_chars,
-            overlap_chars,
-            &mut output,
-        );
+        append_entity(source, &entity, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
         Ok(fallback(source, max_chars, overlap_chars))
@@ -141,18 +123,8 @@ fn resolve_options(options: ChunkOptions) -> Result<(usize, usize), EngineError>
     Ok((max_chars, overlap_chars))
 }
 
-fn fallback(
-    source: &TextSource,
-    max_chars: usize,
-    overlap_chars: usize,
-) -> Vec<IndexingExtractionFragment> {
-    extract_plain_text_fragments(source, max_chars, overlap_chars)
-        .into_iter()
-        .map(|fragment| IndexingExtractionFragment {
-            fragment,
-            embedding_source: None,
-        })
-        .collect()
+fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<ExtractedEntity> {
+    extract_plain_text_entities(source, max_chars, overlap_chars)
 }
 
 #[derive(Debug)]
@@ -163,21 +135,6 @@ struct CodeEntity<'tree> {
     breadcrumb: Vec<String>,
     signature: Option<String>,
     documentation: Option<String>,
-}
-
-#[derive(Debug)]
-struct CodeWindow {
-    text: String,
-    embedding_text: Option<String>,
-    range: TextRange,
-}
-
-#[derive(Debug)]
-struct CodeFragmentOutput {
-    starts_group: bool,
-    range: SourceRange,
-    content: Content,
-    embedding_text: Option<String>,
 }
 
 fn walk_code_node<'tree>(
@@ -226,599 +183,34 @@ fn walk_code_node<'tree>(
 
 fn append_entity(
     source: &TextSource,
-    adapter: &LanguageAdapter,
     entity: &CodeEntity<'_>,
     max_chars: usize,
     overlap_chars: usize,
-    output: &mut Vec<IndexingExtractionFragment>,
+    output: &mut Vec<ExtractedEntity>,
 ) {
-    let mut metadata = Some(code_entity_metadata(entity));
+    let metadata = code_entity_metadata(entity);
     let (content_max, content_overlap) =
-        chunk_options_for_metadata(max_chars, overlap_chars, metadata.as_ref());
-    let fragments =
-        code_entity_to_search_fragments(source, adapter, entity, content_max, content_overlap);
-    let owner_index = fragments
-        .first()
-        .filter(|fragment| fragment.starts_group)
-        .map(|_| output.len());
-
-    for fragment in fragments {
-        let index = output.len();
-        let entity_fragment = if fragment.starts_group {
-            let Content::Text(outline) = fragment.content else {
-                unreachable!("code outline is text");
-            };
-            ExtractedFragment::Representative(ExtractedEntity {
-                index,
-                range: fragment.range,
-                content: EntityContent::Outline(outline),
-                metadata: metadata.take(),
-            })
-        } else if let Some(entity_index) = owner_index {
-            ExtractedFragment::Window(ExtractedWindow {
-                index,
-                entity_index,
-                range: fragment.range,
-                content: fragment.content,
-            })
-        } else {
-            ExtractedFragment::Standalone(ExtractedEntity {
-                index,
-                range: fragment.range,
-                content: EntityContent::Source(fragment.content),
-                metadata: metadata.take(),
-            })
-        };
-        output.push(IndexingExtractionFragment {
-            embedding_source: fragment
-                .embedding_text
-                .map(|text| vec![Content::Text(text)]),
-            fragment: entity_fragment,
-        });
-    }
-}
-
-fn code_entity_to_search_fragments(
-    source: &TextSource,
-    adapter: &LanguageAdapter,
-    entity: &CodeEntity<'_>,
-    content_max: usize,
-    content_overlap: usize,
-) -> Vec<CodeFragmentOutput> {
-    let node_text = text(entity.node, source.text.as_bytes());
-    if utf16_len(node_text) <= content_max {
-        return vec![window_to_fragment(node_to_window(
-            entity.node,
-            source.text.as_bytes(),
-        ))];
-    }
-
-    let major = CodeFragmentOutput {
-        starts_group: true,
-        range: SourceRange::Text(node_to_window(entity.node, source.text.as_bytes()).range),
-        content: Content::Text(code_entity_outline(
-            entity,
-            adapter,
-            source.text.as_bytes(),
-            content_max,
-        )),
-        embedding_text: None,
-    };
-    let mut fragments = vec![major];
-    fragments.extend(
-        split_large_node(
-            entity.node,
-            source.text.as_bytes(),
-            content_max,
-            content_overlap,
-        )
-        .into_iter()
-        .map(window_to_fragment),
-    );
-    fragments
-}
-
-fn window_to_fragment(window: CodeWindow) -> CodeFragmentOutput {
-    CodeFragmentOutput {
-        starts_group: false,
-        range: SourceRange::Text(window.range),
-        content: Content::Text(window.text),
-        embedding_text: window.embedding_text,
-    }
-}
-
-fn node_to_window(node: Node<'_>, source: &[u8]) -> CodeWindow {
-    CodeWindow {
-        text: text(node, source).to_owned(),
-        embedding_text: None,
-        range: TextRange::from_coordinates(
-            node.start_byte(),
-            node.end_byte(),
-            node.start_position().row + 1,
-            node.end_position().row + 1,
-            node.start_position().column,
-            node.end_position().column,
-        )
-        .expect("parser coordinates refer to source text"),
-    }
-}
-
-fn split_large_node(
-    node: Node<'_>,
-    source: &[u8],
-    max_chars: usize,
-    overlap_chars: usize,
-) -> Vec<CodeWindow> {
-    let body = node.child_by_field_name("body").unwrap_or(node);
-    let statements = named_children(body);
-    if statements.len() <= 1 {
-        return split_text_by_lines(
-            text(node, source),
-            max_chars,
-            node.start_position().row + 1,
-            node.start_byte(),
-            node.start_position().column,
-            overlap_chars,
-        );
-    }
-
-    let mut windows = Vec::new();
-    let mut group_start = 0;
-    let mut group_chars = 0;
-    for (index, statement) in statements.iter().copied().enumerate() {
-        let statement_chars = utf16_len(text(statement, source));
-        if statement_chars > max_chars {
-            if index > group_start {
-                windows.push(slice_statements(
-                    source,
-                    &statements,
-                    group_start,
-                    index - 1,
-                ));
-            }
-            windows.extend(split_text_by_lines(
-                text(statement, source),
-                max_chars,
-                statement.start_position().row + 1,
-                statement.start_byte(),
-                statement.start_position().column,
-                overlap_chars,
-            ));
-            group_start = index + 1;
-            group_chars = 0;
-            continue;
-        }
-
-        let separator_chars = usize::from(index > group_start);
-        if group_chars + separator_chars + statement_chars > max_chars && index > group_start {
-            windows.push(slice_statements(
-                source,
-                &statements,
-                group_start,
-                index - 1,
-            ));
-            let overlap_start =
-                compute_overlap_start(source, &statements, group_start, index - 1, overlap_chars);
-            let mut candidate_start = if overlap_start < index {
-                overlap_start
-            } else {
-                index
-            };
-            let mut candidate_chars = statement_chars;
-            for previous in (candidate_start..index).rev() {
-                let added_chars = utf16_len(text(statements[previous], source)) + 1;
-                if candidate_chars + added_chars > max_chars {
-                    candidate_start = previous + 1;
-                    break;
-                }
-                candidate_chars += added_chars;
-            }
-            group_start = candidate_start;
-            group_chars = candidate_chars;
-            continue;
-        }
-        group_chars += separator_chars + statement_chars;
-    }
-
-    if group_start < statements.len() {
-        windows.push(slice_statements(
-            source,
-            &statements,
-            group_start,
-            statements.len() - 1,
-        ));
-    }
-    windows
-}
-
-fn slice_statements(
-    source: &[u8],
-    statements: &[Node<'_>],
-    start_index: usize,
-    end_index: usize,
-) -> CodeWindow {
-    let start = statements[start_index].start_byte();
-    let end = statements[end_index].end_byte();
-    CodeWindow {
-        text: String::from_utf8_lossy(&source[start..end]).into_owned(),
-        embedding_text: Some(
-            statements[start_index..=end_index]
-                .iter()
-                .map(|statement| text(*statement, source))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        range: TextRange::from_coordinates(
-            start,
-            end,
-            statements[start_index].start_position().row + 1,
-            statements[end_index].end_position().row + 1,
-            statements[start_index].start_position().column,
-            statements[end_index].end_position().column,
-        )
-        .expect("parser coordinates refer to source text"),
-    }
-}
-
-fn split_text_by_lines(
-    value: &str,
-    max_chars: usize,
-    start_line: usize,
-    start_byte_offset: usize,
-    start_byte_column: usize,
-    overlap_chars: usize,
-) -> Vec<CodeWindow> {
-    let lines = value.split('\n').collect::<Vec<_>>();
-    let line_offsets = line_byte_offsets(&lines);
-    let mut windows = Vec::new();
-    let mut line_index = 0;
-
-    while line_index < lines.len() {
-        if utf16_len(lines[line_index]) > max_chars {
-            windows.extend(split_long_line_by_chars(
-                lines[line_index],
-                max_chars,
-                start_line + line_index,
-                start_byte_offset + line_offsets[line_index],
-                if line_index == 0 {
-                    start_byte_column
-                } else {
-                    0
-                },
-                overlap_chars,
-            ));
-            line_index += 1;
-            continue;
-        }
-
-        let mut end_index = line_index;
-        let mut used_chars = 0;
-        while end_index < lines.len() {
-            let line_length = utf16_len(lines[end_index]) + 1;
-            if used_chars + line_length > max_chars && end_index > line_index {
-                break;
-            }
-            used_chars += line_length;
-            end_index += 1;
-        }
-        let chunk = lines[line_index..end_index].join("\n");
-        windows.push(CodeWindow {
-            text: chunk.clone(),
-            embedding_text: None,
-            range: TextRange::from_coordinates(
-                start_byte_offset + line_offsets[line_index],
-                start_byte_offset + line_offsets[line_index] + chunk.len(),
-                start_line + line_index,
-                start_line + end_index - 1,
-                if line_index == 0 {
-                    start_byte_column
-                } else {
-                    0
-                },
-                lines[end_index - 1].len() + if end_index == 1 { start_byte_column } else { 0 },
-            )
-            .expect("window coordinates refer to source lines"),
-        });
-        if end_index >= lines.len() {
-            break;
-        }
-        let overlap_lines = compute_line_overlap(&lines, line_index, end_index, overlap_chars);
-        line_index = end_index - overlap_lines;
-    }
-    windows
-}
-
-fn split_long_line_by_chars(
-    line: &str,
-    max_chars: usize,
-    line_number: usize,
-    start_byte_offset: usize,
-    start_byte_column: usize,
-    overlap_chars: usize,
-) -> Vec<CodeWindow> {
-    let total_chars = utf16_len(line);
-    let mut windows = Vec::new();
-    let mut start_char = 0;
-    while start_char < total_chars {
-        let end_char = (start_char + max_chars).min(total_chars);
-        let start_byte = byte_offset_at_utf16_ceil(line, start_char);
-        let actual_start = utf16_len(&line[..start_byte]);
-        let mut end_byte = byte_offset_at_utf16_floor(line, end_char);
-        if end_byte == start_byte {
-            end_byte = byte_offset_at_utf16_ceil(line, end_char);
-        }
-        let actual_end = utf16_len(&line[..end_byte]);
-        windows.push(CodeWindow {
-            text: line[start_byte..end_byte].to_owned(),
-            embedding_text: None,
-            range: TextRange::from_coordinates(
-                start_byte_offset + start_byte,
-                start_byte_offset + end_byte,
-                line_number,
-                line_number,
-                start_byte_column + start_byte,
-                start_byte_column + end_byte,
-            )
-            .expect("window coordinates refer to a source line"),
-        });
-        if actual_end >= total_chars {
-            break;
-        }
-        start_char = (actual_end.saturating_sub(overlap_chars)).max(actual_start + 1);
-    }
-    windows
-}
-
-fn compute_overlap_start(
-    source: &[u8],
-    statements: &[Node<'_>],
-    group_start: usize,
-    group_end: usize,
-    overlap_chars: usize,
-) -> usize {
-    if overlap_chars == 0 {
-        return group_end + 1;
-    }
-    let mut chars = 0;
-    let mut index = group_end;
-    loop {
-        chars += utf16_len(text(statements[index], source));
-        if index < group_end {
-            chars += 1;
-        }
-        if index == group_start || chars >= overlap_chars {
-            return index;
-        }
-        index -= 1;
-    }
-}
-
-fn compute_line_overlap(
-    lines: &[&str],
-    start_index: usize,
-    end_index: usize,
-    overlap_chars: usize,
-) -> usize {
-    if overlap_chars == 0 {
-        return 0;
-    }
-    let mut chars = 0;
-    let mut count = 0;
-    for index in (start_index..end_index).rev() {
-        chars += utf16_len(lines[index]) + 1;
-        if chars > overlap_chars {
-            break;
-        }
-        count += 1;
-    }
-    count.min((end_index - start_index) / 2)
-}
-
-fn code_entity_outline(
-    entity: &CodeEntity<'_>,
-    adapter: &LanguageAdapter,
-    source: &[u8],
-    max_chars: usize,
-) -> String {
-    let header = extract_code_header(text(entity.node, source));
-    let mut lines = vec![if header.is_empty() {
-        entity.name.clone().unwrap_or_else(|| {
-            entity
-                .symbol_type
-                .map_or("code", SymbolType::as_str)
-                .to_owned()
-        })
-    } else {
-        header
-    }];
-
-    if matches!(
-        entity.symbol_type,
-        Some(SymbolType::Class | SymbolType::Enum | SymbolType::Interface | SymbolType::Module)
-    ) || matches!(entity.node.kind(), "union_item" | "union_specifier")
-    {
-        let members = collect_structure_outline_members(entity, adapter, source);
-        if !members.is_empty() {
-            lines.push(String::new());
-            lines.push("members:".to_owned());
-            lines.extend(
-                members
-                    .iter()
-                    .map(|member| format!("- {}", format_outline_member(member))),
-            );
-        }
-    } else if entity.symbol_type == Some(SymbolType::Function) {
-        let calls = collect_function_call_names(entity.node, source);
-        if !calls.is_empty() {
-            lines.push(String::new());
-            lines.push(format!("calls: {}", calls.join(", ")));
-        }
-    }
-    fit_text_to_chars(lines.join("\n").trim(), max_chars)
-}
-
-fn extract_code_header(value: &str) -> String {
-    let mut lines = Vec::new();
-    for line in value.lines().take(24) {
-        lines.push(line);
-        if line.contains('{') {
-            break;
-        }
-    }
-    let header = lines.join("\n").trim().to_owned();
-    if utf16_len(&header) > 1_200 {
-        format!("{}\n...", take_utf16(&header, 1_200).trim_end())
-    } else {
-        header
-    }
-}
-
-#[derive(Debug)]
-struct OutlineMember {
-    symbol_type: Option<SymbolType>,
-    name: Option<String>,
-    signature: Option<String>,
-}
-
-fn collect_structure_outline_members(
-    entity: &CodeEntity<'_>,
-    adapter: &LanguageAdapter,
-    source: &[u8],
-) -> Vec<OutlineMember> {
-    struct Collector<'tree, 'source, 'adapter> {
-        root: Node<'tree>,
-        adapter: &'adapter LanguageAdapter,
-        source: &'source [u8],
-        members: Vec<OutlineMember>,
-        seen: HashSet<String>,
-    }
-
-    impl Collector<'_, '_, '_> {
-        fn visit(&mut self, current: Node<'_>, depth: usize) {
-            if self.members.len() >= OUTLINE_MAX_MEMBERS || depth > 12 {
-                return;
-            }
-            if !same_node(current, self.root) && self.adapter.is_entity(current) {
-                for resolved in self.adapter.resolve_entities(current, self.source) {
-                    if self.members.len() >= OUTLINE_MAX_MEMBERS || same_node(resolved, self.root) {
-                        break;
-                    }
-                    let name = self.adapter.extract_name(resolved, self.source);
-                    let symbol_type = self.adapter.classify(resolved);
-                    let signature = self.adapter.extract_signature(resolved, self.source);
-                    let key = format!(
-                        "{}:{}:{}:{}",
-                        symbol_type.map_or("", SymbolType::as_str),
-                        name.as_deref().unwrap_or_default(),
-                        signature.as_deref().unwrap_or_default(),
-                        resolved.start_byte()
-                    );
-                    if self.seen.insert(key) {
-                        self.members.push(OutlineMember {
-                            symbol_type,
-                            name,
-                            signature,
-                        });
-                    }
-                }
-                return;
-            }
-            for child in named_children(current) {
-                self.visit(child, depth + 1);
-            }
-        }
-    }
-
-    let mut collector = Collector {
-        root: entity.node,
-        adapter,
-        source,
-        members: Vec::new(),
-        seen: HashSet::new(),
-    };
-    collector.visit(entity.node, 0);
-    collector.members
-}
-
-fn format_outline_member(member: &OutlineMember) -> String {
-    let name = member.name.as_deref().unwrap_or_default();
-    let signature = member
-        .signature
-        .as_deref()
-        .map(collapse_whitespace)
-        .map(|value| fit_text_to_chars(&value, OUTLINE_MAX_LINE_CHARS))
-        .unwrap_or_default();
-    let symbol = member.symbol_type.map_or("", SymbolType::as_str);
-    if !signature.is_empty() {
-        if !name.is_empty() && !signature.contains(name) {
-            format!("{symbol} {name}: {signature}")
-                .trim_start()
-                .to_owned()
-        } else {
-            format!("{symbol} {signature}").trim_start().to_owned()
-        }
-    } else if name.is_empty() {
-        symbol.to_owned()
-    } else {
-        format!("{symbol} {name}").trim_start().to_owned()
-    }
-}
-
-fn collect_function_call_names(node: Node<'_>, source: &[u8]) -> Vec<String> {
-    fn visit(node: Node<'_>, source: &[u8], calls: &mut Vec<String>, seen: &mut HashSet<String>) {
-        if calls.len() >= OUTLINE_MAX_CALLS {
-            return;
-        }
-        if matches!(
-            node.kind(),
-            "call"
-                | "call_expression"
-                | "function_call_expression"
-                | "method_invocation"
-                | "object_creation_expression"
-                | "new_expression"
-        ) && let Some(name) = extract_call_name(node, source)
-            && seen.insert(name.clone())
-        {
-            calls.push(name);
-        }
-        for child in named_children(node) {
-            visit(child, source, calls, seen);
-        }
-    }
-
-    let mut calls = Vec::new();
-    let mut seen = HashSet::new();
-    visit(node, source, &mut calls, &mut seen);
-    calls
-}
-
-fn extract_call_name(node: Node<'_>, source: &[u8]) -> Option<String> {
-    let target = node
-        .child_by_field_name("function")
-        .or_else(|| node.child_by_field_name("name"))
-        .or_else(|| node.child_by_field_name("constructor"))
-        .or_else(|| node.child_by_field_name("type"))
-        .or_else(|| named_children(node).first().copied())?;
-    let cleaned = collapse_whitespace(text(target, source));
-    let cleaned = cleaned.strip_prefix("new ").unwrap_or(&cleaned).trim();
-    if cleaned.is_empty()
-        || utf16_len(cleaned) > OUTLINE_MAX_LINE_CHARS
-        || cleaned.contains(['\n', '\r'])
-        || !cleaned
-            .chars()
-            .any(|character| character.is_ascii_alphabetic() || matches!(character, '_' | '$'))
-    {
-        None
-    } else {
-        Some(cleaned.to_owned())
-    }
-}
-
-fn same_node(left: Node<'_>, right: Node<'_>) -> bool {
-    left.start_byte() == right.start_byte()
-        && left.end_byte() == right.end_byte()
-        && left.kind() == right.kind()
+        chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
+    let range = TextRange::from_coordinates(
+        entity.node.start_byte(),
+        entity.node.end_byte(),
+        entity.node.start_position().row + 1,
+        entity.node.end_position().row + 1,
+        entity.node.start_position().column,
+        entity.node.end_position().column,
+    )
+    .expect("parser coordinates refer to source text");
+    let content = range
+        .slice(&source.text)
+        .expect("parser range is valid UTF-8")
+        .to_owned();
+    output.push(ExtractedEntity {
+        index: output.len(),
+        source_range: Range::Text(range),
+        fragments: text_fragments(&content, content_max, content_overlap),
+        content: Content::Text(content),
+        metadata: Some(metadata),
+    });
 }
 
 fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
@@ -843,7 +235,7 @@ fn extract_script_blocks(
     source: &TextSource,
     max_chars: usize,
     overlap_chars: usize,
-) -> Result<Vec<IndexingExtractionFragment>, EngineError> {
+) -> Result<Vec<ExtractedEntity>, EngineError> {
     let lines = source.text.split('\n').collect::<Vec<_>>();
     let line_offsets = line_byte_offsets(&lines);
     let mut fragments = Vec::new();
@@ -859,7 +251,7 @@ fn extract_script_blocks(
             },
             block.jsx,
         )?;
-        let remapped = remap_script_block_fragments(
+        let remapped = remap_script_block_entities(
             source,
             block_fragments,
             fragments.len(),
@@ -952,29 +344,18 @@ fn script_block_format(attrs: &str) -> (FileFormat, bool) {
     }
 }
 
-fn remap_script_block_fragments(
+fn remap_script_block_entities(
     source: &TextSource,
-    fragments: Vec<IndexingExtractionFragment>,
+    fragments: Vec<ExtractedEntity>,
     start_index: usize,
     line_offsets: &[usize],
     start_byte_offset: usize,
-) -> Vec<IndexingExtractionFragment> {
+) -> Vec<ExtractedEntity> {
     fragments
         .into_iter()
-        .map(|mut item| {
-            let range = match &mut item.fragment {
-                ExtractedFragment::Standalone(entity)
-                | ExtractedFragment::Representative(entity) => {
-                    entity.index += start_index;
-                    &mut entity.range
-                }
-                ExtractedFragment::Window(window) => {
-                    window.index += start_index;
-                    window.entity_index += start_index;
-                    &mut window.range
-                }
-            };
-            if let SourceRange::Text(range) = range {
+        .map(|mut entity| {
+            entity.index += start_index;
+            if let Range::Text(range) = &mut entity.source_range {
                 *range = TextRange::from_offsets(
                     &source.text,
                     line_offsets,
@@ -983,7 +364,7 @@ fn remap_script_block_fragments(
                 )
                 .expect("script coordinates refer to the full source");
             }
-            item
+            entity
         })
         .collect()
 }
@@ -993,20 +374,20 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::domain::{
-        CodeMetadata, Content, EntityMetadata, FileFormat, SourceRange, SymbolType, TextRange,
+        CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType, TextRange,
     };
 
     use super::super::{test_content, test_metadata};
 
     use super::super::{
-        ChunkOptions, ExtractedFragment, extract, extract_for_indexing, test_source,
+        ChunkOptions, ExtractedEntity, extract, extract_for_indexing, test_source,
         vector_content_for_fragment,
     };
 
     fn named<'a>(
-        fragments: &'a [super::ExtractedFragment],
+        fragments: &'a [super::ExtractedEntity],
         name: &str,
-    ) -> &'a super::ExtractedFragment {
+    ) -> &'a super::ExtractedEntity {
         fragments
             .iter()
             .find(|fragment| matches!(
@@ -1016,25 +397,60 @@ mod tests {
             .unwrap_or_else(|| panic!("expected fragment for {name}"))
     }
 
-    fn signature<'a>(fragments: &'a [super::ExtractedFragment], name: &str) -> &'a str {
+    fn signature<'a>(fragments: &'a [super::ExtractedEntity], name: &str) -> &'a str {
         let Some(EntityMetadata::Code(metadata)) = test_metadata(named(fragments, name)) else {
             panic!("code metadata expected for {name}");
         };
         metadata.signature.as_deref().expect("signature expected")
     }
 
-    fn assert_source_backed(source: &super::TextSource, fragment: &super::ExtractedFragment) {
-        let Content::Text(content) = &test_content(fragment) else {
-            panic!("text fragment expected");
+    fn assert_source_backed(source: &super::TextSource, entity: &super::ExtractedEntity) {
+        let Content::Text(content) = &entity.content else {
+            panic!("text entity expected");
         };
-        let SourceRange::Text(range) = *fragment.range() else {
+        let Range::Text(range) = entity.source_range else {
             panic!("text range expected");
         };
         assert_eq!(
-            source
+            range.slice(&source.text).expect("entity source range"),
+            content
+        );
+        let mut covered = vec![false; content.len()];
+        for fragment in &entity.fragments {
+            let (start, end) = match fragment.range {
+                Range::Full => (0, content.len()),
+                Range::Byte(local) => (
+                    usize::try_from(local.start_offset).expect("fragment start"),
+                    usize::try_from(local.end_offset).expect("fragment end"),
+                ),
+                Range::Text(_) => panic!("fragments store byte offsets without text coordinates"),
+            };
+            assert!(start < end && end <= content.len());
+            let selected = source
                 .text
-                .get(range.start_byte_offset()..range.end_byte_offset()),
-            Some(content.as_str())
+                .get(range.start_byte_offset() + start..range.start_byte_offset() + end)
+                .expect("source slice");
+            assert!(
+                !selected.trim().is_empty(),
+                "fragments contain searchable source"
+            );
+            assert_eq!(
+                fragment
+                    .range
+                    .extract(&entity.content)
+                    .expect("content slice"),
+                Content::Text(selected.to_owned())
+            );
+            covered[start..end].fill(true);
+        }
+        assert!(
+            content.char_indices().all(|(offset, character)| {
+                character.is_whitespace()
+                    || covered[offset..offset + character.len_utf8()]
+                        .iter()
+                        .all(|value| *value)
+            }),
+            "fragments cover all non-whitespace source, including delimiters"
         );
     }
 
@@ -1095,17 +511,17 @@ mod tests {
             }))
         );
         assert!(matches!(
-            *add.range(),
-            SourceRange::Text(range) if range.start_line() == 2
+            *add.source_range(),
+            Range::Text(range) if range.start_line() == 2
         ));
         assert!(matches!(
-            *create.range(),
-            SourceRange::Text(range) if range.start_line() == 8
+            *create.source_range(),
+            Range::Text(range) if range.start_line() == 8
         ));
         assert_eq!(
             fragments
                 .iter()
-                .map(ExtractedFragment::index)
+                .map(ExtractedEntity::index)
                 .collect::<HashSet<_>>()
                 .len(),
             fragments.len()
@@ -1592,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn impl_class_keeps_method_metadata_and_member_outline() {
+    fn impl_class_keeps_method_metadata_and_complete_source() {
         let source = test_source(
             FileFormat::Rust,
             "fixture.rs",
@@ -1610,7 +1026,7 @@ mod tests {
         )
         .expect("impl extraction");
         let owner = named(&fragments, "User");
-        assert!(matches!(owner, ExtractedFragment::Representative(_)));
+        assert!(owner.fragments.len() > 1);
         assert!(matches!(
             test_metadata(owner),
             Some(EntityMetadata::Code(CodeMetadata {
@@ -1618,11 +1034,8 @@ mod tests {
                 ..
             }))
         ));
-        let Content::Text(outline) = test_content(owner) else {
-            panic!("text outline expected")
-        };
-        assert!(outline.contains("members:"));
-        assert!(outline.contains("function fn name(&self)"));
+        assert_source_backed(&source, owner);
+        assert_eq!(owner.content, Content::Text(source.text.clone()));
         assert!(matches!(
             test_metadata(named(&fragments, "name")),
             Some(EntityMetadata::Code(CodeMetadata {
@@ -1705,118 +1118,50 @@ mod tests {
     }
 
     #[test]
-    fn large_entities_emit_outlines_grouped_windows_and_compact_embeddings() {
-        let source = test_source(
-            FileFormat::TypeScript,
-            "large.ts",
-            &[
-                "export class Service {",
-                "  first(value: string) { return value.repeat(20); }",
-                "  second() { return this.first(fetchValue()); }",
-                "  third() { return new Service(); }",
-                "}",
-                "export function orchestrate(value: string) {",
-                "  const first = load(value);",
-                "  const second = client.fetch(first);",
-                "  return finalize(second);",
-                "}",
-            ]
-            .join("\n"),
-        );
-        let prepared = extract_for_indexing(
-            &source,
-            ChunkOptions {
-                max_chunk_chars: Some(140),
-                chunk_overlap_chars: Some(30),
-            },
-        )
-        .expect("large extraction");
-        let service = prepared.iter().find(|item| {
-            matches!(item.fragment, ExtractedFragment::Representative(_))
-                && matches!(
-                    &test_metadata(&item.fragment),
-                    Some(EntityMetadata::Code(CodeMetadata { symbol_name: Some(name), .. })) if name == "Service"
-                )
-        }).expect("service outline");
-        let Content::Text(service_text) = &test_content(&service.fragment) else {
-            panic!("outline text expected");
-        };
-        assert!(service_text.contains("members:"));
-        assert!(service_text.contains("function first(value: string)"));
-
-        let function = prepared.iter().find(|item| {
-            matches!(item.fragment, ExtractedFragment::Representative(_))
-                && matches!(
-                    &test_metadata(&item.fragment),
-                    Some(EntityMetadata::Code(CodeMetadata { symbol_name: Some(name), .. })) if name == "orchestrate"
-                )
-        }).expect("function outline");
-        let Content::Text(function_text) = &test_content(&function.fragment) else {
-            panic!("outline text expected");
-        };
-        assert!(function_text.contains("calls: load, client.fetch, finalize"));
-
-        for item in prepared.iter().filter(|item| {
-            item.fragment.entity_index() == service.fragment.entity_index()
-                && matches!(item.fragment, ExtractedFragment::Window(_))
-        }) {
-            assert_source_backed(&source, &item.fragment);
+    fn long_entities_preserve_headers_delimiters_and_large_whitespace_gaps() {
+        for (format, path, text) in [
+            (
+                FileFormat::TypeScript,
+                "large.ts",
+                format!(
+                    "export function orchestrate() {{\r\n  load();\r\n{}  finalize();\r\n}}",
+                    "\r\n".repeat(100)
+                ),
+            ),
+            (
+                FileFormat::Python,
+                "spaced.py",
+                format!(
+                    "def spaced() -> str:\n    first_value = prepare()\n{}    return first_value",
+                    "\n".repeat(100)
+                ),
+            ),
+        ] {
+            let source = test_source(format, path, &text);
+            let entities = extract_for_indexing(
+                &source,
+                ChunkOptions {
+                    max_chunk_chars: Some(120),
+                    chunk_overlap_chars: Some(18),
+                },
+            )
+            .expect("structured source");
+            let entity = &entities[0];
+            assert_source_backed(&source, entity);
+            for fragment in &entity.fragments {
+                let content = fragment
+                    .range
+                    .extract(&entity.content)
+                    .expect("source slice");
+                let vector =
+                    vector_content_for_fragment(&content, entity.metadata.as_ref(), Some(120));
+                let [Content::Text(vector)] = vector.as_slice() else {
+                    panic!("text embedding");
+                };
+                assert!(crate::utils::utf16_len(vector) <= 120);
+                assert!(vector.starts_with("symbol: function"));
+            }
         }
-    }
-
-    #[test]
-    fn compacts_ast_gaps_for_embedding_without_changing_stored_source() {
-        let source = test_source(
-            FileFormat::Python,
-            "spaced.py",
-            &[
-                "def spaced() -> str:".to_owned(),
-                "    first_value = prepare()".to_owned(),
-            ]
-            .into_iter()
-            .chain((0..70).map(|_| String::new()))
-            .chain([
-                "    second_value = transform(first_value)".to_owned(),
-                "    return second_value".to_owned(),
-            ])
-            .collect::<Vec<_>>()
-            .join("\n"),
-        );
-        let prepared = extract_for_indexing(
-            &source,
-            ChunkOptions {
-                max_chunk_chars: Some(120),
-                chunk_overlap_chars: Some(18),
-            },
-        )
-        .expect("python extraction");
-        let compact = prepared
-            .iter()
-            .find(|item| {
-                matches!(
-                    item.embedding_source.as_deref(),
-                    Some([Content::Text(value)])
-                        if value.contains("first_value = prepare()")
-                            && value.contains("second_value = transform(first_value)")
-                )
-            })
-            .expect("compact embedding window");
-        assert_source_backed(&source, &compact.fragment);
-        let Some([Content::Text(embedding)]) = compact.embedding_source.as_deref() else {
-            panic!("embedding text expected");
-        };
-        assert!(!embedding.contains("\n\n"));
-        let vector = vector_content_for_fragment(
-            &compact.fragment,
-            test_metadata(&prepared[compact.fragment.entity_index()].fragment),
-            compact.embedding_source.as_deref(),
-            Some(120),
-        );
-        let [Content::Text(vector)] = vector.as_slice() else {
-            panic!("vector text expected");
-        };
-        assert!(vector.chars().count() <= 120);
-        assert!(vector.starts_with("symbol: function spaced"));
     }
 
     #[test]
@@ -1842,12 +1187,12 @@ mod tests {
         assert_source_backed(&source, first);
         assert_source_backed(&source, second);
         assert!(matches!(
-            first.range(),
-            SourceRange::Text(range) if range.start_line() == 3
+            first.source_range(),
+            Range::Text(range) if range.start_line() == 3
         ));
         assert!(matches!(
-            second.range(),
-            SourceRange::Text(range) if range.start_line() == 7
+            second.source_range(),
+            Range::Text(range) if range.start_line() == 7
         ));
 
         let inline_script = test_source(
@@ -1859,7 +1204,7 @@ mod tests {
             extract(&inline_script, ChunkOptions::default()).expect("inline script extraction");
         let inline = named(&fragments, "inline");
         assert_source_backed(&inline_script, inline);
-        let SourceRange::Text(range) = inline.range() else {
+        let Range::Text(range) = inline.source_range() else {
             panic!("text range expected");
         };
         assert_eq!(range.start_line(), 1);
@@ -1882,8 +1227,8 @@ mod tests {
         );
         assert!(test_metadata(&fallback[0]).is_none());
         assert!(matches!(
-            fallback[0].range(),
-            SourceRange::Text(range) if range.end_line() == 4 && range.end_byte_column() == 0
+            fallback[0].source_range(),
+            Range::Text(range) if range.end_line() == 4 && range.end_byte_column() == 0
         ));
 
         let no_script = test_source(FileFormat::Svelte, "plain.svelte", "<h1>No script</h1>");
@@ -1897,14 +1242,14 @@ mod tests {
     }
 
     #[test]
-    fn remaps_window_ownership_across_component_script_blocks() {
+    fn preserves_local_fragment_ranges_across_component_script_blocks() {
         let body = (0..12)
             .map(|index| format!("  const value{index} = step({index});"))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\r\n");
         let text = format!(
-            "<script>\nexport function first() {{\n{body}\n}}\n</script>\n\
-             <script lang=\"ts\">\nexport function second() {{\n{body}\n}}\n</script>"
+            "<p>你好 😀</p><script>export function first() {{\r\n{body}\r\n}}\r\n</script>\r\n\
+             <script lang=\"ts\">export function second() {{\r\n{body}\r\n}}\r\n</script>"
         );
         for (format, path) in [
             (FileFormat::Vue, "fixture.vue"),
@@ -1921,24 +1266,12 @@ mod tests {
             .expect("component extraction");
             let first = named(&fragments, "first");
             let second = named(&fragments, "second");
-            assert!(matches!(first, ExtractedFragment::Representative(_)));
-            assert!(matches!(second, ExtractedFragment::Representative(_)));
-            assert_ne!(first.index(), second.index());
-            for (index, fragment) in fragments.iter().enumerate() {
-                assert_eq!(fragment.index(), index);
-                if let ExtractedFragment::Window(window) = fragment {
-                    let owner = &fragments[window.entity_index];
-                    assert!(matches!(owner, ExtractedFragment::Representative(_)));
-                    assert!(test_metadata(owner).is_some());
-                    assert!(owner.range().contains(fragment.range()));
-                    assert_source_backed(&source, fragment);
-                }
-            }
-            for owner in [first, second] {
-                assert!(fragments.iter().any(|fragment| matches!(
-                    fragment,
-                    ExtractedFragment::Window(window) if window.entity_index == owner.index()
-                )));
+            assert!(first.fragments.len() > 1);
+            assert!(second.fragments.len() > 1);
+            assert_ne!(first.index, second.index);
+            for (index, entity) in fragments.iter().enumerate() {
+                assert_eq!(entity.index, index);
+                assert_source_backed(&source, entity);
             }
         }
     }
@@ -1962,19 +1295,15 @@ mod tests {
                 },
             )
             .expect("unicode extraction");
-            let windows = fragments
-                .iter()
-                .filter(|fragment| {
-                    matches!(
-                        &test_metadata(&fragments[fragment.entity_index()]),
-                        Some(EntityMetadata::Code(CodeMetadata { symbol_name: Some(name), .. })) if name == "emoji"
-                    ) && !matches!(fragment, ExtractedFragment::Representative(_))
-                })
-                .collect::<Vec<_>>();
-            assert!(windows.len() > 2);
-            for fragment in windows {
-                assert_source_backed(&source, fragment);
-                let Content::Text(content) = &test_content(fragment) else {
+            let entity = named(&fragments, "emoji");
+            assert!(entity.fragments.len() > 2);
+            assert_source_backed(&source, entity);
+            for fragment in &entity.fragments {
+                let Content::Text(content) = fragment
+                    .range
+                    .extract(&entity.content)
+                    .expect("fragment content")
+                else {
                     panic!("text expected");
                 };
                 assert!(content.chars().count() <= max_chars);
@@ -1992,7 +1321,7 @@ mod tests {
         let fragments = extract(&source, ChunkOptions::default()).expect("offset extraction");
         let fragment = named(&fragments, "afterEmoji");
         assert_source_backed(&source, fragment);
-        let SourceRange::Text(range) = *fragment.range() else {
+        let Range::Text(range) = *fragment.source_range() else {
             panic!("text range expected");
         };
         assert_eq!(

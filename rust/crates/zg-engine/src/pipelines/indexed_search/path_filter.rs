@@ -107,13 +107,13 @@ fn file_name_filter(pattern: &str) -> Option<StoragePathFilter> {
     }
     if let Some(prefix) = pattern
         .strip_suffix('*')
-        .filter(|prefix| literal_like(prefix))
+        .filter(|prefix| literal_name(prefix))
     {
         return Some(StoragePathFilter::FileNamePrefix(prefix.to_owned()));
     }
     if let Some(suffix) = pattern
         .strip_prefix('*')
-        .filter(|suffix| literal_like(suffix))
+        .filter(|suffix| literal_name(suffix))
     {
         return Some(StoragePathFilter::FileNameSuffix(suffix.to_owned()));
     }
@@ -121,16 +121,12 @@ fn file_name_filter(pattern: &str) -> Option<StoragePathFilter> {
 }
 
 fn literal_name(name: &str) -> bool {
-    // A conservative alphabet avoids differences between glob escaping,
-    // platform separators and SQL LIKE wildcard syntax.
+    // A conservative alphabet avoids differences between glob escaping and
+    // platform separators.
     !name.is_empty()
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-}
-
-fn literal_like(name: &str) -> bool {
-    literal_name(name) && !name.contains('_')
 }
 
 pub(super) fn any(predicates: Vec<StoragePathFilter>) -> StoragePathFilter {

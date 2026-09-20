@@ -5,7 +5,7 @@ pub use result::IndexResult;
 
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::path::PathBuf;
 
     use serde::{Deserialize, Serialize};
     use tokio_util::sync::CancellationToken;
@@ -30,11 +30,8 @@ pub mod options {
         pub changes: Vec<WorkspaceChange>,
         #[serde(default)]
         pub scan: ScanRulesUpdate,
+        /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// Explicit content-to-model routes. Mutually exclusive with `embedding`.
-        /// Models shared by several content kinds produce only one index table.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub embedding_routes: Option<BTreeMap<ContentKind, EmbeddingModelSpec>>,
         /// Maximum embedding batch tasks for this index operation.
         /// The model default is used when omitted.
         pub embedding_concurrency: Option<usize>,
@@ -466,6 +463,21 @@ mod tests {
         assert!(decoded.on_progress.is_none());
         assert!(decoded.signal.is_none());
         assert_eq!(decoded.root, request.root);
+    }
+
+    #[test]
+    fn rejects_removed_content_routing_in_index_requests() {
+        for routes in [
+            serde_json::json!({}),
+            serde_json::json!({"text": "local/model"}),
+        ] {
+            let mut request = serde_json::to_value(IndexOptions::default()).expect("index request");
+            assert!(request.get("embedding_routes").is_none());
+            request["embedding_routes"] = routes;
+            let error =
+                serde_json::from_value::<IndexOptions>(request).expect_err("removed routing");
+            assert!(error.to_string().contains("embedding_routes"));
+        }
     }
 
     #[test]

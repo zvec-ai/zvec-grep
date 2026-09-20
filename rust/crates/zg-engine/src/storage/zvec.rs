@@ -24,9 +24,9 @@ use crate::domain::{FTS_CONFIG, model::EmbeddingModelInfo};
 use crate::{
     EngineError, EngineResult,
     domain::{
-        CodeMetadata, Content, DirectoryId, DirectoryRecord, EntityContent, EntityFragment,
-        EntityId, EntityMetadata, FileId, FileRecord, IndexField, SourcePath, model::Metric,
-        validate_fragments,
+        CodeMetadata, Content, DirectoryId, DirectoryRecord, Entity, EntityFragment, EntityId,
+        EntityMetadata, FileId, FileRecord, IndexField, SourcePath, model::Metric,
+        validate_entities,
     },
     utils::sha256_hex_parts,
 };
@@ -309,11 +309,7 @@ impl NativeStore {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
-        let entity_keys = keys(
-            hits.iter()
-                .map(|hit| primary_key("fragment", hit.entity_id.as_str()))
-                .collect(),
-        );
+        let entity_keys = keys(hits.iter().map(|hit| entity_key(&hit.entity_id)).collect());
         let file_keys = keys(hits.iter().map(|hit| file_key(hit.file_id)).collect());
         let entity_docs = fetch_map(&self.entities, &entity_keys)?;
         let files = fetch_map(&self.files, &file_keys)?
@@ -324,46 +320,44 @@ impl NativeStore {
         let mut fragments = HashMap::new();
         for doc in entity_docs.into_values() {
             let metadata = decode_metadata(&doc)?;
-            let bundle =
-                codec::decode_entity_fragments(&string_field(&doc, "payload")?, metadata.as_ref())?;
-            let owner = bundle
-                .iter()
-                .find_map(EntityFragment::as_entity)
-                .ok_or_else(|| corrupt("entity bundle has no owner"))?;
-            if doc_key(&doc)? != primary_key("fragment", owner.id.as_str())
-                || u32_field(&doc, "file_id")? != owner.file_id.get()
-                || string_field(&doc, "entity_id")? != hex::encode(owner.id.as_str())
-                || string_field(&doc, "document_id")? != hex::encode(owner.id.as_str())
+            let entity = codec::decode_entity(&string_field(&doc, "payload")?, metadata.as_ref())?;
+            if doc_key(&doc)? != entity_key(&entity.id)
+                || u32_field(&doc, "file_id")? != entity.file_id.get()
+                || string_field(&doc, "entity_id")? != hex::encode(entity.id.as_str())
             {
-                return Err(corrupt(
-                    "entity bundle identity differs from its index fields",
-                ));
+                return Err(corrupt("entity identity differs from its index fields"));
             }
             let file = files
-                .get(&owner.file_id)
+                .get(&entity.file_id)
                 .ok_or_else(|| corrupt("entity references a missing file"))?;
-            validate_indexed_owner(file, owner.file_id)?;
-            entities.insert(
-                owner.id.clone(),
-                StoredEntity {
-                    entity: owner.clone(),
-                    file: file.clone(),
-                },
-            );
-            for fragment in bundle {
+            validate_indexed_owner(file, entity.file_id)?;
+            for fragment in &entity.fragments {
                 if fragments
-                    .insert(fragment.document_id().to_owned(), fragment)
+                    .insert(fragment.id.as_str().to_owned(), fragment.clone())
                     .is_some()
                 {
                     return Err(corrupt("duplicate canonical fragment identity"));
                 }
             }
+            entities.insert(
+                entity.id.clone(),
+                StoredEntity {
+                    entity,
+                    file: file.clone(),
+                },
+            );
         }
         for hit in hits {
-            let fragment = fragments
-                .get(&hit.document_id)
-                .ok_or_else(|| corrupt("search references a missing fragment"))?;
-            if fragment.entity_id() != &hit.entity_id || *fragment.file_id() != hit.file_id {
+            let owner = entities
+                .get(&hit.entity_id)
+                .ok_or_else(|| corrupt("search references a missing entity"))?;
+            if owner.file.id != hit.file_id
+                || !owner
+                    .entity
+                    .fragments
+                    .iter()
+                    .any(|fragment| fragment.id.as_str() == hit.document_id)
+            {
                 return Err(corrupt(
                     "search identities differ from their stored fragment",
                 ));
@@ -379,65 +373,45 @@ impl NativeStore {
     fn validate_replacement(
         &self,
         file: &FileRecord,
+        entities: &[Entity],
         entries: &[IndexedFragment],
     ) -> EngineResult<()> {
-        validate_fragments(file.id, entries.iter().map(|entry| &entry.fragment))?;
-        let entity_count = u64::try_from(
-            entries
-                .iter()
-                .filter(|entry| entry.fragment.as_entity().is_some())
-                .count(),
-        )
-        .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?;
-        if (!file.index_status.is_indexed() && !entries.is_empty())
-            || file.index_status.entity_count() != entity_count
+        validate_entities(file.id, entities)?;
+        validate_projections(entities, entries)?;
+        let count = u64::try_from(entities.len())
+            .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?;
+        if (!file.index_status.is_indexed() && (!entities.is_empty() || !entries.is_empty()))
+            || file.index_status.entity_count() != count
         {
             return Err(EngineError::invalid_argument(
-                "file index status does not match its fragments",
+                "file index status does not match its entities",
             ));
         }
-        let mut models = HashMap::new();
         for entry in entries {
             self.validate_vector(&entry.model, &entry.vector)?;
-            if models
-                .insert(entry.fragment.entity_id(), entry.model.as_str())
-                .is_some_and(|other| other != entry.model)
-            {
-                return Err(EngineError::invalid_argument(
-                    "all fragments of an entity must use one embedding model",
-                ));
-            }
         }
-        // Reject foreign IDs before deleting anything. Fragment identity is generation-wide,
-        // including across model partitions, and may only be replaced by the same file.
         let fragment_keys = entries
             .iter()
-            .map(|entry| primary_key("fragment", entry.fragment.document_id()))
+            .map(|entry| primary_key("fragment", entry.fragment_id.as_str()))
             .collect::<Vec<_>>();
-        for collection in self
-            .indexes
-            .values()
-            .map(|index| &index.collection)
-            .chain(std::iter::once(&self.entities))
-        {
-            for doc in fetch_map(collection, &fragment_keys)?.into_values() {
-                if u32_field(&doc, "file_id")? != file.id.get() {
-                    return Err(EngineError::invalid_argument(
-                        "fragment ID is already owned by another file",
-                    ));
-                }
-            }
+        for collection in self.indexes.values().map(|index| &index.collection) {
+            reject_foreign_ids(collection, &fragment_keys, file.id)?;
         }
-        Ok(())
+        let entity_keys = entities
+            .iter()
+            .map(|entity| entity_key(&entity.id))
+            .collect::<Vec<_>>();
+        reject_foreign_ids(&self.entities, &entity_keys, file.id)
     }
 
     pub(super) fn apply_replace(
         &self,
         file: &FileRecord,
+        entities: &[Entity],
         entries: &[IndexedFragment],
     ) -> EngineResult<()> {
         self.assert_writable()?;
-        self.validate_replacement(file, entries)?;
+        self.validate_replacement(file, entities, entries)?;
         let (directory_ids, directory_docs) = {
             let mut guard = self.directory_ids()?;
             let ids = guard.as_mut().expect("loaded directories");
@@ -462,9 +436,8 @@ impl NativeStore {
             (directory_ids, directory_docs)
         };
         let file_doc = encode_file_doc(file, &directory_ids)?;
-        let owners = entries
+        let owners = entities
             .iter()
-            .filter_map(|entry| entry.fragment.as_entity())
             .map(|entity| {
                 Ok((
                     &entity.id,
@@ -479,16 +452,18 @@ impl NativeStore {
                 ))
             })
             .collect::<EngineResult<HashMap<_, _>>>()?;
+        let fragments = entities
+            .iter()
+            .flat_map(|entity| &entity.fragments)
+            .map(|fragment| (&fragment.id, fragment))
+            .collect::<HashMap<_, _>>();
         let mut projections: BTreeMap<&str, Vec<Doc>> = BTreeMap::new();
-        let mut bundles: BTreeMap<&EntityId, Vec<&EntityFragment>> = BTreeMap::new();
         for entry in entries {
-            let (owner, metadata) = &owners[entry.fragment.entity_id()];
-            let mut doc = fragment_doc(&entry.fragment, file, &directory_ids, metadata.as_ref())?;
+            let (owner, metadata) = &owners[&entry.entity_id];
+            let fragment = fragments[&entry.fragment_id];
+            let mut doc = fragment_doc(owner, fragment, file, &directory_ids, metadata.as_ref())?;
             native(
-                doc.add_string(
-                    "text",
-                    &lexical_text(&entry.fragment, owner.metadata.as_ref()),
-                ),
+                doc.add_string("text", &lexical_text(owner, fragment)?),
                 "encode searchable text",
             )?;
             native(
@@ -496,35 +471,38 @@ impl NativeStore {
                 "encode embedding vector",
             )?;
             projections.entry(&entry.model).or_default().push(doc);
-            bundles
-                .entry(entry.fragment.entity_id())
-                .or_default()
-                .push(&entry.fragment);
         }
-        let mut entities = Vec::with_capacity(bundles.len());
-        for (entity_id, fragments) in bundles {
-            let owner = fragments
-                .iter()
-                .find(|fragment| fragment.as_entity().is_some())
-                .expect("validated entity owner");
-            let mut doc = identity_doc(owner)?;
-            native(
-                doc.add_string("payload", &codec::encode_entity_fragments(&fragments)?),
-                "encode canonical entity fragments",
-            )?;
-            if let Some(metadata) = &owners[entity_id].1 {
+        let entity_docs = entities
+            .iter()
+            .map(|entity| {
+                let mut doc = native(Doc::new(), "create canonical entity record")?;
+                doc.set_pk(&entity_key(&entity.id));
                 native(
-                    doc.add_string("metadata", &metadata.json),
-                    "encode entity metadata",
+                    doc.add_u32("file_id", entity.file_id.get()),
+                    "encode entity file",
                 )?;
-            }
-            entities.push(doc);
-        }
+                native(
+                    doc.add_string("entity_id", &hex::encode(entity.id.as_str())),
+                    "encode entity identity",
+                )?;
+                native(
+                    doc.add_string("payload", &codec::encode_entity(entity)?),
+                    "encode canonical entity",
+                )?;
+                if let Some(metadata) = &owners[&entity.id].1 {
+                    native(
+                        doc.add_string("metadata", &metadata.json),
+                        "encode entity metadata",
+                    )?;
+                }
+                Ok(doc)
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
         self.delete_documents(file.id)?;
         write_docs(&self.directories, &directory_docs, "write directories")?;
         write_docs(
             &self.entities,
-            &entities,
+            &entity_docs,
             "write entities and canonical fragments",
         )?;
         for (model, docs) in projections {
@@ -676,10 +654,7 @@ fn scalar(
     if indexed {
         native(
             field.set_index_params(&native(
-                IndexParams::invert(
-                    !matches!(data_type, DataType::Uint32 | DataType::ArrayUint32),
-                    false,
-                ),
+                IndexParams::invert(true, false),
                 "define scalar index",
             )?),
             "attach scalar index",
@@ -795,7 +770,9 @@ fn files_schema() -> EngineResult<CollectionSchema> {
 }
 
 fn entities_schema() -> EngineResult<CollectionSchema> {
-    let mut schema = identity_schema("entities")?;
+    let mut schema = native(CollectionSchema::new("entities"), "create entities schema")?;
+    scalar(&mut schema, "file_id", DataType::Uint32, false, true)?;
+    scalar(&mut schema, "entity_id", DataType::String, false, true)?;
     scalar(&mut schema, "payload", DataType::String, false, false)?;
     scalar(&mut schema, "metadata", DataType::String, true, false)?;
     Ok(schema)
@@ -915,31 +892,32 @@ fn decode_file_path_doc(doc: &Doc) -> EngineResult<(FileId, PathBuf)> {
     ))
 }
 
-fn identity_doc(fragment: &EntityFragment) -> EngineResult<Doc> {
+fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc> {
     let mut doc = native(Doc::new(), "create fragment record")?;
-    doc.set_pk(&primary_key("fragment", fragment.document_id()));
+    doc.set_pk(&primary_key("fragment", fragment.id.as_str()));
     native(
-        doc.add_u32("file_id", fragment.file_id().get()),
+        doc.add_u32("file_id", entity.file_id.get()),
         "encode source identity",
     )?;
     native(
-        doc.add_string("entity_id", &hex::encode(fragment.entity_id().as_str())),
+        doc.add_string("entity_id", &hex::encode(entity.id.as_str())),
         "encode entity identity",
     )?;
     native(
-        doc.add_string("document_id", &hex::encode(fragment.document_id())),
+        doc.add_string("document_id", &hex::encode(fragment.id.as_str())),
         "encode document identity",
     )?;
     Ok(doc)
 }
 
 fn fragment_doc(
+    entity: &Entity,
     fragment: &EntityFragment,
     file: &FileRecord,
     directories: &[DirectoryId],
     metadata: Option<&EncodedMetadata>,
 ) -> EngineResult<Doc> {
-    let mut doc = identity_doc(fragment)?;
+    let mut doc = identity_doc(entity, fragment)?;
     file_membership_doc(&mut doc, file, directories)?;
     if let Some(metadata) = metadata {
         for (field, value) in &metadata.fields {
@@ -1148,7 +1126,7 @@ fn in_filter(field: &str, values: impl Iterator<Item = impl AsRef<str>>) -> Stri
     )
 }
 
-/// Push negation to leaves: native SQL supports `NOT CONTAIN_ANY`, but no unary `NOT`.
+/// Push negation to field operators; execution support and errors belong to zvec.
 fn path_filter(
     store: &NativeStore,
     filter: &StoragePathFilter,
@@ -1166,15 +1144,10 @@ fn path_filter(
             else {
                 return Ok(constant_filter(negated));
             };
-            if negated {
-                // Native NOT CONTAIN_ANY omits empty arrays; root files have
-                // no ancestors and must remain in the complement.
-                format!(
-                    "(ancestor_directory_ids NOT CONTAIN_ANY ({id}) OR array_length(ancestor_directory_ids) = 0)"
-                )
-            } else {
-                format!("ancestor_directory_ids CONTAIN_ANY ({id})")
-            }
+            format!(
+                "ancestor_directory_ids {}CONTAIN_ANY ({id})",
+                if negated { "NOT " } else { "" }
+            )
         }
         StoragePathFilter::FileNameExact(name) => {
             if name.contains(['\\', '\0']) {
@@ -1188,29 +1161,16 @@ fn path_filter(
                 quote(name)
             )
         }
-        StoragePathFilter::FileNamePrefix(prefix) => {
-            // Inverted prefix lookup does not unescape LIKE literals either.
-            let wildcard = if prefix.contains(['_', '%', '\\']) {
-                "%%"
-            } else {
-                "%"
-            };
-            format!(
-                "file_name {}LIKE {}",
-                if negated { "NOT " } else { "" },
-                quote(&format!("{}{wildcard}", like_literal(prefix)))
-            )
-        }
-        StoragePathFilter::FileNameSuffix(suffix) => {
-            // The native suffix inversion still keeps the leading '%' in 0.7.1
-            // as a literal. Two equivalent '%' operators select its correct
-            // forward LIKE evaluator until that native bug is fixed.
-            format!(
-                "file_name {}LIKE {}",
-                if negated { "NOT " } else { "" },
-                quote(&format!("%%{}", like_literal(suffix)))
-            )
-        }
+        StoragePathFilter::FileNamePrefix(prefix) => format!(
+            "file_name {}LIKE {}",
+            if negated { "NOT " } else { "" },
+            quote(&format!("{}%", like_literal(prefix)))
+        ),
+        StoragePathFilter::FileNameSuffix(suffix) => format!(
+            "file_name {}LIKE {}",
+            if negated { "NOT " } else { "" },
+            quote(&format!("%{}", like_literal(suffix)))
+        ),
         StoragePathFilter::And(filters) => boolean_filter(store, filters, !negated, negated)?,
         StoragePathFilter::Or(filters) => boolean_filter(store, filters, negated, negated)?,
         StoragePathFilter::Not(filter) => path_filter(store, filter, !negated)?,
@@ -1285,7 +1245,8 @@ fn top_k(limit: usize) -> EngineResult<i32> {
         .map_err(|_| EngineError::invalid_argument("storage query limit is too large"))
 }
 
-fn lexical_text(fragment: &EntityFragment, metadata: Option<&EntityMetadata>) -> String {
+fn lexical_text(entity: &Entity, fragment: &EntityFragment) -> EngineResult<String> {
+    let metadata = entity.metadata.as_ref();
     let mut output = String::new();
     if let Some(metadata) = metadata {
         match metadata {
@@ -1311,24 +1272,15 @@ fn lexical_text(fragment: &EntityFragment, metadata: Option<&EntityMetadata>) ->
             }
         }
     }
-    match fragment {
-        EntityFragment::Standalone(entity) | EntityFragment::Representative(entity) => {
-            match &entity.content {
-                EntityContent::Source(content) => {
-                    append_contents(&mut output, std::slice::from_ref(content));
-                }
-                EntityContent::Outline(text) => output.push_str(text),
-            }
-        }
-        EntityFragment::Window(window) => {
-            append_contents(&mut output, std::slice::from_ref(&window.content));
-        }
-    }
-    if output.contains('\0') {
+    append_contents(
+        &mut output,
+        std::slice::from_ref(&fragment.range.extract(&entity.content)?),
+    );
+    Ok(if output.contains('\0') {
         output.replace('\0', " ")
     } else {
         output
-    }
+    })
 }
 
 // C strings cannot contain NUL; indexed projections preserve token boundaries.
@@ -1357,6 +1309,69 @@ fn append_contents(output: &mut String, contents: &[Content]) {
         }
         output.push('\n');
     }
+}
+
+fn entity_key(id: &EntityId) -> String {
+    primary_key("entity", id.as_str())
+}
+
+fn reject_foreign_ids(
+    collection: &Collection,
+    keys: &[String],
+    file_id: FileId,
+) -> EngineResult<()> {
+    for doc in fetch_map(collection, keys)?.into_values() {
+        if u32_field(&doc, "file_id")? != file_id.get() {
+            return Err(EngineError::invalid_argument(
+                "entity or fragment ID is already owned by another file",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every canonical fragment has exactly one projection, and its entity has one model.
+pub(super) fn validate_projections(
+    entities: &[Entity],
+    entries: &[IndexedFragment],
+) -> EngineResult<()> {
+    let expected = entities
+        .iter()
+        .flat_map(|entity| {
+            entity
+                .fragments
+                .iter()
+                .map(move |fragment| (&fragment.id, &entity.id))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut models = HashMap::new();
+    for entry in entries {
+        if expected.get(&entry.fragment_id).copied() != Some(&entry.entity_id) {
+            return Err(EngineError::invalid_argument(
+                "search projection does not reference its canonical entity fragment",
+            ));
+        }
+        if !seen.insert(&entry.fragment_id) {
+            return Err(EngineError::invalid_argument(
+                "canonical fragment has more than one search projection",
+            ));
+        }
+        if models
+            .insert(&entry.entity_id, &entry.model)
+            .is_some_and(|previous| previous != &entry.model)
+        {
+            return Err(EngineError::invalid_argument(
+                "all fragments of an entity must use one embedding model",
+            ));
+        }
+    }
+    if expected.len() != seen.len() {
+        return Err(EngineError::invalid_argument(
+            "every canonical fragment requires a search projection",
+        ));
+    }
+    Ok(())
 }
 
 fn file_key(id: FileId) -> String {

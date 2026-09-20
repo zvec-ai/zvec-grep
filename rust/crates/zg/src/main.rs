@@ -126,28 +126,14 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
                             endpoint,
                             device,
                             default_model,
-                            content,
                         },
                 } => {
-                    let mut path = None;
-                    if endpoint.is_some() || device.is_some() || default_model || content.is_empty()
-                    {
-                        path = Some(zg_engine::config::set_model(
-                            &reference,
-                            endpoint.as_deref(),
-                            device.map(Into::into),
-                            default_model,
-                        )?);
-                    }
-                    if !content.is_empty() {
-                        let kinds = content
-                            .into_iter()
-                            .map(|kind| serde_json::from_value(serde_json::json!(kind)))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        path = Some(zg_engine::config::set_content_routes(&reference, &kinds)?);
-                    }
-                    let path = path
-                        .ok_or_else(|| io::Error::other("model configuration was not changed"))?;
+                    let path = zg_engine::config::set_model(
+                        &reference,
+                        endpoint.as_deref(),
+                        device.map(Into::into),
+                        default_model,
+                    )?;
                     ("Model", reference, path)
                 }
             };

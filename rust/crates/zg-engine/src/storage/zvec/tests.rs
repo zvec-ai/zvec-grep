@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::{
-    CodeMetadata, Entity, FileIndexStatus, FileSnapshot, FragmentId, IndexField, MarkdownMetadata,
-    SourceRange, SymbolType, TextRange, WindowFragment,
+    ByteRange, CodeMetadata, Entity, FileIndexStatus, FileSnapshot, FragmentId, IndexField,
+    MarkdownMetadata, Range, SymbolType, TextRange,
 };
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
@@ -191,6 +191,7 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
         .collect();
     write_docs(&collection, &docs, "write source IDs").expect("write source IDs");
     collection.flush().expect("flush IDs");
+    collection.optimize().expect("optimize full-range IDs");
     for (value, expected_count) in [(true, ids.len()), (false, 0)] {
         let mut query = SearchQuery::scalar(10).expect("constant query");
         query
@@ -253,7 +254,10 @@ fn metadata_store(path: &Path) -> NativeStore {
     .expect("metadata storage")
 }
 
-fn metadata_fragments(entity_id: &str, window_id: &str) -> (FileRecord, Vec<IndexedFragment>) {
+fn metadata_fragments(
+    entity_id: &str,
+    window_id: &str,
+) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
     let mut source = file(0, "harvest.rs");
     source.snapshot.size_bytes = 100;
     source.snapshot.content_hash = Some("fixture-hash".into());
@@ -261,13 +265,17 @@ fn metadata_fragments(entity_id: &str, window_id: &str) -> (FileRecord, Vec<Inde
         indexed_epoch_ms: 1,
         entity_count: 1,
     };
+    let mut text = "Harvest outline".to_owned();
+    text.push_str(&" ".repeat(20 - text.len()));
+    text.push_str("orchard fruit");
+    text.push_str(&" ".repeat(100 - text.len()));
     let owner = Entity {
         id: EntityId::new(entity_id).expect("owner ID"),
         file_id: source.id,
-        range: SourceRange::Text(
-            TextRange::from_coordinates(0, 100, 1, 10, 0, 0).expect("owner range"),
+        source_range: Range::Text(
+            TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"),
         ),
-        content: EntityContent::Outline("Harvest outline".into()),
+        content: Content::Text(text),
         metadata: Some(EntityMetadata::Code(CodeMetadata {
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("harvest 春'\\crop".into()),
@@ -275,31 +283,43 @@ fn metadata_fragments(entity_id: &str, window_id: &str) -> (FileRecord, Vec<Inde
             signature: Some("pub async fn harvest() -> Crop".into()),
             documentation: Some("Produces the seasonal crop.".into()),
         })),
-    };
-    let window = WindowFragment {
-        id: FragmentId::new(window_id).expect("window ID"),
-        entity_id: owner.id.clone(),
-        file_id: source.id,
-        range: SourceRange::Text(
-            TextRange::from_coordinates(20, 40, 3, 4, 0, 5).expect("window range"),
-        ),
-        content: Content::Text("orchard fruit".into()),
-    };
-    (
-        source,
-        vec![
-            IndexedFragment {
-                model: "fixture/fixture".into(),
-                fragment: EntityFragment::Representative(owner),
-                vector: vec![0.0, 1.0, 0.0],
+        fragments: vec![
+            EntityFragment {
+                id: FragmentId::new(format!("{entity_id}-first")).expect("first fragment ID"),
+                range: Range::Byte(ByteRange {
+                    start_offset: 0,
+                    end_offset: 15,
+                }),
             },
-            IndexedFragment {
-                model: "fixture/fixture".into(),
-                fragment: EntityFragment::Window(window),
-                vector: vec![1.0, 0.0, 0.0],
+            EntityFragment {
+                id: FragmentId::new(window_id).expect("window ID"),
+                range: Range::Byte(ByteRange {
+                    start_offset: 20,
+                    end_offset: 40,
+                }),
             },
         ],
-    )
+    };
+    let entries = owner
+        .fragments
+        .iter()
+        .zip([vec![0.0, 1.0, 0.0], vec![1.0, 0.0, 0.0]])
+        .map(|(fragment, vector)| IndexedFragment {
+            model: "fixture/fixture".into(),
+            entity_id: owner.id.clone(),
+            fragment_id: fragment.id.clone(),
+            vector,
+        })
+        .collect();
+    (source, vec![owner], entries)
+}
+
+fn entity_document(collection: &Collection, id: &str) -> Doc {
+    let key = entity_key(&EntityId::new(id).expect("entity ID"));
+    fetch_map(collection, std::slice::from_ref(&key))
+        .expect("stored entities")
+        .remove(&key)
+        .expect("stored entity")
 }
 
 fn fragment_document(collection: &Collection, id: &str) -> Doc {
@@ -360,14 +380,8 @@ fn metadata_projection_rejects_values_that_do_not_match_the_declared_type() {
 
 #[test]
 fn metadata_projection_preserves_full_json_without_indexing_other_fields() {
-    let (_, entries) = metadata_fragments("owner", "window");
-    let metadata = entries[0]
-        .fragment
-        .as_entity()
-        .expect("owner entity")
-        .metadata
-        .as_ref()
-        .expect("owner metadata");
+    let (_, entities, _) = metadata_fragments("owner", "window");
+    let metadata = entities[0].metadata.as_ref().expect("owner metadata");
     let encoded = EncodedMetadata::new(metadata).expect("encode metadata");
 
     assert_eq!(
@@ -390,23 +404,28 @@ fn metadata_projection_preserves_full_json_without_indexing_other_fields() {
 fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let (source, entries) = metadata_fragments("owner", "window");
-    store.apply_replace(&source, &entries).expect("write file");
+    let (source, entities, entries) = metadata_fragments("owner", "window");
+    store
+        .apply_replace(&source, &entities, &entries)
+        .expect("write file");
     store.flush().expect("flush storage");
-    let owner = entries[0].fragment.as_entity().expect("owner entity");
-    let entity_doc = fragment_document(&store.entities, owner.id.as_str());
+    let owner = &entities[0];
+    let entity_doc = entity_document(&store.entities, owner.id.as_str());
     assert_eq!(
         decode_metadata(&entity_doc).expect("metadata JSON"),
         owner.metadata
     );
     assert_eq!(
-        fetch_map(&store.entities, &[primary_key("fragment", "window")])
-            .expect("window entity lookup")
-            .len(),
+        fetch_map(
+            &store.entities,
+            &[entity_key(&EntityId::new("window").expect("ID"))]
+        )
+        .expect("window entity lookup")
+        .len(),
         0
     );
     for entry in &entries {
-        let id = entry.fragment.document_id();
+        let id = entry.fragment_id.as_str();
         let doc = fragment_document(&store.indexes["fixture/fixture"].collection, id);
         assert!(
             !doc.has_field("payload"),
@@ -446,7 +465,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     assert_eq!(loaded.entities.len(), 1);
     assert_eq!(loaded.entities[&owner.id].entity, *owner);
     assert_eq!(loaded.entities[&owner.id].file, source);
-    assert_eq!(loaded.fragments["window"], entries[1].fragment);
+    assert_eq!(loaded.fragments["window"], entities[0].fragments[1]);
 
     for rejected in [
         StorageSearchFilter {
@@ -497,23 +516,20 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
             scope: Some("Garden".into()),
         })),
     ] {
-        let (source, mut entries) = metadata_fragments("owner", "window");
-        let EntityFragment::Representative(owner) = &mut entries[0].fragment else {
-            panic!("representative entity");
-        };
-        owner.metadata = metadata.clone();
+        let (source, mut entities, entries) = metadata_fragments("owner", "window");
+        entities[0].metadata = metadata.clone();
         store
-            .apply_replace(&source, &entries)
+            .apply_replace(&source, &entities, &entries)
             .expect("write entities without metadata filter values");
         store.flush().expect("flush storage");
         assert_eq!(
-            decode_metadata(&fragment_document(&store.entities, "owner")).expect("metadata JSON"),
+            decode_metadata(&entity_document(&store.entities, "owner")).expect("metadata JSON"),
             metadata
         );
         {
             let collection = &store.indexes["fixture/fixture"].collection;
             for entry in &entries {
-                let doc = fragment_document(collection, entry.fragment.document_id());
+                let doc = fragment_document(collection, entry.fragment_id.as_str());
                 for IndexField::String(name) in EntityMetadata::index_schema() {
                     assert!(
                         doc.is_field_null(name),
@@ -529,17 +545,20 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
 fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let (mut source, mut entries) = metadata_fragments("class", "class-window");
-    entries.extend(metadata_fragments("enum", "enum-window").1);
-    entries.extend(metadata_fragments("unclassified", "unclassified-window").1);
-    for (pair, symbol_type) in entries.as_chunks_mut::<2>().0.iter_mut().zip([
-        Some(SymbolType::Class),
-        Some(SymbolType::Enum),
-        None,
-    ]) {
-        let EntityFragment::Representative(owner) = &mut pair[0].fragment else {
-            panic!("representative entity");
-        };
+    let (mut source, mut entities, mut entries) = metadata_fragments("class", "class-window");
+    for (id, fragment_id) in [
+        ("enum", "enum-window"),
+        ("unclassified", "unclassified-window"),
+    ] {
+        let (_, added_entities, added_entries) = metadata_fragments(id, fragment_id);
+        entities.extend(added_entities);
+        entries.extend(added_entries);
+    }
+    for (owner, symbol_type) in
+        entities
+            .iter_mut()
+            .zip([Some(SymbolType::Class), Some(SymbolType::Enum), None])
+    {
         let Some(EntityMetadata::Code(metadata)) = &mut owner.metadata else {
             panic!("code metadata");
         };
@@ -550,7 +569,7 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         entity_count: 3,
     };
     store
-        .apply_replace(&source, &entries)
+        .apply_replace(&source, &entities, &entries)
         .expect("write classified entities");
     store.flush().expect("flush storage");
 
@@ -605,10 +624,7 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         let loaded = store
             .load_search_hits(std::slice::from_ref(unclassified))
             .expect("load unclassified entity");
-        assert_eq!(
-            loaded.entities[&unclassified.entity_id].entity,
-            *entries[4].fragment.as_entity().expect("original entity")
-        );
+        assert_eq!(loaded.entities[&unclassified.entity_id].entity, entities[2]);
         assert!(
             filtered
                 .expect("classified results")
@@ -622,9 +638,11 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
 fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let (source, entries) = metadata_fragments("owner", "window");
-    store.apply_replace(&source, &entries).expect("write file");
-    let mut doc = fragment_document(&store.entities, "owner");
+    let (source, entities, entries) = metadata_fragments("owner", "window");
+    store
+        .apply_replace(&source, &entities, &entries)
+        .expect("write file");
+    let mut doc = entity_document(&store.entities, "owner");
     doc.add_string("metadata", "invalid metadata JSON")
         .expect("corrupt metadata");
     write_docs(&store.entities, &[doc], "replace metadata").expect("write corrupt metadata");
@@ -657,9 +675,9 @@ fn native_search_and_loading_restore_arbitrary_domain_ids() {
     let store = metadata_store(temporary.path());
     let entity_id = "实体'\\\0owner";
     let window_id = "窗口'\\\0window";
-    let (source, entries) = metadata_fragments(entity_id, window_id);
+    let (source, entities, entries) = metadata_fragments(entity_id, window_id);
     store
-        .apply_replace(&source, &entries)
+        .apply_replace(&source, &entities, &entries)
         .expect("write arbitrary IDs");
     store.flush().expect("flush storage");
     let filter = StorageSearchFilter {
@@ -682,9 +700,9 @@ fn native_search_and_loading_restore_arbitrary_domain_ids() {
         let loaded = store
             .load_search_hits(std::slice::from_ref(window))
             .expect("load arbitrary IDs");
-        let owner = entries[0].fragment.as_entity().expect("owner entity");
+        let owner = &entities[0];
         assert_eq!(loaded.entities[&owner.id].entity, *owner);
-        assert_eq!(loaded.fragments[window_id], entries[1].fragment);
+        assert_eq!(loaded.fragments[window_id], entities[0].fragments[1]);
     }
     {
         let collection = &store.indexes["fixture/fixture"].collection;
@@ -704,7 +722,7 @@ fn native_search_and_loading_restore_arbitrary_domain_ids() {
 fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collections() {
     let temporary = tempfile::tempdir().expect("storage");
     let store = metadata_store(temporary.path());
-    let (mut source, entries) = metadata_fragments("owner", "window");
+    let (mut source, entities, entries) = metadata_fragments("owner", "window");
     source.relative_path = SourcePath::new("edge/harvest.rs").expect("path");
     let mut directories = DirectoryIds::default();
     directories
@@ -722,9 +740,18 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     .expect("stored directory");
     *store.directory_ids.lock().expect("directory cache") = Some(directories);
     store
-        .apply_replace(&source, &entries)
+        .apply_replace(&source, &entities, &entries)
         .expect("write maximum membership");
     store.flush().expect("checkpoint");
+    store.files.optimize().expect("optimize file IDs");
+    store
+        .directories
+        .optimize()
+        .expect("optimize directory IDs");
+    store.indexes["fixture/fixture"]
+        .collection
+        .optimize()
+        .expect("optimize directory membership");
     let schema = EmbeddingModelInfo {
         model: crate::domain::model::ModelInfo {
             provider: "fixture".into(),
@@ -776,125 +803,292 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
 }
 
 #[test]
-fn filename_negation_emits_native_sql_with_literal_escaping() {
+fn filename_like_uses_single_wildcards_and_literal_escaping() {
     let temporary = tempfile::tempdir().expect("storage");
     let store = metadata_store(temporary.path());
     for (filter, expected) in [
+        (
+            StoragePathFilter::FileNamePrefix("main".into()),
+            "file_name LIKE 'main%'",
+        ),
+        (
+            StoragePathFilter::FileNameSuffix(".rs".into()),
+            "file_name LIKE '%.rs'",
+        ),
+        (
+            StoragePathFilter::FileNamePrefix("under_".into()),
+            r"file_name LIKE 'under\_%'",
+        ),
+        (
+            StoragePathFilter::FileNameSuffix("%.rs".into()),
+            r"file_name LIKE '%\%.rs'",
+        ),
+        (
+            StoragePathFilter::FileNamePrefix(r"back\".into()),
+            r"file_name LIKE 'back\\%'",
+        ),
+        (
+            StoragePathFilter::FileNamePrefix("quote'".into()),
+            r"file_name LIKE 'quote\'%'",
+        ),
+        (
+            StoragePathFilter::FileNamePrefix("果园".into()),
+            "file_name LIKE '果园%'",
+        ),
+    ] {
+        assert_eq!(path_filter(&store, &filter, false).expect("SQL"), expected);
+        let negative = StoragePathFilter::Not(Box::new(filter));
+        assert_eq!(
+            path_filter(&store, &negative, false).expect("negative SQL"),
+            expected.replace(" LIKE ", " NOT LIKE ")
+        );
+        assert_eq!(
+            path_filter(&store, &StoragePathFilter::Not(Box::new(negative)), false)
+                .expect("double negation"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn filename_like_negation_propagates_native_query_errors() {
+    let temporary = tempfile::tempdir().expect("storage");
+    let store = metadata_store(temporary.path());
+    let (source, entities, entries) = metadata_fragments("owner", "window");
+    store
+        .apply_replace(&source, &entities, &entries)
+        .expect("indexed source");
+    for (positive, sql) in [
         (
             StoragePathFilter::FileNamePrefix("main".into()),
             "file_name NOT LIKE 'main%'",
         ),
         (
             StoragePathFilter::FileNameSuffix(".rs".into()),
-            "file_name NOT LIKE '%%.rs'",
-        ),
-        (
-            StoragePathFilter::FileNamePrefix("under_".into()),
-            r"file_name NOT LIKE 'under\_%%'",
-        ),
-        (
-            StoragePathFilter::FileNameSuffix("%.rs".into()),
-            r"file_name NOT LIKE '%%\%.rs'",
-        ),
-        (
-            StoragePathFilter::FileNamePrefix(r"back\".into()),
-            r"file_name NOT LIKE 'back\\%%'",
-        ),
-        (
-            StoragePathFilter::FileNamePrefix("quote'".into()),
-            r"file_name NOT LIKE 'quote\'%'",
-        ),
-        (
-            StoragePathFilter::FileNameExact("main.rs".into()),
-            "file_name != 'main.rs'",
+            "file_name NOT LIKE '%.rs'",
         ),
     ] {
-        assert_eq!(
-            path_filter(&store, &StoragePathFilter::Not(Box::new(filter)), false).expect("SQL"),
-            expected
-        );
+        let mut query = SearchQuery::scalar(10).expect("native query");
+        query.set_filter(sql).expect("native filter");
+        let native_error = store
+            .files
+            .query(&query)
+            .err()
+            .expect("the pinned zvec release does not parse NOT LIKE");
+        let filter = StorageSearchFilter {
+            path: Some(StoragePathFilter::Not(Box::new(positive))),
+            ..StorageSearchFilter::default()
+        };
+        for (operation, result) in [
+            (
+                "search full-text index",
+                store.search_fts("orchard", 10, Some(&filter)),
+            ),
+            (
+                "search vector index",
+                store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, Some(&filter)),
+            ),
+        ] {
+            let error = result.expect_err("native rejection reaches the caller");
+            assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+            assert_eq!(error.message(), format!("zvec {operation}: {native_error}"));
+        }
     }
-    let filter = StoragePathFilter::Not(Box::new(StoragePathFilter::Or(vec![
+    let nested = StoragePathFilter::Not(Box::new(StoragePathFilter::Or(vec![
         StoragePathFilter::FileNamePrefix("main".into()),
         StoragePathFilter::Not(Box::new(StoragePathFilter::FileNameSuffix(".rs".into()))),
     ])));
     assert_eq!(
-        path_filter(&store, &filter, false).expect("boolean SQL"),
-        "(file_name NOT LIKE 'main%' AND file_name LIKE '%%.rs')"
+        path_filter(&store, &nested, false).expect("nested negation"),
+        "(file_name NOT LIKE 'main%' AND file_name LIKE '%.rs')"
     );
 }
 
-#[test]
-fn filename_negation_preserves_native_results_or_errors_for_both_retrieval_routes() {
-    let temporary = tempfile::tempdir().expect("storage");
-    let store = metadata_store(temporary.path());
-    let (source, entries) = metadata_fragments("owner", "window");
-    store
-        .apply_replace(&source, &entries)
-        .expect("indexed source");
-    let mut fts = Fts::new().expect("FTS request");
-    fts.set_match_string("orchard").expect("query text");
-    for (path, sql) in [
-        (
-            StoragePathFilter::FileNamePrefix("absent".into()),
-            "file_name NOT LIKE 'absent%'",
-        ),
-        (
-            StoragePathFilter::FileNameSuffix(".rs".into()),
-            "file_name NOT LIKE '%%.rs'",
-        ),
-    ] {
-        let filter = StorageSearchFilter {
-            path: Some(StoragePathFilter::Not(Box::new(path))),
-            ..StorageSearchFilter::default()
-        };
-        let queries = [
-            (
-                SearchQuery::fts("text", &fts, 10).expect("native FTS query"),
-                &store.indexes["fixture/fixture"].collection,
-                StorageSearchPath::Fts,
-                "search full-text index",
-            ),
-            (
-                SearchQuery::new("embedding", &[1.0, 0.0, 0.0], 10).expect("native vector query"),
-                &store.indexes["fixture/fixture"].collection,
-                StorageSearchPath::Vector,
-                "search vector index",
-            ),
-        ];
-        for (mut query, collection, route, operation) in queries {
-            query.set_filter(sql).expect("native SQL");
-            query
-                .set_output_fields(&["document_id", "entity_id", "file_id"])
-                .expect("projection");
-            query.set_include_vector(false).expect("omit vectors");
-            let expected = collection.query(&query);
-            let actual = match route {
-                StorageSearchPath::Fts => store.search_fts("orchard", 10, Some(&filter)),
-                StorageSearchPath::Vector => {
-                    store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, Some(&filter))
-                }
-            };
-            match expected {
-                Ok(docs) => {
-                    let expected = docs
-                        .iter()
-                        .map(|doc| decode_search_hit(doc, route).expect("native hit"))
-                        .collect::<Vec<_>>();
-                    assert_eq!(actual.expect("native query succeeded"), expected);
-                }
-                Err(error) => {
-                    let actual = actual.expect_err("native query failed");
-                    assert_eq!(actual.code(), EngineError::STORAGE_FAILURE);
-                    assert_eq!(actual.message(), format!("zvec {operation}: {error}"));
-                }
-            }
+fn index_named_filter_sources(store: &NativeStore, paths: &[&str]) {
+    for (index, path) in paths.iter().enumerate() {
+        let id = u32::try_from(index + 1).expect("file ID");
+        let (mut source, mut entities, entries) =
+            metadata_fragments(&format!("owner-{id}"), &format!("window-{id}"));
+        source.id = FileId::new(id);
+        source.relative_path = SourcePath::new(*path).expect("source path");
+        for entity in &mut entities {
+            entity.file_id = source.id;
         }
+        store
+            .apply_replace(&source, &entities, &entries)
+            .expect("index filter source");
     }
 }
 
+fn assert_filter_file_ids(store: &NativeStore, path: &StoragePathFilter, expected: &[u32]) {
+    let filter = StorageSearchFilter {
+        path: Some(path.clone()),
+        ..StorageSearchFilter::default()
+    };
+    for (label, result, fragments_per_file) in [
+        ("FTS", store.search_fts("orchard", 100, Some(&filter)), 1),
+        (
+            "vector",
+            store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 100, Some(&filter)),
+            2,
+        ),
+    ] {
+        let mut actual = result
+            .expect("native filtered search")
+            .into_iter()
+            .map(|hit| hit.file_id.get())
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = expected
+            .iter()
+            .flat_map(|id| std::iter::repeat_n(*id, fragments_per_file))
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "{label}: {path:?}");
+    }
+}
+
+fn reopen_filter_store(path: &Path) -> NativeStore {
+    NativeStore::open(
+        path,
+        &[EmbeddingModelInfo {
+            model: crate::domain::model::ModelInfo {
+                provider: "fixture".into(),
+                name: "fixture".into(),
+                endpoint: None,
+            },
+            dimension: 3,
+            metric: Metric::Cosine,
+            max_batch_size: 32,
+            max_input_tokens: None,
+            max_image_bytes: None,
+        }],
+        true,
+    )
+    .expect("reopen filter storage")
+}
+
 #[test]
-fn entity_bundle_is_authoritative_and_rejects_cross_model_fragment_ownership() {
+fn filename_like_matches_literals_and_case_before_and_after_reopen() {
+    let temporary = tempfile::tempdir().expect("storage");
+    let store = metadata_store(temporary.path());
+    let mut names = vec![
+        "main.rs",
+        "Main.rs",
+        "main.RS",
+        "under_.rs",
+        "underX.rs",
+        "literal%.rs",
+        "literalX.rs",
+        "quote'.rs",
+        "quoteX.rs",
+        "果园.rs",
+        "果园.txt",
+        "unrelated.txt",
+    ];
+    let mut suffix_matches = vec![1, 2, 4, 5, 6, 7, 8, 9, 10];
+    let mut cases = vec![
+        (StoragePathFilter::FileNamePrefix("main".into()), vec![1, 3]),
+        (StoragePathFilter::FileNamePrefix("Main".into()), vec![2]),
+        (StoragePathFilter::FileNameSuffix(".RS".into()), vec![3]),
+        (StoragePathFilter::FileNamePrefix("under_".into()), vec![4]),
+        (StoragePathFilter::FileNameSuffix("_.rs".into()), vec![4]),
+        (
+            StoragePathFilter::FileNamePrefix("literal%".into()),
+            vec![6],
+        ),
+        (StoragePathFilter::FileNameSuffix("%.rs".into()), vec![6]),
+        (StoragePathFilter::FileNamePrefix("quote'".into()), vec![8]),
+        (StoragePathFilter::FileNameSuffix("'.rs".into()), vec![8]),
+        (
+            StoragePathFilter::FileNamePrefix("果园".into()),
+            vec![10, 11],
+        ),
+        (StoragePathFilter::FileNameSuffix("园.rs".into()), vec![10]),
+        (StoragePathFilter::FileNameSuffix(".missing".into()), vec![]),
+    ];
+    if cfg!(unix) {
+        names.extend([r"back\.rs", "backX.rs"]);
+        suffix_matches.extend([13, 14]);
+        cases.extend([
+            (StoragePathFilter::FileNamePrefix(r"back\".into()), vec![13]),
+            (StoragePathFilter::FileNameSuffix(r"\.rs".into()), vec![13]),
+        ]);
+    }
+    cases.push((
+        StoragePathFilter::FileNameSuffix(".rs".into()),
+        suffix_matches,
+    ));
+    index_named_filter_sources(&store, &names);
+    let verify = |store: &NativeStore| {
+        for (path, expected) in &cases {
+            assert_filter_file_ids(store, path, expected);
+        }
+    };
+    verify(&store);
+    store.flush().expect("flush filter storage");
+    verify(&store);
+    drop(store);
+    verify(&reopen_filter_store(temporary.path()));
+}
+
+#[test]
+fn negated_directory_contains_empty_root_arrays_before_and_after_reopen() {
+    let temporary = tempfile::tempdir().expect("storage");
+    let store = metadata_store(temporary.path());
+    index_named_filter_sources(
+        &store,
+        &[
+            "root.rs",
+            "src/main.rs",
+            "src/nested/deep.rs",
+            "other/main.rs",
+        ],
+    );
+    let directory = StoragePathFilter::Directory(SourcePath::new("src").expect("directory"));
+    let complement = StoragePathFilter::Not(Box::new(directory.clone()));
+    let id = store
+        .directory_ids()
+        .expect("directories")
+        .as_ref()
+        .expect("cache")
+        .get(&SourcePath::new("src").expect("directory"))
+        .expect("directory ID");
+    assert_eq!(
+        path_filter(&store, &complement, false).expect("native complement"),
+        format!("ancestor_directory_ids NOT CONTAIN_ANY ({id})")
+    );
+    let cases = [
+        (directory, vec![2, 3]),
+        (complement, vec![1, 4]),
+        (
+            StoragePathFilter::Not(Box::new(StoragePathFilter::Directory(
+                SourcePath::new("absent").expect("directory"),
+            ))),
+            vec![1, 2, 3, 4],
+        ),
+        (
+            StoragePathFilter::Not(Box::new(StoragePathFilter::Or(vec![
+                StoragePathFilter::Directory(SourcePath::new("src").expect("directory")),
+                StoragePathFilter::FileNameExact("main.rs".into()),
+            ]))),
+            vec![1],
+        ),
+    ];
+    let verify = |store: &NativeStore| {
+        for (path, expected) in &cases {
+            assert_filter_file_ids(store, path, expected);
+        }
+    };
+    verify(&store);
+    store.flush().expect("flush empty-array storage");
+    verify(&store);
+    drop(store);
+    verify(&reopen_filter_store(temporary.path()));
+}
+
+#[test]
+fn entity_content_is_canonical_and_fragments_have_one_model() {
     let home = tempfile::tempdir().expect("storage");
     super::super::backend::initialize().expect("native runtime");
     let text = EmbeddingModelInfo {
@@ -912,16 +1106,16 @@ fn entity_bundle_is_authoritative_and_rejects_cross_model_fragment_ownership() {
     let mut other = text.clone();
     other.model.name = "other".into();
     let store = NativeStore::open(home.path(), &[text, other], false).expect("two models");
-    let (source, mut entries) = metadata_fragments("owner", "window");
+    let (source, entities, mut entries) = metadata_fragments("owner", "window");
     entries[1].model = "fixture/other".into();
     assert!(
-        store.apply_replace(&source, &entries).is_err(),
+        store.apply_replace(&source, &entities, &entries).is_err(),
         "one entity cannot span model tables"
     );
     assert!(store.list_files().expect("unmodified").is_empty());
     entries[1].model = "fixture/fixture".into();
     store
-        .apply_replace(&source, &entries)
+        .apply_replace(&source, &entities, &entries)
         .expect("one model owns entire entity");
     let hits = store.search_fts("orchard", 10, None).expect("window match");
     assert_eq!(hits.len(), 1);
@@ -931,8 +1125,8 @@ fn entity_bundle_is_authoritative_and_rejects_cross_model_fragment_ownership() {
         2,
         "one owner read loads all its fragments"
     );
-    assert_eq!(loaded.fragments["owner"], entries[0].fragment);
-    assert_eq!(loaded.fragments["window"], entries[1].fragment);
+    assert_eq!(loaded.fragments["owner-first"], entities[0].fragments[0]);
+    assert_eq!(loaded.fragments["window"], entities[0].fragments[1]);
     for index in store.indexes.values() {
         let schema = index.collection.schema().expect("schema");
         assert!(schema.has_index("text"));
@@ -975,23 +1169,26 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     let mut second = first.clone();
     second.model.name = "other".into();
     let store = NativeStore::open(home.path(), &[first, second], false).expect("two models");
-    let (source, entries) = metadata_fragments("owner", "window");
+    let (source, entities, entries) = metadata_fragments("owner", "window");
     store
-        .apply_replace(&source, &entries)
+        .apply_replace(&source, &entities, &entries)
         .expect("original owner");
     let mut foreign_source = source.clone();
     foreign_source.id = FileId::new(1);
     foreign_source.relative_path = SourcePath::new("other.rs").expect("path");
+    let mut foreign_entities = entities.clone();
+    foreign_entities[0].file_id = foreign_source.id;
+    foreign_entities[0].id = EntityId::new("foreign-owner").expect("foreign owner ID");
     let mut foreign = entries.clone();
     for entry in &mut foreign {
         entry.model = "fixture/other".into();
-        match &mut entry.fragment {
-            EntityFragment::Representative(entity) => entity.file_id = foreign_source.id,
-            EntityFragment::Window(window) => window.file_id = foreign_source.id,
-            EntityFragment::Standalone(_) => unreachable!(),
-        }
+        entry.entity_id = foreign_entities[0].id.clone();
     }
-    assert!(store.apply_replace(&foreign_source, &foreign).is_err());
+    assert!(
+        store
+            .apply_replace(&foreign_source, &foreign_entities, &foreign)
+            .is_err()
+    );
     assert_eq!(store.list_files().expect("original file").len(), 1);
     assert_eq!(
         store

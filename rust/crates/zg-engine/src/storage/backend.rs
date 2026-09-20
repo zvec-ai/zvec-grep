@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{FileId, FileIndexStatus, FileRecord, model::Metric, validate_fragments},
+    domain::{Entity, FileId, FileIndexStatus, FileRecord, model::Metric, validate_entities},
     utils::{atomic_write as write_record, sync_directory},
 };
 
@@ -76,13 +76,13 @@ struct SchemaRecord {
 impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
-            version: 2,
+            version: 4,
             embeddings: embeddings.to_vec(),
         }
     }
 
     fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
-        if self.version != 2 {
+        if self.version != 4 {
             return Err(EngineError::storage_failure(
                 "unsupported storage schema; rebuild the index",
             ));
@@ -392,25 +392,25 @@ impl WorkspaceIndexStorage for ZvecStorage {
         self.read(|native| native.search_vector(model, vector, limit, filter))
     }
 
-    fn replace_file(&self, file: &FileRecord, entries: &[IndexedFragment]) -> StorageResult<()> {
+    fn replace_file(
+        &self,
+        file: &FileRecord,
+        entities: &[Entity],
+        entries: &[IndexedFragment],
+    ) -> StorageResult<()> {
         let shared = self.shared()?;
-        validate_batch(file, entries, &shared.schema)?;
+        validate_batch(file, entities, entries, &shared.schema)?;
         let mut file = file.clone();
         file.index_status = FileIndexStatus::Indexed {
             indexed_epoch_ms: now_epoch_ms()?,
-            entity_count: u64::try_from(
-                entries
-                    .iter()
-                    .filter(|entry| entry.fragment.as_entity().is_some())
-                    .count(),
-            )
-            .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
+            entity_count: u64::try_from(entities.len())
+                .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
         };
         file.validate()?;
         self.apply(
             PendingChange::reindex(&file),
             estimated_write_bytes(&file, entries),
-            |native| native.apply_replace(&file, entries),
+            |native| native.apply_replace(&file, entities, entries),
         )
     }
 
@@ -456,7 +456,7 @@ impl WorkspaceIndexStorage for ZvecStorage {
         };
         file.validate()?;
         self.apply(PendingChange::reindex(&file), 0, |native| {
-            native.apply_replace(&file, &[])
+            native.apply_replace(&file, &[], &[])
         })
     }
 
@@ -519,7 +519,7 @@ fn recover_pending(native: &NativeStore, changes: PendingChanges) -> EngineResul
         match change {
             PendingChange::Reindex(mut file) => {
                 file.index_status = FileIndexStatus::NotIndexed;
-                native.apply_replace(&file, &[])?;
+                native.apply_replace(&file, &[], &[])?;
             }
             PendingChange::Delete(id) => native.apply_delete(id)?,
         }
@@ -529,22 +529,17 @@ fn recover_pending(native: &NativeStore, changes: PendingChanges) -> EngineResul
 
 fn validate_batch(
     file: &FileRecord,
+    entities: &[Entity],
     entries: &[IndexedFragment],
     schema: &[EmbeddingModelInfo],
 ) -> EngineResult<()> {
     file.validate()?;
-    validate_fragments(file.id, entries.iter().map(|entry| &entry.fragment))?;
-    let mut owners = HashMap::new();
+    validate_entities(file.id, entities)?;
+    super::zvec::validate_projections(entities, entries)?;
+    for entity in entities {
+        codec::validate_entity(entity)?;
+    }
     for entry in entries {
-        if owners
-            .insert(entry.fragment.entity_id(), &entry.model)
-            .is_some_and(|previous| previous != &entry.model)
-        {
-            return Err(EngineError::invalid_argument(
-                "all fragments of an entity must use one embedding model",
-            ));
-        }
-        codec::validate_fragment(&entry.fragment)?;
         validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
     }
     Ok(())

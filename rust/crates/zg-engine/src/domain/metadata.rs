@@ -9,6 +9,8 @@ pub enum EntityMetadata {
 }
 
 impl EntityMetadata {
+    /// Returns the metadata fields stored separately in the underlying storage
+    /// and available for query filtering across all entity kinds.
     pub(crate) fn index_schema() -> impl Iterator<Item = IndexField> {
         [CodeMetadata::INDEX_FIELDS, MarkdownMetadata::INDEX_FIELDS]
             .into_iter()
@@ -24,7 +26,9 @@ pub(crate) trait IndexedMetadata {
     const INDEX_FIELDS: &'static [IndexField];
 }
 
-/// A separately indexed field, named by its serialized JSON key.
+/// A metadata field stored separately in the underlying storage for query filtering.
+///
+/// The field name must match its serialized JSON key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IndexField {
     String(&'static str),

@@ -3954,19 +3954,21 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zvec-rust"
-version = "0.7.1"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "572509c7f611c4d8c278919273c586028ebb1d718ed2a64cf0f9407026be14e6"
 dependencies = [
  "zvec-rust-sys",
 ]
 
 [[package]]
 name = "zvec-rust-build"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "133a1af74d96adff4b3906e5d67f66d152f4523dfc347742053e70a4fdf3da43"
+checksum = "02e865fae2b82eb84027fee4fafc750e7d9ebefe785192c409f3951338668b54"
 
 [[package]]
 name = "zvec-rust-sys"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4450e6db22dfdc209b09d457ae6c6e4c1de0cd063815a0e369e5d3bd5e5872f0"
+checksum = "c5a02fdececf3b1472013909d7aad6045b1b39b9708a12e2662e54dcac3aeacd"

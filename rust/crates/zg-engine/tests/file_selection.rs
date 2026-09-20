@@ -12,7 +12,7 @@ use support::{
     EmbeddingServer, configure_remote_model, index_options, info_options, native_file_records,
 };
 use zg_engine::{
-    EngineError, ZvecGrep,
+    ZvecGrep,
     api::{
         context::{
             ContextOptions,
@@ -533,7 +533,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "Compare native filename predicates and error propagation through both public query routes"
+    reason = "Compare positive catalog filtering and native NOT LIKE errors through both public retrieval routes"
 )]
 async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResult {
     let temporary = tempfile::tempdir()?;
@@ -600,55 +600,80 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         }
     }
 
-    // Negated suffixes are delegated to zvec. Compare with the native query so
-    // this also verifies the results when zvec adds support for NOT LIKE.
     let info = engine.info(info_options(root)).await?;
-    let mut options = zvec_rust::CollectionOptions::new()?;
-    options.set_read_only(true)?;
-    let path = info.index_path.join("files");
-    // Match the engine's native boundary for Windows canonical paths.
+    let dimension = info
+        .workspace_index
+        .expect("workspace")
+        .embedding
+        .expect("model")
+        .dimension;
+    let collections = fs::read_dir(&info.index_path)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .expect("collection name")
+                .to_string_lossy()
+                .starts_with("fragments_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(collections.len(), 1, "one native model collection");
+    let collection_path = &collections[0];
     #[cfg(windows)]
-    let path = dunce::simplified(&path);
-    let collection =
-        zvec_rust::Collection::open(path.to_str().expect("UTF-8 path"), Some(&options))?;
-    let mut query = zvec_rust::SearchQuery::scalar(64)?;
-    query.set_filter("(file_name NOT LIKE '%%.rs' OR file_name = '.rs')")?;
-    let native_result = collection.query(&query);
-    collection.close()?;
-    for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
-        let result = search_paths(
-            &engine,
-            root,
-            mode,
-            QueryFilter {
-                excluded_formats: vec![FileFormat::Rust],
-                ..Default::default()
-            },
-        )
-        .await;
-        match &native_result {
-            Ok(_) => assert_eq!(
-                result?,
-                paths(&[
-                    "upper.RS",
-                    "tsconfig.json",
-                    "CMakeLists.txt",
-                    "notes.txt",
-                    "script",
-                    "header.h",
-                ])
-            ),
-            Err(native_error) => {
-                let error = result.expect_err("native query failure must reach the caller");
-                let error = error.downcast_ref::<EngineError>().expect("engine error");
-                assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
-                assert!(
-                    error.message().contains(&native_error.to_string()),
-                    "{error}"
-                );
-            }
-        }
+    let collection_path = dunce::simplified(collection_path);
+    let mut collection_options = zvec_rust::CollectionOptions::new()?;
+    collection_options.set_read_only(true)?;
+    let collection = zvec_rust::Collection::open(
+        collection_path.to_str().expect("UTF-8 collection path"),
+        Some(&collection_options),
+    )?;
+    let mut fts = zvec_rust::Fts::new()?;
+    fts.set_match_string("orchard")?;
+    for (mode, operation, mut native_query) in [
+        (
+            ContextRouteMode::Fts,
+            "search full-text index",
+            zvec_rust::SearchQuery::fts("text", &fts, 64)?,
+        ),
+        (
+            ContextRouteMode::Vector,
+            "search vector index",
+            zvec_rust::SearchQuery::new("embedding", &vec![1.0; dimension], 64)?,
+        ),
+    ] {
+        // Excluding Rust negates both its suffix and the dot-only filename exception.
+        native_query.set_filter("(file_name NOT LIKE '%.rs' OR file_name = '.rs')")?;
+        native_query.set_output_fields(&["document_id", "entity_id", "file_id"])?;
+        native_query.set_include_vector(false)?;
+        let native_error = collection
+            .query(&native_query)
+            .err()
+            .expect("zvec 0.7.2 does not parse NOT LIKE");
+        assert!(native_error.to_string().contains("syntax error"));
+        let error = engine
+            .context(ContextOptions {
+                root: Some(root.to_path_buf()),
+                routes: vec![ContextRoute {
+                    mode,
+                    query: "orchard".into(),
+                }],
+                filter: QueryFilter {
+                    excluded_formats: vec![FileFormat::Rust],
+                    ..Default::default()
+                },
+                limit: Some(64),
+                auto_update: false,
+                allow_remote: true,
+                ..ContextOptions::default()
+            })
+            .await
+            .expect_err("native NOT LIKE error must not be replaced with a successful fallback");
+        assert_eq!(error.code(), zg_engine::EngineError::STORAGE_FAILURE);
+        assert_eq!(error.message(), format!("zvec {operation}: {native_error}"));
     }
+    collection.close()?;
+
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())

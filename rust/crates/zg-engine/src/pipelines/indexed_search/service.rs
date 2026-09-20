@@ -87,18 +87,15 @@ pub(crate) async fn context(
         .iter()
         .any(|route| route.mode == crate::api::context::options::ContextRouteMode::Vector)
     {
-        for schema in manifest.embeddings() {
-            let model = acquire_search_model_for(
-                models,
-                &manifest,
-                schema,
-                options.embedding_concurrency,
-                options,
-                &location.root,
-            )?;
-            assert_embedding_compatible(Some(&manifest), &model)?;
-            acquired.push(model);
-        }
+        let model = acquire_search_model(
+            models,
+            &manifest,
+            options.embedding_concurrency,
+            options,
+            &location.root,
+        )?;
+        assert_embedding_compatible(Some(&manifest), &model)?;
+        acquired.push(model);
     }
     let runtimes = acquired
         .iter()
@@ -151,7 +148,6 @@ pub(in crate::pipelines) fn refresh_options(
     }
 }
 
-#[cfg(test)]
 pub(in crate::pipelines) fn acquire_search_model(
     models: &ModelRuntimeManager,
     manifest: &WorkspaceManifest,
@@ -181,11 +177,10 @@ fn acquire_search_model_for(
     root: &Path,
 ) -> Result<ModelRuntimeLease, EngineError> {
     let reference = schema.model.reference();
-    if manifest.embeddings().len() == 1
-        && options
-            .authorization_model
-            .as_ref()
-            .is_some_and(|expected| expected != &reference)
+    if options
+        .authorization_model
+        .as_ref()
+        .is_some_and(|expected| expected != &reference)
     {
         return Err(EngineError::permission_denied(
             "Workspace embedding model changed after authorization; retry the query",
@@ -198,13 +193,7 @@ fn acquire_search_model_for(
         .unwrap_or_default();
     let config = crate::config::read()?;
     let local = schema.model.provider == "local";
-    if !local
-        && options.device.is_some()
-        && !manifest
-            .embeddings()
-            .iter()
-            .any(|model| model.model.provider == "local")
-    {
+    if !local && options.device.is_some() {
         return Err(EngineError::invalid_argument(
             "--device is only supported for local embedding models",
         ));

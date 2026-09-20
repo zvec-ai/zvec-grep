@@ -27,7 +27,6 @@ pub(crate) struct WorkspaceBuild {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 enum PreviousStorage {
-    Legacy,
     Generation { id: String },
 }
 
@@ -102,14 +101,9 @@ pub(crate) fn prepare_build(
     active: Option<&WorkspaceManifest>,
 ) -> Result<WorkspaceBuild, EngineError> {
     target.storage_generation = Some(Uuid::new_v4().to_string());
-    let previous = active.map(|manifest| {
-        manifest
-            .storage_generation
-            .as_ref()
-            .map_or(PreviousStorage::Legacy, |id| PreviousStorage::Generation {
-                id: id.clone(),
-            })
-    });
+    let previous = active
+        .and_then(|manifest| manifest.storage_generation.as_ref())
+        .map(|id| PreviousStorage::Generation { id: id.clone() });
     let build = WorkspaceBuild {
         version: BUILD_VERSION,
         target,
@@ -208,14 +202,12 @@ fn cleanup_previous(
 ) -> Result<(), EngineError> {
     match &build.previous {
         None => Ok(()),
-        Some(PreviousStorage::Legacy) => factory.delete(home),
         Some(PreviousStorage::Generation { id }) => {
             let mut previous = build.target.clone();
             previous.storage_generation = Some(id.clone());
             remove_generation(home, &previous, factory)
         }
-    }?;
-    crate::storage::delete_workspace_identities(home)
+    }
 }
 
 fn remove_generation(
@@ -296,7 +288,7 @@ mod tests {
     }
 
     fn manifest(root: &Path) -> WorkspaceManifest {
-        WorkspaceManifest::new(
+        let mut manifest = WorkspaceManifest::new(
             Workspace {
                 name: "workspace".to_owned(),
                 root: root.to_path_buf(),
@@ -320,7 +312,9 @@ mod tests {
             Some(5),
             std::collections::BTreeMap::from([("local/example".into(), ModelConfig::default())]),
         )
-        .expect("manifest")
+        .expect("manifest");
+        manifest.storage_generation = Some(Uuid::new_v4().to_string());
+        manifest
     }
 
     fn write_active(manifest: &WorkspaceManifest) {
@@ -393,11 +387,8 @@ mod tests {
     #[test]
     fn publication_cleanup_failure_keeps_new_active_and_recovers_after_rename() {
         let directory = tempdir().expect("workspace");
-        let mut active = manifest(directory.path());
-        active.storage_generation = Some(Uuid::new_v4().to_string());
+        let active = manifest(directory.path());
         write_active(&active);
-        fs::create_dir(active.path.join("catalog")).expect("legacy catalog");
-        fs::write(active.path.join("identity.json"), b"legacy").expect("legacy identities");
         let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         fs::create_dir(build.target.storage_home().join("storage")).expect("completed new storage");
@@ -419,7 +410,6 @@ mod tests {
         );
         assert!(active.storage_home().exists());
         assert!(has_build(&active.path));
-        assert!(active.path.join("catalog").exists());
         committed.workspace.name = "renamed".to_owned();
         write_workspace_manifest(&active.path, &committed).expect("rename after publication");
         factory.fail_delete.store(false, Ordering::Relaxed);
@@ -427,8 +417,6 @@ mod tests {
         assert!(!active.storage_home().exists());
         assert!(committed.storage_home().join("storage").is_dir());
         assert!(!has_build(&active.path));
-        assert!(!active.path.join("catalog").exists());
-        assert!(!active.path.join("identity.json").exists());
         assert_eq!(
             read_workspace_manifest(&active.path).expect("active manifest"),
             Some(committed)
@@ -436,15 +424,12 @@ mod tests {
     }
 
     #[test]
-    fn completed_legacy_rebuild_switches_manifest_before_removing_old_storage() {
+    fn completed_rebuild_switches_manifest_before_removing_previous_generation() {
         let directory = tempdir().expect("workspace");
-        let mut active = manifest(directory.path());
-        active.index_version = Some(4);
+        let active = manifest(directory.path());
         write_active(&active);
         let factory = TestFactory::default();
-        let mut target = active.clone();
-        target.index_version = Some(5);
-        let build = prepare_build(target, Some(&active)).expect("stage");
+        let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         fs::create_dir(build.target.storage_home().join("storage")).expect("new storage");
         publish_build(build, 3, &factory).expect("publish");
         let committed = read_workspace_manifest(&active.path)
@@ -479,14 +464,23 @@ mod tests {
         assert_eq!(pending.target.workspace.name, active.workspace.name);
         recover_build(&home, &factory).expect("discard moved stage");
         assert!(!pending.target.storage_home().exists());
-        assert!(home.join("storage/old").exists());
+        assert!(
+            home.join("generations")
+                .join(
+                    active
+                        .storage_generation
+                        .as_ref()
+                        .expect("active generation")
+                )
+                .join("storage/old")
+                .exists()
+        );
     }
 
     #[test]
     fn drop_removes_both_active_and_interrupted_generations() {
         let directory = tempdir().expect("workspace");
-        let mut active = manifest(directory.path());
-        active.storage_generation = Some(Uuid::new_v4().to_string());
+        let active = manifest(directory.path());
         write_active(&active);
         let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");

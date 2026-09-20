@@ -415,7 +415,6 @@ pub mod result {
         pub excerpt_range: Option<ContentRange>,
         pub content: String,
         pub content_role: Option<ContextContentRole>,
-        pub outline: Option<String>,
         pub status: ContextItemStatus,
         pub score: Option<f64>,
         pub matched_by: MatchedBy,
@@ -432,7 +431,6 @@ pub mod result {
     #[serde(rename_all = "snake_case")]
     pub enum ContextContentRole {
         Source,
-        Outline,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -548,12 +546,12 @@ pub mod result {
     }
 }
 
-impl From<crate::domain::SourceRange> for result::ContentRange {
-    fn from(range: crate::domain::SourceRange) -> Self {
-        use crate::domain::SourceRange;
+impl From<crate::domain::Range> for result::ContentRange {
+    fn from(range: crate::domain::Range) -> Self {
+        use crate::domain::Range;
         match range {
-            SourceRange::File => Self::File,
-            SourceRange::Text(range) => Self::Text {
+            Range::Full => Self::File,
+            Range::Text(range) => Self::Text {
                 start_line: range.start_line(),
                 end_line: range.end_line(),
                 start_byte_offset: range.start_byte_offset(),
@@ -561,7 +559,7 @@ impl From<crate::domain::SourceRange> for result::ContentRange {
                 start_byte_column: range.start_byte_column(),
                 end_byte_column: range.end_byte_column(),
             },
-            SourceRange::Byte(range) => Self::Byte {
+            Range::Byte(range) => Self::Byte {
                 start_offset: range.start_offset,
                 end_offset: range.end_offset,
             },
@@ -569,15 +567,15 @@ impl From<crate::domain::SourceRange> for result::ContentRange {
     }
 }
 
-impl From<&crate::domain::SourceRange> for result::ContentRange {
-    fn from(range: &crate::domain::SourceRange) -> Self {
+impl From<&crate::domain::Range> for result::ContentRange {
+    fn from(range: &crate::domain::Range) -> Self {
         (*range).into()
     }
 }
 
 impl From<crate::domain::TextRange> for result::ContentRange {
     fn from(range: crate::domain::TextRange) -> Self {
-        crate::domain::SourceRange::Text(range).into()
+        crate::domain::Range::Text(range).into()
     }
 }
 
@@ -591,18 +589,18 @@ impl From<&crate::domain::TextRange> for result::ContentRange {
 mod tests {
     use serde_json::json;
 
-    use crate::domain::{ByteRange, SourceRange, TextRange};
+    use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
 
     #[test]
     fn domain_ranges_preserve_public_wire_coordinates() {
-        let file: result::ContentRange = SourceRange::File.into();
+        let file: result::ContentRange = Range::Full.into();
         assert_eq!(
             serde_json::to_value(file).expect("file range"),
             json!({ "kind": "file" })
         );
-        let bytes: result::ContentRange = SourceRange::Byte(ByteRange {
+        let bytes: result::ContentRange = Range::Byte(ByteRange {
             start_offset: 12,
             end_offset: 24,
         })

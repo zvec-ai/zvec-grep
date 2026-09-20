@@ -3,10 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{
-    EngineError,
-    storage::{delete_workspace_identities, spi::WorkspaceIndexStorageFactory},
-};
+use crate::{EngineError, storage::spi::WorkspaceIndexStorageFactory};
 
 use super::manifest::{delete_workspace_manifest, workspace_manifest_path};
 
@@ -66,8 +63,6 @@ pub(crate) fn reset_workspace_index(
     storage_factory: &dyn WorkspaceIndexStorageFactory,
 ) -> Result<(), EngineError> {
     super::build::drop_build_storage(&location.home, storage_factory)?;
-    storage_factory.delete(&location.home)?;
-    delete_workspace_identities(&location.home)?;
     delete_workspace_manifest(&location.home)
 }
 

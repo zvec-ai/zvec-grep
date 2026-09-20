@@ -18,9 +18,15 @@ The engine also uses per-user files: `~/.zvec-grep/workspaces.json` registers wo
 
 **Models.** Local models download missing assets on first use and process content locally. On macOS and Linux, the default model cache is `~/.zvec-grep/models`. Set `ZVEC_GREP_MODEL_CACHE` to choose a cache directory. Remote models send content or queries to the configured embedding endpoint and require authorization.
 
-**Storage and routing.** A generation contains `directories`, `files`, `entities`, and one `fragments_<fingerprint>` collection per enabled embedding model. Canonical entities contain one content object and all their fragments. Explicit content routes choose one model for each content kind; each fragment appears in one model collection, with both FTS and vector indexes. Changing models or routes requires `--rebuild`. For example, `zg index --embedding-route text=qwen/text-embedding-v4 --embedding-route image=qwen/qwen3-vl-embedding` creates two model collections. Remote destinations require consent as usual.
+**Storage and embedding.** This version supports one text embedding model per workspace. A generation contains `directories`, `files`, `entities`, and one `fragments_<fingerprint>` collection for that model. Each entity stores one complete source content object, its source location, metadata, and its fragments. A fragment has its own ID and one range relative to its entity's content. Its source location is calculated from that range and the entity's source location; it stores neither a second content payload nor duplicate source coordinates. Short entities use one full-content fragment, and long entities use source slices that preserve headers, delimiters, and whitespace. Metadata remains attached to the entity and is projected into FTS and embedding inputs; supported metadata filters have dedicated index fields.
 
-**Index updates.** Repeated indexing reuses unchanged files, updates changed files, and removes deleted files from the index. Unsupported files are skipped. Extracted content without a model route fails its file. A failed file keeps its path and error but loses all searchable records; the next index retries the whole file. `drop_index` removes index data, workspace configuration, and the name reservation while preserving source files and shared model caches.
+Entities and fragments use the same `Range` type. An entity's `source_range` is relative to its file; text source locations include decoded UTF-8 byte offsets, one-based line numbers, and zero-based byte columns. A text fragment's `range` selects full content or a half-open UTF-8 byte span relative to its entity's content. Fragment line and column numbers are computed when source locations are needed. Images and tables can only use full-content fragments; raw byte source locations remain available independently.
+
+Whitespace-only ranges remain in the complete entity content without creating search fragments. Every non-whitespace part of an extracted entity, including braces and punctuation, remains covered by its fragments.
+
+Select the model with `zg index --embedding <model>`. Every text fragment uses that model, with both FTS and vector indexes. Images and other unsupported sources are skipped; multimodal content and content-route configuration are not supported. Changing the model requires `--rebuild`. Remote destinations require consent as usual. This entity and fragment layout uses index format 5, collection schema 4, and document codec 10.
+
+**Index updates.** Repeated indexing reuses unchanged files, updates changed files, and removes deleted files from the index. Unsupported files are skipped. A failed file keeps its path and error but loses all searchable records; the next index retries the whole file. `drop_index` removes index data, workspace configuration, and the name reservation while preserving source files and shared model caches.
 
 **Workspace names.** Names are case-sensitive and unique within the per-user registry; new workspaces default to the root directory's name. Use `IndexOptions::name` to choose or change a name. Move the source root together with `.zvec-grep`; the next index operation updates its registered location once the original root no longer exists. A copy of an existing workspace needs a different name.
 
@@ -30,7 +36,7 @@ The engine also uses per-user files: `~/.zvec-grep/workspaces.json` registers wo
 
 Workspace scan rules determine index membership. Query filters only narrow the stored corpus and never modify workspace settings or read source files to identify their formats. The `--rg` path remains independent and uses ripgrep's own glob, type, ignore, and traversal behavior. Scanning options on an indexed query are rejected instead of silently ignored.
 
-Indexing can inspect content to choose an extractor, but file records do not persist detected formats. An extensionless Python script can therefore be indexed as code while its file name does not match a Python query filter. Image contents retain their encoding format, serialized by its canonical name rather than a numeric format ID.
+Indexing can inspect content to choose an extractor, but file records do not persist detected formats. An extensionless Python script can therefore be indexed as code while its file name does not match a Python query filter. The file-format catalog includes non-text formats for classification; recognizing a format does not imply that this version can index it.
 
 Index requests update only supplied scan-rule fields: an empty list clears a list, `false` disables a flag, and JSON `null` removes a depth or size limit. The CLI accepts `--hidden=false`, `--no-ignore=false`, and `--follow=false`; `--reset-paths` resets all saved selection settings before applying the request. A selection update always reconciles the full workspace.
 
@@ -42,7 +48,7 @@ Nested Git repositories and checked-out submodules are scanned by default, subje
 - **Service** connects engine capabilities behind `ZvecGrep`.
 - **Domain** defines shared data types for workspaces, sources, content, entities, and metadata.
 - **File selection** compiles domain glob rules and supplies engine-owned scan/watch policies.
-- **Extraction** turns source files into content and metadata.
+- **Extraction** turns source files into complete entities, metadata, and source-preserving fragment ranges.
 - **Lexical** searches source files directly with embedded grep.
 - **Models** provides embedding backends and manages model runtimes.
 - **Storage** persists indexed data and supports lexical and vector search with Zvec.

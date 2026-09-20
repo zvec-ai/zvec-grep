@@ -7,11 +7,11 @@ use std::{
 use crate::{
     api::context::result::{StructureEnrichmentDiagnostics, StructureEnrichmentSource},
     domain::{
-        CodeMetadata, EntityId, EntityMetadata, FileCategory, FileFormat, MarkdownMetadata,
-        SourcePath, SourceRange, TextRange,
+        CodeMetadata, EntityId, EntityMetadata, FileCategory, FileFormat, MarkdownMetadata, Range,
+        SourcePath, TextRange,
     },
-    extraction::{ChunkOptions, ExtractedFragment, TextSource, extract},
-    utils::{decode_text, sha256_hex_parts},
+    extraction::{ChunkOptions, ExtractedEntity, TextSource, extract},
+    utils::{decode_text, line_byte_offsets, sha256_hex_parts},
 };
 
 use crate::lexical::types::LexicalMatch;
@@ -31,7 +31,7 @@ pub(crate) struct EnrichedLexicalMatch {
 
 pub(crate) struct LexicalContainer {
     pub entity_id: EntityId,
-    pub range: SourceRange,
+    pub range: Range,
     pub metadata: Option<EntityMetadata>,
 }
 
@@ -39,7 +39,7 @@ struct StructuralFragment {
     entity_index: usize,
     entity_id: EntityId,
     document_id: String,
-    range: SourceRange,
+    range: Range,
 }
 
 struct StructuralSource {
@@ -168,55 +168,58 @@ fn parse_structural_source(
 }
 
 fn namespace_lexical_fragments(
-    fragments: Vec<ExtractedFragment>,
+    entities: Vec<ExtractedEntity>,
     namespace: &str,
 ) -> StructuralSource {
-    let mut entities = HashMap::<usize, EntityId>::new();
     let mut metadata = HashMap::new();
-    let mut fragments: Vec<_> =
-        fragments
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, fragment)| {
-                let entity_index = fragment.entity_index();
-                let next_entity = (entities.len() as u64).to_le_bytes();
-                let entity_id = entities
-                    .entry(fragment.entity_index())
-                    .or_insert_with(|| {
-                        EntityId::new(sha256_hex_parts([
-                            namespace.as_bytes(),
-                            b"\0entity\0",
-                            &next_entity,
-                        ]))
-                        .expect("SHA-256 produces a nonempty entity ID")
-                    })
-                    .clone();
-                let document_id = match &fragment {
-                    ExtractedFragment::Standalone(_) | ExtractedFragment::Representative(_) => {
-                        entity_id.as_str().to_owned()
-                    }
-                    ExtractedFragment::Window(_) => sha256_hex_parts([
-                        namespace.as_bytes(),
-                        b"\0window\0",
-                        &(ordinal as u64).to_le_bytes(),
-                    ]),
-                };
-                let range = *fragment.range();
-                if let ExtractedFragment::Standalone(entity)
-                | ExtractedFragment::Representative(entity) = fragment
-                    && let Some(value) = entity.metadata
-                {
-                    metadata.insert(entity_index, value);
-                }
-                StructuralFragment {
-                    entity_index,
-                    entity_id,
-                    document_id,
-                    range,
-                }
-            })
-            .collect();
-    fragments.retain(|fragment| metadata.contains_key(&fragment.entity_index));
+    let mut fragments = Vec::new();
+    for entity in entities {
+        let Some(value) = entity.metadata else {
+            continue;
+        };
+        let entity_id = EntityId::new(sha256_hex_parts([
+            namespace.as_bytes(),
+            b"\0entity\0",
+            &(entity.index as u64).to_le_bytes(),
+        ]))
+        .expect("SHA-256 produces a nonempty entity ID");
+        metadata.insert(entity.index, value);
+        // The full entity remains a structural container for matches spanning
+        // several retrieval ranges. It does not create a retrieval fragment.
+        fragments.push(StructuralFragment {
+            entity_index: entity.index,
+            entity_id: entity_id.clone(),
+            document_id: entity_id.as_str().to_owned(),
+            range: entity.source_range,
+        });
+        let crate::domain::Content::Text(content) = &entity.content else {
+            continue;
+        };
+        let line_offsets = line_byte_offsets(&content.split('\n').collect::<Vec<_>>());
+        for (ordinal, fragment) in entity.fragments.into_iter().enumerate() {
+            let (Range::Text(source_range), Range::Byte(local_range)) =
+                (entity.source_range, fragment.range)
+            else {
+                continue;
+            };
+            let Ok(range) = local_range
+                .text_range(content, &line_offsets)
+                .and_then(|local| local.within(source_range))
+            else {
+                continue;
+            };
+            fragments.push(StructuralFragment {
+                entity_index: entity.index,
+                entity_id: entity_id.clone(),
+                document_id: sha256_hex_parts([
+                    entity_id.as_str().as_bytes(),
+                    b"\0fragment\0",
+                    &(ordinal as u64).to_le_bytes(),
+                ]),
+                range: Range::Text(range),
+            });
+        }
+    }
     StructuralSource {
         fragments,
         metadata,
@@ -230,9 +233,7 @@ fn smallest_containing_fragment<'fragment>(
     source
         .fragments
         .iter()
-        .filter(
-            |fragment| matches!(&fragment.range, SourceRange::Text(outer) if outer.contains(inner)),
-        )
+        .filter(|fragment| matches!(&fragment.range, Range::Text(outer) if outer.contains(inner)))
         .min_by(|left, right| compare_fragment_container(source, left, right))
 }
 
@@ -253,7 +254,7 @@ fn compare_fragment_container(
 
 fn fragment_byte_span(fragment: &StructuralFragment) -> usize {
     match &fragment.range {
-        SourceRange::Text(range) => range
+        Range::Text(range) => range
             .end_byte_offset()
             .saturating_sub(range.start_byte_offset()),
         _ => usize::MAX,
@@ -446,8 +447,11 @@ mod tests {
     #[test]
     fn enriches_window_matches_with_their_owners_metadata() {
         let directory = tempdir().expect("workspace");
-        let line = "A long section contains the needle and enough text for several windows.";
-        let text = format!("# Shared heading\n\n{}", format!("{line}\n").repeat(200));
+        let line = "A long section contains the needle, 中文 😀, and text for several windows.";
+        let text = format!(
+            "# Earlier\r\n\r\nA preamble 😀.\r\n\r\n# Shared heading\r\n\r\n{}",
+            format!("{line}\r\n").repeat(200)
+        );
         fs::write(directory.path().join("section.md"), &text).expect("markdown fixture");
         let result = enrich_lexical_matches_with_structure(
             directory.path(),
@@ -463,10 +467,10 @@ mod tests {
             Some(EntityMetadata::Markdown(MarkdownMetadata { heading: Some(heading), .. }))
                 if heading == "Shared heading"
         ));
-        let crate::domain::SourceRange::Text(range) = container.range else {
+        let crate::domain::Range::Text(range) = container.range else {
             panic!("text window expected");
         };
-        assert!(range.start_line() > 1);
+        assert!(range.start_line() > 6);
         assert!(range.contains(&result.items[0].matched.range));
     }
 
@@ -541,16 +545,11 @@ mod tests {
             container.metadata.as_ref(),
             Some(EntityMetadata::Code(CodeMetadata { symbol_name: Some(name), .. })) if name == "beta"
         ));
-        assert!(
-            container
-                .range
-                .contains(&crate::domain::SourceRange::Text(excerpt))
-        );
-        assert!(
-            !container
-                .range
-                .contains(&crate::domain::SourceRange::Text(visible_range))
-        );
+        let crate::domain::Range::Text(range) = container.range else {
+            panic!("text container range");
+        };
+        assert!(range.contains(&excerpt));
+        assert!(!range.contains(&visible_range));
         assert_eq!(result.diagnostics.enriched_items, 1);
     }
 

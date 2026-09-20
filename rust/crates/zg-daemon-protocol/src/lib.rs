@@ -12,7 +12,7 @@ use zg_engine::api::{
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 10;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -297,8 +297,6 @@ mod tests {
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
                 embedding: None,
-                embeddings: Vec::new(),
-                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],

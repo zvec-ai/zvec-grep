@@ -61,12 +61,14 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     // Seed credentials without changing process-wide environment. Each fixture
     // keeps one globally unique name, including when its root is later moved.
     let name = format!("fixture-{}", uuid::Uuid::new_v4());
+    let generation = uuid::Uuid::new_v4().to_string();
+    fs::create_dir_all(home.join("generations").join(&generation))?;
     let manifest = json!({
         "manifestVersion": 5, "name": name, "path": home,
         "root": root, "scan": {},
         "indexPolicy": "enabled", "embeddings": [{ "model": { "provider": "qwen", "name": "text-embedding-v4", "endpoint": format!("http://{address}/embeddings") }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null }],
         "embeddingRoutes": { "text": "qwen/text-embedding-v4" },
-        "indexVersion": null, "createdTime": 1, "updatedTime": 1,
+        "indexVersion": null, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
         "embeddingRuntimes": { "qwen/text-embedding-v4": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") } }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)

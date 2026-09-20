@@ -1,4 +1,5 @@
-mod content;
+//! Shared domain types for source content, indexing, and search.
+
 mod entity;
 mod glob;
 mod metadata;
@@ -6,38 +7,27 @@ pub(crate) mod model;
 mod source;
 mod workspace;
 
-// Source files.
-pub(crate) use source::{FileId, FileIndexStatus, FileRecord, FileSnapshot};
-
-// Source directories and shared path invariants.
-pub(crate) use source::{DirectoryId, DirectoryRecord, SourcePath};
-
-// File formats.
-pub use source::{FileCategory, FileFormat};
-
-// Source ranges.
-pub(crate) use source::{ByteRange, SourceRange, TextRange};
-
-// Content.
-pub use content::ContentKind;
-pub(crate) use content::{Content, ImageContent, TableCell, TableCellRole, TableContent};
-
 // Entities.
-pub(crate) use entity::{Entity, EntityContent, EntityId};
+pub(crate) use entity::{Entity, EntityFragment, EntityId, FragmentId, validate_entities};
+
+// Glob rules.
+pub use glob::GlobRule;
 
 // Metadata.
 pub(crate) use metadata::IndexField;
 pub use metadata::{CodeMetadata, EntityMetadata, MarkdownMetadata, SymbolType};
 
-// Fragments.
-pub(crate) use entity::{EntityFragment, FragmentId, WindowFragment, validate_fragments};
+// Models.
+pub(crate) use model::{EmbeddingModelInfo, Metric};
 
-// Path rules.
-pub use glob::GlobRule;
+// Sources.
+pub(crate) use source::{
+    ByteRange, Content, DirectoryId, DirectoryRecord, FileId, FileIndexStatus, FileRecord,
+    FileSnapshot, ImageContent, Range, SourcePath, TableCell, TableCellRole, TableContent,
+    TextRange,
+};
+pub use source::{ContentKind, FileCategory, FileFormat};
 
 // Workspaces.
 pub use workspace::ScanRules;
 pub(crate) use workspace::{FTS_CONFIG, FtsConfig, IndexDescriptor, IndexState, Workspace};
-
-// Models.
-pub(crate) use model::{EmbeddingModelInfo, Metric};

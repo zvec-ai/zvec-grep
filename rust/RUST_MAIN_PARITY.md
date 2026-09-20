@@ -182,7 +182,7 @@ README change (#131) restored released examples; it did not revert #105's code.
 
 ## H. CI and parity evidence
 
-Relevant code: [CI workflow](.github/workflows/ci.yml).
+Relevant code: [CI workflow](../.github/workflows/rust-ci.yml).
 
 - [ ] Scope concurrency by workflow, event, and pull request/commit, following #100, so unrelated runs do not cancel one another.
 - [ ] Reconcile the security workflow portion of #100; this Rust branch currently has no corresponding workflow.

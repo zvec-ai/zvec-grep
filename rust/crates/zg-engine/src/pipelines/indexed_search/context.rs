@@ -13,7 +13,7 @@ use crate::{
             IndexRouteDiagnostics, MatchedBy,
         },
     },
-    domain::{Content, EntityContent, EntityFragment, FileRecord, Workspace},
+    domain::{Content, FileRecord, Workspace},
     storage::spi::WorkspaceIndexStorage,
     utils::sha256_hex,
 };
@@ -175,14 +175,7 @@ pub(crate) async fn context_from_index(
         );
     }
 
-    Ok(build_context_result(
-        root,
-        workspace,
-        workspace_home,
-        request,
-        &groups,
-        searches,
-    ))
+    build_context_result(root, workspace, workspace_home, request, &groups, searches)
 }
 
 fn build_context_result(
@@ -192,12 +185,12 @@ fn build_context_result(
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
     searches: Vec<SearchPlanResult>,
-) -> ContextResult {
+) -> Result<ContextResult, EngineError> {
     let group_items = searches
         .iter()
         .zip(groups)
         .map(|(search, group)| search_plan_to_context_items(search, &workspace.root, group))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let coverage_groups = groups
         .iter()
         .filter(|group| group.role == ContextQueryGroupRole::Primary)
@@ -213,7 +206,7 @@ fn build_context_result(
         .collect();
     let hits_returned = items.len();
 
-    ContextResult {
+    Ok(ContextResult {
         freshness: None,
         background_refresh: None,
         query: request.display_query.clone(),
@@ -261,7 +254,7 @@ fn build_context_result(
             structure: None,
             timings,
         },
-    }
+    })
 }
 
 fn context_group_limit(limit: Option<usize>, group_count: usize) -> usize {
@@ -279,22 +272,21 @@ fn search_plan_to_context_items(
     result: &SearchPlanResult,
     workspace_root: &Path,
     group: &NormalizedContextGroup,
-) -> Vec<ContextItem> {
+) -> Result<Vec<ContextItem>, EngineError> {
     result
         .hits
         .iter()
         .map(|hit| {
-            let target = context_item_target(hit);
-            ContextItem {
+            let target = context_item_target(hit)?;
+            Ok(ContextItem {
                 kind: ContextItemKind::IndexedEntity,
                 rank: hit.rank,
                 absolute_path: workspace_root.join(&hit.file.relative_path),
                 relative_path: hit.file.relative_path.to_path_buf(),
-                range: hit.entity.range.into(),
+                range: hit.entity.source_range.into(),
                 excerpt_range: target.excerpt_range,
                 content: target.content,
                 content_role: Some(target.content_role),
-                outline: target.outline,
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),
                 matched_by: hit.matched_by,
@@ -311,7 +303,7 @@ fn search_plan_to_context_items(
                 }],
                 selection_reason: None,
                 coverage_group: None,
-            }
+            })
         })
         .collect()
 }
@@ -475,46 +467,46 @@ struct ContextItemTarget {
     content: String,
     content_role: ContextContentRole,
     excerpt_range: Option<ContentRange>,
-    outline: Option<String>,
 }
 
-fn context_item_target(hit: &SearchHit) -> ContextItemTarget {
-    let window = hit
-        .evidence
-        .iter()
-        .find_map(|evidence| match &evidence.fragment {
-            EntityFragment::Window(window) => Some(window),
-            EntityFragment::Standalone(_) | EntityFragment::Representative(_) => None,
-        });
-    if let Some(window) = window {
-        let same_source = hit.entity.range == window.range
-            && matches!(&hit.entity.content, EntityContent::Source(content) if content == &window.content);
-        let content = content_to_text(&window.content);
-        let outline = match &hit.entity.content {
-            EntityContent::Outline(outline)
-                if !outline.trim().is_empty() && outline.trim() != content.trim() =>
-            {
-                Some(outline.trim().to_owned())
-            }
-            EntityContent::Source(_) | EntityContent::Outline(_) => None,
-        };
-        return ContextItemTarget {
-            content,
+fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError> {
+    let Some(evidence) = hit.evidence.first() else {
+        return Ok(ContextItemTarget {
+            content: content_to_text(&hit.entity.content),
             content_role: ContextContentRole::Source,
-            excerpt_range: (!same_source).then(|| window.range.into()),
-            outline,
-        };
-    }
-    let (content, content_role) = match &hit.entity.content {
-        EntityContent::Source(content) => (content_to_text(content), ContextContentRole::Source),
-        EntityContent::Outline(outline) => (outline.clone(), ContextContentRole::Outline),
+            excerpt_range: None,
+        });
     };
-    ContextItemTarget {
-        content,
-        content_role,
-        excerpt_range: None,
-        outline: None,
-    }
+    let fragment = &evidence.fragment;
+    let content = fragment
+        .range
+        .extract(&hit.entity.content)
+        .map_err(|error| {
+            EngineError::storage_failure(format!(
+                "invalid search fragment {}: {error}",
+                fragment.id.as_str()
+            ))
+        })?;
+    let excerpt_range = if fragment.range == crate::domain::Range::Full {
+        None
+    } else {
+        Some(
+            hit.entity
+                .fragment_source_range(fragment)
+                .map_err(|error| {
+                    EngineError::storage_failure(format!(
+                        "invalid search fragment source range {}: {error}",
+                        fragment.id.as_str()
+                    ))
+                })?
+                .into(),
+        )
+    };
+    Ok(ContextItemTarget {
+        content: content_to_text(&content),
+        content_role: ContextContentRole::Source,
+        excerpt_range,
+    })
 }
 
 fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextItemStatus {
@@ -644,69 +636,105 @@ mod tests {
     }
 
     #[test]
-    fn explicit_content_roles_preserve_source_and_window_provenance() {
+    fn best_fragment_preserves_original_content_and_source_range() {
         use crate::{
             domain::{
-                Content, Entity, EntityContent, EntityFragment, EntityId, FileId, FileIndexStatus,
-                FileRecord, FileSnapshot, FragmentId, SourceRange, TextRange, WindowFragment,
+                ByteRange, Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus,
+                FileRecord, FileSnapshot, FragmentId, Range, TextRange,
             },
-            pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit},
+            pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit, SearchPlanResult},
         };
-
         let file_id = FileId::new(1);
-        let range = SourceRange::Text(
-            TextRange::from_coordinates(0, 100, 1, 20, 0, 5).expect("valid range"),
+        let source = "A中😀\r\nβeta\n尾";
+        let source_range = Range::Text(
+            TextRange::from_coordinates(9, 9 + source.len(), 2, 4, 2, 3).expect("range"),
         );
+        let fragment_range = Range::Byte(ByteRange {
+            start_offset: 1,
+            end_offset: 12,
+        });
+        let fragment_source_range = Range::Text(
+            TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
+        );
+        let fragment = EntityFragment {
+            id: FragmentId::new("fragment").expect("fragment id"),
+            range: fragment_range,
+        };
+        let full = EntityFragment {
+            id: FragmentId::new("full").expect("fragment id"),
+            range: Range::Full,
+        };
         let mut hit = SearchHit {
             entity: Entity {
                 id: EntityId::new("entity").expect("entity id"),
                 file_id,
-                range,
-                content: EntityContent::Source(Content::Text("A short source excerpt".to_owned())),
+                source_range,
+                content: Content::Text(source.into()),
                 metadata: None,
+                fragments: vec![fragment.clone(), full.clone()],
             },
             file: FileRecord {
                 id: file_id,
                 relative_path: crate::domain::SourcePath::new("file.txt").expect("source path"),
                 snapshot: FileSnapshot {
-                    size_bytes: 100,
+                    size_bytes: (9 + source.len()) as u64,
                     modified_epoch_ms: None,
                     content_hash: None,
                 },
                 index_status: FileIndexStatus::NotIndexed,
             },
-            evidence: Vec::new(),
+            evidence: vec![
+                SearchEvidence {
+                    fragment: fragment.clone(),
+                },
+                SearchEvidence {
+                    fragment: full.clone(),
+                },
+            ],
             rank: 1,
             score: 1.0,
             matched_by: MatchedBy::Fts,
             trace: None,
         };
-        assert_eq!(
-            super::context_item_target(&hit).content_role,
-            ContextContentRole::Source
-        );
-        hit.entity.content = EntityContent::Outline("Function outline".to_owned());
-        assert_eq!(
-            super::context_item_target(&hit).content_role,
-            ContextContentRole::Outline
-        );
-        let window_range = SourceRange::Text(
-            TextRange::from_coordinates(10, 20, 2, 2, 0, 10).expect("valid range"),
-        );
-        hit.evidence.push(SearchEvidence {
-            fragment: EntityFragment::Window(WindowFragment {
-                id: FragmentId::new("window").expect("fragment id"),
-                entity_id: hit.entity.id.clone(),
-                file_id,
-                range: window_range,
-                content: Content::Text("Exact source".to_owned()),
-            }),
-        });
-        let target = super::context_item_target(&hit);
+        let target = super::context_item_target(&hit).expect("fragment content");
         assert_eq!(target.content_role, ContextContentRole::Source);
-        assert_eq!(target.content, "Exact source");
-        assert_eq!(target.outline.as_deref(), Some("Function outline"));
-        assert_eq!(target.excerpt_range, Some(window_range.into()));
+        assert_eq!(target.content, "中😀\r\nβ");
+        assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
+        assert_eq!(hit.entity.content, Content::Text(source.into()));
+        let search = SearchPlanResult {
+            routes: Vec::new(),
+            hits: vec![hit.clone()],
+            timings: Vec::new(),
+        };
+        let request = normalize_context_request(&ContextOptions {
+            query: Some("source".into()),
+            ..ContextOptions::default()
+        })
+        .expect("request");
+        let items = super::search_plan_to_context_items(
+            &search,
+            std::path::Path::new("."),
+            &request.groups[0],
+        )
+        .expect("context items");
+        assert_eq!(items[0].range, source_range.into());
+        assert_eq!(items[0].excerpt_range, Some(fragment_source_range.into()));
+        assert_eq!(items[0].content, "中😀\r\nβ");
+        hit.evidence.reverse();
+        let target = super::context_item_target(&hit).expect("full content");
+        assert_eq!(target.content, source);
+        assert_eq!(
+            target.excerpt_range, None,
+            "full fragments do not create an excerpt range"
+        );
+        hit.evidence[0].fragment.range = Range::Byte(ByteRange {
+            start_offset: 0,
+            end_offset: 999,
+        });
+        let error = super::context_item_target(&hit)
+            .err()
+            .expect("invalid fragment must fail");
+        assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
     }
 
     #[test]
@@ -717,8 +745,8 @@ mod tests {
     fn resolves_context_paths_and_freshness_after_workspace_relocation() {
         use crate::{
             domain::{
-                Content, Entity, EntityContent, EntityId, FileId, FileIndexStatus, FileRecord,
-                FileSnapshot, IndexDescriptor, IndexState, SourceRange, TextRange, Workspace,
+                Content, Entity, EntityId, FileId, FileIndexStatus, FileRecord, FileSnapshot,
+                IndexDescriptor, IndexState, Range, TextRange, Workspace,
                 model::{EmbeddingModelInfo, Metric},
             },
             pipelines::indexed_search::pipeline::{SearchHit, SearchPlanResult},
@@ -754,12 +782,13 @@ mod tests {
                 entity: Entity {
                     id: EntityId::new("entity").expect("entity id"),
                     file_id: source.id,
-                    range: SourceRange::Text(
+                    source_range: Range::Text(
                         TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len())
                             .expect("range"),
                     ),
-                    content: EntityContent::Source(Content::Text(content.to_owned())),
+                    content: Content::Text(content.to_owned()),
                     metadata: None,
+                    fragments: Vec::new(),
                 },
                 file: file.clone(),
                 evidence: Vec::new(),
@@ -810,7 +839,8 @@ mod tests {
                 &request,
                 &request.groups,
                 vec![search.clone()],
-            );
+            )
+            .expect("context result");
             assert_eq!(result.root, requested_root);
             assert_eq!(result.items[0].absolute_path, root.join("src/file.txt"));
             assert_eq!(result.items[0].relative_path, PathBuf::from("src/file.txt"));
@@ -916,7 +946,6 @@ mod tests {
             excerpt_range: None,
             content: id.to_owned(),
             content_role: Some(ContextContentRole::Source),
-            outline: None,
             status: ContextItemStatus::Fresh,
             score: Some(1.0),
             matched_by: query_group.matched_by,

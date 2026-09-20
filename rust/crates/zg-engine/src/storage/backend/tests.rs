@@ -3,21 +3,81 @@ use super::super::spi::StoragePathFilter;
 use super::*;
 use crate::domain::SourcePath;
 use crate::domain::{
-    CodeMetadata, Content, Entity, EntityContent, EntityFragment, EntityId, EntityMetadata,
-    FileRecord, FileSnapshot, SourceRange, SymbolType, TableCell, TableCellRole, TableContent,
+    CodeMetadata, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileRecord,
+    FileSnapshot, FragmentId, Range, SymbolType, TableCell, TableCellRole, TableContent,
 };
 
-fn file_at(storage: &dyn WorkspaceIndexStorage, path: &str) -> (FileRecord, IndexedFragment) {
+/// Test input keeps canonical entities and model outputs separate, as the writer does.
+#[derive(Clone)]
+struct FixtureEntity {
+    entity: Entity,
+    model: String,
+    vector: Vec<f32>,
+}
+
+fn fixture_records(
+    fixtures: &[FixtureEntity],
+) -> (Vec<Entity>, Vec<super::super::spi::IndexedFragment>) {
+    let entities = fixtures
+        .iter()
+        .map(|fixture| fixture.entity.clone())
+        .collect();
+    let entries = fixtures
+        .iter()
+        .flat_map(|fixture| {
+            fixture
+                .entity
+                .fragments
+                .iter()
+                .map(|fragment| super::super::spi::IndexedFragment {
+                    entity_id: fixture.entity.id.clone(),
+                    fragment_id: fragment.id.clone(),
+                    model: fixture.model.clone(),
+                    vector: fixture.vector.clone(),
+                })
+        })
+        .collect();
+    (entities, entries)
+}
+
+trait FixtureWriter {
+    fn replace_fixture_file(
+        &self,
+        file: &FileRecord,
+        fixtures: &[FixtureEntity],
+    ) -> StorageResult<()>;
+}
+impl<T: WorkspaceIndexStorage + ?Sized> FixtureWriter for T {
+    fn replace_fixture_file(
+        &self,
+        file: &FileRecord,
+        fixtures: &[FixtureEntity],
+    ) -> StorageResult<()> {
+        let (entities, entries) = fixture_records(fixtures);
+        self.replace_file(file, &entities, &entries)
+    }
+}
+impl NativeStore {
+    fn apply_fixture_file(
+        &self,
+        file: &FileRecord,
+        fixtures: &[FixtureEntity],
+    ) -> StorageResult<()> {
+        let (entities, entries) = fixture_records(fixtures);
+        self.apply_replace(file, &entities, &entries)
+    }
+}
+
+fn file_at(storage: &dyn WorkspaceIndexStorage, path: &str) -> (FileRecord, FixtureEntity) {
     let (mut file, mut entry) = fixture(None, "template", "orchard", vec![1.0, 0.0, 0.0]);
     file.relative_path = crate::domain::SourcePath::new(path).expect("source path");
     file.id = storage
         .resolve_file_ids(&[file.relative_path.to_path_buf()])
         .expect("reserve identity")[0];
-    let EntityFragment::Standalone(entity) = &mut entry.fragment else {
-        panic!("fixture must be standalone")
-    };
+    let entity = &mut entry.entity;
     entity.file_id = file.id;
     entity.id = EntityId::new(format!("entity-{}", file.id)).expect("entity ID");
+    entity.fragments[0].id = FragmentId::new(format!("fragment-{}", file.id)).expect("fragment ID");
     (file, entry)
 }
 
@@ -44,7 +104,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
     for path in paths {
         let (file, entry) = file_at(storage.as_ref(), path);
         storage
-            .replace_file(&file, &[entry])
+            .replace_fixture_file(&file, &[entry])
             .expect("indexed fixture");
         files.push(file);
     }
@@ -172,12 +232,11 @@ fn file_ids_are_local_to_index_records_and_rebuilds_are_independent() {
     let second_home = temporary.path().join("second");
     let first = open(&first_home, false);
     let (file, entry) = file_at(first.as_ref(), "src/main.rs");
-    first.replace_file(&file, &[entry]).expect("write");
+    first.replace_fixture_file(&file, &[entry]).expect("write");
     let reserved = first
         .resolve_file_ids(&[PathBuf::from("pending.rs")])
         .expect("reserve")[0];
     first.close().expect("checkpoint");
-    assert!(!first_home.join("catalog").exists());
     let reopened = open(&first_home, false);
     assert_eq!(
         reopened
@@ -208,16 +267,18 @@ fn deleting_a_record_releases_its_path_but_never_reuses_a_live_id() {
     let temporary = tempfile::tempdir().expect("workspace");
     let storage = open(temporary.path(), false);
     let (file, entry) = file_at(storage.as_ref(), "src/main.rs");
-    storage.replace_file(&file, &[entry]).expect("write");
+    storage
+        .replace_fixture_file(&file, &[entry])
+        .expect("write");
     storage.delete_file(file.id).expect("delete");
     let (replacement, entry) = file_at(storage.as_ref(), "src/main.rs");
     assert_ne!(file.id, replacement.id);
     storage
-        .replace_file(&replacement, &[entry])
+        .replace_fixture_file(&replacement, &[entry])
         .expect("replace");
     let (mut mismatched, entry) = file_at(storage.as_ref(), "other.rs");
     mismatched.relative_path = replacement.relative_path.clone();
-    assert!(storage.replace_file(&mismatched, &[entry]).is_err());
+    assert!(storage.replace_fixture_file(&mismatched, &[entry]).is_err());
     storage.close().expect("checkpoint");
     let reopened = open(temporary.path(), false);
     assert_eq!(
@@ -279,7 +340,9 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
     let storage = open(temporary.path(), false);
     let (mut file, entry) = file_at(storage.as_ref(), "source.txt");
     file.snapshot.modified_epoch_ms = Some(0);
-    storage.replace_file(&file, &[entry]).expect("write");
+    storage
+        .replace_fixture_file(&file, &[entry])
+        .expect("write");
     assert_eq!(
         storage.list_file_attributes().expect("attributes"),
         [StoredFileAttributes::from(&file)]
@@ -318,9 +381,13 @@ fn recovery_validates_source_record_owners_before_mutating_any_collection() {
     let home = directory.path();
     let storage = open(home, false);
     let (first, entry) = file_at(storage.as_ref(), "first.rs");
-    storage.replace_file(&first, &[entry]).expect("first");
+    storage
+        .replace_fixture_file(&first, &[entry])
+        .expect("first");
     let (mut second, entry) = file_at(storage.as_ref(), "second.rs");
-    storage.replace_file(&second, &[entry]).expect("second");
+    storage
+        .replace_fixture_file(&second, &[entry])
+        .expect("second");
     storage.close().expect("checkpoint");
     second.relative_path = crate::domain::SourcePath::new("first.rs").expect("source path");
     let changes = PendingChanges::from([
@@ -376,7 +443,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let descriptor = home.join("storage/schema.json");
     let persisted = fs::read(&descriptor).expect("read descriptor");
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
-    assert_eq!(record["version"], 2);
+    assert_eq!(record["version"], 4);
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
@@ -502,7 +569,7 @@ fn fixture(
     name: &str,
     text: &str,
     vector: Vec<f32>,
-) -> (FileRecord, IndexedFragment) {
+) -> (FileRecord, FixtureEntity) {
     let relative_path = crate::domain::SourcePath::new(format!("{name}.txt")).expect("source path");
     let id = storage.map_or_else(
         || FileId::new(1),
@@ -522,13 +589,17 @@ fn fixture(
         },
         index_status: FileIndexStatus::NotIndexed,
     };
-    let entry = IndexedFragment {
+    let entry = FixtureEntity {
         model: "fixture/fixture-model".into(),
-        fragment: EntityFragment::Standalone(Entity {
+        entity: Entity {
             id: EntityId::new(format!("entity-{}", id.get())).expect("entity ID"),
             file_id: id,
-            range: SourceRange::File,
-            content: EntityContent::Source(Content::Text(text.to_owned())),
+            source_range: Range::Full,
+            fragments: vec![EntityFragment {
+                id: FragmentId::new(format!("fragment-{id}")).expect("fragment ID"),
+                range: Range::Full,
+            }],
+            content: Content::Text(text.to_owned()),
             metadata: Some(EntityMetadata::Code(CodeMetadata {
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("quoted'\\name\0suffix".to_owned()),
@@ -536,7 +607,7 @@ fn fixture(
                 signature: None,
                 documentation: None,
             })),
-        }),
+        },
         vector,
     };
     (file, entry)
@@ -564,10 +635,10 @@ fn persists_filters_and_replaces_complete_files() {
         vec![0.0, 1.0, 0.0],
     );
     storage
-        .replace_file(&first, std::slice::from_ref(&entry))
+        .replace_fixture_file(&first, std::slice::from_ref(&entry))
         .expect("first file");
     storage
-        .replace_file(&second, &[other])
+        .replace_fixture_file(&second, &[other])
         .expect("second file");
     let marker = home.join("storage").join(pending::NAME);
     assert!(marker.exists(), "small writes await a checkpoint");
@@ -575,7 +646,7 @@ fn persists_filters_and_replaces_complete_files() {
     let filter = StorageSearchFilter {
         path: None,
         file_ids: Some(vec![first.id]),
-        entity_ids: Some(vec![entry.fragment.entity_id().clone()]),
+        entity_ids: Some(vec![entry.entity.id.clone()]),
         symbol_names: Some(vec!["quoted'\\name\0suffix".to_owned()]),
         symbol_types: Some(vec![SymbolType::Function]),
     };
@@ -585,7 +656,10 @@ fn persists_filters_and_replaces_complete_files() {
             .expect("filtered FTS");
         assert_eq!(hits.len(), 1);
         let loaded = storage.load_search_hits(&hits).expect("FTS result details");
-        assert_eq!(loaded.fragments[&hits[0].document_id], entry.fragment);
+        assert_eq!(
+            loaded.fragments[&hits[0].document_id],
+            entry.entity.fragments[0]
+        );
     }
     let hits = storage
         .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, Some(&filter))
@@ -603,7 +677,10 @@ fn persists_filters_and_replaces_complete_files() {
     let loaded = storage
         .load_search_hits(&ranked)
         .expect("ranked result details");
-    assert_eq!(loaded.fragments[&ranked[0].document_id], entry.fragment);
+    assert_eq!(
+        loaded.fragments[&ranked[0].document_id],
+        entry.entity.fragments[0]
+    );
     for rejected in [
         StorageSearchFilter {
             file_ids: Some(vec![second.id]),
@@ -640,10 +717,7 @@ fn persists_filters_and_replaces_complete_files() {
                 .is_empty()
         );
     }
-    assert_eq!(
-        loaded.entities[entry.fragment.entity_id()].entity,
-        *entry.fragment.as_entity().expect("standalone")
-    );
+    assert_eq!(loaded.entities[&entry.entity.id].entity, entry.entity);
     let empty = StorageSearchFilter {
         file_ids: Some(Vec::new()),
         ..StorageSearchFilter::default()
@@ -682,7 +756,7 @@ fn persists_filters_and_replaces_complete_files() {
         Some("fixture extraction error")
     );
     storage
-        .replace_file(&first, &[entry])
+        .replace_fixture_file(&first, &[entry])
         .expect("retry failed file");
     storage.delete_file(second.id).expect("delete file");
     storage.close().expect("close writer");
@@ -758,7 +832,7 @@ fn invalidates_interrupted_batches_before_serving_readers() {
         (&unaffected, &unaffected_entry),
     ] {
         storage
-            .replace_file(source, std::slice::from_ref(entry))
+            .replace_fixture_file(source, std::slice::from_ref(entry))
             .expect("initial file");
     }
     let (replacement_file, _) = fixture(
@@ -791,7 +865,7 @@ fn invalidates_interrupted_batches_before_serving_readers() {
         entity_count: 1,
     };
     native
-        .apply_replace(&partial, std::slice::from_ref(&replacement))
+        .apply_fixture_file(&partial, std::slice::from_ref(&replacement))
         .expect("uncheckpointed replacement");
     native.flush().expect("persist partial mutation");
     drop(native);
@@ -869,8 +943,8 @@ fn invalidates_interrupted_batches_before_serving_readers() {
         .load_search_hits(&hits)
         .expect("unaffected result details");
     assert_eq!(
-        loaded.entities[unaffected_entry.fragment.entity_id()].entity,
-        *unaffected_entry.fragment.as_entity().expect("standalone")
+        loaded.entities[&unaffected_entry.entity.id].entity,
+        unaffected_entry.entity
     );
     reader.close().expect("close recovered reader");
     drop(acquire_storage_lock(home, false).expect("closing recovered reader releases its lock"));
@@ -923,7 +997,7 @@ fn prepared_replacements_share_one_durable_marker_and_recover_unwritten_files() 
         .expect("repeat hint");
     for (file, entry) in &fixtures[..3] {
         storage
-            .replace_file(file, std::slice::from_ref(entry))
+            .replace_fixture_file(file, std::slice::from_ref(entry))
             .expect("prepared write");
     }
     assert_eq!(
@@ -975,14 +1049,14 @@ fn prepared_replacements_are_rejournaled_after_a_checkpoint() {
     let before = pending::WRITE_COUNT.get();
     for (file, entry) in &fixtures[..CHECKPOINT_OPERATIONS] {
         storage
-            .replace_file(file, std::slice::from_ref(entry))
+            .replace_fixture_file(file, std::slice::from_ref(entry))
             .expect("prepared write");
     }
     assert_eq!(pending::WRITE_COUNT.get(), before);
     assert!(!home.join("storage").join(pending::NAME).exists());
     let (last, entry) = fixtures.last().expect("last fixture");
     storage
-        .replace_file(last, std::slice::from_ref(entry))
+        .replace_fixture_file(last, std::slice::from_ref(entry))
         .expect("fresh intent after checkpoint");
     assert_eq!(pending::WRITE_COUNT.get(), before + 1);
     assert_eq!(
@@ -1034,7 +1108,7 @@ fn changed_prepared_metadata_and_deletions_refresh_recovery_intent() {
         vec![1.0, 0.0, 0.0],
     );
     storage
-        .replace_file(&latest, &[entry])
+        .replace_fixture_file(&latest, &[entry])
         .expect("changed snapshot");
     assert_eq!(pending::WRITE_COUNT.get(), before + 1);
     assert_eq!(
@@ -1066,7 +1140,9 @@ fn checkpoints_batches_at_the_operation_limit() {
             "orchard",
             vec![1.0, 0.0, 0.0],
         );
-        storage.replace_file(&file, &[entry]).expect("batch write");
+        storage
+            .replace_fixture_file(&file, &[entry])
+            .expect("batch write");
         assert_eq!(marker.exists(), index + 1 < CHECKPOINT_OPERATIONS);
     }
 
@@ -1076,7 +1152,9 @@ fn checkpoints_batches_at_the_operation_limit() {
         "uncheckpointed banana",
         vec![0.0, 1.0, 0.0],
     );
-    storage.replace_file(&later, &[entry]).expect("next batch");
+    storage
+        .replace_fixture_file(&later, &[entry])
+        .expect("next batch");
     assert_eq!(
         pending::read(&home.join("storage"))
             .expect("next batch marker")
@@ -1127,7 +1205,7 @@ fn checkpoints_large_sources_before_the_operation_limit() {
         // Source metadata represents a large file without allocating its full contents.
         file.snapshot.size_bytes = CHECKPOINT_BYTES / 2;
         storage
-            .replace_file(&file, &[entry])
+            .replace_fixture_file(&file, &[entry])
             .expect("large source write");
         assert_eq!(marker.exists(), id == "first-large");
     }
@@ -1160,7 +1238,9 @@ async fn finalizes_small_batches_and_preserves_failure_status() {
         "unreadable",
         vec![0.0, 1.0, 0.0],
     );
-    storage.replace_file(&file, &[entry]).expect("small write");
+    storage
+        .replace_fixture_file(&file, &[entry])
+        .expect("small write");
     storage
         .mark_file_failed(&failed, "fixture failure")
         .expect("failed source");
@@ -1209,7 +1289,7 @@ fn retains_only_the_latest_intent_for_repeated_file_updates() {
         vec![1.0, 0.0, 0.0],
     );
     storage
-        .replace_file(&file, &[original])
+        .replace_fixture_file(&file, &[original])
         .expect("initial replacement");
     storage.delete_file(file.id).expect("temporary deletion");
     let (mut latest, replacement) = fixture(
@@ -1220,7 +1300,7 @@ fn retains_only_the_latest_intent_for_repeated_file_updates() {
     );
     latest.snapshot.modified_epoch_ms = Some(2);
     storage
-        .replace_file(&latest, std::slice::from_ref(&replacement))
+        .replace_fixture_file(&latest, std::slice::from_ref(&replacement))
         .expect("latest replacement");
     let (deleted, entry) = fixture(
         Some(storage.as_ref()),
@@ -1229,7 +1309,7 @@ fn retains_only_the_latest_intent_for_repeated_file_updates() {
         vec![0.0, 0.0, 1.0],
     );
     storage
-        .replace_file(&deleted, &[entry])
+        .replace_fixture_file(&deleted, &[entry])
         .expect("another replacement");
     storage.delete_file(deleted.id).expect("final deletion");
     assert_eq!(
@@ -1287,7 +1367,7 @@ async fn assert_failed_marker_write(prepared: bool) {
         vec![1.0, 0.0, 0.0],
     );
     storage
-        .replace_file(&file, std::slice::from_ref(&entry))
+        .replace_fixture_file(&file, std::slice::from_ref(&entry))
         .expect("healthy pending write");
     let marker = path.join(pending::NAME);
     let preserved = path.join("preserved-pending.json");
@@ -1302,7 +1382,11 @@ async fn assert_failed_marker_write(prepared: bool) {
     if prepared {
         assert!(storage.prepare_file_replacements(&[&other]).is_err());
     } else {
-        assert!(storage.replace_file(&other, &[replacement]).is_err());
+        assert!(
+            storage
+                .replace_fixture_file(&other, &[replacement])
+                .is_err()
+        );
     }
     for error in [
         storage
@@ -1377,7 +1461,7 @@ fn invalid_prepared_files_leave_the_writer_usable_and_readers_reject_preparation
     storage.prepare_file_replacements(&[]).expect("empty hint");
     assert!(!home.join("storage").join(pending::NAME).exists());
     storage
-        .replace_file(&file, &[entry])
+        .replace_fixture_file(&file, &[entry])
         .expect("writer remains usable");
     storage.close().expect("close writer");
     let reader = open(home, true);
@@ -1405,7 +1489,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         entry.vector = invalid;
         assert_eq!(
             storage
-                .replace_file(&file, std::slice::from_ref(&entry))
+                .replace_fixture_file(&file, std::slice::from_ref(&entry))
                 .expect_err("invalid vector")
                 .code(),
             EngineError::INVALID_ARGUMENT
@@ -1420,14 +1504,14 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     }
     entry.vector = vec![1.0, 0.0, 0.0];
     storage
-        .replace_file(&file, std::slice::from_ref(&entry))
+        .replace_fixture_file(&file, std::slice::from_ref(&entry))
         .expect("valid write after rejections");
     let marker = home.join("storage").join(pending::NAME);
     let healthy_pending = fs::read(&marker).expect("healthy pending batch");
     entry.vector = vec![1.0];
     assert_eq!(
         storage
-            .replace_file(&file, &[entry])
+            .replace_fixture_file(&file, &[entry])
             .expect_err("invalid replacement of pending source")
             .code(),
         EngineError::INVALID_ARGUMENT
@@ -1442,10 +1526,8 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         "rejected table",
         vec![1.0, 0.0, 0.0],
     );
-    let EntityFragment::Standalone(entity) = &mut invalid_table.fragment else {
-        panic!("fixture must be a standalone entity");
-    };
-    entity.content = EntityContent::Source(Content::Table(TableContent {
+    let entity = &mut invalid_table.entity;
+    entity.content = Content::Table(TableContent {
         row_count: 1,
         column_count: 1,
         cells: vec![TableCell {
@@ -1456,9 +1538,9 @@ fn rejects_invalid_writes_without_poisoning_storage() {
             contents: vec![Content::Text("invalid zero-height cell".to_owned())],
             kind: TableCellRole::Data,
         }],
-    }));
+    });
     let error = storage
-        .replace_file(&file, &[invalid_table])
+        .replace_fixture_file(&file, &[invalid_table])
         .expect_err("invalid table must be rejected before writing intent");
     assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
     assert!(error.message().contains("table cell span"));
@@ -1518,20 +1600,36 @@ fn invalid_file_states_and_owners_never_start_a_pending_batch() {
     unread.snapshot.content_hash = None;
     assert!(
         storage
-            .replace_file(&unread, std::slice::from_ref(&entry))
+            .replace_fixture_file(&unread, std::slice::from_ref(&entry))
             .is_err()
     );
     let mut other = file.clone();
     other.id = FileId::new(99);
     assert!(
         storage
-            .replace_file(&other, std::slice::from_ref(&entry))
+            .replace_fixture_file(&other, std::slice::from_ref(&entry))
             .is_err()
     );
+    let (entities, entries) = fixture_records(std::slice::from_ref(&entry));
+    let mut wrong_owner = entries[0].clone();
+    wrong_owner.entity_id = EntityId::new("unrelated-owner").expect("owner ID");
+    let mut unknown_fragment = entries[0].clone();
+    unknown_fragment.fragment_id = FragmentId::new("unknown-fragment").expect("fragment ID");
+    for invalid in [
+        vec![],
+        vec![entries[0].clone(), entries[0].clone()],
+        vec![wrong_owner],
+        vec![unknown_fragment],
+    ] {
+        assert!(
+            storage.replace_file(&file, &entities, &invalid).is_err(),
+            "every canonical fragment requires exactly one projection of its owner"
+        );
+    }
     assert!(!marker.exists());
     assert!(storage.list_files().expect("no partial records").is_empty());
     storage
-        .replace_file(&file, &[])
+        .replace_fixture_file(&file, &[])
         .expect("successful empty extraction");
     storage.close().expect("checkpoint empty result");
     let reader = open(directory.path(), true);
@@ -1569,7 +1667,7 @@ fn native_replacements_require_a_consistent_complete_file_state() {
         file.index_status = status;
         assert!(
             native
-                .apply_replace(&file, std::slice::from_ref(&entry))
+                .apply_fixture_file(&file, std::slice::from_ref(&entry))
                 .is_err()
         );
     }
@@ -1584,7 +1682,7 @@ fn native_replacements_require_a_consistent_complete_file_state() {
         entity_count: 1,
     };
     native
-        .apply_replace(&file, std::slice::from_ref(&entry))
+        .apply_fixture_file(&file, std::slice::from_ref(&entry))
         .expect("consistent result");
     let hits = native
         .search_vector("fixture/fixture-model", &entry.vector, 10, None)
@@ -1593,10 +1691,10 @@ fn native_replacements_require_a_consistent_complete_file_state() {
     let loaded = native
         .load_search_hits(&hits)
         .expect("stored result details");
-    assert_eq!(loaded.entities[entry.fragment.entity_id()].file, file);
+    assert_eq!(loaded.entities[&entry.entity.id].file, file);
     file.index_status = FileIndexStatus::NotIndexed;
     native
-        .apply_replace(&file, &[])
+        .apply_fixture_file(&file, &[])
         .expect("discard interrupted result");
     assert!(
         native
@@ -1620,21 +1718,23 @@ fn writes_fragments_across_native_batch_boundaries() {
     );
     let entries = (0..1025)
         .map(|index| {
-            let mut entity = prototype.fragment.as_entity().expect("standalone").clone();
+            let mut entity = prototype.entity.clone();
             entity.id = EntityId::new(format!("batch-entity-{index}")).expect("entity ID");
-            IndexedFragment {
+            entity.fragments[0].id =
+                FragmentId::new(format!("batch-fragment-{index}")).expect("fragment ID");
+            FixtureEntity {
                 model: "fixture/fixture-model".into(),
-                fragment: EntityFragment::Standalone(entity),
+                entity,
                 vector: prototype.vector.clone(),
             }
         })
         .collect::<Vec<_>>();
     storage
-        .replace_file(&file, &entries)
+        .replace_fixture_file(&file, &entries)
         .expect("batched write");
     let last = entries.last().expect("last batch entry");
     let filter = StorageSearchFilter {
-        entity_ids: Some(vec![last.fragment.entity_id().clone()]),
+        entity_ids: Some(vec![last.entity.id.clone()]),
         ..StorageSearchFilter::default()
     };
     assert_eq!(
@@ -1656,9 +1756,12 @@ fn writes_fragments_across_native_batch_boundaries() {
     let loaded = storage
         .load_search_hits(&hits)
         .expect("last batch result details");
-    assert_eq!(loaded.fragments[&hits[0].document_id], last.fragment);
+    assert_eq!(
+        loaded.fragments[&hits[0].document_id],
+        last.entity.fragments[0]
+    );
     storage
-        .replace_file(&file, &[])
+        .replace_fixture_file(&file, &[])
         .expect("replace with empty file");
     assert!(
         storage
@@ -1709,16 +1812,14 @@ fn reopened_readers_detect_non_unicode_names_without_loading_the_allocation_cach
 }
 
 #[test]
-fn directory_collection_is_authoritative_and_legacy_cache_is_ignored() {
+fn directory_collection_preserves_membership_after_reopen_and_recovery() {
     let home = tempfile::tempdir().expect("workspace");
     let storage = open(home.path(), false);
     let (file, entry) = file_at(storage.as_ref(), "src/nested/file.rs");
     storage
-        .replace_file(&file, &[entry])
+        .replace_fixture_file(&file, &[entry])
         .expect("indexed source");
     storage.close().expect("checkpoint");
-    let cache = home.path().join("storage/directories.json");
-    assert!(!cache.exists());
     assert!(home.path().join("storage/directories").is_dir());
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(
@@ -1726,31 +1827,15 @@ fn directory_collection_is_authoritative_and_legacy_cache_is_ignored() {
         )),
         ..StorageSearchFilter::default()
     };
-    for corrupt in [false, true] {
-        if corrupt {
-            fs::write(&cache, b"invalid cache").expect("corrupt cache");
-        } else {
-            assert!(!cache.exists());
-        }
-        let reader = open(home.path(), true);
-        assert_eq!(
-            reader
-                .search_fts("orchard", 10, Some(&filter))
-                .expect("directory query")
-                .len(),
-            1
-        );
-        reader.close().expect("close reader");
-    }
-    // A valid but stale cache must never override source membership during recovery.
-    fs::write(
-        &cache,
-        serde_json::to_vec(&serde_json::json!({
-            "version": 1,
-            "directories": [[999, super::super::path::encode_path(&crate::domain::SourcePath::new("src").expect("path")).expect("encoded path")]]
-        })).expect("valid stale cache"),
-    )
-    .expect("stale cache");
+    let reader = open(home.path(), true);
+    assert_eq!(
+        reader
+            .search_fts("orchard", 10, Some(&filter))
+            .expect("directory query")
+            .len(),
+        1
+    );
+    reader.close().expect("close reader");
     pending::write(
         &home.path().join("storage"),
         &PendingChanges::from([(file.id, PendingChange::reindex(&file))]),
@@ -1759,7 +1844,7 @@ fn directory_collection_is_authoritative_and_legacy_cache_is_ignored() {
     let writer = open(home.path(), false);
     let (_, entry) = file_at(writer.as_ref(), "src/nested/file.rs");
     writer
-        .replace_file(&file, &[entry])
+        .replace_fixture_file(&file, &[entry])
         .expect("reindex source");
     writer.close().expect("checkpoint recovered source");
     let reader = open(home.path(), true);
@@ -1790,7 +1875,7 @@ fn open_multi_model(path: &Path) -> Box<dyn WorkspaceIndexStorage> {
         .expect("multi-model storage")
 }
 
-fn multi_model_file(storage: &dyn WorkspaceIndexStorage) -> (FileRecord, Vec<IndexedFragment>) {
+fn multi_model_file(storage: &dyn WorkspaceIndexStorage) -> (FileRecord, Vec<FixtureEntity>) {
     let (file, text) = fixture(
         Some(storage),
         "nested/mixed",
@@ -1800,14 +1885,13 @@ fn multi_model_file(storage: &dyn WorkspaceIndexStorage) -> (FileRecord, Vec<Ind
     let mut image = text.clone();
     image.model = "fixture/vision".into();
     image.vector = vec![0.0, 1.0];
-    let EntityFragment::Standalone(entity) = &mut image.fragment else {
-        unreachable!()
-    };
-    entity.id = EntityId::new("image-fragment").expect("image ID");
-    entity.content = EntityContent::Source(Content::Image(
+    let entity = &mut image.entity;
+    entity.id = EntityId::new("image-entity").expect("image ID");
+    entity.fragments[0].id = FragmentId::new("image-fragment").expect("image fragment ID");
+    entity.content = Content::Image(
         crate::domain::ImageContent::new(vec![1, 2, 3], crate::domain::FileFormat::Png)
             .expect("image"),
-    ));
+    );
     (file, vec![text, image])
 }
 
@@ -1816,7 +1900,9 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     let home = tempfile::tempdir().expect("workspace");
     let writer = open_multi_model(home.path());
     let (file, entries) = multi_model_file(writer.as_ref());
-    writer.replace_file(&file, &entries).expect("complete file");
+    writer
+        .replace_fixture_file(&file, &entries)
+        .expect("complete file");
     writer.close().expect("checkpoint");
 
     let storage_path = home.path().join("storage");
@@ -1842,19 +1928,18 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         collections, expected,
         "three canonical collections plus one per model"
     );
-    assert!(!storage_path.join("directories.json").exists());
 
     let reader = open(home.path(), true);
     for (model, vector, id) in [
         (
             "fixture/fixture-model",
             vec![1.0, 0.0, 0.0],
-            entries[0].fragment.document_id(),
+            entries[0].entity.fragments[0].id.as_str(),
         ),
         (
             "fixture/vision",
             vec![0.0, 1.0],
-            entries[1].fragment.document_id(),
+            entries[1].entity.fragments[0].id.as_str(),
         ),
     ] {
         let hits = reader
@@ -1863,7 +1948,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].document_id, id);
         let loaded = reader.load_search_hits(&hits).expect("canonical fragment");
-        assert_eq!(loaded.fragments[id].document_id(), id);
+        assert_eq!(loaded.fragments[id].id.as_str(), id);
     }
     assert!(
         reader
@@ -1945,7 +2030,9 @@ fn pending_multi_model_file_recovery_discards_every_partition() {
     let home = tempfile::tempdir().expect("workspace");
     let writer = open_multi_model(home.path());
     let (file, entries) = multi_model_file(writer.as_ref());
-    writer.replace_file(&file, &entries).expect("complete file");
+    writer
+        .replace_fixture_file(&file, &entries)
+        .expect("complete file");
     writer.close().expect("checkpoint");
     pending::write(
         &home.path().join("storage"),

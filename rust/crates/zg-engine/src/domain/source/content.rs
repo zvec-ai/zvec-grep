@@ -1,6 +1,6 @@
 use crate::{EngineError, EngineResult};
 
-use super::source::{FileCategory, FileFormat};
+use super::{FileCategory, FileFormat};
 
 #[derive(
     Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,

@@ -1018,7 +1018,6 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
     template.embedding = None;
-    template.embedding_routes = None;
     template
 }
 

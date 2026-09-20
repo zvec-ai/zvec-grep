@@ -9,7 +9,6 @@ mod render;
 pub use progress::IndexProgressDisplay;
 
 use std::{
-    collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     str::FromStr,
@@ -28,7 +27,7 @@ use zg_engine::api::{
     },
     index::{
         IndexOptions,
-        options::{ContentKind, Device, EmbeddingModelSpec, GlobRule, ScanRulesUpdate},
+        options::{Device, EmbeddingModelSpec, GlobRule, ScanRulesUpdate},
     },
     info::InfoOptions,
 };
@@ -148,9 +147,6 @@ pub enum ModelAction {
         device: Option<DeviceArg>,
         #[arg(long = "default")]
         default_model: bool,
-        /// Route these content kinds to this model by default (repeatable).
-        #[arg(long, value_parser = ["text", "image", "table"])]
-        content: Vec<String>,
     },
 }
 
@@ -530,15 +526,9 @@ pub struct IndexArgs {
     pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
+    /// Single embedding model for this workspace; this version indexes text only.
     #[arg(long)]
     pub embedding: Option<String>,
-    /// Assign a content kind to a model, e.g. text=qwen/text-embedding-v4 (repeatable).
-    #[arg(
-        long = "embedding-route",
-        value_name = "CONTENT=MODEL",
-        conflicts_with = "embedding"
-    )]
-    pub embedding_routes: Vec<String>,
     #[arg(long = "model-cache")]
     pub model_cache: Option<PathBuf>,
     #[arg(long, value_enum, ignore_case = true)]
@@ -713,10 +703,6 @@ pub enum CliError {
     UnknownQueryOption(String),
     #[error("--modified-after must not be later than --modified-before")]
     InvalidModifiedRange,
-    #[error(
-        "invalid embedding route: {0}; use text=MODEL, image=MODEL, or table=MODEL once per content kind"
-    )]
-    InvalidEmbeddingRoute(String),
     #[error("zg index --drop cannot be combined with indexing options")]
     DropWithIndexOptions,
     #[error("zg index --drop requires --yes in non-interactive Rust mode")]
@@ -1194,7 +1180,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || args.rebuild
             || args.reset_paths
             || args.embedding.is_some()
-            || !args.embedding_routes.is_empty()
             || args.model_cache.is_some()
             || args.device.is_some()
             || args.api_key.is_some()
@@ -1226,7 +1211,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             .map(|path| resolve_from(current_dir, Some(&path)))
             .collect()
     });
-    let embedding_routes = parse_embedding_routes(&args)?;
     let embedding = args.embedding.map(|reference| EmbeddingModelSpec {
         reference,
         revision: None,
@@ -1244,7 +1228,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             reset_paths: args.reset_paths,
             scan,
             embedding,
-            embedding_routes,
             allow_remote: args.allow_remote,
             api_key: args.api_key,
             endpoint: args.endpoint.clone(),
@@ -1255,33 +1238,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         })),
         output,
     })
-}
-
-fn parse_embedding_routes(
-    args: &IndexArgs,
-) -> Result<Option<BTreeMap<ContentKind, EmbeddingModelSpec>>, CliError> {
-    let mut routes = BTreeMap::new();
-    for route in &args.embedding_routes {
-        let (kind, reference) = route
-            .split_once('=')
-            .ok_or_else(|| CliError::InvalidEmbeddingRoute(route.clone()))?;
-        let kind: ContentKind = serde_json::from_value(serde_json::json!(kind))
-            .map_err(|_| CliError::InvalidEmbeddingRoute(route.clone()))?;
-        if reference.trim().is_empty() || routes.contains_key(&kind) {
-            return Err(CliError::InvalidEmbeddingRoute(route.clone()));
-        }
-        routes.insert(
-            kind,
-            EmbeddingModelSpec {
-                reference: reference.to_owned(),
-                revision: None,
-                cache_dir: None,
-                endpoint: None,
-                device: Device::Auto,
-            },
-        );
-    }
-    Ok((!routes.is_empty()).then_some(routes))
 }
 
 fn server_plan(args: ServerArgs) -> Result<ServerPlan, CliError> {
@@ -1775,74 +1731,34 @@ mod tests {
     }
 
     #[test]
-    fn explicit_content_routes_are_unique_and_exclusive_with_single_model() {
+    fn index_accepts_one_model_and_rejects_model_routes() {
+        for args in [
+            vec!["zg", "index", "--embedding", "one", "--embedding", "two"],
+            vec!["zg", "index", "--embedding-route", "text=one"],
+            vec!["zg", "config", "model", "set", "one", "--content", "text"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
         let CliPlan::Index {
             operation: IndexOperation::Build(request),
             ..
         } = Cli::try_parse_from([
             "zg",
             "index",
-            "--embedding-route",
-            "text=local/potion-code-16m-v2",
-            "--embedding-route",
-            "table=local/potion-code-16m-v2",
-            "--embedding-route",
-            "image=qwen/qwen3-vl-embedding",
+            "--embedding",
+            "local/potion-code-16m-v2",
             "--device",
             "cpu",
-            "--endpoint",
-            "https://runtime.example.test/embeddings",
         ])
-        .expect("parse routes")
+        .expect("parse one model")
         .into_plan(PathBuf::from("/workspace"))
-        .expect("route plan")
+        .expect("single model plan")
         else {
             panic!("index");
         };
-        assert_eq!(request.device, Some(super::Device::Cpu));
-        assert_eq!(
-            request.endpoint.as_deref(),
-            Some("https://runtime.example.test/embeddings")
-        );
-        let routes = request.embedding_routes.expect("explicit routes");
-        assert!(
-            routes
-                .values()
-                .all(|spec| spec.endpoint.is_none() && spec.device == super::Device::Auto)
-        );
-        assert_eq!(routes.len(), 3);
-        assert_eq!(
-            routes[&super::ContentKind::Text].reference,
-            routes[&super::ContentKind::Table].reference
-        );
-        assert!(request.embedding.is_none());
-        assert!(
-            Cli::try_parse_from([
-                "zg",
-                "index",
-                "--embedding",
-                "one",
-                "--embedding-route",
-                "text=two"
-            ])
-            .is_err()
-        );
-        for values in [
-            vec!["text=one", "text=two"],
-            vec!["video=one"],
-            vec!["text="],
-        ] {
-            let mut args = vec!["zg", "index"];
-            for value in values {
-                args.extend(["--embedding-route", value]);
-            }
-            assert!(
-                Cli::try_parse_from(args)
-                    .expect("parse syntax")
-                    .into_plan(PathBuf::from("/workspace"))
-                    .is_err()
-            );
-        }
+        let model = request.embedding.expect("selected model");
+        assert_eq!(model.reference, "local/potion-code-16m-v2");
+        assert_eq!(model.device, super::Device::Cpu);
     }
 
     #[test]

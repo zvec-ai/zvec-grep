@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{
     EngineError, EngineResult,
     domain::{
-        ByteRange, Content, Entity, EntityContent, EntityFragment, EntityId, EntityMetadata,
-        FileFormat, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, ImageContent,
-        SourcePath, SourceRange, TableCell, TableCellRole, TableContent, TextRange, WindowFragment,
+        ByteRange, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileFormat, FileId,
+        FileIndexStatus, FileRecord, FileSnapshot, FragmentId, ImageContent, Range, SourcePath,
+        TableCell, TableCellRole, TableContent, TextRange,
     },
 };
 
-const VERSION: u16 = 7;
+const VERSION: u16 = 10;
 // Nested tables add several JSON containers; keep records below serde's recursion limit.
 const MAX_TABLE_DEPTH: usize = 16;
 
@@ -32,75 +32,19 @@ pub(crate) fn decode_file(json: &str) -> EngineResult<FileRecord> {
         .map_err(|error| invalid_record("source file", &error))
 }
 
-#[cfg(test)]
-fn encode_fragment(fragment: &EntityFragment) -> EngineResult<String> {
-    validate_fragment(fragment)?;
-    encode(FragmentRecord::from(fragment), "fragment")
+/// One canonical entity record contains its content once and all fragment selectors.
+pub(super) fn encode_entity(entity: &Entity) -> EngineResult<String> {
+    validate_entity(entity)?;
+    encode(EntityRecord::from(entity), "entity")
 }
 
-#[cfg(test)]
-fn decode_fragment(json: &str, metadata: Option<&EntityMetadata>) -> EngineResult<EntityFragment> {
-    let record: FragmentRecord<'static> = decode(json, "fragment")?;
-    let fragment = record
-        .into_fragment(metadata)
-        .map_err(|error| invalid_record("fragment", &error))?;
-    validate_fragment(&fragment).map_err(|error| invalid_record("fragment", &error))?;
-    Ok(fragment)
-}
-
-/// Canonical storage for an entity and every fragment owned by it. Model indexes
-/// carry only searchable projections and never the authoritative content payload.
-pub(super) fn encode_entity_fragments(fragments: &[&EntityFragment]) -> EngineResult<String> {
-    validate_entity_fragments(fragments.iter().copied())?;
-    encode(
-        fragments
-            .iter()
-            .map(|fragment| FragmentRecord::from(*fragment))
-            .collect::<Vec<_>>(),
-        "entity fragments",
-    )
-}
-
-pub(super) fn decode_entity_fragments(
-    json: &str,
-    metadata: Option<&EntityMetadata>,
-) -> EngineResult<Vec<EntityFragment>> {
-    let records: Vec<FragmentRecord<'static>> = decode(json, "entity fragments")?;
-    let fragments = records
-        .into_iter()
-        .map(|record| record.into_fragment(metadata))
-        .collect::<EngineResult<Vec<_>>>()?;
-    validate_entity_fragments(fragments.iter())
-        .map_err(|error| invalid_record("entity fragments", &error))?;
-    Ok(fragments)
-}
-
-fn validate_entity_fragments<'a>(
-    fragments: impl Iterator<Item = &'a EntityFragment>,
-) -> EngineResult<()> {
-    let fragments = fragments.collect::<Vec<_>>();
-    let owner = fragments
-        .iter()
-        .find_map(|fragment| fragment.as_entity())
-        .ok_or_else(|| EngineError::invalid_argument("entity bundle has no owner"))?;
-    if fragments
-        .iter()
-        .filter(|fragment| fragment.as_entity().is_some())
-        .count()
-        != 1
-        || fragments
-            .iter()
-            .any(|fragment| fragment.entity_id() != &owner.id)
-    {
-        return Err(EngineError::invalid_argument(
-            "entity bundle must contain exactly one owner and its fragments",
-        ));
-    }
-    crate::domain::validate_fragments(owner.file_id, fragments.iter().copied())?;
-    for fragment in fragments {
-        validate_fragment(fragment)?;
-    }
-    Ok(())
+pub(super) fn decode_entity(json: &str, metadata: Option<&EntityMetadata>) -> EngineResult<Entity> {
+    let record: EntityRecord<'static> = decode(json, "entity")?;
+    let entity = record
+        .into_entity(metadata)
+        .map_err(|error| invalid_record("entity", &error))?;
+    validate_entity(&entity).map_err(|error| invalid_record("entity", &error))?;
+    Ok(entity)
 }
 
 fn encode(value: impl Serialize, kind: &str) -> EngineResult<String> {
@@ -302,69 +246,20 @@ fn validate_path(path: &Path) -> EngineResult<()> {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum FragmentRecord<'a> {
-    Standalone(EntityRecord<'a>),
-    Representative(EntityRecord<'a>),
-    Window(WindowRecord<'a>),
-}
-
-#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EntityRecord<'a> {
     id: Cow<'a, str>,
     file_id: u32,
-    range: RangeRecord,
-    content: EntityContentRecord<'a>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum EntityContentRecord<'a> {
-    Source(ContentRecord<'a>),
-    Outline(Cow<'a, str>),
-}
-
-#[derive(Serialize, Deserialize)]
-struct WindowRecord<'a> {
-    id: Cow<'a, str>,
-    entity_id: Cow<'a, str>,
-    file_id: u32,
-    range: RangeRecord,
+    source_range: RangeRecord,
     content: ContentRecord<'a>,
+    fragments: Vec<FragmentRecord<'a>>,
 }
 
-impl<'a> From<&'a EntityFragment> for FragmentRecord<'a> {
-    fn from(fragment: &'a EntityFragment) -> Self {
-        match fragment {
-            EntityFragment::Standalone(entity) => Self::Standalone(entity.into()),
-            EntityFragment::Representative(entity) => Self::Representative(entity.into()),
-            EntityFragment::Window(window) => Self::Window(WindowRecord {
-                id: window.id.as_str().into(),
-                entity_id: window.entity_id.as_str().into(),
-                file_id: window.file_id.get(),
-                range: window.range.into(),
-                content: encode_content(&window.content),
-            }),
-        }
-    }
-}
-
-impl FragmentRecord<'_> {
-    fn into_fragment(self, metadata: Option<&EntityMetadata>) -> EngineResult<EntityFragment> {
-        Ok(match self {
-            Self::Standalone(entity) => EntityFragment::Standalone(entity.into_entity(metadata)?),
-            Self::Representative(entity) => {
-                EntityFragment::Representative(entity.into_entity(metadata)?)
-            }
-            Self::Window(window) => EntityFragment::Window(WindowFragment {
-                id: FragmentId::new(window.id.into_owned())?,
-                entity_id: EntityId::new(window.entity_id.into_owned())?,
-                file_id: FileId::new(window.file_id),
-                range: window.range.try_into()?,
-                content: decode_content(window.content)?,
-            }),
-        })
-    }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FragmentRecord<'a> {
+    id: Cow<'a, str>,
+    range: RangeRecord,
 }
 
 impl<'a> From<&'a Entity> for EntityRecord<'a> {
@@ -372,15 +267,16 @@ impl<'a> From<&'a Entity> for EntityRecord<'a> {
         Self {
             id: entity.id.as_str().into(),
             file_id: entity.file_id.get(),
-            range: entity.range.into(),
-            content: match &entity.content {
-                EntityContent::Source(content) => {
-                    EntityContentRecord::Source(encode_content(content))
-                }
-                EntityContent::Outline(outline) => {
-                    EntityContentRecord::Outline(outline.as_str().into())
-                }
-            },
+            source_range: entity.source_range.into(),
+            content: encode_content(&entity.content),
+            fragments: entity
+                .fragments
+                .iter()
+                .map(|fragment| FragmentRecord {
+                    id: fragment.id.as_str().into(),
+                    range: fragment.range.into(),
+                })
+                .collect(),
         }
     }
 }
@@ -390,16 +286,19 @@ impl EntityRecord<'_> {
         Ok(Entity {
             id: EntityId::new(self.id.into_owned())?,
             file_id: FileId::new(self.file_id),
-            range: self.range.try_into()?,
-            content: match self.content {
-                EntityContentRecord::Source(content) => {
-                    EntityContent::Source(decode_content(content)?)
-                }
-                EntityContentRecord::Outline(outline) => {
-                    EntityContent::Outline(outline.into_owned())
-                }
-            },
+            source_range: self.source_range.try_into()?,
+            content: decode_content(self.content)?,
             metadata: metadata.cloned(),
+            fragments: self
+                .fragments
+                .into_iter()
+                .map(|fragment| {
+                    Ok(EntityFragment {
+                        id: FragmentId::new(fragment.id.into_owned())?,
+                        range: fragment.range.try_into()?,
+                    })
+                })
+                .collect::<EngineResult<_>>()?,
         })
     }
 }
@@ -544,9 +443,9 @@ fn decode_content(content: ContentRecord<'_>) -> EngineResult<Content> {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RangeRecord {
-    File,
+    Full,
     Text {
         start_line: usize,
         end_line: usize,
@@ -561,11 +460,11 @@ enum RangeRecord {
     },
 }
 
-impl From<SourceRange> for RangeRecord {
-    fn from(range: SourceRange) -> Self {
+impl From<Range> for RangeRecord {
+    fn from(range: Range) -> Self {
         match range {
-            SourceRange::File => Self::File,
-            SourceRange::Text(range) => Self::Text {
+            Range::Full => Self::Full,
+            Range::Text(range) => Self::Text {
                 start_line: range.start_line(),
                 end_line: range.end_line(),
                 start_byte_offset: range.start_byte_offset(),
@@ -573,7 +472,7 @@ impl From<SourceRange> for RangeRecord {
                 start_byte_column: range.start_byte_column(),
                 end_byte_column: range.end_byte_column(),
             },
-            SourceRange::Byte(range) => Self::Byte {
+            Range::Byte(range) => Self::Byte {
                 start_offset: range.start_offset,
                 end_offset: range.end_offset,
             },
@@ -581,12 +480,12 @@ impl From<SourceRange> for RangeRecord {
     }
 }
 
-impl TryFrom<RangeRecord> for SourceRange {
+impl TryFrom<RangeRecord> for Range {
     type Error = EngineError;
 
     fn try_from(range: RangeRecord) -> EngineResult<Self> {
         Ok(match range {
-            RangeRecord::File => Self::File,
+            RangeRecord::Full => Self::Full,
             RangeRecord::Text {
                 start_line,
                 end_line,
@@ -613,22 +512,9 @@ impl TryFrom<RangeRecord> for SourceRange {
     }
 }
 
-pub(super) fn validate_fragment(fragment: &EntityFragment) -> EngineResult<()> {
-    fragment.range().validate()?;
-    if let Some(EntityContent::Outline(outline)) =
-        fragment.as_entity().map(|entity| &entity.content)
-    {
-        if outline.trim().is_empty() {
-            return Err(EngineError::invalid_argument(
-                "fragment outline must not be blank",
-            ));
-        }
-    } else if fragment.contents().is_empty() {
-        return Err(EngineError::invalid_argument(
-            "fragment must contain source content",
-        ));
-    }
-    validate_contents(fragment.contents(), 0)
+pub(super) fn validate_entity(entity: &Entity) -> EngineResult<()> {
+    crate::domain::validate_entities(entity.file_id, std::slice::from_ref(entity))?;
+    validate_contents(std::slice::from_ref(&entity.content), 0)
 }
 
 fn validate_contents(contents: &[Content], table_depth: usize) -> EngineResult<()> {
@@ -700,10 +586,9 @@ fn validate_table(table: &TableContent) -> EngineResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::domain::{CodeMetadata, MarkdownMetadata, SymbolType};
     use serde_json::{Value, json};
-
-    use super::*;
 
     fn file() -> FileRecord {
         FileRecord {
@@ -713,13 +598,13 @@ mod tests {
             snapshot: FileSnapshot {
                 size_bytes: 123,
                 modified_epoch_ms: Some(456),
-                content_hash: Some("content-hash".to_owned()),
+                content_hash: Some("content-hash".into()),
             },
         }
     }
 
-    fn text_range() -> SourceRange {
-        SourceRange::Text(TextRange::from_coordinates(7, 18, 2, 2, 0, 11).expect("text range"))
+    fn text_range() -> Range {
+        Range::Text(TextRange::from_coordinates(7, 18, 2, 2, 0, 11).expect("text range"))
     }
 
     fn cell(
@@ -739,7 +624,7 @@ mod tests {
         }
     }
 
-    fn fragment() -> EntityFragment {
+    fn entity() -> Entity {
         let image =
             Content::Image(ImageContent::new(vec![0, 1, 255], FileFormat::Png).expect("image"));
         let mut nested = cell(1, 1, 1, 1, TableCellRole::Unknown);
@@ -749,12 +634,12 @@ mod tests {
             cells: vec![cell(0, 0, 1, 1, TableCellRole::Header)],
         }));
         let mut mixed = cell(0, 1, 1, 2, TableCellRole::Data);
-        mixed.contents.push(image.clone());
-        EntityFragment::Standalone(Entity {
-            id: EntityId::new("entity").expect("entity ID"),
+        mixed.contents.push(image);
+        Entity {
+            id: EntityId::new("entity").expect("entity id"),
             file_id: file().id,
-            range: text_range(),
-            content: EntityContent::Source(Content::Table(TableContent {
+            source_range: text_range(),
+            content: Content::Table(TableContent {
                 row_count: 2,
                 column_count: 3,
                 cells: vec![
@@ -763,28 +648,25 @@ mod tests {
                     nested,
                     cell(1, 2, 1, 1, TableCellRole::Data),
                 ],
-            })),
+            }),
             metadata: None,
-        })
+            fragments: vec![EntityFragment {
+                id: FragmentId::new("fragment").expect("fragment id"),
+                range: Range::Full,
+            }],
+        }
     }
 
-    fn round_trip(fragment: &EntityFragment) {
-        let encoded = encode_fragment(fragment).expect("encode fragment");
+    fn round_trip(entity: &Entity) {
+        let encoded = encode_entity(entity).expect("encode entity");
         assert_eq!(
-            decode_fragment(
-                &encoded,
-                fragment
-                    .as_entity()
-                    .and_then(|entity| entity.metadata.as_ref())
-            )
-            .expect("decode fragment"),
-            *fragment
+            decode_entity(&encoded, entity.metadata.as_ref()).expect("decode entity"),
+            *entity
         );
     }
 
-    fn assert_corrupt_fragment(record: &Value) {
-        let error =
-            decode_fragment(&record.to_string(), None).expect_err("invalid stored fragment");
+    fn assert_corrupt_entity(record: &Value) {
+        let error = decode_entity(&record.to_string(), None).expect_err("invalid stored entity");
         assert_eq!(error.code(), EngineError::STORAGE_FAILURE, "{error}");
     }
 
@@ -794,22 +676,15 @@ mod tests {
         let encoded = encode_file(&source).expect("encode source");
         let record: Value = serde_json::from_str(&encoded).expect("JSON record");
         assert_eq!(record["version"], VERSION);
-        assert!(record["value"].get("formats").is_none());
         assert_eq!(
             record["value"],
             json!({
-                "id": 1,
-                "index_status": {"kind": "not_indexed"},
+                "id": 1, "index_status": {"kind": "not_indexed"},
                 "relative_path": {"encoding": "utf8", "value": "nested/tsconfig.json"},
-                "snapshot": {
-                    "size_bytes": 123,
-                    "modified_epoch_ms": 456,
-                    "content_hash": "content-hash",
-                },
+                "snapshot": {"size_bytes": 123, "modified_epoch_ms": 456, "content_hash": "content-hash"},
             })
         );
         assert_eq!(decode_file(&encoded).expect("decode source"), source);
-
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStringExt;
@@ -825,8 +700,11 @@ mod tests {
             ]))
             .expect("source path");
         }
-        let encoded = encode_file(&source).expect("encode native path");
-        assert_eq!(decode_file(&encoded).expect("decode native path"), source);
+        assert_eq!(
+            decode_file(&encode_file(&source).expect("encode native path"))
+                .expect("decode native path"),
+            source
+        );
     }
 
     #[test]
@@ -838,15 +716,9 @@ mod tests {
                 decode_file(&encode_file(&source).expect("encode source")).expect("decode source"),
                 source
             );
-            let mut fragment = fragment();
-            if let EntityFragment::Standalone(entity) = &mut fragment {
-                entity.file_id = source.id;
-            }
-            assert_eq!(
-                decode_fragment(&encode_fragment(&fragment).expect("encode fragment"), None)
-                    .expect("decode fragment"),
-                fragment
-            );
+            let mut entity = entity();
+            entity.file_id = source.id;
+            round_trip(&entity);
         }
     }
 
@@ -854,13 +726,13 @@ mod tests {
     fn stored_file_identities_reject_values_outside_u32() {
         let mut record: Value =
             serde_json::from_str(&encode_file(&file()).expect("source")).expect("JSON");
-        let mut fragment: Value =
-            serde_json::from_str(&encode_fragment(&fragment()).expect("fragment")).expect("JSON");
+        let mut entity: Value =
+            serde_json::from_str(&encode_entity(&entity()).expect("entity")).expect("JSON");
         for invalid in [json!(-1), json!(u64::from(u32::MAX) + 1), json!(1e20)] {
             record["value"]["id"] = invalid.clone();
             assert!(decode_file(&record.to_string()).is_err());
-            fragment["value"]["value"]["file_id"] = invalid;
-            assert_corrupt_fragment(&fragment);
+            entity["value"]["file_id"] = invalid;
+            assert_corrupt_entity(&entity);
         }
     }
 
@@ -878,7 +750,7 @@ mod tests {
                 entity_count: u64::MAX,
             },
             FileIndexStatus::Failed {
-                error: "extraction failed".to_owned(),
+                error: "extraction failed".into(),
             },
         ] {
             file.index_status = status;
@@ -888,147 +760,147 @@ mod tests {
             );
         }
         let mut record: Value =
-            serde_json::from_str(&encode_file(&file).expect("valid file")).expect("file JSON");
+            serde_json::from_str(&encode_file(&file).expect("valid file")).expect("JSON");
         for invalid in [
-            json!({"kind": "indexed", "indexed_epoch_ms": 1, "entity_count": 0, "error": "failure"}),
-            json!({"kind": "indexed", "indexed_epoch_ms": null, "entity_count": 0}),
-            json!({"kind": "indexed", "indexed_epoch_ms": 1, "entity_count": -1}),
-            json!({"kind": "not_indexed", "entity_count": 1}),
-            json!({"kind": "running"}),
+            json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":0, "error":"failure"}),
+            json!({"kind":"indexed", "indexed_epoch_ms":null, "entity_count":0}),
+            json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":-1}),
+            json!({"kind":"not_indexed", "entity_count":1}),
+            json!({"kind":"running"}),
             Value::Null,
         ] {
             record["value"]["index_status"] = invalid;
             assert!(decode_file(&record.to_string()).is_err());
         }
         record["value"]["index_status"] =
-            json!({"kind": "indexed", "indexed_epoch_ms": 1, "entity_count": 0});
+            json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":0});
         record["value"]["snapshot"]["content_hash"] = Value::Null;
         assert!(decode_file(&record.to_string()).is_err());
     }
 
     #[test]
-    fn fragment_records_preserve_structured_content_ranges_metadata_and_ownership() {
-        round_trip(&fragment());
-        let restored = decode_fragment(
-            &encode_fragment(&fragment()).expect("encode fragment"),
-            None,
-        )
-        .expect("decode fragment");
-        let SourceRange::Text(range) = restored.range() else {
-            panic!("text range");
-        };
+    fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
+        round_trip(&entity());
+        let record: Value =
+            serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
         assert_eq!(
-            "前言\n正文 😀".get(range.start_byte_offset()..range.end_byte_offset()),
-            Some("正文 😀")
-        );
-        let encoded: Value =
-            serde_json::from_str(&encode_fragment(&fragment()).expect("encode fragment"))
-                .expect("fragment JSON");
-        assert_eq!(
-            encoded["value"]["value"]["content"]["value"]["value"]["cells"][1]["contents"][1]["value"]
-                ["data"],
+            record["value"]["content"]["value"]["cells"][1]["contents"][1]["value"]["data"],
             "AAH/"
         );
         assert_eq!(
-            encoded["value"]["value"]["content"]["value"]["value"]["cells"][1]["contents"][1]["value"]
-                ["format"],
+            record["value"]["content"]["value"]["cells"][1]["contents"][1]["value"]["format"],
             "png"
         );
-        assert_eq!(encoded["version"], VERSION);
-        let ranges = [
-            (SourceRange::File, json!({"kind": "file"})),
+        assert!(
+            record["value"].get("metadata").is_none(),
+            "metadata is supplied by its dedicated storage column"
+        );
+        for (range, stored_range) in [
+            (Range::Full, json!({"kind":"full"})),
             (
                 text_range(),
-                json!({
-                    "kind": "text", "start_line": 2, "end_line": 2,
-                    "start_byte_offset": 7, "end_byte_offset": 18,
-                    "start_byte_column": 0, "end_byte_column": 11,
-                }),
+                json!({"kind":"text", "start_line":2, "end_line":2, "start_byte_offset":7, "end_byte_offset":18, "start_byte_column":0, "end_byte_column":11}),
             ),
             (
-                SourceRange::Byte(ByteRange {
+                Range::Byte(ByteRange {
                     start_offset: 2,
                     end_offset: u64::MAX,
                 }),
-                json!({"kind": "byte", "start_offset": 2, "end_offset": u64::MAX}),
+                json!({"kind":"byte", "start_offset":2, "end_offset":u64::MAX}),
             ),
-            (
-                SourceRange::Byte(ByteRange {
-                    start_offset: u64::MAX,
-                    end_offset: u64::MAX,
-                }),
-                json!({"kind": "byte", "start_offset": u64::MAX, "end_offset": u64::MAX}),
-            ),
-        ];
-        let symbols = [
-            SymbolType::Alias,
-            SymbolType::Class,
-            SymbolType::Enum,
-            SymbolType::Function,
-            SymbolType::Interface,
-            SymbolType::Module,
-            SymbolType::Value,
-        ];
-        for ((range, stored_range), symbol_type) in ranges.iter().cycle().zip(symbols) {
-            let EntityFragment::Standalone(mut entity) = fragment() else {
-                unreachable!()
-            };
-            entity.range = *range;
+        ] {
+            let mut entity = entity();
+            entity.source_range = range;
             entity.metadata = Some(EntityMetadata::Code(CodeMetadata {
-                symbol_type: Some(symbol_type),
-                symbol_name: Some("symbol".to_owned()),
-                scope: Some("module".to_owned()),
-                signature: Some("pub async fn symbol()".to_owned()),
-                documentation: Some("documentation".to_owned()),
+                symbol_type: Some(SymbolType::Function),
+                symbol_name: Some("symbol".into()),
+                scope: Some("module".into()),
+                signature: Some("pub async fn symbol()".into()),
+                documentation: Some("documentation".into()),
             }));
-            let fragment = EntityFragment::Standalone(entity);
-            let encoded = encode_fragment(&fragment).expect("encode fragment");
-            let record: Value = serde_json::from_str(&encoded).expect("fragment JSON");
-            assert_eq!(&record["value"]["value"]["range"], stored_range);
-            assert_eq!(
-                decode_fragment(
-                    &encoded,
-                    fragment
-                        .as_entity()
-                        .and_then(|entity| entity.metadata.as_ref())
-                )
-                .expect("decode fragment"),
-                fragment
-            );
+            round_trip(&entity);
+            let record: Value =
+                serde_json::from_str(&encode_entity(&entity).expect("encode entity"))
+                    .expect("JSON");
+            assert_eq!(record["value"]["source_range"], stored_range);
         }
     }
 
     #[test]
-    fn fragment_records_preserve_representative_and_window_ownership() {
-        let representative = EntityFragment::Representative(Entity {
-            id: EntityId::new("group").expect("entity ID"),
-            file_id: file().id,
-            range: SourceRange::File,
-            content: EntityContent::Outline("section outline".to_owned()),
-            metadata: Some(EntityMetadata::Markdown(MarkdownMetadata {
-                heading: Some("heading".to_owned()),
-                level: Some(2),
-                scope: Some("parent".to_owned()),
-            })),
+    fn fragment_selectors_preserve_utf8_slices_without_repeating_content_or_ownership() {
+        let mut entity = entity();
+        entity.content = Content::Text("a中文b".into());
+        entity.source_range =
+            Range::Text(TextRange::from_coordinates(10, 18, 1, 1, 10, 18).expect("range"));
+        entity.fragments.push(EntityFragment {
+            id: FragmentId::new("slice").expect("fragment id"),
+            range: Range::Byte(ByteRange {
+                start_offset: 1,
+                end_offset: 7,
+            }),
         });
-        let window = EntityFragment::Window(WindowFragment {
-            id: FragmentId::new("window").expect("window ID"),
-            entity_id: representative.entity_id().clone(),
-            file_id: file().id,
-            range: text_range(),
-            content: Content::Text("window text".to_owned()),
-        });
-        for fragment in [&representative, &window] {
-            round_trip(fragment);
+        entity.metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
+            heading: Some("heading".into()),
+            level: Some(2),
+            scope: Some("parent".into()),
+        }));
+        round_trip(&entity);
+        let encoded = encode_entity(&entity).expect("encode entity");
+        let record: Value = serde_json::from_str(&encoded).expect("JSON");
+        assert_eq!(
+            record["value"]["fragments"][1],
+            json!({
+                "id":"slice", "range":{"kind":"byte", "start_offset":1, "end_offset":7},
+            })
+        );
+        let restored = decode_entity(&encoded, entity.metadata.as_ref()).expect("decode entity");
+        assert_eq!(
+            restored.fragments[1]
+                .range
+                .extract(&restored.content)
+                .expect("extract"),
+            Content::Text("中文".into())
+        );
+        assert_eq!(
+            restored
+                .fragment_source_range(&restored.fragments[1])
+                .expect("source location"),
+            Range::Text(TextRange::from_coordinates(11, 17, 1, 1, 11, 17).expect("source range"))
+        );
+        for (start, end) in [(2, 7), (1, 9), (1, 1)] {
+            let mut invalid = record.clone();
+            invalid["value"]["fragments"][1]["range"] = json!({
+                "kind":"byte", "start_offset":start, "end_offset":end,
+            });
+            assert_corrupt_entity(&invalid);
         }
-        crate::domain::validate_fragments(file().id, [&representative, &window])
-            .expect("valid group");
+        let mut invalid = record.clone();
+        invalid["value"]["fragments"][1]["range"] = json!({
+            "kind":"text", "start_line":1, "end_line":1, "start_byte_offset":1,
+            "end_byte_offset":7, "start_byte_column":1, "end_byte_column":7,
+        });
+        assert_corrupt_entity(&invalid);
+        let mut invalid = record.clone();
+        invalid["value"]["fragments"][1]["range"]["start_line"] = json!(1);
+        assert_corrupt_entity(&invalid);
+        let mut invalid = record.clone();
+        invalid["value"]["fragments"][1]["content_range"] = json!({"kind":"full"});
+        assert_corrupt_entity(&invalid);
+        let mut invalid = record.clone();
+        invalid["value"]["range"] = invalid["value"]["source_range"].clone();
+        assert_corrupt_entity(&invalid);
+        let mut invalid = record.clone();
+        invalid["value"]["fragments"][1]["id"] = record["value"]["fragments"][0]["id"].clone();
+        assert_corrupt_entity(&invalid);
+        let mut invalid = record;
+        invalid["value"]["fragments"] = json!([]);
+        assert_corrupt_entity(&invalid);
     }
 
     #[test]
     fn rejects_invalid_source_paths_during_decoding() {
         let original: Value =
-            serde_json::from_str(&encode_file(&file()).expect("encode file")).expect("file JSON");
+            serde_json::from_str(&encode_file(&file()).expect("encode file")).expect("JSON");
         for path in [
             "../escape",
             "src//file.rs",
@@ -1037,10 +909,10 @@ mod tests {
             "bad\0path",
         ] {
             let mut record = original.clone();
-            record["value"]["relative_path"] = json!({"encoding": "utf8", "value": path});
+            record["value"]["relative_path"] = json!({"encoding":"utf8", "value":path});
             assert_eq!(
                 decode_file(&record.to_string())
-                    .expect_err("invalid source path")
+                    .expect_err("invalid path")
                     .code(),
                 EngineError::STORAGE_FAILURE
             );
@@ -1048,42 +920,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_corrupt_versions_ids_images_and_ranges() {
+    fn rejects_corrupt_versions_identities_images_and_ranges() {
         let file_record: Value =
-            serde_json::from_str(&encode_file(&file()).expect("encode file")).expect("file JSON");
-        let mut invalid_file = file_record.clone();
-        invalid_file["value"]["id"] = json!(" ");
-        assert_eq!(
-            decode_file(&invalid_file.to_string())
-                .expect_err("invalid source identity")
-                .code(),
-            EngineError::STORAGE_FAILURE
-        );
+            serde_json::from_str(&encode_file(&file()).expect("encode file")).expect("JSON");
         let original: Value =
-            serde_json::from_str(&encode_fragment(&fragment()).expect("encode fragment"))
-                .expect("fragment JSON");
-        for (kind, record) in [("source file", file_record), ("fragment", original.clone())] {
-            for version in [1, 2, 3, 4, 5] {
-                let mut record = record.clone();
-                record["version"] = json!(version);
-                if kind == "fragment" {
-                    record["value"]["value"]["range"] = if version == 1 {
-                        json!({
-                            "kind": "text", "start_line": 2, "end_line": 2,
-                            "start_utf16_offset": 3, "end_utf16_offset": 8,
-                        })
-                    } else {
-                        json!({
-                            "kind": "text", "start_line": 2, "end_line": 2,
-                            "start_byte_offset": 7, "end_byte_offset": 18,
-                        })
-                    };
-                }
-                let json = record.to_string();
+            serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
+        for (kind, record) in [("source file", file_record), ("entity", original.clone())] {
+            for version in (1..VERSION).chain([VERSION + 1]) {
+                let mut invalid = record.clone();
+                invalid["version"] = json!(version);
+                let json = invalid.to_string();
                 let error = if kind == "source file" {
-                    decode_file(&json).expect_err("legacy source record")
+                    decode_file(&json).expect_err("wrong version")
                 } else {
-                    decode_fragment(&json, None).expect_err("legacy text range")
+                    decode_entity(&json, None).expect_err("wrong version")
                 };
                 assert!(
                     error
@@ -1093,13 +943,10 @@ mod tests {
                 assert!(error.message().contains("rebuild the index"));
             }
         }
-        let mut record = original.clone();
-        record["version"] = json!(VERSION + 1);
-        assert_corrupt_fragment(&record);
         for field in ["id", "file_id"] {
             let mut record = original.clone();
-            record["value"]["value"][field] = json!("");
-            assert_corrupt_fragment(&record);
+            record["value"][field] = json!("");
+            assert_corrupt_entity(&record);
         }
         for (field, value) in [
             ("format", json!("rust")),
@@ -1109,29 +956,24 @@ mod tests {
             ("data", json!("invalid base64!")),
         ] {
             let mut record = original.clone();
-            record["value"]["value"]["content"]["value"]["value"]["cells"][1]["contents"][1]["value"]
-                [field] = value;
-            assert_corrupt_fragment(&record);
+            record["value"]["content"]["value"]["cells"][1]["contents"][1]["value"][field] = value;
+            assert_corrupt_entity(&record);
         }
         for (field, value) in [("start_line", 0), ("end_byte_column", 12)] {
             let mut record = original.clone();
-            record["value"]["value"]["range"][field] = json!(value);
-            assert_corrupt_fragment(&record);
+            record["value"]["source_range"][field] = json!(value);
+            assert_corrupt_entity(&record);
         }
-        let mut record = original.clone();
-        record["value"]["value"]["content"]["value"] = json!([]);
-        assert_corrupt_fragment(&record);
         let mut record = original;
-        record["value"]["value"]["content"] = json!({"kind":"outline", "value":" "});
-        assert_corrupt_fragment(&record);
-        assert!(decode_fragment("not JSON", None).is_err());
+        record["value"]["fragments"][0]["id"] = json!("");
+        assert_corrupt_entity(&record);
+        assert!(decode_entity("not JSON", None).is_err());
     }
 
     #[test]
     fn rejects_invalid_table_geometry_without_allocating_a_dense_grid() {
         let original: Value =
-            serde_json::from_str(&encode_fragment(&fragment()).expect("encode fragment"))
-                .expect("fragment JSON");
+            serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
         for (field, value) in [
             ("row_span", 0),
             ("row_span", 3),
@@ -1139,8 +981,8 @@ mod tests {
             ("column", usize::MAX),
         ] {
             let mut record = original.clone();
-            record["value"]["value"]["content"]["value"]["value"]["cells"][0][field] = json!(value);
-            assert_corrupt_fragment(&record);
+            record["value"]["content"]["value"]["cells"][0][field] = json!(value);
+            assert_corrupt_entity(&record);
         }
         let mut table = TableContent {
             row_count: usize::MAX,
@@ -1158,11 +1000,8 @@ mod tests {
             cell(1, 1, 1, 1, TableCellRole::Data),
         ];
         assert!(validate_table(&table).is_err());
-
-        let EntityFragment::Standalone(mut entity) = fragment() else {
-            unreachable!()
-        };
-        let mut content = Content::Text("nested".to_owned());
+        let mut entity = entity();
+        let mut content = Content::Text("nested".into());
         for depth in 1..=MAX_TABLE_DEPTH + 1 {
             let mut nested = cell(0, 0, 1, 1, TableCellRole::Data);
             nested.contents = vec![content];
@@ -1171,12 +1010,11 @@ mod tests {
                 column_count: 1,
                 cells: vec![nested],
             });
-            entity.content = EntityContent::Source(content.clone());
-            let fragment = EntityFragment::Standalone(entity.clone());
+            entity.content = content.clone();
             if depth <= MAX_TABLE_DEPTH {
-                round_trip(&fragment);
+                round_trip(&entity);
             } else {
-                assert!(encode_fragment(&fragment).is_err());
+                assert!(encode_entity(&entity).is_err());
             }
         }
     }
