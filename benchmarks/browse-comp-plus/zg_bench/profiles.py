@@ -17,6 +17,7 @@ from .artifacts import (
 from .config import BENCHMARK_ROOT, BenchmarkConfig
 from .corpus import workspace_root
 from .process import inherited_environment, resolve_executable, run_command
+from .zg_cli import INSTALL, QUERY, SERVER_START, SERVER_STATUS, SERVER_STOP
 
 
 CONFIG_START = "# ZVEC_GREP_START"
@@ -159,17 +160,7 @@ def prepare_profiles(
     )
     install_started = time.monotonic()
     install = run_command(
-        [
-            zg,
-            "--install",
-            "--target",
-            "codex",
-            "--mcp-transport",
-            "http",
-            "--mcp-tool-timeout",
-            str(config.zvec_grep.mcp_tool_timeout_seconds),
-            "--yes",
-        ],
+        INSTALL.build(zg, timeout=config.zvec_grep.mcp_tool_timeout_seconds),
         cwd=workspace_root(artifacts, "zvec-grep"),
         env=environment,
         timeout=180,
@@ -232,9 +223,7 @@ def prepare_profiles(
         "zvec-grep": {
             "zvec_mcp": True,
             "zvec_guidance": True,
-            "install_command": (
-                "zg --install --target codex --mcp-transport http --yes"
-            ),
+            "install_command": " ".join(install.args),
         },
         "install_stdout": install.stdout,
         "install_stderr": install.stderr,
@@ -321,7 +310,7 @@ def ensure_server(
         raise RuntimeError("zvec-grep executable not found: zg")
     environment = server_environment(config, artifacts)
     check = run_command(
-        [executable, "--server", "status", "--check-ready"],
+        SERVER_STATUS.build(executable),
         env=environment,
         timeout=30,
     )
@@ -329,29 +318,21 @@ def ensure_server(
         return
     if check.ok:
         stop = run_command(
-            [executable, "--server", "off"],
+            SERVER_STOP.build(executable),
             env=environment,
             timeout=60,
         )
         if not stop.ok:
             raise RuntimeError(stop.stderr.strip() or stop.stdout.strip())
     start = run_command(
-        [
-            executable,
-            "--server",
-            "on",
-            "--listen",
-            f"127.0.0.1:{config.zvec_grep.server_port}",
-            "--mcp-toolset",
-            "agent",
-        ],
+        SERVER_START.build(executable, listen=f"127.0.0.1:{config.zvec_grep.server_port}"),
         env=environment,
         timeout=60,
     )
     if not start.ok:
         raise RuntimeError(start.stderr.strip() or start.stdout.strip())
     check = run_command(
-        [executable, "--server", "status", "--check-ready"],
+        SERVER_STATUS.build(executable),
         env=environment,
         timeout=30,
     )
@@ -364,7 +345,7 @@ def stop_server(config: BenchmarkConfig, artifacts: Path) -> None:
     if executable is None:
         raise RuntimeError("zvec-grep executable not found: zg")
     result = run_command(
-        [executable, "--server", "off"],
+        SERVER_STOP.build(executable),
         env=server_environment(config, artifacts),
         timeout=60,
     )
@@ -391,18 +372,7 @@ def prepare_search_runtime(
     root = workspace_root(artifacts, "zvec-grep")
     environment = server_environment(config, artifacts)
     warmup = run_command(
-        [
-            executable,
-            "benchmark runtime readiness",
-            "--mode",
-            "server",
-            "--refresh",
-            "off",
-            "--limit",
-            "1",
-            "--preview",
-            "none",
-        ],
+        QUERY.build(executable, query="benchmark runtime readiness"),
         cwd=root,
         env=environment,
         timeout=max(900, config.zvec_grep.mcp_tool_timeout_seconds),

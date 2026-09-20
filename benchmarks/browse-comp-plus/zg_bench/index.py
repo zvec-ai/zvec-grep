@@ -15,6 +15,7 @@ from .process import (
     run_command,
     run_streaming_command,
 )
+from .zg_cli import AUTHORIZE, INDEX, STATUS
 
 
 def prepared_index(config: BenchmarkConfig, artifacts: Path) -> Path | None:
@@ -52,7 +53,7 @@ def index_is_ready(
         (artifacts / "runtime" / "zvec-home").resolve()
     )
     status = run_command(
-        [executable, "--status", root, "--mode", "direct", "--check-ready"],
+        STATUS.build(executable, root=root),
         cwd=root,
         env=environment,
         timeout=120,
@@ -94,7 +95,7 @@ def build_index(
             and state.get("root") == str(root)
         ):
             check = run_command(
-                [executable, "--status", root, "--mode", "direct", "--check-ready"],
+                STATUS.build(executable, root=root),
                 cwd=root,
                 env=environment,
                 timeout=120,
@@ -106,25 +107,19 @@ def build_index(
             "start with an empty artifacts directory"
         )
 
-    command: list[str | Path] = [
+    command = INDEX.build(
         executable,
-        "--index",
-        root,
-        "--mode",
-        "direct",
-        "--embedding",
-        config.zvec_grep.embedding,
-        "--index-embedding-concurrency",
-        str(config.zvec_grep.embedding_concurrency),
-        "--max-filesize",
-        config.zvec_grep.max_filesize,
-        "--glob",
-        "*.md",
-    ]
-    if rebuild:
-        command.append("--rebuild")
-    if config.zvec_grep.embedding.startswith("local/"):
-        command.extend(["--device", config.zvec_grep.device])
+        root=root,
+        embedding=config.zvec_grep.embedding,
+        concurrency=config.zvec_grep.embedding_concurrency,
+        max_filesize=config.zvec_grep.max_filesize,
+        rebuild=rebuild,
+        device=(
+            config.zvec_grep.device
+            if config.zvec_grep.embedding.startswith("local/")
+            else None
+        ),
+    )
     stdout_log = artifacts / "logs" / "index.stdout.log"
     stderr_log = artifacts / "logs" / "index.stderr.log"
     started_at = utc_now()
@@ -142,7 +137,7 @@ def build_index(
             _index_failure(config, result.stderr, result.stdout, stderr_log)
         )
     status = run_command(
-        [executable, "--status", root, "--mode", "direct", "--check-ready"],
+        STATUS.build(executable, root=root),
         cwd=root,
         env=environment,
         timeout=120,
@@ -181,18 +176,7 @@ def _prepare_remote_authorization(
     if config.zvec_grep.embedding.startswith("local/"):
         return
     grant = run_command(
-        [
-            executable,
-            "--auth",
-            "grant",
-            root,
-            "--capability",
-            "embedding",
-            "--scope",
-            "workspace",
-            "--embedding",
-            config.zvec_grep.embedding,
-        ],
+        AUTHORIZE.build(executable, root=root, embedding=config.zvec_grep.embedding),
         cwd=root,
         env=environment,
         timeout=120,

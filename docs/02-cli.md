@@ -129,7 +129,7 @@ Core options:
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
 Local Potion embedding tasks run on worker threads. They default to two workers;
-`--index-embedding-concurrencyy` can override that value for larger machines.
+`--index-embedding-concurrency` can override that value for larger machines.
 
 File discovery accepts `-g/--glob`, `--iglob`, `-t/--type`, `-T/--type-not`,
 `--hidden`, `--no-ignore`, `--ignore-file`, `--max-depth`, `--max-filesize`, and
