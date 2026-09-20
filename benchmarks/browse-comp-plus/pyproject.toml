@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zvec-grep-browsecomp-plus-benchmark"
+version = "0.1.0"
+description = "Reproducible BrowseComp-Plus A/B benchmark for zvec-grep"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "huggingface-hub>=0.34,<2",
+  "pyarrow>=19,<24",
+]
+
+[project.scripts]
+zg-bench = "zg_bench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["zg_bench"]

@@ -1,0 +1,172 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { updateGlobalConfig } from "../dist/engine/config.js";
+import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { embeddingModelPoolKeyForIdentity } from "../dist/engine/service/index.js";
+import { createZvecGrep } from "../dist/index.js";
+import {
+  createRemoteEmbeddingOperationPermit,
+  createRemoteEmbeddingTarget,
+  withRemoteEmbeddingOperationPermit,
+} from "../dist/authorization/index.js";
+
+test("embedding model cache identities are stable without exposing API keys", () => {
+  const identity = { provider: "qwen", name: "text-embedding-v4" };
+  const options = {
+    apiKey: "first-secret-key",
+    endpoint: "https://example.test/embeddings",
+  };
+  const first = embeddingModelPoolKeyForIdentity(identity, options);
+  const repeated = embeddingModelPoolKeyForIdentity(identity, options);
+  const differentKey = embeddingModelPoolKeyForIdentity(identity, {
+    ...options,
+    apiKey: "second-secret-key",
+  });
+
+  assert.equal(repeated, first);
+  assert.notEqual(differentKey, first);
+  assert.doesNotMatch(first, /first-secret-key/);
+  assert.doesNotMatch(differentKey, /second-secret-key/);
+});
+
+test("recovered embedding model cache is bounded and defers disposal until active queries finish", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-model-cache-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  const originalHome = process.env.HOME;
+  const originalFetch = globalThis.fetch;
+  const originalDispose = BaseEmbeddingModel.prototype.dispose;
+  const disposedModels = [];
+  let releaseBlockedRequest;
+  let service;
+  let blockedContext;
+
+  const blockedRequestStarted = new Promise((resolve) => {
+    globalThis.fetch = async (_input, init) => {
+      if (init?.headers?.Authorization === "Bearer blocked") {
+        resolve();
+        await new Promise((release) => {
+          releaseBlockedRequest = release;
+        });
+      }
+
+      return embeddingResponse(init);
+    };
+  });
+
+  process.env.HOME = temporaryDirectory;
+  BaseEmbeddingModel.prototype.dispose = async function disposeForTest() {
+    disposedModels.push(this);
+  };
+
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(
+      join(root, "src", "example.ts"),
+      "export const answer = 42;\n",
+    );
+    configureQwen("initial");
+
+    service = await createZvecGrep({
+      root,
+      embedding: "qwen/text-embedding-v4",
+    });
+    await withPermit(root, "https://initial.test/embeddings", () =>
+      service.index(),
+    );
+
+    configureQwen("blocked");
+    blockedContext = withPermit(root, "https://initial.test/embeddings", () =>
+      service.context({
+        root,
+        query: "where is the answer defined",
+        limit: 1,
+        autoUpdate: false,
+      }),
+    );
+    await blockedRequestStarted;
+
+    for (const name of ["third", "fourth", "fifth", "sixth"]) {
+      configureQwen(name);
+      await withPermit(root, "https://initial.test/embeddings", () =>
+        service.context({
+          root,
+          query: "where is the answer defined",
+          limit: 1,
+          autoUpdate: false,
+        }),
+      );
+    }
+
+    assert.equal(disposedModels.length, 0);
+    releaseBlockedRequest();
+    await blockedContext;
+    blockedContext = undefined;
+    assert.equal(disposedModels.length, 2);
+
+    await service.close();
+    service = undefined;
+    assert.equal(disposedModels.length, 6);
+  } finally {
+    releaseBlockedRequest?.();
+    await blockedContext?.catch(() => undefined);
+    await service?.close();
+    BaseEmbeddingModel.prototype.dispose = originalDispose;
+    globalThis.fetch = originalFetch;
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+function configureQwen(apiKey) {
+  updateGlobalConfig({
+    providers: {
+      qwen: {
+        apiKey,
+      },
+    },
+    models: {
+      "qwen/text-embedding-v4": {
+        endpoint: "https://initial.test/embeddings",
+      },
+    },
+  });
+}
+
+async function withPermit(root, endpoint, operation) {
+  const target = await createRemoteEmbeddingTarget({
+    roots: [root],
+    provider: "qwen",
+    model: "text-embedding-v4",
+    endpoint,
+  });
+  return await withRemoteEmbeddingOperationPermit(
+    createRemoteEmbeddingOperationPermit(target, "once"),
+    operation,
+  );
+}
+
+function embeddingResponse(init) {
+  const body = JSON.parse(String(init?.body));
+  const contents = Array.isArray(body.input) ? body.input : [];
+  return new Response(
+    JSON.stringify({
+      data: contents.map((_, index) => ({
+        index,
+        embedding: new Array(1024).fill(0.01),
+      })),
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+}

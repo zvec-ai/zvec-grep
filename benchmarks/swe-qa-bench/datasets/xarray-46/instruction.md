@@ -1,0 +1,1 @@
+Where does the cumprod function's data flow handle the propagation of NaN values through the cumulative product computation when skipna transitions from True to False, and what intermediate state changes occur in the numeric_only filtering before the reduce operation executes?

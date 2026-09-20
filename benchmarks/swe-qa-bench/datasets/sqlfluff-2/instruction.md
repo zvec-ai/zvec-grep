@@ -1,0 +1,1 @@
+What is the architectural role of the functional-style wrapper classes that convert rule context segments into tuple-based collections with query methods in decoupling the layout rule that enforces select target line placement from direct parse tree structure access?

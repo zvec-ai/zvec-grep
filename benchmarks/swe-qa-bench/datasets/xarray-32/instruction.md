@@ -1,0 +1,1 @@
+Why do performance bottlenecks emerge from the sequential invocation of from_variables(), from_xindex(), and assign_coords() operations on large datasets, and how does the overhead of variable materialization during coordinate transformation impact throughput compared to direct index assignment?

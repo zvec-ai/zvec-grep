@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "conan:27"
+source_index = 27
+index_base = 0
+role = "category"
+category = "why"
+question_type = "why"
+question_hash = "398215b212b50d4744d9bfeaa41a4bcf64d763ba47ead21a575bad12fa38deca"
+repository = "conan-io/conan"
+repository_commit = "52f43d98fe44ab92d01317110488d0670c3e9e64"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

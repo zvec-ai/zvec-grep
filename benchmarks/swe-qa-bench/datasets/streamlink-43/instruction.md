@@ -1,0 +1,1 @@
+Why does the parameter that enables reduced-latency streaming mode in a platform-specific HLS stream implementation class's initialization affect HLS segment fetching performance and buffer management?

@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: zvec-grep Documentation
+    url: https://zvec.org/en/docs/zvec-grep/
+    about: Read the guides for installation, indexing, search, Agent integrations, and configuration.
+
+  - name: Troubleshooting
+    url: https://zvec.org/en/docs/zvec-grep/troubleshooting/
+    about: Check common solutions and the diagnostics to include with a bug report.

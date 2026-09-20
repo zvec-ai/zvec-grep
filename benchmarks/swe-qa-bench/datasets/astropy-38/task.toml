@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "astropy:38"
+source_index = 38
+index_base = 0
+role = "category"
+category = "where"
+question_type = "where"
+question_hash = "7ce28ac0654a3efbc8d56b7f09adb970bc30e1c987bbcb58cb0cd0d87fb70e21"
+repository = "astropy/astropy"
+repository_commit = "0a041d38fbd0014298d4cf340d9f891c4522093f"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

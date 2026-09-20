@@ -1,0 +1,35 @@
+# The first 100 eligible cases in the pinned Hugging Face test-split order.
+@first 100
+
+# The source document conflicts with the reference answer ("of" vs. "for").
+@exclude 219
+
+# The acquisition and funding clues identify a collection containing two books about opium, so the answer is not unique.
+@exclude 221
+
+# The reference's publication and award chronology does not satisfy the question.
+@exclude 775
+
+# The target match evidence is absent from the pinned corpus, and the assigned gold document describes an unrelated match.
+@exclude 794
+
+# The reference misspells the nonfiction title ("at" instead of "in") and conflicts with the assigned gold document.
+@exclude 826
+
+# The pinned corpus does not identify the subject or support the reference answer; the strongest external match assigns kindergarten to the youngest child, not the oldest.
+@exclude 869
+
+# The reference BMI comes from an unrelated fitness assignment, while the query attributes are assembled from multiple people and cannot form a valid identity chain.
+@exclude 873
+
+# The pinned corpus identifies Norman Mapeza but never provides the middle name required by the full-name reference answer.
+@exclude 253
+
+# The missing-person clues combine unrelated children from different locations and years into one identity.
+@exclude 773
+
+# The evidence uses both "Sadiq Malkani" and "Muhammad Sadiq Malkani," making the requested first name ambiguous.
+@exclude 809
+
+# The reference subject's documented film debut falls outside the query's date range, and the final-U.S.-shows clue is unsupported.
+@exclude 856

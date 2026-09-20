@@ -1,8 +1,14 @@
 # Rust rewrite contributor guide
 
+The Rust workspace lives in `rust/`. Run the commands in this guide from that
+directory; the repository root contains the TypeScript / Node.js implementation.
+
 ## Start
 
+From the repository root:
+
 ```sh
+cd rust
 bash scripts/check.sh
 cargo run -p zg -- query --rg needle .
 ```
@@ -35,8 +41,8 @@ make an engine-internal module public solely to avoid a crate dependency cycle.
 
 ## Compatibility
 
-The TypeScript implementation on `origin/main` is the behavioral oracle during
-the rewrite. Store stable, machine-readable cases under `compat/` and normalize
+The TypeScript implementation in the repository root is the behavioral oracle
+during the rewrite. Store stable, machine-readable cases under `compat/` and normalize
 paths, random identifiers and timings in the runner.
 
 ## Verification

@@ -1,7 +1,15 @@
 # zvec-grep Rust rewrite
 
-This branch contains the Rust implementation of zvec-grep. The application API
-is centered on one reusable `ZvecGrep` engine value:
+This directory contains the Rust implementation of zvec-grep. The TypeScript /
+Node.js implementation remains at the repository root; the [main README](../README.md)
+and [user documentation](../docs/README.md) describe that implementation.
+
+Run the development commands below from `rust/` (`cd rust` from the repository
+root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
+
+This workspace preserves its own crates, scripts, compatibility fixtures, and
+benchmarks. The application API is centered on one reusable `ZvecGrep` engine
+value:
 
 ```rust,ignore
 use zg_engine::{

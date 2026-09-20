@@ -1,0 +1,32 @@
+name: swe-qa-bench
+path: ../datasets
+tiers:
+  smoke:
+    tasks:
+      - reflex-6
+      - pylint-9
+      - matplotlib-37
+      - streamlink-14
+      - xarray-32
+  full:
+    tasks:
+      - reflex-6
+      - sqlfluff-2
+      - conan-1
+      - pylint-10
+      - pylint-9
+      - sympy-38
+      - conan-39
+      - xarray-46
+      - astropy-38
+      - matplotlib-37
+      - streamlink-14
+      - conan-19
+      - django-21
+      - pylint-14
+      - requests-16
+      - django-32
+      - xarray-32
+      - streamlink-43
+      - sympy-26
+      - conan-27

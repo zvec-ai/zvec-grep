@@ -48,9 +48,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check packages independently
@@ -88,9 +88,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-
       - name: Run workspace tests
         run: cargo test --locked --workspace --all-targets
       - name: Smoke test the CLI

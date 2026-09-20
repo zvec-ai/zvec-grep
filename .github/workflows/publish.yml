@@ -1,0 +1,166 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  package-candidate:
+    name: Build release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Validate release source and version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
+            echo "::error::npm releases must run from main, not $RELEASE_REF"
+            exit 1
+          fi
+
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          export PACKAGE_VERSION
+          LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
+          LOCK_ROOT_VERSION="$(node -p "require('./package-lock.json').packages[''].version")"
+          EXPECTED_TAG="v$PACKAGE_VERSION"
+
+          if [[ "$LOCK_VERSION" != "$PACKAGE_VERSION" || "$LOCK_ROOT_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "::error::package.json and package-lock.json versions must match"
+            exit 1
+          fi
+
+          TAG_SHA="$(git rev-parse --verify "refs/tags/$EXPECTED_TAG^{commit}" 2>/dev/null)" || true
+          if [[ -z "$TAG_SHA" || "$TAG_SHA" != "$RELEASE_SHA" ]]; then
+            echo "::error::$EXPECTED_TAG must point to the main commit being released ($RELEASE_SHA)"
+            exit 1
+          fi
+
+          npm view "$PACKAGE_NAME" versions --json | node --input-type=module -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const published = JSON.parse(input);
+            const versions = Array.isArray(published) ? published : [published];
+            const version = process.env.PACKAGE_VERSION;
+            if (versions.includes(version)) {
+              console.error(`::error::${version} is already published to npm`);
+              process.exit(1);
+            }
+            console.log(`Release validation passed: ${version} is tagged and unpublished.`);
+          '
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run release checks
+        run: npm run check
+
+      - name: Build the release tarball
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --json --pack-destination "$RUNNER_TEMP/package"
+
+      - name: Upload the release candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/package/
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-local-models:
+    name: Verify ${{ matrix.model }} (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: package-candidate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24, 26]
+        model:
+          - local/potion-code-16m-v2
+          - local/all-minilm-l6-v2
+          - local/embeddinggemma-300m
+        exclude:
+          - node: 22
+            model: local/all-minilm-l6-v2
+          - node: 22
+            model: local/embeddinggemma-300m
+          - node: 26
+            model: local/all-minilm-l6-v2
+          - node: 26
+            model: local/embeddinggemma-300m
+    steps:
+      - name: Checkout smoke tests
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Download the release candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/package
+
+      - name: Restore the real model cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/zvec-grep-model-cache
+          key: >-
+            release-model-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.model }}-${{ hashFiles('src/engine/models/catalog.ts', 'package-lock.json') }}
+
+      - name: Run the packed package with the real local model
+        env:
+          ZVEC_GREP_PACKAGE_TARBALL: ${{ runner.temp }}/package
+          ZVEC_GREP_MODEL_CACHE: ${{ runner.temp }}/zvec-grep-model-cache
+          ZVEC_GREP_SMOKE_MODEL: ${{ matrix.model }}
+        run: npm run test:smoke:local-model
+
+  publish:
+    name: Publish verified candidate
+    needs: verify-local-models
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Download the verified release candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/package
+
+      - name: Publish package
+        run: npm publish "$RUNNER_TEMP/package"/*.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

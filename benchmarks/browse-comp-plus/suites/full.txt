@@ -1,0 +1,2 @@
+# Every query in the pinned official dataset.
+@all

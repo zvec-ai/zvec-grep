@@ -1,0 +1,9 @@
+# Fixed random sample from all 830 cases in the pinned dataset revision.
+# Revision: 144cff8e35b5eaef7e526346aa60774a9deb941f
+# Seed: browsecomp-plus-ci-v1
+# Rank: SHA256("<revision>\0<seed>\0<query_id>"); select the lowest 5 hashes.
+628
+700
+966
+827
+241

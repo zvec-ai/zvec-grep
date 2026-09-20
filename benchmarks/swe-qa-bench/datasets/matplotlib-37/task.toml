@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "matplotlib:37"
+source_index = 37
+index_base = 0
+role = "category"
+category = "where"
+question_type = "where"
+question_hash = "97feca511d28845f5d32adda672a5f4b448a8f7ad81ad8bbec6035b97dabadab"
+repository = "matplotlib/matplotlib"
+repository_commit = "a5e1f6086e92d5cc0a23f85685d03d85b89a8395"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

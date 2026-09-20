@@ -1,0 +1,1045 @@
+import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import test from "node:test";
+import {
+  createTemporaryDirectory,
+  removeTemporaryDirectory,
+  runCli,
+} from "../helpers/fixtures.mjs";
+import { createFakeEmbeddingServer } from "../helpers/fake-embedding.mjs";
+
+test("direct and server indexes report aggregate local model download progress", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-local-download-progress-",
+    { cleanup: false },
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  const directCache = join(temporaryDirectory, "direct-models");
+  const serverCache = join(temporaryDirectory, "server-models");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "example.ts"),
+    "export const LocalDownloadProgress = 1;\n",
+  );
+
+  const preload = pathToFileURL(
+    resolve("test/helpers/fake-model-download.mjs"),
+  ).href;
+  const port = await availablePort();
+  const baseEnv = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    NODE_OPTIONS: `--import=${preload}`,
+    ZVEC_GREP_HOME: home,
+    ZVEC_GREP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
+  };
+
+  await assert.rejects(
+    runCli(
+      [
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "local/potion-retrieval-32m",
+        "--model-cache",
+        directCache,
+        root,
+      ],
+      { cwd: root, env: baseEnv, timeout: 120_000 },
+    ),
+    (error) => {
+      assert.match(error.stderr, /Preparing local\/potion-retrieval-32m/);
+      assert.match(error.stderr, /Downloading local\/potion-retrieval-32m/);
+      assert.doesNotMatch(error.stderr, /model\.safetensors|tokenizer\.json/);
+      return true;
+    },
+  );
+
+  const serverEnv = {
+    ...baseEnv,
+    ZVEC_GREP_MODEL_CACHE: serverCache,
+  };
+  t.after(async () => {
+    await runCli(["--server", "off", "--home", home], {
+      cwd: root,
+      env: serverEnv,
+    }).catch(() => undefined);
+    await removeTemporaryDirectory(temporaryDirectory);
+  });
+  await runCli(
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    { cwd: root, env: serverEnv },
+  );
+  await assert.rejects(
+    runCli(
+      [
+        "--index",
+        "--mode",
+        "server",
+        "--embedding",
+        "local/potion-retrieval-32m",
+        root,
+      ],
+      { cwd: root, env: serverEnv, timeout: 120_000 },
+    ),
+    (error) => {
+      assert.match(error.stderr, /Preparing local\/potion-retrieval-32m/);
+      assert.match(error.stderr, /Downloading local\/potion-retrieval-32m/);
+      assert.doesNotMatch(error.stderr, /model\.safetensors|tokenizer\.json/);
+      return true;
+    },
+  );
+});
+
+test("direct-mode debug index reports a redacted local model download failure", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-direct-model-download-failure-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  const modelCache = join(temporaryDirectory, "models");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "example.ts"),
+    "export const DirectModelDownloadFailure = 1;\n",
+  );
+
+  const preload = pathToFileURL(
+    resolve("test/helpers/failing-model-download.mjs"),
+  ).href;
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    NODE_OPTIONS: `--import=${preload}`,
+    ZVEC_GREP_HOME: home,
+  };
+
+  await assert.rejects(
+    runCli(
+      [
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "local/potion-code-16m-v2",
+        "--model-cache",
+        modelCache,
+        "--debug",
+        root,
+      ],
+      { cwd: root, env, timeout: 120_000 },
+    ),
+    (error) => {
+      assert.match(
+        error.stderr,
+        /Code:\s+ZVEC_GREP\.ENGINE\.MODELS\.MODEL2VEC_DOWNLOAD_FAILED/,
+      );
+      assert.match(
+        error.stderr,
+        /Cause:.*simulated model download network failure/,
+      );
+      assert.match(error.stderr, /\[redacted\]/);
+      assert.doesNotMatch(
+        `${error.stdout}\n${error.stderr}`,
+        /model-download-secret/,
+      );
+      return true;
+    },
+  );
+});
+
+test("server-mode debug index reports a redacted local model download failure", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-server-model-download-failure-",
+    { cleanup: false },
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  const modelCache = join(temporaryDirectory, "models");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "example.ts"),
+    "export const ModelDownloadFailure = 1;\n",
+  );
+
+  const preload = pathToFileURL(
+    resolve("test/helpers/failing-model-download.mjs"),
+  ).href;
+  const port = await availablePort();
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    NODE_OPTIONS: `--import=${preload}`,
+    ZVEC_GREP_HOME: home,
+    ZVEC_GREP_MODEL_CACHE: modelCache,
+    ZVEC_GREP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
+  };
+  t.after(async () => {
+    await runCli(["--server", "off", "--home", home], {
+      cwd: root,
+      env,
+    }).catch(() => undefined);
+    await removeTemporaryDirectory(temporaryDirectory);
+  });
+  await runCli(
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    { cwd: root, env },
+  );
+
+  await assert.rejects(
+    runCli(
+      [
+        "--index",
+        "--mode",
+        "server",
+        "--embedding",
+        "local/potion-code-16m-v2",
+        "--debug",
+        root,
+      ],
+      { cwd: root, env, timeout: 120_000 },
+    ),
+    (error) => {
+      assert.match(error.stdout, /Workspace index: failed/);
+      assert.match(
+        error.stderr,
+        /Code:\s+ZVEC_GREP\.ENGINE\.MODELS\.MODEL2VEC_DOWNLOAD_FAILED/,
+      );
+      assert.match(
+        error.stderr,
+        /Cause:.*simulated model download network failure/,
+      );
+      assert.match(error.stderr, /\[redacted\]/);
+      assert.doesNotMatch(error.stderr, /model-download-secret/);
+      return true;
+    },
+  );
+});
+
+test("direct and server indexes summarize model download failures unless debugging", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-local-download-failure-",
+    { cleanup: false },
+  );
+  const directRoot = join(temporaryDirectory, "direct-repo");
+  const implicitRoot = join(temporaryDirectory, "implicit-repo");
+  const implicitServerRoot = join(temporaryDirectory, "implicit-server-repo");
+  const serverRoot = join(temporaryDirectory, "server-repo");
+  const home = join(temporaryDirectory, "home");
+  for (const root of [
+    directRoot,
+    implicitRoot,
+    implicitServerRoot,
+    serverRoot,
+  ]) {
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "README.md"), "# Model download failure\n");
+  }
+  const preload = pathToFileURL(
+    resolve("test/helpers/fake-model-download.mjs"),
+  ).href;
+  const port = await availablePort();
+  const clientEnv = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    ZVEC_GREP_HOME: home,
+    ZVEC_GREP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
+    ZVEC_GREP_SERVER_TOKEN: undefined,
+    ZVEC_GREP_SERVER_TOKEN_FILE: undefined,
+  };
+  const downloadEnv = {
+    ...clientEnv,
+    NODE_OPTIONS: `--import=${preload}`,
+    ZVEC_GREP_TEST_MODEL_DOWNLOAD_FAILURE: "1",
+  };
+  t.after(async () => {
+    await runCli(["--server", "off", "--home", home], {
+      env: clientEnv,
+    }).catch(() => undefined);
+    await removeTemporaryDirectory(temporaryDirectory);
+  });
+
+  const conciseMessage = 'Failed to download model "local/potion-code-16m-v2".';
+  const conciseError = `Error: ${conciseMessage}`;
+  const assertConciseOutput = (output) => {
+    assert.ok(output.includes(conciseMessage), output);
+    assert.doesNotMatch(
+      output,
+      /ZVEC_GREP\.|MODEL2VEC_DOWNLOAD_FAILED|Code:|Details:|Cause:|huggingface\.co/,
+    );
+  };
+  const assertDebugOutput = (output) => {
+    assert.ok(output.includes(conciseMessage), output);
+    assert.match(output, /^\s*Details(?:\s|:)/m);
+    assert.match(output, /MODEL2VEC_DOWNLOAD_FAILED/);
+    assert.match(output, /model: local\/potion-code-16m-v2/);
+    assert.match(output, /repo: minishlab\/potion-code-16M-v2/);
+    assert.match(output, /revision: [a-f0-9]{40}/);
+    assert.match(output, /Cause(?:\s|:).*503/);
+    assert.doesNotMatch(
+      output,
+      /FILES_FAILED|failedReasons|model\.safetensors|tokenizer\.json|huggingface\.co/,
+    );
+  };
+  const assertDownloadFailure = (debug) => (error) => {
+    assert.equal(error.code, 1);
+    assert.ok(error.stderr.split("\n").includes(conciseError), error.stderr);
+    if (debug) {
+      assert.match(error.stderr, /^Code:/m);
+      assertDebugOutput(error.stderr);
+    } else {
+      assert.equal(error.stderr.trimEnd().split("\n").at(-1), conciseError);
+      assertConciseOutput(error.stderr);
+    }
+    return true;
+  };
+  const assertImplicitDownloadFailure = (debug) => (error) => {
+    assert.match(
+      error.stderr,
+      /No index found; creating one with local\/potion-code-16m-v2\./,
+    );
+    return assertDownloadFailure(debug)(error);
+  };
+  await runCli(
+    ["--config", "model", "set", "qwen/text-embedding-v4", "--default"],
+    { cwd: implicitRoot, env: clientEnv },
+  );
+  await assert.rejects(
+    runCli(
+      [
+        "implicit local index",
+        "--mode",
+        "direct",
+        "--model-cache",
+        join(temporaryDirectory, "implicit-models"),
+      ],
+      { cwd: implicitRoot, env: downloadEnv, timeout: 120_000 },
+    ),
+    assertImplicitDownloadFailure(false),
+  );
+  for (const debug of [false, true]) {
+    await assert.rejects(
+      runCli(
+        [
+          "--index",
+          directRoot,
+          "--mode",
+          "direct",
+          "--embedding",
+          "local/potion-code-16m-v2",
+          "--model-cache",
+          join(temporaryDirectory, "direct-models"),
+          ...(debug ? ["--debug"] : []),
+        ],
+        { env: downloadEnv, timeout: 120_000 },
+      ),
+      assertDownloadFailure(debug),
+    );
+    await assert.rejects(
+      runCli(
+        [
+          "model download failure",
+          "--mode",
+          "direct",
+          "--refresh",
+          "wait",
+          "--model-cache",
+          join(temporaryDirectory, "direct-models"),
+          ...(debug ? ["--debug"] : []),
+        ],
+        { cwd: directRoot, env: downloadEnv, timeout: 120_000 },
+      ),
+      assertDownloadFailure(debug),
+    );
+    const directStatus = await runCli(
+      [
+        "--status",
+        directRoot,
+        "--mode",
+        "direct",
+        ...(debug ? ["--debug"] : []),
+      ],
+      { env: clientEnv },
+    );
+    assert.doesNotMatch(
+      directStatus.stdout,
+      /Failed to download model|MODEL2VEC_DOWNLOAD_FAILED|failedReasons|^\s*Error\s/m,
+    );
+  }
+
+  await runCli(
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    {
+      env: {
+        ...downloadEnv,
+        ZVEC_GREP_MODEL_CACHE: join(temporaryDirectory, "server-models"),
+      },
+    },
+  );
+  await assert.rejects(
+    runCli(["implicit server index", "--mode", "server"], {
+      cwd: implicitServerRoot,
+      env: clientEnv,
+      timeout: 120_000,
+    }),
+    assertImplicitDownloadFailure(false),
+  );
+  for (const debug of [false, true]) {
+    await assert.rejects(
+      runCli(
+        [
+          "--index",
+          serverRoot,
+          "--mode",
+          "server",
+          "--embedding",
+          "local/potion-code-16m-v2",
+          ...(debug ? ["--debug"] : []),
+        ],
+        { env: clientEnv, timeout: 120_000 },
+      ),
+      assertDownloadFailure(debug),
+    );
+  }
+  const ready = await runCli(["--server", "status", "--check-ready"], {
+    env: clientEnv,
+  });
+  assert.match(ready.stdout, /Server: ready/);
+  const status = await runCli(["--status", serverRoot, "--mode", "server"], {
+    env: clientEnv,
+  });
+  assert.match(status.stdout, /Workspace index failed/);
+  assert.match(
+    status.stdout,
+    /^\s*Error\s+Failed to download model "local\/potion-code-16m-v2"\.$/m,
+  );
+  assertConciseOutput(status.stdout);
+  const debugStatus = await runCli(
+    ["--status", serverRoot, "--mode", "server", "--debug"],
+    { env: clientEnv },
+  );
+  assert.match(debugStatus.stdout, /Workspace index failed/);
+  assert.match(
+    debugStatus.stdout,
+    /^\s*Error\s+Failed to download model "local\/potion-code-16m-v2"\.$/m,
+  );
+  assertDebugOutput(debugStatus.stdout);
+});
+
+test("server-mode index reports Workspace progress", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-server-progress-",
+    { cleanup: false },
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "example.ts"),
+    "export const ServerProgressSymbol = 42;\n",
+  );
+
+  const endpoint = await createFakeEmbeddingServer(t);
+  const port = await availablePort();
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    ZVEC_GREP_API_KEY: "test-key",
+    ZVEC_GREP_ENDPOINT: endpoint,
+    ZVEC_GREP_HOME: home,
+    ZVEC_GREP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
+  };
+  await mkdir(join(home, ".zvec-grep"), { recursive: true });
+  await writeFile(
+    join(home, ".zvec-grep", "config.json"),
+    `${JSON.stringify({
+      version: 1,
+      defaults: { embedding: "qwen/text-embedding-v4" },
+    })}\n`,
+  );
+  t.after(async () => {
+    await runCli(["--server", "off", "--home", home], {
+      cwd: root,
+      env,
+    }).catch(() => undefined);
+    await removeTemporaryDirectory(temporaryDirectory);
+  });
+  await runCli(
+    ["--server", "on", "--listen", `127.0.0.1:${port}`, "--home", home],
+    { cwd: root, env },
+  );
+
+  const indexed = await runCli(
+    ["--index", "--mode", "server", "--allow-remote", root],
+    {
+      cwd: root,
+      env: {
+        ...env,
+        ZVEC_GREP_EMBEDDING: "qwen/qwen3.7-text-embedding",
+      },
+      timeout: 120_000,
+    },
+  );
+
+  assert.match(indexed.stdout, /Workspace index: succeeded/);
+  assert.match(indexed.stderr, /Scanning/);
+  assert.match(indexed.stderr, /Indexing complete/);
+
+  const groupedQueryArgs = [
+    "--vector",
+    "missing-symbol",
+    "--fts",
+    "ServerProgressSymbol",
+    "--limit",
+    "1",
+    "--preview",
+    "short",
+    "--refresh",
+    "off",
+    "--allow-remote",
+  ];
+  const directGrouped = await runCli(
+    [...groupedQueryArgs, "--mode", "direct"],
+    { cwd: root, env },
+  );
+  const serverGrouped = await runCli(
+    [...groupedQueryArgs, "--mode", "server"],
+    { cwd: root, env },
+  );
+  assert.equal(serverGrouped.stdout, directGrouped.stdout);
+  assert.equal(serverGrouped.stderr, directGrouped.stderr);
+  assert.match(serverGrouped.stdout, /^query groups \(2\):/);
+  assert.match(serverGrouped.stdout, /Q1 \[supplemental\]: missing-symbol/);
+  assert.match(
+    serverGrouped.stdout,
+    /Q2 \[supplemental\]: ServerProgressSymbol/,
+  );
+  assert.doesNotMatch(
+    serverGrouped.stdout,
+    /group_coverage|global_fill|groups: Q/,
+  );
+
+  const indexedStatus = await runCli(["--status", "--mode", "server", root], {
+    cwd: root,
+    env,
+  });
+  assert.match(indexedStatus.stdout, /qwen\/qwen3\.7-text-embedding/);
+  await runCli(["--index", "--mode", "server", "--allow-remote", root], {
+    cwd: root,
+    env: {
+      ...env,
+      ZVEC_GREP_EMBEDDING: "qwen/text-embedding-v4",
+    },
+    timeout: 120_000,
+  });
+  const reusedStatus = await runCli(["--status", "--mode", "server", root], {
+    cwd: root,
+    env,
+  });
+  assert.match(reusedStatus.stdout, /qwen\/qwen3\.7-text-embedding/);
+  await assert.rejects(
+    runCli(
+      [
+        "--index",
+        "--mode",
+        "server",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--allow-remote",
+        root,
+      ],
+      { cwd: root, env, timeout: 120_000 },
+    ),
+    /does not match requested model.*use rebuild/i,
+  );
+  await runCli(
+    [
+      "--index",
+      "--mode",
+      "server",
+      "--embedding",
+      "qwen/text-embedding-v4",
+      "--rebuild",
+      "--allow-remote",
+      root,
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  const rebuiltStatus = await runCli(["--status", "--mode", "server", root], {
+    cwd: root,
+    env,
+  });
+  assert.match(rebuiltStatus.stdout, /qwen\/text-embedding-v4/);
+
+  const dropped = await runCli(
+    ["--index", "--drop", "--yes", "--mode", "server", root],
+    { cwd: root, env },
+  );
+  assert.match(dropped.stdout, /Dropped index/);
+
+  const status = await runCli(["--status", "--mode", "server", root], {
+    cwd: root,
+    env,
+  });
+  assert.match(status.stdout, /Workspace index is not configured/i);
+});
+
+test("CLI completes index, search, explicit refresh, status, and rg workflows", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-e2e-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "example.ts"),
+    "export const FirstWorkflowSymbol = 41;\n",
+  );
+
+  const endpoint = await createFakeEmbeddingServer(t);
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    ZVEC_GREP_EMBEDDING: "qwen/qwen3.7-text-embedding",
+  };
+  await mkdir(join(home, ".zvec-grep"), { recursive: true });
+  await writeFile(
+    join(home, ".zvec-grep", "config.json"),
+    `${JSON.stringify({
+      version: 1,
+      defaults: { embedding: "qwen/text-embedding-v4" },
+    })}\n`,
+  );
+
+  const indexed = await runCli(
+    [
+      "--index",
+      "--api-key",
+      "test-key",
+      "--endpoint",
+      endpoint,
+      "--allow-remote",
+      "-g",
+      "src/**",
+      "-t",
+      "ts",
+      root,
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(indexed.stdout, /Workspace index/);
+
+  const first = await runCli(
+    [
+      "FirstWorkflowSymbol",
+      "--allow-remote",
+      "--limit",
+      "5",
+      "-g",
+      "src/**",
+      "-t",
+      "ts",
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(first.stdout, /example\.ts/);
+
+  const warnedOldQuery = await runCli(
+    [
+      "query",
+      "FirstWorkflowSymbol",
+      "--allow-remote",
+      "--limit",
+      "5",
+      "-g",
+      "src/**",
+      "-t",
+      "ts",
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(warnedOldQuery.stdout, /example\.ts/);
+  assert.match(
+    warnedOldQuery.stderr,
+    /warning: "zg query \.\.\." is not a subcommand/,
+  );
+
+  await writeFile(
+    join(root, "src", "example.ts"),
+    "export const RefreshedWorkflowSymbol = 42;\nexport const OtherWorkflowSymbol = 43;\n",
+  );
+  const stale = await runCli(
+    ["--mode", "direct", "--fts", "RefreshedWorkflowSymbol", "--limit", "5"],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(stale.stdout, /hits: 0/);
+  assert.doesNotMatch(stale.stdout, /example\.ts:/);
+  assert.match(stale.stderr, /status: possibly_stale/);
+  assert.match(stale.stderr, /results: served_from_current_index/);
+  assert.match(stale.stderr, /background_refresh: idle \(0\/1\)/);
+  await assert.rejects(
+    runCli(["--status", "--check-ready", root], { cwd: root, env }),
+    (error) => {
+      assert.match(error.stdout, /Workspace index needs an update/i);
+      assert.match(error.stderr, /state: stale/i);
+      return true;
+    },
+  );
+
+  const background = await runCli(
+    [
+      "--mode",
+      "direct",
+      "--refresh",
+      "background",
+      "--fts",
+      "RefreshedWorkflowSymbol",
+      "--limit",
+      "5",
+    ],
+    { cwd: root, env, timeout: 120_000 },
+  );
+  assert.match(background.stderr, /requires Server mode/);
+  assert.match(background.stderr, /results: served_from_current_index/);
+  assert.match(background.stderr, /background_refresh: idle \(0\/1\)/);
+
+  const refreshed = await runCli(
+    [
+      "--fts",
+      "RefreshedWorkflowSymbol",
+      "--limit",
+      "5",
+      "--refresh",
+      "wait",
+      "--allow-remote",
+    ],
+    {
+      cwd: root,
+      env,
+      timeout: 120_000,
+    },
+  );
+  assert.match(refreshed.stdout, /RefreshedWorkflowSymbol/);
+  assert.doesNotMatch(refreshed.stdout, /FirstWorkflowSymbol/);
+
+  const status = await runCli(["--status", root], { cwd: root, env });
+  assert.match(status.stdout, /Workspace index is ready/i);
+  assert.match(status.stdout, /qwen\/qwen3\.7-text-embedding/);
+  assert.match(status.stdout, /Coverage\s+.*100%\s+1 \/ 1 files/i);
+  assert.match(status.stdout, /glob=src\/\*\*/);
+  assert.match(status.stdout, /type=ts/);
+  const existingAuth = await runCli(
+    [
+      "--auth",
+      "grant",
+      root,
+      "--capability",
+      "embedding",
+      "--scope",
+      "workspace",
+    ],
+    {
+      cwd: root,
+      env: {
+        ...env,
+        ZVEC_GREP_API_KEY: "test-key",
+        ZVEC_GREP_EMBEDDING: "qwen/text-embedding-v4",
+      },
+    },
+  );
+  assert.match(existingAuth.stdout, /qwen\/qwen3\.7-text-embedding/);
+  assert.doesNotMatch(existingAuth.stdout, /qwen\/text-embedding-v4/);
+  const checkedStatus = await runCli(["--status", "--check-ready", root], {
+    cwd: root,
+    env,
+  });
+  assert.match(checkedStatus.stdout, /Workspace index is ready/i);
+
+  await writeFile(
+    join(root, "outside.ts"),
+    "export const OutsideStoredFilterSymbol = 44;\n",
+  );
+  const reindexed = await runCli(["--index", root], {
+    cwd: root,
+    env,
+    timeout: 120_000,
+  });
+  assert.match(reindexed.stdout, /glob=src\/\*\*/);
+  assert.match(reindexed.stdout, /type=ts/);
+  const outside = await runCli(
+    ["--fts", "OutsideStoredFilterSymbol", "--refresh", "off"],
+    { cwd: root, env },
+  );
+  assert.doesNotMatch(outside.stdout, /outside\.ts/);
+
+  const lexical = await runCli(
+    [
+      "--rg",
+      "-F",
+      "-i",
+      "-C1",
+      "-m1",
+      "-g",
+      "src/**",
+      "-t",
+      "ts",
+      "RefreshedWorkflowSymbol",
+      "src",
+    ],
+    { cwd: root, env },
+  );
+  assert.match(lexical.stdout, /RefreshedWorkflowSymbol/);
+
+  const inverted = await runCli(
+    ["--rg", "-F", "-v", "RefreshedWorkflowSymbol", "src/example.ts"],
+    { cwd: root, env },
+  );
+  assert.match(inverted.stdout, /OtherWorkflowSymbol/);
+
+  const multiline = await runCli(
+    [
+      "--rg",
+      "-F",
+      "-U",
+      "RefreshedWorkflowSymbol = 42;\nexport const OtherWorkflowSymbol",
+      "src/example.ts",
+    ],
+    { cwd: root, env },
+  );
+  assert.match(multiline.stdout, /example\.ts\n/);
+  assert.match(multiline.stdout, / {2}1:.*RefreshedWorkflowSymbol/);
+  assert.match(multiline.stdout, / {2}2:.*OtherWorkflowSymbol/);
+
+  await writeFile(join(root, "patterns.txt"), "RefreshedWorkflowSymbol\n");
+  const patternFile = await runCli(
+    ["--rg", "-f", "patterns.txt", "-t", "ts", "src"],
+    { cwd: root, env },
+  );
+  assert.match(patternFile.stdout, /RefreshedWorkflowSymbol/);
+
+  const dropped = await runCli(["--index", root, "--drop", "--yes"], {
+    cwd: root,
+    env,
+  });
+  assert.match(dropped.stdout, /Dropped index/);
+  const droppedStatus = await runCli(["--status", root], { cwd: root, env });
+  assert.match(droppedStatus.stdout, /Workspace index is not configured/i);
+});
+
+test("auth grant uses the environment model before the global default", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-auth-environment-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  await mkdir(join(root, "src"), { recursive: true });
+  await mkdir(join(home, ".zvec-grep"), { recursive: true });
+  await writeFile(
+    join(home, ".zvec-grep", "config.json"),
+    `${JSON.stringify({
+      version: 1,
+      defaults: { embedding: "qwen/text-embedding-v4" },
+    })}\n`,
+  );
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    ZVEC_GREP_API_KEY: "test-key",
+    ZVEC_GREP_EMBEDDING: "qwen/qwen3.7-text-embedding",
+  };
+
+  const granted = await runCli(
+    [
+      "--auth",
+      "grant",
+      root,
+      "--capability",
+      "embedding",
+      "--scope",
+      "workspace",
+    ],
+    { cwd: root, env },
+  );
+
+  assert.match(granted.stdout, /qwen\/qwen3\.7-text-embedding/);
+  assert.doesNotMatch(granted.stdout, /qwen\/text-embedding-v4/);
+});
+
+test("direct index points an empty workspace to file type help", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-empty-index-",
+  );
+  const root = join(temporaryDirectory, "repo");
+  const home = join(temporaryDirectory, "home");
+  await mkdir(root, { recursive: true });
+
+  const indexed = await runCli(
+    [
+      "--index",
+      "--mode",
+      "direct",
+      "--embedding",
+      "local/potion-code-16m-v2",
+      root,
+    ],
+    {
+      cwd: root,
+      env: {
+        HOME: home,
+        USERPROFILE: home,
+        NO_COLOR: "1",
+        ZVEC_GREP_HOME: home,
+      },
+    },
+  );
+
+  assert.match(indexed.stdout, /0 scanned/);
+  assert.match(indexed.stdout, /zg --help file-types/);
+});
+
+test("CLI exposes stable help, version, and failure behavior", async (t) => {
+  const help = await runCli(["--help"]);
+  assert.match(help.stdout, /Usage:/);
+  assert.equal(help.stderr, "");
+  assert.match(help.stdout, /zg --help models or zg --help file-types/);
+  assert.match(help.stdout, /zg --help environment/);
+  assert.match(help.stdout, /ZVEC_GREP_MODE/);
+  const oldQueryShape = await runCli(["query", "--help"]);
+  assert.match(oldQueryShape.stdout, /zg <query> \[options\]/);
+  assert.match(
+    oldQueryShape.stderr,
+    /warning: "zg query \.\.\." is not a subcommand/,
+  );
+  const oldIndexShape = await runCli(["index", "--help"]);
+  assert.match(oldIndexShape.stdout, /zg <query> \[options\]/);
+  assert.match(oldIndexShape.stderr, /Use "zg --index \.\.\."/);
+  const helpTopics = await runCli(["--help", "help"]);
+  assert.match(helpTopics.stdout, /models\s+Supported embedding models/);
+  assert.match(helpTopics.stdout, /file-types\s+Supported file types/);
+  const modelsHelp = await runCli(["--help", "models"]);
+  assert.match(modelsHelp.stdout, /local\/potion-code-16m-v2/);
+  assert.match(modelsHelp.stdout, /local\/potion-retrieval-32m/);
+  assert.match(modelsHelp.stdout, /local\/potion-multilingual-128m/);
+  assert.doesNotMatch(modelsHelp.stdout, /local\/potion-base-8m/);
+  assert.match(modelsHelp.stdout, /qwen\/qwen3-vl-embedding/);
+  assert.match(modelsHelp.stdout, /Local models are downloaded/);
+  assert.match(modelsHelp.stdout, /Workspace authorization/);
+  const fileTypesHelp = await runCli(["--help", "file-types"]);
+  assert.match(fileTypesHelp.stdout, /Structured code \(symbols and scopes\)/);
+  assert.match(fileTypesHelp.stdout, /typescript\s+\.ts/);
+  assert.match(fileTypesHelp.stdout, /Other code \(plain-text chunks\)/);
+  assert.match(fileTypesHelp.stdout, /dockerfile\s+Dockerfile/);
+  assert.match(fileTypesHelp.stdout, /Documents and data/);
+  assert.match(
+    fileTypesHelp.stdout,
+    /Images \(multimodal embedding required\)/,
+  );
+  assert.match(fileTypesHelp.stdout, /\.pdf/);
+  assert.match(fileTypesHelp.stdout, /Code\s+1 MiB/);
+  assert.match(fileTypesHelp.stdout, /Text\s+256 MiB/);
+  const indexHelp = await runCli(["--index", "-h"]);
+  assert.match(indexHelp.stdout, /qwen\/text-embedding-v4/);
+  assert.doesNotMatch(indexHelp.stdout, /qwen3\.7-text-embedding/);
+  assert.match(indexHelp.stdout, /ZVEC_GREP_EMBEDDING/);
+  const configHelp = await runCli(["--config", "--help"]);
+  assert.match(configHelp.stdout, /Default API key for the provider/);
+  assert.match(configHelp.stdout, /Existing indexes continue to use/);
+  const authHelp = await runCli(["--auth", "--help"]);
+  assert.match(
+    authHelp.stdout,
+    /selects the Remote Embedding model to authorize/,
+  );
+  assert.match(authHelp.stdout, /existing Workspace index model/);
+  assert.match(authHelp.stdout, /ZVEC_GREP_EMBEDDING, then the global default/);
+  const environmentHelp = await runCli(["--help", "environment"], {
+    env: {
+      ...process.env,
+      ZVEC_GREP_API_KEY: "environment-help-secret",
+      ZVEC_GREP_SERVER_TOKEN: "server-help-secret".repeat(3),
+    },
+  });
+  assert.match(environmentHelp.stdout, /ZVEC_GREP_AUTHORIZATION_KEY_FILE/);
+  assert.match(environmentHelp.stdout, /DASHSCOPE_API_KEY/);
+  assert.match(environmentHelp.stdout, /CLI > Workspace snapshot/);
+  assert.match(
+    environmentHelp.stdout,
+    /--embedding > ZVEC_GREP_EMBEDDING > Global config/,
+  );
+  assert.match(environmentHelp.stdout, /forwards its ZVEC_GREP_EMBEDDING/);
+  assert.doesNotMatch(environmentHelp.stdout, /environment-help-secret/);
+  assert.doesNotMatch(environmentHelp.stdout, /server-help-secret/);
+  const environmentAliasHelp = await runCli(["--help", "env"]);
+  assert.equal(environmentAliasHelp.stdout, environmentHelp.stdout);
+  const version = await runCli(["--version"]);
+  assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+/);
+  const verboseVersion = await runCli(["-v"]);
+  assert.equal(verboseVersion.stdout, version.stdout);
+  await assert.rejects(runCli(["--definitely-invalid"]), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /Unknown option/);
+    return true;
+  });
+  await assert.rejects(
+    runCli(["--index", "--embedding", "unknown/model"]),
+    (error) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /Unsupported embedding model: unknown\/model/);
+      assert.match(error.stderr, /zg --help models/);
+      return true;
+    },
+  );
+  const invalidEnvironmentRoot = await createTemporaryDirectory(
+    t,
+    "zvec-grep-invalid-embedding-environment-",
+  );
+  await assert.rejects(
+    runCli(["--index", invalidEnvironmentRoot, "--mode", "direct"], {
+      cwd: invalidEnvironmentRoot,
+      env: { ZVEC_GREP_EMBEDDING: "unknown/model" },
+    }),
+    (error) => {
+      assert.match(
+        error.stderr,
+        /Invalid ZVEC_GREP_EMBEDDING: unsupported model unknown\/model/,
+      );
+      assert.match(error.stderr, /zg --help models/);
+      return true;
+    },
+  );
+});
+
+async function availablePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  await new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  if (!address || typeof address === "string") {
+    throw new Error("Could not allocate a test port.");
+  }
+  return address.port;
+}

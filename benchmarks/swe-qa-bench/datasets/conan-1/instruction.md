@@ -1,0 +1,1 @@
+What is the integration mechanism between the Basic authentication credential processor and the authorization header processing base class for processing Basic credentials in the web framework's plugin system of the application server?

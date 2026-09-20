@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.venv/
+.npm/
+.pnpm-store/
+
+# Build and test outputs
+/target/
+dist/
+build/
+coverage/
+*.profraw
+*.log
+*.tgz
+__pycache__/
+*.py[cod]
+
+# Local tool state
+.cache/
+.zvec-grep/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.turbo/
+.vite/
+.opencode/
+
+# Benchmark artifacts
+/benchmarks/browse-comp-plus/artifacts/
+/benchmarks/swe-qa-bench/runs/
+/benchmarks/coir-zg/work/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

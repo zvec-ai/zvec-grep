@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 170" role="img" aria-labelledby="title desc">
+  <title id="title">zg logo</title>
+  <desc id="desc">A shell prompt followed by the lowercase letters z and g and a terminal cursor</desc>
+  <text x="32" y="104" fill="#8B949E" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="78" font-weight="700">›</text>
+  <text x="75" y="116" fill="#D0D7DE" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="112" font-weight="700" letter-spacing="-11">zg</text>
+  <rect x="186" y="132" width="34" height="8" rx="4" fill="#3FB950"/>
+</svg>

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 490" role="img" aria-labelledby="title desc">
+  <title id="title">配对 A/B 评测结果</title>
+  <desc id="desc">Baseline 与 zvec-grep Treatment 的配对评测结果。回答质量直接展示，两条独立的效率条形图表示相对资源用量。</desc>
+  <style>
+    .canvas { fill: transparent; }
+    .panel { fill: #f6f8fa; stroke: #d0d7de; }
+    .text { fill: #1f2328; }
+    .muted { fill: #59636e; }
+    .rule { stroke: #d0d7de; }
+    .baseline { fill: #afb8c1; }
+    .treatment { fill: #2da44e; }
+    .gain { fill: #1a7f37; }
+    .number { font-variant-numeric: tabular-nums; }
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: transparent; }
+      .panel { fill: #161b22; stroke: #30363d; }
+      .text { fill: #f0f6fc; }
+      .muted { fill: #9da7b3; }
+      .rule { stroke: #30363d; }
+      .baseline { fill: #6e7681; }
+      .treatment { fill: #3fb950; }
+      .gain { fill: #56d364; }
+    }
+  </style>
+  <rect class="canvas" width="1200" height="490" />
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+    <text class="text" x="0" y="32" font-size="27" font-weight="700">配对 A/B 评测结果</text>
+    <rect class="treatment" x="0" y="61" width="20" height="8" rx="4" />
+    <text class="muted" x="28" y="70" font-size="15">Treatment (zvec-grep)</text>
+    <rect class="baseline" x="220" y="61" width="20" height="8" rx="4" />
+    <text class="muted" x="248" y="70" font-size="15">Baseline</text>
+    <text class="muted" x="1200" y="70" font-size="15" text-anchor="end">横条用于对比 zvec-grep 与 Baseline 的资源使用情况。</text>
+    <g aria-label="SWE-QA-Bench">
+      <rect class="panel" x="0.0" y="104" width="590.0" height="386" rx="14" />
+      <text class="text" x="26.0" y="142" font-size="23" font-weight="700">SWE-QA-Bench</text>
+      <text class="muted" x="26.0" y="168" font-size="15">20 个任务 · 代码库 QA</text>
+      <line class="rule" x1="26.0" y1="188" x2="564.0" y2="188" />
+      <text class="muted" x="26.0" y="222" font-size="16">评审得分</text>
+      <text class="text number" x="459.0" y="222" font-size="20" font-weight="700" text-anchor="end">80.42<tspan class="muted" font-weight="400"> → </tspan><tspan class="gain">81.92</tspan></text>
+      <text class="gain number" x="564.0" y="222" font-size="17" font-weight="700" text-anchor="end">+1.50 分</text>
+      <line class="rule" x1="26.0" y1="244" x2="564.0" y2="244" />
+      <text class="text" x="26.0" y="272" font-size="16" font-weight="600">输入 Token</text>
+      <text class="gain number" x="564.0" y="272" font-size="20" font-weight="700" text-anchor="end">−47.3%</text>
+      <rect class="treatment" x="26.0" y="282" width="283.5" height="16" rx="8" />
+      <rect class="baseline" x="26.0" y="306" width="538.0" height="16" rx="8" />
+      <text class="text" x="26.0" y="348" font-size="16" font-weight="600">工具调用</text>
+      <text class="gain number" x="564.0" y="348" font-size="20" font-weight="700" text-anchor="end">−58.6%</text>
+      <rect class="treatment" x="26.0" y="358" width="222.7" height="16" rx="8" />
+      <rect class="baseline" x="26.0" y="382" width="538.0" height="16" rx="8" />
+      <text class="text" x="26.0" y="424" font-size="16" font-weight="600">Agent 耗时</text>
+      <text class="gain number" x="564.0" y="424" font-size="20" font-weight="700" text-anchor="end">−37.5%</text>
+      <rect class="treatment" x="26.0" y="434" width="336.2" height="16" rx="8" />
+      <rect class="baseline" x="26.0" y="458" width="538.0" height="16" rx="8" />
+    </g>
+    <g aria-label="BrowseComp-Plus">
+      <rect class="panel" x="610.0" y="104" width="590.0" height="386" rx="14" />
+      <text class="text" x="636.0" y="142" font-size="23" font-weight="700">BrowseComp-Plus</text>
+      <text class="muted" x="636.0" y="168" font-size="15">80 个样例 · 深度研究 QA</text>
+      <line class="rule" x1="636.0" y1="188" x2="1174.0" y2="188" />
+      <text class="muted" x="636.0" y="222" font-size="16">准确率</text>
+      <text class="text number" x="1174.0" y="222" font-size="20" font-weight="700" text-anchor="end">98.67%<tspan class="muted" font-weight="400"> → </tspan><tspan class="gain">99.00%</tspan></text>
+      <line class="rule" x1="636.0" y1="244" x2="1174.0" y2="244" />
+      <text class="text" x="636.0" y="272" font-size="16" font-weight="600">输入 Token</text>
+      <text class="gain number" x="1174.0" y="272" font-size="20" font-weight="700" text-anchor="end">−37.56%</text>
+      <rect class="treatment" x="636.0" y="282" width="335.9" height="16" rx="8" />
+      <rect class="baseline" x="636.0" y="306" width="538.0" height="16" rx="8" />
+      <text class="text" x="636.0" y="348" font-size="16" font-weight="600">工具调用</text>
+      <text class="gain number" x="1174.0" y="348" font-size="20" font-weight="700" text-anchor="end">−43.52%</text>
+      <rect class="treatment" x="636.0" y="358" width="303.9" height="16" rx="8" />
+      <rect class="baseline" x="636.0" y="382" width="538.0" height="16" rx="8" />
+      <text class="text" x="636.0" y="424" font-size="16" font-weight="600">Agent 耗时</text>
+      <text class="gain number" x="1174.0" y="424" font-size="20" font-weight="700" text-anchor="end">−38.58%</text>
+      <rect class="treatment" x="636.0" y="434" width="330.4" height="16" rx="8" />
+      <rect class="baseline" x="636.0" y="458" width="538.0" height="16" rx="8" />
+    </g>
+  </g>
+</svg>

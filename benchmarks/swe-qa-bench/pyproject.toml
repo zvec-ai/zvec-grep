@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zvec-grep-swe-qa-benchmark"
+version = "0.1.0"
+description = "Harbor-based SWE-QA benchmark for zvec-grep"
+requires-python = ">=3.12,<3.14"
+dependencies = ["harbor==0.18.0", "litellm==1.83.14", "PyYAML>=6.0.2,<7"]
+
+[project.scripts]
+zg-bench = "zg_bench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["zg_bench"]

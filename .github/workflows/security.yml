@@ -1,0 +1,29 @@
+name: Security
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    # Dependency review requires Dependency Graph. Keep it opt-in so
+    # repositories without that setting do not fail every pull request.
+    if: >-
+      github.event_name == 'pull_request' &&
+      vars.ENABLE_DEPENDENCY_REVIEW == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high

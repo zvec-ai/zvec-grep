@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "xarray:46"
+source_index = 46
+index_base = 0
+role = "category"
+category = "where"
+question_type = "where"
+question_hash = "6a998ccc7984fec2a3ce4e405de3f4c8b317ed1a4702dba90de0fdebf4d4b663"
+repository = "pydata/xarray"
+repository_commit = "40119bf35c53fc222934894d842cfc07b2e264bf"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "conan:39"
+source_index = 39
+index_base = 0
+role = "category"
+category = "where"
+question_type = "where"
+question_hash = "b20d9dbfaa3224708ee4c38d25350ce2b61542a272c560f51abb9e9c141d495e"
+repository = "conan-io/conan"
+repository_commit = "52f43d98fe44ab92d01317110488d0670c3e9e64"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "requests:16"
+source_index = 16
+index_base = 0
+role = "category"
+category = "how"
+question_type = "how"
+question_hash = "eeee60bf279b1d5ae11273834e74baebe72ab368bf4f8c7f5d03c9c797d0807f"
+repository = "psf/requests"
+repository_commit = "46e939b5525d9c72b677340985582b04b128478a"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

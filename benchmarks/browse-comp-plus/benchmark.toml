@@ -1,0 +1,24 @@
+[dataset]
+queries_repo = "Tevatron/browsecomp-plus"
+queries_revision = "144cff8e35b5eaef7e526346aa60774a9deb941f"
+queries_split = "test"
+expected_queries = 830
+corpus_repo = "Tevatron/browsecomp-plus-corpus"
+corpus_revision = "b27b02bc3e45511b8b82a13e6f90ce761df726f6"
+corpus_split = "train"
+expected_corpus_documents = 100195
+
+[zvec_grep]
+embedding = "qwen/qwen3.7-text-embedding"
+embedding_concurrency = 60
+max_filesize = "64M"
+device = "auto"
+mcp_tool_timeout_seconds = 600
+server_port = 7999
+
+[run]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+trials_per_case = 3
+infrastructure_retries = 2
+idle_timeout_seconds = 1800

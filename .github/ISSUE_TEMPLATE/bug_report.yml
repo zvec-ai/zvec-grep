@@ -1,0 +1,96 @@
+name: Bug Report
+description: Report a reproducible problem or unexpected behavior in zvec-grep
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Please include enough detail for us to reproduce it, and remove credentials, private paths, and sensitive file contents from diagnostics.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+      placeholder: The command returned no results even though the indexed workspace contains a matching document.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Include the smallest workspace setup, configuration, and command sequence that reproduces the problem.
+      placeholder: |
+        1. Install zvec-grep with `npm install -g @zvec/zvec-grep`.
+        2. Run `zg index` in a workspace containing ...
+        3. Run `zg query ...`.
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Version and Diagnostics
+      description: Run `zg version`, `node --version`, and relevant `zg status` or `--debug` commands. Sanitize sensitive output before pasting it.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Error Output
+      description: Paste the complete relevant error, stack trace, or Agent/MCP log if one is available. Sanitize sensitive output.
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating System
+      placeholder: macOS 15 (Apple Silicon), Ubuntu 24.04 (x86_64), or Windows 11
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation_method
+    attributes:
+      label: Installation Method
+      options:
+        - npm global installation
+        - npm project dependency
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected Area
+      multiple: true
+      options:
+        - Installation or packaging
+        - Indexing or file extraction
+        - Search or result quality
+        - Embedding model or provider
+        - CLI
+        - Agent or MCP integration
+        - Local server
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I checked the zvec-grep troubleshooting guide and existing issues.
+          required: true
+        - label: I removed credentials, private paths, and sensitive file contents from this report.
+          required: true
