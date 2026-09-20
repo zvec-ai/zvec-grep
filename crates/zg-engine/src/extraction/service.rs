@@ -270,17 +270,11 @@ pub(super) fn test_content(fragment: &ExtractedFragment) -> Content {
     match fragment {
         ExtractedFragment::Standalone(entity) | ExtractedFragment::Representative(entity) => {
             match &entity.content {
-                EntityContent::Source(contents) => {
-                    assert_eq!(contents.len(), 1);
-                    contents[0].clone()
-                }
+                EntityContent::Source(content) => content.clone(),
                 EntityContent::Outline(text) => Content::Text(text.clone()),
             }
         }
-        ExtractedFragment::Window(window) => {
-            assert_eq!(window.contents.len(), 1);
-            window.contents[0].clone()
-        }
+        ExtractedFragment::Window(window) => window.content.clone(),
     }
 }
 
@@ -326,32 +320,26 @@ mod tests {
         let fragment = ExtractedFragment::Standalone(ExtractedEntity {
             index: 0,
             range: SourceRange::File,
-            content: EntityContent::Source(vec![
-                Content::Text("before".to_owned()),
-                Content::Table(TableContent {
-                    row_count: 1,
-                    column_count: 1,
-                    cells: vec![TableCell {
-                        row: 0,
-                        column: 0,
-                        row_span: 1,
-                        column_span: 1,
-                        contents: vec![Content::Text("cell".to_owned()), image.clone()],
-                        kind: TableCellRole::Data,
-                    }],
-                }),
-                Content::Text("after".to_owned()),
-            ]),
+            content: EntityContent::Source(Content::Table(TableContent {
+                row_count: 1,
+                column_count: 1,
+                cells: vec![TableCell {
+                    row: 0,
+                    column: 0,
+                    row_span: 1,
+                    column_span: 1,
+                    contents: vec![Content::Text("cell".to_owned()), image.clone()],
+                    kind: TableCellRole::Data,
+                }],
+            })),
             metadata: None,
         });
         assert_eq!(
             vector_content_for_fragment(&fragment, None, None, None),
             vec![
-                Content::Text("before".to_owned()),
                 Content::Text("cell 0,0 (1x1):".to_owned()),
                 Content::Text("cell".to_owned()),
                 image,
-                Content::Text("after".to_owned()),
             ]
         );
     }

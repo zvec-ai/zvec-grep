@@ -786,22 +786,12 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             on_progress: request.on_progress.clone(),
             signal: request.signal.clone(),
             allow_remote: request.allow_remote,
+            authorized_remote: request.authorized_remote.clone(),
             api_key: request.api_key.clone(),
             endpoint: request.endpoint.clone(),
             embedding_concurrency: request.embedding_concurrency,
             device: request.device,
             model_cache: request.model_cache.clone(),
-            embedding: request.authorization_model.as_ref().map(|reference| {
-                zg_engine::api::index::options::EmbeddingModelSpec {
-                    reference: reference.clone(),
-                    revision: None,
-                    cache_dir: request.model_cache.clone(),
-                    endpoint: request.endpoint.clone(),
-                    device: request
-                        .device
-                        .unwrap_or(zg_engine::api::index::options::Device::Auto),
-                }
-            }),
             ..IndexOptions::default()
         };
         if policy == RefreshPolicy::Background {
@@ -945,6 +935,7 @@ async fn watch_loop(
         let mut options = lock(&runtime.index_template).clone();
         // One-operation consent must never authorize later watcher jobs.
         options.allow_remote = false;
+        options.authorized_remote.clear();
         options.name = None;
         options.signal = None;
         options.on_progress = None;
@@ -1021,11 +1012,13 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.signal = None;
     template.on_progress = None;
     template.allow_remote = false;
+    template.authorized_remote.clear();
     template.rebuild = false;
     template.reset_paths = false;
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
     template.embedding = None;
+    template.embedding_routes = None;
     template
 }
 
@@ -1735,6 +1728,13 @@ mod tests {
                     rebuild: true,
                     reset_paths: true,
                     allow_remote: true,
+                    authorized_remote: vec![zg_engine::authorization::IndexAuthorization {
+                        root: root.clone(),
+                        workspace_roots: vec![root.clone()],
+                        model: "qwen/text-embedding-v4".into(),
+                        endpoint: "https://once.example.test/embedding".into(),
+                        endpoint_host: "once.example.test".into(),
+                    }],
                     scan: ScanRulesUpdate {
                         globs: Some(vec!["*.rs".into()]),
                         hidden: Some(false),
@@ -1770,6 +1770,7 @@ mod tests {
             assert!(!watched.rebuild);
             assert!(!watched.reset_paths);
             assert!(!watched.allow_remote);
+            assert!(watched.authorized_remote.is_empty());
             assert_eq!(
                 watched.changes,
                 vec![IndexChange::Upsert("changed.rs".into())]

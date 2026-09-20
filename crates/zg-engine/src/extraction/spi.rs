@@ -74,7 +74,7 @@ pub(crate) struct ExtractedWindow {
     pub index: usize,
     pub entity_index: usize,
     pub range: SourceRange,
-    pub contents: Vec<Content>,
+    pub content: Content,
 }
 
 impl ExtractedFragment {
@@ -102,10 +102,10 @@ impl ExtractedFragment {
     pub(crate) fn contents(&self) -> &[Content] {
         match self {
             Self::Standalone(entity) | Self::Representative(entity) => match &entity.content {
-                EntityContent::Source(contents) => contents,
+                EntityContent::Source(content) => std::slice::from_ref(content),
                 EntityContent::Outline(_) => &[],
             },
-            Self::Window(window) => &window.contents,
+            Self::Window(window) => std::slice::from_ref(&window.content),
         }
     }
 

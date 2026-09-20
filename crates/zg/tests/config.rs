@@ -99,8 +99,14 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
         &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
     )
     .expect("JSON");
-    assert_eq!(manifest["embedding"]["model"]["name"], "potion-code-16m-v2");
-    assert_eq!(manifest["embeddingRuntime"]["device"], "cpu");
+    assert_eq!(
+        manifest["embeddings"][0]["model"]["name"],
+        "potion-code-16m-v2"
+    );
+    assert_eq!(
+        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
+        "cpu"
+    );
     let status = fixture.success(&["status", "--mode", "direct"]);
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("FTS: tokenizer=jieba filters=lowercase")
@@ -177,7 +183,7 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddingRuntime"]["endpoint"],
+        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/embeddings"
     );
     fixture.success(&[
@@ -195,7 +201,7 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddingRuntime"]["endpoint"],
+        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/updated"
     );
 }

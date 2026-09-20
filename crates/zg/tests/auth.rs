@@ -120,6 +120,43 @@ fn grants_are_signed_scoped_and_revocable_without_remote_requests() {
 }
 
 #[test]
+fn remembered_model_grants_coexist_and_remain_independently_signed() {
+    let fixture = Fixture::new();
+    fixture.grant();
+    fixture.success(&[
+        "auth",
+        "grant",
+        ".",
+        "--capability",
+        "embedding",
+        "--scope",
+        "workspace",
+        "--embedding",
+        "qwen/qwen3-vl-embedding",
+    ]);
+    fixture.grant();
+    let path = fixture.root.path().join(".zvec-grep/authorization.json");
+    let mut grants: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("grants")).expect("signed grant list");
+    assert_eq!(grants.as_array().expect("two destinations").len(), 2);
+    for model in ["qwen/text-embedding-v4", "qwen/qwen3-vl-embedding"] {
+        let status = fixture.success(&["auth", "status"]);
+        assert!(status.contains(model));
+        let output = fixture.run(&["index", "--mode", "direct", "--embedding", model]);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires an API key"));
+    }
+    grants[1]["grant"]["endpoint"] = "https://unapproved.example.test/embeddings".into();
+    fs::write(&path, serde_json::to_vec(&grants).expect("tampered grant")).expect("write grant");
+    assert!(!fixture.run(&["auth", "status"]).status.success());
+    fixture.success(&["auth", "revoke"]);
+    assert!(
+        fixture
+            .success(&["auth", "status"])
+            .contains("not authorized")
+    );
+}
+
+#[test]
 fn indexing_requires_matching_consent_before_credentials_or_network() {
     let fixture = Fixture::new();
     let args = [

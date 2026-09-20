@@ -66,7 +66,7 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
     std::fs::create_dir(&storage_path).expect("storage directory");
     let store = NativeStore::open(
         &storage_path,
-        &EmbeddingModelInfo {
+        &[EmbeddingModelInfo {
             model: crate::domain::model::ModelInfo {
                 provider: "fixture".into(),
                 name: "fixture".into(),
@@ -77,7 +77,7 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
             max_batch_size: 32,
             max_input_tokens: None,
             max_image_bytes: None,
-        },
+        }],
         false,
     )
     .expect("open storage");
@@ -236,7 +236,7 @@ fn metadata_store(path: &Path) -> NativeStore {
     super::super::backend::initialize().expect("initialize zvec");
     NativeStore::open(
         path,
-        &EmbeddingModelInfo {
+        &[EmbeddingModelInfo {
             model: crate::domain::model::ModelInfo {
                 provider: "fixture".into(),
                 name: "fixture".into(),
@@ -247,7 +247,7 @@ fn metadata_store(path: &Path) -> NativeStore {
             max_batch_size: 32,
             max_input_tokens: None,
             max_image_bytes: None,
-        },
+        }],
         false,
     )
     .expect("metadata storage")
@@ -283,16 +283,18 @@ fn metadata_fragments(entity_id: &str, window_id: &str) -> (FileRecord, Vec<Inde
         range: SourceRange::Text(
             TextRange::from_coordinates(20, 40, 3, 4, 0, 5).expect("window range"),
         ),
-        contents: vec![Content::Text("orchard fruit".into())],
+        content: Content::Text("orchard fruit".into()),
     };
     (
         source,
         vec![
             IndexedFragment {
+                model: "fixture/fixture".into(),
                 fragment: EntityFragment::Representative(owner),
                 vector: vec![0.0, 1.0, 0.0],
             },
             IndexedFragment {
+                model: "fixture/fixture".into(),
                 fragment: EntityFragment::Window(window),
                 vector: vec![1.0, 0.0, 0.0],
             },
@@ -405,12 +407,12 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     );
     for entry in &entries {
         let id = entry.fragment.document_id();
-        let doc = fragment_document(&store.fragments, id);
-        let payload: serde_json::Value =
-            serde_json::from_str(&string_field(&doc, "payload").expect("payload"))
-                .expect("fragment JSON");
-        assert!(payload["value"]["value"].get("metadata").is_none());
-        for doc in [doc, fragment_document(&store.vectors, id)] {
+        let doc = fragment_document(&store.indexes["fixture/fixture"].collection, id);
+        assert!(
+            !doc.has_field("payload"),
+            "search tables contain only projections"
+        );
+        {
             assert!(!doc.has_field("metadata"));
             assert_eq!(
                 string_field(&doc, "symbol_name").expect("indexed owner name"),
@@ -434,7 +436,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document_id, "window");
     let vectors = store
-        .search_vector(&entries[1].vector, 10, Some(&filter))
+        .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
         .expect("filtered vector retrieval");
     assert_eq!(vectors.len(), 2);
     assert!(vectors.iter().any(|hit| hit.document_id == "window"));
@@ -464,7 +466,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
         );
         assert!(
             store
-                .search_vector(&entries[1].vector, 10, Some(&rejected))
+                .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&rejected))
                 .expect("filtered vector retrieval")
                 .is_empty()
         );
@@ -475,7 +477,8 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
 fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    for collection in [&store.fragments, &store.vectors] {
+    {
+        let collection = &store.indexes["fixture/fixture"].collection;
         let schema = collection.schema().expect("retrieval schema");
         for IndexField::String(name) in EntityMetadata::index_schema() {
             assert!(schema.has_field(name), "missing metadata field: {name}");
@@ -507,7 +510,8 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
             decode_metadata(&fragment_document(&store.entities, "owner")).expect("metadata JSON"),
             metadata
         );
-        for collection in [&store.fragments, &store.vectors] {
+        {
+            let collection = &store.indexes["fixture/fixture"].collection;
             for entry in &entries {
                 let doc = fragment_document(collection, entry.fragment.document_id());
                 for IndexField::String(name) in EntityMetadata::index_schema() {
@@ -558,7 +562,7 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         for (hits, count) in [
             (store.search_fts("orchard", 10, Some(&filter)), 1),
             (
-                store.search_vector(&entries[1].vector, 10, Some(&filter)),
+                store.search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter)),
                 2,
             ),
         ] {
@@ -589,8 +593,8 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
             store.search_fts("orchard", 10, Some(&classified)),
         ),
         (
-            store.search_vector(&entries[1].vector, 10, None),
-            store.search_vector(&entries[1].vector, 10, Some(&classified)),
+            store.search_vector("fixture/fixture", &entries[1].vector, 10, None),
+            store.search_vector("fixture/fixture", &entries[1].vector, 10, Some(&classified)),
         ),
     ] {
         let all = all.expect("unfiltered results");
@@ -631,7 +635,7 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
             .search_fts("orchard", 10, None)
             .expect("lightweight FTS"),
         store
-            .search_vector(&entries[1].vector, 10, None)
+            .search_vector("fixture/fixture", &entries[1].vector, 10, None)
             .expect("lightweight vectors"),
     ] {
         let window = hits
@@ -667,7 +671,7 @@ fn native_search_and_loading_restore_arbitrary_domain_ids() {
             .search_fts("orchard", 10, Some(&filter))
             .expect("ID-filtered FTS"),
         store
-            .search_vector(&entries[1].vector, 10, Some(&filter))
+            .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
             .expect("ID-filtered vectors"),
     ] {
         assert!(hits.iter().all(|hit| hit.entity_id.as_str() == entity_id));
@@ -682,7 +686,8 @@ fn native_search_and_loading_restore_arbitrary_domain_ids() {
         assert_eq!(loaded.entities[&owner.id].entity, *owner);
         assert_eq!(loaded.fragments[window_id], entries[1].fragment);
     }
-    for collection in [&store.fragments, &store.vectors] {
+    {
+        let collection = &store.indexes["fixture/fixture"].collection;
         let doc = fragment_document(collection, window_id);
         assert_eq!(
             string_field(&doc, "entity_id").expect("encoded owner ID"),
@@ -705,6 +710,16 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     directories
         .add_source(&source.relative_path, &[u32::MAX])
         .expect("maximum directory ID");
+    write_docs(
+        &store.directories,
+        &[encode_directory_doc(
+            &SourcePath::new("edge").expect("directory path"),
+            &directories,
+        )
+        .expect("directory record")],
+        "seed maximum directory ID",
+    )
+    .expect("stored directory");
     *store.directory_ids.lock().expect("directory cache") = Some(directories);
     store
         .apply_replace(&source, &entries)
@@ -723,7 +738,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
         max_image_bytes: None,
     };
     drop(store);
-    let reader = NativeStore::open(temporary.path(), &schema, true).expect("reopen");
+    let reader = NativeStore::open(temporary.path(), &[schema], true).expect("reopen");
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(
             SourcePath::new("edge").expect("path"),
@@ -739,7 +754,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     );
     assert_eq!(
         reader
-            .search_vector(&[1.0, 0.0, 0.0], 10, Some(&filter))
+            .search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, Some(&filter))
             .expect("vector membership")
             .len(),
         2
@@ -836,13 +851,13 @@ fn filename_negation_preserves_native_results_or_errors_for_both_retrieval_route
         let queries = [
             (
                 SearchQuery::fts("text", &fts, 10).expect("native FTS query"),
-                &store.fragments,
+                &store.indexes["fixture/fixture"].collection,
                 StorageSearchPath::Fts,
                 "search full-text index",
             ),
             (
                 SearchQuery::new("embedding", &[1.0, 0.0, 0.0], 10).expect("native vector query"),
-                &store.vectors,
+                &store.indexes["fixture/fixture"].collection,
                 StorageSearchPath::Vector,
                 "search vector index",
             ),
@@ -857,7 +872,7 @@ fn filename_negation_preserves_native_results_or_errors_for_both_retrieval_route
             let actual = match route {
                 StorageSearchPath::Fts => store.search_fts("orchard", 10, Some(&filter)),
                 StorageSearchPath::Vector => {
-                    store.search_vector(&[1.0, 0.0, 0.0], 10, Some(&filter))
+                    store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, Some(&filter))
                 }
             };
             match expected {
@@ -876,4 +891,119 @@ fn filename_negation_preserves_native_results_or_errors_for_both_retrieval_route
             }
         }
     }
+}
+
+#[test]
+fn entity_bundle_is_authoritative_and_rejects_cross_model_fragment_ownership() {
+    let home = tempfile::tempdir().expect("storage");
+    super::super::backend::initialize().expect("native runtime");
+    let text = EmbeddingModelInfo {
+        model: crate::domain::model::ModelInfo {
+            provider: "fixture".into(),
+            name: "fixture".into(),
+            endpoint: None,
+        },
+        dimension: 3,
+        metric: Metric::Cosine,
+        max_batch_size: 32,
+        max_input_tokens: None,
+        max_image_bytes: None,
+    };
+    let mut other = text.clone();
+    other.model.name = "other".into();
+    let store = NativeStore::open(home.path(), &[text, other], false).expect("two models");
+    let (source, mut entries) = metadata_fragments("owner", "window");
+    entries[1].model = "fixture/other".into();
+    assert!(
+        store.apply_replace(&source, &entries).is_err(),
+        "one entity cannot span model tables"
+    );
+    assert!(store.list_files().expect("unmodified").is_empty());
+    entries[1].model = "fixture/fixture".into();
+    store
+        .apply_replace(&source, &entries)
+        .expect("one model owns entire entity");
+    let hits = store.search_fts("orchard", 10, None).expect("window match");
+    assert_eq!(hits.len(), 1);
+    let loaded = store.load_search_hits(&hits).expect("canonical bundle");
+    assert_eq!(
+        loaded.fragments.len(),
+        2,
+        "one owner read loads all its fragments"
+    );
+    assert_eq!(loaded.fragments["owner"], entries[0].fragment);
+    assert_eq!(loaded.fragments["window"], entries[1].fragment);
+    for index in store.indexes.values() {
+        let schema = index.collection.schema().expect("schema");
+        assert!(schema.has_index("text"));
+        assert!(schema.has_index("embedding"));
+        assert!(!schema.has_field("payload"));
+    }
+    // Removing a derived projection does not remove or redefine the canonical fragment.
+    native(
+        store.indexes["fixture/fixture"]
+            .collection
+            .delete_by_filter("file_id = 0"),
+        "remove derived rows",
+    )
+    .expect("remove projection");
+    assert_eq!(
+        store
+            .load_search_hits(&hits)
+            .expect("canonical data survives")
+            .fragments,
+        loaded.fragments
+    );
+}
+
+#[test]
+fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
+    let home = tempfile::tempdir().expect("storage");
+    super::super::backend::initialize().expect("native runtime");
+    let first = EmbeddingModelInfo {
+        model: crate::domain::model::ModelInfo {
+            provider: "fixture".into(),
+            name: "fixture".into(),
+            endpoint: None,
+        },
+        dimension: 3,
+        metric: Metric::Cosine,
+        max_batch_size: 32,
+        max_input_tokens: None,
+        max_image_bytes: None,
+    };
+    let mut second = first.clone();
+    second.model.name = "other".into();
+    let store = NativeStore::open(home.path(), &[first, second], false).expect("two models");
+    let (source, entries) = metadata_fragments("owner", "window");
+    store
+        .apply_replace(&source, &entries)
+        .expect("original owner");
+    let mut foreign_source = source.clone();
+    foreign_source.id = FileId::new(1);
+    foreign_source.relative_path = SourcePath::new("other.rs").expect("path");
+    let mut foreign = entries.clone();
+    for entry in &mut foreign {
+        entry.model = "fixture/other".into();
+        match &mut entry.fragment {
+            EntityFragment::Representative(entity) => entity.file_id = foreign_source.id,
+            EntityFragment::Window(window) => window.file_id = foreign_source.id,
+            EntityFragment::Standalone(_) => unreachable!(),
+        }
+    }
+    assert!(store.apply_replace(&foreign_source, &foreign).is_err());
+    assert_eq!(store.list_files().expect("original file").len(), 1);
+    assert_eq!(
+        store
+            .search_fts("orchard", 10, None)
+            .expect("original fragments")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .search_vector("fixture/other", &[1.0, 0.0, 0.0], 10, None)
+            .expect("no foreign fragments")
+            .is_empty()
+    );
 }

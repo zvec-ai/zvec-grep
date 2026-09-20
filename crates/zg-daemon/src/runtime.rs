@@ -229,11 +229,11 @@ async fn execute_command(
     }
     let result = match command {
         DaemonCommand::QueryAuthorization(request) => engine_execution(
-            zg_engine::authorization::query_authorization(&request)
+            zg_engine::authorization::query_authorizations(&request)
                 .map(DaemonReply::QueryAuthorization),
         ),
         DaemonCommand::IndexAuthorization(request) => engine_execution(
-            zg_engine::authorization::index_authorization(&request)
+            zg_engine::authorization::index_authorizations(&request)
                 .map(DaemonReply::IndexAuthorization),
         ),
         DaemonCommand::GrantIndexAuthorization(target) => engine_execution(

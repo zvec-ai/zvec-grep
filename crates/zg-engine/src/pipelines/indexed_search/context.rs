@@ -133,7 +133,7 @@ pub(crate) async fn context_from_index(
     workspace: &Workspace,
     workspace_home: &Path,
     storage: &dyn WorkspaceIndexStorage,
-    embedding_model: Option<&dyn SearchEmbeddingRuntime>,
+    embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
 ) -> Result<ContextResult, EngineError> {
@@ -169,7 +169,7 @@ pub(crate) async fn context_from_index(
                     filter: options.filter.clone(),
                 },
                 storage,
-                embedding_model,
+                embedding_models,
             )
             .await?,
         );
@@ -488,8 +488,8 @@ fn context_item_target(hit: &SearchHit) -> ContextItemTarget {
         });
     if let Some(window) = window {
         let same_source = hit.entity.range == window.range
-            && matches!(&hit.entity.content, EntityContent::Source(contents) if contents == &window.contents);
-        let content = contents_to_text(&window.contents);
+            && matches!(&hit.entity.content, EntityContent::Source(content) if content == &window.content);
+        let content = content_to_text(&window.content);
         let outline = match &hit.entity.content {
             EntityContent::Outline(outline)
                 if !outline.trim().is_empty() && outline.trim() != content.trim() =>
@@ -506,7 +506,7 @@ fn context_item_target(hit: &SearchHit) -> ContextItemTarget {
         };
     }
     let (content, content_role) = match &hit.entity.content {
-        EntityContent::Source(contents) => (contents_to_text(contents), ContextContentRole::Source),
+        EntityContent::Source(content) => (content_to_text(content), ContextContentRole::Source),
         EntityContent::Outline(outline) => (outline.clone(), ContextContentRole::Outline),
     };
     ContextItemTarget {
@@ -662,9 +662,7 @@ mod tests {
                 id: EntityId::new("entity").expect("entity id"),
                 file_id,
                 range,
-                content: EntityContent::Source(vec![Content::Text(
-                    "A short source excerpt".to_owned(),
-                )]),
+                content: EntityContent::Source(Content::Text("A short source excerpt".to_owned())),
                 metadata: None,
             },
             file: FileRecord {
@@ -701,7 +699,7 @@ mod tests {
                 entity_id: hit.entity.id.clone(),
                 file_id,
                 range: window_range,
-                contents: vec![Content::Text("Exact source".to_owned())],
+                content: Content::Text("Exact source".to_owned()),
             }),
         });
         let target = super::context_item_target(&hit);
@@ -760,7 +758,7 @@ mod tests {
                         TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len())
                             .expect("range"),
                     ),
-                    content: EntityContent::Source(vec![Content::Text(content.to_owned())]),
+                    content: EntityContent::Source(Content::Text(content.to_owned())),
                     metadata: None,
                 },
                 file: file.clone(),
@@ -781,21 +779,18 @@ mod tests {
             name: "workspace".to_owned(),
             root: original_root.clone(),
             scan: crate::domain::ScanRules::default(),
-            index: IndexState::Enabled(IndexDescriptor {
-                fts: crate::domain::FTS_CONFIG,
-                embedding: EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "local".to_owned(),
-                        name: "fixture".to_owned(),
-                        endpoint: None,
-                    },
-                    dimension: 2,
-                    metric: Metric::Cosine,
-                    max_batch_size: 32,
-                    max_input_tokens: None,
-                    max_image_bytes: None,
+            index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+                model: crate::domain::model::ModelInfo {
+                    provider: "local".to_owned(),
+                    name: "fixture".to_owned(),
+                    endpoint: None,
                 },
-            }),
+                dimension: 2,
+                metric: Metric::Cosine,
+                max_batch_size: 32,
+                max_input_tokens: None,
+                max_image_bytes: None,
+            })),
             created_epoch_ms: 0,
             updated_epoch_ms: 0,
         };

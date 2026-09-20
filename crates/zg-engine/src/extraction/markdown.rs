@@ -94,14 +94,14 @@ pub(super) fn extract(
                     index: fragments.len(),
                     entity_index,
                     range: SourceRange::Text(window.range),
-                    contents: vec![Content::Text(window.text)],
+                    content: Content::Text(window.text),
                 }));
             }
         } else if let Some(window) = windows.into_iter().next() {
             fragments.push(ExtractedFragment::Standalone(ExtractedEntity {
                 index: fragments.len(),
                 range: SourceRange::Text(window.range),
-                content: EntityContent::Source(vec![Content::Text(window.text)]),
+                content: EntityContent::Source(Content::Text(window.text)),
                 metadata: Some(metadata),
             }));
         }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -29,9 +29,9 @@ use crate::{
         info::result::IndexStats,
     },
     domain::{
-        Content, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
-        FileIndexStatus, FileRecord, FileSnapshot, FragmentId, ImageContent, IndexState,
-        SourcePath, WindowFragment, Workspace,
+        Content, ContentKind, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
+        FileIndexStatus, FileRecord, FileSnapshot, FragmentId, ImageContent, SourcePath,
+        WindowFragment, Workspace,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
         validate_fragments,
     },
@@ -99,7 +99,7 @@ pub(crate) struct IndexingContext<'context> {
     pub workspace_index: &'context Workspace,
     pub storage: &'context dyn WorkspaceIndexStorage,
     pub scanner: &'context dyn WorkspaceScannerPort,
-    pub embedding_model: &'context dyn IndexEmbeddingRuntime,
+    pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
     pub embedding_concurrency: Option<usize>,
     pub on_progress: Option<IndexProgressReporter>,
     pub signal: Option<CancellationToken>,
@@ -177,18 +177,7 @@ pub(crate) async fn index_workspace(
                 embedding: None,
             },
         );
-        return Err(EngineError::internal(format!(
-            "indexing completed with {} failed files: {}",
-            result.files_failed,
-            final_pass
-                .stats
-                .failed_files
-                .iter()
-                .take(5)
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        return Ok(result);
     }
 
     report(
@@ -250,6 +239,17 @@ pub(crate) async fn get_workspace_index_status(
             .map(|file| file.snapshot.size_bytes)
             .sum(),
         files_pending: pending_files.len(),
+        failed_files: pending_files
+            .iter()
+            .filter_map(|file| {
+                file.index_status
+                    .error()
+                    .map(|reason| crate::api::info::result::FailedFile {
+                        path: file.relative_path.to_path_buf(),
+                        reason: reason.to_owned(),
+                    })
+            })
+            .collect(),
         files_failed: pending_files
             .iter()
             .filter(|file| file.index_status.error().is_some())
@@ -548,7 +548,9 @@ async fn resolve_status_modifications(
     Ok(())
 }
 
+#[derive(Clone)]
 struct PreparedFragment {
+    model: String,
     fragment: EntityFragment,
     embedding_content: Vec<Content>,
 }
@@ -579,10 +581,26 @@ async fn index_candidates(
 ) -> Result<IndexWriteStats, EngineError> {
     let policy = resolve_embedding_policy(
         context.embedding_concurrency,
-        context.embedding_model.concurrency_defaults(),
+        context.embedding_models[0].concurrency_defaults(),
     )?;
     let scheduler = Arc::new(EmbeddingScheduler::new(policy));
-    let max_batch_size = context.embedding_model.info().max_batch_size;
+    let schedulers = Arc::new(
+        context
+            .embedding_models
+            .iter()
+            .map(|model| {
+                let policy = resolve_embedding_policy(
+                    context.embedding_concurrency,
+                    model.concurrency_defaults(),
+                )?;
+                Ok((
+                    model.info().model.reference(),
+                    Arc::new(EmbeddingScheduler::new(policy)),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, EngineError>>()?,
+    );
+    let max_batch_size = context.embedding_models[0].info().max_batch_size;
     let mut stats = IndexWriteStats::default();
     let mut current_batch = Vec::new();
     let mut current_fragments = 0;
@@ -662,6 +680,7 @@ async fn index_candidates(
                     std::mem::take(&mut current_batch),
                     context,
                     Arc::clone(&scheduler),
+                    Arc::clone(&schedulers),
                 );
                 current_fragments = 0;
             }
@@ -670,6 +689,7 @@ async fn index_candidates(
                 vec![prepared],
                 context,
                 Arc::clone(&scheduler),
+                Arc::clone(&schedulers),
             );
         } else {
             if current_fragments > 0
@@ -680,6 +700,7 @@ async fn index_candidates(
                     std::mem::take(&mut current_batch),
                     context,
                     Arc::clone(&scheduler),
+                    Arc::clone(&schedulers),
                 );
                 current_fragments = 0;
             }
@@ -691,6 +712,7 @@ async fn index_candidates(
                     std::mem::take(&mut current_batch),
                     context,
                     Arc::clone(&scheduler),
+                    Arc::clone(&schedulers),
                 );
                 current_fragments = 0;
             }
@@ -704,7 +726,13 @@ async fn index_candidates(
     }
 
     if !current_batch.is_empty() {
-        push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
+        push_embedding(
+            &mut running,
+            current_batch,
+            context,
+            Arc::clone(&scheduler),
+            Arc::clone(&schedulers),
+        );
     }
     while let Some(outcome) = running.next().await {
         apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)?;
@@ -718,10 +746,15 @@ fn push_embedding<'context>(
     files: Vec<PreparedFile>,
     context: &'context IndexingContext<'context>,
     scheduler: Arc<EmbeddingScheduler>,
+    schedulers: Arc<BTreeMap<String, Arc<EmbeddingScheduler>>>,
 ) {
+    if context.embedding_models.len() > 1 {
+        running.push(Box::pin(embed_routed_files(files, context, schedulers)));
+        return;
+    }
     running.push(Box::pin(embed_prepared_files(
         files,
-        context.embedding_model,
+        context.embedding_models[0],
         scheduler,
         context.signal.clone(),
         context.on_progress.clone(),
@@ -839,6 +872,7 @@ fn commit_file(
         .into_iter()
         .zip(vectors)
         .map(|(fragment, vector)| IndexedFragment {
+            model: fragment.model,
             fragment: fragment.fragment,
             vector,
         })
@@ -899,10 +933,13 @@ async fn prepare_candidate(
     } else {
         None
     };
-    let chunk_options = index_chunk_options(
-        context.embedding_model.info().max_input_tokens,
-        source_text.as_deref(),
-    );
+    let kind = if image_format.is_some() {
+        ContentKind::Image
+    } else {
+        ContentKind::Text
+    };
+    let model = model_for_content(context, kind)?;
+    let chunk_options = index_chunk_options(model.info().max_input_tokens, source_text.as_deref());
     let extracted = if let Some(format) = image_format {
         let image = ImageSource {
             content: ImageContent::new(source.bytes, format)?,
@@ -918,12 +955,47 @@ async fn prepare_candidate(
         };
         extract_for_indexing(&text, chunk_options)?
     };
-    let fragments = prepare_fragments(file.id, extracted, chunk_options.max_chunk_chars);
+    let mut fragments = prepare_fragments(file.id, extracted, chunk_options.max_chunk_chars);
+    let owners = fragments
+        .iter()
+        .filter_map(|fragment| fragment.fragment.as_entity())
+        .map(|entity| {
+            Ok((
+                entity.id.clone(),
+                model_for_content(context, entity.content.kind())?
+                    .info()
+                    .model
+                    .reference(),
+            ))
+        })
+        .collect::<Result<HashMap<_, _>, EngineError>>()?;
+    for fragment in &mut fragments {
+        fragment.model = owners[fragment.fragment.entity_id()].clone();
+    }
     validate_fragments(file.id, fragments.iter().map(|item| &item.fragment))?;
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
         fragments,
     })))
+}
+
+fn model_for_content<'a>(
+    context: &'a IndexingContext<'_>,
+    kind: ContentKind,
+) -> Result<&'a dyn IndexEmbeddingRuntime, EngineError> {
+    let index =
+        context.workspace_index.index.descriptor().ok_or_else(|| {
+            EngineError::invalid_argument("indexing requires an enabled workspace")
+        })?;
+    let reference = index.model_for(kind)?.model.reference();
+    context
+        .embedding_models
+        .iter()
+        .copied()
+        .find(|model| model.info().model.reference() == reference)
+        .ok_or_else(|| {
+            EngineError::invalid_argument(format!("embedding runtime is missing for {reference}"))
+        })
 }
 
 fn prepare_fragments(
@@ -950,6 +1022,7 @@ fn prepare_fragments(
         .into_iter()
         .zip(embeddings)
         .map(|(item, embedding_content)| PreparedFragment {
+            model: String::new(),
             embedding_content,
             fragment: bind_fragment(file_id, item.fragment),
         })
@@ -979,7 +1052,7 @@ fn bind_fragment(file_id: FileId, fragment: ExtractedFragment) -> EntityFragment
             entity_id: entity_id(window.entity_index),
             file_id,
             range: window.range,
-            contents: window.contents,
+            content: window.content,
         }),
     }
 }
@@ -1012,9 +1085,7 @@ fn mark_file_failed(
 fn record_file_failed(stats: &mut IndexWriteStats, file: &FileRecord, reason: &str) {
     stats.files_failed += 1;
     stats.failed_files.push(file.relative_path.to_path_buf());
-    stats
-        .failed_reasons
-        .push(format!("{}: {reason}", file.relative_path.display()));
+    stats.failed_reasons.push(reason.to_owned());
 }
 
 struct EmbeddingBatchOutcome {
@@ -1031,6 +1102,82 @@ enum EmbeddedFileOutcome {
         file: PreparedFile,
         reason: String,
     },
+}
+
+/// Finish every model's inputs before replacing any part of a file in storage.
+async fn embed_routed_files(
+    files: Vec<PreparedFile>,
+    context: &IndexingContext<'_>,
+    schedulers: Arc<BTreeMap<String, Arc<EmbeddingScheduler>>>,
+) -> EmbeddingBatchOutcome {
+    let started = Instant::now();
+    let mut outcomes = Vec::with_capacity(files.len());
+    for file in files {
+        let mut vectors = vec![None; file.fragments.len()];
+        let mut failure = None;
+        for model in context.embedding_models {
+            let reference = model.info().model.reference();
+            let positions = file
+                .fragments
+                .iter()
+                .enumerate()
+                .filter(|(_, fragment)| fragment.model == reference)
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>();
+            if positions.is_empty() {
+                continue;
+            }
+            let inputs = PreparedFile {
+                file: file.file.clone(),
+                fragments: positions
+                    .iter()
+                    .map(|position| file.fragments[*position].clone())
+                    .collect(),
+            };
+            match embed_file(
+                &inputs,
+                *model,
+                &schedulers[&reference],
+                context.signal.as_ref(),
+                context.on_progress.clone(),
+            )
+            .await
+            {
+                Ok(result) if result.vectors.len() == positions.len() => {
+                    for (position, vector) in positions.into_iter().zip(result.vectors) {
+                        vectors[position] = Some(vector);
+                    }
+                }
+                Ok(_) => {
+                    failure = Some(format!(
+                        "{reference} returned the wrong number of fragment vectors"
+                    ));
+                    break;
+                }
+                Err(error) => {
+                    failure = Some(format!("{reference}: {}", model_error_text(&error)));
+                    break;
+                }
+            }
+        }
+        if failure.is_none() && vectors.iter().any(Option::is_none) {
+            failure = Some("a fragment has no configured embedding model".to_owned());
+        }
+        outcomes.push(match failure {
+            Some(reason) => EmbeddedFileOutcome::Failed { file, reason },
+            None => EmbeddedFileOutcome::Success {
+                file,
+                vectors: vectors
+                    .into_iter()
+                    .map(|vector| vector.expect("all fragments embedded"))
+                    .collect(),
+            },
+        });
+    }
+    EmbeddingBatchOutcome {
+        outcomes,
+        duration: started.elapsed(),
+    }
 }
 
 async fn embed_prepared_files(
@@ -1657,16 +1804,34 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
             "indexing requires an enabled workspace",
         ));
     }
-    context.embedding_model.info().validate()?;
-    if let IndexState::Enabled(index) = &context.workspace_index.index {
-        index
-            .embedding
-            .ensure_index_compatible(context.embedding_model.info())?;
+    if context.embedding_models.is_empty() {
+        return Err(EngineError::invalid_argument(
+            "indexing requires embedding models",
+        ));
     }
-    let _ = resolve_embedding_policy(
-        context.embedding_concurrency,
-        context.embedding_model.concurrency_defaults(),
-    )?;
+    let index = context
+        .workspace_index
+        .index
+        .descriptor()
+        .expect("enabled workspace");
+    if context.embedding_models.len() != index.embeddings.len() {
+        return Err(EngineError::invalid_argument(
+            "runtime models differ from workspace models",
+        ));
+    }
+    for model in context.embedding_models {
+        model.info().validate()?;
+        let schema = index
+            .embeddings
+            .iter()
+            .find(|schema| schema.model.reference() == model.info().model.reference())
+            .ok_or_else(|| {
+                EngineError::invalid_argument("runtime model is not in workspace index")
+            })?;
+        schema.ensure_index_compatible(model.info())?;
+        let _ =
+            resolve_embedding_policy(context.embedding_concurrency, model.concurrency_defaults())?;
+    }
     Ok(())
 }
 
@@ -2007,6 +2172,16 @@ fn build_index_result(
         files_deleted: passes.iter().map(|pass| pass.diff.deleted.len()).sum(),
         files_unchanged: first.diff.unchanged,
         files_failed: final_pass.stats.files_failed,
+        failed_files: final_pass
+            .stats
+            .failed_files
+            .iter()
+            .zip(&final_pass.stats.failed_reasons)
+            .map(|(path, reason)| crate::api::info::result::FailedFile {
+                path: path.clone(),
+                reason: reason.clone(),
+            })
+            .collect(),
         entities_created: passes.iter().map(|pass| pass.stats.entities_created).sum(),
         duration_micros: duration.as_micros().try_into().unwrap_or(u64::MAX),
         timings: timings.entries,
@@ -2108,6 +2283,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryStorage {
         files: Mutex<Vec<FileRecord>>,
+        entries: Mutex<HashMap<FileId, Vec<IndexedFragment>>>,
         identities: Mutex<HashMap<PathBuf, FileId>>,
         resolved_paths: Mutex<Vec<Vec<PathBuf>>>,
         finalized: AtomicUsize,
@@ -2161,6 +2337,7 @@ mod tests {
 
         fn search_vector(
             &self,
+            _model: &str,
             _vector: &[f32],
             _limit: usize,
             _filter: Option<&StorageSearchFilter>,
@@ -2182,6 +2359,10 @@ mod tests {
                     .count() as u64,
             };
             stored.validate()?;
+            self.entries
+                .lock()
+                .expect("stored entries")
+                .insert(file.id, entries.to_vec());
             let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(existing) = files.iter_mut().find(|existing| existing.id == stored.id) {
                 *existing = stored;
@@ -2200,6 +2381,10 @@ mod tests {
         }
 
         fn mark_file_failed(&self, file: &FileRecord, error: &str) -> StorageResult<()> {
+            self.entries
+                .lock()
+                .expect("stored entries")
+                .remove(&file.id);
             let mut stored = file.clone();
             stored.index_status = FileIndexStatus::Failed {
                 error: error.to_owned(),
@@ -2214,6 +2399,10 @@ mod tests {
         }
 
         fn delete_file(&self, file_id: FileId) -> StorageResult<()> {
+            self.entries
+                .lock()
+                .expect("stored entries")
+                .remove(&file_id);
             self.files
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -2363,9 +2552,8 @@ mod tests {
             name: "fixture".to_owned(),
             root: root.to_path_buf(),
             scan: crate::domain::ScanRules::default(),
-            index: IndexState::Enabled(IndexDescriptor {
-                fts: crate::domain::FTS_CONFIG,
-                embedding: EmbeddingModelInfo {
+            index: crate::domain::IndexState::Enabled(IndexDescriptor::single(
+                EmbeddingModelInfo {
                     model: crate::domain::model::ModelInfo {
                         provider: "local".to_owned(),
                         name: "test".to_owned(),
@@ -2374,13 +2562,208 @@ mod tests {
                     dimension: 2,
                     metric: Metric::Cosine,
                     max_batch_size: 32,
-                    max_input_tokens: None,
+                    max_input_tokens: Some(64),
                     max_image_bytes: None,
                 },
-            }),
+            )),
             created_epoch_ms: 1,
             updated_epoch_ms: 1,
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn routed_models_commit_or_fail_the_whole_file_and_preserve_fragment_order() {
+        use crate::domain::{EntityContent, SourceRange};
+        use std::sync::atomic::AtomicBool;
+
+        struct RoutedModel {
+            info: EmbeddingModelInfo,
+            kind: ContentKind,
+            vector: Vec<f32>,
+            fail: AtomicBool,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl IndexEmbeddingRuntime for RoutedModel {
+            fn info(&self) -> &EmbeddingModelInfo {
+                &self.info
+            }
+            fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
+                EmbeddingConcurrencyDefaults {
+                    initial: 1,
+                    maximum: 1,
+                }
+            }
+            async fn embed(
+                &self,
+                contents: &[Vec<Content>],
+                _options: EmbeddingOptions,
+                _progress: Option<IndexProgressReporter>,
+            ) -> Result<EmbeddingResult, ModelError> {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                assert!(
+                    contents
+                        .iter()
+                        .all(|input| input.len() == 1 && input[0].kind() == self.kind)
+                );
+                if self.fail.load(Ordering::Acquire) {
+                    return Err(ModelError::unsupported("fixture model failed"));
+                }
+                Ok(EmbeddingResult {
+                    vectors: contents.iter().map(|_| self.vector.clone()).collect(),
+                    truncated: Vec::new(),
+                })
+            }
+        }
+
+        let make_model = |name: &str, kind, vector: Vec<f32>| {
+            let mut info = ConcurrentModel::new().info;
+            info.model.name = name.into();
+            info.dimension = vector.len();
+            info.max_image_bytes = (kind == ContentKind::Image).then_some(1024);
+            RoutedModel {
+                info,
+                kind,
+                vector,
+                fail: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
+            }
+        };
+        let text_model = make_model("text", ContentKind::Text, vec![1.0, 0.0]);
+        let image_model = make_model("image", ContentKind::Image, vec![0.0, 1.0, 0.0]);
+        let directory = tempdir().expect("workspace");
+        let mut workspace = workspace(directory.path());
+        workspace.index = crate::domain::IndexState::Enabled(IndexDescriptor {
+            fts: crate::domain::FTS_CONFIG,
+            embeddings: vec![text_model.info.clone(), image_model.info.clone()],
+            routes: BTreeMap::from([
+                (ContentKind::Text, text_model.info.model.reference()),
+                (ContentKind::Image, image_model.info.model.reference()),
+            ]),
+        });
+        let storage = MemoryStorage::default();
+        let scanner = NativeScanner::default();
+        let models: &[&dyn IndexEmbeddingRuntime] = &[&text_model, &image_model];
+        let context = IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: models,
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        let schedulers = || {
+            Arc::new(
+                models
+                    .iter()
+                    .map(|model| {
+                        (
+                            model.info().model.reference(),
+                            Arc::new(EmbeddingScheduler::new(
+                                resolve_embedding_policy(None, model.concurrency_defaults())
+                                    .expect("policy"),
+                            )),
+                        )
+                    })
+                    .collect(),
+            )
+        };
+        let file = FileRecord {
+            id: FileId::new(1),
+            relative_path: SourcePath::new("mixed.document").expect("path"),
+            snapshot: FileSnapshot {
+                size_bytes: 10,
+                modified_epoch_ms: Some(1),
+                content_hash: Some(sha256_hex(b"mixed file")),
+            },
+            index_status: FileIndexStatus::NotIndexed,
+        };
+        let prepared = || PreparedFile {
+            file: file.clone(),
+            // Fragment order deliberately differs from model iteration order.
+            fragments: [
+                (
+                    "picture",
+                    &image_model,
+                    Content::Image(ImageContent::new(vec![1], FileFormat::Png).expect("image")),
+                ),
+                ("caption", &text_model, Content::Text("orchard".into())),
+            ]
+            .into_iter()
+            .map(|(id, model, content)| PreparedFragment {
+                model: model.info.model.reference(),
+                fragment: EntityFragment::Standalone(Entity {
+                    id: EntityId::new(id).expect("entity ID"),
+                    file_id: file.id,
+                    range: SourceRange::File,
+                    content: EntityContent::Source(content.clone()),
+                    metadata: None,
+                }),
+                embedding_content: vec![content],
+            })
+            .collect(),
+        };
+        let success = embed_routed_files(vec![prepared()], &context, schedulers()).await;
+        let EmbeddedFileOutcome::Success { vectors, .. } = &success.outcomes[0] else {
+            panic!("both models must complete successfully");
+        };
+        assert_eq!(
+            vectors,
+            &[image_model.vector.clone(), text_model.vector.clone()]
+        );
+        assert!(storage.entries.lock().expect("entries").is_empty());
+        let mut stats = IndexWriteStats::default();
+        apply_embedding_files(
+            &context,
+            &DiffPlan::default(),
+            None,
+            &mut TimingCollector::default(),
+            &mut stats,
+            success.outcomes,
+        )
+        .expect("complete commit");
+        assert_eq!((stats.files_indexed, stats.entities_created), (1, 2));
+        let entries = storage.entries.lock().expect("entries")[&file.id].clone();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].vector, image_model.vector);
+        assert_eq!(entries[1].vector, text_model.vector);
+
+        image_model.fail.store(true, Ordering::Release);
+        let failed = embed_routed_files(vec![prepared()], &context, schedulers()).await;
+        assert!(
+            matches!(&failed.outcomes[0], EmbeddedFileOutcome::Failed { reason, .. } if reason.contains("local/image"))
+        );
+        assert_eq!(text_model.calls.load(Ordering::Acquire), 2);
+        assert_eq!(image_model.calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            storage.entries.lock().expect("entries")[&file.id],
+            entries,
+            "embedding work cannot partially replace the file"
+        );
+        apply_embedding_files(
+            &context,
+            &DiffPlan::default(),
+            None,
+            &mut TimingCollector::default(),
+            &mut stats,
+            failed.outcomes,
+        )
+        .expect("whole-file failure");
+        assert_eq!(stats.files_failed, 1);
+        assert!(
+            !storage
+                .entries
+                .lock()
+                .expect("entries")
+                .contains_key(&file.id)
+        );
+        assert!(
+            matches!(&storage.list_files().expect("files")[0].index_status, FileIndexStatus::Failed { error } if error.contains("local/image"))
+        );
     }
 
     #[tokio::test]
@@ -2401,7 +2784,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -2517,7 +2900,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -2574,7 +2957,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: None,
             on_progress: None,
             signal: None,
@@ -2625,7 +3008,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: Some(reporter),
             signal: None,
@@ -2679,7 +3062,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: None,
             signal: None,
@@ -2695,7 +3078,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: Some(2),
             on_progress: None,
             signal: None,
@@ -2779,7 +3162,7 @@ mod tests {
             workspace_index: &workspace,
             storage: &storage,
             scanner: &scanner,
-            embedding_model: &model,
+            embedding_models: &[&model],
             embedding_concurrency: Some(1),
             on_progress: None,
             signal: None,

@@ -49,6 +49,8 @@ impl EmbeddingModelInfo {
             || self.model.name != other.model.name
             || self.dimension != other.dimension
             || self.metric != other.metric
+            || self.max_input_tokens != other.max_input_tokens
+            || self.max_image_bytes != other.max_image_bytes
         {
             return Err(EngineError::invalid_argument(
                 "existing index uses a different embedding model; rebuild the index",

@@ -7,13 +7,7 @@ use rmcp::{
 };
 use zg_engine::{
     EngineError,
-    api::{
-        context::ContextOptions,
-        index::{
-            IndexOptions,
-            options::{Device, EmbeddingModelSpec},
-        },
-    },
+    api::{context::ContextOptions, index::IndexOptions},
     authorization::{self, IndexAuthorization},
 };
 
@@ -28,66 +22,71 @@ pub(crate) async fn index(
     options: &mut IndexOptions,
     context: &RequestContext<RoleServer>,
 ) -> Result<(), EngineError> {
-    let Some(target) = authorization::index_authorization(options)? else {
+    let targets = authorization::index_authorizations(options)?;
+    if targets.is_empty() {
         return Ok(());
-    };
-    let decision = ask(&target, false, true, false, context).await?;
-    // Bind execution to the destination disclosed before waiting for user input.
-    options.root = Some(target.root.clone());
-    options.endpoint = Some(target.endpoint.clone());
-    let embedding = options.embedding.get_or_insert_with(|| EmbeddingModelSpec {
-        reference: target.model.clone(),
-        endpoint: Some(target.endpoint.clone()),
-        revision: None,
-        cache_dir: None,
-        device: options.device.unwrap_or(Device::Auto),
-    });
-    embedding.reference.clone_from(&target.model);
-    embedding.endpoint = Some(target.endpoint.clone());
-    if authorization::index_authorization(options)?.is_some_and(|current| current != target) {
+    }
+    let mut decisions = Vec::new();
+    for target in &targets {
+        decisions.push(ask(target, false, true, false, context).await?);
+    }
+    if authorization::index_authorizations(options)? != targets {
         return Err(EngineError::permission_denied(
-            "Workspace sources changed while awaiting consent; retry to review the new scope",
+            "Workspace authorization scope changed while awaiting consent; retry to review all destinations",
         ));
     }
-    apply(decision, &target, &mut options.allow_remote)
+    for (target, decision) in targets.iter().zip(decisions) {
+        apply(decision, target, &mut options.authorized_remote)?;
+    }
+    options.root = Some(targets[0].root.clone());
+    Ok(())
 }
 
 pub(crate) async fn search(
     options: &mut ContextOptions,
     context: &RequestContext<RoleServer>,
 ) -> Result<(), EngineError> {
-    let Some(required) = authorization::query_authorization(options)? else {
-        return Ok(());
-    };
-    let decision = ask(
-        &required.target,
-        required.query_text,
-        required.workspace_content,
-        true,
-        context,
-    )
-    .await?;
-    if decision == Decision::FtsOnly {
-        zg_cli::use_fts_only(options);
+    let targets = authorization::query_authorizations(options)?;
+    if targets.is_empty() {
         return Ok(());
     }
-    options.endpoint = Some(required.target.endpoint.clone());
-    options.authorization_model = Some(required.target.model.clone());
-    if authorization::query_authorization(options)?.is_some_and(|current| current != required) {
+    let mut decisions = Vec::new();
+    for required in &targets {
+        let decision = ask(
+            &required.target,
+            required.query_text,
+            required.workspace_content,
+            true,
+            context,
+        )
+        .await?;
+        if decision == Decision::FtsOnly {
+            zg_cli::use_fts_only(options);
+            return Ok(());
+        }
+        decisions.push(decision);
+    }
+    if authorization::query_authorizations(options)? != targets {
         return Err(EngineError::permission_denied(
-            "Workspace authorization scope changed while awaiting consent; retry the request",
+            "Workspace authorization scope changed while awaiting consent; retry to review all destinations",
         ));
     }
-    apply(decision, &required.target, &mut options.allow_remote)
+    for (required, decision) in targets.iter().zip(decisions) {
+        apply(decision, &required.target, &mut options.authorized_remote)?;
+    }
+    if targets.len() == 1 {
+        options.authorization_model = Some(targets[0].target.model.clone());
+    }
+    Ok(())
 }
 
 fn apply(
     decision: Decision,
     target: &IndexAuthorization,
-    allow_remote: &mut bool,
+    authorized_remote: &mut Vec<IndexAuthorization>,
 ) -> Result<(), EngineError> {
     match decision {
-        Decision::Once => *allow_remote = true,
+        Decision::Once => authorized_remote.push(target.clone()),
         Decision::Workspace => authorization::grant_index(target)?,
         Decision::FtsOnly => {
             return Err(EngineError::permission_denied(
@@ -408,6 +407,20 @@ mod tests {
         })
         .await
         .expect("protocol tests must terminate");
+    }
+
+    #[test]
+    fn once_consent_records_only_the_disclosed_destination() {
+        let target = IndexAuthorization {
+            root: std::env::temp_dir().join("consent-workspace"),
+            workspace_roots: vec![std::env::temp_dir().join("consent-workspace")],
+            model: "qwen/text-embedding-v4".into(),
+            endpoint: "https://embedding.example.test/v1".into(),
+            endpoint_host: "embedding.example.test".into(),
+        };
+        let mut approved = Vec::new();
+        apply(Decision::Once, &target, &mut approved).expect("once");
+        assert_eq!(approved, vec![target]);
     }
 
     #[test]

@@ -1,24 +1,16 @@
 //! Compact directory IDs derived from source membership, scoped to one index.
 //! The optional snapshot speeds reader startup; source records can rebuild it.
-use std::{collections::HashMap, fs, path::Path};
-
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::{
     EngineError, EngineResult,
     domain::{DirectoryId, DirectoryRecord, SourcePath},
-    utils::atomic_write,
 };
-
-use super::path::{decode_path, encode_path};
-
-pub(super) const CACHE_NAME: &str = "directories.json";
 
 pub(super) struct DirectoryIds {
     by_path: HashMap<SourcePath, DirectoryId>,
     by_id: HashMap<DirectoryId, SourcePath>,
     next: Option<u32>,
-    dirty: bool,
 }
 
 impl Default for DirectoryIds {
@@ -27,13 +19,12 @@ impl Default for DirectoryIds {
             by_path: HashMap::new(),
             by_id: HashMap::new(),
             next: Some(0),
-            dirty: false,
         }
     }
 }
 
 impl DirectoryIds {
-    fn claim(&mut self, directory: DirectoryRecord) -> EngineResult<()> {
+    pub(super) fn claim(&mut self, directory: DirectoryRecord) -> EngineResult<()> {
         let DirectoryRecord {
             id,
             relative_path: path,
@@ -53,6 +44,7 @@ impl DirectoryIds {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn add_source(&mut self, file: &SourcePath, ids: &[u32]) -> EngineResult<()> {
         let ancestors = ancestors(file)?;
         if ancestors.len() != ids.len() {
@@ -66,7 +58,6 @@ impl DirectoryIds {
                 relative_path,
             })?;
         }
-        self.dirty = true;
         Ok(())
     }
 
@@ -98,7 +89,6 @@ impl DirectoryIds {
                     id,
                     relative_path: path,
                 })?;
-                self.dirty = true;
                 Ok(id)
             })
             .collect()
@@ -107,60 +97,6 @@ impl DirectoryIds {
     pub(super) fn get(&self, path: &SourcePath) -> Option<DirectoryId> {
         self.by_path.get(path).copied()
     }
-
-    pub(super) fn read_cache(home: &Path) -> EngineResult<Option<Self>> {
-        let bytes = match fs::read(home.join(CACHE_NAME)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(EngineError::from_io("read directory cache", &error)),
-        };
-        // An invalid derived cache can be rebuilt from source membership.
-        Ok(Self::decode_cache(&bytes).ok())
-    }
-
-    fn decode_cache(bytes: &[u8]) -> EngineResult<Self> {
-        let cache: Cache =
-            serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
-        if cache.version != 1 {
-            return Err(invalid("unsupported directory cache version"));
-        }
-        let mut result = Self::default();
-        for (id, path) in cache.directories {
-            result.claim(DirectoryRecord {
-                id: DirectoryId::new(id),
-                relative_path: decode_path(&path)?,
-            })?;
-        }
-        Ok(result)
-    }
-
-    /// Runs after native flush and before clearing the existing file write journal.
-    pub(super) fn write_cache(&mut self, home: &Path) -> EngineResult<()> {
-        if !self.dirty {
-            return Ok(());
-        }
-        let mut directories = self
-            .by_id
-            .iter()
-            .map(|(id, path)| Ok((id.get(), encode_path(path)?)))
-            .collect::<EngineResult<Vec<_>>>()?;
-        directories.sort_unstable_by_key(|(id, _)| *id);
-        let bytes = serde_json::to_vec(&Cache {
-            version: 1,
-            directories,
-        })
-        .map_err(|error| invalid(error.to_string()))?;
-        atomic_write(&home.join(CACHE_NAME), &bytes)?;
-        self.dirty = false;
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Cache {
-    version: u32,
-    directories: Vec<(u32, String)>,
 }
 
 fn ancestors(path: &SourcePath) -> EngineResult<Vec<SourcePath>> {
@@ -226,35 +162,6 @@ mod tests {
             ids.resolve(&SourcePath::new("root-file").expect("path"))
                 .expect("no ancestors")
                 .is_empty()
-        );
-        assert!(DirectoryIds::decode_cache(&serde_json::to_vec(&serde_json::json!({
-            "version": 1,
-            "directories": [[u64::from(u32::MAX) + 1, encode_path(&SourcePath::new("too-large").expect("path")).expect("encoded path")]]
-        })).expect("JSON")).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cache_round_trip_preserves_native_paths_and_invalid_cache_is_discarded() {
-        use std::os::unix::ffi::OsStringExt;
-        let home = tempfile::tempdir().expect("home");
-        let mut ids = DirectoryIds::default();
-        for byte in [0xfe, 0xff] {
-            let file = SourcePath::new(std::ffi::OsString::from_vec(vec![byte, b'/', b'f']))
-                .expect("path");
-            ids.resolve(&file).expect("ID");
-        }
-        ids.write_cache(home.path()).expect("cache");
-        let decoded = DirectoryIds::read_cache(home.path())
-            .expect("read")
-            .expect("cache");
-        assert_eq!(decoded.by_path, ids.by_path);
-        assert_eq!(decoded.by_path.len(), 2);
-        fs::write(home.path().join(CACHE_NAME), b"broken cache").expect("corrupt cache");
-        assert!(
-            DirectoryIds::read_cache(home.path())
-                .expect("rebuild fallback")
-                .is_none()
         );
     }
 }

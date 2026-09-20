@@ -19,6 +19,7 @@ pub use source::{FileCategory, FileFormat};
 pub(crate) use source::{ByteRange, SourceRange, TextRange};
 
 // Content.
+pub use content::ContentKind;
 pub(crate) use content::{Content, ImageContent, TableCell, TableCellRole, TableContent};
 
 // Entities.
@@ -31,7 +32,7 @@ pub use metadata::{CodeMetadata, EntityMetadata, MarkdownMetadata, SymbolType};
 // Fragments.
 pub(crate) use entity::{EntityFragment, FragmentId, WindowFragment, validate_fragments};
 
-// Ordered path rules.
+// Path rules.
 pub use glob::GlobRule;
 
 // Workspaces.

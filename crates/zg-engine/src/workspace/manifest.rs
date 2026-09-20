@@ -3,17 +3,20 @@ use crate::domain::model::ModelConfig;
 use crate::domain::model::{Device, Metric};
 use crate::{
     EngineError,
-    domain::{IndexDescriptor, IndexState, ScanRules, Workspace, model::EmbeddingModelInfo},
+    domain::{
+        ContentKind, IndexDescriptor, IndexState, ScanRules, Workspace, model::EmbeddingModelInfo,
+    },
     utils::{atomic_write, sync_directory},
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 pub(crate) const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
-pub(crate) const CURRENT_MANIFEST_VERSION: u32 = 4;
+pub(crate) const CURRENT_MANIFEST_VERSION: u32 = 5;
 
 /// Disk metadata owns layout/versioning; domain workspace owns its logical state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -26,7 +29,7 @@ pub(crate) struct WorkspaceManifest {
     pub path: PathBuf,
     pub index_version: Option<u32>,
     pub storage_generation: Option<String>,
-    pub embedding_runtime: ModelConfig,
+    pub embedding_runtimes: BTreeMap<String, ModelConfig>,
 }
 
 // Serialized policy is a disk concern; domain enabled state always has a descriptor.
@@ -54,13 +57,21 @@ struct ManifestData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     root_paths: Option<Vec<LegacyRootPath>>,
     index_policy: IndexPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     embedding: Option<EmbeddingModelInfo>,
+    #[serde(default)]
+    embeddings: Vec<EmbeddingModelInfo>,
+    #[serde(default)]
+    embedding_routes: BTreeMap<ContentKind, String>,
     index_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_generation: Option<String>,
     created_time: u64,
     updated_time: u64,
-    embedding_runtime: ModelConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding_runtime: Option<ModelConfig>,
+    #[serde(default)]
+    embedding_runtimes: BTreeMap<String, ModelConfig>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -92,10 +103,28 @@ impl TryFrom<ManifestData> for WorkspaceManifest {
             (Some(_), Some(_)) => return Err("specify root or legacy rootPaths, not both".into()),
             (None, None) => return Err("workspace root is missing".into()),
         };
-        let index = input.embedding.map(|embedding| IndexDescriptor {
-            embedding,
-            fts: crate::domain::FTS_CONFIG,
-        });
+        if input.embedding.is_some() && !input.embeddings.is_empty() {
+            return Err("specify embeddings or legacy embedding, not both".into());
+        }
+        let index = if input.embeddings.is_empty() {
+            input.embedding.map(IndexDescriptor::single)
+        } else {
+            Some(IndexDescriptor {
+                embeddings: input.embeddings,
+                routes: input.embedding_routes,
+                fts: crate::domain::FTS_CONFIG,
+            })
+        };
+        let mut embedding_runtimes = input.embedding_runtimes;
+        if let Some(runtime) = input.embedding_runtime
+            && let Some(index) = &index
+        {
+            for embedding in &index.embeddings {
+                embedding_runtimes
+                    .entry(embedding.model.reference())
+                    .or_insert_with(|| runtime.clone());
+            }
+        }
         let index = match input.index_policy {
             IndexPolicy::Disabled => IndexState::Disabled,
             IndexPolicy::Uninitialized => IndexState::Uninitialized,
@@ -117,7 +146,7 @@ impl TryFrom<ManifestData> for WorkspaceManifest {
             path: input.path,
             index_version: input.index_version,
             storage_generation: input.storage_generation,
-            embedding_runtime: input.embedding_runtime,
+            embedding_runtimes,
         };
         manifest.validate().map_err(|error| error.to_string())?;
         Ok(manifest)
@@ -140,15 +169,21 @@ impl From<WorkspaceManifest> for ManifestData {
                 IndexState::Disabled => IndexPolicy::Disabled,
                 IndexState::Enabled(_) => IndexPolicy::Enabled,
             },
-            embedding: workspace
+            embedding: None,
+            embeddings: workspace
                 .index
                 .descriptor()
-                .map(|index| index.embedding.clone()),
+                .map_or_else(Vec::new, |index| index.embeddings.clone()),
+            embedding_routes: workspace
+                .index
+                .descriptor()
+                .map_or_else(BTreeMap::new, |index| index.routes.clone()),
             index_version: manifest.index_version,
             storage_generation: manifest.storage_generation,
             created_time: workspace.created_epoch_ms,
             updated_time: workspace.updated_epoch_ms,
-            embedding_runtime: manifest.embedding_runtime,
+            embedding_runtime: None,
+            embedding_runtimes: manifest.embedding_runtimes,
         }
     }
 }
@@ -158,7 +193,7 @@ impl WorkspaceManifest {
         workspace: Workspace,
         home: PathBuf,
         index_version: Option<u32>,
-        embedding_runtime: ModelConfig,
+        embedding_runtimes: BTreeMap<String, ModelConfig>,
     ) -> Result<Self, EngineError> {
         let manifest = Self {
             manifest_version: CURRENT_MANIFEST_VERSION,
@@ -167,7 +202,7 @@ impl WorkspaceManifest {
             workspace,
             index_version,
             storage_generation: None,
-            embedding_runtime,
+            embedding_runtimes,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -184,7 +219,14 @@ impl WorkspaceManifest {
         self.workspace
             .index
             .descriptor()
-            .map(|index| &index.embedding)
+            .and_then(|index| index.embeddings.first())
+    }
+
+    pub(crate) fn embeddings(&self) -> &[EmbeddingModelInfo] {
+        self.workspace
+            .index
+            .descriptor()
+            .map_or(&[], |index| index.embeddings.as_slice())
     }
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
@@ -193,7 +235,10 @@ impl WorkspaceManifest {
     }
 
     pub(crate) fn validate(&self) -> Result<(), EngineError> {
-        if !matches!(self.manifest_version, 1 | 2 | 3 | CURRENT_MANIFEST_VERSION) {
+        if !matches!(
+            self.manifest_version,
+            1 | 2 | 3 | 4 | CURRENT_MANIFEST_VERSION
+        ) {
             return Err(invalid_manifest(format!(
                 "unsupported manifestVersion {}",
                 self.manifest_version
@@ -310,33 +355,49 @@ mod tests {
                     globs: vec!["*.rs".into()],
                     ..crate::domain::ScanRules::default()
                 },
-                index: IndexState::Enabled(IndexDescriptor {
-                    fts: crate::domain::FTS_CONFIG,
-                    embedding: EmbeddingModelInfo {
-                        model: crate::domain::model::ModelInfo {
-                            provider: "local".into(),
-                            name: "minilm".into(),
-                            endpoint: Some("https://models.example.test/embeddings".into()),
-                        },
-                        dimension: 384,
-                        metric: Metric::Cosine,
-                        max_batch_size: 32,
-                        max_input_tokens: Some(8192),
-                        max_image_bytes: Some(1_048_576),
+                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+                    model: crate::domain::model::ModelInfo {
+                        provider: "local".into(),
+                        name: "minilm".into(),
+                        endpoint: Some("https://models.example.test/embeddings".into()),
                     },
-                }),
+                    dimension: 384,
+                    metric: Metric::Cosine,
+                    max_batch_size: 32,
+                    max_input_tokens: Some(8192),
+                    max_image_bytes: Some(1_048_576),
+                })),
                 created_epoch_ms: 10,
                 updated_epoch_ms: 20,
             },
             home.to_path_buf(),
             Some(1),
-            ModelConfig {
-                device: Some(Device::Cpu),
-                cache_dir: Some(home.join("models")),
-                ..ModelConfig::default()
-            },
+            BTreeMap::from([(
+                "local/minilm".into(),
+                ModelConfig {
+                    device: Some(Device::Cpu),
+                    cache_dir: Some(home.join("models")),
+                    ..ModelConfig::default()
+                },
+            )]),
         )
         .expect("fixture manifest")
+    }
+
+    #[test]
+    fn legacy_single_model_metadata_normalizes_into_explicit_routes() {
+        let directory = tempdir().expect("workspace");
+        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let mut value = serde_json::to_value(&manifest).expect("manifest");
+        value["manifestVersion"] = serde_json::json!(4);
+        value["embedding"] = value["embeddings"][0].clone();
+        value["embeddingRuntime"] = value["embeddingRuntimes"]["local/minilm"].clone();
+        for key in ["embeddings", "embeddingRoutes", "embeddingRuntimes"] {
+            value.as_object_mut().expect("object").remove(key);
+        }
+        let restored: WorkspaceManifest = serde_json::from_value(value).expect("legacy manifest");
+        assert_eq!(restored.workspace.index, manifest.workspace.index);
+        assert_eq!(restored.embedding_runtimes, manifest.embedding_runtimes);
     }
 
     #[test]
@@ -344,7 +405,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let mut manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         let mut json = serde_json::to_value(&manifest).expect("serialize");
-        json["embedding"] = serde_json::Value::Null;
+        json["embeddings"] = serde_json::json!([]);
         assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
         for index in [
             IndexState::Uninitialized,
@@ -401,10 +462,10 @@ mod tests {
         assert!(json.get("rootPaths").is_none());
         assert_eq!(json["root"], directory.path().to_string_lossy().as_ref());
         assert_eq!(json["scan"]["globs"][0]["pattern"], "*.rs");
-        assert_eq!(json["embeddingRuntime"]["device"], "cpu");
+        assert_eq!(json["embeddingRuntimes"]["local/minilm"]["device"], "cpu");
         assert!(json.get("generation").is_none());
         assert_eq!(
-            json["embeddingRuntime"]["cacheDir"],
+            json["embeddingRuntimes"]["local/minilm"]["cacheDir"],
             home.join("models").to_string_lossy().as_ref()
         );
         assert_eq!(
@@ -412,13 +473,16 @@ mod tests {
             Some(manifest)
         );
         let mut without_cache = json;
-        without_cache["embeddingRuntime"]
+        without_cache["embeddingRuntimes"]["local/minilm"]
             .as_object_mut()
             .expect("runtime object")
             .remove("cacheDir");
         let without_cache: WorkspaceManifest =
             serde_json::from_value(without_cache).expect("optional runtime cache");
-        assert_eq!(without_cache.embedding_runtime.cache_dir, None);
+        assert_eq!(
+            without_cache.embedding_runtimes["local/minilm"].cache_dir,
+            None
+        );
     }
 
     #[test]

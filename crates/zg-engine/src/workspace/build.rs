@@ -301,27 +301,24 @@ mod tests {
                 name: "workspace".to_owned(),
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor {
-                    fts: crate::domain::FTS_CONFIG,
-                    embedding: EmbeddingModelInfo {
-                        model: crate::domain::model::ModelInfo {
-                            provider: "local".into(),
-                            name: "example".into(),
-                            endpoint: None,
-                        },
-                        dimension: 8,
-                        metric: Metric::Cosine,
-                        max_batch_size: 32,
-                        max_input_tokens: None,
-                        max_image_bytes: None,
+                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+                    model: crate::domain::model::ModelInfo {
+                        provider: "local".into(),
+                        name: "example".into(),
+                        endpoint: None,
                     },
-                }),
+                    dimension: 8,
+                    metric: Metric::Cosine,
+                    max_batch_size: 32,
+                    max_input_tokens: None,
+                    max_image_bytes: None,
+                })),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
             },
             root.join(".zvec-grep"),
             Some(5),
-            ModelConfig::default(),
+            std::collections::BTreeMap::from([("local/example".into(), ModelConfig::default())]),
         )
         .expect("manifest")
     }

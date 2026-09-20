@@ -2,11 +2,12 @@
 
 use crate::{
     EngineError,
-    domain::model::Device,
+    domain::{ContentKind, model::Device},
     utils::{atomic_write, sync_directory},
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -56,6 +57,50 @@ pub(crate) fn string(value: &Value, path: &[&str]) -> Option<String> {
         current = current.get(*key)?;
     }
     current.as_str().map(str::to_owned)
+}
+
+/// Read explicit global content routing; omission preserves legacy model resolution.
+pub(crate) fn embedding_routes(
+    value: &Value,
+) -> Result<Option<BTreeMap<ContentKind, String>>, EngineError> {
+    let Some(routes) = value
+        .get("defaults")
+        .and_then(|defaults| defaults.get("embeddingRoutes"))
+    else {
+        return Ok(None);
+    };
+    if routes.is_null() {
+        return Ok(None);
+    }
+    let routes: BTreeMap<ContentKind, String> =
+        serde_json::from_value(routes.clone()).map_err(|error| {
+            EngineError::invalid_argument(format!("Invalid defaults.embeddingRoutes: {error}"))
+        })?;
+    if routes.is_empty() || routes.values().any(|reference| reference.trim().is_empty()) {
+        return Err(EngineError::invalid_argument(
+            "defaults.embeddingRoutes requires at least one non-empty model reference",
+        ));
+    }
+    Ok(Some(routes))
+}
+
+/// Assign content kinds to one model in the global defaults.
+///
+/// # Errors
+/// Returns model validation and configuration I/O errors.
+pub fn set_content_routes(reference: &str, kinds: &[ContentKind]) -> Result<PathBuf, EngineError> {
+    if crate::models::get_embedding_model_catalog_entry(reference).is_none() {
+        return Err(EngineError::invalid_argument(
+            "Unsupported embedding model; run zg help models",
+        ));
+    }
+    if kinds.is_empty() {
+        return Err(EngineError::invalid_argument(
+            "at least one content kind is required",
+        ));
+    }
+    let routes: BTreeMap<_, _> = kinds.iter().map(|kind| (*kind, reference)).collect();
+    update(json!({"defaults": {"embeddingRoutes": routes}}))
 }
 
 pub(crate) fn device(value: &Value, reference: &str) -> Option<Device> {
@@ -145,6 +190,8 @@ pub fn set_model(
     }
     if default_model {
         patch["defaults"]["embedding"] = json!(reference);
+        // A singleton default replaces previously configured content routes.
+        patch["defaults"]["embeddingRoutes"] = Value::Null;
     }
     update(patch)
 }
@@ -215,6 +262,23 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_content_routes_distinguish_omission_and_invalid_configuration() {
+        assert_eq!(embedding_routes(&json!({})).expect("omitted"), None);
+        assert_eq!(
+            embedding_routes(&json!({"defaults":{"embeddingRoutes":null}})).expect("cleared"),
+            None
+        );
+        for routes in [json!({}), json!({"video":"test/model"}), json!({"text":""})] {
+            assert!(embedding_routes(&json!({"defaults":{"embeddingRoutes":routes}})).is_err());
+        }
+        let routes = embedding_routes(&json!({"defaults":{"embeddingRoutes":{
+            "text":"qwen/text-embedding-v4", "table":"qwen/text-embedding-v4", "image":"qwen/qwen3-vl-embedding"
+        }}})).expect("valid routes").expect("present");
+        assert_eq!(routes.len(), 3);
+        assert_eq!(routes[&ContentKind::Text], routes[&ContentKind::Table]);
+    }
 
     #[test]
     fn config_directory_requires_an_existing_outer_directory() {

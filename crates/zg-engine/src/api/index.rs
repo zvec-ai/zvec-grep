@@ -5,7 +5,7 @@ pub use result::IndexResult;
 
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use serde::{Deserialize, Serialize};
     use tokio_util::sync::CancellationToken;
@@ -31,12 +31,20 @@ pub mod options {
         #[serde(default)]
         pub scan: ScanRulesUpdate,
         pub embedding: Option<EmbeddingModelSpec>,
+        /// Explicit content-to-model routes. Mutually exclusive with `embedding`.
+        /// Models shared by several content kinds produce only one index table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub embedding_routes: Option<BTreeMap<ContentKind, EmbeddingModelSpec>>,
         /// Maximum embedding batch tasks for this index operation.
         /// The model default is used when omitted.
         pub embedding_concurrency: Option<usize>,
         /// Allows remote embedding for this operation without persisting a grant.
         #[serde(default)]
         pub allow_remote: bool,
+        /// Exact destinations approved by interactive consent for this operation.
+        /// Separate from the explicit blanket `allow_remote` option.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub authorized_remote: Vec<crate::authorization::IndexAuthorization>,
         #[serde(default)]
         pub api_key: Option<String>,
         #[serde(default)]
@@ -59,7 +67,7 @@ pub mod options {
         pub signal: Option<CancellationToken>,
     }
 
-    pub use crate::domain::{GlobRule, ScanRules};
+    pub use crate::domain::{ContentKind, GlobRule, ScanRules};
 
     /// Changes to filesystem scanning. `null` clears an optional limit.
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -401,6 +409,9 @@ pub mod result {
         pub files_deleted: usize,
         pub files_unchanged: usize,
         pub files_failed: usize,
+        /// Files that could not be indexed; successful files remain published.
+        #[serde(default)]
+        pub failed_files: Vec<crate::api::info::result::FailedFile>,
         pub entities_created: usize,
         pub duration_micros: u64,
         pub timings: Vec<TimingEntry>,

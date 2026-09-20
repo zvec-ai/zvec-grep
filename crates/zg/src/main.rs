@@ -126,14 +126,28 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
                             endpoint,
                             device,
                             default_model,
+                            content,
                         },
                 } => {
-                    let path = zg_engine::config::set_model(
-                        &reference,
-                        endpoint.as_deref(),
-                        device.map(Into::into),
-                        default_model,
-                    )?;
+                    let mut path = None;
+                    if endpoint.is_some() || device.is_some() || default_model || content.is_empty()
+                    {
+                        path = Some(zg_engine::config::set_model(
+                            &reference,
+                            endpoint.as_deref(),
+                            device.map(Into::into),
+                            default_model,
+                        )?);
+                    }
+                    if !content.is_empty() {
+                        let kinds = content
+                            .into_iter()
+                            .map(|kind| serde_json::from_value(serde_json::json!(kind)))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        path = Some(zg_engine::config::set_content_routes(&reference, &kinds)?);
+                    }
+                    let path = path
+                        .ok_or_else(|| io::Error::other("model configuration was not changed"))?;
                     ("Model", reference, path)
                 }
             };
@@ -300,8 +314,8 @@ async fn authorize_query_with_io(
     request: &mut ContextOptions,
     server: bool,
     home: Option<&Path>,
-    input: impl io::BufRead,
-    output: impl io::Write,
+    mut input: impl io::BufRead,
+    mut output: impl io::Write,
 ) -> Result<(), Box<dyn Error>> {
     use zg_cli::QueryAuthorizationDecision;
     let server_home = if server {
@@ -309,58 +323,92 @@ async fn authorize_query_with_io(
     } else {
         None
     };
-    let authorization = if let Some(home) = &server_home {
-        let reply =
-            zg_daemon::execute_command(home, DaemonCommand::QueryAuthorization(request.clone()))
-                .await?;
-        let DaemonReply::QueryAuthorization(target) = reply else {
-            return Err(protocol_mismatch("query_authorization"));
-        };
-        target
-    } else {
-        zg_engine::authorization::query_authorization(request)?
-    };
-    let Some(authorization) = authorization else {
+    let targets = query_authorization_targets(request, server_home.as_deref()).await?;
+    if targets.is_empty() {
         return Ok(());
-    };
-    let target = authorization.target;
-    let decision = zg_cli::prompt_query_authorization(
-        &target,
-        authorization.query_text,
-        authorization.workspace_content,
-        input,
-        output,
-    )?;
-    match decision {
-        QueryAuthorizationDecision::Cancel => {
-            return Err(io::Error::other(
-                "Remote Embedding authorization was declined. No remote data was sent.",
-            )
-            .into());
-        }
-        QueryAuthorizationDecision::FtsOnly => {
-            zg_cli::use_fts_only(request);
-            return Ok(());
-        }
-        QueryAuthorizationDecision::Once => request.allow_remote = true,
-        QueryAuthorizationDecision::Workspace => {
-            if let Some(home) = &server_home {
-                let reply = zg_daemon::execute_command(
-                    home,
-                    DaemonCommand::GrantIndexAuthorization(target.clone()),
+    }
+    let mut decisions = Vec::new();
+    for authorization in &targets {
+        let decision = zg_cli::prompt_query_authorization(
+            &authorization.target,
+            authorization.query_text,
+            authorization.workspace_content,
+            &mut input,
+            &mut output,
+        )?;
+        match decision {
+            QueryAuthorizationDecision::Cancel => {
+                return Err(io::Error::other(
+                    "Remote Embedding authorization was declined. No remote data was sent.",
                 )
-                .await?;
-                if !matches!(reply, DaemonReply::GrantIndexAuthorization) {
-                    return Err(protocol_mismatch("grant_index_authorization"));
-                }
-            } else {
-                zg_engine::authorization::grant_index(&target)?;
+                .into());
+            }
+            QueryAuthorizationDecision::FtsOnly => {
+                zg_cli::use_fts_only(request);
+                return Ok(());
+            }
+            QueryAuthorizationDecision::Once | QueryAuthorizationDecision::Workspace => {
+                decisions.push(decision);
             }
         }
     }
-    // Bind query and refresh execution to the destination disclosed at the prompt.
-    request.endpoint = Some(target.endpoint);
-    request.authorization_model = Some(target.model);
+    if query_authorization_targets(request, server_home.as_deref()).await? != targets {
+        return Err(io::Error::other("Workspace authorization scope changed while awaiting consent; retry to review all destinations").into());
+    }
+    for (authorization, decision) in targets.iter().zip(decisions) {
+        match decision {
+            QueryAuthorizationDecision::Once => {
+                request.authorized_remote.push(authorization.target.clone());
+            }
+            QueryAuthorizationDecision::Workspace => {
+                grant_authorization(&authorization.target, server_home.as_deref()).await?;
+            }
+            QueryAuthorizationDecision::Cancel | QueryAuthorizationDecision::FtsOnly => {
+                unreachable!()
+            }
+        }
+    }
+    // A single remote query destination can retain the legacy binding. Multiple
+    // models keep their individual saved endpoints instead of a global override.
+    if targets.len() == 1 {
+        request.authorization_model = Some(targets[0].target.model.clone());
+    }
+    Ok(())
+}
+
+async fn query_authorization_targets(
+    request: &ContextOptions,
+    server_home: Option<&Path>,
+) -> Result<Vec<zg_engine::authorization::QueryAuthorization>, Box<dyn Error>> {
+    if let Some(home) = server_home {
+        let reply =
+            zg_daemon::execute_command(home, DaemonCommand::QueryAuthorization(request.clone()))
+                .await?;
+        let DaemonReply::QueryAuthorization(targets) = reply else {
+            return Err(protocol_mismatch("query_authorization"));
+        };
+        Ok(targets)
+    } else {
+        Ok(zg_engine::authorization::query_authorizations(request)?)
+    }
+}
+
+async fn grant_authorization(
+    target: &zg_engine::authorization::IndexAuthorization,
+    server_home: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(home) = server_home {
+        let reply = zg_daemon::execute_command(
+            home,
+            DaemonCommand::GrantIndexAuthorization(target.clone()),
+        )
+        .await?;
+        if !matches!(reply, DaemonReply::GrantIndexAuthorization) {
+            return Err(protocol_mismatch("grant_index_authorization"));
+        }
+    } else {
+        zg_engine::authorization::grant_index(target)?;
+    }
     Ok(())
 }
 
@@ -465,7 +513,6 @@ async fn authorize_index(
     server: bool,
     home: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
-    // Non-interactive callers retain the engine's explicit authorization error.
     if request.allow_remote || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Ok(());
     }
@@ -474,62 +521,53 @@ async fn authorize_index(
     } else {
         None
     };
-    let target = if let Some(home) = &server_home {
+    let targets = index_authorization_targets(request, server_home.as_deref()).await?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut decisions = Vec::new();
+    for target in &targets {
+        let decision =
+            zg_cli::prompt_index_authorization(target, io::stdin().lock(), io::stderr().lock())?;
+        if decision == zg_cli::AuthorizationDecision::Cancel {
+            return Err(io::Error::other(
+                "Remote Embedding authorization was declined. No remote data was sent.",
+            )
+            .into());
+        }
+        decisions.push(decision);
+    }
+    if index_authorization_targets(request, server_home.as_deref()).await? != targets {
+        return Err(io::Error::other("Workspace authorization scope changed while awaiting consent; retry to review all destinations").into());
+    }
+    for (target, decision) in targets.iter().zip(decisions) {
+        match decision {
+            zg_cli::AuthorizationDecision::Once => request.authorized_remote.push(target.clone()),
+            zg_cli::AuthorizationDecision::Workspace => {
+                grant_authorization(target, server_home.as_deref()).await?;
+            }
+            zg_cli::AuthorizationDecision::Cancel => unreachable!(),
+        }
+    }
+    request.root = Some(targets[0].root.clone());
+    Ok(())
+}
+
+async fn index_authorization_targets(
+    request: &zg_engine::api::index::IndexOptions,
+    server_home: Option<&Path>,
+) -> Result<Vec<zg_engine::authorization::IndexAuthorization>, Box<dyn Error>> {
+    if let Some(home) = server_home {
         let reply =
             zg_daemon::execute_command(home, DaemonCommand::IndexAuthorization(request.clone()))
                 .await?;
-        let DaemonReply::IndexAuthorization(target) = reply else {
+        let DaemonReply::IndexAuthorization(targets) = reply else {
             return Err(protocol_mismatch("index_authorization"));
         };
-        target
+        Ok(targets)
     } else {
-        zg_engine::authorization::index_authorization(request)?
-    };
-    let Some(target) = target else {
-        return Ok(());
-    };
-    let decision =
-        zg_cli::prompt_index_authorization(&target, io::stdin().lock(), io::stderr().lock())?;
-    if decision == zg_cli::AuthorizationDecision::Cancel {
-        return Err(io::Error::other(
-            "Remote Embedding authorization was declined. No remote data was sent.",
-        )
-        .into());
+        Ok(zg_engine::authorization::index_authorizations(request)?)
     }
-    // Bind execution to exactly the model and endpoint shown before user input.
-    request.root = Some(target.root.clone());
-    request.endpoint = Some(target.endpoint.clone());
-    if let Some(embedding) = &mut request.embedding {
-        embedding.reference.clone_from(&target.model);
-        embedding.endpoint = Some(target.endpoint.clone());
-    } else {
-        request.embedding = Some(zg_engine::api::index::options::EmbeddingModelSpec {
-            reference: target.model.clone(),
-            endpoint: Some(target.endpoint.clone()),
-            revision: None,
-            cache_dir: None,
-            device: zg_engine::api::index::options::Device::Auto,
-        });
-    }
-    match decision {
-        zg_cli::AuthorizationDecision::Once => request.allow_remote = true,
-        zg_cli::AuthorizationDecision::Workspace => {
-            if let Some(home) = &server_home {
-                let reply = zg_daemon::execute_command(
-                    home,
-                    DaemonCommand::GrantIndexAuthorization(target),
-                )
-                .await?;
-                if !matches!(reply, DaemonReply::GrantIndexAuthorization) {
-                    return Err(protocol_mismatch("grant_index_authorization"));
-                }
-            } else {
-                zg_engine::authorization::grant_index(&target)?;
-            }
-        }
-        zg_cli::AuthorizationDecision::Cancel => unreachable!(),
-    }
-    Ok(())
 }
 
 async fn execute_status(
@@ -726,7 +764,12 @@ mod query_authorization_tests {
         authorize_query_with_io(&mut once, false, None, "1\n".as_bytes(), &mut prompt)
             .await
             .expect("once");
-        assert!(once.allow_remote);
+        assert!(
+            !once.allow_remote,
+            "interactive consent must be destination scoped"
+        );
+        assert_eq!(once.authorized_remote.len(), 1);
+        assert_eq!(once.authorized_remote[0].model, "qwen/text-embedding-v4");
         assert_eq!(
             once.authorization_model.as_deref(),
             Some("qwen/text-embedding-v4")
@@ -744,6 +787,7 @@ mod query_authorization_tests {
                 .is_err()
         );
         assert!(!cancelled.allow_remote);
+        assert!(cancelled.authorized_remote.is_empty());
         let mut fts = make();
         authorize_query_with_io(&mut fts, false, None, "3\n".as_bytes(), Vec::new())
             .await

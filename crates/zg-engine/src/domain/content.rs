@@ -2,11 +2,42 @@ use crate::{EngineError, EngineResult};
 
 use super::source::{FileCategory, FileFormat};
 
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentKind {
+    Text,
+    Image,
+    Table,
+}
+
+impl ContentKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Table => "table",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Content {
     Text(String),
     Image(ImageContent),
     Table(TableContent),
+}
+
+impl Content {
+    pub(crate) fn kind(&self) -> ContentKind {
+        match self {
+            Self::Text(_) => ContentKind::Text,
+            Self::Image(_) => ContentKind::Image,
+            Self::Table(_) => ContentKind::Table,
+        }
+    }
 }
 
 // --- Image ---

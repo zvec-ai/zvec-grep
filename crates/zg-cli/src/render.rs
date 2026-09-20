@@ -281,6 +281,9 @@ pub fn write_index_result(
         result.files_unchanged,
         result.files_failed
     )?;
+    for file in &result.failed_files {
+        writeln!(writer, "Failed: {}: {}", file.path.display(), file.reason)?;
+    }
     writeln!(writer, "Entities: {}", result.entities_created)
 }
 
@@ -304,12 +307,15 @@ pub fn write_info_result(mut writer: impl Write, result: &InfoResult) -> io::Res
                 "excluded"
             }
         )?;
-        if let Some(embedding) = &index.embedding {
+        for embedding in &index.embeddings {
             writeln!(
                 writer,
                 "Embedding: {}/{}",
                 embedding.provider, embedding.model
             )?;
+        }
+        for (kind, model) in &index.embedding_routes {
+            writeln!(writer, "Content route: {} -> {model}", kind.as_str())?;
         }
         if let Some(fts) = &index.fts {
             writeln!(
@@ -326,6 +332,9 @@ pub fn write_info_result(mut writer: impl Write, result: &InfoResult) -> io::Res
             "Files: scanned={} indexed={} pending={} failed={}",
             status.files_scanned, status.files_indexed, status.files_pending, status.files_failed
         )?;
+        for file in &status.failed_files {
+            writeln!(writer, "Failed: {}: {}", file.path.display(), file.reason)?;
+        }
         writeln!(writer, "Entities: {}", status.entities_indexed)?;
         writeln!(
             writer,
@@ -499,7 +508,8 @@ Index options:
   --mode <direct|server|auto>       Select indexing transport
 
 Embedding options:
-  --embedding <model>               Model such as local/potion-code-16m-v2 or qwen/text-embedding-v4
+  --embedding <model>               One model for supported content kinds
+  --embedding-route <kind=model>    Explicit text/image/table routing (repeatable)
   --api-key <key>                   Embedding provider API key
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
@@ -526,7 +536,9 @@ A new workspace name defaults to root directory name; use --name if it is taken.
 Names are case-sensitive and unique within the per-user registry. Naming an
 existing workspace renames it while preserving file IDs and active storage.
 
-New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
+New indexes require --embedding, --embedding-route, ZVEC_GREP_EMBEDDING, or a configured default.
+Model or content-route changes require --rebuild. Failed files are recorded;
+successful files remain searchable after a rebuild.
 Existing indexes reuse their stored embedding schema.
 
 Environment:
@@ -551,6 +563,7 @@ Workspace index is ready.";
 const CONFIG_HELP: &str = r"Usage:
   zg config provider set <provider> --api-key <key>
   zg config model set <model> [--endpoint <url> | --device <device>] [--default]
+  zg config model set <model> --content <text|image|table> [--content ...]
 
 Provider options:
   --api-key <key>                   Default API key for the provider

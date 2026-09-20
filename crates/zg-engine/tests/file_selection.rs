@@ -605,10 +605,12 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     let info = engine.info(info_options(root)).await?;
     let mut options = zvec_rust::CollectionOptions::new()?;
     options.set_read_only(true)?;
-    let collection = zvec_rust::Collection::open(
-        info.index_path.join("files").to_str().expect("UTF-8 path"),
-        Some(&options),
-    )?;
+    let path = info.index_path.join("files");
+    // Match the engine's native boundary for Windows canonical paths.
+    #[cfg(windows)]
+    let path = dunce::simplified(&path);
+    let collection =
+        zvec_rust::Collection::open(path.to_str().expect("UTF-8 path"), Some(&options))?;
     let mut query = zvec_rust::SearchQuery::scalar(64)?;
     query.set_filter("(file_name NOT LIKE '%%.rs' OR file_name = '.rs')")?;
     let native_result = collection.query(&query);

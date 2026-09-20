@@ -259,13 +259,13 @@ fn append_entity(
                 index,
                 entity_index,
                 range: fragment.range,
-                contents: vec![fragment.content],
+                content: fragment.content,
             })
         } else {
             ExtractedFragment::Standalone(ExtractedEntity {
                 index,
                 range: fragment.range,
-                content: EntityContent::Source(vec![fragment.content]),
+                content: EntityContent::Source(fragment.content),
                 metadata: metadata.take(),
             })
         };

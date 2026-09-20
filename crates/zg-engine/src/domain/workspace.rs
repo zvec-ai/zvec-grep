@@ -1,10 +1,13 @@
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{EngineError, EngineResult};
 
-use super::{GlobRule, SourcePath, model::EmbeddingModelInfo};
+use super::{ContentKind, GlobRule, SourcePath, model::EmbeddingModelInfo};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Workspace {
@@ -43,7 +46,7 @@ impl Workspace {
             )));
         }
         if let IndexState::Enabled(index) = &self.index {
-            index.embedding.validate()?;
+            index.validate()?;
         }
         Ok(())
     }
@@ -71,8 +74,111 @@ pub(crate) const FTS_CONFIG: FtsConfig = FtsConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IndexDescriptor {
-    pub embedding: EmbeddingModelInfo,
+    pub embeddings: Vec<EmbeddingModelInfo>,
+    /// Each content kind has exactly one owning embedding model reference.
+    pub routes: BTreeMap<ContentKind, String>,
     pub fts: FtsConfig,
+}
+
+impl IndexDescriptor {
+    /// Normalize the legacy single-model selection into explicit content routes.
+    pub(crate) fn single(embedding: EmbeddingModelInfo) -> Self {
+        let reference = embedding.model.reference();
+        let mut routes = BTreeMap::from([
+            (ContentKind::Text, reference.clone()),
+            (ContentKind::Table, reference.clone()),
+        ]);
+        if embedding.max_image_bytes.is_some() {
+            routes.insert(ContentKind::Image, reference);
+        }
+        Self {
+            embeddings: vec![embedding],
+            routes,
+            fts: FTS_CONFIG,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        if self.embeddings.is_empty() || self.routes.is_empty() {
+            return Err(EngineError::invalid_argument(
+                "enabled index requires embedding models and content routes",
+            ));
+        }
+        let mut references = BTreeSet::new();
+        for embedding in &self.embeddings {
+            embedding.validate()?;
+            if !references.insert(embedding.model.reference()) {
+                return Err(EngineError::invalid_argument(
+                    "embedding model references must be unique",
+                ));
+            }
+        }
+        for (kind, reference) in &self.routes {
+            let model = self
+                .embeddings
+                .iter()
+                .find(|embedding| embedding.model.reference() == *reference)
+                .ok_or_else(|| {
+                    EngineError::invalid_argument(format!(
+                        "content route {kind:?} references an unconfigured model: {reference}"
+                    ))
+                })?;
+            if *kind == ContentKind::Image && model.max_image_bytes.is_none() {
+                return Err(EngineError::invalid_argument(format!(
+                    "image content route requires an image-capable embedding model: {reference}"
+                )));
+            }
+        }
+        if references
+            .iter()
+            .any(|reference| !self.routes.values().any(|route| route == reference))
+        {
+            return Err(EngineError::invalid_argument(
+                "every embedding model must own at least one content route",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn model_for(&self, kind: ContentKind) -> EngineResult<&EmbeddingModelInfo> {
+        let reference = self.routes.get(&kind).ok_or_else(|| {
+            EngineError::invalid_argument(format!(
+                "no embedding model configured for {kind:?} content"
+            ))
+        })?;
+        self.embeddings
+            .iter()
+            .find(|embedding| embedding.model.reference() == *reference)
+            .ok_or_else(|| {
+                EngineError::internal(format!(
+                    "content route refers to missing model: {reference}"
+                ))
+            })
+    }
+
+    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
+        if self.routes != other.routes
+            || self.fts != other.fts
+            || self.embeddings.len() != other.embeddings.len()
+        {
+            return Err(EngineError::invalid_argument(
+                "existing index uses different embedding models, content routes or FTS configuration; rebuild the index",
+            ));
+        }
+        for embedding in &self.embeddings {
+            let other = other
+                .embeddings
+                .iter()
+                .find(|candidate| candidate.model.reference() == embedding.model.reference())
+                .ok_or_else(|| {
+                    EngineError::invalid_argument(
+                        "existing index uses different embedding models; rebuild the index",
+                    )
+                })?;
+            embedding.ensure_index_compatible(other)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,5 +227,82 @@ impl Default for ScanRules {
             ignore_files: Vec::new(),
             nested_git: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::model::{Metric, ModelInfo};
+
+    fn model(name: &str, image: bool) -> EmbeddingModelInfo {
+        EmbeddingModelInfo {
+            model: ModelInfo {
+                provider: "test".into(),
+                name: name.into(),
+                endpoint: None,
+            },
+            dimension: 16,
+            metric: Metric::Cosine,
+            max_batch_size: 8,
+            max_input_tokens: Some(512),
+            max_image_bytes: image.then_some(1024),
+        }
+    }
+
+    #[test]
+    fn content_routes_have_one_owner_and_shared_models_are_stored_once() {
+        let text = model("text", false);
+        let image = model("vl", true);
+        let mut index = IndexDescriptor::single(text.clone());
+        index.embeddings.push(image.clone());
+        index
+            .routes
+            .insert(ContentKind::Image, image.model.reference());
+        index.validate().expect("valid partition");
+        assert_eq!(
+            index.model_for(ContentKind::Text).expect("text route"),
+            &text
+        );
+        assert_eq!(
+            index.model_for(ContentKind::Table).expect("table route"),
+            &text
+        );
+        assert_eq!(
+            index.model_for(ContentKind::Image).expect("image route"),
+            &image
+        );
+        assert_eq!(index.embeddings.len(), 2);
+
+        index
+            .routes
+            .insert(ContentKind::Image, text.model.reference());
+        assert!(
+            index.validate().is_err(),
+            "text-only model cannot own images"
+        );
+        index
+            .routes
+            .insert(ContentKind::Image, "missing/model".into());
+        assert!(index.validate().is_err(), "every route must resolve");
+    }
+
+    #[test]
+    fn routing_and_chunk_limits_require_rebuild_but_runtime_changes_do_not() {
+        let index = IndexDescriptor::single(model("vl", true));
+        let mut changed = index.clone();
+        changed.embeddings[0].model.endpoint = Some("https://other.example.test".into());
+        changed.embeddings[0].max_batch_size = 64;
+        index
+            .ensure_index_compatible(&changed)
+            .expect("runtime configuration");
+        changed.routes.remove(&ContentKind::Table);
+        assert!(index.ensure_index_compatible(&changed).is_err());
+        changed = index.clone();
+        changed.embeddings[0].max_input_tokens = Some(256);
+        assert!(index.ensure_index_compatible(&changed).is_err());
+        changed = index.clone();
+        changed.embeddings.push(model("new", false));
+        assert!(index.ensure_index_compatible(&changed).is_err());
     }
 }

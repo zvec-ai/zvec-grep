@@ -45,7 +45,7 @@ impl ZvecStorageFactory {
 struct SharedStore {
     state: Mutex<StoreState>,
     path: PathBuf,
-    schema: EmbeddingModelInfo,
+    schema: Vec<EmbeddingModelInfo>,
     read_only: bool,
     // The native handles must close before the operating-system lock is released.
     _lock: File,
@@ -69,29 +69,54 @@ struct ZvecStorage {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
-    embedding: EmbeddingModelInfo,
+    version: u32,
+    embeddings: Vec<EmbeddingModelInfo>,
 }
 
 impl SchemaRecord {
-    fn new(embedding: &EmbeddingModelInfo) -> Self {
+    fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
-            embedding: embedding.clone(),
+            version: 2,
+            embeddings: embeddings.to_vec(),
         }
     }
 
-    fn embedding(self) -> EngineResult<EmbeddingModelInfo> {
-        if !(1..=20_000).contains(&self.embedding.dimension) {
+    fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
+        if self.version != 2 {
             return Err(EngineError::storage_failure(
-                "stored embedding dimension must be in 1..=20,000",
+                "unsupported storage schema; rebuild the index",
             ));
         }
-        self.embedding.validate().map_err(|error| {
+        validate_models(&self.embeddings).map_err(|error| {
             EngineError::storage_failure(format!(
                 "invalid stored embedding model information: {error}"
             ))
         })?;
-        Ok(self.embedding)
+        Ok(self.embeddings)
     }
+}
+
+fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
+    if embeddings.is_empty() {
+        return Err(EngineError::invalid_argument(
+            "at least one embedding model is required",
+        ));
+    }
+    let mut models = std::collections::HashSet::new();
+    for embedding in embeddings {
+        embedding.validate()?;
+        if !(1..=20_000).contains(&embedding.dimension) {
+            return Err(EngineError::invalid_argument(
+                "embedding dimension must be in 1..=20,000",
+            ));
+        }
+        if !models.insert(embedding.model.reference()) {
+            return Err(EngineError::invalid_argument(
+                "embedding model references must be unique",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
@@ -99,8 +124,8 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
         &self,
         options: WorkspaceIndexStorageOptions,
     ) -> StorageResult<Box<dyn WorkspaceIndexStorage>> {
-        if let WorkspaceIndexStorageOptions::ReadWrite { embedding, .. } = &options {
-            embedding.validate()?;
+        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
+            validate_models(embeddings)?;
         }
         initialize()?;
         let home = options.storage_path();
@@ -357,13 +382,14 @@ impl WorkspaceIndexStorage for ZvecStorage {
 
     fn search_vector(
         &self,
+        model: &str,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> StorageResult<Vec<StorageSearchHit>> {
         let shared = self.shared()?;
-        validate_vector(vector, &shared.schema)?;
-        self.read(|native| native.search_vector(vector, limit, filter))
+        validate_vector(vector, model_schema(&shared.schema, model)?)?;
+        self.read(|native| native.search_vector(model, vector, limit, filter))
     }
 
     fn replace_file(&self, file: &FileRecord, entries: &[IndexedFragment]) -> StorageResult<()> {
@@ -504,15 +530,34 @@ fn recover_pending(native: &NativeStore, changes: PendingChanges) -> EngineResul
 fn validate_batch(
     file: &FileRecord,
     entries: &[IndexedFragment],
-    schema: &EmbeddingModelInfo,
+    schema: &[EmbeddingModelInfo],
 ) -> EngineResult<()> {
     file.validate()?;
     validate_fragments(file.id, entries.iter().map(|entry| &entry.fragment))?;
+    let mut owners = HashMap::new();
     for entry in entries {
+        if owners
+            .insert(entry.fragment.entity_id(), &entry.model)
+            .is_some_and(|previous| previous != &entry.model)
+        {
+            return Err(EngineError::invalid_argument(
+                "all fragments of an entity must use one embedding model",
+            ));
+        }
         codec::validate_fragment(&entry.fragment)?;
-        validate_vector(&entry.vector, schema)?;
+        validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
     }
     Ok(())
+}
+
+fn model_schema<'a>(
+    schemas: &'a [EmbeddingModelInfo],
+    model: &str,
+) -> EngineResult<&'a EmbeddingModelInfo> {
+    schemas
+        .iter()
+        .find(|schema| schema.model.reference() == model)
+        .ok_or_else(|| EngineError::invalid_argument(format!("unknown embedding model {model:?}")))
 }
 
 fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<()> {
@@ -549,30 +594,39 @@ pub(super) fn initialize() -> EngineResult<()> {
 fn load_schema(
     path: &Path,
     options: &WorkspaceIndexStorageOptions,
-) -> EngineResult<EmbeddingModelInfo> {
+) -> EngineResult<Vec<EmbeddingModelInfo>> {
     let descriptor = path.join("schema.json");
     if descriptor.exists() {
-        let schema = read_json::<SchemaRecord>(&descriptor)?.embedding()?;
-        if let WorkspaceIndexStorageOptions::ReadWrite { embedding, .. } = options {
-            schema.ensure_index_compatible(embedding)?;
+        let schema = read_json::<SchemaRecord>(&descriptor)?.embeddings()?;
+        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options {
+            if schema.len() != embeddings.len() {
+                return Err(EngineError::invalid_argument(
+                    "embedding model set changed; rebuild the index",
+                ));
+            }
+            for stored in &schema {
+                let current =
+                    model_schema(embeddings, &stored.model.reference()).map_err(|_| {
+                        EngineError::invalid_argument(
+                            "embedding model set changed; rebuild the index",
+                        )
+                    })?;
+                stored.ensure_index_compatible(current)?;
+            }
         }
         return Ok(schema);
     }
-    let WorkspaceIndexStorageOptions::ReadWrite { embedding, .. } = options else {
+    let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options else {
         return Err(EngineError::not_found(
             "workspace storage schema does not exist",
         ));
     };
-    if !(1..=20_000).contains(&embedding.dimension) {
-        return Err(EngineError::invalid_argument(
-            "embedding dimension must be in 1..=20,000",
-        ));
-    }
+    validate_models(embeddings)?;
     write_record(
         &descriptor,
-        &serde_json::to_vec(&SchemaRecord::new(embedding)).map_err(|error| json_error(&error))?,
+        &serde_json::to_vec(&SchemaRecord::new(embeddings)).map_err(|error| json_error(&error))?,
     )?;
-    Ok(embedding.clone())
+    Ok(embeddings.clone())
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -595,7 +649,7 @@ fn prepare_storage(
     home: &Path,
     path: &Path,
     options: &WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, EmbeddingModelInfo)> {
+) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
     let read_only = options.is_read_only();
     let mut shared = read_only;
     loop {

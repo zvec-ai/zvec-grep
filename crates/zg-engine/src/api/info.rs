@@ -124,7 +124,13 @@ pub mod result {
         pub root: PathBuf,
         pub scan: ScanRules,
         pub policy: WorkspaceIndexPolicy,
+        /// First configured model, retained for older clients. Use `embeddings` for all models.
         pub embedding: Option<WorkspaceIndexEmbedding>,
+        #[serde(default)]
+        pub embeddings: Vec<WorkspaceIndexEmbedding>,
+        #[serde(default)]
+        pub embedding_routes:
+            std::collections::BTreeMap<crate::api::index::options::ContentKind, String>,
         pub fts: Option<WorkspaceIndexFts>,
         pub index_version: Option<u32>,
         pub created_epoch_ms: u64,
@@ -145,6 +151,13 @@ pub mod result {
         pub filters: Vec<String>,
     }
 
+    /// A file that could not be indexed, recorded independently of successful files.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct FailedFile {
+        pub path: PathBuf,
+        pub reason: String,
+    }
+
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexStats {
         pub files_scanned: usize,
@@ -155,6 +168,8 @@ pub mod result {
         pub indexed_size_bytes: u64,
         pub files_pending: usize,
         pub files_failed: usize,
+        #[serde(default)]
+        pub failed_files: Vec<FailedFile>,
         pub files_added: usize,
         pub files_modified: usize,
         pub files_deleted: usize,
@@ -187,7 +202,16 @@ impl result::WorkspaceIndexInfo {
             embedding: workspace
                 .index
                 .descriptor()
-                .map(|index| (&index.embedding).into()),
+                .and_then(|index| index.embeddings.first().map(Into::into)),
+            embeddings: workspace.index.descriptor().map_or_else(Vec::new, |index| {
+                index.embeddings.iter().map(Into::into).collect()
+            }),
+            embedding_routes: workspace
+                .index
+                .descriptor()
+                .map_or_else(std::collections::BTreeMap::new, |index| {
+                    index.routes.clone()
+                }),
             fts: workspace
                 .index
                 .descriptor()

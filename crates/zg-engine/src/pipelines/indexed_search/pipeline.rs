@@ -169,11 +169,11 @@ pub(crate) async fn search_workspace_index(
     workspace_root: &Path,
     plan: SearchPlan,
     storage: &dyn WorkspaceIndexStorage,
-    embedding_model: Option<&dyn SearchEmbeddingRuntime>,
+    embedding_models: &[&dyn SearchEmbeddingRuntime],
 ) -> Result<SearchPlanResult, EngineError> {
     let total_started = Instant::now();
     let plan_started = Instant::now();
-    let routes = resolve_routes(&plan.routes)?;
+    let mut routes = resolve_routes(&plan.routes)?;
     validate_modified_range(&plan)?;
     let limit = plan.limit.unwrap_or(DEFAULT_LIMIT);
     let plan_duration = plan_started.elapsed();
@@ -189,7 +189,34 @@ pub(crate) async fn search_workspace_index(
             .iter()
             .any(|route| route.mode == SearchRouteMode::Vector)
     {
-        embed_vector_routes(&routes, require_embedding_model(embedding_model)?).await?
+        if embedding_models.is_empty() {
+            return Err(EngineError::unsupported(
+                "vector search requires configured embedding models",
+            ));
+        }
+        let mut vectors = HashMap::new();
+        let mut expanded = routes
+            .iter()
+            .filter(|route| route.mode == SearchRouteMode::Fts)
+            .cloned()
+            .collect::<Vec<_>>();
+        for model in embedding_models {
+            let model_routes = routes
+                .iter()
+                .filter(|route| route.mode == SearchRouteMode::Vector)
+                .map(|route| {
+                    let mut route = route.clone();
+                    if embedding_models.len() > 1 {
+                        route.id = format!("{}@{}", route.id, model.info().model.reference());
+                    }
+                    route
+                })
+                .collect::<Vec<_>>();
+            vectors.extend(embed_vector_routes(&model_routes, *model).await?);
+            expanded.extend(model_routes);
+        }
+        routes = expanded;
+        vectors
     } else {
         HashMap::new()
     };
@@ -284,18 +311,15 @@ fn validate_modified_range(plan: &SearchPlan) -> Result<(), EngineError> {
     }
 }
 
-fn require_embedding_model(
-    model: Option<&dyn SearchEmbeddingRuntime>,
-) -> Result<&dyn SearchEmbeddingRuntime, EngineError> {
-    model.ok_or_else(|| {
-        EngineError::unsupported("vector search requires a configured embedding model")
-    })
+struct ModelQueryVector {
+    model: String,
+    values: Vec<f32>,
 }
 
 async fn embed_vector_routes(
     routes: &[ResolvedSearchRoute],
     model: &dyn SearchEmbeddingRuntime,
-) -> Result<HashMap<String, Vec<f32>>, EngineError> {
+) -> Result<HashMap<String, ModelQueryVector>, EngineError> {
     model.info().validate()?;
     let vector_routes = routes
         .iter()
@@ -318,7 +342,13 @@ async fn embed_vector_routes(
             ));
         }
         for (route, vector) in batch.iter().zip(embedded) {
-            vectors.insert(route.id.clone(), vector);
+            vectors.insert(
+                route.id.clone(),
+                ModelQueryVector {
+                    model: model.info().model.reference(),
+                    values: vector,
+                },
+            );
         }
     }
     Ok(vectors)
@@ -329,7 +359,7 @@ fn collect_adaptive_recall(
     routes: &[ResolvedSearchRoute],
     filter: Option<&StorageSearchFilter>,
     prefer_symbol: bool,
-    vectors: &HashMap<String, Vec<f32>>,
+    vectors: &HashMap<String, ModelQueryVector>,
     limit: usize,
     storage: &dyn WorkspaceIndexStorage,
     candidates: &mut HashMap<EntityId, Candidate>,
@@ -349,7 +379,14 @@ fn collect_adaptive_recall(
                     .get(route.vector_route_id.as_deref().unwrap_or(&route.route.id))
                     .map_or_else(
                         || Ok(Vec::new()),
-                        |vector| storage.search_vector(vector, depth, route.filter.as_ref()),
+                        |vector| {
+                            storage.search_vector(
+                                &vector.model,
+                                &vector.values,
+                                depth,
+                                route.filter.as_ref(),
+                            )
+                        },
                     )?,
             };
             saturated |= hits.len() >= depth;
@@ -378,7 +415,17 @@ fn build_recall_routes(
         })
         .collect::<Vec<_>>();
     if prefer_symbol {
+        let mut symbol_routes = HashSet::new();
         for route in routes {
+            // Model expansion creates independent vector searches, while symbol
+            // recall still searches all FTS partitions for the original route.
+            let logical_id = route
+                .id
+                .split_once('@')
+                .map_or(route.id.as_str(), |(id, _)| id);
+            if !symbol_routes.insert(logical_id) {
+                continue;
+            }
             let symbol_names = extract_symbol_names(&route.query);
             if symbol_names.is_empty() {
                 continue;
@@ -387,7 +434,7 @@ fn build_recall_routes(
             symbol_filter.symbol_names = Some(symbol_names);
             output.push(RecallRoute {
                 route: ResolvedSearchRoute {
-                    id: format!("{}.prefer-symbol", route.id),
+                    id: format!("{logical_id}.prefer-symbol"),
                     mode: SearchRouteMode::Fts,
                     query: route.query.clone(),
                 },
@@ -994,6 +1041,7 @@ mod tests {
 
         fn search_vector(
             &self,
+            _model: &str,
             _vector: &[f32],
             limit: usize,
             filter: Option<&StorageSearchFilter>,
@@ -1060,7 +1108,7 @@ mod tests {
                 },
             ]),
             &storage,
-            Some(&model),
+            &[&model],
         )
         .await
         .expect("hybrid search");
@@ -1134,7 +1182,7 @@ mod tests {
             Path::new("/workspace"),
             plan,
             &storage,
-            Some(&FixtureModel::new()),
+            &[&FixtureModel::new()],
         )
         .await
         .expect("search");
@@ -1184,7 +1232,7 @@ mod tests {
                 mode: SearchRouteMode::Fts,
                 query: "query".to_owned(),
             }]);
-            let error = search_workspace_index(Path::new("/workspace"), plan, &storage, None)
+            let error = search_workspace_index(Path::new("/workspace"), plan, &storage, &[])
                 .await
                 .expect_err("invalid stored result must fail");
             assert!(error.to_string().contains(if missing {
@@ -1193,6 +1241,52 @@ mod tests {
                 "inconsistent ownership"
             }));
         }
+    }
+
+    #[tokio::test]
+    async fn model_expansion_does_not_multiply_symbol_recall_weight() {
+        let source = file(1, "src/service.rs", 200);
+        let owner = entity("service", &source, "Service implementation");
+        let storage = FixtureStorage {
+            paths_only: false,
+            path_pushdown: false,
+            files: vec![source],
+            entities: HashMap::from([("service".to_owned(), owner.clone())]),
+            fts: HashMap::from([(
+                "Service".to_owned(),
+                vec![hit(&owner, "service-hit", StorageSearchPath::Fts, 2.0)],
+            )]),
+            vector: Vec::new(),
+            filters: Arc::new(Mutex::new(Vec::new())),
+            load_batches: Mutex::default(),
+        };
+        let first = FixtureModel::new();
+        let mut second = FixtureModel::new();
+        second.info.model.name = "second".into();
+        let mut query = plan(vec![SearchRoute {
+            mode: SearchRouteMode::Vector,
+            query: "Service".to_owned(),
+        }]);
+        query.prefer_symbol = true;
+        let single =
+            search_workspace_index(Path::new("/workspace"), query.clone(), &storage, &[&first])
+                .await
+                .expect("one model");
+        let multiple =
+            search_workspace_index(Path::new("/workspace"), query, &storage, &[&first, &second])
+                .await
+                .expect("two models");
+        assert_eq!(multiple.routes.len(), 2, "vector searches expand per model");
+        assert_eq!(multiple.hits.len(), 1);
+        let trace = multiple.hits[0].trace.as_ref().expect("recall trace");
+        assert_eq!(
+            trace.recall.len(),
+            1,
+            "one logical route contributes one full-text symbol lookup"
+        );
+        assert_eq!(trace.recall[0].route_id, "vector.prefer-symbol");
+        assert!((multiple.hits[0].score - single.hits[0].score).abs() < f64::EPSILON);
+        assert_eq!(second.calls.lock().expect("second model calls").len(), 1);
     }
 
     #[tokio::test]
@@ -1229,7 +1323,7 @@ mod tests {
         plan.filter.formats = vec![FileFormat::Rust];
         plan.prefer_symbol = true;
 
-        let result = search_workspace_index(Path::new("/workspace"), plan, &storage, None)
+        let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[])
             .await
             .expect("filtered search");
 
@@ -1907,7 +2001,7 @@ mod tests {
                 id: EntityId::new(id).expect("entity id"),
                 file_id: file.id,
                 range: text_range(1, 8),
-                content: EntityContent::Source(vec![Content::Text(content.to_owned())]),
+                content: EntityContent::Source(Content::Text(content.to_owned())),
                 metadata: None,
             },
             file: file.clone(),
@@ -1933,10 +2027,7 @@ mod tests {
                 entity_id: stored.entity.id.clone(),
                 file_id: stored.file.id,
                 range: text_range(2, 3),
-                contents: vec![Content::Text(format!(
-                    "{} source",
-                    stored.entity.id.as_str()
-                ))],
+                content: Content::Text(format!("{} source", stored.entity.id.as_str())),
             }),
         }
     }

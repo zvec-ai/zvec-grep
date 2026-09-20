@@ -81,23 +81,36 @@ pub(crate) async fn context(
         ));
     }
     assert_index_version(manifest.index_version)?;
-    let model = request
+    let mut acquired = Vec::new();
+    if request
         .routes
         .iter()
         .any(|route| route.mode == crate::api::context::options::ContextRouteMode::Vector)
-        .then(|| {
-            acquire_search_model(
+    {
+        for schema in manifest.embeddings() {
+            let model = acquire_search_model_for(
                 models,
                 &manifest,
+                schema,
                 options.embedding_concurrency,
                 options,
                 &location.root,
-            )
-        })
-        .transpose()?;
-    if let Some(model) = &model {
-        assert_embedding_compatible(Some(&manifest), model)?;
+            )?;
+            assert_embedding_compatible(Some(&manifest), &model)?;
+            acquired.push(model);
+        }
     }
+    let runtimes = acquired
+        .iter()
+        .map(|model| RequestEmbeddingRuntime {
+            model,
+            signal: options.signal.clone(),
+        })
+        .collect::<Vec<_>>();
+    let embedding_models = runtimes
+        .iter()
+        .map(|runtime| runtime as &dyn SearchEmbeddingRuntime)
+        .collect::<Vec<_>>();
     let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
         storage_path: manifest.storage_home(),
     })?;
@@ -106,14 +119,7 @@ pub(crate) async fn context(
         &manifest.workspace,
         &manifest.path,
         storage.as_ref(),
-        model
-            .as_ref()
-            .map(|model| RequestEmbeddingRuntime {
-                model,
-                signal: options.signal.clone(),
-            })
-            .as_ref()
-            .map(|model| model as &dyn SearchEmbeddingRuntime),
+        &embedding_models,
         options,
         &request,
     )
@@ -135,26 +141,17 @@ pub(in crate::pipelines) fn refresh_options(
         on_progress: options.on_progress.clone(),
         signal: options.signal.clone(),
         allow_remote: options.allow_remote,
+        authorized_remote: options.authorized_remote.clone(),
         api_key: options.api_key.clone(),
         endpoint: options.endpoint.clone(),
         embedding_concurrency: options.embedding_concurrency,
         device: options.device,
         model_cache: options.model_cache.clone(),
-        embedding: options.authorization_model.as_ref().map(|reference| {
-            crate::api::index::options::EmbeddingModelSpec {
-                reference: reference.clone(),
-                revision: None,
-                cache_dir: options.model_cache.clone(),
-                endpoint: options.endpoint.clone(),
-                device: options
-                    .device
-                    .unwrap_or(crate::api::index::options::Device::Auto),
-            }
-        }),
         ..IndexOptions::default()
     }
 }
 
+#[cfg(test)]
 pub(in crate::pipelines) fn acquire_search_model(
     models: &ModelRuntimeManager,
     manifest: &WorkspaceManifest,
@@ -165,19 +162,49 @@ pub(in crate::pipelines) fn acquire_search_model(
     let schema = manifest.embedding().ok_or_else(|| {
         workspace_index_unavailable(&manifest.path, "embedding model information is missing")
     })?;
+    acquire_search_model_for(
+        models,
+        manifest,
+        schema,
+        embedding_concurrency,
+        options,
+        root,
+    )
+}
+
+fn acquire_search_model_for(
+    models: &ModelRuntimeManager,
+    manifest: &WorkspaceManifest,
+    schema: &crate::domain::EmbeddingModelInfo,
+    embedding_concurrency: Option<usize>,
+    options: &ContextOptions,
+    root: &Path,
+) -> Result<ModelRuntimeLease, EngineError> {
     let reference = schema.model.reference();
-    if options
-        .authorization_model
-        .as_ref()
-        .is_some_and(|expected| expected != &reference)
+    if manifest.embeddings().len() == 1
+        && options
+            .authorization_model
+            .as_ref()
+            .is_some_and(|expected| expected != &reference)
     {
         return Err(EngineError::permission_denied(
             "Workspace embedding model changed after authorization; retry the query",
         ));
     }
+    let runtime = manifest
+        .embedding_runtimes
+        .get(&reference)
+        .cloned()
+        .unwrap_or_default();
     let config = crate::config::read()?;
     let local = schema.model.provider == "local";
-    if !local && options.device.is_some() {
+    if !local
+        && options.device.is_some()
+        && !manifest
+            .embeddings()
+            .iter()
+            .any(|model| model.model.provider == "local")
+    {
         return Err(EngineError::invalid_argument(
             "--device is only supported for local embedding models",
         ));
@@ -187,12 +214,15 @@ pub(in crate::pipelines) fn acquire_search_model(
     } else {
         let endpoint = crate::authorization::remote_endpoint(
             &reference,
-            options
-                .endpoint
-                .as_deref()
-                .or(manifest.embedding_runtime.endpoint.as_deref()),
+            options.endpoint.as_deref().or(runtime.endpoint.as_deref()),
         )?;
-        crate::authorization::require(root, &reference, &endpoint, options.allow_remote)?;
+        crate::authorization::require_with_targets(
+            root,
+            &reference,
+            &endpoint,
+            options.allow_remote,
+            &options.authorized_remote,
+        )?;
         Some(endpoint)
     };
     models
@@ -204,7 +234,7 @@ pub(in crate::pipelines) fn acquire_search_model(
                         options
                             .api_key
                             .clone()
-                            .or_else(|| manifest.embedding_runtime.api_key.clone())
+                            .or_else(|| runtime.api_key.clone())
                             .or_else(|| {
                                 crate::config::string(
                                     &config,
@@ -220,7 +250,7 @@ pub(in crate::pipelines) fn acquire_search_model(
                         &config,
                         &reference,
                         options.device,
-                        manifest.embedding_runtime.device,
+                        runtime.device,
                     )?
                 } else {
                     None
@@ -228,7 +258,7 @@ pub(in crate::pipelines) fn acquire_search_model(
                 cache_dir: crate::config::model_cache(
                     &config,
                     options.model_cache.clone(),
-                    manifest.embedding_runtime.cache_dir.clone(),
+                    runtime.cache_dir.clone(),
                 ),
             },
             embedding_concurrency,

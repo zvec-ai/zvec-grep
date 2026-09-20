@@ -23,7 +23,7 @@ pub(crate) enum WorkspaceIndexStorageOptions {
     },
     ReadWrite {
         storage_path: PathBuf,
-        embedding: EmbeddingModelInfo,
+        embeddings: Vec<EmbeddingModelInfo>,
     },
 }
 
@@ -68,6 +68,8 @@ impl From<&FileRecord> for StoredFileAttributes {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct IndexedFragment {
     pub fragment: EntityFragment,
+    /// Unique configured embedding model reference (provider/name).
+    pub model: String,
     pub vector: Vec<f32>,
 }
 
@@ -80,7 +82,7 @@ pub(crate) struct StorageSearchFilter {
     pub symbol_types: Option<Vec<SymbolType>>,
 }
 
-/// Boolean predicates over metadata duplicated on both retrieval collections.
+/// Boolean predicates over metadata projected into each model collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StoragePathFilter {
     All,
@@ -183,6 +185,7 @@ pub(crate) trait WorkspaceIndexStorage: Send + Sync {
 
     fn search_vector(
         &self,
+        model: &str,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,

@@ -1,6 +1,7 @@
 mod support;
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
@@ -21,11 +22,155 @@ use zg_engine::{
             options::{ContextRoute, ContextRouteMode, QueryFilter, SymbolType},
             result::{ContextItemStatus, EntityMetadata},
         },
-        index::{IndexOptions, options::WorkspaceChange},
+        index::{
+            IndexOptions,
+            options::{ContentKind, Device, EmbeddingModelSpec, WorkspaceChange},
+        },
     },
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn content_routes_partition_canonical_fragments_into_one_index_per_model() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::write(root.join("note.txt"), "Orchard textual documentation.")?;
+    let engine = ZvecGrep::new();
+    engine
+        .index(IndexOptions {
+            scan: zg_engine::api::index::options::ScanRulesUpdate {
+                globs: Some(vec!["*.txt".into(), "*.png".into()]),
+                ..Default::default()
+            },
+            ..index_options(root)
+        })
+        .await?;
+    let original = engine.info(info_options(root)).await?;
+    assert_eq!(model_collections(&original.index_path)?.len(), 1);
+    for name in ["directories", "files", "entities"] {
+        assert!(original.index_path.join(name).is_dir());
+    }
+    // A complete PNG resource; the fixture provider embeds bytes without decoding them.
+    fs::write(
+        root.join("diagram.png"),
+        [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15,
+            0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ],
+    )?;
+    let unsupported = engine.index(index_options(root)).await?;
+    assert_eq!(unsupported.files_failed, 1);
+    assert_eq!(unsupported.failed_files[0].path, Path::new("diagram.png"));
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 0);
+
+    let spec = |reference: &str| EmbeddingModelSpec {
+        reference: reference.to_owned(),
+        revision: None,
+        cache_dir: None,
+        endpoint: Some(format!("http://{}/embeddings", server.address)),
+        device: Device::Auto,
+    };
+    let routes = BTreeMap::from([
+        (ContentKind::Text, spec("qwen/text-embedding-v4")),
+        (ContentKind::Image, spec("qwen/qwen3-vl-embedding")),
+    ]);
+    let inputs = server.inputs.load(Ordering::Acquire);
+    let error = engine
+        .index(IndexOptions {
+            embedding_routes: Some(routes.clone()),
+            api_key: Some("local-test-key".into()),
+            ..index_options(root)
+        })
+        .await
+        .expect_err("model additions require explicit rebuild");
+    assert!(error.message().contains("rebuild"), "{error}");
+    assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
+    assert_eq!(
+        engine.info(info_options(root)).await?.index_path,
+        original.index_path
+    );
+
+    let rebuilt = engine
+        .index(IndexOptions {
+            rebuild: true,
+            embedding_routes: Some(routes),
+            api_key: Some("local-test-key".into()),
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((rebuilt.files_added, rebuilt.files_failed), (2, 0));
+    assert_eq!(server.inputs.load(Ordering::Acquire), inputs + 2);
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 1);
+    let published = engine.info(info_options(root)).await?;
+    assert_ne!(published.index_path, original.index_path);
+    let collections = model_collections(&published.index_path)?;
+    assert_eq!(collections.len(), 2);
+    assert!(!published.index_path.join("fragments").exists());
+    assert!(!published.index_path.join("directories.json").exists());
+    let mut indexed_ids = BTreeSet::new();
+    for collection in collections {
+        let documents = native_documents(&collection)?;
+        assert_eq!(
+            documents.len(),
+            1,
+            "each content belongs to exactly one model"
+        );
+        assert!(documents[0].get_string("text")?.is_some());
+        assert!(
+            indexed_ids.insert(
+                documents[0]
+                    .get_string("document_id")?
+                    .expect("fragment ID")
+            )
+        );
+    }
+    let entities = native_documents(&published.index_path.join("entities"))?;
+    assert_eq!(entities.len(), 2);
+    let mut canonical_ids = BTreeSet::new();
+    for entity in entities {
+        let payload: Value =
+            serde_json::from_str(&entity.get_string("payload")?.expect("entity payload"))?;
+        for fragment in payload["value"]
+            .as_array()
+            .expect("canonical fragment bundle")
+        {
+            let id = fragment["value"]["id"].as_str().expect("fragment ID");
+            assert!(canonical_ids.insert(hex::encode(id)));
+        }
+    }
+    assert_eq!(canonical_ids, indexed_ids);
+    assert_eq!(
+        fts_paths(&engine, root, "orchard").await?,
+        [PathBuf::from("note.txt")]
+    );
+    let result = engine
+        .context(ContextOptions {
+            root: Some(root.to_path_buf()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Vector,
+                query: "image".into(),
+            }],
+            filter: QueryFilter {
+                formats: vec![zg_engine::api::context::options::FileFormat::Png],
+                ..QueryFilter::default()
+            },
+            auto_update: false,
+            allow_remote: true,
+            api_key: Some("local-test-key".into()),
+            ..ContextOptions::default()
+        })
+        .await?;
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].relative_path, Path::new("diagram.png"));
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
 
 #[tokio::test]
 async fn public_symbol_filters_distinguish_all_categories_and_implementation_blocks() -> TestResult
@@ -331,7 +476,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
 }
 
 #[tokio::test]
-async fn public_engine_restarts_failed_initial_build_from_empty_storage() -> TestResult {
+async fn initial_build_publishes_successes_and_incrementally_retries_failed_files() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();
     let home = root.join(".zvec-grep");
@@ -340,80 +485,59 @@ async fn public_engine_restarts_failed_initial_build_from_empty_storage() -> Tes
     fs::write(root.join("broken.txt"), [255_u8, 254, 255])?;
     fs::write(root.join("stable.txt"), "Stable orchard baseline.\n")?;
     let engine = ZvecGrep::new();
-    let error = engine
-        .index(index_options(root))
-        .await
-        .expect_err("invalid source fails the build");
-    assert!(
-        error.message().contains("failed files: broken.txt"),
-        "{error}"
-    );
+    let initial = engine.index(index_options(root)).await?;
+    assert_eq!(initial.files_failed, 1);
+    assert_eq!(initial.failed_files.len(), 1);
+    assert_eq!(initial.failed_files[0].path, Path::new("broken.txt"));
+    assert!(!initial.failed_files[0].reason.is_empty());
     let info = engine.info(info_options(root)).await?;
-    assert!(!info.indexed);
-    assert!(
-        info.status.is_none(),
-        "an unpublished stage is not the active index"
-    );
+    assert!(info.indexed);
+    let status = info.status.expect("published status");
+    assert_eq!((status.files_failed, status.files_indexed), (1, 1));
+    assert_eq!(status.failed_files[0].path, Path::new("broken.txt"));
     assert!(!home.join("build.json").exists());
-    assert_eq!(fs::read_dir(home.join("generations"))?.count(), 0);
-    let requests = server.requests.load(Ordering::Acquire);
+    assert_eq!(fs::read_dir(home.join("generations"))?.count(), 1);
+    assert_eq!(
+        fts_paths(&engine, root, "orchard").await?,
+        [PathBuf::from("stable.txt")]
+    );
+    let inputs = server.inputs.load(Ordering::Acquire);
     fs::write(
         root.join("broken.txt"),
         "Recovered readable nebula documentation.\n",
     )?;
-    let query = ContextOptions {
-        root: Some(root.to_path_buf()),
-        routes: vec![ContextRoute {
-            mode: ContextRouteMode::Fts,
-            query: "nebula".to_owned(),
-        }],
-        auto_update: true,
-        allow_remote: true,
-        ..ContextOptions::default()
-    };
-    assert!(
-        engine.context(query.clone()).await.is_err(),
-        "query refresh must not publish a stage"
-    );
-    assert_eq!(server.requests.load(Ordering::Acquire), requests);
-    assert!(!home.join("build.json").exists());
     engine.close();
     drop(engine);
 
     let engine = ZvecGrep::new();
     let resumed = engine.index(index_options(root)).await?;
-    assert_eq!(
-        (
-            resumed.files_added,
-            resumed.files_unchanged,
-            resumed.files_failed
-        ),
-        (2, 0, 0)
-    );
-    assert!(server.requests.load(Ordering::Acquire) > requests);
-    assert!(!home.join("build.json").exists());
-    let info = engine.info(info_options(root)).await?;
-    assert!(info.indexed);
-    let status = info.status.expect("published status");
+    assert_eq!((resumed.files_unchanged, resumed.files_failed), (1, 0));
+    assert!(resumed.failed_files.is_empty());
+    assert_eq!(server.inputs.load(Ordering::Acquire), inputs + 1);
+    let after = engine.info(info_options(root)).await?;
+    assert_eq!(after.index_path, info.index_path);
+    let status = after.status.expect("published status");
     assert_eq!((status.files_failed, status.files_indexed), (0, 2));
-    let records = native_file_records(&info.index_path)?;
+    assert!(status.failed_files.is_empty());
+    let records = native_file_records(&after.index_path)?;
     assert_eq!(records.len(), 2);
     assert!(
         records
             .iter()
             .all(|record| record["value"]["index_status"]["kind"] == "indexed")
     );
-    let result = engine.context(query).await?;
-    assert_eq!(result.items.len(), 1);
-    assert_eq!(result.items[0].relative_path, Path::new("broken.txt"));
-    assert_eq!(result.items[0].status, ContextItemStatus::Fresh);
+    assert_eq!(
+        fts_paths(&engine, root, "nebula").await?,
+        [PathBuf::from("broken.txt")]
+    );
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())
 }
 
 #[tokio::test]
-async fn failed_native_rebuild_keeps_active_index_and_retry_reembeds_every_file() -> TestResult {
+async fn rebuild_publishes_successful_files_and_records_failures_for_incremental_retry()
+-> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();
     let home = root.join(".zvec-grep");
@@ -423,50 +547,37 @@ async fn failed_native_rebuild_keeps_active_index_and_retry_reembeds_every_file(
         root.join("note.txt"),
         "Orchard documentation remains available.\n",
     )?;
-    let engine = ZvecGrep::new();
     fs::write(
         root.join("stable.txt"),
         "Stable baseline that must be embedded again.\n",
     )?;
+    let engine = ZvecGrep::new();
     engine.index(index_options(root)).await?;
     let original_path = engine.info(info_options(root)).await?.index_path;
-    let original_manifest = fs::read(home.join("manifest.json"))?;
+    let original_inputs = server.inputs.load(Ordering::Acquire);
     fs::write(root.join("note.txt"), [255_u8, 254, 255])?;
-    let error = engine
+    let rebuilt = engine
         .index(IndexOptions {
             rebuild: true,
             ..index_options(root)
         })
-        .await
-        .expect_err("invalid source fails the rebuild");
-    assert!(
-        error.message().contains("failed files: note.txt"),
-        "{error}"
-    );
-    assert_eq!(fs::read(home.join("manifest.json"))?, original_manifest);
+        .await?;
+    assert_eq!(rebuilt.files_failed, 1);
+    assert_eq!(rebuilt.failed_files[0].path, Path::new("note.txt"));
+    assert_eq!(server.inputs.load(Ordering::Acquire), original_inputs + 1);
+    let published = engine.info(info_options(root)).await?;
+    assert_ne!(published.index_path, original_path);
+    assert!(!original_path.exists());
+    let status = published.status.expect("published status");
+    assert_eq!((status.files_indexed, status.files_failed), (1, 1));
+    assert_eq!(status.failed_files[0].path, Path::new("note.txt"));
     assert!(!home.join("build.json").exists());
     assert_eq!(fs::read_dir(home.join("generations"))?.count(), 1);
-    let requests = server.requests.load(Ordering::Acquire);
-    let old_results = engine
-        .context(ContextOptions {
-            root: Some(root.to_path_buf()),
-            routes: vec![ContextRoute {
-                mode: ContextRouteMode::Fts,
-                query: "orchard".into(),
-            }],
-            auto_update: false,
-            allow_remote: true,
-            ..ContextOptions::default()
-        })
-        .await?;
-    assert_eq!(old_results.items.len(), 1);
-    assert_eq!(old_results.items[0].relative_path, Path::new("note.txt"));
+    assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
     assert_eq!(
-        old_results.items[0].status,
-        ContextItemStatus::PossiblyStale
+        fts_paths(&engine, root, "baseline").await?,
+        [PathBuf::from("stable.txt")]
     );
-    assert_eq!(server.requests.load(Ordering::Acquire), requests);
-    assert_eq!(fs::read(home.join("manifest.json"))?, original_manifest);
     fs::write(
         root.join("note.txt"),
         "Vineyard replacement documentation.\n",
@@ -475,33 +586,55 @@ async fn failed_native_rebuild_keeps_active_index_and_retry_reembeds_every_file(
     drop(engine);
 
     let engine = ZvecGrep::new();
-    let requests_before_rebuild = server.requests.load(Ordering::Acquire);
-    let rebuilt = engine
-        .index(IndexOptions {
-            rebuild: true,
-            ..index_options(root)
-        })
-        .await?;
+    let inputs = server.inputs.load(Ordering::Acquire);
+    let resumed = engine.index(index_options(root)).await?;
+    assert_eq!((resumed.files_unchanged, resumed.files_failed), (1, 0));
+    assert_eq!(server.inputs.load(Ordering::Acquire), inputs + 1);
     assert_eq!(
-        (
-            rebuilt.files_added,
-            rebuilt.files_unchanged,
-            rebuilt.files_failed
-        ),
-        (2, 0, 0)
-    );
-    assert!(server.requests.load(Ordering::Acquire) > requests_before_rebuild);
-    assert!(!home.join("build.json").exists());
-    assert_ne!(
         engine.info(info_options(root)).await?.index_path,
-        original_path
+        published.index_path
     );
-    assert!(!original_path.exists());
-    assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
     assert_eq!(
         fts_paths(&engine, root, "vineyard").await?,
         [PathBuf::from("note.txt")]
     );
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn incremental_failure_removes_all_old_searchable_content_for_the_file() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::write(root.join("note.txt"), "Orchard original documentation.\n")?;
+    fs::write(root.join("stable.txt"), "Unchanged vineyard baseline.\n")?;
+    let engine = ZvecGrep::new();
+    engine.index(index_options(root)).await?;
+    let index_path = engine.info(info_options(root)).await?.index_path;
+    let inputs = server.inputs.load(Ordering::Acquire);
+    fs::write(root.join("note.txt"), [255_u8, 254, 255])?;
+    let updated = engine.index(index_options(root)).await?;
+    assert_eq!((updated.files_unchanged, updated.files_failed), (1, 1));
+    assert_eq!(updated.failed_files[0].path, Path::new("note.txt"));
+    assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
+    assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
+    assert_eq!(
+        fts_paths(&engine, root, "vineyard").await?,
+        [PathBuf::from("stable.txt")]
+    );
+    assert_eq!(native_documents(&index_path.join("entities"))?.len(), 1);
+    for collection in model_collections(&index_path)? {
+        assert_eq!(native_documents(&collection)?.len(), 1);
+    }
+    let status = engine
+        .info(info_options(root))
+        .await?
+        .status
+        .expect("status");
+    assert_eq!((status.files_indexed, status.files_failed), (1, 1));
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())
@@ -605,13 +738,14 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|entry| {
-            entry.file_name().to_str().is_some_and(|name| {
-                matches!(name, "entities" | "fragments") || name.starts_with("vectors_")
-            })
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name == "entities" || name.starts_with("fragments_"))
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    assert_eq!(collections.len(), 3);
+    assert_eq!(collections.len(), 2);
     for collection in collections {
         assert!(
             native_documents(&collection)?.is_empty(),
@@ -840,7 +974,7 @@ async fn version_four_requires_explicit_rebuild_to_version_five() -> TestResult 
     assert_ne!(after.index_path, before.index_path);
     assert!(!before.index_path.exists());
     let current: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-    for field in ["name", "root", "scan", "embeddingRuntime", "createdTime"] {
+    for field in ["name", "root", "scan", "embeddingRuntimes", "createdTime"] {
         assert_eq!(current[field], old[field], "{field}");
     }
     assert_eq!(engine.index(index_options(root)).await?.files_unchanged, 2);
@@ -850,4 +984,18 @@ async fn version_four_requires_explicit_rebuild_to_version_five() -> TestResult 
     );
     engine.close();
     Ok(())
+}
+
+fn model_collections(index_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    Ok(fs::read_dir(index_path)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("fragments_"))
+        })
+        .map(|entry| entry.path())
+        .collect())
 }

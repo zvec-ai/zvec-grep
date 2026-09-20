@@ -212,8 +212,15 @@ mod tests {
             ),
             (
                 FileFormat::Jpeg,
-                vec!["photo.jpg", "photo.JPEG", "photo.Jpeg", ".jpeg"],
-                vec![true, true, false, false],
+                vec![
+                    "photo.jpg",
+                    "photo.JPEG",
+                    "photo.Jpg",
+                    "photo.Jpeg",
+                    "photo.jPg",
+                    ".jpeg",
+                ],
+                vec![true, true, true, true, false, false],
             ),
             (
                 FileFormat::Cpp,

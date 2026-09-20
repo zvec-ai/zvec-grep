@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fmt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -17,7 +18,7 @@ use crate::{
         },
     },
     domain::{
-        IndexDescriptor, IndexState, Workspace,
+        ContentKind, IndexDescriptor, IndexState, Workspace,
         model::{Device, ModelConfig},
     },
     models::{
@@ -41,7 +42,9 @@ use crate::{
     },
 };
 
-use super::pipeline::{IndexingContext, get_workspace_index_status, index_workspace};
+use super::pipeline::{
+    IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+};
 
 const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 
@@ -147,15 +150,7 @@ impl WorkspaceIndexService {
         if let Some(name) = options.name.as_deref() {
             Workspace::validate_name(name)?;
         }
-        if let Some(cache_dir) = options
-            .embedding
-            .as_mut()
-            .and_then(|embedding| embedding.cache_dir.as_mut())
-        {
-            *cache_dir = std::path::absolute(&*cache_dir).map_err(|error| {
-                EngineError::from_io("failed to resolve model cache directory", &error)
-            })?;
-        }
+        normalize_model_paths(&mut options)?;
         let factory = &self.storage_factory;
         let requested_root = resolve_root(options.root.as_deref())?;
         validate_workspace_root(&requested_root)?;
@@ -207,11 +202,26 @@ impl WorkspaceIndexService {
             // A changed selection can admit files outside a watcher's narrow change scope.
             options.changes.clear();
         }
-        let model = acquire_model(models, existing.as_ref(), &options)?;
-        if !rebuilding {
-            assert_embedding_compatible(existing.as_ref(), &model)?;
+        let IndexModels {
+            runtimes: acquired,
+            descriptor,
+            specs,
+        } = acquire_index_models(models, existing.as_ref(), &options)?;
+        if !rebuilding
+            && let Some(previous) = existing
+                .as_ref()
+                .and_then(|manifest| manifest.workspace.index.descriptor())
+        {
+            previous.ensure_index_compatible(&descriptor)?;
         }
-        let mut manifest = index_manifest(&location, existing.as_ref(), &options, &model)?;
+        let mut manifest = index_manifest(
+            &location,
+            existing.as_ref(),
+            &options,
+            &acquired,
+            descriptor,
+            specs.as_ref(),
+        )?;
         let build = if rebuilding {
             // Fresh builds always cover the full configured workspace.
             options.changes.clear();
@@ -228,7 +238,7 @@ impl WorkspaceIndexService {
             None
         };
         let is_build = build.is_some();
-        let result = self.run_index(manifest, build, model, options).await;
+        let result = self.run_index(manifest, build, acquired, options).await;
         if is_build && result.is_err() {
             // Storage handles have been released. Preserve the original error if
             // cleanup also fails; its build record lets the next writer retry.
@@ -241,20 +251,24 @@ impl WorkspaceIndexService {
         &self,
         mut manifest: WorkspaceManifest,
         build: Option<WorkspaceBuild>,
-        model: ModelRuntimeLease,
+        models: Vec<ModelRuntimeLease>,
         options: IndexOptions,
     ) -> Result<IndexResult, EngineError> {
         let storage = self
             .storage_factory
             .open(WorkspaceIndexStorageOptions::ReadWrite {
                 storage_path: manifest.storage_home(),
-                embedding: model.info().clone(),
+                embeddings: models.iter().map(|model| model.info().clone()).collect(),
             })?;
+        let embedding_models = models
+            .iter()
+            .map(|model| model as &dyn IndexEmbeddingRuntime)
+            .collect::<Vec<_>>();
         let result = index_workspace(&IndexingContext {
             workspace_index: &manifest.workspace,
             storage: storage.as_ref(),
             scanner: &self.scanner,
-            embedding_model: &model,
+            embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
             on_progress: options.on_progress,
             signal: options.signal.clone(),
@@ -274,9 +288,6 @@ impl WorkspaceIndexService {
             return Err(EngineError::cancelled(
                 "indexing was cancelled before publication",
             ));
-        }
-        if indexed.files_failed > 0 {
-            return Err(EngineError::storage_failure("indexing has failed files"));
         }
         let now = epoch_millis();
         if let Some(build) = build {
@@ -438,7 +449,9 @@ fn index_manifest(
     location: &WorkspaceIndexLocation,
     active: Option<&WorkspaceManifest>,
     options: &IndexOptions,
-    model: &ModelRuntimeLease,
+    models: &[ModelRuntimeLease],
+    descriptor: IndexDescriptor,
+    specs: Option<&BTreeMap<ContentKind, EmbeddingModelSpec>>,
 ) -> Result<WorkspaceManifest, EngineError> {
     let now = epoch_millis();
     let workspace = Workspace {
@@ -449,14 +462,27 @@ fn index_manifest(
             .unwrap_or_else(|| workspace_name(&location.root)),
         root: location.root.clone(),
         scan: resolve_scan(active, options),
-        index: IndexState::Enabled(IndexDescriptor {
-            fts: crate::domain::FTS_CONFIG,
-            embedding: model.info().clone(),
-        }),
+        index: IndexState::Enabled(descriptor),
         created_epoch_ms: active.map_or(now, |value| value.workspace.created_epoch_ms),
         updated_epoch_ms: now,
     };
-    let runtime = embedding_runtime(active, options, model)?;
+    let runtime = models
+        .iter()
+        .map(|model| {
+            let mut request = options.clone();
+            if let Some(spec) = specs.and_then(|routes| {
+                routes
+                    .values()
+                    .find(|spec| spec.reference == model.info().model.reference())
+            }) {
+                request.embedding = Some(spec.clone());
+            }
+            Ok((
+                model.info().model.reference(),
+                embedding_runtime(active, &request, model)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
     let mut manifest = WorkspaceManifest::new(
         workspace,
         location.home.clone(),
@@ -482,6 +508,96 @@ impl fmt::Debug for WorkspaceIndexService {
     }
 }
 
+fn normalize_model_paths(options: &mut IndexOptions) -> Result<(), EngineError> {
+    for spec in options.embedding.iter_mut().chain(
+        options
+            .embedding_routes
+            .iter_mut()
+            .flat_map(BTreeMap::values_mut),
+    ) {
+        if let Some(cache_dir) = &mut spec.cache_dir {
+            *cache_dir = std::path::absolute(&*cache_dir).map_err(|error| {
+                EngineError::from_io("failed to resolve model cache directory", &error)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+struct IndexModels {
+    runtimes: Vec<ModelRuntimeLease>,
+    descriptor: IndexDescriptor,
+    specs: Option<BTreeMap<ContentKind, EmbeddingModelSpec>>,
+}
+
+fn acquire_index_models(
+    models: &ModelRuntimeManager,
+    existing: Option<&WorkspaceManifest>,
+    options: &IndexOptions,
+) -> Result<IndexModels, EngineError> {
+    let specs = embedding_specs(existing, options)?;
+    let mut acquired = BTreeMap::new();
+    if let Some(routes) = &specs {
+        if options.device.is_some()
+            && !routes
+                .values()
+                .any(|spec| spec.reference.starts_with("local/"))
+        {
+            return Err(EngineError::invalid_argument(
+                "device requires a local model",
+            ));
+        }
+        if options.endpoint.is_some()
+            && routes
+                .values()
+                .all(|spec| spec.reference.starts_with("local/"))
+        {
+            return Err(EngineError::invalid_argument(
+                "endpoint requires a remote model",
+            ));
+        }
+        for spec in routes.values() {
+            if acquired.contains_key(&spec.reference) {
+                continue;
+            }
+            let mut request = options.clone();
+            request.embedding_routes = None;
+            request.embedding = Some(spec.clone());
+            if spec.reference.starts_with("local/") {
+                request.endpoint = None;
+            } else {
+                request.device = None;
+            }
+            acquired.insert(
+                spec.reference.clone(),
+                acquire_model(models, existing, &request)?,
+            );
+        }
+    } else {
+        let model = acquire_model(models, existing, options)?;
+        acquired.insert(model.info().model.reference(), model);
+    }
+    let acquired = acquired.into_values().collect::<Vec<_>>();
+    let descriptor = if let Some(routes) = &specs {
+        IndexDescriptor {
+            embeddings: acquired.iter().map(|model| model.info().clone()).collect(),
+            routes: routes
+                .iter()
+                .map(|(kind, spec)| (*kind, spec.reference.clone()))
+                .collect(),
+            fts: crate::domain::FTS_CONFIG,
+        }
+    } else {
+        IndexDescriptor::single(acquired[0].info().clone())
+    };
+    descriptor.validate()?;
+    Ok(IndexModels {
+        runtimes: acquired,
+        descriptor,
+        specs,
+    })
+}
+
 fn acquire_model(
     models: &ModelRuntimeManager,
     existing: Option<&WorkspaceManifest>,
@@ -505,7 +621,8 @@ fn acquire_model(
             "device requires a local model; endpoint requires a remote model",
         ));
     }
-    let existing_runtime = existing.map(|manifest| &manifest.embedding_runtime);
+    let existing_runtime =
+        existing.and_then(|manifest| manifest.embedding_runtimes.get(&reference));
     let api_key = if local {
         None
     } else {
@@ -537,7 +654,13 @@ fn acquire_model(
     } else {
         let endpoint = crate::authorization::remote_endpoint(&reference, endpoint.as_deref())?;
         let root = resolve_root(options.root.as_deref())?;
-        crate::authorization::require(&root, &reference, &endpoint, options.allow_remote)?;
+        crate::authorization::require_with_targets(
+            &root,
+            &reference,
+            &endpoint,
+            options.allow_remote,
+            &options.authorized_remote,
+        )?;
         Some(endpoint)
     };
     let device = if local {
@@ -577,6 +700,83 @@ fn acquire_model(
         .map_err(ModelError::into_engine_error)
 }
 
+/// Resolve explicit content routing before model acquisition or consent checks.
+pub(crate) fn embedding_specs(
+    existing: Option<&WorkspaceManifest>,
+    options: &IndexOptions,
+) -> Result<Option<BTreeMap<ContentKind, EmbeddingModelSpec>>, EngineError> {
+    if options.embedding.is_some() && options.embedding_routes.is_some() {
+        return Err(EngineError::invalid_argument(
+            "embedding and embedding_routes are mutually exclusive",
+        ));
+    }
+    let routes = if let Some(routes) = &options.embedding_routes {
+        Some(routes.clone())
+    } else if options.embedding.is_some() {
+        None
+    } else if let Some(index) = existing.and_then(|manifest| manifest.workspace.index.descriptor())
+    {
+        Some(
+            index
+                .routes
+                .iter()
+                .map(|(kind, reference)| {
+                    (
+                        *kind,
+                        EmbeddingModelSpec {
+                            reference: reference.clone(),
+                            revision: None,
+                            cache_dir: None,
+                            endpoint: None,
+                            device: Device::Auto,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    } else if env::var("ZVEC_GREP_EMBEDDING").is_ok_and(|value| !value.trim().is_empty()) {
+        // Preserve the single-model environment override over global defaults.
+        None
+    } else {
+        crate::config::embedding_routes(&crate::config::read()?)?.map(|routes| {
+            routes
+                .into_iter()
+                .map(|(kind, reference)| {
+                    (
+                        kind,
+                        EmbeddingModelSpec {
+                            reference,
+                            revision: None,
+                            cache_dir: None,
+                            endpoint: None,
+                            device: Device::Auto,
+                        },
+                    )
+                })
+                .collect()
+        })
+    };
+    if let Some(routes) = &routes {
+        if routes.is_empty() {
+            return Err(EngineError::invalid_argument(
+                "embedding_routes must not be empty",
+            ));
+        }
+        let mut models = BTreeMap::new();
+        for spec in routes.values() {
+            if let Some(previous) = models.insert(&spec.reference, spec)
+                && previous != spec
+            {
+                return Err(EngineError::invalid_argument(format!(
+                    "conflicting configurations for embedding model {}",
+                    spec.reference
+                )));
+            }
+        }
+    }
+    Ok(routes)
+}
+
 pub(crate) fn embedding_reference(
     existing: Option<&WorkspaceManifest>,
     requested: Option<&EmbeddingModelSpec>,
@@ -612,9 +812,15 @@ pub(in crate::pipelines) fn assert_embedding_compatible(
     let Some(existing) = existing.filter(|manifest| is_indexed(manifest)) else {
         return Ok(());
     };
-    let Some(schema) = existing.embedding() else {
-        return Ok(());
-    };
+    let schema = existing
+        .embeddings()
+        .iter()
+        .find(|schema| schema.model.reference() == model.info().model.reference())
+        .ok_or_else(|| {
+            EngineError::invalid_argument(
+                "model is not part of the workspace index; rebuild the index",
+            )
+        })?;
     schema.ensure_index_compatible(model.info())
 }
 
@@ -639,7 +845,12 @@ fn embedding_runtime(
     model: &ModelRuntimeLease,
 ) -> Result<ModelConfig, EngineError> {
     let current = existing
-        .map(|manifest| manifest.embedding_runtime.clone())
+        .and_then(|manifest| {
+            manifest
+                .embedding_runtimes
+                .get(&model.info().model.reference())
+                .cloned()
+        })
         .unwrap_or_default();
     let config = crate::config::read()?;
     if model.info().model.provider == "local" {
@@ -900,6 +1111,7 @@ mod tests {
 
         fn search_vector(
             &self,
+            _model: &str,
             _vector: &[f32],
             _limit: usize,
             _filter: Option<&StorageSearchFilter>,
@@ -975,7 +1187,7 @@ mod tests {
             },
             directory.path().join(".zvec-grep"),
             None,
-            crate::domain::model::ModelConfig::default(),
+            std::collections::BTreeMap::new(),
         )
         .expect("manifest");
         manifest.workspace.scan.hidden = true;
@@ -1256,7 +1468,12 @@ mod tests {
             .expect("active");
         let mut target = active.clone();
         target.workspace.scan.globs.push("*.rs".into());
-        target.embedding_runtime.endpoint = Some("https://abandoned.test/embeddings".into());
+        target
+            .embedding_runtimes
+            .values_mut()
+            .next()
+            .expect("runtime")
+            .endpoint = Some("https://abandoned.test/embeddings".into());
         let abandoned = super::prepare_build(target, Some(&active)).expect("crashed build");
         std::fs::write(
             abandoned.target.storage_home().join("checkpoint"),
@@ -1272,7 +1489,7 @@ mod tests {
             .expect("active");
         assert_eq!(updated.storage_generation, active.storage_generation);
         assert_eq!(updated.workspace.scan, active.workspace.scan);
-        assert_eq!(updated.embedding_runtime, active.embedding_runtime);
+        assert_eq!(updated.embedding_runtimes, active.embedding_runtimes);
         assert!(!abandoned.target.storage_home().exists());
         assert!(!super::has_build(&home));
         models.close();
@@ -1993,6 +2210,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_model_runtime_overrides_are_scoped_by_provider() {
+        use crate::domain::ContentKind;
+        use std::collections::BTreeMap;
+
+        let directory = tempdir().expect("empty workspace");
+        let service =
+            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let models = ModelRuntimeManager::new();
+        let spec = |reference: &str| EmbeddingModelSpec {
+            reference: reference.into(),
+            revision: None,
+            cache_dir: None,
+            endpoint: None,
+            device: Device::Auto,
+        };
+        let local = "local/potion-code-16m-v2";
+        let remote = "qwen/qwen3-vl-embedding";
+        let endpoint = "https://mixed-model.example.test/embeddings";
+        let result = service
+            .index(
+                &models,
+                IndexOptions {
+                    root: Some(directory.path().to_path_buf()),
+                    embedding_routes: Some(BTreeMap::from([
+                        (ContentKind::Text, spec(local)),
+                        (ContentKind::Table, spec(local)),
+                        (ContentKind::Image, spec(remote)),
+                    ])),
+                    device: Some(Device::Cpu),
+                    endpoint: Some(endpoint.into()),
+                    allow_remote: true,
+                    api_key: Some("local-test-key".into()),
+                    ..IndexOptions::default()
+                },
+            )
+            .await
+            .expect("mixed model index accepts applicable runtime overrides");
+        assert_eq!(result.files_scanned, 0, "empty index performs no inference");
+        assert_eq!(models.snapshot().cached_runtimes, 2);
+        let mut manifest = super::read_workspace_manifest(&directory.path().join(".zvec-grep"))
+            .expect("read manifest")
+            .expect("published manifest");
+        assert_eq!(manifest.embeddings().len(), 2);
+        assert_eq!(manifest.embedding_runtimes[local].device, Some(Device::Cpu));
+        assert_eq!(manifest.embedding_runtimes[local].endpoint, None);
+        assert_eq!(manifest.embedding_runtimes[remote].device, None);
+        assert_eq!(
+            manifest.embedding_runtimes[remote].endpoint.as_deref(),
+            Some(endpoint)
+        );
+
+        // The test-only search acquisition helper selects the first model. Check
+        // both model positions without embedding a query or loading artifacts.
+        let request = crate::api::context::ContextOptions {
+            device: Some(Device::Cpu),
+            api_key: Some("local-test-key".into()),
+            allow_remote: true,
+            ..crate::api::context::ContextOptions::default()
+        };
+        for expected in [local, remote] {
+            let lease = crate::pipelines::indexed_search::service::acquire_search_model(
+                &models,
+                &manifest,
+                None,
+                &request,
+                directory.path(),
+            )
+            .expect("mixed search accepts a local device override");
+            assert_eq!(lease.info().model.reference(), expected);
+            assert_eq!(
+                models.snapshot().cached_runtimes,
+                2,
+                "search reuses both model runtimes"
+            );
+            drop(lease);
+            let IndexState::Enabled(index) = &mut manifest.workspace.index else {
+                panic!("enabled index");
+            };
+            index.embeddings.reverse();
+        }
+        models.close();
+    }
+
+    #[tokio::test]
     async fn composes_workspace_lifecycle_around_the_indexing_pipeline() {
         let directory = tempdir().expect("temporary directory");
         let sources = directory.path().join("sources");
@@ -2026,7 +2327,12 @@ mod tests {
             .expect("manifest read")
             .expect("manifest");
         assert_eq!(
-            manifest.embedding_runtime.cache_dir,
+            manifest
+                .embedding_runtimes
+                .values()
+                .next()
+                .expect("runtime")
+                .cache_dir,
             Some(directory.path().join("model-cache"))
         );
         let lease = crate::pipelines::indexed_search::service::acquire_search_model(
@@ -2072,10 +2378,10 @@ mod tests {
         let rebuilt = super::read_workspace_manifest(&info.home)
             .expect("manifest read")
             .expect("manifest");
-        assert_eq!(rebuilt.index_version, Some(5));
+        assert_eq!(rebuilt.index_version, Some(super::CURRENT_INDEX_VERSION));
         assert_eq!(rebuilt.workspace.root, manifest.workspace.root);
         assert_eq!(rebuilt.workspace.scan, manifest.workspace.scan);
-        assert_eq!(rebuilt.embedding_runtime, manifest.embedding_runtime);
+        assert_eq!(rebuilt.embedding_runtimes, manifest.embedding_runtimes);
         assert_eq!(rebuilt.workspace.name, manifest.workspace.name);
         assert_eq!(
             rebuilt.workspace.created_epoch_ms,

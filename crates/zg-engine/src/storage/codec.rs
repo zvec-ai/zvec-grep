@@ -32,21 +32,75 @@ pub(crate) fn decode_file(json: &str) -> EngineResult<FileRecord> {
         .map_err(|error| invalid_record("source file", &error))
 }
 
-pub(crate) fn encode_fragment(fragment: &EntityFragment) -> EngineResult<String> {
+#[cfg(test)]
+fn encode_fragment(fragment: &EntityFragment) -> EngineResult<String> {
     validate_fragment(fragment)?;
     encode(FragmentRecord::from(fragment), "fragment")
 }
 
-pub(crate) fn decode_fragment(
-    json: &str,
-    metadata: Option<&EntityMetadata>,
-) -> EngineResult<EntityFragment> {
+#[cfg(test)]
+fn decode_fragment(json: &str, metadata: Option<&EntityMetadata>) -> EngineResult<EntityFragment> {
     let record: FragmentRecord<'static> = decode(json, "fragment")?;
     let fragment = record
         .into_fragment(metadata)
         .map_err(|error| invalid_record("fragment", &error))?;
     validate_fragment(&fragment).map_err(|error| invalid_record("fragment", &error))?;
     Ok(fragment)
+}
+
+/// Canonical storage for an entity and every fragment owned by it. Model indexes
+/// carry only searchable projections and never the authoritative content payload.
+pub(super) fn encode_entity_fragments(fragments: &[&EntityFragment]) -> EngineResult<String> {
+    validate_entity_fragments(fragments.iter().copied())?;
+    encode(
+        fragments
+            .iter()
+            .map(|fragment| FragmentRecord::from(*fragment))
+            .collect::<Vec<_>>(),
+        "entity fragments",
+    )
+}
+
+pub(super) fn decode_entity_fragments(
+    json: &str,
+    metadata: Option<&EntityMetadata>,
+) -> EngineResult<Vec<EntityFragment>> {
+    let records: Vec<FragmentRecord<'static>> = decode(json, "entity fragments")?;
+    let fragments = records
+        .into_iter()
+        .map(|record| record.into_fragment(metadata))
+        .collect::<EngineResult<Vec<_>>>()?;
+    validate_entity_fragments(fragments.iter())
+        .map_err(|error| invalid_record("entity fragments", &error))?;
+    Ok(fragments)
+}
+
+fn validate_entity_fragments<'a>(
+    fragments: impl Iterator<Item = &'a EntityFragment>,
+) -> EngineResult<()> {
+    let fragments = fragments.collect::<Vec<_>>();
+    let owner = fragments
+        .iter()
+        .find_map(|fragment| fragment.as_entity())
+        .ok_or_else(|| EngineError::invalid_argument("entity bundle has no owner"))?;
+    if fragments
+        .iter()
+        .filter(|fragment| fragment.as_entity().is_some())
+        .count()
+        != 1
+        || fragments
+            .iter()
+            .any(|fragment| fragment.entity_id() != &owner.id)
+    {
+        return Err(EngineError::invalid_argument(
+            "entity bundle must contain exactly one owner and its fragments",
+        ));
+    }
+    crate::domain::validate_fragments(owner.file_id, fragments.iter().copied())?;
+    for fragment in fragments {
+        validate_fragment(fragment)?;
+    }
+    Ok(())
 }
 
 fn encode(value: impl Serialize, kind: &str) -> EngineResult<String> {
@@ -266,7 +320,7 @@ struct EntityRecord<'a> {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum EntityContentRecord<'a> {
-    Source(Vec<ContentRecord<'a>>),
+    Source(ContentRecord<'a>),
     Outline(Cow<'a, str>),
 }
 
@@ -276,7 +330,7 @@ struct WindowRecord<'a> {
     entity_id: Cow<'a, str>,
     file_id: u32,
     range: RangeRecord,
-    contents: Vec<ContentRecord<'a>>,
+    content: ContentRecord<'a>,
 }
 
 impl<'a> From<&'a EntityFragment> for FragmentRecord<'a> {
@@ -289,7 +343,7 @@ impl<'a> From<&'a EntityFragment> for FragmentRecord<'a> {
                 entity_id: window.entity_id.as_str().into(),
                 file_id: window.file_id.get(),
                 range: window.range.into(),
-                contents: encode_contents(&window.contents),
+                content: encode_content(&window.content),
             }),
         }
     }
@@ -307,7 +361,7 @@ impl FragmentRecord<'_> {
                 entity_id: EntityId::new(window.entity_id.into_owned())?,
                 file_id: FileId::new(window.file_id),
                 range: window.range.try_into()?,
-                contents: decode_contents(window.contents)?,
+                content: decode_content(window.content)?,
             }),
         })
     }
@@ -320,8 +374,8 @@ impl<'a> From<&'a Entity> for EntityRecord<'a> {
             file_id: entity.file_id.get(),
             range: entity.range.into(),
             content: match &entity.content {
-                EntityContent::Source(contents) => {
-                    EntityContentRecord::Source(encode_contents(contents))
+                EntityContent::Source(content) => {
+                    EntityContentRecord::Source(encode_content(content))
                 }
                 EntityContent::Outline(outline) => {
                     EntityContentRecord::Outline(outline.as_str().into())
@@ -338,8 +392,8 @@ impl EntityRecord<'_> {
             file_id: FileId::new(self.file_id),
             range: self.range.try_into()?,
             content: match self.content {
-                EntityContentRecord::Source(contents) => {
-                    EntityContent::Source(decode_contents(contents)?)
+                EntityContentRecord::Source(content) => {
+                    EntityContent::Source(decode_content(content)?)
                 }
                 EntityContentRecord::Outline(outline) => {
                     EntityContent::Outline(outline.into_owned())
@@ -419,75 +473,74 @@ enum CellRoleRecord {
 }
 
 fn encode_contents(contents: &[Content]) -> Vec<ContentRecord<'_>> {
-    contents
-        .iter()
-        .map(|content| match content {
-            Content::Text(text) => ContentRecord::Text(text.as_str().into()),
-            Content::Image(image) => ContentRecord::Image {
-                format: image.format(),
-                data: image.data().into(),
-            },
-            Content::Table(table) => ContentRecord::Table {
-                row_count: table.row_count,
-                column_count: table.column_count,
-                cells: table
-                    .cells
-                    .iter()
-                    .map(|cell| CellRecord {
+    contents.iter().map(encode_content).collect()
+}
+
+fn decode_contents(contents: Vec<ContentRecord<'_>>) -> EngineResult<Vec<Content>> {
+    contents.into_iter().map(decode_content).collect()
+}
+
+fn encode_content(content: &Content) -> ContentRecord<'_> {
+    match content {
+        Content::Text(text) => ContentRecord::Text(text.as_str().into()),
+        Content::Image(image) => ContentRecord::Image {
+            format: image.format(),
+            data: image.data().into(),
+        },
+        Content::Table(table) => ContentRecord::Table {
+            row_count: table.row_count,
+            column_count: table.column_count,
+            cells: table
+                .cells
+                .iter()
+                .map(|cell| CellRecord {
+                    row: cell.row,
+                    column: cell.column,
+                    row_span: cell.row_span,
+                    column_span: cell.column_span,
+                    contents: encode_contents(&cell.contents),
+                    role: match cell.kind {
+                        TableCellRole::Unknown => CellRoleRecord::Unknown,
+                        TableCellRole::Data => CellRoleRecord::Data,
+                        TableCellRole::Header => CellRoleRecord::Header,
+                    },
+                })
+                .collect(),
+        },
+    }
+}
+fn decode_content(content: ContentRecord<'_>) -> EngineResult<Content> {
+    Ok(match content {
+        ContentRecord::Text(text) => Content::Text(text.into_owned()),
+        ContentRecord::Image { format, data } => {
+            Content::Image(ImageContent::new(data.into_owned(), format)?)
+        }
+        ContentRecord::Table {
+            row_count,
+            column_count,
+            cells,
+        } => Content::Table(TableContent {
+            row_count,
+            column_count,
+            cells: cells
+                .into_iter()
+                .map(|cell| {
+                    Ok(TableCell {
                         row: cell.row,
                         column: cell.column,
                         row_span: cell.row_span,
                         column_span: cell.column_span,
-                        contents: encode_contents(&cell.contents),
-                        role: match cell.kind {
-                            TableCellRole::Unknown => CellRoleRecord::Unknown,
-                            TableCellRole::Data => CellRoleRecord::Data,
-                            TableCellRole::Header => CellRoleRecord::Header,
+                        contents: decode_contents(cell.contents)?,
+                        kind: match cell.role {
+                            CellRoleRecord::Unknown => TableCellRole::Unknown,
+                            CellRoleRecord::Data => TableCellRole::Data,
+                            CellRoleRecord::Header => TableCellRole::Header,
                         },
                     })
-                    .collect(),
-            },
-        })
-        .collect()
-}
-
-fn decode_contents(contents: Vec<ContentRecord<'_>>) -> EngineResult<Vec<Content>> {
-    contents
-        .into_iter()
-        .map(|content| {
-            Ok(match content {
-                ContentRecord::Text(text) => Content::Text(text.into_owned()),
-                ContentRecord::Image { format, data } => {
-                    Content::Image(ImageContent::new(data.into_owned(), format)?)
-                }
-                ContentRecord::Table {
-                    row_count,
-                    column_count,
-                    cells,
-                } => Content::Table(TableContent {
-                    row_count,
-                    column_count,
-                    cells: cells
-                        .into_iter()
-                        .map(|cell| {
-                            Ok(TableCell {
-                                row: cell.row,
-                                column: cell.column,
-                                row_span: cell.row_span,
-                                column_span: cell.column_span,
-                                contents: decode_contents(cell.contents)?,
-                                kind: match cell.role {
-                                    CellRoleRecord::Unknown => TableCellRole::Unknown,
-                                    CellRoleRecord::Data => TableCellRole::Data,
-                                    CellRoleRecord::Header => TableCellRole::Header,
-                                },
-                            })
-                        })
-                        .collect::<EngineResult<_>>()?,
-                }),
-            })
-        })
-        .collect()
+                })
+                .collect::<EngineResult<_>>()?,
+        }),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -701,20 +754,16 @@ mod tests {
             id: EntityId::new("entity").expect("entity ID"),
             file_id: file().id,
             range: text_range(),
-            content: EntityContent::Source(vec![
-                Content::Text("正文 😀".to_owned()),
-                image,
-                Content::Table(TableContent {
-                    row_count: 2,
-                    column_count: 3,
-                    cells: vec![
-                        cell(0, 0, 2, 1, TableCellRole::Header),
-                        mixed,
-                        nested,
-                        cell(1, 2, 1, 1, TableCellRole::Data),
-                    ],
-                }),
-            ]),
+            content: EntityContent::Source(Content::Table(TableContent {
+                row_count: 2,
+                column_count: 3,
+                cells: vec![
+                    cell(0, 0, 2, 1, TableCellRole::Header),
+                    mixed,
+                    nested,
+                    cell(1, 2, 1, 1, TableCellRole::Data),
+                ],
+            })),
             metadata: None,
         })
     }
@@ -858,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn fragment_records_preserve_compound_content_ranges_metadata_and_ownership() {
+    fn fragment_records_preserve_structured_content_ranges_metadata_and_ownership() {
         round_trip(&fragment());
         let restored = decode_fragment(
             &encode_fragment(&fragment()).expect("encode fragment"),
@@ -876,11 +925,13 @@ mod tests {
             serde_json::from_str(&encode_fragment(&fragment()).expect("encode fragment"))
                 .expect("fragment JSON");
         assert_eq!(
-            encoded["value"]["value"]["content"]["value"][1]["value"]["data"],
+            encoded["value"]["value"]["content"]["value"]["value"]["cells"][1]["contents"][1]["value"]
+                ["data"],
             "AAH/"
         );
         assert_eq!(
-            encoded["value"]["value"]["content"]["value"][1]["value"]["format"],
+            encoded["value"]["value"]["content"]["value"]["value"]["cells"][1]["contents"][1]["value"]
+                ["format"],
             "png"
         );
         assert_eq!(encoded["version"], VERSION);
@@ -965,7 +1016,7 @@ mod tests {
             entity_id: representative.entity_id().clone(),
             file_id: file().id,
             range: text_range(),
-            contents: vec![Content::Text("window text".to_owned())],
+            content: Content::Text("window text".to_owned()),
         });
         for fragment in [&representative, &window] {
             round_trip(fragment);
@@ -1058,7 +1109,8 @@ mod tests {
             ("data", json!("invalid base64!")),
         ] {
             let mut record = original.clone();
-            record["value"]["value"]["content"]["value"][1]["value"][field] = value;
+            record["value"]["value"]["content"]["value"]["value"]["cells"][1]["contents"][1]["value"]
+                [field] = value;
             assert_corrupt_fragment(&record);
         }
         for (field, value) in [("start_line", 0), ("end_byte_column", 12)] {
@@ -1087,8 +1139,7 @@ mod tests {
             ("column", usize::MAX),
         ] {
             let mut record = original.clone();
-            record["value"]["value"]["content"]["value"][2]["value"]["cells"][0][field] =
-                json!(value);
+            record["value"]["value"]["content"]["value"]["value"]["cells"][0][field] = json!(value);
             assert_corrupt_fragment(&record);
         }
         let mut table = TableContent {
@@ -1120,7 +1171,7 @@ mod tests {
                 column_count: 1,
                 cells: vec![nested],
             });
-            entity.content = EntityContent::Source(vec![content.clone()]);
+            entity.content = EntityContent::Source(content.clone());
             let fragment = EntityFragment::Standalone(entity.clone());
             if depth <= MAX_TABLE_DEPTH {
                 round_trip(&fragment);

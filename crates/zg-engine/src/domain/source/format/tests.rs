@@ -161,7 +161,7 @@ fn file_names_resolve_registered_formats() {
 #[test]
 fn extensions_match_longest_registered_suffix() {
     let aliases: &[(&[&str], FileFormat)] = &[
-        (&["jpg", "JPEG", "jfif"], Jpeg),
+        (&["jpg", "JPEG", "jfif", "Jpg", "Jpeg", "Jpe", "Jfif"], Jpeg),
         (&["doc", "DOCX", "docm", "dotx"], Word),
         (&["xls", "XLSX", "xlsb"], Excel),
         (&["ppt", "pptx", "potm"], PowerPoint),
@@ -225,8 +225,8 @@ fn extensions_match_longest_registered_suffix() {
         "settings.conf",
         "settings.cfg",
         "scan.TiF",
-        "photo.Jpg",
-        "photo.Png",
+        "photo.jPg",
+        "photo.pNg",
         "main.RS",
         "main.Rs",
         ".config.JSON",
@@ -254,8 +254,9 @@ fn canonical_names_and_extension_aliases_have_separate_case_rules() {
         ("JPEG", Some(Jpeg)),
         ("JPG", Some(Jpeg)),
         (".JPG", Some(Jpeg)),
-        ("Jpg", None),
-        (".Jpeg", None),
+        ("Jpg", Some(Jpeg)),
+        (".Jpeg", Some(Jpeg)),
+        (".jPg", None),
         (".R", Some(R)),
         (".S", Some(Assembly)),
     ];
@@ -302,6 +303,10 @@ fn known_paths_skip_content_detection() {
     let directory = tempdir().expect("temporary directory");
     let cases: &[(&str, &[FileFormat])] = &[
         ("missing.JPG", &[Jpeg]),
+        ("missing.Jpg", &[Jpeg]),
+        ("missing.Jpeg", &[Jpeg]),
+        ("missing.Jpe", &[Jpeg]),
+        ("missing.Jfif", &[Jpeg]),
         ("header.h", &[C, Cpp]),
         ("header.H", &[Cpp]),
         ("module.d.ts", &[TypeScript]),

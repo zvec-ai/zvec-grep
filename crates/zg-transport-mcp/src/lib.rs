@@ -7,6 +7,7 @@ mod consent;
 mod request;
 
 use std::{
+    collections::BTreeMap,
     fmt::{self, Write as _},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -41,7 +42,7 @@ use zg_engine::{
         index::{
             IndexOptions,
             options::{
-                Device, EmbeddingModelSpec, GlobRule, ScanRules, ScanRulesUpdate,
+                ContentKind, Device, EmbeddingModelSpec, GlobRule, ScanRules, ScanRulesUpdate,
                 deserialize_optional_update,
             },
         },
@@ -649,6 +650,8 @@ pub struct IndexInput {
     /// Embedding model reference for a new index.
     #[schemars(length(min = 1, max = 256))]
     pub embedding: Option<String>,
+    /// Explicit text/image/table to model-reference map; mutually exclusive with embedding.
+    pub embedding_routes: Option<BTreeMap<String, String>>,
     /// Explicitly rebuild the existing index.
     pub rebuild: Option<bool>,
     /// Replace the index root-path configuration.
@@ -733,6 +736,8 @@ struct IndexOutput {
     dropped: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<IndexJobErrorOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failed_files: Vec<FailedFileOutput>,
     /// Completed indexing statistics, timings and skipped files when debug is requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     debug: Option<serde_json::Value>,
@@ -830,6 +835,8 @@ struct WorkspaceIndexOutput {
     root_paths: Vec<RootSpecOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     embedding: Option<IndexedEmbeddingOutput>,
+    embeddings: Vec<IndexedEmbeddingOutput>,
+    embedding_routes: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fts: Option<IndexedFtsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -875,12 +882,28 @@ struct IndexedFtsOutput {
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
+struct FailedFileOutput {
+    path: String,
+    reason: String,
+}
+
+impl From<&zg_engine::api::info::result::FailedFile> for FailedFileOutput {
+    fn from(file: &zg_engine::api::info::result::FailedFile) -> Self {
+        Self {
+            path: file.path.display().to_string(),
+            reason: file.reason.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 struct IndexFilesOutput {
     stored: usize,
     scanned: usize,
     indexed: usize,
     pending: usize,
     failed: usize,
+    failed_files: Vec<FailedFileOutput>,
     added: usize,
     modified: usize,
     deleted: usize,
@@ -1169,6 +1192,39 @@ impl From<DeviceInput> for Device {
     }
 }
 
+fn normalize_embedding_routes(
+    routes: Option<BTreeMap<String, String>>,
+) -> Result<Option<BTreeMap<ContentKind, EmbeddingModelSpec>>, String> {
+    routes
+        .map(|routes| {
+            if routes.is_empty() {
+                return Err("embeddingRoutes requires at least one content route".to_owned());
+            }
+            routes
+                .into_iter()
+                .map(|(kind, reference)| {
+                    let kind: ContentKind = serde_json::from_value(serde_json::json!(kind))
+                        .map_err(|_| {
+                            "embeddingRoutes keys must be text, image or table".to_owned()
+                        })?;
+                    let reference = reference.trim().to_owned();
+                    validate_text("embeddingRoutes model", &reference, 1, 256)?;
+                    Ok((
+                        kind,
+                        EmbeddingModelSpec {
+                            reference,
+                            revision: None,
+                            cache_dir: None,
+                            endpoint: None,
+                            device: Device::Auto,
+                        },
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()
+        })
+        .transpose()
+}
+
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
         let root = absolute_root(&self.root)?;
@@ -1193,13 +1249,16 @@ impl IndexInput {
         if self.max_file_size_bytes == Some(Some(0)) {
             return Err("maxFileSizeBytes must be greater than zero".to_owned());
         }
+        if self.embedding.is_some() && self.embedding_routes.is_some() {
+            return Err("embedding and embeddingRoutes are mutually exclusive".to_owned());
+        }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
-            if self.embedding.is_none() {
+            if self.embedding.is_none() && self.embedding_routes.is_none() {
                 return Err("endpoint requires an explicit embedding model".to_owned());
             }
         }
-        if self.device.is_some() && self.embedding.is_none() {
+        if self.device.is_some() && self.embedding.is_none() && self.embedding_routes.is_none() {
             return Err("device requires an explicit embedding model".to_owned());
         }
 
@@ -1222,6 +1281,7 @@ impl IndexInput {
         if let Some(paths) = &scan.ignore_files {
             validate_scoped_paths(&root, paths, "ignore file")?;
         }
+        let embedding_routes = normalize_embedding_routes(self.embedding_routes)?;
         let embedding = if let Some(reference) = self.embedding {
             let reference = reference.trim().to_owned();
             validate_text("embedding", &reference, 1, 256)?;
@@ -1229,7 +1289,7 @@ impl IndexInput {
                 reference,
                 revision: None,
                 cache_dir: None,
-                endpoint: self.endpoint,
+                endpoint: self.endpoint.clone(),
                 device: self.device.map_or(Device::Auto, Into::into),
             })
         } else {
@@ -1243,6 +1303,9 @@ impl IndexInput {
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
+                embedding_routes,
+                endpoint: self.endpoint,
+                device: self.device.map(Into::into),
                 api_key: self.api_key,
                 embedding_concurrency: self.embedding_concurrency,
                 ..IndexOptions::default()
@@ -1258,6 +1321,7 @@ impl IndexInput {
             || self.device.is_some()
             || self.endpoint.is_some()
             || self.embedding.is_some()
+            || self.embedding_routes.is_some()
             || self.rebuild.is_some()
             || self.reset_paths.is_some()
             || self.globs.is_some()
@@ -1595,6 +1659,13 @@ fn index_operation_to_result(reply: &IndexOperationResult, debug: bool) -> CallT
         action: Some(IndexActionOutput::Index),
         dropped: None,
         error: reply.error.as_ref().map(index_job_error_output),
+        failed_files: reply.result.as_ref().map_or_else(Vec::new, |result| {
+            result
+                .failed_files
+                .iter()
+                .map(FailedFileOutput::from)
+                .collect()
+        }),
         debug: reply.result.as_ref().filter(|_| debug).map(|result| {
             let mut diagnostics = result.clone();
             diagnostics.skipped.truncate(100);
@@ -1612,6 +1683,7 @@ fn drop_result_to_index_result(root: &Path, removed: bool) -> CallToolResult {
         action: Some(IndexActionOutput::Drop),
         dropped: Some(removed),
         error: None,
+        failed_files: Vec::new(),
         debug: None,
     })
 }
@@ -1645,6 +1717,21 @@ impl From<InfoResult> for IndexStatusOutput {
                 dimension: embedding.dimension,
                 metric: embedding.metric,
             }),
+            embeddings: info
+                .embeddings
+                .into_iter()
+                .map(|embedding| IndexedEmbeddingOutput {
+                    provider: embedding.provider,
+                    model: embedding.model,
+                    dimension: embedding.dimension,
+                    metric: embedding.metric,
+                })
+                .collect(),
+            embedding_routes: info
+                .embedding_routes
+                .into_iter()
+                .map(|(kind, model)| (kind.as_str().to_owned(), model))
+                .collect(),
             fts: info.fts.map(|fts| IndexedFtsOutput {
                 tokenizer: fts.tokenizer,
                 filters: fts.filters,
@@ -1659,6 +1746,11 @@ impl From<InfoResult> for IndexStatusOutput {
             indexed: status.files_indexed,
             pending: status.files_pending,
             failed: status.files_failed,
+            failed_files: status
+                .failed_files
+                .iter()
+                .map(FailedFileOutput::from)
+                .collect(),
             added: status.files_added,
             modified: status.files_modified,
             deleted: status.files_deleted,
@@ -1990,6 +2082,8 @@ mod tests {
                 scan: super::ScanRules::default(),
                 policy: super::WorkspaceIndexPolicy::Enabled,
                 embedding: None,
+                embeddings: Vec::new(),
+                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
@@ -2147,6 +2241,51 @@ mod tests {
                 .instructions
                 .is_some_and(|instructions| instructions.contains("zvec_grep_index"))
         );
+    }
+
+    #[test]
+    fn explicit_content_routes_reach_the_engine_and_reject_invalid_maps() {
+        let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(), "device": "cpu", "endpoint": "https://runtime.example.test/embeddings", "embeddingRoutes": {
+                "text":"local/potion-code-16m-v2", "table":"local/potion-code-16m-v2", "image":"qwen/qwen3-vl-embedding"
+            }
+        })).expect("routing input");
+        let IndexToolRequest::Index { options, .. } =
+            parsed.into_request().expect("routing request")
+        else {
+            panic!("index");
+        };
+        assert_eq!(options.device, Some(super::Device::Cpu));
+        assert_eq!(
+            options.endpoint.as_deref(),
+            Some("https://runtime.example.test/embeddings")
+        );
+        let routes = options.embedding_routes.expect("explicit routes");
+        assert!(
+            routes
+                .values()
+                .all(|spec| spec.endpoint.is_none() && spec.device == super::Device::Auto)
+        );
+        assert_eq!(routes.len(), 3);
+        assert_eq!(
+            routes[&super::ContentKind::Text].reference,
+            routes[&super::ContentKind::Table].reference
+        );
+        for patch in [
+            serde_json::json!({"embeddingRoutes": {}}),
+            serde_json::json!({"embeddingRoutes": {"video":"model"}}),
+            serde_json::json!({"embeddingRoutes": {"text":" "}}),
+            serde_json::json!({"embedding":"one", "embeddingRoutes":{"text":"two"}}),
+        ] {
+            let mut value = patch;
+            value["root"] = serde_json::json!(test_root());
+            assert!(
+                serde_json::from_value::<IndexInput>(value)
+                    .expect("input schema")
+                    .into_request()
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2398,6 +2537,7 @@ mod tests {
             endpoint: None,
             drop: None,
             embedding: Some("potion-base-8M".to_owned()),
+            embedding_routes: None,
             rebuild: Some(false),
             reset_paths: None,
             globs: Some(vec![super::GlobInput {

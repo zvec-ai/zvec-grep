@@ -12,7 +12,7 @@ use zg_engine::api::{
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 9;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -188,8 +188,8 @@ pub enum IndexStreamEvent {
 pub enum DaemonReply {
     Context(Box<ContextResult>),
     Index(Box<IndexResult>),
-    IndexAuthorization(Option<zg_engine::authorization::IndexAuthorization>),
-    QueryAuthorization(Option<zg_engine::authorization::QueryAuthorization>),
+    IndexAuthorization(Vec<zg_engine::authorization::IndexAuthorization>),
+    QueryAuthorization(Vec<zg_engine::authorization::QueryAuthorization>),
     GrantIndexAuthorization,
     DropIndex(bool),
     Info(Box<InfoResult>),
@@ -297,6 +297,8 @@ mod tests {
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
                 embedding: None,
+                embeddings: Vec::new(),
+                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],

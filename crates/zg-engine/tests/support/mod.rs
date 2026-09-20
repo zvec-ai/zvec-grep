@@ -62,11 +62,12 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     // keeps one globally unique name, including when its root is later moved.
     let name = format!("fixture-{}", uuid::Uuid::new_v4());
     let manifest = json!({
-        "manifestVersion": 4, "name": name, "path": home,
+        "manifestVersion": 5, "name": name, "path": home,
         "root": root, "scan": {},
-        "indexPolicy": "enabled", "embedding": { "model": { "provider": "qwen", "name": "text-embedding-v4", "endpoint": format!("http://{address}/embeddings") }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null },
+        "indexPolicy": "enabled", "embeddings": [{ "model": { "provider": "qwen", "name": "text-embedding-v4", "endpoint": format!("http://{address}/embeddings") }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null }],
+        "embeddingRoutes": { "text": "qwen/text-embedding-v4" },
         "indexVersion": null, "createdTime": 1, "updatedTime": 1,
-        "embeddingRuntime": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") }
+        "embeddingRuntimes": { "qwen/text-embedding-v4": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") } }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)
 }
@@ -75,6 +76,8 @@ pub struct EmbeddingServer {
     pub address: SocketAddr,
     pub requests: Arc<AtomicUsize>,
     pub inputs: Arc<AtomicUsize>,
+    #[allow(dead_code)] // Other integration binaries share the server without image assertions.
+    pub multimodal_inputs: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -86,18 +89,24 @@ impl EmbeddingServer {
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
         let inputs = Arc::new(AtomicUsize::new(0));
+        let multimodal_inputs = Arc::new(AtomicUsize::new(0));
         let worker = thread::spawn({
             let stop = Arc::clone(&stop);
             let requests = Arc::clone(&requests);
             let inputs = Arc::clone(&inputs);
+            let multimodal_inputs = Arc::clone(&multimodal_inputs);
             move || {
                 for stream in listener.incoming() {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
                     requests.fetch_add(1, Ordering::Release);
-                    respond(stream.expect("mock HTTP connection"), &inputs)
-                        .expect("mock embedding response");
+                    respond(
+                        stream.expect("mock HTTP connection"),
+                        &inputs,
+                        &multimodal_inputs,
+                    )
+                    .expect("mock embedding response");
                 }
             }
         });
@@ -105,6 +114,7 @@ impl EmbeddingServer {
             address,
             requests,
             inputs,
+            multimodal_inputs,
             stop,
             worker: Some(worker),
         })
@@ -124,7 +134,11 @@ impl Drop for EmbeddingServer {
     }
 }
 
-fn respond(mut stream: TcpStream, inputs: &AtomicUsize) -> std::io::Result<()> {
+fn respond(
+    mut stream: TcpStream,
+    inputs: &AtomicUsize,
+    multimodal_inputs: &AtomicUsize,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut request = Vec::new();
@@ -156,22 +170,36 @@ fn respond(mut stream: TcpStream, inputs: &AtomicUsize) -> std::io::Result<()> {
         request.extend_from_slice(&buffer[..count]);
     }
     let body: Value = serde_json::from_slice(&request[header_end..header_end + content_length])?;
-    inputs.fetch_add(
-        body["input"].as_array().expect("text inputs").len(),
-        Ordering::Release,
-    );
-    let dimension = usize::try_from(body["dimensions"].as_u64().expect("dimensions"))
-        .expect("usize dimensions");
-    let data = body["input"]
-        .as_array()
-        .expect("text inputs")
+    let multimodal = body["input"].is_object();
+    let items = if multimodal {
+        body["input"]["contents"]
+            .as_array()
+            .expect("multimodal inputs")
+    } else {
+        body["input"].as_array().expect("text inputs")
+    };
+    inputs.fetch_add(items.len(), Ordering::Release);
+    if multimodal {
+        multimodal_inputs.fetch_add(items.len(), Ordering::Release);
+    }
+    let dimension_value = if multimodal {
+        &body["parameters"]["dimension"]
+    } else {
+        &body["dimensions"]
+    };
+    let dimension =
+        usize::try_from(dimension_value.as_u64().expect("dimensions")).expect("usize dimensions");
+    let data = items
         .iter()
         .enumerate()
         .map(|(index, text)| {
             let mut vector = vec![0.0_f32; dimension];
+            let text = if multimodal {
+                text["text"].as_str().unwrap_or("image")
+            } else {
+                text.as_str().expect("text")
+            };
             for word in text
-                .as_str()
-                .expect("text")
                 .split(|character: char| !character.is_alphanumeric())
                 .filter(|word| !word.is_empty())
             {
@@ -183,7 +211,11 @@ fn respond(mut stream: TcpStream, inputs: &AtomicUsize) -> std::io::Result<()> {
             json!({ "index": index, "embedding": vector })
         })
         .collect::<Vec<_>>();
-    let response = serde_json::to_vec(&json!({ "data": data }))?;
+    let response = serde_json::to_vec(&if multimodal {
+        json!({ "output": { "embeddings": data } })
+    } else {
+        json!({ "data": data })
+    })?;
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

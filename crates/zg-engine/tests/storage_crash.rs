@@ -258,7 +258,7 @@ async fn recovers_only_the_uncheckpointed_batch_after_process_termination() -> T
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if matches!(name, "entities" | "fragments") || name.starts_with("vectors_") {
+        if name == "entities" || name.starts_with("fragments_") {
             searchable_collections += 1;
             let documents = native_documents(&entry.path())?;
             assert_eq!(documents.len(), CHECKPOINT_FILES, "{name}");
@@ -279,7 +279,7 @@ async fn recovers_only_the_uncheckpointed_batch_after_process_termination() -> T
             }
         }
     }
-    assert_eq!(searchable_collections, 3);
+    assert_eq!(searchable_collections, 2);
     for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
         assert_eq!(
             search_paths(&engine, &root, mode, Vec::new()).await?,
@@ -330,7 +330,7 @@ async fn recovers_only_the_uncheckpointed_batch_after_process_termination() -> T
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name == "fragments" || name.starts_with("vectors_") {
+        if name.starts_with("fragments_") {
             let documents = native_documents(&entry.path())?;
             assert_eq!(documents.len(), TOTAL_FILES);
             assert_document_file_metadata(&documents, &file_paths, directory_ids)?;
@@ -370,6 +370,17 @@ struct IdentitySnapshot {
 fn index_identities(home: &Path) -> TestResult<IdentitySnapshot> {
     let mut files = BTreeMap::new();
     let mut directories = BTreeMap::new();
+    for doc in native_documents(&home.join("directories"))? {
+        let id = doc.get_u32("directory_id")?.expect("directory ID");
+        let path: Value =
+            serde_json::from_str(&doc.get_string("path")?.expect("native directory path"))?;
+        assert_eq!(path["encoding"], "utf8");
+        let path = PathBuf::from(path["value"].as_str().expect("UTF-8 directory path"));
+        assert!(
+            directories.insert(path, id).is_none(),
+            "unique directory path"
+        );
+    }
     let mut ids = BTreeSet::new();
     for doc in native_documents(&home.join("files"))? {
         let id = doc.get_u32("file_id")?.expect("numeric source identity");
@@ -387,9 +398,11 @@ fn index_identities(home: &Path) -> TestResult<IdentitySnapshot> {
             .unwrap_or_default();
         assert_eq!(ancestors.len(), membership.len());
         for (path, directory_id) in ancestors.into_iter().zip(membership) {
-            if let Some(existing) = directories.insert(path.to_path_buf(), directory_id) {
-                assert_eq!(existing, directory_id, "shared ancestors have one ID");
-            }
+            assert_eq!(
+                directories.get(path),
+                Some(&directory_id),
+                "file ancestry references canonical directories"
+            );
         }
         assert!(ids.insert(id), "source IDs must be unique");
         assert!(

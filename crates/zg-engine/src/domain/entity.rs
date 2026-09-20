@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{EngineError, EngineResult};
 
+use super::content::ContentKind;
 use super::{Content, EntityMetadata, FileId, SourceRange};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct EntityId(String);
 
 impl EntityId {
@@ -22,7 +23,7 @@ impl EntityId {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct FragmentId(String);
 
 impl FragmentId {
@@ -42,7 +43,7 @@ impl FragmentId {
     }
 }
 
-/// A logical result unit with source provenance and descriptive metadata.
+/// A logical result unit with exactly one content object and its provenance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Entity {
     pub id: EntityId,
@@ -54,12 +55,24 @@ pub(crate) struct Entity {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EntityContent {
-    Source(Vec<Content>),
+    /// One atomic content object, routed as a whole to one embedding model.
+    /// A future composite representation must be an explicit variant with its
+    /// own composition contract; arbitrary lists are intentionally unsupported.
+    Source(Content),
     /// Describes the entity's source range without reproducing its original content.
     Outline(String),
 }
 
-/// Retrieval ownership, independent of an entity's internal content composition.
+impl EntityContent {
+    pub(crate) fn kind(&self) -> ContentKind {
+        match self {
+            Self::Source(content) => content.kind(),
+            Self::Outline(_) => ContentKind::Text,
+        }
+    }
+}
+
+/// Retrieval ownership for fragments of one entity's content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EntityFragment {
     Standalone(Entity),
@@ -73,7 +86,7 @@ pub(crate) struct WindowFragment {
     pub entity_id: EntityId,
     pub file_id: FileId,
     pub range: SourceRange,
-    pub contents: Vec<Content>,
+    pub content: Content,
 }
 
 impl EntityFragment {
@@ -106,14 +119,14 @@ impl EntityFragment {
         }
     }
 
-    /// Original content in reading order; outlines have no recorded source content.
+    /// A single source content object; outlines have no recorded source content.
     pub(crate) fn contents(&self) -> &[Content] {
         match self {
             Self::Standalone(entity) | Self::Representative(entity) => match &entity.content {
-                EntityContent::Source(contents) => contents,
+                EntityContent::Source(content) => std::slice::from_ref(content),
                 EntityContent::Outline(_) => &[],
             },
-            Self::Window(window) => &window.contents,
+            Self::Window(window) => std::slice::from_ref(&window.content),
         }
     }
 
@@ -150,11 +163,11 @@ pub(crate) fn validate_fragments<'a>(
         let has_content = match fragment {
             EntityFragment::Standalone(entity) | EntityFragment::Representative(entity) => {
                 match &entity.content {
-                    EntityContent::Source(contents) => !contents.is_empty(),
+                    EntityContent::Source(content) => content_has_value(content),
                     EntityContent::Outline(outline) => !outline.trim().is_empty(),
                 }
             }
-            EntityFragment::Window(window) => !window.contents.is_empty(),
+            EntityFragment::Window(window) => content_has_value(&window.content),
         };
         if !has_content {
             return Err(EngineError::invalid_argument(format!(
@@ -185,14 +198,32 @@ pub(crate) fn validate_fragments<'a>(
                 window.entity_id.as_str()
             )));
         }
+        if entity.content.kind() != window.content.kind() {
+            return Err(EngineError::invalid_argument(format!(
+                "window {} has a different content kind than entity {}",
+                window.id.as_str(),
+                window.entity_id.as_str()
+            )));
+        }
     }
     Ok(())
+}
+
+fn content_has_value(content: &Content) -> bool {
+    match content {
+        Content::Text(text) => !text.trim().is_empty(),
+        Content::Image(image) => !image.data().is_empty(),
+        Content::Table(table) => table
+            .cells
+            .iter()
+            .any(|cell| cell.contents.iter().any(content_has_value)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ByteRange, TextRange};
+    use crate::domain::{ByteRange, FileFormat, ImageContent, TextRange};
 
     fn file_id() -> FileId {
         FileId::new(1)
@@ -209,7 +240,7 @@ mod tests {
             id: EntityId::new(id).expect("entity id"),
             file_id: file_id(),
             range: range(0, 20),
-            content: EntityContent::Source(vec![Content::Text("abcdefghijklmnopqrst".to_owned())]),
+            content: EntityContent::Source(Content::Text("abcdefghijklmnopqrst".to_owned())),
             metadata: None,
         }
     }
@@ -220,7 +251,7 @@ mod tests {
             entity_id: EntityId::new(owner).expect("owner id"),
             file_id: file_id(),
             range: range(5, 15),
-            contents: vec![Content::Text("fghijklmno".to_owned())],
+            content: Content::Text("fghijklmno".to_owned()),
         }
     }
 
@@ -326,6 +357,41 @@ mod tests {
     }
 
     #[test]
+    fn keeps_all_windows_in_their_entity_content_kind() {
+        let mut image_window = window("image-window", "text-entity");
+        image_window.content =
+            Content::Image(ImageContent::new(vec![1], FileFormat::Png).expect("image content"));
+        assert_invalid(
+            &[
+                EntityFragment::Representative(entity("text-entity")),
+                EntityFragment::Window(image_window),
+            ],
+            "different content kind",
+        );
+    }
+
+    #[test]
+    fn exposes_one_content_object_for_source_entities_and_windows() {
+        let source = EntityFragment::Standalone(entity("source"));
+        let fragment = EntityFragment::Window(window("window", "source"));
+        assert_eq!(
+            source.contents(),
+            &[Content::Text("abcdefghijklmnopqrst".to_owned())]
+        );
+        assert_eq!(
+            fragment.contents(),
+            &[Content::Text("fghijklmno".to_owned())]
+        );
+        let mut image_entity = entity("image");
+        image_entity.content = EntityContent::Source(Content::Image(
+            ImageContent::new(vec![1], FileFormat::Png).expect("image content"),
+        ));
+        assert_eq!(image_entity.content.kind(), ContentKind::Image);
+        let image = EntityFragment::Standalone(image_entity);
+        validate_fragments(file_id(), [&image]).expect("single image entity");
+    }
+
+    #[test]
     fn representation_and_content_role_are_independent() {
         let source = entity("group");
         let mut outline = source.clone();
@@ -335,7 +401,7 @@ mod tests {
         for representative in [source, outline] {
             let mut equal_window = window("window", "group");
             equal_window.range = representative.range;
-            equal_window.contents = vec![Content::Text("abcdefghijklmnopqrst".to_owned())];
+            equal_window.content = Content::Text("abcdefghijklmnopqrst".to_owned());
             let fragments = vec![
                 EntityFragment::Representative(representative),
                 EntityFragment::Window(equal_window),
@@ -345,7 +411,7 @@ mod tests {
         }
         validate_fragments(file_id(), &[]).expect("empty source produces no fragments");
         let mut empty = entity("empty");
-        empty.content = EntityContent::Source(Vec::new());
+        empty.content = EntityContent::Source(Content::Text(String::new()));
         assert_invalid(&[EntityFragment::Standalone(empty)], "has no content");
         let mut empty_outline = entity("empty-outline");
         empty_outline.content = EntityContent::Outline(" ".to_owned());
@@ -354,7 +420,7 @@ mod tests {
             "has no content",
         );
         let mut empty_window = window("empty-window", "group");
-        empty_window.contents.clear();
+        empty_window.content = Content::Text(String::new());
         assert_invalid(&[EntityFragment::Window(empty_window)], "has no content");
     }
 

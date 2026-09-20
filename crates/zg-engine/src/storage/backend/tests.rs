@@ -132,7 +132,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
                 .search_fts("orchard", 20, Some(&filter))
                 .expect("FTS"),
             storage
-                .search_vector(&[1.0, 0.0, 0.0], 20, Some(&filter))
+                .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 20, Some(&filter))
                 .expect("vector"),
         ] {
             let mut actual = hits.into_iter().map(|hit| hit.file_id).collect::<Vec<_>>();
@@ -149,7 +149,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
     };
     assert!(
         storage
-            .search_vector(&[1.0, 0.0, 0.0], 20, Some(&filter))
+            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 20, Some(&filter))
             .expect("no stale vectors")
             .is_empty()
     );
@@ -157,7 +157,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
     let reader = open(directory.path(), true);
     assert!(
         reader
-            .search_vector(&[1.0, 0.0, 0.0], 20, Some(&filter))
+            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 20, Some(&filter))
             .expect("reopened filter")
             .is_empty()
     );
@@ -336,7 +336,7 @@ fn recovery_validates_source_record_owners_before_mutating_any_collection() {
             .is_err()
     );
     let native =
-        NativeStore::open(&home.join("storage"), &schema(), true).expect("inspect native data");
+        NativeStore::open(&home.join("storage"), &[schema()], true).expect("inspect native data");
     assert_eq!(native.list_files().expect("no mutation").len(), 2);
     assert!(home.join("storage").join(pending::NAME).exists());
 }
@@ -368,7 +368,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     factory
         .open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: home.to_owned(),
-            embedding: original.clone(),
+            embeddings: vec![original.clone()],
         })
         .expect("create index")
         .close()
@@ -376,24 +376,23 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let descriptor = home.join("storage/schema.json");
     let persisted = fs::read(&descriptor).expect("read descriptor");
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
-    assert!(record.get("version").is_none());
+    assert_eq!(record["version"], 2);
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
-            .embedding()
+            .embeddings()
             .expect("valid model info"),
-        original
+        vec![original.clone()]
     );
 
     let mut current = original.clone();
     current.model.endpoint = Some("https://new.example.test/embeddings".into());
     current.max_batch_size = 64;
-    current.max_input_tokens = Some(4096);
-    current.max_image_bytes = None;
+
     factory
         .open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: home.to_owned(),
-            embedding: current.clone(),
+            embeddings: vec![current.clone()],
         })
         .expect("runtime metadata changes do not invalidate an index")
         .close()
@@ -404,26 +403,35 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let error = factory
         .open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: home.to_owned(),
-            embedding: invalid,
+            embeddings: vec![invalid],
         })
         .err()
         .expect("reopening must validate incoming metadata too");
     assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
     assert!(error.message().contains("max_batch_size"));
 
-    for field in ["provider", "name", "dimension", "metric"] {
+    for field in [
+        "provider",
+        "name",
+        "dimension",
+        "metric",
+        "max_input_tokens",
+        "max_image_bytes",
+    ] {
         let mut changed = current.clone();
         match field {
             "provider" => changed.model.provider = "other".into(),
             "name" => changed.model.name = "other".into(),
             "dimension" => changed.dimension += 1,
             "metric" => changed.metric = Metric::Cosine,
+            "max_input_tokens" => changed.max_input_tokens = Some(4096),
+            "max_image_bytes" => changed.max_image_bytes = None,
             _ => unreachable!(),
         }
         let error = factory
             .open(WorkspaceIndexStorageOptions::ReadWrite {
                 storage_path: home.to_owned(),
-                embedding: changed,
+                embeddings: vec![changed],
             })
             .err()
             .expect("index fields must match");
@@ -442,8 +450,8 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     fs::create_dir(&path).expect("storage directory");
     for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
         let mut record =
-            serde_json::to_value(SchemaRecord::new(&schema())).expect("descriptor JSON");
-        record["embedding"][field] = serde_json::json!(0);
+            serde_json::to_value(SchemaRecord::new(&[schema()])).expect("descriptor JSON");
+        record["embeddings"][0][field] = serde_json::json!(0);
         fs::write(
             path.join("schema.json"),
             serde_json::to_vec(&record).expect("encode descriptor"),
@@ -455,7 +463,7 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
             },
             WorkspaceIndexStorageOptions::ReadWrite {
                 storage_path: directory.path().to_owned(),
-                embedding: schema(),
+                embeddings: vec![schema()],
             },
         ] {
             let error = ZvecStorageFactory::new()
@@ -481,7 +489,7 @@ fn open(path: &Path, read_only: bool) -> Box<dyn WorkspaceIndexStorage> {
     } else {
         WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: path.to_owned(),
-            embedding: schema(),
+            embeddings: vec![schema()],
         }
     };
     ZvecStorageFactory::new()
@@ -515,11 +523,12 @@ fn fixture(
         index_status: FileIndexStatus::NotIndexed,
     };
     let entry = IndexedFragment {
+        model: "fixture/fixture-model".into(),
         fragment: EntityFragment::Standalone(Entity {
             id: EntityId::new(format!("entity-{}", id.get())).expect("entity ID"),
             file_id: id,
             range: SourceRange::File,
-            content: EntityContent::Source(vec![Content::Text(text.to_owned())]),
+            content: EntityContent::Source(Content::Text(text.to_owned())),
             metadata: Some(EntityMetadata::Code(CodeMetadata {
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("quoted'\\name\0suffix".to_owned()),
@@ -579,7 +588,7 @@ fn persists_filters_and_replaces_complete_files() {
         assert_eq!(loaded.fragments[&hits[0].document_id], entry.fragment);
     }
     let hits = storage
-        .search_vector(&[1.0, 0.0, 0.0], 10, Some(&filter))
+        .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, Some(&filter))
         .expect("filtered ANN");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].file_id, first.id);
@@ -588,7 +597,7 @@ fn persists_filters_and_replaces_complete_files() {
     assert_eq!(stored.file.snapshot, first.snapshot);
     assert!(stored.file.index_status.is_indexed());
     let ranked = storage
-        .search_vector(&[1.0, 0.0, 0.0], 10, None)
+        .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, None)
         .expect("ranked ANN");
     assert_eq!(ranked.len(), 2);
     let loaded = storage
@@ -621,7 +630,12 @@ fn persists_filters_and_replaces_complete_files() {
         );
         assert!(
             storage
-                .search_vector(&[1.0, 0.0, 0.0], 10, Some(&rejected))
+                .search_vector(
+                    "fixture/fixture-model",
+                    &[1.0, 0.0, 0.0],
+                    10,
+                    Some(&rejected)
+                )
                 .expect("ANN exclusion")
                 .is_empty()
         );
@@ -642,7 +656,7 @@ fn persists_filters_and_replaces_complete_files() {
     );
     assert!(
         storage
-            .search_vector(&[1.0, 0.0, 0.0], 10, Some(&empty))
+            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, Some(&empty))
             .expect("empty filter")
             .is_empty()
     );
@@ -659,7 +673,7 @@ fn persists_filters_and_replaces_complete_files() {
     );
     assert!(
         storage
-            .search_vector(&entry.vector, 10, Some(&filter))
+            .search_vector("fixture/fixture-model", &entry.vector, 10, Some(&filter))
             .expect("old vector removed")
             .is_empty()
     );
@@ -691,7 +705,7 @@ fn persists_filters_and_replaces_complete_files() {
     );
     assert_eq!(
         reader
-            .search_vector(&[1.0, 0.0, 0.0], 10, None)
+            .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, None)
             .expect("reopened ANN")
             .len(),
         1
@@ -769,7 +783,7 @@ fn invalidates_interrupted_batches_before_serving_readers() {
     pending::write(&path, &changes).expect("durable batch intent");
     // Persist an incomplete batch: one source was removed, another replaced,
     // and the requested deletion has not started.
-    let native = NativeStore::open(&path, &schema(), false).expect("native writer");
+    let native = NativeStore::open(&path, &[schema()], false).expect("native writer");
     native.apply_delete(file.id).expect("partial mutation");
     let mut partial = added.clone();
     partial.index_status = FileIndexStatus::Indexed {
@@ -821,7 +835,7 @@ fn invalidates_interrupted_batches_before_serving_readers() {
         };
         assert!(
             reader
-                .search_vector(&entry.vector, 10, Some(&filter))
+                .search_vector("fixture/fixture-model", &entry.vector, 10, Some(&filter))
                 .expect("no partial vectors")
                 .is_empty()
         );
@@ -848,7 +862,7 @@ fn invalidates_interrupted_batches_before_serving_readers() {
         1
     );
     let hits = reader
-        .search_vector(&unaffected_entry.vector, 10, None)
+        .search_vector("fixture/fixture-model", &unaffected_entry.vector, 10, None)
         .expect("unaffected vector");
     assert_eq!(hits.len(), 1);
     let loaded = reader
@@ -1243,7 +1257,7 @@ fn retains_only_the_latest_intent_for_repeated_file_updates() {
     assert_eq!(files[0].index_status.indexed_epoch_ms(), None);
     assert!(
         reader
-            .search_vector(&replacement.vector, 10, None)
+            .search_vector("fixture/fixture-model", &replacement.vector, 10, None)
             .expect("requires fresh embeddings")
             .is_empty()
     );
@@ -1298,7 +1312,7 @@ async fn assert_failed_marker_write(prepared: bool) {
             .search_fts("orchard", 10, None)
             .expect_err("failed writer cannot search"),
         storage
-            .search_vector(&entry.vector, 10, None)
+            .search_vector("fixture/fixture-model", &entry.vector, 10, None)
             .expect_err("failed writer cannot search vectors"),
         storage
             .load_search_hits(&[])
@@ -1431,7 +1445,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     let EntityFragment::Standalone(entity) = &mut invalid_table.fragment else {
         panic!("fixture must be a standalone entity");
     };
-    entity.content = EntityContent::Source(vec![Content::Table(TableContent {
+    entity.content = EntityContent::Source(Content::Table(TableContent {
         row_count: 1,
         column_count: 1,
         cells: vec![TableCell {
@@ -1442,7 +1456,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
             contents: vec![Content::Text("invalid zero-height cell".to_owned())],
             kind: TableCellRole::Data,
         }],
-    })]);
+    }));
     let error = storage
         .replace_file(&file, &[invalid_table])
         .expect_err("invalid table must be rejected before writing intent");
@@ -1474,7 +1488,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         ZvecStorageFactory::new()
             .open(WorkspaceIndexStorageOptions::ReadWrite {
                 storage_path: home.to_owned(),
-                embedding: incompatible
+                embeddings: vec![incompatible],
             })
             .is_err()
     );
@@ -1535,7 +1549,7 @@ fn native_replacements_require_a_consistent_complete_file_state() {
     open(directory.path(), false)
         .close()
         .expect("initialize storage");
-    let native = NativeStore::open(&directory.path().join("storage"), &schema(), false)
+    let native = NativeStore::open(&directory.path().join("storage"), &[schema()], false)
         .expect("native writer");
     let (mut file, entry) = fixture(None, "state", "source content", vec![1.0, 0.0, 0.0]);
     for status in [
@@ -1573,7 +1587,7 @@ fn native_replacements_require_a_consistent_complete_file_state() {
         .apply_replace(&file, std::slice::from_ref(&entry))
         .expect("consistent result");
     let hits = native
-        .search_vector(&entry.vector, 10, None)
+        .search_vector("fixture/fixture-model", &entry.vector, 10, None)
         .expect("stored vector");
     assert_eq!(hits.len(), 1);
     let loaded = native
@@ -1586,7 +1600,7 @@ fn native_replacements_require_a_consistent_complete_file_state() {
         .expect("discard interrupted result");
     assert!(
         native
-            .search_vector(&entry.vector, 10, None)
+            .search_vector("fixture/fixture-model", &entry.vector, 10, None)
             .expect("no partial vector")
             .is_empty()
     );
@@ -1609,6 +1623,7 @@ fn writes_fragments_across_native_batch_boundaries() {
             let mut entity = prototype.fragment.as_entity().expect("standalone").clone();
             entity.id = EntityId::new(format!("batch-entity-{index}")).expect("entity ID");
             IndexedFragment {
+                model: "fixture/fixture-model".into(),
                 fragment: EntityFragment::Standalone(entity),
                 vector: prototype.vector.clone(),
             }
@@ -1630,7 +1645,12 @@ fn writes_fragments_across_native_batch_boundaries() {
         entries.len()
     );
     let hits = storage
-        .search_vector(&prototype.vector, 10, Some(&filter))
+        .search_vector(
+            "fixture/fixture-model",
+            &prototype.vector,
+            10,
+            Some(&filter),
+        )
         .expect("last batch ANN");
     assert_eq!(hits.len(), 1);
     let loaded = storage
@@ -1648,7 +1668,12 @@ fn writes_fragments_across_native_batch_boundaries() {
     );
     assert!(
         storage
-            .search_vector(&prototype.vector, 10, Some(&filter))
+            .search_vector(
+                "fixture/fixture-model",
+                &prototype.vector,
+                10,
+                Some(&filter)
+            )
             .expect("no stale vector")
             .is_empty()
     );
@@ -1684,8 +1709,7 @@ fn reopened_readers_detect_non_unicode_names_without_loading_the_allocation_cach
 }
 
 #[test]
-fn directory_filters_rebuild_missing_cache_and_recovery_ignores_stale_cache() {
-    use super::super::directories::CACHE_NAME;
+fn directory_collection_is_authoritative_and_legacy_cache_is_ignored() {
     let home = tempfile::tempdir().expect("workspace");
     let storage = open(home.path(), false);
     let (file, entry) = file_at(storage.as_ref(), "src/nested/file.rs");
@@ -1693,7 +1717,9 @@ fn directory_filters_rebuild_missing_cache_and_recovery_ignores_stale_cache() {
         .replace_file(&file, &[entry])
         .expect("indexed source");
     storage.close().expect("checkpoint");
-    let cache = home.path().join("storage").join(CACHE_NAME);
+    let cache = home.path().join("storage/directories.json");
+    assert!(!cache.exists());
+    assert!(home.path().join("storage/directories").is_dir());
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(
             crate::domain::SourcePath::new("src").expect("path"),
@@ -1704,7 +1730,7 @@ fn directory_filters_rebuild_missing_cache_and_recovery_ignores_stale_cache() {
         if corrupt {
             fs::write(&cache, b"invalid cache").expect("corrupt cache");
         } else {
-            fs::remove_file(&cache).expect("remove cache");
+            assert!(!cache.exists());
         }
         let reader = open(home.path(), true);
         assert_eq!(
@@ -1743,6 +1769,207 @@ fn directory_filters_rebuild_missing_cache_and_recovery_ignores_stale_cache() {
             .expect("recovered directory query")
             .len(),
         1
+    );
+    reader.close().expect("close reader");
+}
+
+fn multi_model_schema() -> Vec<EmbeddingModelInfo> {
+    let text = schema();
+    let mut vision = schema();
+    vision.model.name = "vision".into();
+    vision.dimension = 2;
+    vec![text, vision]
+}
+
+fn open_multi_model(path: &Path) -> Box<dyn WorkspaceIndexStorage> {
+    ZvecStorageFactory::new()
+        .open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: path.to_owned(),
+            embeddings: multi_model_schema(),
+        })
+        .expect("multi-model storage")
+}
+
+fn multi_model_file(storage: &dyn WorkspaceIndexStorage) -> (FileRecord, Vec<IndexedFragment>) {
+    let (file, text) = fixture(
+        Some(storage),
+        "nested/mixed",
+        "orchard text",
+        vec![1.0, 0.0, 0.0],
+    );
+    let mut image = text.clone();
+    image.model = "fixture/vision".into();
+    image.vector = vec![0.0, 1.0];
+    let EntityFragment::Standalone(entity) = &mut image.fragment else {
+        unreachable!()
+    };
+    entity.id = EntityId::new("image-fragment").expect("image ID");
+    entity.content = EntityContent::Source(Content::Image(
+        crate::domain::ImageContent::new(vec![1, 2, 3], crate::domain::FileFormat::Png)
+            .expect("image"),
+    ));
+    (file, vec![text, image])
+}
+
+#[test]
+fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
+    let home = tempfile::tempdir().expect("workspace");
+    let writer = open_multi_model(home.path());
+    let (file, entries) = multi_model_file(writer.as_ref());
+    writer.replace_file(&file, &entries).expect("complete file");
+    writer.close().expect("checkpoint");
+
+    let storage_path = home.path().join("storage");
+    let mut collections = fs::read_dir(&storage_path)
+        .expect("storage layout")
+        .map(|entry| entry.expect("directory entry"))
+        .filter(|entry| entry.file_type().expect("type").is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    collections.sort();
+    let mut expected = vec![
+        "directories".to_owned(),
+        "files".to_owned(),
+        "entities".to_owned(),
+    ];
+    expected.extend(
+        multi_model_schema()
+            .iter()
+            .map(super::super::zvec::fragment_collection_name),
+    );
+    expected.sort();
+    assert_eq!(
+        collections, expected,
+        "three canonical collections plus one per model"
+    );
+    assert!(!storage_path.join("directories.json").exists());
+
+    let reader = open(home.path(), true);
+    for (model, vector, id) in [
+        (
+            "fixture/fixture-model",
+            vec![1.0, 0.0, 0.0],
+            entries[0].fragment.document_id(),
+        ),
+        (
+            "fixture/vision",
+            vec![0.0, 1.0],
+            entries[1].fragment.document_id(),
+        ),
+    ] {
+        let hits = reader
+            .search_vector(model, &vector, 10, None)
+            .expect("partition query");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document_id, id);
+        let loaded = reader.load_search_hits(&hits).expect("canonical fragment");
+        assert_eq!(loaded.fragments[id].document_id(), id);
+    }
+    assert!(
+        reader
+            .search_vector("fixture/unknown", &[1.0, 0.0], 10, None)
+            .is_err()
+    );
+    assert!(
+        reader
+            .search_vector("fixture/vision", &[1.0, 0.0, 0.0], 10, None)
+            .is_err()
+    );
+    // Indexed owner metadata is searchable in both disjoint partitions.
+    let hits = reader.search_fts("name", 10, None).expect("all-table FTS");
+    assert_eq!(hits.len(), 2);
+    assert_ne!(hits[0].document_id, hits[1].document_id);
+    reader.close().expect("close reader");
+
+    let writer = open_multi_model(home.path());
+    writer
+        .mark_file_failed(&file, "vision request failed")
+        .expect("file failure");
+    let failed = writer.list_files().expect("failed files");
+    assert!(
+        matches!(&failed[0].index_status, FileIndexStatus::Failed { error } if error == "vision request failed")
+    );
+    assert!(
+        writer
+            .search_fts("name", 10, None)
+            .expect("no FTS remnants")
+            .is_empty()
+    );
+    for entry in &entries {
+        assert!(
+            writer
+                .search_vector(&entry.model, &entry.vector, 10, None)
+                .expect("no vector remnants")
+                .is_empty()
+        );
+    }
+    writer.close().expect("persist failure");
+    let native =
+        NativeStore::open(&storage_path, &multi_model_schema(), true).expect("inspect failed file");
+    assert_eq!(native.list_files().expect("failure remains").len(), 1);
+    assert!(
+        native.load_search_hits(&hits).is_err(),
+        "canonical entities were removed too"
+    );
+}
+
+#[test]
+fn model_set_changes_require_rebuild_and_order_does_not() {
+    let home = tempfile::tempdir().expect("workspace");
+    open_multi_model(home.path()).close().expect("checkpoint");
+    let mut reversed = multi_model_schema();
+    reversed.reverse();
+    let factory = ZvecStorageFactory::new();
+    factory
+        .open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: home.path().to_owned(),
+            embeddings: reversed,
+        })
+        .expect("same models in different order")
+        .close()
+        .expect("close");
+    for embeddings in [vec![schema()], vec![schema(), schema()]] {
+        assert!(
+            factory
+                .open(WorkspaceIndexStorageOptions::ReadWrite {
+                    storage_path: home.path().to_owned(),
+                    embeddings,
+                })
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn pending_multi_model_file_recovery_discards_every_partition() {
+    let home = tempfile::tempdir().expect("workspace");
+    let writer = open_multi_model(home.path());
+    let (file, entries) = multi_model_file(writer.as_ref());
+    writer.replace_file(&file, &entries).expect("complete file");
+    writer.close().expect("checkpoint");
+    pending::write(
+        &home.path().join("storage"),
+        &PendingChanges::from([(file.id, PendingChange::reindex(&file))]),
+    )
+    .expect("interrupted replacement intent");
+    let reader = open(home.path(), true);
+    assert!(matches!(
+        reader.list_files().expect("recovered source")[0].index_status,
+        FileIndexStatus::NotIndexed
+    ));
+    for entry in &entries {
+        assert!(
+            reader
+                .search_vector(&entry.model, &entry.vector, 10, None)
+                .expect("recovered partition")
+                .is_empty()
+        );
+    }
+    assert!(
+        reader
+            .search_fts("name", 10, None)
+            .expect("recovered full text")
+            .is_empty()
     );
     reader.close().expect("close reader");
 }

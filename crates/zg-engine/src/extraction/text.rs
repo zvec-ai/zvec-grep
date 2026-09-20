@@ -37,7 +37,7 @@ pub(super) fn extract_plain_text_fragments(
             ExtractedFragment::Standalone(ExtractedEntity {
                 index,
                 range: SourceRange::Text(chunk.range),
-                content: EntityContent::Source(vec![Content::Text(chunk.text)]),
+                content: EntityContent::Source(Content::Text(chunk.text)),
                 metadata: None,
             })
         })

@@ -34,8 +34,17 @@ pub struct IndexAuthorization {
 pub fn index_authorization(
     options: &crate::api::index::IndexOptions,
 ) -> Result<Option<IndexAuthorization>, EngineError> {
+    Ok(index_authorizations(options)?.into_iter().next())
+}
+
+/// Resolve every remote destination used by the configured content routes.
+/// # Errors
+/// Returns invalid configuration, workspace or authorization errors.
+pub fn index_authorizations(
+    options: &crate::api::index::IndexOptions,
+) -> Result<Vec<IndexAuthorization>, EngineError> {
     if options.allow_remote {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let requested_root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
     let location = match find_nearest_workspace(&requested_root)? {
@@ -43,7 +52,34 @@ pub fn index_authorization(
         None => workspace_index_location(&requested_root)?,
     };
     let existing = read_workspace_manifest(&location.home)?;
-    authorization_for_manifest(options, &location.root, existing.as_ref())
+    authorizations_for_manifest(options, &location.root, existing.as_ref())
+}
+
+fn authorizations_for_manifest(
+    options: &crate::api::index::IndexOptions,
+    root: &Path,
+    existing: Option<&WorkspaceManifest>,
+) -> Result<Vec<IndexAuthorization>, EngineError> {
+    let Some(routes) = crate::pipelines::indexing::service::embedding_specs(existing, options)?
+    else {
+        return Ok(authorization_for_manifest(options, root, existing)?
+            .into_iter()
+            .collect());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut targets = Vec::new();
+    for spec in routes.values() {
+        if !seen.insert(&spec.reference) {
+            continue;
+        }
+        let mut request = options.clone();
+        request.embedding_routes = None;
+        request.embedding = Some(spec.clone());
+        if let Some(target) = authorization_for_manifest(&request, root, existing)? {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
 }
 
 fn authorization_for_manifest(
@@ -69,10 +105,18 @@ fn authorization_for_manifest(
                     .as_ref()
                     .and_then(|e| e.endpoint.as_deref())
             })
-            .or_else(|| existing.and_then(|m| m.embedding_runtime.endpoint.as_deref())),
+            .or_else(|| {
+                existing
+                    .and_then(|m| m.embedding_runtimes.get(&model))
+                    .and_then(|runtime| runtime.endpoint.as_deref())
+            }),
     )?;
     let root = fs::canonicalize(workspace_root).map_err(io)?;
-    if read_grant(&root)?.is_some_and(|g| g.model == model && g.endpoint == endpoint) {
+    if approved_destination(&root, &model, &endpoint, &options.authorized_remote)
+        || read_grants(&root)?
+            .iter()
+            .any(|g| g.model == model && g.endpoint == endpoint)
+    {
         return Ok(None);
     }
     let url = reqwest::Url::parse(&endpoint)
@@ -105,9 +149,18 @@ pub struct QueryAuthorization {
 pub fn query_authorization(
     options: &crate::api::context::ContextOptions,
 ) -> Result<Option<QueryAuthorization>, EngineError> {
+    Ok(query_authorizations(options)?.into_iter().next())
+}
+
+/// Resolve all query and optional refresh destinations before sending data.
+/// # Errors
+/// Returns invalid request, workspace or consent errors.
+pub fn query_authorizations(
+    options: &crate::api::context::ContextOptions,
+) -> Result<Vec<QueryAuthorization>, EngineError> {
     use crate::api::context::options::{ContextRouteMode, RefreshPolicy};
     if options.rg || options.allow_remote {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let request = crate::pipelines::indexed_search::context::normalize_context_request(options)?;
     let query_text = request
@@ -118,32 +171,36 @@ pub fn query_authorization(
         .refresh
         .map_or(options.auto_update, |refresh| refresh != RefreshPolicy::Off);
     if !query_text && !workspace_content {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
     let Some(location) = find_nearest_workspace(&root)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Some(manifest) = read_workspace_manifest(&location.home)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     if manifest.embedding().is_none() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let target = authorization_for_manifest(
+    let targets = authorizations_for_manifest(
         &crate::api::index::IndexOptions {
             root: Some(location.root.clone()),
             endpoint: options.endpoint.clone(),
+            authorized_remote: options.authorized_remote.clone(),
             ..crate::api::index::IndexOptions::default()
         },
         &location.root,
         Some(&manifest),
     )?;
-    Ok(target.map(|target| QueryAuthorization {
-        target,
-        query_text,
-        workspace_content,
-    }))
+    Ok(targets
+        .into_iter()
+        .map(|target| QueryAuthorization {
+            target,
+            query_text,
+            workspace_content,
+        })
+        .collect())
 }
 
 /// Persists a destination explicitly approved by the terminal user.
@@ -177,6 +234,13 @@ struct Grant {
 struct SignedGrant {
     grant: Grant,
     signature: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SignedGrants {
+    One(SignedGrant),
+    Many(Vec<SignedGrant>),
 }
 
 #[allow(
@@ -353,7 +417,8 @@ pub fn grant(
         endpoint.or_else(|| {
             manifest
                 .as_ref()
-                .and_then(|m| m.embedding_runtime.endpoint.as_deref())
+                .and_then(|m| m.embedding_runtimes.get(&model))
+                .and_then(|runtime| runtime.endpoint.as_deref())
         }),
     )?;
     let grant = Grant {
@@ -370,11 +435,6 @@ pub fn grant(
 
 fn persist_grant(grant: Grant) -> Result<(), EngineError> {
     let location = workspace_index_location(&grant.root)?;
-    let signature = hmac_sha256::HMAC::mac(
-        serde_json::to_vec(&grant).map_err(json)?,
-        signing_key(true)?,
-    )
-    .to_vec();
     let mut builder = fs::DirBuilder::new();
     builder.recursive(false);
     #[cfg(unix)]
@@ -393,41 +453,72 @@ fn persist_grant(grant: Grant) -> Result<(), EngineError> {
             &error,
         ));
     }
-    let bytes = serde_json::to_vec_pretty(&SignedGrant { grant, signature }).map_err(json)?;
+    let _lock = crate::workspace::lock::acquire_read_write_lock(
+        &location.home.join("authorization.lock"),
+        crate::workspace::lock::LockMode::Write,
+        "authorization.grant",
+    )?;
+    let mut grants = read_grants(&grant.root)?;
+    grants.retain(|previous| previous.model != grant.model || previous.endpoint != grant.endpoint);
+    grants.push(grant);
+    let key = signing_key(true)?;
+    let signed = grants
+        .into_iter()
+        .map(|grant| {
+            let signature =
+                hmac_sha256::HMAC::mac(serde_json::to_vec(&grant).map_err(json)?, &key).to_vec();
+            Ok(SignedGrant { grant, signature })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    let bytes = if signed.len() == 1 {
+        serde_json::to_vec_pretty(&signed[0])
+    } else {
+        serde_json::to_vec_pretty(&signed)
+    }
+    .map_err(json)?;
     atomic_write(&location.home.join("authorization.json"), &bytes)?;
     sync_directory(&location.root)
 }
 
-fn read_grant(root: &Path) -> Result<Option<Grant>, EngineError> {
+fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
     let path = root.join(".zvec-grep/authorization.json");
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(io(e)),
     };
-    let signed: SignedGrant = serde_json::from_slice(&bytes).map_err(json)?;
-    let expected = hmac_sha256::HMAC::mac(
-        serde_json::to_vec(&signed.grant).map_err(json)?,
-        signing_key(false)?,
-    );
-    let valid = signed.signature.len() == expected.len()
-        && signed
-            .signature
-            .iter()
-            .zip(expected)
-            .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
-            == 0;
-    if !valid
-        || signed.grant.version != 1
-        || signed.grant.root != root
-        || signed.grant.capability != "embedding"
-        || signed.grant.scope != "workspace"
-    {
-        return Err(EngineError::permission_denied(
-            "Invalid workspace authorization signature or scope; run zg auth grant again",
-        ));
-    }
-    Ok(Some(signed.grant))
+    let records: SignedGrants = serde_json::from_slice(&bytes).map_err(json)?;
+    let records = match records {
+        SignedGrants::One(record) => vec![record],
+        SignedGrants::Many(records) => records,
+    };
+    records
+        .into_iter()
+        .map(|signed| {
+            let expected = hmac_sha256::HMAC::mac(
+                serde_json::to_vec(&signed.grant).map_err(json)?,
+                signing_key(false)?,
+            );
+            let valid = signed.signature.len() == expected.len()
+                && signed
+                    .signature
+                    .iter()
+                    .zip(expected)
+                    .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+                    == 0;
+            if !valid
+                || signed.grant.version != 1
+                || signed.grant.root != root
+                || signed.grant.capability != "embedding"
+                || signed.grant.scope != "workspace"
+            {
+                return Err(EngineError::permission_denied(
+                    "Invalid workspace authorization signature or scope; run zg auth grant again",
+                ));
+            }
+            Ok(signed.grant)
+        })
+        .collect()
 }
 
 /// Reports verified consent without creating any state.
@@ -436,17 +527,21 @@ fn read_grant(root: &Path) -> Result<Option<Grant>, EngineError> {
 /// Returns an error if existing consent cannot be verified.
 pub fn status(root: &Path) -> Result<String, EngineError> {
     let root = root_path(root)?;
-    let Some(grant) = read_grant(&root)? else {
+    let grants = read_grants(&root)?;
+    if grants.is_empty() {
         return Ok(format!(
             "Remote Embedding: not authorized\nRoot: {}",
             root.display()
         ));
-    };
+    }
+    let destinations = grants
+        .iter()
+        .map(|grant| format!("Model: {}\nEndpoint: {}", grant.model, grant.endpoint))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(format!(
-        "Remote Embedding: authorized\nRoot: {}\nScope: workspace\nModel: {}\nEndpoint: {}",
-        root.display(),
-        grant.model,
-        grant.endpoint
+        "Remote Embedding: authorized\nRoot: {}\nScope: workspace\n{destinations}",
+        root.display()
     ))
 }
 
@@ -468,6 +563,33 @@ pub fn revoke(root: &Path) -> Result<String, EngineError> {
     ))
 }
 
+fn approved_destination(
+    root: &Path,
+    model: &str,
+    endpoint: &str,
+    targets: &[IndexAuthorization],
+) -> bool {
+    targets
+        .iter()
+        .any(|target| target.root == root && target.model == model && target.endpoint == endpoint)
+}
+
+pub(crate) fn require_with_targets(
+    root: &Path,
+    model: &str,
+    endpoint: &str,
+    once: bool,
+    targets: &[IndexAuthorization],
+) -> Result<(), EngineError> {
+    let root = fs::canonicalize(root).map_err(io)?;
+    require(
+        &root,
+        model,
+        endpoint,
+        once || approved_destination(&root, model, endpoint, targets),
+    )
+}
+
 pub(crate) fn require(
     root: &Path,
     model: &str,
@@ -478,7 +600,10 @@ pub(crate) fn require(
         return Ok(());
     }
     let root = fs::canonicalize(root).map_err(io)?;
-    if read_grant(&root)?.is_some_and(|g| g.model == model && g.endpoint == endpoint) {
+    if read_grants(&root)?
+        .iter()
+        .any(|g| g.model == model && g.endpoint == endpoint)
+    {
         return Ok(());
     }
     Err(EngineError::permission_denied(format!(
@@ -494,6 +619,103 @@ mod tests {
         api::index::{IndexOptions, options::EmbeddingModelSpec},
         domain::model::Device,
     };
+
+    #[test]
+    fn content_routes_disclose_each_remote_destination_once() {
+        use crate::domain::ContentKind;
+        use std::collections::BTreeMap;
+
+        let directory = tempfile::tempdir().expect("workspace");
+        let spec = |reference: &str, endpoint: &str| EmbeddingModelSpec {
+            reference: reference.into(),
+            revision: None,
+            cache_dir: None,
+            endpoint: Some(endpoint.into()),
+            device: Device::Auto,
+        };
+        let text = spec(
+            "qwen/text-embedding-v4",
+            "https://text.example.test/embeddings",
+        );
+        let image = spec(
+            "qwen/qwen3-vl-embedding",
+            "https://image.example.test/embeddings",
+        );
+        let options = IndexOptions {
+            root: Some(directory.path().into()),
+            embedding_routes: Some(BTreeMap::from([
+                (ContentKind::Text, text.clone()),
+                (ContentKind::Table, text),
+                (ContentKind::Image, image),
+            ])),
+            ..IndexOptions::default()
+        };
+        let targets = index_authorizations(&options).expect("all destinations");
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.model == "qwen/text-embedding-v4"
+                    && target.endpoint_host == "text.example.test")
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.model == "qwen/qwen3-vl-embedding"
+                    && target.endpoint_host == "image.example.test")
+        );
+        assert!(
+            !directory.path().join(".zvec-grep").exists(),
+            "disclosure is read-only"
+        );
+        let approved = IndexOptions {
+            authorized_remote: targets.clone(),
+            ..options.clone()
+        };
+        assert!(
+            index_authorizations(&approved)
+                .expect("approved destinations")
+                .is_empty()
+        );
+        let target = &targets[0];
+        require_with_targets(
+            directory.path(),
+            &target.model,
+            &target.endpoint,
+            false,
+            &targets,
+        )
+        .expect("exact approved destination");
+        let other_root = tempfile::tempdir().expect("different workspace");
+        for (root, model, endpoint) in [
+            (
+                directory.path(),
+                target.model.as_str(),
+                "https://changed.example.test/embeddings",
+            ),
+            (
+                directory.path(),
+                "qwen/unapproved-model",
+                target.endpoint.as_str(),
+            ),
+            (
+                other_root.path(),
+                target.model.as_str(),
+                target.endpoint.as_str(),
+            ),
+        ] {
+            assert!(require_with_targets(root, model, endpoint, false, &targets).is_err());
+        }
+        let once = IndexOptions {
+            allow_remote: true,
+            ..options
+        };
+        assert!(
+            index_authorizations(&once)
+                .expect("explicit invocation grant")
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn query_disclosure_uses_index_destination_and_actual_refresh_policy() {
@@ -591,35 +813,40 @@ mod tests {
                 name: "workspace".to_owned(),
                 root: directory.path().to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor {
-                    fts: crate::domain::FTS_CONFIG,
-                    embedding: EmbeddingModelInfo {
-                        model: crate::domain::model::ModelInfo {
-                            provider: "qwen".into(),
-                            name: "text-embedding-v4".into(),
-                            endpoint: None,
-                        },
-                        dimension: 1024,
-                        metric: Metric::Cosine,
-                        max_batch_size: 32,
-                        max_input_tokens: None,
-                        max_image_bytes: None,
+                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+                    model: crate::domain::model::ModelInfo {
+                        provider: "qwen".into(),
+                        name: "text-embedding-v4".into(),
+                        endpoint: None,
                     },
-                }),
+                    dimension: 1024,
+                    metric: Metric::Cosine,
+                    max_batch_size: 32,
+                    max_input_tokens: None,
+                    max_image_bytes: None,
+                })),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 1,
             },
             home.clone(),
             Some(5),
-            ModelConfig {
-                endpoint: Some("https://active.test/embeddings".into()),
-                ..ModelConfig::default()
-            },
+            std::collections::BTreeMap::from([(
+                "qwen/text-embedding-v4".into(),
+                ModelConfig {
+                    endpoint: Some("https://active.test/embeddings".into()),
+                    ..ModelConfig::default()
+                },
+            )]),
         )
         .expect("manifest");
         write_workspace_manifest(&home, &active).expect("write active");
         let mut target = active.clone();
-        target.embedding_runtime.endpoint = Some("https://staging.test/embeddings".into());
+        target
+            .embedding_runtimes
+            .values_mut()
+            .next()
+            .expect("runtime")
+            .endpoint = Some("https://staging.test/embeddings".into());
         prepare_build(target, Some(&active)).expect("staged build");
         let index = index_authorization(&IndexOptions {
             root: Some(directory.path().into()),

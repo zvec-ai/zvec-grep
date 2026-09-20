@@ -82,6 +82,10 @@ pub mod options {
         /// Allows remote embedding for this operation without persisting a grant.
         #[serde(default)]
         pub allow_remote: bool,
+        /// Exact destinations approved by interactive consent for this operation.
+        /// Separate from the explicit blanket `allow_remote` option.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub authorized_remote: Vec<crate::authorization::IndexAuthorization>,
         #[serde(default)]
         pub api_key: Option<String>,
         #[serde(default)]
@@ -159,6 +163,7 @@ pub mod options {
                 follow: false,
                 embedding_concurrency: None,
                 allow_remote: false,
+                authorized_remote: Vec::new(),
                 api_key: None,
                 endpoint: None,
                 authorization_model: None,
