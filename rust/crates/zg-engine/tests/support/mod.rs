@@ -40,6 +40,33 @@ pub fn native_documents(path: &Path) -> Result<Vec<zvec_rust::Doc>, Box<dyn std:
     Ok(documents)
 }
 
+/// Persist an interrupted file operation without depending on production test hooks.
+#[allow(dead_code)] // Shared by storage tests, not by file-selection tests.
+pub fn set_native_file_status(
+    index_path: &Path,
+    id: u32,
+    status: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = index_path.join("files");
+    #[cfg(windows)]
+    let path = dunce::simplified(&path);
+    let collection = zvec_rust::Collection::open(path.to_str().expect("UTF-8 path"), None)?;
+    let key = format!("f{id}");
+    let document = collection.fetch(&[&key])?.pop().expect("stored file");
+    let mut payload: Value =
+        serde_json::from_str(&document.get_string("payload")?.expect("file payload"))?;
+    payload["value"]["index_status"] = json!({"kind": status});
+    let mut update = zvec_rust::Doc::new()?;
+    update.set_pk(&key);
+    update.add_string("payload", &serde_json::to_string(&payload)?)?;
+    let result = collection.update(&[&update])?;
+    assert_eq!(result.error_count, 0, "update file state: {result:?}");
+    assert_eq!(result.success_count, 1);
+    collection.flush()?;
+    collection.close()?;
+    Ok(())
+}
+
 pub fn index_options(root: &Path) -> IndexOptions {
     IndexOptions {
         root: Some(root.to_path_buf()),

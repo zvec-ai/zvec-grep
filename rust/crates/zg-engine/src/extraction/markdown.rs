@@ -59,10 +59,13 @@ pub(super) fn extract(
                 section.start_index,
                 section.end_index,
             );
-            let content = range
-                .slice(&source.text)
-                .expect("section range refers to source")
-                .to_owned();
+            let content = crate::utils::slice_text(
+                &source.text,
+                range.start_byte_offset(),
+                range.end_byte_offset(),
+            )
+            .expect("section range refers to source")
+            .to_owned();
             ExtractedEntity {
                 index,
                 source_range: Range::Text(range),
@@ -302,6 +305,10 @@ mod tests {
             )
         );
 
+        assert_source_backed(&source, &fragments);
+    }
+
+    fn assert_source_backed(source: &super::TextSource, fragments: &[super::ExtractedEntity]) {
         for (index, entity) in fragments.iter().enumerate() {
             assert_eq!(entity.index, index);
             let Content::Text(content) = &entity.content else {
@@ -310,32 +317,27 @@ mod tests {
             let Range::Text(range) = entity.source_range else {
                 panic!("text range expected");
             };
-            assert_eq!(range.slice(&source.text).expect("source range"), content);
+            assert_eq!(
+                crate::utils::slice_text(
+                    &source.text,
+                    range.start_byte_offset(),
+                    range.end_byte_offset()
+                )
+                .expect("source range"),
+                content
+            );
             let mut covered = vec![false; content.len()];
             for fragment in &entity.fragments {
-                let fragment_content = fragment
-                    .range
-                    .extract(&entity.content)
-                    .expect("fragment content");
                 let (start, end) = match fragment.range {
                     Range::Full => (0, content.len()),
                     Range::Byte(local) => (
-                        usize::try_from(local.start_offset).expect("fragment start"),
-                        usize::try_from(local.end_offset).expect("fragment end"),
+                        usize::try_from(local.start_offset()).expect("fragment start"),
+                        usize::try_from(local.end_offset()).expect("fragment end"),
                     ),
                     Range::Text(_) => panic!("fragments must store byte offsets"),
                 };
                 assert!(start < end && end <= content.len());
-                assert_eq!(
-                    fragment_content,
-                    Content::Text(
-                        source
-                            .text
-                            .get(range.start_byte_offset() + start..range.start_byte_offset() + end)
-                            .expect("fragment source")
-                            .to_owned()
-                    )
-                );
+                assert!(content.is_char_boundary(start) && content.is_char_boundary(end));
                 covered[start..end].fill(true);
             }
             assert!(

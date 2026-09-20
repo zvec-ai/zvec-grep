@@ -15,7 +15,7 @@ use std::{
 
 use crate::{
     EngineError,
-    domain::TextRange,
+    domain::{Range, TextRange},
     utils::{decode_text, line_byte_offsets},
 };
 use grep::{
@@ -174,8 +174,9 @@ fn search_sync(
 
     expand_context(&mut lexical_matches, request);
     debug_assert!(lexical_matches.iter().all(|item| {
-        item.range
-            .contains(item.excerpt_range.as_ref().unwrap_or(&item.range))
+        Range::Text(item.range)
+            .contains(&Range::Text(item.excerpt_range.unwrap_or(item.range)))
+            .expect("text ranges have the same kind")
     }));
     lexical_matches.sort_by(|left, right| {
         left.relative_path.cmp(&right.relative_path).then(
@@ -959,7 +960,7 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
             continue;
         };
         let excerpt = item.range;
-        if TextRange::from_offsets(
+        if crate::utils::text_range_from_offsets(
             &source.text,
             &source.line_starts,
             excerpt.start_byte_offset(),
@@ -994,7 +995,7 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         let start_byte_offset = source.line_starts[start_line - 1];
         let end_byte_offset = (last_start + trim_line_terminator(last_line.as_bytes()).len())
             .max(excerpt.end_byte_offset());
-        let Ok(range) = TextRange::from_offsets(
+        let Ok(range) = crate::utils::text_range_from_offsets(
             &source.text,
             &source.line_starts,
             start_byte_offset,
@@ -1195,19 +1196,43 @@ mod tests {
             assert_eq!(item.range.start_line(), 1);
             assert_eq!(item.range.end_line(), 3);
             assert_eq!(item.range.end_byte_column(), "尾巴".len());
-            assert_eq!(item.range.slice(text).expect("context range"), item.content);
+            assert_eq!(
+                crate::utils::slice_text(
+                    text,
+                    item.range.start_byte_offset(),
+                    item.range.end_byte_offset()
+                )
+                .expect("context range"),
+                item.content
+            );
             let excerpt = item.excerpt_range.expect("matched span");
             assert_eq!(excerpt.start_line(), 2);
             assert_eq!(excerpt.start_byte_column(), 13);
             assert_eq!(excerpt.end_byte_column(), 19);
-            assert_eq!(excerpt.slice(text).expect("matched range"), "你好");
+            assert_eq!(
+                crate::utils::slice_text(
+                    text,
+                    excerpt.start_byte_offset(),
+                    excerpt.end_byte_offset()
+                )
+                .expect("matched range"),
+                "你好"
+            );
             let line = text.lines().nth(1).expect("matched line");
             assert_eq!(
                 &line[excerpt.start_byte_column()..excerpt.end_byte_column()],
                 "你好"
             );
         }
+    }
 
+    #[test]
+    fn context_preserves_a_half_open_match_ending_at_the_next_line() {
+        let root = TempDir::new().expect("temp dir");
+        let text = "前😀\r\nlet x = \"😀你好\";\r\n尾巴\r\n";
+        fs::write(root.path().join("source-0.txt"), text).expect("fixture");
+        let mut request = request("你好");
+        request.options.matching.before_context = 1;
         let start = text.find("let").expect("matched line");
         let end = text.find("尾巴").expect("following line");
         let range =
@@ -1227,7 +1252,12 @@ mod tests {
         assert_eq!(items[0].range.end_line(), 3);
         assert_eq!(items[0].range.end_byte_column(), 0);
         assert_eq!(
-            items[0].range.slice(text).expect("context range"),
+            crate::utils::slice_text(
+                text,
+                items[0].range.start_byte_offset(),
+                items[0].range.end_byte_offset(),
+            )
+            .expect("context range"),
             items[0].content
         );
     }

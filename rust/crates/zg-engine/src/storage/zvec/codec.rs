@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-const VERSION: u16 = 10;
+const VERSION: u16 = 12;
 // Nested tables add several JSON containers; keep records below serde's recursion limit.
 const MAX_TABLE_DEPTH: usize = 16;
 
@@ -33,8 +33,8 @@ pub(crate) fn decode_file(json: &str) -> EngineResult<FileRecord> {
 }
 
 /// One canonical entity record contains its content once and all fragment selectors.
+/// The storage write entry point validates entities before encoding.
 pub(super) fn encode_entity(entity: &Entity) -> EngineResult<String> {
-    validate_entity(entity)?;
     encode(EntityRecord::from(entity), "entity")
 }
 
@@ -43,7 +43,10 @@ pub(super) fn decode_entity(json: &str, metadata: Option<&EntityMetadata>) -> En
     let entity = record
         .into_entity(metadata)
         .map_err(|error| invalid_record("entity", &error))?;
-    validate_entity(&entity).map_err(|error| invalid_record("entity", &error))?;
+    entity
+        .validate()
+        .and_then(|()| validate_content(&entity.content))
+        .map_err(|error| invalid_record("entity", &error))?;
     Ok(entity)
 }
 
@@ -102,6 +105,7 @@ enum IndexStatusRecord<'a> {
         indexed_epoch_ms: u64,
         entity_count: u64,
     },
+    Deleting {},
     Failed {
         error: Cow<'a, str>,
     },
@@ -118,6 +122,7 @@ impl<'a> From<&'a FileIndexStatus> for IndexStatusRecord<'a> {
                 indexed_epoch_ms: *indexed_epoch_ms,
                 entity_count: *entity_count,
             },
+            FileIndexStatus::Deleting => Self::Deleting {},
             FileIndexStatus::Failed { error } => Self::Failed {
                 error: error.as_str().into(),
             },
@@ -136,6 +141,7 @@ impl From<IndexStatusRecord<'_>> for FileIndexStatus {
                 indexed_epoch_ms,
                 entity_count,
             },
+            IndexStatusRecord::Deleting {} => Self::Deleting,
             IndexStatusRecord::Failed { error } => Self::Failed {
                 error: error.into_owned(),
             },
@@ -284,7 +290,7 @@ impl<'a> From<&'a Entity> for EntityRecord<'a> {
 impl EntityRecord<'_> {
     fn into_entity(self, metadata: Option<&EntityMetadata>) -> EngineResult<Entity> {
         Ok(Entity {
-            id: EntityId::new(self.id.into_owned())?,
+            id: EntityId::from_string(self.id.into_owned()),
             file_id: FileId::new(self.file_id),
             source_range: self.source_range.try_into()?,
             content: decode_content(self.content)?,
@@ -294,7 +300,7 @@ impl EntityRecord<'_> {
                 .into_iter()
                 .map(|fragment| {
                     Ok(EntityFragment {
-                        id: FragmentId::new(fragment.id.into_owned())?,
+                        id: FragmentId::from_string(fragment.id.into_owned()),
                         range: fragment.range.try_into()?,
                     })
                 })
@@ -473,8 +479,8 @@ impl From<Range> for RangeRecord {
                 end_byte_column: range.end_byte_column(),
             },
             Range::Byte(range) => Self::Byte {
-                start_offset: range.start_offset,
-                end_offset: range.end_offset,
+                start_offset: range.start_offset(),
+                end_offset: range.end_offset(),
             },
         }
     }
@@ -504,30 +510,28 @@ impl TryFrom<RangeRecord> for Range {
             RangeRecord::Byte {
                 start_offset,
                 end_offset,
-            } => Self::Byte(ByteRange {
-                start_offset,
-                end_offset,
-            }),
+            } => Self::Byte(ByteRange::new(start_offset, end_offset)?),
         })
     }
 }
 
-pub(super) fn validate_entity(entity: &Entity) -> EngineResult<()> {
-    crate::domain::validate_entities(entity.file_id, std::slice::from_ref(entity))?;
-    validate_contents(std::slice::from_ref(&entity.content), 0)
-}
-
-fn validate_contents(contents: &[Content], table_depth: usize) -> EngineResult<()> {
-    for content in contents {
-        if let Content::Table(table) = content {
-            if table_depth == MAX_TABLE_DEPTH {
-                return Err(EngineError::invalid_argument(format!(
-                    "stored table nesting must not exceed {MAX_TABLE_DEPTH} levels"
-                )));
-            }
-            validate_table(table)?;
-            for cell in &table.cells {
-                validate_contents(&cell.contents, table_depth + 1)?;
+pub(super) fn validate_content(content: &Content) -> EngineResult<()> {
+    let Content::Table(table) = content else {
+        return Ok(());
+    };
+    let mut tables = vec![(table, 1)];
+    while let Some((table, depth)) = tables.pop() {
+        if depth > MAX_TABLE_DEPTH {
+            return Err(EngineError::invalid_argument(format!(
+                "stored table nesting must not exceed {MAX_TABLE_DEPTH} levels"
+            )));
+        }
+        validate_table(table)?;
+        for cell in &table.cells {
+            for content in &cell.contents {
+                if let Content::Table(nested) = content {
+                    tables.push((nested, depth + 1));
+                }
             }
         }
     }
@@ -635,23 +639,25 @@ mod tests {
         }));
         let mut mixed = cell(0, 1, 1, 2, TableCellRole::Data);
         mixed.contents.push(image);
+        let content = Content::Table(TableContent {
+            row_count: 2,
+            column_count: 3,
+            cells: vec![
+                cell(0, 0, 2, 1, TableCellRole::Header),
+                mixed,
+                nested,
+                cell(1, 2, 1, 1, TableCellRole::Data),
+            ],
+        });
+        let id = EntityId::new(file().id, &content, text_range()).expect("entity id");
         Entity {
-            id: EntityId::new("entity").expect("entity id"),
+            id: id.clone(),
             file_id: file().id,
             source_range: text_range(),
-            content: Content::Table(TableContent {
-                row_count: 2,
-                column_count: 3,
-                cells: vec![
-                    cell(0, 0, 2, 1, TableCellRole::Header),
-                    mixed,
-                    nested,
-                    cell(1, 2, 1, 1, TableCellRole::Data),
-                ],
-            }),
+            content,
             metadata: None,
             fragments: vec![EntityFragment {
-                id: FragmentId::new("fragment").expect("fragment id"),
+                id: FragmentId::new(&id, 0),
                 range: Range::Full,
             }],
         }
@@ -749,6 +755,7 @@ mod tests {
                 indexed_epoch_ms: 789,
                 entity_count: u64::MAX,
             },
+            FileIndexStatus::Deleting,
             FileIndexStatus::Failed {
                 error: "extraction failed".into(),
             },
@@ -802,10 +809,7 @@ mod tests {
                 json!({"kind":"text", "start_line":2, "end_line":2, "start_byte_offset":7, "end_byte_offset":18, "start_byte_column":0, "end_byte_column":11}),
             ),
             (
-                Range::Byte(ByteRange {
-                    start_offset: 2,
-                    end_offset: u64::MAX,
-                }),
+                Range::Byte(ByteRange::new(2, u64::MAX).expect("ordered byte offsets")),
                 json!({"kind":"byte", "start_offset":2, "end_offset":u64::MAX}),
             ),
         ] {
@@ -833,11 +837,8 @@ mod tests {
         entity.source_range =
             Range::Text(TextRange::from_coordinates(10, 18, 1, 1, 10, 18).expect("range"));
         entity.fragments.push(EntityFragment {
-            id: FragmentId::new("slice").expect("fragment id"),
-            range: Range::Byte(ByteRange {
-                start_offset: 1,
-                end_offset: 7,
-            }),
+            id: FragmentId::new(&entity.id, 1),
+            range: Range::Byte(ByteRange::new(1, 7).expect("ordered byte offsets")),
         });
         entity.metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
             heading: Some("heading".into()),
@@ -850,24 +851,10 @@ mod tests {
         assert_eq!(
             record["value"]["fragments"][1],
             json!({
-                "id":"slice", "range":{"kind":"byte", "start_offset":1, "end_offset":7},
+                "id":entity.fragments[1].id.as_str(), "range":{"kind":"byte", "start_offset":1, "end_offset":7},
             })
         );
-        let restored = decode_entity(&encoded, entity.metadata.as_ref()).expect("decode entity");
-        assert_eq!(
-            restored.fragments[1]
-                .range
-                .extract(&restored.content)
-                .expect("extract"),
-            Content::Text("中文".into())
-        );
-        assert_eq!(
-            restored
-                .fragment_source_range(&restored.fragments[1])
-                .expect("source location"),
-            Range::Text(TextRange::from_coordinates(11, 17, 1, 1, 11, 17).expect("source range"))
-        );
-        for (start, end) in [(2, 7), (1, 9), (1, 1)] {
+        for (start, end) in [(2, 7), (1, 9), (1, 1), (7, 1)] {
             let mut invalid = record.clone();
             invalid["value"]["fragments"][1]["range"] = json!({
                 "kind":"byte", "start_offset":start, "end_offset":end,
@@ -943,11 +930,9 @@ mod tests {
                 assert!(error.message().contains("rebuild the index"));
             }
         }
-        for field in ["id", "file_id"] {
-            let mut record = original.clone();
-            record["value"][field] = json!("");
-            assert_corrupt_entity(&record);
-        }
+        let mut record = original.clone();
+        record["value"]["file_id"] = json!("");
+        assert_corrupt_entity(&record);
         for (field, value) in [
             ("format", json!("rust")),
             ("format", json!("not-a-format")),
@@ -964,9 +949,6 @@ mod tests {
             record["value"]["source_range"][field] = json!(value);
             assert_corrupt_entity(&record);
         }
-        let mut record = original;
-        record["value"]["fragments"][0]["id"] = json!("");
-        assert_corrupt_entity(&record);
         assert!(decode_entity("not JSON", None).is_err());
     }
 
@@ -1014,7 +996,9 @@ mod tests {
             if depth <= MAX_TABLE_DEPTH {
                 round_trip(&entity);
             } else {
-                assert!(encode_entity(&entity).is_err());
+                assert!(validate_content(&entity.content).is_err());
+                let encoded = encode_entity(&entity).expect("encode invalid fixture");
+                assert!(decode_entity(&encoded, None).is_err());
             }
         }
     }

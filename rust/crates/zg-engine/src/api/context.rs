@@ -435,7 +435,8 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextContainer {
-        pub entity_id: String,
+        /// Present when the container is associated with a stored entity.
+        pub entity_id: Option<String>,
         pub range: ContentRange,
         pub metadata: Option<EntityMetadata>,
     }
@@ -560,8 +561,8 @@ impl From<crate::domain::Range> for result::ContentRange {
                 end_byte_column: range.end_byte_column(),
             },
             Range::Byte(range) => Self::Byte {
-                start_offset: range.start_offset,
-                end_offset: range.end_offset,
+                start_offset: range.start_offset(),
+                end_offset: range.end_offset(),
             },
         }
     }
@@ -600,11 +601,8 @@ mod tests {
             serde_json::to_value(file).expect("file range"),
             json!({ "kind": "file" })
         );
-        let bytes: result::ContentRange = Range::Byte(ByteRange {
-            start_offset: 12,
-            end_offset: 24,
-        })
-        .into();
+        let bytes: result::ContentRange =
+            Range::Byte(ByteRange::new(12, 24).expect("ordered byte offsets")).into();
         assert_eq!(
             serde_json::to_value(bytes).expect("byte range"),
             json!({ "kind": "byte", "start_offset": 12, "end_offset": 24 })

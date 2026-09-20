@@ -34,10 +34,9 @@ pub(super) fn text_fragments(
         let end = start + count;
         if !text[start..end].trim().is_empty() {
             fragments.push(ExtractedEntityFragment {
-                range: Range::Byte(ByteRange {
-                    start_offset: start as u64,
-                    end_offset: end as u64,
-                }),
+                range: Range::Byte(
+                    ByteRange::new(start as u64, end as u64).expect("ordered byte offsets"),
+                ),
             });
         }
         if end == text.len() {

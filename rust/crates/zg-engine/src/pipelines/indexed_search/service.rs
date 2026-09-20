@@ -14,7 +14,7 @@ use crate::{
         WorkspaceIndexService, assert_embedding_compatible, assert_index_version,
         environment_api_key, is_indexed,
     },
-    storage::spi::WorkspaceIndexStorageOptions,
+    storage::zvec::{ZvecStorage, types::WorkspaceIndexStorageOptions},
     workspace::{
         layout::find_nearest_workspace,
         lock::{LockMode, acquire_home_lock},
@@ -42,11 +42,10 @@ pub(crate) async fn context(
             "no workspace manifest was found",
         ));
     };
-    let factory = indexing.storage_factory();
     let initial_manifest = read_workspace_manifest(&location.home)?;
     if !initial_manifest
         .as_ref()
-        .map(|manifest| factory.exists(&manifest.storage_home()))
+        .map(|manifest| ZvecStorage::exists(&manifest.storage_home()))
         .transpose()?
         .unwrap_or(false)
     {
@@ -57,7 +56,7 @@ pub(crate) async fn context(
     }
     if options.refresh.map_or(options.auto_update, |policy| {
         policy == crate::api::context::options::RefreshPolicy::Wait
-    }) && indexing.workspace_needs_refresh(&location, factory).await?
+    }) && indexing.workspace_needs_refresh(&location).await?
     {
         indexing
             .index(models, refresh_options(options, location.root.clone()))
@@ -108,14 +107,14 @@ pub(crate) async fn context(
         .iter()
         .map(|runtime| runtime as &dyn SearchEmbeddingRuntime)
         .collect::<Vec<_>>();
-    let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
+    let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
         storage_path: manifest.storage_home(),
     })?;
     let result = context_from_index(
         &location.root,
         &manifest.workspace,
         &manifest.path,
-        storage.as_ref(),
+        &storage,
         &embedding_models,
         options,
         &request,

@@ -1,50 +1,36 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, DirBuilder, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord, model::Metric, validate_entities},
+    domain::{Entity, FileId, FileIndexStatus, FileRecord, model::Metric},
     utils::{atomic_write as write_record, sync_directory},
 };
 
 use super::{
     codec,
+    collections::NativeStore,
     file_ids::FileIds,
-    pending::{self, PendingChange, PendingChanges},
-    spi::{
-        IndexedFragment, StorageResult, StorageSearchFilter, StorageSearchHit,
-        StoredFileAttributes, StoredSearchData, WorkspaceIndexStorage,
-        WorkspaceIndexStorageFactory, WorkspaceIndexStorageOptions,
+    types::{
+        IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredFileAttributes,
+        StoredSearchData, WorkspaceIndexStorageOptions,
     },
-    zvec::NativeStore,
 };
 use crate::domain::model::EmbeddingModelInfo;
 
-const CHECKPOINT_OPERATIONS: usize = 64;
-const CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
-pub(crate) struct ZvecStorageFactory;
-
-impl ZvecStorageFactory {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
-
 struct SharedStore {
     state: Mutex<StoreState>,
-    path: PathBuf,
     schema: Vec<EmbeddingModelInfo>,
     read_only: bool,
     // The native handles must close before the operating-system lock is released.
@@ -54,14 +40,10 @@ struct SharedStore {
 struct StoreState {
     native: NativeStore,
     file_ids: FileIds,
-    pending: PendingChanges,
-    pending_operations: usize,
-    pending_bytes: u64,
-    needs_recovery: bool,
     closed: bool,
 }
 
-struct ZvecStorage {
+pub(crate) struct ZvecStorage {
     shared: Mutex<Option<Arc<SharedStore>>>,
     read_only: bool,
 }
@@ -76,13 +58,13 @@ struct SchemaRecord {
 impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
-            version: 4,
+            version: 6,
             embeddings: embeddings.to_vec(),
         }
     }
 
     fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
-        if self.version != 4 {
+        if self.version != 6 {
             return Err(EngineError::storage_failure(
                 "unsupported storage schema; rebuild the index",
             ));
@@ -119,11 +101,8 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
     Ok(())
 }
 
-impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
-    fn open(
-        &self,
-        options: WorkspaceIndexStorageOptions,
-    ) -> StorageResult<Box<dyn WorkspaceIndexStorage>> {
+impl ZvecStorage {
+    pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
         if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
             validate_models(embeddings)?;
         }
@@ -135,7 +114,10 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
             ));
         }
         let read_only = options.is_read_only();
-        let outer = home.file_name().and_then(|_| home.parent());
+        let outer = home
+            .file_name()
+            .and_then(|_| home.parent())
+            .map(Path::to_path_buf);
         if !read_only {
             let mut builder = DirBuilder::new();
             builder.recursive(false);
@@ -156,16 +138,16 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
             if read_only && shared.read_only {
-                return Ok(Box::new(ZvecStorage {
+                return Ok(Self {
                     shared: Mutex::new(Some(shared)),
                     read_only,
-                }));
+                });
             }
             return Err(EngineError::resource_busy(
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema) = prepare_storage(&home, &path, &options)?;
+        let (lock, schema) = prepare_storage(&home, &path, options)?;
         let native = NativeStore::open(&path, &schema, read_only)?;
         // Readers do not need an allocation map or an O(files) startup scan.
         let file_ids = if read_only {
@@ -178,32 +160,27 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
             sync_directory(&path)?;
             sync_directory(&home)?;
             if let Some(outer) = outer {
-                sync_directory(outer)?;
+                sync_directory(&outer)?;
             }
         }
         let shared = Arc::new(SharedStore {
             state: Mutex::new(StoreState {
                 native,
                 file_ids,
-                pending: PendingChanges::new(),
-                pending_operations: 0,
-                pending_bytes: 0,
-                needs_recovery: false,
                 closed: false,
             }),
-            path: path.clone(),
             schema,
             read_only,
             _lock: lock,
         });
         registry.insert(path, Arc::downgrade(&shared));
-        Ok(Box::new(ZvecStorage {
+        Ok(Self {
             shared: Mutex::new(Some(shared)),
             read_only,
-        }))
+        })
     }
 
-    fn exists(&self, storage_path: &Path) -> StorageResult<bool> {
+    pub(crate) fn exists(storage_path: &Path) -> EngineResult<bool> {
         match fs::metadata(storage_path.join("storage")) {
             Ok(metadata) => Ok(metadata.is_dir()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -211,8 +188,8 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
         }
     }
 
-    fn delete(&self, storage_path: &Path) -> StorageResult<()> {
-        if !self.exists(storage_path)? {
+    pub(crate) fn delete(storage_path: &Path) -> EngineResult<()> {
+        if !Self::exists(storage_path)? {
             return Ok(());
         }
         let home = fs::canonicalize(storage_path)
@@ -231,9 +208,7 @@ impl WorkspaceIndexStorageFactory for ZvecStorageFactory {
         registry.remove(&path);
         Ok(())
     }
-}
 
-impl ZvecStorage {
     fn shared(&self) -> EngineResult<Arc<SharedStore>> {
         self.shared
             .lock()
@@ -250,98 +225,38 @@ impl ZvecStorage {
         operation(&state.native)
     }
 
-    fn apply(
+    fn write<T>(
         &self,
-        change: PendingChange,
-        bytes: u64,
-        operation: impl FnOnce(&NativeStore) -> EngineResult<()>,
-    ) -> EngineResult<()> {
+        operation: impl FnOnce(&mut StoreState) -> EngineResult<T>,
+    ) -> EngineResult<T> {
         if self.read_only {
-            return Err(EngineError::invalid_argument(
+            return Err(EngineError::permission_denied(
                 "cannot write read-only workspace storage",
             ));
         }
         let shared = self.shared()?;
         let mut state = lock_state(&shared)?;
         assert_usable(&state)?;
-        if let PendingChange::Reindex(file) = &change {
-            state.file_ids.validate(file)?;
-        }
-        let deleted = match &change {
-            PendingChange::Delete(id) => Some(*id),
-            PendingChange::Reindex(_) => None,
-        };
-        // Keep every file changed since the last checkpoint. A crash may require
-        // reindexing even files whose native writes already completed in memory.
-        state.needs_recovery = true;
-        // A prepared batch already has durable intent for matching snapshots.
-        // Check again here: a checkpoint, deletion, or new snapshot invalidates it.
-        if state.pending.get(change.file_id()) != Some(&change) {
-            state.pending.insert(*change.file_id(), change);
-            pending::write(&shared.path, &state.pending)?;
-        }
-        operation(&state.native)?;
-        if let Some(id) = deleted {
-            state.file_ids.remove(id);
-        }
-        state.pending_operations = state.pending_operations.saturating_add(1);
-        state.pending_bytes = state.pending_bytes.saturating_add(bytes);
-        if state.pending_operations >= CHECKPOINT_OPERATIONS
-            || state.pending_bytes >= CHECKPOINT_BYTES
-        {
-            checkpoint(&shared.path, &mut state)?;
-        } else {
-            // The complete in-memory result is readable by this writer. Its
-            // durability is confirmed only when the batch is checkpointed.
-            state.needs_recovery = false;
-        }
-        Ok(())
+        operation(&mut state)
     }
-}
 
-fn assert_usable(state: &StoreState) -> EngineResult<()> {
-    if state.closed {
-        return Err(EngineError::resource_closed("workspace storage is closed"));
-    }
-    if state.needs_recovery {
-        return Err(recovery_required());
-    }
-    Ok(())
-}
-
-fn checkpoint(path: &Path, state: &mut StoreState) -> EngineResult<()> {
-    if state.pending.is_empty() {
-        return Ok(());
-    }
-    state.needs_recovery = true;
-    state.native.flush()?;
-    pending::clear(path)?;
-    state.pending.clear();
-    state.pending_operations = 0;
-    state.pending_bytes = 0;
-    state.needs_recovery = false;
-    Ok(())
-}
-
-#[async_trait]
-impl WorkspaceIndexStorage for ZvecStorage {
-    fn is_read_only(&self) -> bool {
+    pub(crate) fn is_read_only(&self) -> bool {
         self.read_only
     }
 
-    fn list_files(&self) -> StorageResult<Vec<FileRecord>> {
+    pub(crate) fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.read(NativeStore::list_files)
     }
 
-    fn list_file_paths(&self) -> StorageResult<Vec<(FileId, PathBuf)>> {
+    pub(crate) fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
         self.read(NativeStore::list_file_paths)
     }
 
-    fn list_file_attributes(&self) -> StorageResult<Vec<StoredFileAttributes>> {
+    pub(crate) fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {
         self.read(NativeStore::list_file_attributes)
     }
 
-    fn resolve_file_ids(&self, paths: &[PathBuf]) -> StorageResult<Vec<FileId>> {
+    pub(crate) fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>> {
         if self.read_only {
             return Err(EngineError::permission_denied(
                 "cannot allocate file identities in read-only storage",
@@ -353,11 +268,7 @@ impl WorkspaceIndexStorage for ZvecStorage {
         state.file_ids.resolve(paths)
     }
 
-    fn supports_path_filters(&self) -> bool {
-        true
-    }
-
-    fn has_non_unicode_file_names(&self) -> StorageResult<bool> {
+    pub(crate) fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
         if self.read_only {
             return self.read(NativeStore::has_non_unicode_file_names);
         }
@@ -367,37 +278,40 @@ impl WorkspaceIndexStorage for ZvecStorage {
         Ok(state.file_ids.has_non_unicode_file_names())
     }
 
-    fn load_search_hits(&self, hits: &[StorageSearchHit]) -> StorageResult<StoredSearchData> {
+    pub(crate) fn load_search_hits(
+        &self,
+        hits: &[StorageSearchHit],
+    ) -> EngineResult<StoredSearchData> {
         self.read(|native| native.load_search_hits(hits))
     }
 
-    fn search_fts(
+    pub(crate) fn search_fts(
         &self,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
-    ) -> StorageResult<Vec<StorageSearchHit>> {
+    ) -> EngineResult<Vec<StorageSearchHit>> {
         self.read(|native| native.search_fts(query, limit, filter))
     }
 
-    fn search_vector(
+    pub(crate) fn search_vector(
         &self,
         model: &str,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
-    ) -> StorageResult<Vec<StorageSearchHit>> {
+    ) -> EngineResult<Vec<StorageSearchHit>> {
         let shared = self.shared()?;
         validate_vector(vector, model_schema(&shared.schema, model)?)?;
         self.read(|native| native.search_vector(model, vector, limit, filter))
     }
 
-    fn replace_file(
+    pub(crate) fn replace_file(
         &self,
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
-    ) -> StorageResult<()> {
+    ) -> EngineResult<()> {
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
         let mut file = file.clone();
@@ -407,76 +321,42 @@ impl WorkspaceIndexStorage for ZvecStorage {
                 .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
         };
         file.validate()?;
-        self.apply(
-            PendingChange::reindex(&file),
-            estimated_write_bytes(&file, entries),
-            |native| native.apply_replace(&file, entities, entries),
-        )
+        self.write(|state| {
+            state.file_ids.validate(&file)?;
+            state.native.apply_replace(&file, entities, entries)
+        })
     }
 
-    fn prepare_file_replacements(&self, files: &[&FileRecord]) -> StorageResult<()> {
-        if self.read_only {
-            return Err(EngineError::invalid_argument(
-                "cannot write read-only workspace storage",
-            ));
-        }
-        for file in files {
-            file.validate()?;
-        }
-        let shared = self.shared()?;
-        let mut state = lock_state(&shared)?;
-        assert_usable(&state)?;
-        for file in files {
-            state.file_ids.validate(file)?;
-        }
-        let changes = files
-            .iter()
-            .map(|file| PendingChange::reindex(file))
-            .filter(|change| state.pending.get(change.file_id()) != Some(change))
-            .collect::<Vec<_>>();
-        if changes.is_empty() {
-            return Ok(());
-        }
-        state.needs_recovery = true;
-        for change in changes {
-            state.pending.insert(*change.file_id(), change);
-        }
-        // Publish the whole recovery set before any corresponding native mutation.
-        // Prepared but unwritten files can safely be reindexed after an interruption.
-        pending::write(&shared.path, &state.pending)?;
-        state.needs_recovery = false;
-        Ok(())
-    }
-
-    fn mark_file_failed(&self, file: &FileRecord, error: &str) -> StorageResult<()> {
+    pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
         file.validate()?;
         let mut file = file.clone();
         file.index_status = FileIndexStatus::Failed {
             error: error.to_owned(),
         };
         file.validate()?;
-        self.apply(PendingChange::reindex(&file), 0, |native| {
-            native.apply_replace(&file, &[], &[])
+        self.write(|state| {
+            state.file_ids.validate(&file)?;
+            state.native.apply_replace(&file, &[], &[])
         })
     }
 
-    fn delete_file(&self, file_id: FileId) -> StorageResult<()> {
-        self.apply(PendingChange::Delete(file_id), 0, |native| {
-            native.apply_delete(file_id)
+    pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
+        self.write(|state| {
+            state.native.apply_delete(file_id)?;
+            state.file_ids.remove(file_id);
+            Ok(())
         })
     }
 
-    async fn finalize_writes(&self) -> StorageResult<()> {
+    /// Flush accepted writes, including any unfinished file's retry state.
+    pub(crate) fn checkpoint(&self) -> EngineResult<()> {
         if self.read_only {
             return Ok(());
         }
-        let shared = self.shared()?;
-        let mut state = lock_state(&shared)?;
-        assert_usable(&state)?;
-        checkpoint(&shared.path, &mut state)
+        self.write(|state| state.native.flush())
     }
 
-    fn close(&self) -> StorageResult<()> {
+    pub(crate) fn close(&self) -> EngineResult<()> {
         // Serialize concurrent closes through the final checkpoint as well as
         // taking the lease, so none can return while its writes are persisting.
         let mut lease = self
@@ -493,36 +373,13 @@ impl WorkspaceIndexStorage for ZvecStorage {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
-        if state.needs_recovery {
-            return Err(recovery_required());
-        }
-        checkpoint(&shared.path, &mut state)
+        state.native.flush()
     }
 }
 
-fn estimated_write_bytes(file: &FileRecord, entries: &[IndexedFragment]) -> u64 {
-    // Bound the batch using source size and raw vectors without serializing a
-    // second copy of fragment contents. An oversized file forces a checkpoint.
-    entries
-        .iter()
-        .fold(file.snapshot.size_bytes, |bytes, entry| {
-            bytes.saturating_add(
-                u64::try_from(entry.vector.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(4),
-            )
-        })
-}
-
-fn recover_pending(native: &NativeStore, changes: PendingChanges) -> EngineResult<()> {
-    for change in changes.into_values() {
-        match change {
-            PendingChange::Reindex(mut file) => {
-                file.index_status = FileIndexStatus::NotIndexed;
-                native.apply_replace(&file, &[], &[])?;
-            }
-            PendingChange::Delete(id) => native.apply_delete(id)?,
-        }
+fn assert_usable(state: &StoreState) -> EngineResult<()> {
+    if state.closed {
+        return Err(EngineError::resource_closed("workspace storage is closed"));
     }
     Ok(())
 }
@@ -534,11 +391,26 @@ fn validate_batch(
     schema: &[EmbeddingModelInfo],
 ) -> EngineResult<()> {
     file.validate()?;
-    validate_entities(file.id, entities)?;
-    super::zvec::validate_projections(entities, entries)?;
+    let mut entity_ids = HashSet::new();
+    let mut fragment_ids = HashSet::new();
     for entity in entities {
-        codec::validate_entity(entity)?;
+        if entity.file_id != file.id {
+            return Err(EngineError::invalid_argument(
+                "entity belongs to a different file",
+            ));
+        }
+        if !entity_ids.insert(&entity.id) {
+            return Err(EngineError::invalid_argument("duplicate entity id"));
+        }
+        entity.validate()?;
+        codec::validate_content(&entity.content)?;
+        for fragment in &entity.fragments {
+            if !fragment_ids.insert(&fragment.id) {
+                return Err(EngineError::invalid_argument("duplicate fragment id"));
+            }
+        }
     }
+    super::collections::validate_projections(entities, entries)?;
     for entry in entries {
         validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
     }
@@ -588,12 +460,12 @@ pub(super) fn initialize() -> EngineResult<()> {
 
 fn load_schema(
     path: &Path,
-    options: &WorkspaceIndexStorageOptions,
+    options: WorkspaceIndexStorageOptions,
 ) -> EngineResult<Vec<EmbeddingModelInfo>> {
     let descriptor = path.join("schema.json");
     if descriptor.exists() {
         let schema = read_json::<SchemaRecord>(&descriptor)?.embeddings()?;
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options {
+        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
             if schema.len() != embeddings.len() {
                 return Err(EngineError::invalid_argument(
                     "embedding model set changed; rebuild the index",
@@ -616,12 +488,12 @@ fn load_schema(
             "workspace storage schema does not exist",
         ));
     };
-    validate_models(embeddings)?;
+    validate_models(&embeddings)?;
     write_record(
         &descriptor,
-        &serde_json::to_vec(&SchemaRecord::new(embeddings)).map_err(|error| json_error(&error))?,
+        &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
     )?;
-    Ok(embeddings.clone())
+    Ok(embeddings)
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -643,63 +515,24 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 fn prepare_storage(
     home: &Path,
     path: &Path,
-    options: &WorkspaceIndexStorageOptions,
+    options: WorkspaceIndexStorageOptions,
 ) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
-    let read_only = options.is_read_only();
-    let mut shared = read_only;
-    loop {
-        let lock = acquire_storage_lock(home, shared)?;
-        let marker = path.join(pending::NAME);
-        if shared && marker.exists() {
-            // Release before changing lock modes; Windows does not convert held locks.
-            shared = false;
-            continue;
+    let lock = acquire_storage_lock(home, options.is_read_only())?;
+    if !options.is_read_only() {
+        let mut builder = DirBuilder::new();
+        builder.recursive(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
         }
-        if !read_only {
-            let mut builder = DirBuilder::new();
-            builder.recursive(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            if let Err(error) = builder.create(path)
-                && !(error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir())
-            {
-                return Err(io_error("create storage directory", path, &error));
-            }
+        if let Err(error) = builder.create(path)
+            && !(error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir())
+        {
+            return Err(io_error("create storage directory", path, &error));
         }
-        let schema = load_schema(path, options)?;
-        if marker.exists() {
-            // Decode the entire batch before touching native data. Recovery
-            // needs writable handles even when the caller only wants to search.
-            let changes = pending::read(path)?;
-            let native = NativeStore::open(path, &schema, false)?;
-            let mut file_ids = native.load_file_ids()?;
-            // The journal may contain new source records absent from native storage.
-            // Remove deleted owners first, then reject every conflicting mapping
-            // before touching any collection.
-            for change in changes.values() {
-                if let PendingChange::Delete(id) = change {
-                    file_ids.remove(*id);
-                }
-            }
-            for change in changes.values() {
-                if let PendingChange::Reindex(file) = change {
-                    file_ids.claim(file.id, file.relative_path.clone())?;
-                }
-            }
-            recover_pending(&native, changes)?;
-            native.flush()?;
-            pending::clear(path)?;
-        }
-        if read_only && !shared {
-            // Recheck after reacquiring: another writer may run between locks.
-            shared = true;
-            continue;
-        }
-        return Ok((lock, schema));
     }
+    Ok((lock, load_schema(path, options)?))
 }
 
 fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {
@@ -749,10 +582,6 @@ pub(super) fn io_error(action: &str, path: &Path, error: &std::io::Error) -> Eng
 
 fn json_error(error: &serde_json::Error) -> EngineError {
     EngineError::storage_failure(format!("cannot encode storage record: {error}"))
-}
-
-fn recovery_required() -> EngineError {
-    EngineError::resource_busy("storage has an unfinished write; close and reopen it to recover")
 }
 
 fn now_epoch_ms() -> EngineResult<u64> {

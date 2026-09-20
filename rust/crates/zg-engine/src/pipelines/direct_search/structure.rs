@@ -7,17 +7,16 @@ use std::{
 use crate::{
     api::context::result::{StructureEnrichmentDiagnostics, StructureEnrichmentSource},
     domain::{
-        CodeMetadata, EntityId, EntityMetadata, FileCategory, FileFormat, MarkdownMetadata, Range,
+        CodeMetadata, EntityMetadata, FileCategory, FileFormat, MarkdownMetadata, Range,
         SourcePath, TextRange,
     },
     extraction::{ChunkOptions, ExtractedEntity, TextSource, extract},
-    utils::{decode_text, line_byte_offsets, sha256_hex_parts},
+    utils::{decode_text, line_byte_offsets},
 };
 
 use crate::lexical::types::LexicalMatch;
 
 pub(crate) const RG_STRUCTURE_ENRICH_FILE_LIMIT: usize = 100;
-const STRUCTURE_NAMESPACE: &str = "__rg_structure__";
 
 pub(crate) struct StructureEnrichmentResult {
     pub items: Vec<EnrichedLexicalMatch>,
@@ -30,15 +29,12 @@ pub(crate) struct EnrichedLexicalMatch {
 }
 
 pub(crate) struct LexicalContainer {
-    pub entity_id: EntityId,
     pub range: Range,
     pub metadata: Option<EntityMetadata>,
 }
 
 struct StructuralFragment {
     entity_index: usize,
-    entity_id: EntityId,
-    document_id: String,
     range: Range,
 }
 
@@ -82,7 +78,6 @@ pub(crate) fn enrich_lexical_matches_with_structure(
             enriched_items += 1;
             enriched_files.insert(item.absolute_path.clone());
             Some(LexicalContainer {
-                entity_id: container.entity_id.clone(),
                 range: container.range,
                 metadata: source.metadata.get(&container.entity_index).cloned(),
             })
@@ -131,11 +126,6 @@ fn parse_structural_source(
         Ok(relative) if !relative.as_os_str().is_empty() => relative,
         _ => Path::new(absolute_path.file_name()?),
     };
-    let namespace = sha256_hex_parts([
-        STRUCTURE_NAMESPACE.as_bytes(),
-        b"\0",
-        absolute_path.as_os_str().as_encoded_bytes(),
-    ]);
     let metadata = fs::metadata(absolute_path).ok()?;
     if !metadata.is_file() || metadata.len() == 0 {
         return None;
@@ -159,63 +149,52 @@ fn parse_structural_source(
         formats,
         text,
     };
-    let fragments = extract(&source, ChunkOptions::default()).ok()?;
-    let structural = namespace_lexical_fragments(fragments, &namespace);
+    let entities = extract(&source, ChunkOptions::default()).ok()?;
+    let structural = collect_structural_fragments(entities);
     if structural.fragments.is_empty() {
         return None;
     }
     Some(structural)
 }
 
-fn namespace_lexical_fragments(
-    entities: Vec<ExtractedEntity>,
-    namespace: &str,
-) -> StructuralSource {
+fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSource {
     let mut metadata = HashMap::new();
     let mut fragments = Vec::new();
     for entity in entities {
         let Some(value) = entity.metadata else {
             continue;
         };
-        let entity_id = EntityId::new(sha256_hex_parts([
-            namespace.as_bytes(),
-            b"\0entity\0",
-            &(entity.index as u64).to_le_bytes(),
-        ]))
-        .expect("SHA-256 produces a nonempty entity ID");
         metadata.insert(entity.index, value);
         // The full entity remains a structural container for matches spanning
         // several retrieval ranges. It does not create a retrieval fragment.
         fragments.push(StructuralFragment {
             entity_index: entity.index,
-            entity_id: entity_id.clone(),
-            document_id: entity_id.as_str().to_owned(),
             range: entity.source_range,
         });
         let crate::domain::Content::Text(content) = &entity.content else {
             continue;
         };
         let line_offsets = line_byte_offsets(&content.split('\n').collect::<Vec<_>>());
-        for (ordinal, fragment) in entity.fragments.into_iter().enumerate() {
+        for fragment in entity.fragments {
             let (Range::Text(source_range), Range::Byte(local_range)) =
                 (entity.source_range, fragment.range)
             else {
                 continue;
             };
-            let Ok(range) = local_range
-                .text_range(content, &line_offsets)
-                .and_then(|local| local.within(source_range))
+            let (Ok(start), Ok(end)) = (
+                usize::try_from(local_range.start_offset()),
+                usize::try_from(local_range.end_offset()),
+            ) else {
+                continue;
+            };
+            let Ok(range) =
+                crate::utils::text_range_from_offsets(content, &line_offsets, start, end)
+                    .and_then(|local| crate::utils::map_text_range(local, source_range))
             else {
                 continue;
             };
             fragments.push(StructuralFragment {
                 entity_index: entity.index,
-                entity_id: entity_id.clone(),
-                document_id: sha256_hex_parts([
-                    entity_id.as_str().as_bytes(),
-                    b"\0fragment\0",
-                    &(ordinal as u64).to_le_bytes(),
-                ]),
                 range: Range::Text(range),
             });
         }
@@ -233,7 +212,13 @@ fn smallest_containing_fragment<'fragment>(
     source
         .fragments
         .iter()
-        .filter(|fragment| matches!(&fragment.range, Range::Text(outer) if outer.contains(inner)))
+        .filter(|fragment| match fragment.range {
+            Range::Text(_) => fragment
+                .range
+                .contains(&Range::Text(*inner))
+                .expect("text ranges have the same kind"),
+            _ => false,
+        })
         .min_by(|left, right| compare_fragment_container(source, left, right))
 }
 
@@ -249,7 +234,7 @@ fn compare_fragment_container(
                 &metadata_specificity(source.metadata.get(&left.entity_index)),
             )
         })
-        .then_with(|| left.document_id.cmp(&right.document_id))
+        .then_with(|| left.entity_index.cmp(&right.entity_index))
 }
 
 fn fragment_byte_span(fragment: &StructuralFragment) -> usize {
@@ -287,7 +272,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::domain::{CodeMetadata, EntityMetadata, MarkdownMetadata, TextRange};
+    use crate::domain::{CodeMetadata, EntityMetadata, MarkdownMetadata, Range, TextRange};
     use crate::lexical::types::LexicalMatch;
 
     use super::{
@@ -366,11 +351,11 @@ mod tests {
                 result.items[0]
                     .container
                     .as_ref()
-                    .map(|container| &container.entity_id),
+                    .map(|container| (container.range, &container.metadata)),
                 structured
                     .container
                     .as_ref()
-                    .map(|container| &container.entity_id),
+                    .map(|container| (container.range, &container.metadata)),
             );
         }
     }
@@ -379,21 +364,26 @@ mod tests {
     fn distinguishes_identical_relative_paths_in_different_source_roots() {
         let first = tempdir().expect("first source root");
         let second = tempdir().expect("second source root");
-        let ids = [first.path(), second.path()].map(|root| {
-            fs::write(root.join("section.md"), "# Section\n\nneedle\n").expect("markdown fixture");
-            let result = enrich_lexical_matches_with_structure(
-                root,
-                vec![lexical_item(root, "section.md", 3, "needle")],
-                None,
-            );
-            result.items[0]
-                .container
-                .as_ref()
-                .expect("section container")
-                .entity_id
-                .clone()
+        let items = [(first.path(), "First"), (second.path(), "Second")].map(|(root, heading)| {
+            fs::write(root.join("section.md"), format!("# {heading}\n\nneedle\n"))
+                .expect("markdown fixture");
+            lexical_item(root, "section.md", 3, "needle")
         });
-        assert_ne!(ids[0], ids[1]);
+        let result = enrich_lexical_matches_with_structure(first.path(), items.into(), None);
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.diagnostics.enriched_files, 2);
+        for (item, (root, heading)) in result
+            .items
+            .iter()
+            .zip([(first.path(), "First"), (second.path(), "Second")])
+        {
+            assert_eq!(item.matched.absolute_path, root.join("section.md"));
+            assert!(matches!(
+                item.container.as_ref().and_then(|container| container.metadata.as_ref()),
+                Some(EntityMetadata::Markdown(MarkdownMetadata { heading: Some(actual), .. }))
+                    if actual == heading
+            ));
+        }
     }
 
     #[cfg(unix)]
@@ -422,26 +412,11 @@ mod tests {
         let result = enrich_lexical_matches_with_structure(directory.path(), items, None);
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.diagnostics.matched_files, 2);
-        // macOS filesystems can reject non-Unicode names. Exercise the namespace
-        // independently of whether such paths can be created on this host.
-        let source = super::TextSource {
-            relative_path: super::SourcePath::new("template.md").expect("source path"),
-            formats: vec![super::FileFormat::Markdown],
-            text: text.to_owned(),
-        };
-        let fragments =
-            super::extract(&source, super::ChunkOptions::default()).expect("template structure");
-        let identities = paths.map(|path| {
-            let namespace = crate::utils::sha256_hex_parts([
-                super::STRUCTURE_NAMESPACE.as_bytes(),
-                b"\0",
-                directory.path().join(path).as_os_str().as_encoded_bytes(),
-            ]);
-            super::namespace_lexical_fragments(fragments.clone(), &namespace).fragments[0]
-                .entity_id
-                .clone()
-        });
-        assert_ne!(identities[0], identities[1]);
+        // Preserve native paths even when the host cannot create these filenames.
+        for (item, path) in result.items.iter().zip(paths) {
+            assert_eq!(item.matched.absolute_path, directory.path().join(path));
+            assert_eq!(item.matched.relative_path, path);
+        }
     }
 
     #[test]
@@ -471,7 +446,11 @@ mod tests {
             panic!("text window expected");
         };
         assert!(range.start_line() > 6);
-        assert!(range.contains(&result.items[0].matched.range));
+        assert!(
+            Range::Text(range)
+                .contains(&Range::Text(result.items[0].matched.range))
+                .expect("same range kind")
+        );
     }
 
     #[test]
@@ -548,8 +527,16 @@ mod tests {
         let crate::domain::Range::Text(range) = container.range else {
             panic!("text container range");
         };
-        assert!(range.contains(&excerpt));
-        assert!(!range.contains(&visible_range));
+        assert!(
+            Range::Text(range)
+                .contains(&Range::Text(excerpt))
+                .expect("same range kind")
+        );
+        assert!(
+            !Range::Text(range)
+                .contains(&Range::Text(visible_range))
+                .expect("same range kind")
+        );
         assert_eq!(result.diagnostics.enriched_items, 1);
     }
 

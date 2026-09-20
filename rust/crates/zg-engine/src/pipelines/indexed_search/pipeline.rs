@@ -1,3 +1,5 @@
+use super::storage::SearchStorage;
+
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -21,9 +23,8 @@ use crate::{
     },
     file_selection::GlobMatcher,
     models::{EmbeddingOptions, ModelError, ModelRuntimeLease},
-    storage::spi::{
+    storage::zvec::types::{
         StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData,
-        WorkspaceIndexStorage,
     },
 };
 
@@ -168,7 +169,7 @@ struct InternalEvidence {
 pub(crate) async fn search_workspace_index(
     workspace_root: &Path,
     plan: SearchPlan,
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
 ) -> Result<SearchPlanResult, EngineError> {
     if embedding_models.len() > 1 {
@@ -342,7 +343,7 @@ fn collect_adaptive_recall(
     prefer_symbol: bool,
     vectors: &HashMap<String, ModelQueryVector>,
     limit: usize,
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn SearchStorage,
     candidates: &mut HashMap<EntityId, Candidate>,
 ) -> Result<(), EngineError> {
     let recall_routes = build_recall_routes(routes, filter, prefer_symbol);
@@ -520,7 +521,7 @@ fn load_candidates(
     candidates: Vec<Candidate>,
     limit: usize,
     trace: bool,
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn SearchStorage,
 ) -> Result<Vec<SearchHit>, EngineError> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -533,10 +534,13 @@ fn load_candidates(
         .map(|evidence| evidence.hit.clone())
         .collect::<Vec<_>>();
     let mut data = storage.load_search_hits(&hits)?;
-    candidates
-        .into_iter()
-        .map(|candidate| candidate_to_hit(candidate, limit, trace, &mut data))
-        .collect()
+    let mut loaded = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if let Some(hit) = candidate_to_hit(candidate, limit, trace, &mut data)? {
+            loaded.push(hit);
+        }
+    }
+    Ok(loaded)
 }
 
 fn candidate_to_hit(
@@ -544,10 +548,11 @@ fn candidate_to_hit(
     limit: usize,
     trace: bool,
     data: &mut StoredSearchData,
-) -> Result<SearchHit, EngineError> {
-    let stored = data.entities.remove(&candidate.id).ok_or_else(|| {
-        EngineError::storage_failure(format!("missing search entity {}", candidate.id.as_str()))
-    })?;
+) -> Result<Option<SearchHit>, EngineError> {
+    let Some(stored) = data.entities.remove(&candidate.id) else {
+        // A file replacement may remove owners after recall has completed.
+        return Ok(None);
+    };
     if stored.entity.id != candidate.id
         || stored.entity.file_id != candidate.file_id
         || stored.file.id != candidate.file_id
@@ -556,8 +561,6 @@ fn candidate_to_hit(
             "loaded search entity has inconsistent ownership",
         ));
     }
-    crate::domain::validate_entities(candidate.file_id, std::slice::from_ref(&stored.entity))
-        .map_err(|error| EngineError::storage_failure(format!("invalid search entity: {error}")))?;
     let matched_by = derive_matched_by(&candidate.sources);
     let mut evidence = candidate.evidence;
     evidence.sort_by(|left, right| {
@@ -567,38 +570,33 @@ fn candidate_to_hit(
             .then_with(|| left.route_id.cmp(&right.route_id))
             .then_with(|| left.hit.document_id.cmp(&right.hit.document_id))
     });
-    let evidence = evidence
-        .into_iter()
-        .map(|evidence| {
-            let fragment = data
+    let mut loaded_evidence = Vec::with_capacity(evidence.len());
+    for evidence in evidence {
+        let Some(fragment) = data.fragments.get(&evidence.hit.document_id) else {
+            continue;
+        };
+        if fragment.id.as_str() != evidence.hit.document_id
+            || !stored
+                .entity
                 .fragments
-                .get(&evidence.hit.document_id)
-                .ok_or_else(|| {
-                    EngineError::storage_failure(format!(
-                        "missing search fragment {}",
-                        evidence.hit.document_id
-                    ))
-                })?;
-            if fragment.id.as_str() != evidence.hit.document_id
-                || !stored
-                    .entity
-                    .fragments
-                    .iter()
-                    .any(|owned| owned == fragment)
-            {
-                return Err(EngineError::storage_failure(
-                    "loaded search fragment has inconsistent ownership",
-                ));
-            }
-            Ok(SearchEvidence {
-                fragment: fragment.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(SearchHit {
+                .iter()
+                .any(|owned| owned == fragment)
+        {
+            return Err(EngineError::storage_failure(
+                "loaded search fragment has inconsistent ownership",
+            ));
+        }
+        loaded_evidence.push(SearchEvidence {
+            fragment: fragment.clone(),
+        });
+    }
+    if loaded_evidence.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(SearchHit {
         entity: stored.entity,
         file: stored.file,
-        evidence,
+        evidence: loaded_evidence,
         rank: candidate.rank,
         score: candidate.score,
         matched_by,
@@ -614,7 +612,7 @@ fn candidate_to_hit(
                 cutoff_rank: limit,
             },
         }),
-    })
+    }))
 }
 
 fn derive_matched_by(sources: &HashSet<SearchRouteMode>) -> MatchedBy {
@@ -693,7 +691,7 @@ fn extract_symbol_names(query: &str) -> Vec<String> {
 fn search_plan_to_storage_filter(
     workspace_root: &Path,
     plan: &SearchPlan,
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn SearchStorage,
 ) -> Result<Option<StorageSearchFilter>, EngineError> {
     // Compile even when pushdown is available so invalid rules have one error path.
     let matcher = GlobMatcher::new(workspace_root, &plan.filter.globs)?;
@@ -704,9 +702,7 @@ fn search_plan_to_storage_filter(
         None
     };
     let format_path = compile_format_filter(&plan.filter);
-    let push_formats = format_path.is_some()
-        && storage.supports_path_filters()
-        && !storage.has_non_unicode_file_names()?;
+    let push_formats = format_path.is_some() && !storage.has_non_unicode_file_names()?;
     let residual_format = (!push_formats).then_some(format_path.as_ref()).flatten();
     let needs_attributes = plan.filter.modified_after_epoch_ms.is_some()
         || plan.filter.modified_before_epoch_ms.is_some();
@@ -833,22 +829,22 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::{
+        EngineResult,
         domain::{
             ByteRange, Content, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
             FileIndexStatus, FileRecord, FileSnapshot, FragmentId, GlobRule, Range, TextRange,
             model::{EmbeddingModelInfo, Metric},
         },
         models::ModelError,
-        storage::spi::{
-            IndexedFragment, StoragePathFilter, StorageResult, StorageSearchFilter,
-            StorageSearchHit, StorageSearchPath, StoredEntity, StoredFileAttributes,
-            StoredSearchData, WorkspaceIndexStorage,
+        storage::zvec::types::{
+            StoragePathFilter, StorageSearchFilter, StorageSearchHit, StorageSearchPath,
+            StoredEntity, StoredFileAttributes, StoredSearchData,
         },
     };
 
     use super::{
         GlobMatcher, MatchedBy, QueryFilter, SearchEmbeddingRuntime, SearchPlan, SearchRoute,
-        SearchRouteMode, compile_path_filter, search_workspace_index,
+        SearchRouteMode, SearchStorage, compile_path_filter, search_workspace_index,
     };
 
     struct FixtureModel {
@@ -893,7 +889,7 @@ mod tests {
 
     struct FixtureStorage {
         paths_only: bool,
-        path_pushdown: bool,
+        forbid_enumeration: bool,
         files: Vec<FileRecord>,
         entities: HashMap<String, StoredEntity>,
         fts: HashMap<String, Vec<FixtureHit>>,
@@ -947,27 +943,18 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl WorkspaceIndexStorage for FixtureStorage {
-        fn is_read_only(&self) -> bool {
-            true
-        }
-
-        fn list_files(&self) -> StorageResult<Vec<FileRecord>> {
-            panic!("query filters must not load complete file records")
-        }
-
-        fn list_file_attributes(&self) -> StorageResult<Vec<StoredFileAttributes>> {
+    impl SearchStorage for FixtureStorage {
+        fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {
             assert!(!self.paths_only, "name filters must only read paths");
             assert!(
-                !self.path_pushdown,
+                !self.forbid_enumeration,
                 "pushdown must not enumerate attributes"
             );
             Ok(self.files.iter().map(StoredFileAttributes::from).collect())
         }
 
-        fn list_file_paths(&self) -> StorageResult<Vec<(FileId, PathBuf)>> {
-            assert!(!self.path_pushdown, "pushdown must not scan paths");
+        fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
+            assert!(!self.forbid_enumeration, "pushdown must not scan paths");
             Ok(self
                 .files
                 .iter()
@@ -975,11 +962,7 @@ mod tests {
                 .collect())
         }
 
-        fn supports_path_filters(&self) -> bool {
-            self.path_pushdown
-        }
-
-        fn has_non_unicode_file_names(&self) -> StorageResult<bool> {
+        fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
             Ok(self.files.iter().any(|file| {
                 file.relative_path
                     .file_name()
@@ -987,7 +970,7 @@ mod tests {
             }))
         }
 
-        fn load_search_hits(&self, hits: &[StorageSearchHit]) -> StorageResult<StoredSearchData> {
+        fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData> {
             self.load_batches
                 .lock()
                 .expect("load batches")
@@ -1005,8 +988,7 @@ mod tests {
                         .filter(|found| found.hit.entity_id == hit.entity_id)
                         .filter(|found| seen.insert(found.hit.document_id.clone()))
                         .map(|found| EntityFragment {
-                            id: FragmentId::new(found.hit.document_id.clone())
-                                .expect("fragment id"),
+                            id: FragmentId::from_string(found.hit.document_id.clone()),
                             range: Range::Full,
                         })
                         .collect();
@@ -1031,7 +1013,7 @@ mod tests {
             query: &str,
             limit: usize,
             filter: Option<&StorageSearchFilter>,
-        ) -> StorageResult<Vec<StorageSearchHit>> {
+        ) -> EngineResult<Vec<StorageSearchHit>> {
             Ok(self.hits_with_filter(
                 self.fts.get(query).map_or(&[], Vec::as_slice),
                 limit,
@@ -1045,50 +1027,28 @@ mod tests {
             _vector: &[f32],
             limit: usize,
             filter: Option<&StorageSearchFilter>,
-        ) -> StorageResult<Vec<StorageSearchHit>> {
+        ) -> EngineResult<Vec<StorageSearchHit>> {
             Ok(self.hits_with_filter(&self.vector, limit, filter))
-        }
-
-        fn replace_file(
-            &self,
-            _file: &FileRecord,
-            _entities: &[Entity],
-            _entries: &[IndexedFragment],
-        ) -> StorageResult<()> {
-            Ok(())
-        }
-
-        fn mark_file_failed(&self, _file: &FileRecord, _error: &str) -> StorageResult<()> {
-            Ok(())
-        }
-
-        fn delete_file(&self, _file_id: FileId) -> StorageResult<()> {
-            Ok(())
-        }
-
-        async fn finalize_writes(&self) -> StorageResult<()> {
-            Ok(())
-        }
-
-        fn close(&self) -> StorageResult<()> {
-            Ok(())
         }
     }
 
     #[tokio::test]
     async fn fuses_fts_and_vector_routes_with_main_compatible_rrf() {
         let file = file(1, "src/lib.rs", 100);
-        let entity_a = entity("a", &file, "alpha entity");
-        let entity_b = entity("b", &file, "beta entity");
-        let a_fts = hit(&entity_a, "a-fts", StorageSearchPath::Fts, 9.0);
-        let b_fts = hit(&entity_b, "b-fts", StorageSearchPath::Fts, 8.0);
-        let b_vector = hit(&entity_b, "b-vector", StorageSearchPath::Vector, 0.9);
-        let a_vector = hit(&entity_a, "a-vector", StorageSearchPath::Vector, 0.8);
+        let entity_a = entity(&file, "alpha entity");
+        let entity_b = entity(&file, "beta entity");
+        let a_fts = hit(&entity_a, 0, StorageSearchPath::Fts, 9.0);
+        let b_fts = hit(&entity_b, 0, StorageSearchPath::Fts, 8.0);
+        let b_vector = hit(&entity_b, 1, StorageSearchPath::Vector, 0.9);
+        let a_vector = hit(&entity_a, 1, StorageSearchPath::Vector, 0.8);
         let storage = FixtureStorage {
             paths_only: false,
-            path_pushdown: false,
+            forbid_enumeration: false,
             files: vec![file],
-            entities: HashMap::from([("a".to_owned(), entity_a), ("b".to_owned(), entity_b)]),
+            entities: HashMap::from([
+                (entity_a.entity.id.as_str().to_owned(), entity_a.clone()),
+                (entity_b.entity.id.as_str().to_owned(), entity_b.clone()),
+            ]),
             fts: HashMap::from([("alpha".to_owned(), vec![a_fts, b_fts])]),
             vector: vec![b_vector, a_vector],
             filters: Arc::new(Mutex::new(Vec::new())),
@@ -1115,8 +1075,10 @@ mod tests {
         .expect("hybrid search");
 
         assert_eq!(result.hits.len(), 2);
-        assert_eq!(result.hits[0].entity.id.as_str(), "a");
-        assert_eq!(result.hits[1].entity.id.as_str(), "b");
+        let mut expected_ids = [entity_a.entity.id, entity_b.entity.id];
+        expected_ids.sort();
+        assert_eq!(result.hits[0].entity.id, expected_ids[0]);
+        assert_eq!(result.hits[1].entity.id, expected_ids[1]);
         assert!(
             result
                 .hits
@@ -1140,32 +1102,22 @@ mod tests {
     #[tokio::test]
     async fn loads_only_selected_entities_once_after_adaptive_recall() {
         let source = file(1, "src/lib.rs", 100);
-        let selected = entity("selected", &source, "selected source");
-        let discarded = entity("discarded", &source, "discarded source");
+        let selected = entity(&source, "selected source");
+        let discarded = entity(&source, "discarded source");
         let mut fts = (0..205)
-            .map(|index| {
-                hit(
-                    &selected,
-                    &format!("window-{index:03}"),
-                    StorageSearchPath::Fts,
-                    1.0,
-                )
-            })
+            .map(|index| hit(&selected, index, StorageSearchPath::Fts, 1.0))
             .collect::<Vec<_>>();
-        fts.push(hit(
-            &discarded,
-            "discarded-window",
-            StorageSearchPath::Fts,
-            0.5,
-        ));
+        fts.push(hit(&discarded, 0, StorageSearchPath::Fts, 0.5));
         let mut storage = pushdown_storage();
         storage.files.push(source.clone());
         storage
             .entities
-            .insert("selected".to_owned(), selected.clone());
-        storage.entities.insert("discarded".to_owned(), discarded);
+            .insert(selected.entity.id.as_str().to_owned(), selected.clone());
+        storage
+            .entities
+            .insert(discarded.entity.id.as_str().to_owned(), discarded);
         storage.fts.insert("query".to_owned(), fts);
-        storage.vector = vec![hit(&selected, "window-000", StorageSearchPath::Vector, 0.9)];
+        storage.vector = vec![hit(&selected, 0, StorageSearchPath::Vector, 0.9)];
         let mut plan = plan(vec![
             SearchRoute {
                 mode: SearchRouteMode::Fts,
@@ -1192,8 +1144,14 @@ mod tests {
         let selected_hit = &result.hits[0];
         assert_eq!(selected_hit.entity.id, selected.entity.id);
         assert_eq!(selected_hit.evidence.len(), 206);
-        assert_eq!(selected_hit.evidence[0].fragment.id.as_str(), "window-000");
-        assert_eq!(selected_hit.evidence[1].fragment.id.as_str(), "window-000");
+        assert_eq!(
+            selected_hit.evidence[0].fragment.id,
+            FragmentId::new(&selected.entity.id, 0)
+        );
+        assert_eq!(
+            selected_hit.evidence[1].fragment.id,
+            FragmentId::new(&selected.entity.id, 0)
+        );
         let trace = selected_hit.trace.as_ref().expect("trace");
         assert_eq!(trace.recall.len(), 2);
         assert!(trace.recall.iter().all(|recall| recall.rank == Some(1)));
@@ -1209,47 +1167,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_entities_and_mismatched_fragment_ownership() {
+    async fn skips_missing_entities_but_rejects_mismatched_fragment_ownership() {
         let source = file(1, "src/lib.rs", 100);
-        let stored = entity("entity", &source, "source");
+        let stored = entity(&source, "source");
         for missing in [true, false] {
             let mut storage = pushdown_storage();
-            let mut recalled = hit(&stored, "window", StorageSearchPath::Fts, 1.0);
+            let mut recalled = hit(&stored, 0, StorageSearchPath::Fts, 1.0);
             if !missing {
-                storage.entities.insert("entity".to_owned(), stored.clone());
-                recalled.fragment.range = Range::Byte(ByteRange {
-                    start_offset: 1,
-                    end_offset: 3,
-                });
+                storage
+                    .entities
+                    .insert(stored.entity.id.as_str().to_owned(), stored.clone());
+                recalled.fragment.range =
+                    Range::Byte(ByteRange::new(1, 3).expect("ordered byte offsets"));
             }
             storage.fts.insert("query".to_owned(), vec![recalled]);
             let plan = plan(vec![SearchRoute {
                 mode: SearchRouteMode::Fts,
                 query: "query".to_owned(),
             }]);
-            let error = search_workspace_index(Path::new("/workspace"), plan, &storage, &[])
-                .await
-                .expect_err("invalid stored result must fail");
-            assert!(error.to_string().contains(if missing {
-                "missing search entity"
+            let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[]).await;
+            if missing {
+                assert!(result.expect("interrupted replacement").hits.is_empty());
             } else {
-                "inconsistent ownership"
-            }));
+                assert!(
+                    result
+                        .expect_err("invalid ownership")
+                        .to_string()
+                        .contains("inconsistent ownership")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn skips_missing_fragments_without_discarding_other_evidence() {
+        let source = file(1, "src/lib.rs", 100);
+        let mut stored = entity(&source, "source");
+        let retained = hit(&stored, 0, StorageSearchPath::Fts, 2.0);
+        let removed = hit(&stored, 1, StorageSearchPath::Fts, 1.0);
+        stored.entity.fragments = vec![retained.fragment.clone()];
+        for keep_fragment in [false, true] {
+            let mut data = StoredSearchData::default();
+            data.entities
+                .insert(stored.entity.id.clone(), stored.clone());
+            if keep_fragment {
+                data.fragments
+                    .insert(retained.hit.document_id.clone(), retained.fragment.clone());
+            }
+            let candidate = super::Candidate {
+                id: stored.entity.id.clone(),
+                file_id: source.id,
+                sources: std::collections::HashSet::from([SearchRouteMode::Fts]),
+                recall: Vec::new(),
+                evidence: [&retained, &removed]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, hit)| super::InternalEvidence {
+                        hit: hit.hit.clone(),
+                        path: SearchRouteMode::Fts,
+                        route_id: "fts".to_owned(),
+                        rank: rank + 1,
+                    })
+                    .collect(),
+                score: 1.0,
+                rank: 1,
+            };
+            let result =
+                super::candidate_to_hit(candidate, 1, false, &mut data).expect("partial load");
+            if keep_fragment {
+                let result = result.expect("surviving evidence");
+                assert_eq!(result.evidence.len(), 1);
+                assert_eq!(result.evidence[0].fragment.id, retained.fragment.id);
+            } else {
+                assert!(result.is_none());
+            }
         }
     }
 
     #[tokio::test]
     async fn multiple_models_are_rejected_before_query_embedding() {
         let source = file(1, "src/service.rs", 200);
-        let owner = entity("service", &source, "Service implementation");
+        let owner = entity(&source, "Service implementation");
         let storage = FixtureStorage {
             paths_only: false,
-            path_pushdown: false,
+            forbid_enumeration: false,
             files: vec![source],
-            entities: HashMap::from([("service".to_owned(), owner.clone())]),
+            entities: HashMap::from([(owner.entity.id.as_str().to_owned(), owner.clone())]),
             fts: HashMap::from([(
                 "Service".to_owned(),
-                vec![hit(&owner, "service-hit", StorageSearchPath::Fts, 2.0)],
+                vec![hit(&owner, 0, StorageSearchPath::Fts, 2.0)],
             )]),
             vector: Vec::new(),
             filters: Arc::new(Mutex::new(Vec::new())),
@@ -1276,22 +1282,28 @@ mod tests {
     async fn pushes_file_and_symbol_filters_into_storage() {
         let source = file(1, "src/service.rs", 200);
         let docs = file(2, "docs/service.md", 200);
-        let source_entity = entity("source-entity", &source, "Service implementation");
-        let docs_entity = entity("docs-entity", &docs, "Service documentation");
+        let source_entity = entity(&source, "Service implementation");
+        let docs_entity = entity(&docs, "Service documentation");
         let filters = Arc::new(Mutex::new(Vec::new()));
         let storage = FixtureStorage {
             paths_only: false,
-            path_pushdown: false,
+            forbid_enumeration: false,
             files: vec![source.clone(), docs.clone()],
             entities: HashMap::from([
-                ("source-entity".to_owned(), source_entity.clone()),
-                ("docs-entity".to_owned(), docs_entity.clone()),
+                (
+                    source_entity.entity.id.as_str().to_owned(),
+                    source_entity.clone(),
+                ),
+                (
+                    docs_entity.entity.id.as_str().to_owned(),
+                    docs_entity.clone(),
+                ),
             ]),
             fts: HashMap::from([(
                 "Service".to_owned(),
                 vec![
-                    hit(&source_entity, "source-hit", StorageSearchPath::Fts, 2.0),
-                    hit(&docs_entity, "docs-hit", StorageSearchPath::Fts, 1.0),
+                    hit(&source_entity, 0, StorageSearchPath::Fts, 2.0),
+                    hit(&docs_entity, 0, StorageSearchPath::Fts, 1.0),
                 ],
             )]),
             vector: Vec::new(),
@@ -1317,7 +1329,7 @@ mod tests {
             filters
                 .iter()
                 .flatten()
-                .all(|filter| { filter.file_ids.as_deref() == Some(&[source.id]) })
+                .all(|filter| selected_file_ids(&storage, filter) == [source.id])
         );
         assert!(filters.iter().flatten().any(|filter| {
             filter
@@ -1351,10 +1363,27 @@ mod tests {
         );
     }
 
+    fn selected_file_ids(storage: &FixtureStorage, filter: &StorageSearchFilter) -> Vec<FileId> {
+        storage
+            .files
+            .iter()
+            .filter(|file| {
+                filter
+                    .file_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&file.id))
+                    && filter.path.as_ref().is_none_or(|predicate| {
+                        predicate_matches(predicate, file.relative_path.as_path())
+                    })
+            })
+            .map(|file| file.id)
+            .collect()
+    }
+
     fn pushdown_storage() -> FixtureStorage {
         FixtureStorage {
             paths_only: false,
-            path_pushdown: true,
+            forbid_enumeration: true,
             files: Vec::new(),
             entities: HashMap::new(),
             fts: HashMap::new(),
@@ -1367,7 +1396,7 @@ mod tests {
     #[test]
     fn complex_globs_only_read_the_path_projection() {
         let mut storage = pushdown_storage();
-        storage.path_pushdown = false;
+        storage.forbid_enumeration = false;
         storage.paths_only = true;
         storage.files = vec![
             file(1, "src/engine/tests/a.rs", 10),
@@ -1459,8 +1488,8 @@ mod tests {
         assert!(!predicate_matches(&predicate, Path::new("src/main.RS")));
         assert!(!predicate_matches(&predicate, Path::new("tests/main.rs")));
 
-        // Backends without predicate support still match the compiled rules.
-        storage.path_pushdown = false;
+        // Time filtering enumerates attributes while format filtering remains pushed down.
+        storage.forbid_enumeration = false;
         storage.files = vec![
             file(1, "src/main.rs", 10),
             file(2, "src/other.rs", 20),
@@ -1470,13 +1499,14 @@ mod tests {
         let filter = super::search_plan_to_storage_filter(Path::new("/missing"), &plan, &storage)
             .expect("fallback")
             .expect("filter");
-        assert_eq!(filter.file_ids, Some(vec![FileId::new(2)]));
+        assert_eq!(filter.file_ids, Some(vec![FileId::new(2), FileId::new(3)]));
+        assert_eq!(selected_file_ids(&storage, &filter), vec![FileId::new(2)]);
     }
 
     #[test]
     fn formats_and_categories_use_stored_names_with_any_exclusion_taking_precedence() {
         let mut storage = pushdown_storage();
-        storage.path_pushdown = false;
+        storage.forbid_enumeration = false;
         storage.paths_only = true;
         storage.files = vec![
             file(1, "src/header.h", 10),
@@ -1503,7 +1533,7 @@ mod tests {
         )
         .expect("stored names")
         .expect("filter");
-        assert_eq!(filter.file_ids, Some(vec![FileId::new(3)]));
+        assert_eq!(selected_file_ids(&storage, &filter), vec![FileId::new(3)]);
 
         let categories = QueryFilter {
             categories: vec![FileCategory::Code],
@@ -1525,7 +1555,7 @@ mod tests {
         )
         .expect("extensionless Python source");
         let mut storage = pushdown_storage();
-        storage.path_pushdown = false;
+        storage.forbid_enumeration = false;
         storage.paths_only = true;
         storage.files = vec![
             file(1, "CMakeLists.txt", 0),
@@ -1553,8 +1583,8 @@ mod tests {
                 .expect("name filter")
                 .expect("filter");
             assert_eq!(
-                selected.file_ids,
-                Some(expected.into_iter().map(FileId::new).collect()),
+                selected_file_ids(&storage, &selected),
+                expected.into_iter().map(FileId::new).collect::<Vec<_>>(),
                 "{format:?}"
             );
         }
@@ -1564,18 +1594,18 @@ mod tests {
         let selected = super::search_plan_to_storage_filter(root.path(), &plan, &storage)
             .expect("overlapping formats")
             .expect("filter");
-        assert_eq!(selected.file_ids, Some(vec![FileId::new(2)]));
+        assert_eq!(selected_file_ids(&storage, &selected), vec![FileId::new(2)]);
         plan.filter.excluded_formats = vec![FileFormat::TypeScript];
         let excluded = super::search_plan_to_storage_filter(root.path(), &plan, &storage)
             .expect("format exclusion")
             .expect("filter");
-        assert_eq!(excluded.file_ids, Some(Vec::new()));
+        assert!(selected_file_ids(&storage, &excluded).is_empty());
     }
 
     #[test]
     fn modification_time_filters_use_light_attributes_and_exclude_unknown_times() {
         let mut storage = pushdown_storage();
-        storage.path_pushdown = false;
+        storage.forbid_enumeration = false;
         storage.files = vec![
             file(1, "old.rs", 0),
             file(2, "new.rs", 20),
@@ -1613,8 +1643,8 @@ mod tests {
         .expect("unknown times need no exclusion without a time filter")
         .expect("filter");
         assert_eq!(
-            filter.file_ids,
-            Some(vec![FileId::new(1), FileId::new(2), FileId::new(3)])
+            selected_file_ids(&storage, &filter),
+            vec![FileId::new(1), FileId::new(2), FileId::new(3)]
         );
     }
 
@@ -2021,16 +2051,18 @@ mod tests {
         }
     }
 
-    fn entity(id: &str, file: &FileRecord, content: &str) -> StoredEntity {
+    fn entity(file: &FileRecord, content: &str) -> StoredEntity {
+        let source_range = Range::Text(
+            TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len())
+                .expect("source range"),
+        );
+        let content = Content::Text(content.to_owned());
         StoredEntity {
             entity: Entity {
-                id: EntityId::new(id).expect("entity id"),
+                id: EntityId::new(file.id, &content, source_range).expect("entity id"),
                 file_id: file.id,
-                source_range: Range::Text(
-                    TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len())
-                        .expect("source range"),
-                ),
-                content: Content::Text(content.to_owned()),
+                source_range,
+                content,
                 metadata: None,
                 fragments: Vec::new(),
             },
@@ -2038,22 +2070,18 @@ mod tests {
         }
     }
 
-    fn hit(
-        stored: &StoredEntity,
-        fragment_id: &str,
-        path: StorageSearchPath,
-        score: f64,
-    ) -> FixtureHit {
+    fn hit(stored: &StoredEntity, ordinal: u32, path: StorageSearchPath, score: f64) -> FixtureHit {
+        let fragment_id = FragmentId::new(&stored.entity.id, ordinal);
         FixtureHit {
             hit: StorageSearchHit {
-                document_id: fragment_id.to_owned(),
+                document_id: fragment_id.as_str().to_owned(),
                 entity_id: stored.entity.id.clone(),
                 file_id: stored.file.id,
                 path,
                 score,
             },
             fragment: EntityFragment {
-                id: FragmentId::new(fragment_id).expect("fragment id"),
+                id: fragment_id,
                 range: Range::Full,
             },
         }

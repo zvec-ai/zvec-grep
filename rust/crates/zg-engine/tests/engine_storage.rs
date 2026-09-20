@@ -9,7 +9,7 @@ use std::{
 
 use support::{
     EmbeddingServer, configure_remote_model, index_options, info_options, native_documents,
-    native_file_records,
+    native_file_records, set_native_file_status,
 };
 
 use serde_json::{Value, json};
@@ -210,6 +210,13 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
             .expect("canonical entity"),
     )?;
     let entity = &payload["value"];
+    let entity_id = entity["id"].as_str().expect("entity ID");
+    assert_eq!(entity_id.len(), 32);
+    assert_eq!(entities[0].get_pk(), Some(entity_id));
+    assert_eq!(
+        entities[0].get_string("entity_id")?.as_deref(),
+        Some(entity_id)
+    );
     assert_eq!(entity["content"], json!({"kind": "text", "value": source}));
     assert_eq!(entity["source_range"]["kind"], "text");
     assert!(entity.get("range").is_none());
@@ -225,10 +232,11 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
     assert!(fragments.len() > 1);
     let mut coverage = vec![false; source.len()];
     let mut ids = BTreeSet::new();
-    for fragment in fragments {
+    for (ordinal, fragment) in fragments.iter().enumerate() {
         let id = fragment["id"].as_str().expect("fragment ID");
-        assert_ne!(Some(id), entity["id"].as_str());
-        assert!(ids.insert(hex::encode(id)));
+        assert_eq!(id, format!("{entity_id}{ordinal:08x}"));
+        assert_eq!(id.len(), 40);
+        assert!(ids.insert(id.to_owned()));
         assert!(fragment.get("content").is_none());
         assert!(fragment.get("metadata").is_none());
         assert_eq!(fragment.as_object().expect("fragment object").len(), 2);
@@ -249,7 +257,10 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
     assert_eq!(projected.len(), fragments.len());
     let mut projected_ids = BTreeSet::new();
     for doc in projected {
-        projected_ids.insert(doc.get_string("document_id")?.expect("fragment ID"));
+        let document_id = doc.get_string("document_id")?.expect("fragment ID");
+        assert_eq!(doc.get_pk(), Some(document_id.as_str()));
+        assert_eq!(doc.get_string("entity_id")?.as_deref(), Some(entity_id));
+        projected_ids.insert(document_id);
         assert_eq!(doc.get_string("symbol_type")?.as_deref(), Some("function"));
         assert!(doc.get_string("symbol_name")?.is_some());
         assert!(
@@ -823,19 +834,11 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         assert_eq!(files.len(), 1);
         files[0].get_string("payload")?.expect("source payload")
     };
-    // A completed file can still have a pending marker after a crash before marker removal.
-    // The actual journal stores reindex intent, never a claim that the batch is complete.
-    let mut pending_source: Value = serde_json::from_str(&source)?;
-    pending_source["value"]["index_status"] = json!({"kind": "not_indexed"});
-    // Preserve its full snapshot so recovery must override the ordinary unchanged-file fast path.
-    let pending_path = index_path.join("pending.json");
-    fs::write(
-        &pending_path,
-        serde_json::to_vec(&json!({
-            "version": 2,
-            "files": [{ "kind": "reindex", "source": serde_json::to_string(&pending_source)? }],
-        }))?,
-    )?;
+    // Simulate interruption after recording NotIndexed. Opening the store must
+    // preserve this state and any remaining search documents until indexing retries.
+    let original: Value = serde_json::from_str(&source)?;
+    let id = u32::try_from(original["value"]["id"].as_u64().expect("file ID"))?;
+    set_native_file_status(&index_path, id, "not_indexed")?;
 
     let engine = ZvecGrep::new();
     let status = engine
@@ -851,11 +854,11 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         ),
         (1, 0, 0)
     );
-    assert!(
-        !pending_path.exists(),
-        "recovery flushes and clears the marker"
+    assert!(!index_path.join("pending.json").exists());
+    assert_eq!(
+        fts_paths(&engine, root, "orchard").await?,
+        [PathBuf::from("note.txt")]
     );
-    assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
     assert_eq!(server.requests.load(Ordering::Acquire), requests);
     engine.close();
     drop(engine);
@@ -899,8 +902,8 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
     assert_eq!(collections.len(), 2);
     for collection in collections {
         assert!(
-            native_documents(&collection)?.is_empty(),
-            "recovery clears searchable records in {}",
+            !native_documents(&collection)?.is_empty(),
+            "opening storage preserves intermediate records in {}",
             collection.display()
         );
     }
@@ -1019,7 +1022,14 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     assert_eq!(updated.files_modified, 1);
     let result = engine.context(query(&relocated_root, "vineyard")).await?;
     assert_eq!(result.items.len(), 1);
-    assert_eq!(result.items[0].entity_id, entity_id);
+    assert_ne!(result.items[0].entity_id, entity_id);
+    assert!(
+        engine
+            .context(query(&relocated_root, "orchard"))
+            .await?
+            .items
+            .is_empty()
+    );
     engine.drop_index(info_options(&relocated_root)).await?;
     engine.close();
     Ok(())

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     EngineError,
-    storage::spi::WorkspaceIndexStorageFactory,
+    storage::zvec::ZvecStorage,
     utils::{atomic_write, sync_directory},
 };
 
@@ -76,9 +76,13 @@ pub(crate) fn has_generation_storage(home: &Path) -> Result<bool, EngineError> {
 
 /// Remove abandoned builds or finish post-publication cleanup under the write lock.
 /// The active manifest is the only commit marker; unfinished work is never resumed.
-pub(crate) fn recover_build(
+pub(crate) fn recover_build(home: &Path) -> Result<(), EngineError> {
+    recover_build_with(home, &ZvecStorage::delete)
+}
+
+fn recover_build_with(
     home: &Path,
-    factory: &dyn WorkspaceIndexStorageFactory,
+    delete_storage: &impl Fn(&Path) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     let Some(build) = read_build(home)? else {
         return Ok(());
@@ -88,9 +92,9 @@ pub(crate) fn recover_build(
         .as_ref()
         .is_some_and(|manifest| manifest.storage_generation == build.target.storage_generation)
     {
-        cleanup_previous(home, &build, factory)?;
+        cleanup_previous(home, &build, delete_storage)?;
     } else {
-        remove_generation(home, &build.target, factory)?;
+        remove_generation(home, &build.target, delete_storage)?;
     }
     remove_build(home)
 }
@@ -116,24 +120,25 @@ pub(crate) fn prepare_build(
 }
 
 /// The caller has completed and closed stage storage before publishing.
-pub(crate) fn publish_build(
+pub(crate) fn publish_build(build: WorkspaceBuild, updated_time: u64) -> Result<(), EngineError> {
+    publish_build_with(build, updated_time, &ZvecStorage::delete)
+}
+
+fn publish_build_with(
     mut build: WorkspaceBuild,
     updated_time: u64,
-    factory: &dyn WorkspaceIndexStorageFactory,
+    delete_storage: &impl Fn(&Path) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     build.target.record_update(updated_time);
     write_workspace_manifest(&build.target.path, &build.target)?;
     // Publication succeeded. Cleanup failure must not turn it into a failed build;
     // keep the ownership record so the next writer can retry cleanup.
-    let _ = recover_build(&build.target.path, factory);
+    let _ = recover_build_with(&build.target.path, delete_storage);
     Ok(())
 }
 
 /// Drop also removes interrupted and superseded generations, under the home lock.
-pub(crate) fn drop_build_storage(
-    home: &Path,
-    factory: &dyn WorkspaceIndexStorageFactory,
-) -> Result<(), EngineError> {
+pub(crate) fn drop_build_storage(home: &Path) -> Result<(), EngineError> {
     let generations = home.join("generations");
     match fs::read_dir(&generations) {
         Ok(entries) => {
@@ -142,7 +147,7 @@ pub(crate) fn drop_build_storage(
                 if !entry.file_type().map_err(build_io)?.is_dir() {
                     continue;
                 }
-                factory.delete(&entry.path())?;
+                ZvecStorage::delete(&entry.path())?;
                 fs::remove_dir_all(entry.path()).map_err(build_io)?;
             }
             sync_directory(&generations)?;
@@ -198,14 +203,14 @@ fn ensure_stage(build: &WorkspaceBuild) -> Result<(), EngineError> {
 fn cleanup_previous(
     home: &Path,
     build: &WorkspaceBuild,
-    factory: &dyn WorkspaceIndexStorageFactory,
+    delete_storage: &impl Fn(&Path) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     match &build.previous {
         None => Ok(()),
         Some(PreviousStorage::Generation { id }) => {
             let mut previous = build.target.clone();
             previous.storage_generation = Some(id.clone());
-            remove_generation(home, &previous, factory)
+            remove_generation(home, &previous, delete_storage)
         }
     }
 }
@@ -213,10 +218,10 @@ fn cleanup_previous(
 fn remove_generation(
     home: &Path,
     manifest: &WorkspaceManifest,
-    factory: &dyn WorkspaceIndexStorageFactory,
+    delete_storage: &impl Fn(&Path) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     let storage = manifest.storage_home();
-    factory.delete(&storage)?;
+    delete_storage(&storage)?;
     match fs::remove_dir_all(&storage) {
         Ok(()) => sync_directory(&home.join("generations")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -242,49 +247,17 @@ fn build_io(error: std::io::Error) -> EngineError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use tempfile::tempdir;
 
-    use crate::{
-        domain::{
-            IndexDescriptor, IndexState, Workspace,
-            model::{EmbeddingModelInfo, Metric, ModelConfig},
-        },
-        storage::spi::{StorageResult, WorkspaceIndexStorage, WorkspaceIndexStorageOptions},
+    use crate::domain::{
+        IndexDescriptor, IndexState, Workspace,
+        model::{EmbeddingModelInfo, Metric, ModelConfig},
     };
 
     use super::*;
 
-    #[derive(Debug, Default)]
-    struct TestFactory {
-        fail_delete: AtomicBool,
-    }
-
-    impl WorkspaceIndexStorageFactory for TestFactory {
-        fn open(
-            &self,
-            _options: WorkspaceIndexStorageOptions,
-        ) -> StorageResult<Box<dyn WorkspaceIndexStorage>> {
-            Err(EngineError::unsupported(
-                "build protocol test does not open native storage",
-            ))
-        }
-
-        fn exists(&self, home: &Path) -> StorageResult<bool> {
-            Ok(home.join("storage").is_dir())
-        }
-
-        fn delete(&self, home: &Path) -> StorageResult<()> {
-            if self.fail_delete.load(Ordering::Relaxed) {
-                return Err(EngineError::storage_failure("injected cleanup failure"));
-            }
-            match fs::remove_dir_all(home.join("storage")) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(build_io(error)),
-            }
-        }
+    fn fail_cleanup(_path: &Path) -> Result<(), EngineError> {
+        Err(EngineError::storage_failure("injected cleanup failure"))
     }
 
     fn manifest(root: &Path) -> WorkspaceManifest {
@@ -309,7 +282,7 @@ mod tests {
                 updated_epoch_ms: 2,
             },
             root.join(".zvec-grep"),
-            Some(5),
+            Some(crate::workspace::CURRENT_INDEX_VERSION),
             std::collections::BTreeMap::from([("local/example".into(), ModelConfig::default())]),
         )
         .expect("manifest");
@@ -328,11 +301,10 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         let checkpoint = build.target.storage_home().join("checkpoint");
         fs::write(&checkpoint, "completed work").expect("checkpoint");
-        recover_build(&active.path, &factory).expect("discard interrupted stage");
+        recover_build(&active.path).expect("discard interrupted stage");
         assert!(!build.target.storage_home().exists());
         assert!(!has_build(&active.path));
         let fresh = prepare_build(active.clone(), Some(&active)).expect("fresh build");
@@ -353,10 +325,9 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         fs::create_dir(build.target.storage_home().join("storage")).expect("completed storage");
-        recover_build(&active.path, &factory).expect("discard before manifest commit");
+        recover_build(&active.path).expect("discard before manifest commit");
         assert!(!build.target.storage_home().exists());
         assert_eq!(
             read_workspace_manifest(&active.path).expect("manifest"),
@@ -370,18 +341,15 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
-        factory.fail_delete.store(true, Ordering::Relaxed);
-        recover_build(&active.path, &factory).expect_err("cleanup fails");
+        recover_build_with(&active.path, &fail_cleanup).expect_err("cleanup fails");
         assert!(has_build(&active.path));
         assert!(build.target.storage_home().exists());
         assert!(active.storage_home().join("storage/old").exists());
-        factory.fail_delete.store(false, Ordering::Relaxed);
-        recover_build(&active.path, &factory).expect("retry cleanup");
+        recover_build(&active.path).expect("retry cleanup");
         assert!(!has_build(&active.path));
         assert!(!build.target.storage_home().exists());
-        recover_build(&active.path, &factory).expect("idempotent cleanup");
+        recover_build(&active.path).expect("idempotent cleanup");
     }
 
     #[test]
@@ -389,11 +357,9 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         fs::create_dir(build.target.storage_home().join("storage")).expect("completed new storage");
-        factory.fail_delete.store(true, Ordering::Relaxed);
-        publish_build(build.clone(), 3, &factory)
+        publish_build_with(build.clone(), 3, &fail_cleanup)
             .expect("cleanup failure does not undo successful publication");
         let mut committed = read_workspace_manifest(&active.path)
             .expect("manifest")
@@ -412,8 +378,7 @@ mod tests {
         assert!(has_build(&active.path));
         committed.workspace.name = "renamed".to_owned();
         write_workspace_manifest(&active.path, &committed).expect("rename after publication");
-        factory.fail_delete.store(false, Ordering::Relaxed);
-        recover_build(&active.path, &factory).expect("complete cleanup");
+        recover_build(&active.path).expect("complete cleanup");
         assert!(!active.storage_home().exists());
         assert!(committed.storage_home().join("storage").is_dir());
         assert!(!has_build(&active.path));
@@ -428,14 +393,16 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         fs::create_dir(build.target.storage_home().join("storage")).expect("new storage");
-        publish_build(build, 3, &factory).expect("publish");
+        publish_build(build, 3).expect("publish");
         let committed = read_workspace_manifest(&active.path)
             .expect("manifest")
             .expect("active");
-        assert_eq!(committed.index_version, Some(5));
+        assert_eq!(
+            committed.index_version,
+            Some(crate::workspace::CURRENT_INDEX_VERSION)
+        );
         assert_eq!(committed.workspace.updated_epoch_ms, 3);
         assert!(committed.storage_home().join("storage").is_dir());
         assert!(!active.storage_home().join("storage").exists());
@@ -449,7 +416,6 @@ mod tests {
         fs::create_dir(&original).expect("root");
         let active = manifest(&original);
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         let moved = directory.path().join("moved");
         fs::rename(original, &moved).expect("move");
@@ -462,7 +428,7 @@ mod tests {
         assert_eq!(pending.target.workspace.root, moved);
         assert!(pending.target.storage_home().is_dir());
         assert_eq!(pending.target.workspace.name, active.workspace.name);
-        recover_build(&home, &factory).expect("discard moved stage");
+        recover_build(&home).expect("discard moved stage");
         assert!(!pending.target.storage_home().exists());
         assert!(
             home.join("generations")
@@ -482,15 +448,14 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
-        let factory = TestFactory::default();
         let build = prepare_build(active.clone(), Some(&active)).expect("stage");
         assert!(has_generation_storage(&active.path).expect("generations present"));
-        drop_build_storage(&active.path, &factory).expect("drop generations");
+        drop_build_storage(&active.path).expect("drop generations");
         assert!(!active.storage_home().exists());
         assert!(!build.target.storage_home().exists());
         assert!(!has_build(&active.path));
         assert!(!has_generation_storage(&active.path).expect("empty generations container"));
-        drop_build_storage(&active.path, &factory).expect("idempotent drop");
+        drop_build_storage(&active.path).expect("idempotent drop");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, ffi::OsStr};
 
 use crate::{
-    api::context::options::QueryFilter, domain::FileFormat, storage::spi::StoragePathFilter,
+    api::context::options::QueryFilter, domain::FileFormat, storage::zvec::types::StoragePathFilter,
 };
 
 use super::path_filter::{all, any, negate};

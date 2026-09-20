@@ -1,6 +1,6 @@
 //! Index-local lookup cache derived from source records, never a separate database.
 //!
-//! Reservations are ephemeral until a `FileRecord` enters the existing write journal.
+//! Reservations are ephemeral until their `FileRecord` is stored.
 //! Deleted IDs need not survive reopening; IDs have no cross-generation contract.
 use std::{
     collections::{HashMap, HashSet},
@@ -34,7 +34,7 @@ impl FileIds {
         Ok(ids)
     }
 
-    /// Validate a whole recovery batch before replaying any native mutations.
+    /// Restore a stored identity or reserve a newly allocated one.
     pub(super) fn claim(&mut self, id: FileId, path: SourcePath) -> EngineResult<()> {
         if self
             .by_path

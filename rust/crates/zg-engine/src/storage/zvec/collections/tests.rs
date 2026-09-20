@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::{
-    ByteRange, CodeMetadata, Entity, FileIndexStatus, FileSnapshot, FragmentId, IndexField,
-    MarkdownMetadata, Range, SymbolType, TextRange,
+    ByteRange, CodeMetadata, Content, Entity, FileIndexStatus, FileSnapshot, FragmentId,
+    IndexField, MarkdownMetadata, Range, SymbolType, TextRange,
 };
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
@@ -19,13 +19,14 @@ fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
 
 #[test]
 fn source_file_projection_preserves_paths_and_directory_membership_for_all_statuses() {
-    super::super::backend::initialize().expect("initialize zvec");
+    super::super::storage::initialize().expect("initialize zvec");
     assert!(!files_schema().expect("file schema").has_field("formats"));
     let directories = [DirectoryId::new(0), DirectoryId::new(1)];
     let mut source = file(12, Path::new("src").join("nested").join("name.rs"));
     source.snapshot.content_hash = Some("fixture-hash".into());
     for status in [
         FileIndexStatus::NotIndexed,
+        FileIndexStatus::Deleting,
         FileIndexStatus::Failed {
             error: "extractor unavailable".into(),
         },
@@ -60,7 +61,7 @@ fn source_file_projection_preserves_paths_and_directory_membership_for_all_statu
 
 #[test]
 fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads() {
-    super::super::backend::initialize().expect("initialize zvec");
+    super::super::storage::initialize().expect("initialize zvec");
     let temporary = tempfile::tempdir().expect("temporary storage");
     let storage_path = temporary.path().join("storage");
     std::fs::create_dir(&storage_path).expect("storage directory");
@@ -120,7 +121,7 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
 fn non_unicode_file_projection_keeps_native_path_without_a_lossy_query_value() {
     use std::os::unix::ffi::OsStringExt;
 
-    super::super::backend::initialize().expect("initialize zvec");
+    super::super::storage::initialize().expect("initialize zvec");
     let path = PathBuf::from(std::ffi::OsString::from_vec(b"src/\xff.rs".to_vec()));
     let source = file(9, path.clone());
     let doc = encode_file_doc(
@@ -150,7 +151,7 @@ fn non_unicode_file_projection_keeps_native_path_without_a_lossy_query_value() {
 
 #[test]
 fn full_file_decode_rejects_a_path_projection_from_another_file() {
-    super::super::backend::initialize().expect("initialize zvec");
+    super::super::storage::initialize().expect("initialize zvec");
     let source = file(2, "first.rs");
     let mut doc = encode_file_doc(&source, &[]).expect("encode source");
     doc.add_string(
@@ -164,7 +165,7 @@ fn full_file_decode_rejects_a_path_projection_from_another_file() {
 
 #[test]
 fn full_range_ids_support_native_queries_membership_and_deletion() {
-    super::super::backend::initialize().expect("initialize zvec");
+    super::super::storage::initialize().expect("initialize zvec");
     let temporary = tempfile::tempdir().expect("temporary storage");
     let collection = open_collection(
         &temporary.path().join("files"),
@@ -234,7 +235,7 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
 }
 
 fn metadata_store(path: &Path) -> NativeStore {
-    super::super::backend::initialize().expect("initialize zvec");
+    super::super::storage::initialize().expect("initialize zvec");
     NativeStore::open(
         path,
         &[EmbeddingModelInfo {
@@ -255,10 +256,10 @@ fn metadata_store(path: &Path) -> NativeStore {
 }
 
 fn metadata_fragments(
-    entity_id: &str,
-    window_id: &str,
+    file_id: u32,
+    label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
-    let mut source = file(0, "harvest.rs");
+    let mut source = file(file_id, "harvest.rs");
     source.snapshot.size_bytes = 100;
     source.snapshot.content_hash = Some("fixture-hash".into());
     source.index_status = FileIndexStatus::Indexed {
@@ -268,14 +269,18 @@ fn metadata_fragments(
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
     text.push_str("orchard fruit");
+    text.push_str(&" ".repeat(40 - text.len()));
+    text.push_str(label);
     text.push_str(&" ".repeat(100 - text.len()));
+    let content = Content::Text(text);
+    let source_range =
+        Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
+    let id = EntityId::new(source.id, &content, source_range).expect("entity id");
     let owner = Entity {
-        id: EntityId::new(entity_id).expect("owner ID"),
+        id: id.clone(),
         file_id: source.id,
-        source_range: Range::Text(
-            TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"),
-        ),
-        content: Content::Text(text),
+        source_range,
+        content,
         metadata: Some(EntityMetadata::Code(CodeMetadata {
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("harvest 春'\\crop".into()),
@@ -285,26 +290,24 @@ fn metadata_fragments(
         })),
         fragments: vec![
             EntityFragment {
-                id: FragmentId::new(format!("{entity_id}-first")).expect("first fragment ID"),
-                range: Range::Byte(ByteRange {
-                    start_offset: 0,
-                    end_offset: 15,
-                }),
+                id: FragmentId::new(&id, 0),
+                range: Range::Byte(ByteRange::new(0, 15).expect("ordered byte offsets")),
             },
             EntityFragment {
-                id: FragmentId::new(window_id).expect("window ID"),
-                range: Range::Byte(ByteRange {
-                    start_offset: 20,
-                    end_offset: 40,
-                }),
+                id: FragmentId::new(&id, 1),
+                range: Range::Byte(ByteRange::new(20, 40).expect("ordered byte offsets")),
             },
         ],
     };
     let entries = owner
         .fragments
         .iter()
-        .zip([vec![0.0, 1.0, 0.0], vec![1.0, 0.0, 0.0]])
-        .map(|(fragment, vector)| IndexedFragment {
+        .zip([
+            (vec![0.0, 1.0, 0.0], "Harvest outline\n"),
+            (vec![1.0, 0.0, 0.0], "orchard fruit        \n"),
+        ])
+        .map(|(fragment, (vector, text))| IndexedFragment {
+            fts_text: format!("harvest 春'\\crop\nGarden\npub async fn harvest() -> Crop\nProduces the seasonal crop.\n{text}"),
             model: "fixture/fixture".into(),
             entity_id: owner.id.clone(),
             fragment_id: fragment.id.clone(),
@@ -315,7 +318,7 @@ fn metadata_fragments(
 }
 
 fn entity_document(collection: &Collection, id: &str) -> Doc {
-    let key = entity_key(&EntityId::new(id).expect("entity ID"));
+    let key = id.to_owned();
     fetch_map(collection, std::slice::from_ref(&key))
         .expect("stored entities")
         .remove(&key)
@@ -323,7 +326,7 @@ fn entity_document(collection: &Collection, id: &str) -> Doc {
 }
 
 fn fragment_document(collection: &Collection, id: &str) -> Doc {
-    let key = primary_key("fragment", id);
+    let key = id.to_owned();
     fetch_map(collection, std::slice::from_ref(&key))
         .expect("stored documents")
         .remove(&key)
@@ -380,7 +383,7 @@ fn metadata_projection_rejects_values_that_do_not_match_the_declared_type() {
 
 #[test]
 fn metadata_projection_preserves_full_json_without_indexing_other_fields() {
-    let (_, entities, _) = metadata_fragments("owner", "window");
+    let (_, entities, _) = metadata_fragments(0, "owner");
     let metadata = entities[0].metadata.as_ref().expect("owner metadata");
     let encoded = EncodedMetadata::new(metadata).expect("encode metadata");
 
@@ -404,7 +407,8 @@ fn metadata_projection_preserves_full_json_without_indexing_other_fields() {
 fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let (source, entities, entries) = metadata_fragments("owner", "window");
+    let (source, entities, mut entries) = metadata_fragments(0, "owner");
+    entries[0].fts_text = "prepared\0projection\n".into();
     store
         .apply_replace(&source, &entities, &entries)
         .expect("write file");
@@ -418,7 +422,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     assert_eq!(
         fetch_map(
             &store.entities,
-            &[entity_key(&EntityId::new("window").expect("ID"))]
+            &[entities[0].fragments[1].id.as_str().to_owned()]
         )
         .expect("window entity lookup")
         .len(),
@@ -426,7 +430,11 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     );
     for entry in &entries {
         let id = entry.fragment_id.as_str();
-        let doc = fragment_document(&store.indexes["fixture/fixture"].collection, id);
+        let doc = fragment_document(&store.indexes["fixture/fixture"], id);
+        assert_eq!(
+            string_field(&doc, "text").expect("prepared searchable text"),
+            entry.fts_text.replace('\0', " "),
+        );
         assert!(
             !doc.has_field("payload"),
             "search tables contain only projections"
@@ -453,19 +461,26 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
         .search_fts("orchard", 10, Some(&filter))
         .expect("filtered FTS");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].document_id, "window");
+    assert_eq!(hits[0].document_id, entities[0].fragments[1].id.as_str());
     let vectors = store
         .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
         .expect("filtered vector retrieval");
     assert_eq!(vectors.len(), 2);
-    assert!(vectors.iter().any(|hit| hit.document_id == "window"));
+    assert!(
+        vectors
+            .iter()
+            .any(|hit| hit.document_id == entities[0].fragments[1].id.as_str())
+    );
     let loaded = store
         .load_search_hits(&hits)
         .expect("selected window details");
     assert_eq!(loaded.entities.len(), 1);
     assert_eq!(loaded.entities[&owner.id].entity, *owner);
     assert_eq!(loaded.entities[&owner.id].file, source);
-    assert_eq!(loaded.fragments["window"], entities[0].fragments[1]);
+    assert_eq!(
+        loaded.fragments[entities[0].fragments[1].id.as_str()],
+        entities[0].fragments[1]
+    );
 
     for rejected in [
         StorageSearchFilter {
@@ -497,7 +512,7 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
     {
-        let collection = &store.indexes["fixture/fixture"].collection;
+        let collection = &store.indexes["fixture/fixture"];
         let schema = collection.schema().expect("retrieval schema");
         for IndexField::String(name) in EntityMetadata::index_schema() {
             assert!(schema.has_field(name), "missing metadata field: {name}");
@@ -516,18 +531,19 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
             scope: Some("Garden".into()),
         })),
     ] {
-        let (source, mut entities, entries) = metadata_fragments("owner", "window");
+        let (source, mut entities, entries) = metadata_fragments(0, "owner");
         entities[0].metadata = metadata.clone();
         store
             .apply_replace(&source, &entities, &entries)
             .expect("write entities without metadata filter values");
         store.flush().expect("flush storage");
         assert_eq!(
-            decode_metadata(&entity_document(&store.entities, "owner")).expect("metadata JSON"),
+            decode_metadata(&entity_document(&store.entities, entities[0].id.as_str()))
+                .expect("metadata JSON"),
             metadata
         );
         {
-            let collection = &store.indexes["fixture/fixture"].collection;
+            let collection = &store.indexes["fixture/fixture"];
             for entry in &entries {
                 let doc = fragment_document(collection, entry.fragment_id.as_str());
                 for IndexField::String(name) in EntityMetadata::index_schema() {
@@ -545,12 +561,9 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
 fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let (mut source, mut entities, mut entries) = metadata_fragments("class", "class-window");
-    for (id, fragment_id) in [
-        ("enum", "enum-window"),
-        ("unclassified", "unclassified-window"),
-    ] {
-        let (_, added_entities, added_entries) = metadata_fragments(id, fragment_id);
+    let (mut source, mut entities, mut entries) = metadata_fragments(0, "class");
+    for id in ["enum", "unclassified"] {
+        let (_, added_entities, added_entries) = metadata_fragments(0, id);
         entities.extend(added_entities);
         entries.extend(added_entries);
     }
@@ -587,10 +600,15 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         ] {
             let hits = hits.expect("filtered results");
             assert_eq!(hits.len(), count);
-            assert!(
-                hits.iter()
-                    .all(|hit| hit.entity_id.as_str() == symbol_type.as_str())
-            );
+            assert!(hits.iter().all(|hit| {
+                hit.entity_id
+                    == entities[match symbol_type {
+                        SymbolType::Class => 0,
+                        SymbolType::Enum => 1,
+                        _ => unreachable!(),
+                    }]
+                    .id
+            }));
         }
     }
 
@@ -619,7 +637,7 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         let all = all.expect("unfiltered results");
         let unclassified = all
             .iter()
-            .find(|hit| hit.entity_id.as_str() == "unclassified")
+            .find(|hit| hit.entity_id == entities[2].id)
             .expect("unclassified entity is searchable");
         let loaded = store
             .load_search_hits(std::slice::from_ref(unclassified))
@@ -629,7 +647,7 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
             filtered
                 .expect("classified results")
                 .iter()
-                .all(|hit| { hit.entity_id.as_str() != "unclassified" })
+                .all(|hit| { hit.entity_id != entities[2].id })
         );
     }
 }
@@ -638,11 +656,11 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
 fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let (source, entities, entries) = metadata_fragments("owner", "window");
+    let (source, entities, entries) = metadata_fragments(0, "owner");
     store
         .apply_replace(&source, &entities, &entries)
         .expect("write file");
-    let mut doc = entity_document(&store.entities, "owner");
+    let mut doc = entity_document(&store.entities, entities[0].id.as_str());
     doc.add_string("metadata", "invalid metadata JSON")
         .expect("corrupt metadata");
     write_docs(&store.entities, &[doc], "replace metadata").expect("write corrupt metadata");
@@ -658,9 +676,9 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
     ] {
         let window = hits
             .iter()
-            .find(|hit| hit.document_id == "window")
+            .find(|hit| hit.document_id == entities[0].fragments[1].id.as_str())
             .expect("window recalled without decoding metadata");
-        assert_eq!(window.entity_id.as_str(), "owner");
+        assert_eq!(window.entity_id, entities[0].id);
         let error = store
             .load_search_hits(std::slice::from_ref(window))
             .err()
@@ -670,18 +688,22 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
 }
 
 #[test]
-fn native_search_and_loading_restore_arbitrary_domain_ids() {
+fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
-    let entity_id = "实体'\\\0owner";
-    let window_id = "窗口'\\\0window";
-    let (source, entities, entries) = metadata_fragments(entity_id, window_id);
+    let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
+    let entity_id = &entities[0].id;
+    let window_id = entities[0].fragments[1].id.as_str();
+    assert_eq!(entity_id.as_str().len(), 32);
+    assert_eq!(window_id.len(), 40);
+    assert!(entity_id.as_str().starts_with("ffffffff"));
+    assert_eq!(window_id, format!("{}00000001", entity_id.as_str()));
     store
         .apply_replace(&source, &entities, &entries)
-        .expect("write arbitrary IDs");
+        .expect("write compact IDs");
     store.flush().expect("flush storage");
     let filter = StorageSearchFilter {
-        entity_ids: Some(vec![EntityId::new(entity_id).expect("entity ID")]),
+        entity_ids: Some(vec![entity_id.clone()]),
         ..StorageSearchFilter::default()
     };
     for hits in [
@@ -692,37 +714,44 @@ fn native_search_and_loading_restore_arbitrary_domain_ids() {
             .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
             .expect("ID-filtered vectors"),
     ] {
-        assert!(hits.iter().all(|hit| hit.entity_id.as_str() == entity_id));
+        assert!(hits.iter().all(|hit| &hit.entity_id == entity_id));
         let window = hits
             .iter()
             .find(|hit| hit.document_id == window_id)
-            .expect("full window ID restored");
+            .expect("window ID preserved");
         let loaded = store
             .load_search_hits(std::slice::from_ref(window))
-            .expect("load arbitrary IDs");
+            .expect("load compact IDs");
         let owner = &entities[0];
         assert_eq!(loaded.entities[&owner.id].entity, *owner);
-        assert_eq!(loaded.fragments[window_id], entities[0].fragments[1]);
+        assert_eq!(loaded.fragments[window_id], owner.fragments[1]);
     }
-    {
-        let collection = &store.indexes["fixture/fixture"].collection;
-        let doc = fragment_document(collection, window_id);
-        assert_eq!(
-            string_field(&doc, "entity_id").expect("encoded owner ID"),
-            hex::encode(entity_id)
-        );
-        assert_eq!(
-            string_field(&doc, "document_id").expect("encoded window ID"),
-            hex::encode(window_id)
-        );
-    }
+    let entity_doc = entity_document(&store.entities, entity_id.as_str());
+    assert_eq!(
+        doc_key(&entity_doc).expect("entity primary key"),
+        entity_id.as_str()
+    );
+    assert_eq!(
+        string_field(&entity_doc, "entity_id").expect("stored owner ID"),
+        entity_id.as_str()
+    );
+    let doc = fragment_document(&store.indexes["fixture/fixture"], window_id);
+    assert_eq!(doc_key(&doc).expect("fragment primary key"), window_id);
+    assert_eq!(
+        string_field(&doc, "entity_id").expect("stored owner ID"),
+        entity_id.as_str()
+    );
+    assert_eq!(
+        string_field(&doc, "document_id").expect("stored window ID"),
+        window_id
+    );
 }
 
 #[test]
 fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collections() {
     let temporary = tempfile::tempdir().expect("storage");
     let store = metadata_store(temporary.path());
-    let (mut source, entities, entries) = metadata_fragments("owner", "window");
+    let (mut source, entities, entries) = metadata_fragments(0, "owner");
     source.relative_path = SourcePath::new("edge/harvest.rs").expect("path");
     let mut directories = DirectoryIds::default();
     directories
@@ -749,7 +778,6 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
         .optimize()
         .expect("optimize directory IDs");
     store.indexes["fixture/fixture"]
-        .collection
         .optimize()
         .expect("optimize directory membership");
     let schema = EmbeddingModelInfo {
@@ -854,7 +882,7 @@ fn filename_like_uses_single_wildcards_and_literal_escaping() {
 fn filename_like_negation_propagates_native_query_errors() {
     let temporary = tempfile::tempdir().expect("storage");
     let store = metadata_store(temporary.path());
-    let (source, entities, entries) = metadata_fragments("owner", "window");
+    let (source, entities, entries) = metadata_fragments(0, "owner");
     store
         .apply_replace(&source, &entities, &entries)
         .expect("indexed source");
@@ -907,8 +935,7 @@ fn filename_like_negation_propagates_native_query_errors() {
 fn index_named_filter_sources(store: &NativeStore, paths: &[&str]) {
     for (index, path) in paths.iter().enumerate() {
         let id = u32::try_from(index + 1).expect("file ID");
-        let (mut source, mut entities, entries) =
-            metadata_fragments(&format!("owner-{id}"), &format!("window-{id}"));
+        let (mut source, mut entities, entries) = metadata_fragments(id, &format!("owner-{id}"));
         source.id = FileId::new(id);
         source.relative_path = SourcePath::new(*path).expect("source path");
         for entity in &mut entities {
@@ -1090,7 +1117,7 @@ fn negated_directory_contains_empty_root_arrays_before_and_after_reopen() {
 #[test]
 fn entity_content_is_canonical_and_fragments_have_one_model() {
     let home = tempfile::tempdir().expect("storage");
-    super::super::backend::initialize().expect("native runtime");
+    super::super::storage::initialize().expect("native runtime");
     let text = EmbeddingModelInfo {
         model: crate::domain::model::ModelInfo {
             provider: "fixture".into(),
@@ -1106,10 +1133,10 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
     let mut other = text.clone();
     other.model.name = "other".into();
     let store = NativeStore::open(home.path(), &[text, other], false).expect("two models");
-    let (source, entities, mut entries) = metadata_fragments("owner", "window");
+    let (source, entities, mut entries) = metadata_fragments(0, "owner");
     entries[1].model = "fixture/other".into();
     assert!(
-        store.apply_replace(&source, &entities, &entries).is_err(),
+        validate_projections(&entities, &entries).is_err(),
         "one entity cannot span model tables"
     );
     assert!(store.list_files().expect("unmodified").is_empty());
@@ -1125,19 +1152,23 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
         2,
         "one owner read loads all its fragments"
     );
-    assert_eq!(loaded.fragments["owner-first"], entities[0].fragments[0]);
-    assert_eq!(loaded.fragments["window"], entities[0].fragments[1]);
+    assert_eq!(
+        loaded.fragments[entities[0].fragments[0].id.as_str()],
+        entities[0].fragments[0]
+    );
+    assert_eq!(
+        loaded.fragments[entities[0].fragments[1].id.as_str()],
+        entities[0].fragments[1]
+    );
     for index in store.indexes.values() {
-        let schema = index.collection.schema().expect("schema");
+        let schema = index.schema().expect("schema");
         assert!(schema.has_index("text"));
         assert!(schema.has_index("embedding"));
         assert!(!schema.has_field("payload"));
     }
     // Removing a derived projection does not remove or redefine the canonical fragment.
     native(
-        store.indexes["fixture/fixture"]
-            .collection
-            .delete_by_filter("file_id = 0"),
+        store.indexes["fixture/fixture"].delete_by_filter("file_id = 0"),
         "remove derived rows",
     )
     .expect("remove projection");
@@ -1153,7 +1184,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
 #[test]
 fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     let home = tempfile::tempdir().expect("storage");
-    super::super::backend::initialize().expect("native runtime");
+    super::super::storage::initialize().expect("native runtime");
     let first = EmbeddingModelInfo {
         model: crate::domain::model::ModelInfo {
             provider: "fixture".into(),
@@ -1169,7 +1200,7 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     let mut second = first.clone();
     second.model.name = "other".into();
     let store = NativeStore::open(home.path(), &[first, second], false).expect("two models");
-    let (source, entities, entries) = metadata_fragments("owner", "window");
+    let (source, entities, entries) = metadata_fragments(0, "owner");
     store
         .apply_replace(&source, &entities, &entries)
         .expect("original owner");
@@ -1178,7 +1209,12 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     foreign_source.relative_path = SourcePath::new("other.rs").expect("path");
     let mut foreign_entities = entities.clone();
     foreign_entities[0].file_id = foreign_source.id;
-    foreign_entities[0].id = EntityId::new("foreign-owner").expect("foreign owner ID");
+    foreign_entities[0].id = EntityId::new(
+        foreign_source.id,
+        &foreign_entities[0].content,
+        foreign_entities[0].source_range,
+    )
+    .expect("entity id");
     let mut foreign = entries.clone();
     for entry in &mut foreign {
         entry.model = "fixture/other".into();
@@ -1203,4 +1239,152 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
             .expect("no foreign fragments")
             .is_empty()
     );
+}
+
+#[test]
+fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() {
+    let home = tempfile::tempdir().expect("storage");
+    let store = metadata_store(home.path());
+    let (mut source, entities, entries) = metadata_fragments(0, "old-owner");
+    source.relative_path = SourcePath::new("src/nested/harvest.rs").expect("path");
+    store
+        .apply_replace(&source, &entities, &entries)
+        .expect("initial file");
+    let old_hits = store.search_fts("orchard", 10, None).expect("old hits");
+
+    // Simulate interruption after the retry marker but before replacing old rows.
+    let mut unfinished = source.clone();
+    unfinished.index_status = FileIndexStatus::NotIndexed;
+    let directories = store.ensure_directories(&unfinished).expect("directories");
+    write_docs(
+        &store.files,
+        &[encode_file_doc(&unfinished, &directories).expect("unfinished file")],
+        "write unfinished file",
+    )
+    .expect("retry state");
+    store.flush().expect("persist interrupted state");
+    drop(store);
+
+    let store = metadata_store(home.path());
+    assert_eq!(
+        store.list_files().expect("unchanged retry state"),
+        [unfinished]
+    );
+    assert_eq!(
+        store
+            .load_search_hits(&old_hits)
+            .expect("partial data remains readable")
+            .entities[&entities[0].id]
+            .entity,
+        entities[0],
+    );
+    let (_, mut replacement, mut projections) = metadata_fragments(0, "new-owner");
+    replacement[0].fragments.truncate(1);
+    projections.truncate(1);
+    store
+        .apply_replace(&source, &replacement, &projections)
+        .expect("retry replacement");
+    store
+        .apply_replace(&source, &replacement, &projections)
+        .expect("idempotent retry");
+    assert_eq!(store.list_files().expect("completed file"), [source]);
+    assert!(
+        store
+            .search_fts("orchard", 10, None)
+            .expect("stale text removed")
+            .is_empty()
+    );
+    assert!(
+        store
+            .load_search_hits(&old_hits)
+            .expect("missing old owners are skipped")
+            .entities
+            .is_empty()
+    );
+    let new_hits = store.search_fts("Harvest", 10, None).expect("new results");
+    assert_eq!(new_hits.len(), 1);
+    assert_eq!(new_hits[0].entity_id, replacement[0].id);
+}
+
+#[test]
+fn interrupted_deletions_keep_identity_until_retry_finishes() {
+    let home = tempfile::tempdir().expect("storage");
+    let store = metadata_store(home.path());
+    let (source, entities, entries) = metadata_fragments(0, "owner");
+    store
+        .apply_replace(&source, &entities, &entries)
+        .expect("initial file");
+    let mut deleting = source.clone();
+    deleting.index_status = FileIndexStatus::Deleting;
+    write_docs(
+        &store.files,
+        &[encode_file_doc(&deleting, &[]).expect("deleting file")],
+        "write deleting file",
+    )
+    .expect("delete intent");
+    // One collection can be cleared while another still contains old results.
+    native(
+        store.entities.delete_by_filter("file_id = 0"),
+        "partial deletion",
+    )
+    .expect("delete entities");
+    store.flush().expect("persist interruption");
+    drop(store);
+
+    let store = metadata_store(home.path());
+    assert_eq!(
+        store.list_files().expect("deletion still pending"),
+        [deleting]
+    );
+    let hits = store.search_fts("orchard", 10, None).expect("stale hit");
+    assert_eq!(hits.len(), 1);
+    assert!(
+        store
+            .load_search_hits(&hits)
+            .expect("missing entities are skipped")
+            .entities
+            .is_empty()
+    );
+    store.apply_delete(source.id).expect("finish deleting");
+    store.apply_delete(source.id).expect("repeat deletion");
+    assert!(store.list_files().expect("no files").is_empty());
+    assert!(
+        store
+            .search_fts("orchard", 10, None)
+            .expect("no stale hits")
+            .is_empty()
+    );
+}
+
+#[test]
+fn result_loading_skips_missing_files_and_canonical_fragments() {
+    let home = tempfile::tempdir().expect("storage");
+    let store = metadata_store(home.path());
+    let (source, mut entities, entries) = metadata_fragments(0, "owner");
+    store
+        .apply_replace(&source, &entities, &entries)
+        .expect("initial file");
+    let hits = store.search_fts("orchard", 10, None).expect("window hit");
+    entities[0].fragments.pop();
+    let mut doc = entity_document(&store.entities, entities[0].id.as_str());
+    native(
+        doc.add_string(
+            "payload",
+            &codec::encode_entity(&entities[0]).expect("entity"),
+        ),
+        "update partial entity",
+    )
+    .expect("partial entity");
+    write_docs(&store.entities, &[doc], "write partial entity").expect("partial replacement");
+    let loaded = store
+        .load_search_hits(&hits)
+        .expect("missing canonical fragment is skipped");
+    assert!(!loaded.fragments.contains_key(&hits[0].document_id));
+
+    native(store.files.delete_by_filter("file_id = 0"), "remove file").expect("missing file");
+    let loaded = store
+        .load_search_hits(&hits)
+        .expect("missing owner file is skipped");
+    assert!(loaded.entities.is_empty());
+    assert!(loaded.fragments.is_empty());
 }

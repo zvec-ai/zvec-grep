@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{EngineError, storage::spi::WorkspaceIndexStorageFactory};
+use crate::EngineError;
 
 use super::manifest::{delete_workspace_manifest, workspace_manifest_path};
 
@@ -58,11 +58,8 @@ pub(crate) fn find_nearest_workspace(
     })
 }
 
-pub(crate) fn reset_workspace_index(
-    location: &WorkspaceIndexLocation,
-    storage_factory: &dyn WorkspaceIndexStorageFactory,
-) -> Result<(), EngineError> {
-    super::build::drop_build_storage(&location.home, storage_factory)?;
+pub(crate) fn reset_workspace_index(location: &WorkspaceIndexLocation) -> Result<(), EngineError> {
+    super::build::drop_build_storage(&location.home)?;
     delete_workspace_manifest(&location.home)
 }
 

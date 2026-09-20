@@ -1,3 +1,5 @@
+use super::storage::SearchStorage;
+
 use std::{collections::HashSet, fs, path::Path};
 
 use crate::{
@@ -13,8 +15,7 @@ use crate::{
             IndexRouteDiagnostics, MatchedBy,
         },
     },
-    domain::{Content, FileRecord, Workspace},
-    storage::spi::WorkspaceIndexStorage,
+    domain::{Content, FileRecord, Range, Workspace},
     utils::sha256_hex,
 };
 
@@ -132,7 +133,7 @@ pub(crate) async fn context_from_index(
     root: &Path,
     workspace: &Workspace,
     workspace_home: &Path,
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
@@ -478,32 +479,50 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
         });
     };
     let fragment = &evidence.fragment;
-    let content = fragment
-        .range
-        .extract(&hit.entity.content)
-        .map_err(|error| {
-            EngineError::storage_failure(format!(
-                "invalid search fragment {}: {error}",
-                fragment.id.as_str()
-            ))
-        })?;
-    let excerpt_range = if fragment.range == crate::domain::Range::Full {
-        None
-    } else {
-        Some(
-            hit.entity
-                .fragment_source_range(fragment)
-                .map_err(|error| {
-                    EngineError::storage_failure(format!(
-                        "invalid search fragment source range {}: {error}",
-                        fragment.id.as_str()
-                    ))
-                })?
-                .into(),
-        )
+    let invalid_fragment = |error| {
+        EngineError::storage_failure(format!(
+            "invalid search fragment {}: {error}",
+            fragment.id.as_str()
+        ))
+    };
+    let (content, excerpt_range) = match (fragment.range, &hit.entity.content) {
+        (Range::Full, content) => (content_to_text(content), None),
+        (Range::Byte(range), Content::Text(text)) => {
+            let start = usize::try_from(range.start_offset()).map_err(|_| {
+                invalid_fragment(EngineError::invalid_argument(
+                    "fragment start offset exceeds platform limits",
+                ))
+            })?;
+            let end = usize::try_from(range.end_offset()).map_err(|_| {
+                invalid_fragment(EngineError::invalid_argument(
+                    "fragment end offset exceeds platform limits",
+                ))
+            })?;
+            let content = crate::utils::slice_text(text, start, end).map_err(invalid_fragment)?;
+            let lines = crate::utils::line_byte_offsets(&text.split('\n').collect::<Vec<_>>());
+            let local = crate::utils::text_range_from_offsets(text, &lines, start, end)
+                .map_err(invalid_fragment)?;
+            let source = match hit.entity.source_range {
+                Range::Full => local,
+                Range::Text(origin) => {
+                    crate::utils::map_text_range(local, origin).map_err(invalid_fragment)?
+                }
+                Range::Byte(_) => {
+                    return Err(invalid_fragment(EngineError::invalid_argument(
+                        "fragment content coordinates cannot be mapped to this entity source",
+                    )));
+                }
+            };
+            (content.to_owned(), Some(Range::Text(source).into()))
+        }
+        _ => {
+            return Err(invalid_fragment(EngineError::invalid_argument(
+                "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+            )));
+        }
     };
     Ok(ContextItemTarget {
-        content: content_to_text(&content),
+        content,
         content_role: ContextContentRole::Source,
         excerpt_range,
     })
@@ -649,27 +668,26 @@ mod tests {
         let source_range = Range::Text(
             TextRange::from_coordinates(9, 9 + source.len(), 2, 4, 2, 3).expect("range"),
         );
-        let fragment_range = Range::Byte(ByteRange {
-            start_offset: 1,
-            end_offset: 12,
-        });
+        let fragment_range = Range::Byte(ByteRange::new(1, 12).expect("ordered byte offsets"));
         let fragment_source_range = Range::Text(
             TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
         );
+        let content = Content::Text(source.into());
+        let entity_id = EntityId::new(file_id, &content, source_range).expect("entity id");
         let fragment = EntityFragment {
-            id: FragmentId::new("fragment").expect("fragment id"),
+            id: FragmentId::new(&entity_id, 0),
             range: fragment_range,
         };
         let full = EntityFragment {
-            id: FragmentId::new("full").expect("fragment id"),
+            id: FragmentId::new(&entity_id, 1),
             range: Range::Full,
         };
         let mut hit = SearchHit {
             entity: Entity {
-                id: EntityId::new("entity").expect("entity id"),
+                id: entity_id,
                 file_id,
                 source_range,
-                content: Content::Text(source.into()),
+                content,
                 metadata: None,
                 fragments: vec![fragment.clone(), full.clone()],
             },
@@ -727,10 +745,8 @@ mod tests {
             target.excerpt_range, None,
             "full fragments do not create an excerpt range"
         );
-        hit.evidence[0].fragment.range = Range::Byte(ByteRange {
-            start_offset: 0,
-            end_offset: 999,
-        });
+        hit.evidence[0].fragment.range =
+            Range::Byte(ByteRange::new(0, 999).expect("ordered byte offsets"));
         let error = super::context_item_target(&hit)
             .err()
             .expect("invalid fragment must fail");
@@ -776,17 +792,18 @@ mod tests {
             },
             ..source.clone()
         };
+        let source_range = Range::Text(
+            TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len()).expect("range"),
+        );
+        let content = Content::Text(content.to_owned());
         let search = SearchPlanResult {
             routes: Vec::new(),
             hits: vec![SearchHit {
                 entity: Entity {
-                    id: EntityId::new("entity").expect("entity id"),
+                    id: EntityId::new(source.id, &content, source_range).expect("entity id"),
                     file_id: source.id,
-                    source_range: Range::Text(
-                        TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len())
-                            .expect("range"),
-                    ),
-                    content: Content::Text(content.to_owned()),
+                    source_range,
+                    content,
                     metadata: None,
                     fragments: Vec::new(),
                 },

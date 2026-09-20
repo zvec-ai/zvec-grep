@@ -791,7 +791,7 @@ mod tests {
                 updated_epoch_ms: 1,
             },
             home.clone(),
-            Some(5),
+            Some(crate::workspace::CURRENT_INDEX_VERSION),
             std::collections::BTreeMap::from([(
                 "qwen/text-embedding-v4".into(),
                 ModelConfig {

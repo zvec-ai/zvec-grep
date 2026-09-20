@@ -200,10 +200,13 @@ fn append_entity(
         entity.node.end_position().column,
     )
     .expect("parser coordinates refer to source text");
-    let content = range
-        .slice(&source.text)
-        .expect("parser range is valid UTF-8")
-        .to_owned();
+    let content = crate::utils::slice_text(
+        &source.text,
+        range.start_byte_offset(),
+        range.end_byte_offset(),
+    )
+    .expect("parser range is valid UTF-8")
+    .to_owned();
     output.push(ExtractedEntity {
         index: output.len(),
         source_range: Range::Text(range),
@@ -356,7 +359,7 @@ fn remap_script_block_entities(
         .map(|mut entity| {
             entity.index += start_index;
             if let Range::Text(range) = &mut entity.source_range {
-                *range = TextRange::from_offsets(
+                *range = crate::utils::text_range_from_offsets(
                     &source.text,
                     line_offsets,
                     start_byte_offset + range.start_byte_offset(),
@@ -412,7 +415,12 @@ mod tests {
             panic!("text range expected");
         };
         assert_eq!(
-            range.slice(&source.text).expect("entity source range"),
+            crate::utils::slice_text(
+                &source.text,
+                range.start_byte_offset(),
+                range.end_byte_offset()
+            )
+            .expect("entity source range"),
             content
         );
         let mut covered = vec![false; content.len()];
@@ -420,8 +428,8 @@ mod tests {
             let (start, end) = match fragment.range {
                 Range::Full => (0, content.len()),
                 Range::Byte(local) => (
-                    usize::try_from(local.start_offset).expect("fragment start"),
-                    usize::try_from(local.end_offset).expect("fragment end"),
+                    usize::try_from(local.start_offset()).expect("fragment start"),
+                    usize::try_from(local.end_offset()).expect("fragment end"),
                 ),
                 Range::Text(_) => panic!("fragments store byte offsets without text coordinates"),
             };
@@ -433,13 +441,6 @@ mod tests {
             assert!(
                 !selected.trim().is_empty(),
                 "fragments contain searchable source"
-            );
-            assert_eq!(
-                fragment
-                    .range
-                    .extract(&entity.content)
-                    .expect("content slice"),
-                Content::Text(selected.to_owned())
             );
             covered[start..end].fill(true);
         }
@@ -1149,10 +1150,15 @@ mod tests {
             let entity = &entities[0];
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let content = fragment
-                    .range
-                    .extract(&entity.content)
-                    .expect("source slice");
+                let Content::Text(text) = &entity.content else {
+                    panic!("text entity expected");
+                };
+                let Range::Byte(range) = fragment.range else {
+                    panic!("chunked entity expected");
+                };
+                let start = usize::try_from(range.start_offset()).expect("fragment start");
+                let end = usize::try_from(range.end_offset()).expect("fragment end");
+                let content = Content::Text(text[start..end].to_owned());
                 let vector =
                     vector_content_for_fragment(&content, entity.metadata.as_ref(), Some(120));
                 let [Content::Text(vector)] = vector.as_slice() else {
@@ -1299,14 +1305,15 @@ mod tests {
             assert!(entity.fragments.len() > 2);
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(content) = fragment
-                    .range
-                    .extract(&entity.content)
-                    .expect("fragment content")
-                else {
-                    panic!("text expected");
+                let Content::Text(text) = &entity.content else {
+                    panic!("text entity expected");
                 };
-                assert!(content.chars().count() <= max_chars);
+                let Range::Byte(range) = fragment.range else {
+                    panic!("chunked entity expected");
+                };
+                let start = usize::try_from(range.start_offset()).expect("fragment start");
+                let end = usize::try_from(range.end_offset()).expect("fragment end");
+                assert!(text[start..end].chars().count() <= max_chars);
             }
         }
     }

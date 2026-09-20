@@ -271,7 +271,12 @@ mod tests {
             panic!("text range expected");
         };
         assert_eq!(
-            range.slice(&source.text).expect("full source span"),
+            crate::utils::slice_text(
+                &source.text,
+                range.start_byte_offset(),
+                range.end_byte_offset()
+            )
+            .expect("full source span"),
             source.text
         );
         assert_eq!((range.end_line(), range.end_byte_column()), (3, 0));

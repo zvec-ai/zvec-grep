@@ -2,9 +2,11 @@ use std::{
     collections::BTreeMap,
     env, fmt,
     path::{Path, PathBuf},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+use std::sync::Arc;
 
 use zg_host_native::NativeScanner;
 
@@ -25,7 +27,7 @@ use crate::{
         ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
         ResolveEmbeddingReferenceOptions, resolve_embedding_reference,
     },
-    storage::spi::{WorkspaceIndexStorageFactory, WorkspaceIndexStorageOptions},
+    storage::zvec::{ZvecStorage, types::WorkspaceIndexStorageOptions},
     workspace::{
         CURRENT_INDEX_VERSION,
         build::{
@@ -51,41 +53,37 @@ const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
     scanner: NativeScanner,
-    storage_factory: Arc<dyn WorkspaceIndexStorageFactory>,
     registry: Option<WorkspaceRegistry>,
     #[cfg(test)]
     _registry_directory: Option<Arc<tempfile::TempDir>>,
+    #[cfg(test)]
+    fail_index_completion: bool,
 }
 
 impl WorkspaceIndexService {
     pub(crate) fn new() -> Self {
         Self {
             scanner: NativeScanner::default(),
-            storage_factory: Arc::new(crate::storage::ZvecStorageFactory::new()),
             registry: None,
             #[cfg(test)]
             _registry_directory: None,
+            #[cfg(test)]
+            fail_index_completion: false,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn with_storage_factory(
-        storage_factory: Arc<dyn WorkspaceIndexStorageFactory>,
-    ) -> Self {
+    pub(crate) fn with_test_registry() -> Self {
         let directory = Arc::new(tempfile::tempdir().expect("test workspace registry"));
         Self {
             scanner: NativeScanner::default(),
-            storage_factory,
             registry: Some(
                 WorkspaceRegistry::at(directory.path().join("workspaces.json"))
                     .expect("registry path"),
             ),
             _registry_directory: Some(directory),
+            fail_index_completion: false,
         }
-    }
-
-    pub(in crate::pipelines) fn storage_factory(&self) -> &dyn WorkspaceIndexStorageFactory {
-        self.storage_factory.as_ref()
     }
 
     fn registry(&self) -> Result<WorkspaceRegistry, EngineError> {
@@ -151,7 +149,6 @@ impl WorkspaceIndexService {
             Workspace::validate_name(name)?;
         }
         normalize_model_paths(&mut options)?;
-        let factory = &self.storage_factory;
         let requested_root = resolve_root(options.root.as_deref())?;
         validate_workspace_root(&requested_root)?;
         let location = find_nearest_workspace(&requested_root)?
@@ -177,7 +174,7 @@ impl WorkspaceIndexService {
                 .or_else(|| abandoned.as_ref().map(|build| &build.target)),
             options.name.as_deref(),
         )?;
-        recover_build(&location.home, factory.as_ref())?;
+        recover_build(&location.home)?;
         options.name = Some(name.clone());
         if let Some(active) = &mut existing {
             active.workspace.name = name;
@@ -226,7 +223,7 @@ impl WorkspaceIndexService {
             let build = match prepare_build(manifest, existing.as_ref()) {
                 Ok(build) => build,
                 Err(error) => {
-                    let _ = recover_build(&location.home, factory.as_ref());
+                    let _ = recover_build(&location.home);
                     return Err(error);
                 }
             };
@@ -240,7 +237,7 @@ impl WorkspaceIndexService {
         if is_build && result.is_err() {
             // Storage handles have been released. Preserve the original error if
             // cleanup also fails; its build record lets the next writer retry.
-            let _ = recover_build(&location.home, factory.as_ref());
+            let _ = recover_build(&location.home);
         }
         result
     }
@@ -252,19 +249,17 @@ impl WorkspaceIndexService {
         models: Vec<ModelRuntimeLease>,
         options: IndexOptions,
     ) -> Result<IndexResult, EngineError> {
-        let storage = self
-            .storage_factory
-            .open(WorkspaceIndexStorageOptions::ReadWrite {
-                storage_path: manifest.storage_home(),
-                embeddings: models.iter().map(|model| model.info().clone()).collect(),
-            })?;
+        let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: manifest.storage_home(),
+            embeddings: models.iter().map(|model| model.info().clone()).collect(),
+        })?;
         let embedding_models = models
             .iter()
             .map(|model| model as &dyn IndexEmbeddingRuntime)
             .collect::<Vec<_>>();
         let result = index_workspace(&IndexingContext {
             workspace_index: &manifest.workspace,
-            storage: storage.as_ref(),
+            storage: &storage,
             scanner: &self.scanner,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
@@ -273,6 +268,15 @@ impl WorkspaceIndexService {
             changes: &options.changes,
         })
         .await;
+        #[cfg(test)]
+        let result = result.and_then(|indexed| {
+            // Exercise service cleanup when the indexing pipeline reports a failed checkpoint.
+            if self.fail_index_completion {
+                Err(EngineError::storage_failure("injected checkpoint failure"))
+            } else {
+                Ok(indexed)
+            }
+        });
         // Closing precedes publication: all checkpoints and native handles belong
         // to the completed generation before the active manifest can select it.
         let close_result = storage.close();
@@ -289,7 +293,7 @@ impl WorkspaceIndexService {
         }
         let now = epoch_millis();
         if let Some(build) = build {
-            publish_build(build, now, self.storage_factory.as_ref())?;
+            publish_build(build, now)?;
         } else {
             manifest.record_update(now);
             write_workspace_manifest(&manifest.path, &manifest)?;
@@ -300,7 +304,6 @@ impl WorkspaceIndexService {
     pub(in crate::pipelines) async fn workspace_needs_refresh(
         &self,
         location: &WorkspaceIndexLocation,
-        factory: &dyn WorkspaceIndexStorageFactory,
     ) -> Result<bool, EngineError> {
         let _lock = acquire_home_lock(&location.home, LockMode::Read, "context.refresh")?;
         let Some(manifest) = read_workspace_manifest(&location.home)? else {
@@ -310,12 +313,11 @@ impl WorkspaceIndexService {
             return Ok(false);
         }
         assert_index_version(manifest.index_version)?;
-        let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
+        let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
             storage_path: manifest.storage_home(),
         })?;
         let status =
-            get_workspace_index_status(&manifest.workspace, storage.as_ref(), &self.scanner, None)
-                .await;
+            get_workspace_index_status(&manifest.workspace, &storage, &self.scanner, None).await;
         let close = storage.close();
         let status = status?;
         close?;
@@ -344,21 +346,16 @@ impl WorkspaceIndexService {
         };
         self.reconcile_name(&mut manifest)?;
         let metadata_indexed = is_indexed(&manifest);
-        let storage_exists = self.storage_factory.exists(&manifest.storage_home())?;
+        let storage_exists = ZvecStorage::exists(&manifest.storage_home())?;
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
             assert_index_version(manifest.index_version)?;
-            let factory = &self.storage_factory;
-            let storage = factory.open(WorkspaceIndexStorageOptions::ReadOnly {
+            let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
                 storage_path: manifest.storage_home(),
             })?;
-            let status = get_workspace_index_status(
-                &manifest.workspace,
-                storage.as_ref(),
-                &self.scanner,
-                None,
-            )
-            .await;
+            let status =
+                get_workspace_index_status(&manifest.workspace, &storage, &self.scanner, None)
+                    .await;
             let close = storage.close();
             let status = status?;
             close?;
@@ -388,7 +385,6 @@ impl WorkspaceIndexService {
         let location = workspace_index_location_from_option(options.root.as_deref())?;
         let registry = self.registry()?;
         let name = registry.name_for_root(&location.root)?;
-        let factory = &self.storage_factory;
         if name.is_none() && !workspace_has_index_data(&location)? {
             return Ok(false);
         }
@@ -423,7 +419,7 @@ impl WorkspaceIndexService {
         };
         let has_data = workspace_has_index_data(&location)?;
         if has_data {
-            reset_workspace_index(&location, factory.as_ref())?;
+            reset_workspace_index(&location)?;
         }
         if let Some((name, registered_root)) = &registration {
             registry.unregister(name, registered_root)?;
@@ -860,13 +856,7 @@ fn moved_registration(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::Path,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-    };
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -878,134 +868,17 @@ mod tests {
             },
             info::InfoOptions,
         },
-        domain::{FileRecord, IndexState, Workspace, model::Device},
-        storage::spi::{
-            IndexedFragment, StorageResult, StorageSearchFilter, StorageSearchHit,
-            WorkspaceIndexStorage, WorkspaceIndexStorageFactory, WorkspaceIndexStorageOptions,
-        },
+        domain::{IndexState, Workspace, model::Device},
     };
 
     use super::{ModelRuntimeManager, WorkspaceIndexService};
-
-    #[derive(Debug, Default)]
-    struct MemoryStorageFactory {
-        exists: Arc<AtomicBool>,
-        fail_finalize: Arc<AtomicBool>,
-    }
-
-    impl WorkspaceIndexStorageFactory for MemoryStorageFactory {
-        fn open(
-            &self,
-            options: WorkspaceIndexStorageOptions,
-        ) -> StorageResult<Box<dyn WorkspaceIndexStorage>> {
-            if !options.is_read_only() {
-                std::fs::create_dir_all(options.storage_path().join("storage"))
-                    .expect("memory storage marker");
-                self.exists.store(true, Ordering::Release);
-            }
-            Ok(Box::new(EmptyStorage {
-                read_only: options.is_read_only(),
-                fail_finalize: self.fail_finalize.clone(),
-            }))
-        }
-
-        fn exists(&self, storage_path: &Path) -> StorageResult<bool> {
-            Ok(storage_path.join("storage").is_dir())
-        }
-
-        fn delete(&self, storage_path: &Path) -> StorageResult<()> {
-            self.exists.store(false, Ordering::Release);
-            if storage_path.join("storage").exists() {
-                std::fs::remove_dir_all(storage_path.join("storage"))
-                    .expect("remove memory storage marker");
-            }
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct EmptyStorage {
-        read_only: bool,
-        fail_finalize: Arc<AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl WorkspaceIndexStorage for EmptyStorage {
-        fn is_read_only(&self) -> bool {
-            self.read_only
-        }
-
-        fn list_files(&self) -> StorageResult<Vec<FileRecord>> {
-            Ok(Vec::new())
-        }
-
-        fn resolve_file_ids(
-            &self,
-            paths: &[std::path::PathBuf],
-        ) -> StorageResult<Vec<crate::domain::FileId>> {
-            assert!(
-                paths.is_empty(),
-                "this storage fixture only models empty workspaces"
-            );
-            Ok(Vec::new())
-        }
-
-        fn search_fts(
-            &self,
-            _query: &str,
-            _limit: usize,
-            _filter: Option<&StorageSearchFilter>,
-        ) -> StorageResult<Vec<StorageSearchHit>> {
-            Ok(Vec::new())
-        }
-
-        fn search_vector(
-            &self,
-            _model: &str,
-            _vector: &[f32],
-            _limit: usize,
-            _filter: Option<&StorageSearchFilter>,
-        ) -> StorageResult<Vec<StorageSearchHit>> {
-            Ok(Vec::new())
-        }
-
-        fn replace_file(
-            &self,
-            _file: &FileRecord,
-            _entities: &[crate::domain::Entity],
-            _entries: &[IndexedFragment],
-        ) -> StorageResult<()> {
-            Ok(())
-        }
-
-        fn mark_file_failed(&self, _file: &FileRecord, _error: &str) -> StorageResult<()> {
-            Ok(())
-        }
-
-        fn delete_file(&self, _file_id: crate::domain::FileId) -> StorageResult<()> {
-            Ok(())
-        }
-
-        async fn finalize_writes(&self) -> StorageResult<()> {
-            if self.fail_finalize.load(Ordering::Relaxed) {
-                return Err(crate::EngineError::storage_failure(
-                    "injected checkpoint failure",
-                ));
-            }
-            Ok(())
-        }
-
-        fn close(&self) -> StorageResult<()> {
-            Ok(())
-        }
-    }
 
     fn write_previous_index_version(
         home: &std::path::Path,
         manifest: &crate::workspace::manifest::WorkspaceManifest,
     ) {
         let mut previous = manifest.clone();
-        previous.index_version = Some(4);
+        previous.index_version = Some(super::CURRENT_INDEX_VERSION - 1);
         super::write_workspace_manifest(home, &previous).expect("previous index metadata");
     }
 
@@ -1014,9 +887,9 @@ mod tests {
         for version in [None, Some(super::CURRENT_INDEX_VERSION)] {
             super::assert_index_version(version).expect("supported or unbuilt index");
         }
-        for version in [1, 2, 3, 4, super::CURRENT_INDEX_VERSION + 1] {
-            let error = super::assert_index_version(Some(version))
-                .expect_err("incompatible text coordinates");
+        for version in (1..super::CURRENT_INDEX_VERSION).chain([super::CURRENT_INDEX_VERSION + 1]) {
+            let error =
+                super::assert_index_version(Some(version)).expect_err("incompatible index format");
             assert!(error.message().contains("rebuild the index"));
         }
     }
@@ -1070,8 +943,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let file = directory.path().join("file.txt");
         std::fs::write(&file, "text").expect("source file");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let error = service
             .index(
@@ -1093,8 +965,7 @@ mod tests {
         let original = directory.path().join("original");
         let moved = directory.path().join("moved");
         std::fs::create_dir(&original).expect("workspace root");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1172,7 +1043,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
 
         assert!(
-            !WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()))
+            !WorkspaceIndexService::with_test_registry()
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
@@ -1190,8 +1061,7 @@ mod tests {
             .join(uuid::Uuid::new_v4().to_string())
             .join("storage");
         std::fs::create_dir_all(&storage).expect("orphaned generation");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: false,
@@ -1211,8 +1081,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_discards_stage_and_normal_index_keeps_active_storage() {
         let directory = tempdir().expect("workspace");
-        let factory = Arc::new(MemoryStorageFactory::default());
-        let service = WorkspaceIndexService::with_storage_factory(factory);
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1277,8 +1146,7 @@ mod tests {
     #[tokio::test]
     async fn abandoned_rebuild_does_not_change_normal_index_settings_or_storage() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1321,8 +1189,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_rebuild_starts_over_even_after_recovering_a_publication() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1365,8 +1232,7 @@ mod tests {
     #[tokio::test]
     async fn failed_checkpoint_does_not_publish_an_incomplete_rebuild() {
         let directory = tempdir().expect("workspace");
-        let factory = Arc::new(MemoryStorageFactory::default());
-        let service = WorkspaceIndexService::with_storage_factory(factory.clone());
+        let mut service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1377,7 +1243,7 @@ mod tests {
         let active = super::read_workspace_manifest(&home)
             .expect("manifest")
             .expect("active");
-        factory.fail_finalize.store(true, Ordering::Relaxed);
+        service.fail_index_completion = true;
         let error = service
             .index(
                 &models,
@@ -1399,7 +1265,7 @@ mod tests {
         let location = super::workspace_index_location(directory.path()).expect("location");
         assert!(
             !service
-                .workspace_needs_refresh(&location, factory.as_ref())
+                .workspace_needs_refresh(&location)
                 .await
                 .expect("refresh decision")
         );
@@ -1437,8 +1303,7 @@ mod tests {
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&deleted).expect("original root");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1490,8 +1355,7 @@ mod tests {
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&original).expect("original root");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1541,8 +1405,7 @@ mod tests {
         let copy = directory.path().join("copy");
         std::fs::create_dir(&original).expect("original root");
         std::fs::create_dir_all(copy.join(".zvec-grep")).expect("copy home");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1596,8 +1459,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_names_are_rejected_before_workspace_mutation() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let registry = service.registry().expect("registry");
         for name in ["", " project", "project/child", "project\nchild"] {
@@ -1629,8 +1491,7 @@ mod tests {
         let second = directory.path().join("second");
         std::fs::create_dir(&first).expect("first workspace");
         std::fs::create_dir(&second).expect("second workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let first_models = ModelRuntimeManager::new();
         service
             .index(
@@ -1675,8 +1536,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_rename_preserves_generation_storage() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1759,8 +1619,7 @@ mod tests {
     #[tokio::test]
     async fn registry_rename_is_replayed_after_manifest_update_is_interrupted() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1816,8 +1675,7 @@ mod tests {
         let directory = tempdir().expect("workspace roots");
         let original = directory.path().join("original");
         let moved = directory.path().join("moved");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let before = move_after_interrupted_rename(&service, &models, &original, &moved).await;
         let info = service
@@ -1880,8 +1738,7 @@ mod tests {
         let moved = directory.path().join("moved");
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         move_after_interrupted_rename(&service, &models, &original, &moved).await;
         assert!(
@@ -1954,8 +1811,7 @@ mod tests {
     #[tokio::test]
     async fn drop_releases_name_reserved_before_initial_model_failure() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.name = Some("reserved".into());
@@ -1994,8 +1850,7 @@ mod tests {
     #[tokio::test]
     async fn initial_build_cancellation_leaves_no_published_or_pending_index() {
         let directory = tempdir().expect("workspace");
-        let service =
-            WorkspaceIndexService::with_storage_factory(Arc::new(MemoryStorageFactory::default()));
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let signal = tokio_util::sync::CancellationToken::new();
         signal.cancel();
@@ -2030,8 +1885,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let sources = directory.path().join("sources");
         std::fs::create_dir(&sources).expect("source directory");
-        let factory = Arc::new(MemoryStorageFactory::default());
-        let service = WorkspaceIndexService::with_storage_factory(factory.clone());
+        let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.scan.globs = Some(vec!["sources/**".into()]);
@@ -2042,7 +1896,6 @@ mod tests {
             .await
             .expect("empty workspace should index");
         assert_eq!(result.files_scanned, 0);
-        assert!(factory.exists.load(Ordering::Acquire));
 
         let info_options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
@@ -2122,7 +1975,7 @@ mod tests {
         assert_ne!(rebuilt.storage_generation, manifest.storage_generation);
 
         assert!(service.drop_index(&info_options).expect("drop index"));
-        assert!(!factory.exists.load(Ordering::Acquire));
+        assert!(!super::ZvecStorage::exists(&rebuilt.storage_home()).expect("storage was deleted"));
         models.close();
     }
 }

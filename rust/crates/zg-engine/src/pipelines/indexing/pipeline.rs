@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     future::Future,
     path::{Component, Path, PathBuf},
@@ -29,10 +30,10 @@ use crate::{
         info::result::IndexStats,
     },
     domain::{
-        Content, ContentKind, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
-        FileIndexStatus, FileRecord, FileSnapshot, FragmentId, SourcePath, Workspace,
+        Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata, FileCategory,
+        FileFormat, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, Range,
+        SourcePath, Workspace,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
-        validate_entities,
     },
     extraction::{
         ExtractedEntity, SourceKind, TextSource, extract_for_indexing, source_kind,
@@ -40,16 +41,15 @@ use crate::{
     },
     file_selection::ScanPolicy,
     models::{EmbeddingConcurrencyDefaults, EmbeddingOptions, ModelError, ModelRuntimeLease},
-    storage::spi::{IndexedFragment, WorkspaceIndexStorage},
+    storage::zvec::types::IndexedFragment,
     utils::{collapse_whitespace, decode_text, sha256_hex},
 };
 
-use super::{input_budget::index_chunk_options, model_progress};
+use super::{input_budget::index_chunk_options, model_progress, storage::IndexStorage};
 
 const MAX_SKIPPED_FILE_SAMPLES: usize = 20;
 // All default file-size limits are at least this large.
 const MIN_DEFAULT_FILE_SIZE_BYTES: u64 = 1024 * 1024;
-const COMMIT_BATCH_FILES: usize = 64;
 const EMBEDDING_TRANSIENT_MAX_RETRIES: usize = 3;
 const EMBEDDING_RATE_LIMIT_MAX_RETRIES: usize = 6;
 const EMBEDDING_TRANSIENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
@@ -96,7 +96,7 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
 
 pub(crate) struct IndexingContext<'context> {
     pub workspace_index: &'context Workspace,
-    pub storage: &'context dyn WorkspaceIndexStorage,
+    pub storage: &'context dyn IndexStorage,
     pub scanner: &'context dyn WorkspaceScannerPort,
     pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
     pub embedding_concurrency: Option<usize>,
@@ -112,7 +112,7 @@ pub(crate) async fn index_workspace(
     let started = Instant::now();
     let mut timings = TimingCollector::default();
 
-    let first = run_index_pass(context, &mut timings, None).await?;
+    let first = run_index_pass(context, &mut timings, None, &[]).await?;
     let mut passes = vec![first];
     if passes[0].stats.files_failed > 0 {
         let succeeded = passes[0].stats.files_indexed;
@@ -139,6 +139,7 @@ pub(crate) async fn index_workspace(
                     files_succeeded: succeeded,
                     files_total,
                 }),
+                &passes[0].stats.failed_files,
             )
             .await?,
         );
@@ -158,7 +159,7 @@ pub(crate) async fn index_workspace(
         },
     );
     let finalize_started = Instant::now();
-    context.storage.finalize_writes().await.map_err(|error| {
+    context.storage.checkpoint().map_err(|error| {
         EngineError::storage_failure(format!("failed to finalize index storage: {error}"))
     })?;
     timings.record("index_optimize", finalize_started.elapsed(), 1);
@@ -195,7 +196,7 @@ pub(crate) async fn index_workspace(
 
 pub(crate) async fn get_workspace_index_status(
     workspace_index: &Workspace,
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn IndexStorage,
     scanner: &dyn WorkspaceScannerPort,
     signal: Option<CancellationToken>,
 ) -> Result<IndexStats, EngineError> {
@@ -342,6 +343,7 @@ async fn run_index_pass(
     context: &IndexingContext<'_>,
     timings: &mut TimingCollector,
     progress_base: Option<ProgressBase>,
+    retry_paths: &[PathBuf],
 ) -> Result<IndexPassResult, EngineError> {
     throw_if_cancelled(context.signal.as_ref())?;
     report(
@@ -362,8 +364,18 @@ async fn run_index_pass(
         },
     );
 
-    let scope = ChangeScope::from_changes(&context.workspace_index.root, context.changes)?;
+    let mut scope = if progress_base.is_some() {
+        ChangeScope::Paths(
+            retry_paths
+                .iter()
+                .map(|path| context.workspace_index.root.join(path))
+                .collect(),
+        )
+    } else {
+        ChangeScope::from_changes(&context.workspace_index.root, context.changes)?
+    };
     let all_stored = context.storage.list_files()?;
+    scope.include_unfinished(&context.workspace_index.root, &all_stored);
     let existing = scope.filter_stored(&context.workspace_index.root, &all_stored);
     let scan_started = Instant::now();
     let control = task_control(context.signal.clone());
@@ -438,7 +450,7 @@ async fn run_index_pass(
 }
 
 fn resolve_scanned_identities(
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn IndexStorage,
     scanned: &mut [ScannedFile],
 ) -> Result<(), EngineError> {
     let paths = scanned
@@ -475,6 +487,10 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
     for scanned in scanned {
         let existing = existing_by_path.remove(&scanned.relative_path);
         let kind = match &existing {
+            Some(file) if matches!(file.index_status, FileIndexStatus::Deleting) => {
+                plan.deleted.push(file.clone());
+                continue;
+            }
             None => CandidateKind::Added,
             Some(existing) if !existing.index_status.is_indexed() => CandidateKind::Pending,
             Some(existing)
@@ -493,7 +509,7 @@ fn compute_diff(scanned: Vec<ScannedFile>, existing_files: &[FileRecord]) -> Dif
             existing,
         });
     }
-    plan.deleted = existing_by_path.into_values().collect();
+    plan.deleted.extend(existing_by_path.into_values());
     plan.deleted
         .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     plan
@@ -553,6 +569,7 @@ struct PreparedFragment {
     entity_id: EntityId,
     fragment_id: FragmentId,
     embedding_content: Vec<Content>,
+    fts_text: String,
 }
 
 struct PreparedFile {
@@ -740,28 +757,14 @@ fn apply_embedding_outcome(
     outcome: EmbeddingBatchOutcome,
 ) -> Result<(), EngineError> {
     timings.record("index_embedding", outcome.duration, outcome.outcomes.len());
-    let mut outcomes = outcome.outcomes.into_iter();
-    loop {
-        let batch = outcomes
-            .by_ref()
-            .take(COMMIT_BATCH_FILES)
-            .collect::<Vec<_>>();
-        if batch.is_empty() {
-            return Ok(());
-        }
-        throw_if_cancelled(context.signal.as_ref())?;
-        let files = batch
-            .iter()
-            .map(|outcome| match outcome {
-                EmbeddedFileOutcome::Success { file, .. }
-                | EmbeddedFileOutcome::Failed { file, .. } => &file.file,
-            })
-            .collect::<Vec<_>>();
-        let commit_started = Instant::now();
-        context.storage.prepare_file_replacements(&files)?;
-        timings.record("index_commit", commit_started.elapsed(), 0);
-        apply_embedding_files(context, diff, progress_base, timings, stats, batch)?;
-    }
+    apply_embedding_files(
+        context,
+        diff,
+        progress_base,
+        timings,
+        stats,
+        outcome.outcomes,
+    )
 }
 
 fn apply_embedding_files(
@@ -821,7 +824,7 @@ struct CommitError {
 }
 
 fn commit_file(
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn IndexStorage,
     file: PreparedFile,
     vectors: Vec<Vec<f32>>,
     stats: &mut IndexWriteStats,
@@ -845,6 +848,7 @@ fn commit_file(
             model: fragment.model,
             entity_id: fragment.entity_id,
             fragment_id: fragment.fragment_id,
+            fts_text: fragment.fts_text,
             vector,
         })
         .collect::<Vec<_>>();
@@ -904,8 +908,7 @@ async fn prepare_candidate(
         text: source_text.into_owned(),
     };
     let extracted = extract_for_indexing(&text, chunk_options)?;
-    let entities = bind_entities(file.id, extracted);
-    validate_entities(file.id, &entities)?;
+    let entities = bind_entities(file.id, extracted)?;
     let owners = entities
         .iter()
         .map(|entity| {
@@ -961,11 +964,26 @@ fn prepare_fragments(
         .iter()
         .flat_map(|entity| {
             entity.fragments.iter().map(move |fragment| {
-                let content = fragment.range.extract(&entity.content)?;
+                let content = match (fragment.range, &entity.content) {
+                    (Range::Full, content) => Cow::Borrowed(content),
+                    (Range::Byte(range), Content::Text(text)) => {
+                        let start = usize::try_from(range.start_offset()).map_err(|_| {
+                            EngineError::invalid_argument("fragment start offset exceeds platform limits")
+                        })?;
+                        let end = usize::try_from(range.end_offset()).map_err(|_| {
+                            EngineError::invalid_argument("fragment end offset exceeds platform limits")
+                        })?;
+                        Cow::Owned(Content::Text(crate::utils::slice_text(text, start, end)?.to_owned()))
+                    }
+                    _ => return Err(EngineError::invalid_argument(
+                        "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+                    )),
+                };
                 Ok(PreparedFragment {
                     model: String::new(),
                     entity_id: entity.id.clone(),
                     fragment_id: fragment.id.clone(),
+                    fts_text: lexical_text(&content, entity.metadata.as_ref()),
                     embedding_content: vector_content_for_fragment(
                         &content,
                         entity.metadata.as_ref(),
@@ -977,40 +995,91 @@ fn prepare_fragments(
         .collect()
 }
 
-fn bind_entities(file_id: FileId, extracted: Vec<ExtractedEntity>) -> Vec<Entity> {
+fn lexical_text(content: &Content, metadata: Option<&EntityMetadata>) -> String {
+    let mut output = String::new();
+    if let Some(metadata) = metadata {
+        match metadata {
+            EntityMetadata::Code(code) => {
+                for value in [
+                    &code.symbol_name,
+                    &code.scope,
+                    &code.signature,
+                    &code.documentation,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    output.push_str(value);
+                    output.push('\n');
+                }
+            }
+            EntityMetadata::Markdown(markdown) => {
+                for value in [&markdown.heading, &markdown.scope].into_iter().flatten() {
+                    output.push_str(value);
+                    output.push('\n');
+                }
+            }
+        }
+    }
+    append_contents(&mut output, std::slice::from_ref(content));
+    output
+}
+
+fn append_contents(output: &mut String, contents: &[Content]) {
+    for content in contents {
+        match content {
+            Content::Text(text) => output.push_str(text),
+            Content::Image(image) => {
+                output.push_str("[image:");
+                output.push_str(image.format().as_str());
+                output.push(']');
+            }
+            Content::Table(table) => {
+                for cell in &table.cells {
+                    append_contents(output, &cell.contents);
+                }
+            }
+        }
+        output.push('\n');
+    }
+}
+
+fn bind_entities(
+    file_id: FileId,
+    extracted: Vec<ExtractedEntity>,
+) -> Result<Vec<Entity>, EngineError> {
     extracted
         .into_iter()
         .map(|entity| {
-            let id = EntityId::new(sha256_hex(
-                format!("entity\0{file_id}\0{}", entity.index).as_bytes(),
-            ))
-            .expect("SHA-256 produces a nonempty entity ID");
+            let id = EntityId::new(file_id, &entity.content, entity.source_range)?;
             let fragments = entity
                 .fragments
                 .into_iter()
                 .enumerate()
-                .map(|(index, fragment)| EntityFragment {
-                    id: FragmentId::new(sha256_hex(
-                        format!("fragment\0{file_id}\0{}\0{index}", entity.index).as_bytes(),
-                    ))
-                    .expect("SHA-256 produces a nonempty fragment ID"),
-                    range: fragment.range,
+                .map(|(ordinal, fragment)| {
+                    let ordinal = u32::try_from(ordinal).map_err(|_| {
+                        EngineError::invalid_argument("fragment ordinal exceeds u32 limits")
+                    })?;
+                    Ok(EntityFragment {
+                        id: FragmentId::new(&id, ordinal),
+                        range: fragment.range,
+                    })
                 })
-                .collect();
-            Entity {
+                .collect::<Result<Vec<_>, EngineError>>()?;
+            Ok(Entity {
                 id,
                 file_id,
                 source_range: entity.source_range,
                 content: entity.content,
                 metadata: entity.metadata,
                 fragments,
-            }
+            })
         })
         .collect()
 }
 
 fn mark_file_failed(
-    storage: &dyn WorkspaceIndexStorage,
+    storage: &dyn IndexStorage,
     file: &FileRecord,
     stage: &str,
     error: &EngineError,
@@ -1960,6 +2029,25 @@ impl ChangeScope {
         Ok(Self::Paths(paths))
     }
 
+    /// A scoped update also repairs interrupted writes from previous runs.
+    fn include_unfinished(&mut self, root: &Path, files: &[FileRecord]) {
+        if let Self::Paths(paths) = self {
+            paths.extend(
+                files
+                    .iter()
+                    .filter(|file| {
+                        matches!(
+                            file.index_status,
+                            FileIndexStatus::NotIndexed | FileIndexStatus::Deleting
+                        )
+                    })
+                    .map(|file| root.join(&file.relative_path)),
+            );
+            paths.sort();
+            paths.dedup();
+        }
+    }
+
     fn contains(&self, path: &Path) -> bool {
         match self {
             Self::All => true,
@@ -2049,7 +2137,7 @@ fn build_index_result(
     let first = &passes[0];
     let final_pass = passes.last().expect("an index pass is always present");
     IndexResult {
-        files_scanned: final_pass.files_scanned,
+        files_scanned: first.files_scanned,
         files_added: passes.iter().map(|pass| pass.diff.added).sum(),
         files_modified: passes.iter().map(|pass| pass.diff.modified).sum(),
         files_pending: passes.iter().map(|pass| pass.diff.pending).sum(),
@@ -2069,7 +2157,7 @@ fn build_index_result(
         entities_created: passes.iter().map(|pass| pass.stats.entities_created).sum(),
         duration_micros: duration.as_micros().try_into().unwrap_or(u64::MAX),
         timings: timings.entries,
-        skipped: final_pass.skipped.clone(),
+        skipped: first.skipped.clone(),
     }
 }
 
@@ -2104,12 +2192,12 @@ mod tests {
     use zg_host_native::NativeScanner;
 
     use crate::{
+        EngineResult,
         api::index::progress::IndexProgressPhase,
         domain::{
             Content, IndexDescriptor,
             model::{EmbeddingModelInfo, Metric},
         },
-        storage::spi::{StorageResult, StorageSearchFilter, StorageSearchHit},
     };
 
     use super::*;
@@ -2127,19 +2215,38 @@ mod tests {
         };
         let extracted = extract_for_indexing(&source, options).expect("extract markdown");
         let file_id = FileId::new(42);
-        let entities = bind_entities(file_id, extracted.clone());
-        assert_eq!(entities, bind_entities(file_id, extracted));
-        validate_entities(file_id, &entities).expect("bound identities and ranges");
+        let entities = bind_entities(file_id, extracted.clone()).expect("bind entities");
+        let mut reordered = extracted;
+        reordered.reverse();
+        for (index, entity) in reordered.iter_mut().enumerate() {
+            entity.index = index + 100;
+        }
+        let mut rebound = bind_entities(file_id, reordered).expect("bind reordered entities");
+        rebound.reverse();
+        assert_eq!(entities, rebound);
         let mut ids = HashSet::new();
         for entity in &entities {
+            entity.validate().expect("valid entity");
             assert!(ids.insert(entity.id.as_str()));
-            for fragment in &entity.fragments {
+            for (ordinal, fragment) in entity.fragments.iter().enumerate() {
                 assert!(ids.insert(fragment.id.as_str()));
+                assert_eq!(
+                    fragment.id.as_str(),
+                    format!("{}{:08x}", entity.id.as_str(), ordinal)
+                );
             }
             if let crate::domain::Range::Text(range) = entity.source_range {
                 assert_eq!(
                     entity.content,
-                    Content::Text(range.slice(&source.text).expect("source range").into())
+                    Content::Text(
+                        crate::utils::slice_text(
+                            &source.text,
+                            range.start_byte_offset(),
+                            range.end_byte_offset()
+                        )
+                        .expect("source range")
+                        .into()
+                    )
                 );
             }
         }
@@ -2172,16 +2279,95 @@ mod tests {
         identities: Mutex<HashMap<PathBuf, FileId>>,
         resolved_paths: Mutex<Vec<Vec<PathBuf>>>,
         finalized: AtomicUsize,
-        prepared_batches: Mutex<Vec<Vec<FileId>>>,
+        fail_replacements_once: Mutex<HashSet<FileId>>,
     }
 
-    #[async_trait]
-    impl WorkspaceIndexStorage for MemoryStorage {
+    #[test]
+    fn prepared_content_and_fts_stay_with_their_fragment_vectors_at_commit() {
+        use crate::domain::{ByteRange, MarkdownMetadata};
+
+        let bodies = [" 中😀\0\r\n", "尾巴\n"];
+        let file_id = FileId::new(42);
+        let content = Content::Text(bodies.concat());
+        let entity_id = EntityId::new(file_id, &content, Range::Full).expect("entity id");
+        let entity = Entity {
+            id: entity_id.clone(),
+            file_id,
+            source_range: Range::Full,
+            content,
+            metadata: Some(EntityMetadata::Markdown(MarkdownMetadata {
+                heading: Some("Heading".into()),
+                scope: Some("Parent".into()),
+                level: Some(2),
+            })),
+            fragments: vec![
+                EntityFragment {
+                    id: FragmentId::new(&entity_id, 0),
+                    range: Range::Byte(ByteRange::new(0, 11).expect("first range")),
+                },
+                EntityFragment {
+                    id: FragmentId::new(&entity_id, 1),
+                    range: Range::Byte(ByteRange::new(11, 18).expect("second range")),
+                },
+            ],
+        };
+        let entities = vec![entity];
+        entities[0].validate().expect("valid entity");
+        let mut fragments = prepare_fragments(&entities, None).expect("prepare both projections");
+        for (fragment, body) in fragments.iter_mut().zip(bodies) {
+            assert_eq!(fragment.fts_text, format!("Heading\nParent\n{body}\n"));
+            let [Content::Text(embedding)] = fragment.embedding_content.as_slice() else {
+                panic!("text embedding");
+            };
+            assert!(embedding.starts_with("heading: Heading\n"));
+            assert!(embedding.ends_with(body));
+            fragment.model = "fixture/model".into();
+        }
+        let storage = MemoryStorage::default();
+        let prepared = PreparedFile {
+            file: FileRecord {
+                id: file_id,
+                relative_path: SourcePath::new("file.md").expect("path"),
+                snapshot: FileSnapshot {
+                    size_bytes: 18,
+                    modified_epoch_ms: None,
+                    content_hash: Some(sha256_hex(bodies.concat().as_bytes())),
+                },
+                index_status: FileIndexStatus::NotIndexed,
+            },
+            entities,
+            fragments,
+        };
+        let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        commit_file(
+            &storage,
+            prepared,
+            vectors.clone(),
+            &mut IndexWriteStats::default(),
+        )
+        .map_err(|error| error.error)
+        .expect("commit prepared fragments");
+        let entries = storage.entries.lock().expect("stored entries");
+        for (((entry, body), vector), ordinal) in entries[&file_id]
+            .iter()
+            .zip(bodies)
+            .zip(vectors)
+            .zip(0_u32..)
+        {
+            assert_eq!(entry.entity_id, entity_id);
+            assert_eq!(entry.fragment_id, FragmentId::new(&entity_id, ordinal));
+            assert_eq!(entry.model, "fixture/model");
+            assert_eq!(entry.vector, vector);
+            assert_eq!(entry.fts_text, format!("Heading\nParent\n{body}\n"));
+        }
+    }
+
+    impl IndexStorage for MemoryStorage {
         fn is_read_only(&self) -> bool {
             false
         }
 
-        fn resolve_file_ids(&self, paths: &[PathBuf]) -> StorageResult<Vec<FileId>> {
+        fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>> {
             self.resolved_paths
                 .lock()
                 .expect("record allocation")
@@ -2203,7 +2389,7 @@ mod tests {
                 .collect()
         }
 
-        fn list_files(&self) -> StorageResult<Vec<FileRecord>> {
+        fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
             Ok(self
                 .files
                 .lock()
@@ -2211,31 +2397,20 @@ mod tests {
                 .clone())
         }
 
-        fn search_fts(
-            &self,
-            _query: &str,
-            _limit: usize,
-            _filter: Option<&StorageSearchFilter>,
-        ) -> StorageResult<Vec<StorageSearchHit>> {
-            Ok(Vec::new())
-        }
-
-        fn search_vector(
-            &self,
-            _model: &str,
-            _vector: &[f32],
-            _limit: usize,
-            _filter: Option<&StorageSearchFilter>,
-        ) -> StorageResult<Vec<StorageSearchHit>> {
-            Ok(Vec::new())
-        }
-
         fn replace_file(
             &self,
             file: &FileRecord,
             entities: &[Entity],
             entries: &[IndexedFragment],
-        ) -> StorageResult<()> {
+        ) -> EngineResult<()> {
+            if self
+                .fail_replacements_once
+                .lock()
+                .expect("failure injection")
+                .remove(&file.id)
+            {
+                return Err(EngineError::storage_failure("injected replacement failure"));
+            }
             let mut stored = file.clone();
             stored.index_status = FileIndexStatus::Indexed {
                 indexed_epoch_ms: 1,
@@ -2255,15 +2430,7 @@ mod tests {
             Ok(())
         }
 
-        fn prepare_file_replacements(&self, files: &[&FileRecord]) -> StorageResult<()> {
-            self.prepared_batches
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(files.iter().map(|file| file.id).collect());
-            Ok(())
-        }
-
-        fn mark_file_failed(&self, file: &FileRecord, error: &str) -> StorageResult<()> {
+        fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
             self.entries
                 .lock()
                 .expect("stored entries")
@@ -2281,7 +2448,7 @@ mod tests {
             Ok(())
         }
 
-        fn delete_file(&self, file_id: FileId) -> StorageResult<()> {
+        fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
             self.entries
                 .lock()
                 .expect("stored entries")
@@ -2293,12 +2460,8 @@ mod tests {
             Ok(())
         }
 
-        async fn finalize_writes(&self) -> StorageResult<()> {
+        fn checkpoint(&self) -> EngineResult<()> {
             self.finalized.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        }
-
-        fn close(&self) -> StorageResult<()> {
             Ok(())
         }
     }
@@ -2681,50 +2844,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepares_bounded_recovery_batches_for_multi_file_embedding_results() {
-        let directory = tempdir().expect("temporary directory");
-        for index in 0..=COMMIT_BATCH_FILES {
-            std::fs::write(
-                directory.path().join(format!("file-{index}.txt")),
-                "orchard",
-            )
-            .expect("fixture file");
-        }
-        let workspace = workspace(directory.path());
-        let scanner = NativeScanner::default();
-        let storage = MemoryStorage::default();
-        let mut model = ConcurrentModel::new();
-        model.info.max_batch_size = COMMIT_BATCH_FILES * 2;
-        let result = index_workspace(&IndexingContext {
-            workspace_index: &workspace,
-            storage: &storage,
-            scanner: &scanner,
-            embedding_models: &[&model],
-            embedding_concurrency: None,
-            on_progress: None,
-            signal: None,
-            changes: &[],
-        })
-        .await
-        .expect("index batch");
-        assert_eq!(result.files_added, COMMIT_BATCH_FILES + 1);
-        assert_eq!(result.entities_created, COMMIT_BATCH_FILES + 1);
-        assert_eq!(model.calls.load(Ordering::Acquire), 1);
-        let batches = storage
-            .prepared_batches
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        assert_eq!(
-            batches.iter().map(Vec::len).collect::<Vec<_>>(),
-            [COMMIT_BATCH_FILES, 1]
-        );
-        assert_eq!(
-            batches.iter().flatten().collect::<HashSet<_>>().len(),
-            COMMIT_BATCH_FILES + 1
-        );
-    }
-
-    #[tokio::test]
     async fn indexes_incrementally_reuses_unchanged_files_and_honors_concurrency() {
         let directory = tempdir().expect("temporary directory");
         for index in 0..4 {
@@ -2850,6 +2969,109 @@ mod tests {
             untouched.snapshot.content_hash.as_deref(),
             Some(changed_hash.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_index_repairs_unfinished_files_and_completes_deletions() {
+        let directory = tempdir().expect("temporary directory");
+        let root = directory.path();
+        for name in [
+            "requested",
+            "repair",
+            "missing",
+            "excluded",
+            "deleting",
+            "failed",
+        ] {
+            std::fs::write(root.join(format!("{name}.txt")), name).expect("fixture file");
+        }
+        let mut workspace = workspace(root);
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let model = ConcurrentModel::new();
+        index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("initial index");
+
+        let repair_id = {
+            let mut files = storage.files.lock().expect("stored files");
+            for file in files.iter_mut() {
+                file.index_status = match file
+                    .relative_path
+                    .as_path()
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                {
+                    Some("repair" | "missing" | "excluded") => FileIndexStatus::NotIndexed,
+                    Some("deleting") => FileIndexStatus::Deleting,
+                    Some("failed") => FileIndexStatus::Failed {
+                        error: "previous failure".to_owned(),
+                    },
+                    _ => file.index_status.clone(),
+                };
+            }
+            files
+                .iter()
+                .find(|file| file.relative_path.as_path() == Path::new("repair.txt"))
+                .expect("repair file")
+                .id
+        };
+        storage
+            .fail_replacements_once
+            .lock()
+            .expect("failure injection")
+            .insert(repair_id);
+        std::fs::remove_file(root.join("missing.txt")).expect("remove source");
+        std::fs::write(root.join("requested.txt"), "requested changed").expect("change source");
+        workspace.scan.globs.push("!excluded.txt".into());
+        let changes = [WorkspaceChange::Upsert(PathBuf::from("requested.txt"))];
+        let result = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &changes,
+        })
+        .await
+        .expect("repair during scoped update");
+        assert_eq!(result.files_deleted, 3);
+        assert_eq!(result.files_pending, 2);
+        assert_eq!(result.files_failed, 0);
+        assert_eq!(result.files_modified, 1);
+        let files = storage.list_files().expect("stored files");
+        assert_eq!(files.len(), 3);
+        let repaired = files
+            .iter()
+            .find(|file| file.id == repair_id)
+            .expect("identity retained");
+        assert!(repaired.index_status.is_indexed());
+        assert!(
+            files
+                .iter()
+                .any(|file| matches!(file.index_status, FileIndexStatus::Failed { .. }))
+        );
+        assert!(
+            root.join("deleting.txt").exists(),
+            "delete intent must win over source existence"
+        );
+        let requests = scanner.requests.lock().expect("scan requests");
+        assert_eq!(requests.len(), 3, "one retry after the failed replacement");
+        assert_eq!(requests[2].scope_paths, vec![root.join("repair.txt")]);
+        let scope = &requests[1].scope_paths;
+        assert!(scope.contains(&root.join("repair.txt")));
+        assert!(!scope.contains(&root.join("failed.txt")));
     }
 
     #[test]
