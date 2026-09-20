@@ -9,6 +9,23 @@ interfaces.
 > zvec-grep is a work in progress. Commands and configuration may change before
 > the first stable release.
 
+> [!WARNING]
+> These guides track **`main`**, where search is the default interface and
+> maintenance uses long options (`zg --index`, `zg --status`, …). The published
+> npm package (currently `0.2.2`) still uses subcommands (`zg index`,
+> `zg query`, `zg status`, …). For an installed binary, follow the project
+> [README](../README.md), https://zvec.org/en/docs/zvec-grep/, or `zg help` /
+> `zg <command> --help`. Do not copy `zg --index` examples from this tree onto
+> `0.2.2`.
+
+| Published (`0.2.2`) | `main` (these guides) |
+| --- | --- |
+| `zg index …` | `zg --index …` |
+| `zg query …` | `zg …` (positional search) |
+| `zg status …` | `zg --status …` |
+| `zg install …` | `zg --install …` |
+| `zg help` / `zg help query` | `zg --help` / `zg --help search` |
+
 ## Start here
 
 | I want to… | Read |
@@ -41,12 +58,18 @@ For the whole-system mental model and trust boundaries, read
 The [Roadmap](./08-roadmap.md) tracks the path from work in progress to a stable
 release.
 
-The CLI remains the source of truth for flags in the installed version:
+The installed CLI remains the source of truth for the package you have:
 
 ```bash
+# published 0.2.2
+zg help
+zg help query
+zg <command> --help
+
+# main / these guides
 zg --help
 zg --help search
-zg --help index
+zg --index --help
 ```
 
 For development setup and pull request conventions, see

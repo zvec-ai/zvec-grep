@@ -5,6 +5,12 @@
 [Architecture](./05-architecture.md) · [Server](./06-server.md) ·
 [Embedding](./07-embedding.md) · [Roadmap](./08-roadmap.md)
 
+> [!WARNING]
+> This page describes the CLI on **`main`** (`zg <query>`, `zg --index`, …).
+> Published `0.2.2` still expects subcommands (`zg query`, `zg index`, …). See
+> [Documentation](./README.md) for the published-vs-`main` mapping, or use the
+> project README / `zg help` with the binary you installed.
+
 The `zg` command is a search interface first. Positional arguments are always
 queries; maintenance operations use long action options so ordinary words such
 as `index`, `install`, and `status` never collide with commands. Use the
