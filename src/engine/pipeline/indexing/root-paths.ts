@@ -1,4 +1,4 @@
-import { realpathSync, statSync, type Stats } from "node:fs";
+import { realpathSync, statSync, type BigIntStats } from "node:fs";
 import { dirname, relative } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { RootPath } from "../../types.js";
@@ -101,14 +101,15 @@ type RootScanDomain = {
   root: RootPath;
   realPath: string;
   kind: "file" | "directory";
-  stat: Stats;
+  stat: BigIntStats;
 };
 
 function rootPathToScanDomain(root: RootPath): RootScanDomain {
-  let info: Stats | undefined;
+  let info: BigIntStats | undefined;
 
   try {
-    info = statSync(root.absolutePath, { throwIfNoEntry: false });
+    // Preserve 64-bit file identities that cannot be represented exactly as Numbers.
+    info = statSync(root.absolutePath, { bigint: true, throwIfNoEntry: false });
   } catch (cause) {
     throw new EngineError("Workspace index root path could not be inspected", {
       code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_STAT_FAILED",
@@ -185,7 +186,7 @@ function sameFileIdentity(
   return (
     left.realPath === right.realPath ||
     (left.stat.dev === right.stat.dev &&
-      left.stat.ino !== 0 &&
+      left.stat.ino !== 0n &&
       left.stat.ino === right.stat.ino)
   );
 }
