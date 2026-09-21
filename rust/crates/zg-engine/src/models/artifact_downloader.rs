@@ -1426,7 +1426,11 @@ fn inspect_existing_lock(
             return Ok(None);
         };
         if file_type.is_file() && entry.file_name().to_string_lossy().starts_with(".owner-") {
-            let Some(metadata) = lock_component(entry.metadata())? else {
+            // Re-read metadata through the path instead of relying on
+            // `DirEntry`'s platform-specific cache. In particular, Windows
+            // may keep returning cached metadata after the owner file has
+            // already been removed by the lock holder.
+            let Some(metadata) = lock_entry_metadata(&entry)? else {
                 return Ok(None);
             };
             newest = newest.max(metadata.modified().unwrap_or(UNIX_EPOCH));
@@ -1446,6 +1450,10 @@ fn lock_component<T>(result: io::Result<T>) -> io::Result<Option<T>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn lock_entry_metadata(entry: &fs::DirEntry) -> io::Result<Option<fs::Metadata>> {
+    lock_component(fs::metadata(entry.path()))
 }
 
 fn is_known_dead_owner(owner_path: &Path) -> bool {
@@ -2067,7 +2075,7 @@ mod tests {
             .expect("read owner entry");
         fs::remove_file(&owner_path).expect("release owner");
         assert!(
-            lock_component(owner.metadata())
+            lock_entry_metadata(&owner)
                 .expect("disappearing owner is not an error")
                 .is_none()
         );
