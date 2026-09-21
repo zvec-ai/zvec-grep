@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::{
     EngineError,
     domain::{GlobRule, SourcePath},
-    storage::zvec::types::StoragePathFilter,
+    storage::types::StoragePathFilter,
 };
 
 pub(super) fn compile_path_filter(

@@ -27,7 +27,7 @@ use crate::{
         ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
         ResolveEmbeddingReferenceOptions, resolve_embedding_reference,
     },
-    storage::zvec::{ZvecStorage, types::WorkspaceIndexStorageOptions},
+    storage::{IndexStore, types::WorkspaceIndexStorageOptions},
     workspace::{
         CURRENT_INDEX_VERSION,
         build::{
@@ -249,7 +249,7 @@ impl WorkspaceIndexService {
         models: Vec<ModelRuntimeLease>,
         options: IndexOptions,
     ) -> Result<IndexResult, EngineError> {
-        let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: manifest.storage_home(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
         })?;
@@ -313,7 +313,7 @@ impl WorkspaceIndexService {
             return Ok(false);
         }
         assert_index_version(manifest.index_version)?;
-        let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
+        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
             storage_path: manifest.storage_home(),
         })?;
         let status =
@@ -346,11 +346,11 @@ impl WorkspaceIndexService {
         };
         self.reconcile_name(&mut manifest)?;
         let metadata_indexed = is_indexed(&manifest);
-        let storage_exists = ZvecStorage::exists(&manifest.storage_home())?;
+        let storage_exists = IndexStore::exists(&manifest.storage_home())?;
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
             assert_index_version(manifest.index_version)?;
-            let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
+            let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
                 storage_path: manifest.storage_home(),
             })?;
             let status =
@@ -1975,7 +1975,7 @@ mod tests {
         assert_ne!(rebuilt.storage_generation, manifest.storage_generation);
 
         assert!(service.drop_index(&info_options).expect("drop index"));
-        assert!(!super::ZvecStorage::exists(&rebuilt.storage_home()).expect("storage was deleted"));
+        assert!(!super::IndexStore::exists(&rebuilt.storage_home()).expect("storage was deleted"));
         models.close();
     }
 }

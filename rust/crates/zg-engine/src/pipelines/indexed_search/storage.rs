@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::{
     EngineResult,
     domain::FileId,
-    storage::zvec::{
-        ZvecStorage,
+    storage::{
+        IndexStore,
         types::{StorageSearchFilter, StorageSearchHit, StoredFileAttributes, StoredSearchData},
     },
 };
@@ -31,7 +31,7 @@ pub(crate) trait SearchStorage: Send + Sync {
     ) -> EngineResult<Vec<StorageSearchHit>>;
 }
 
-impl SearchStorage for ZvecStorage {
+impl SearchStorage for IndexStore {
     fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
         self.list_file_paths()
     }

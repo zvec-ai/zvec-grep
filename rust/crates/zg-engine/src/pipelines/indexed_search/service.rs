@@ -14,7 +14,7 @@ use crate::{
         WorkspaceIndexService, assert_embedding_compatible, assert_index_version,
         environment_api_key, is_indexed,
     },
-    storage::zvec::{ZvecStorage, types::WorkspaceIndexStorageOptions},
+    storage::{IndexStore, types::WorkspaceIndexStorageOptions},
     workspace::{
         layout::find_nearest_workspace,
         lock::{LockMode, acquire_home_lock},
@@ -45,7 +45,7 @@ pub(crate) async fn context(
     let initial_manifest = read_workspace_manifest(&location.home)?;
     if !initial_manifest
         .as_ref()
-        .map(|manifest| ZvecStorage::exists(&manifest.storage_home()))
+        .map(|manifest| IndexStore::exists(&manifest.storage_home()))
         .transpose()?
         .unwrap_or(false)
     {
@@ -107,7 +107,7 @@ pub(crate) async fn context(
         .iter()
         .map(|runtime| runtime as &dyn SearchEmbeddingRuntime)
         .collect::<Vec<_>>();
-    let storage = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
+    let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
         storage_path: manifest.storage_home(),
     })?;
     let result = context_from_index(

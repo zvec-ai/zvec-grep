@@ -40,7 +40,7 @@ fn fixture_records(
     (entities, entries)
 }
 
-impl ZvecStorage {
+impl IndexStore {
     fn replace_fixture_file(
         &self,
         file: &FileRecord,
@@ -50,18 +50,8 @@ impl ZvecStorage {
         self.replace_file(file, &entities, &entries)
     }
 }
-impl NativeStore {
-    fn apply_fixture_file(
-        &self,
-        file: &FileRecord,
-        fixtures: &[FixtureEntity],
-    ) -> EngineResult<()> {
-        let (entities, entries) = fixture_records(fixtures);
-        self.apply_replace(file, &entities, &entries)
-    }
-}
 
-fn file_at(storage: &ZvecStorage, path: &str) -> (FileRecord, FixtureEntity) {
+fn file_at(storage: &IndexStore, path: &str) -> (FileRecord, FixtureEntity) {
     let (mut file, mut entry) = fixture(None, "template", "orchard", vec![1.0, 0.0, 0.0]);
     file.relative_path = crate::domain::SourcePath::new(path).expect("source path");
     file.id = storage
@@ -392,7 +382,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     original.metric = Metric::DotProduct;
     original.max_input_tokens = Some(8192);
     original.max_image_bytes = Some(1_048_576);
-    ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+    IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.to_owned(),
         embeddings: vec![original.clone()],
     })
@@ -415,7 +405,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     current.model.endpoint = Some("https://new.example.test/embeddings".into());
     current.max_batch_size = 64;
 
-    ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+    IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.to_owned(),
         embeddings: vec![current.clone()],
     })
@@ -425,7 +415,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
 
     let mut invalid = current.clone();
     invalid.max_batch_size = 0;
-    let error = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+    let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.to_owned(),
         embeddings: vec![invalid],
     })
@@ -452,7 +442,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
             "max_image_bytes" => changed.max_image_bytes = None,
             _ => unreachable!(),
         }
-        let error = ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+        let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: home.to_owned(),
             embeddings: vec![changed],
         })
@@ -489,7 +479,7 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
                 embeddings: vec![schema()],
             },
         ] {
-            let error = ZvecStorage::open(options).err().expect("corrupt metadata");
+            let error = IndexStore::open(options).err().expect("corrupt metadata");
             assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
             assert!(
                 error
@@ -501,7 +491,7 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     assert_eq!(fs::read_dir(path).expect("storage files").count(), 1);
 }
 
-fn open(path: &Path, read_only: bool) -> ZvecStorage {
+fn open(path: &Path, read_only: bool) -> IndexStore {
     let options = if read_only {
         WorkspaceIndexStorageOptions::ReadOnly {
             storage_path: path.to_owned(),
@@ -512,11 +502,11 @@ fn open(path: &Path, read_only: bool) -> ZvecStorage {
             embeddings: vec![schema()],
         }
     };
-    ZvecStorage::open(options).expect("open real zvec storage")
+    IndexStore::open(options).expect("open real zvec storage")
 }
 
 fn fixture(
-    storage: Option<&ZvecStorage>,
+    storage: Option<&IndexStore>,
     name: &str,
     text: &str,
     vector: Vec<f32>,
@@ -744,10 +734,10 @@ fn persists_filters_and_replaces_complete_files() {
             .len(),
         1
     );
-    assert!(ZvecStorage::delete(home).is_err());
+    assert!(IndexStore::delete(home).is_err());
     second_reader.close().expect("close other reader");
-    ZvecStorage::delete(home).expect("drop storage");
-    assert!(!ZvecStorage::exists(home).expect("absence"));
+    IndexStore::delete(home).expect("drop storage");
+    assert!(!IndexStore::exists(home).expect("absence"));
 }
 
 #[test]
@@ -872,7 +862,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         1
     );
     assert!(
-        ZvecStorage::open(WorkspaceIndexStorageOptions::ReadOnly {
+        IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
             storage_path: home.to_owned(),
         })
         .is_err(),
@@ -882,7 +872,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     let mut incompatible = schema();
     incompatible.dimension = 4;
     assert!(
-        ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+        IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: home.to_owned(),
             embeddings: vec![incompatible],
         })
@@ -966,70 +956,6 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     assert_eq!(files[0].index_status.entity_count(), 0);
     assert_eq!(files[0].snapshot, file.snapshot);
     reader.close().expect("close reader");
-}
-
-#[test]
-fn native_replacements_require_a_consistent_complete_file_state() {
-    let directory = tempfile::tempdir().expect("fixture directory");
-    open(directory.path(), false)
-        .close()
-        .expect("initialize storage");
-    let native = NativeStore::open(&directory.path().join("storage"), &[schema()], false)
-        .expect("native writer");
-    let (mut file, entry) = fixture(None, "state", "source content", vec![1.0, 0.0, 0.0]);
-    for status in [
-        FileIndexStatus::NotIndexed,
-        FileIndexStatus::Failed {
-            error: "extraction failed".to_owned(),
-        },
-        FileIndexStatus::Indexed {
-            indexed_epoch_ms: 1,
-            entity_count: 0,
-        },
-        FileIndexStatus::Indexed {
-            indexed_epoch_ms: 1,
-            entity_count: 2,
-        },
-    ] {
-        file.index_status = status;
-        assert!(
-            native
-                .apply_fixture_file(&file, std::slice::from_ref(&entry))
-                .is_err()
-        );
-    }
-    assert!(
-        native
-            .list_files()
-            .expect("no partial mutations")
-            .is_empty()
-    );
-    file.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 1,
-    };
-    native
-        .apply_fixture_file(&file, std::slice::from_ref(&entry))
-        .expect("consistent result");
-    let hits = native
-        .search_vector("fixture/fixture-model", &entry.vector, 10, None)
-        .expect("stored vector");
-    assert_eq!(hits.len(), 1);
-    let loaded = native
-        .load_search_hits(&hits)
-        .expect("stored result details");
-    assert_eq!(loaded.entities[&entry.entity.id].file, file);
-    file.index_status = FileIndexStatus::NotIndexed;
-    native
-        .apply_fixture_file(&file, &[])
-        .expect("discard interrupted result");
-    assert!(
-        native
-            .search_vector("fixture/fixture-model", &entry.vector, 10, None)
-            .expect("no partial vector")
-            .is_empty()
-    );
-    assert_eq!(native.list_files().expect("reindex marker"), vec![file]);
 }
 
 #[test]
@@ -1185,15 +1111,15 @@ fn multi_model_schema() -> Vec<EmbeddingModelInfo> {
     vec![text, vision]
 }
 
-fn open_multi_model(path: &Path) -> ZvecStorage {
-    ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+fn open_multi_model(path: &Path) -> IndexStore {
+    IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: path.to_owned(),
         embeddings: multi_model_schema(),
     })
     .expect("multi-model storage")
 }
 
-fn multi_model_file(storage: &ZvecStorage) -> (FileRecord, Vec<FixtureEntity>) {
+fn multi_model_file(storage: &IndexStore) -> (FileRecord, Vec<FixtureEntity>) {
     let (file, text) = fixture(
         Some(storage),
         "nested/mixed",
@@ -1240,7 +1166,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     expected.extend(
         multi_model_schema()
             .iter()
-            .map(super::super::collections::fragment_collection_name),
+            .map(super::super::fragments::fragment_collection_name),
     );
     expected.sort();
     assert_eq!(
@@ -1308,8 +1234,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         );
     }
     writer.close().expect("persist failure");
-    let native =
-        NativeStore::open(&storage_path, &multi_model_schema(), true).expect("inspect failed file");
+    let native = open(home.path(), true);
     assert_eq!(native.list_files().expect("failure remains").len(), 1);
     let loaded = native
         .load_search_hits(&hits)
@@ -1324,7 +1249,7 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     open_multi_model(home.path()).close().expect("checkpoint");
     let mut reversed = multi_model_schema();
     reversed.reverse();
-    ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+    IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
         embeddings: reversed,
     })
@@ -1333,7 +1258,7 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     .expect("close");
     for embeddings in [vec![schema()], vec![schema(), schema()]] {
         assert!(
-            ZvecStorage::open(WorkspaceIndexStorageOptions::ReadWrite {
+            IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
                 storage_path: home.path().to_owned(),
                 embeddings,
             })

@@ -1,4 +1,4 @@
-//! Data exchanged with zvec indexing, search, and lifecycle operations.
+//! Data exchanged with index storage operations.
 
 use std::{
     collections::HashMap,

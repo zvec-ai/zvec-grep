@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     EngineError,
-    storage::zvec::ZvecStorage,
+    storage::IndexStore,
     utils::{atomic_write, sync_directory},
 };
 
@@ -77,7 +77,7 @@ pub(crate) fn has_generation_storage(home: &Path) -> Result<bool, EngineError> {
 /// Remove abandoned builds or finish post-publication cleanup under the write lock.
 /// The active manifest is the only commit marker; unfinished work is never resumed.
 pub(crate) fn recover_build(home: &Path) -> Result<(), EngineError> {
-    recover_build_with(home, &ZvecStorage::delete)
+    recover_build_with(home, &IndexStore::delete)
 }
 
 fn recover_build_with(
@@ -121,7 +121,7 @@ pub(crate) fn prepare_build(
 
 /// The caller has completed and closed stage storage before publishing.
 pub(crate) fn publish_build(build: WorkspaceBuild, updated_time: u64) -> Result<(), EngineError> {
-    publish_build_with(build, updated_time, &ZvecStorage::delete)
+    publish_build_with(build, updated_time, &IndexStore::delete)
 }
 
 fn publish_build_with(
@@ -147,7 +147,7 @@ pub(crate) fn drop_build_storage(home: &Path) -> Result<(), EngineError> {
                 if !entry.file_type().map_err(build_io)?.is_dir() {
                     continue;
                 }
-                ZvecStorage::delete(&entry.path())?;
+                IndexStore::delete(&entry.path())?;
                 fs::remove_dir_all(entry.path()).map_err(build_io)?;
             }
             sync_directory(&generations)?;

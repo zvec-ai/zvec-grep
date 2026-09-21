@@ -23,9 +23,7 @@ use crate::{
     },
     file_selection::GlobMatcher,
     models::{EmbeddingOptions, ModelError, ModelRuntimeLease},
-    storage::zvec::types::{
-        StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData,
-    },
+    storage::types::{StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData},
 };
 
 use super::{
@@ -836,7 +834,7 @@ mod tests {
             model::{EmbeddingModelInfo, Metric},
         },
         models::ModelError,
-        storage::zvec::types::{
+        storage::types::{
             StoragePathFilter, StorageSearchFilter, StorageSearchHit, StorageSearchPath,
             StoredEntity, StoredFileAttributes, StoredSearchData,
         },

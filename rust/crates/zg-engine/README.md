@@ -57,7 +57,7 @@ Nested Git repositories and checked-out submodules are scanned by default, subje
 - **Extraction** turns source files into complete entities, metadata, and source-preserving fragment ranges.
 - **Lexical** searches source files directly with embedded grep.
 - **Models** provides embedding backends and manages model runtimes.
-- **Storage** groups persistence capabilities. `storage/zvec` owns file and entity records, FTS, vectors, and file write states; future graph storage can expose its own API.
+- **Storage** groups persistent data into `directories`, `files`, `entities`, and `fragments` modules. Each module owns its collection schema, encoding, and table operations. `IndexStore` coordinates their lifecycle, file write states, and cross-table reads and writes; `zvec.rs` contains shared native helpers.
 - **Workspace** manages workspace names, configuration, index locations, and locks.
 - **Pipelines** coordinates index construction (`indexing`), indexed queries (`indexed_search`), and direct queries (`direct_search`). Direct queries combine lexical search with structural extraction and result assembly.
 - **Authorization** manages consent for sending data to remote embedding services.

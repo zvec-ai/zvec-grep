@@ -41,7 +41,7 @@ use crate::{
     },
     file_selection::ScanPolicy,
     models::{EmbeddingConcurrencyDefaults, EmbeddingOptions, ModelError, ModelRuntimeLease},
-    storage::zvec::types::IndexedFragment,
+    storage::types::IndexedFragment,
     utils::{collapse_whitespace, decode_text, sha256_hex},
 };
 

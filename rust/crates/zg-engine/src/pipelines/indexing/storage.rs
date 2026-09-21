@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::{
     EngineResult,
     domain::{Entity, FileId, FileRecord},
-    storage::zvec::{ZvecStorage, types::IndexedFragment},
+    storage::{IndexStore, types::IndexedFragment},
 };
 
 pub(crate) trait IndexStorage: Send + Sync {
@@ -23,7 +23,7 @@ pub(crate) trait IndexStorage: Send + Sync {
     fn checkpoint(&self) -> EngineResult<()>;
 }
 
-impl IndexStorage for ZvecStorage {
+impl IndexStorage for IndexStore {
     fn is_read_only(&self) -> bool {
         self.is_read_only()
     }

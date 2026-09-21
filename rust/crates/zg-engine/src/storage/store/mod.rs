@@ -1,3 +1,5 @@
+//! Index lifecycle and operations that span multiple tables.
+
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, DirBuilder, File, OpenOptions},
@@ -15,19 +17,20 @@ use crate::{
 };
 
 use super::{
-    codec,
-    collections::NativeStore,
-    file_ids::FileIds,
+    directories::Directories,
+    entities::{self, Entities},
+    files::Files,
+    fragments::{self, Fragments},
     types::{
-        IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredFileAttributes,
+        IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
     },
+    zvec::{corrupt, initialize},
 };
 use crate::domain::model::EmbeddingModelInfo;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
-static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
 struct SharedStore {
     state: Mutex<StoreState>,
@@ -38,12 +41,14 @@ struct SharedStore {
 }
 
 struct StoreState {
-    native: NativeStore,
-    file_ids: FileIds,
+    files: Files,
+    directories: Directories,
+    entities: Entities,
+    fragments: Fragments,
     closed: bool,
 }
 
-pub(crate) struct ZvecStorage {
+pub(crate) struct IndexStore {
     shared: Mutex<Option<Arc<SharedStore>>>,
     read_only: bool,
 }
@@ -101,7 +106,7 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
     Ok(())
 }
 
-impl ZvecStorage {
+impl IndexStore {
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
         if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
             validate_models(embeddings)?;
@@ -148,13 +153,13 @@ impl ZvecStorage {
             ));
         }
         let (lock, schema) = prepare_storage(&home, &path, options)?;
-        let native = NativeStore::open(&path, &schema, read_only)?;
-        // Readers do not need an allocation map or an O(files) startup scan.
-        let file_ids = if read_only {
-            FileIds::from_paths([])?
-        } else {
-            native.load_file_ids()?
-        };
+        let files = Files::open(&path, read_only)?;
+        let directories = Directories::open(&path, read_only)?;
+        let entities = Entities::open(&path, read_only)?;
+        let fragments = Fragments::open(&path, &schema, read_only)?;
+        if !read_only {
+            directories.load()?;
+        }
         if !read_only {
             // Repeat the same range after failures that leave directories in place.
             sync_directory(&path)?;
@@ -165,8 +170,10 @@ impl ZvecStorage {
         }
         let shared = Arc::new(SharedStore {
             state: Mutex::new(StoreState {
-                native,
-                file_ids,
+                files,
+                directories,
+                entities,
+                fragments,
                 closed: false,
             }),
             schema,
@@ -218,11 +225,11 @@ impl ZvecStorage {
             .ok_or_else(|| EngineError::resource_closed("workspace storage is closed"))
     }
 
-    fn read<T>(&self, operation: impl FnOnce(&NativeStore) -> EngineResult<T>) -> EngineResult<T> {
+    fn read<T>(&self, operation: impl FnOnce(&StoreState) -> EngineResult<T>) -> EngineResult<T> {
         let shared = self.shared()?;
         let state = lock_state(&shared)?;
         assert_usable(&state)?;
-        operation(&state.native)
+        operation(&state)
     }
 
     fn write<T>(
@@ -245,44 +252,30 @@ impl ZvecStorage {
     }
 
     pub(crate) fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
-        self.read(NativeStore::list_files)
+        self.read(|state| state.files.list())
     }
 
     pub(crate) fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
-        self.read(NativeStore::list_file_paths)
+        self.read(|state| state.files.list_paths())
     }
 
     pub(crate) fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {
-        self.read(NativeStore::list_file_attributes)
+        self.read(|state| state.files.list_attributes())
     }
 
     pub(crate) fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>> {
-        if self.read_only {
-            return Err(EngineError::permission_denied(
-                "cannot allocate file identities in read-only storage",
-            ));
-        }
-        let shared = self.shared()?;
-        let mut state = lock_state(&shared)?;
-        assert_usable(&state)?;
-        state.file_ids.resolve(paths)
+        self.write(|state| state.files.resolve_ids(paths))
     }
 
     pub(crate) fn has_non_unicode_file_names(&self) -> EngineResult<bool> {
-        if self.read_only {
-            return self.read(NativeStore::has_non_unicode_file_names);
-        }
-        let shared = self.shared()?;
-        let state = lock_state(&shared)?;
-        assert_usable(&state)?;
-        Ok(state.file_ids.has_non_unicode_file_names())
+        self.read(|state| state.files.has_non_unicode_file_names())
     }
 
     pub(crate) fn load_search_hits(
         &self,
         hits: &[StorageSearchHit],
     ) -> EngineResult<StoredSearchData> {
-        self.read(|native| native.load_search_hits(hits))
+        self.read(|state| load_search_hits(state, hits))
     }
 
     pub(crate) fn search_fts(
@@ -291,7 +284,13 @@ impl ZvecStorage {
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.read(|native| native.search_fts(query, limit, filter))
+        self.read(|state| {
+            if limit == 0 || fragments::empty_filter(filter) {
+                return Ok(Vec::new());
+            }
+            let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
+            state.fragments.search_fts(query, limit, filter.as_deref())
+        })
     }
 
     pub(crate) fn search_vector(
@@ -303,7 +302,15 @@ impl ZvecStorage {
     ) -> EngineResult<Vec<StorageSearchHit>> {
         let shared = self.shared()?;
         validate_vector(vector, model_schema(&shared.schema, model)?)?;
-        self.read(|native| native.search_vector(model, vector, limit, filter))
+        self.read(|state| {
+            if limit == 0 || fragments::empty_filter(filter) {
+                return Ok(Vec::new());
+            }
+            let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
+            state
+                .fragments
+                .search_vector(model, vector, limit, filter.as_deref())
+        })
     }
 
     pub(crate) fn replace_file(
@@ -321,10 +328,7 @@ impl ZvecStorage {
                 .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
         };
         file.validate()?;
-        self.write(|state| {
-            state.file_ids.validate(&file)?;
-            state.native.apply_replace(&file, entities, entries)
-        })
+        self.write(|state| replace_file(state, &file, entities, entries))
     }
 
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
@@ -334,17 +338,15 @@ impl ZvecStorage {
             error: error.to_owned(),
         };
         file.validate()?;
-        self.write(|state| {
-            state.file_ids.validate(&file)?;
-            state.native.apply_replace(&file, &[], &[])
-        })
+        self.write(|state| replace_file(state, &file, &[], &[]))
     }
 
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
-            state.native.apply_delete(file_id)?;
-            state.file_ids.remove(file_id);
-            Ok(())
+            state.files.mark_deleting(file_id)?;
+            state.fragments.delete_file(file_id)?;
+            state.entities.delete_file(file_id)?;
+            state.files.delete(file_id)
         })
     }
 
@@ -353,7 +355,7 @@ impl ZvecStorage {
         if self.read_only {
             return Ok(());
         }
-        self.write(|state| state.native.flush())
+        self.write(|state| flush(state))
     }
 
     pub(crate) fn close(&self) -> EngineResult<()> {
@@ -373,8 +375,93 @@ impl ZvecStorage {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
-        state.native.flush()
+        flush(&state)
     }
+}
+
+// Cross-table writes stay under the store's single writer lock.
+fn replace_file(
+    state: &mut StoreState,
+    file: &FileRecord,
+    entities: &[Entity],
+    entries: &[IndexedFragment],
+) -> EngineResult<()> {
+    state.files.validate(file)?;
+    state.entities.validate_ownership(entities, file.id)?;
+    state.fragments.validate_ownership(entries, file.id)?;
+    let directories = state.directories.ensure(&file.relative_path)?;
+    // Encode every projection before removing any of the previous file's data.
+    let entity_docs = Entities::prepare(entities)?;
+    let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
+    let mut unfinished = file.clone();
+    unfinished.index_status = FileIndexStatus::NotIndexed;
+    state.files.put(&unfinished, &directories)?;
+    state.fragments.delete_file(file.id)?;
+    state.entities.delete_file(file.id)?;
+    state.entities.write(&entity_docs)?;
+    state.fragments.write(&fragment_docs)?;
+    state.files.put(file, &directories)
+}
+
+fn load_search_hits(
+    state: &StoreState,
+    hits: &[StorageSearchHit],
+) -> EngineResult<StoredSearchData> {
+    let entity_ids = hits
+        .iter()
+        .map(|hit| hit.entity_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let file_ids = hits
+        .iter()
+        .map(|hit| hit.file_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let stored_entities = state.entities.fetch(&entity_ids)?;
+    let files = state.files.fetch(&file_ids)?;
+    let mut entities = HashMap::new();
+    let mut fragments = HashMap::new();
+    for entity in stored_entities.into_values() {
+        // A replacement or deletion can stop between collection writes.
+        let Some(file) = files.get(&entity.file_id) else {
+            continue;
+        };
+        for fragment in &entity.fragments {
+            if fragments
+                .insert(fragment.id.as_str().to_owned(), fragment.clone())
+                .is_some()
+            {
+                return Err(corrupt("duplicate canonical fragment identity"));
+            }
+        }
+        entities.insert(
+            entity.id.clone(),
+            StoredEntity {
+                entity,
+                file: file.clone(),
+            },
+        );
+    }
+    for hit in hits {
+        if let Some(owner) = entities.get(&hit.entity_id)
+            && owner.file.id != hit.file_id
+        {
+            return Err(corrupt("search identities differ from their stored entity"));
+        }
+    }
+    Ok(StoredSearchData {
+        entities,
+        fragments,
+    })
+}
+
+fn flush(state: &StoreState) -> EngineResult<()> {
+    state.directories.flush()?;
+    state.entities.flush()?;
+    state.fragments.flush()?;
+    state.files.flush()
 }
 
 fn assert_usable(state: &StoreState) -> EngineResult<()> {
@@ -403,14 +490,14 @@ fn validate_batch(
             return Err(EngineError::invalid_argument("duplicate entity id"));
         }
         entity.validate()?;
-        codec::validate_content(&entity.content)?;
+        entities::validate_content(&entity.content)?;
         for fragment in &entity.fragments {
             if !fragment_ids.insert(&fragment.id) {
                 return Err(EngineError::invalid_argument("duplicate fragment id"));
             }
         }
     }
-    super::collections::validate_projections(entities, entries)?;
+    fragments::validate_projections(entities, entries)?;
     for entry in entries {
         validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
     }
@@ -441,21 +528,6 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
         ));
     }
     Ok(())
-}
-
-pub(super) fn initialize() -> EngineResult<()> {
-    match INITIALIZED.get_or_init(|| {
-        let config = zvec_rust::ConfigBuilder::new()
-            .num_threads(2)
-            .memory_limit(512 * 1024 * 1024)
-            .build();
-        zvec_rust::initialize(Some(&config)).map_err(|error| error.to_string())
-    }) {
-        Ok(()) => Ok(()),
-        Err(message) => Err(EngineError::storage_failure(format!(
-            "cannot initialize zvec: {message}"
-        ))),
-    }
 }
 
 fn load_schema(
@@ -594,3 +666,6 @@ fn now_epoch_ms() -> EngineResult<u64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tables_tests;
