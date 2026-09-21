@@ -23,8 +23,19 @@ impl Fixture {
         let overflowed = Arc::new(AtomicBool::new(false));
         let overflow_notify = Arc::new(Notify::new());
         let watcher = healthy.then(|| {
-            create_watcher(&spec, false, &raw, &overflowed, &overflow_notify, None)
-                .expect("watcher")
+            // These tests inject raw events explicitly. Manual polling keeps OS
+            // notifications (including activity in the shared temp parent) out
+            // of the queue while retaining real registration refresh behavior.
+            let mut watcher = NativeWatcher {
+                backend: WatchBackend::Poll(
+                    PollWatcher::new(|_| {}, NotifyConfig::default().with_manual_polling())
+                        .expect("watcher"),
+                ),
+                registrations: BTreeMap::new(),
+                aliases: WatchAliases::default(),
+            };
+            watcher.refresh(&spec, false).expect("registrations");
+            watcher
         });
         let close = CancellationToken::new();
         let task = tokio::spawn(watch_loop(WatchLoop {
