@@ -8,7 +8,9 @@ use std::{
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -38,12 +40,35 @@ struct ManagerInner {
     factory: Arc<ModelFactory>,
     compute_runtime: ModelComputeRuntime,
     state: Mutex<ManagerState>,
+    policy: CachePolicy,
 }
 
 #[derive(Default)]
 struct ManagerState {
     closed: bool,
-    entries: HashMap<ModelRuntimeKey, Arc<ModelRuntimeEntry>>,
+    entries: HashMap<ModelRuntimeKey, CachedRuntime>,
+    maintenance: Option<SyncSender<()>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachePolicy {
+    idle_timeout: Duration,
+    capacity: usize,
+}
+
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            idle_timeout: Duration::from_mins(15),
+            capacity: 1,
+        }
+    }
+}
+
+struct CachedRuntime {
+    entry: Arc<ModelRuntimeEntry>,
+    // Protected by the manager lock, together with lease acquisition and release.
+    idle_since: Option<Instant>,
 }
 
 struct ModelRuntimeEntry {
@@ -123,12 +148,17 @@ impl ModelRuntimeManager {
         + Sync
         + 'static,
     ) -> Self {
+        Self::with_policy(Arc::new(factory), CachePolicy::default())
+    }
+
+    fn with_policy(factory: Arc<ModelFactory>, policy: CachePolicy) -> Self {
         let compute_runtime = ModelComputeRuntime::shared();
         Self {
             inner: Arc::new(ManagerInner {
-                factory: Arc::new(factory),
+                factory,
                 compute_runtime,
                 state: Mutex::new(ManagerState::default()),
+                policy,
             }),
         }
     }
@@ -145,13 +175,19 @@ impl ModelRuntimeManager {
         } = request;
         validate_embedding_concurrency(embedding_concurrency)?;
         let key = ModelRuntimeKey::new(&reference, &options);
+        // Declare retired handles before the guard so even an error releases the
+        // manager lock before running native model destructors.
+        let mut retired = Vec::new();
         let mut state = self.lock_state();
         if state.closed {
             return Err(manager_closed());
         }
+        self.inner.start_maintenance(&mut state)?;
+        retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
 
-        let entry = if let Some(entry) = state.entries.get(&key) {
-            Arc::clone(entry)
+        let entry = if let Some(cached) = state.entries.get_mut(&key) {
+            cached.idle_since = None;
+            Arc::clone(&cached.entry)
         } else {
             // Model construction is intentionally performed while holding the
             // short-lived manager lock. Backends load heavy resources lazily,
@@ -168,7 +204,13 @@ impl ModelRuntimeManager {
                 }),
                 leases: AtomicUsize::new(0),
             });
-            state.entries.insert(key.clone(), Arc::clone(&entry));
+            state.entries.insert(
+                key.clone(),
+                CachedRuntime {
+                    entry: Arc::clone(&entry),
+                    idle_since: None,
+                },
+            );
             entry
         };
         let concurrency = resolve_embedding_concurrency(
@@ -176,7 +218,9 @@ impl ModelRuntimeManager {
             entry.runtime.model.concurrency_defaults(),
         );
         entry.leases.fetch_add(1, Ordering::AcqRel);
-        Ok(ModelRuntimeLease {
+        retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
+        state.wake_maintenance();
+        let lease = ModelRuntimeLease {
             key,
             entry,
             manager: Arc::downgrade(&self.inner),
@@ -184,16 +228,22 @@ impl ModelRuntimeManager {
                 limit: concurrency,
                 permits: Arc::new(Semaphore::new(concurrency)),
             }),
-        })
+        };
+        drop(state);
+        drop(retired);
+        Ok(lease)
     }
 
     /// Stops new acquisitions and retires runtimes without active leases.
     pub(super) fn close_impl(&self) {
         let mut state = self.lock_state();
         state.closed = true;
-        state
-            .entries
-            .retain(|_, entry| entry.leases.load(Ordering::Acquire) > 0);
+        // Disconnecting the channel stops maintenance without retaining the manager
+        // or waiting for model destructors while holding its state lock.
+        state.maintenance.take();
+        let retired = state.retire_idle(self.inner.policy, Instant::now());
+        drop(state);
+        drop(retired);
     }
 
     pub(super) fn snapshot_impl(&self) -> ModelRuntimeSnapshot {
@@ -203,12 +253,18 @@ impl ModelRuntimeManager {
             active_leases: state
                 .entries
                 .values()
-                .map(|entry| entry.leases.load(Ordering::Acquire))
+                .map(|cached| cached.entry.leases.load(Ordering::Acquire))
                 .sum(),
             active_embeddings: state
                 .entries
                 .values()
-                .map(|entry| entry.runtime.active_embeddings.load(Ordering::Acquire))
+                .map(|cached| {
+                    cached
+                        .entry
+                        .runtime
+                        .active_embeddings
+                        .load(Ordering::Acquire)
+                })
                 .sum(),
         }
     }
@@ -218,6 +274,110 @@ impl ModelRuntimeManager {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl ManagerState {
+    fn retire_idle(&mut self, policy: CachePolicy, now: Instant) -> Vec<Arc<ModelRuntimeEntry>> {
+        let mut candidates = self
+            .entries
+            .iter()
+            .filter_map(|(key, cached)| {
+                cached
+                    .idle_since
+                    .filter(|_| {
+                        cached.entry.leases.load(Ordering::Acquire) == 0
+                            && cached
+                                .entry
+                                .runtime
+                                .active_embeddings
+                                .load(Ordering::Acquire)
+                                == 0
+                    })
+                    .map(|idle_since| (key.clone(), idle_since))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|(_, idle_since)| *idle_since);
+        let mut retired = Vec::new();
+        for (key, idle_since) in candidates {
+            if !self.closed
+                && now.saturating_duration_since(idle_since) < policy.idle_timeout
+                && self.entries.len() <= policy.capacity
+            {
+                break;
+            }
+            if let Some(cached) = self.entries.remove(&key) {
+                retired.push(cached.entry);
+            }
+        }
+        retired
+    }
+
+    fn wake_maintenance(&self) {
+        if let Some(sender) = &self.maintenance {
+            // One pending wakeup is sufficient; release/acquire must never block.
+            let _ = sender.try_send(());
+        }
+    }
+}
+
+impl ManagerInner {
+    fn start_maintenance(self: &Arc<Self>, state: &mut ManagerState) -> Result<(), ModelError> {
+        if state.maintenance.is_none() {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let weak = Arc::downgrade(self);
+            // A native waiter also works for synchronous callers and engines used
+            // across multiple Tokio runtimes. It owns no strong manager reference.
+            std::thread::Builder::new()
+                .name("model-cache".into())
+                .spawn(move || maintain_cache(&weak, &receiver))
+                .map_err(|error| {
+                    ModelError::internal("Unable to start model cache maintenance")
+                        .with_cause(error)
+                })?;
+            state.maintenance = Some(sender);
+        }
+        Ok(())
+    }
+}
+
+fn maintain_cache(manager: &Weak<ManagerInner>, receiver: &Receiver<()>) {
+    loop {
+        let Some(inner) = manager.upgrade() else {
+            return;
+        };
+        let mut state = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return;
+        }
+        let retired = state.retire_idle(inner.policy, Instant::now());
+        let deadline = state
+            .entries
+            .values()
+            .filter_map(|cached| {
+                cached
+                    .idle_since
+                    .map(|idle_since| idle_since + inner.policy.idle_timeout)
+            })
+            .min();
+        drop(state);
+        drop(inner);
+        drop(retired);
+        // With no idle model there is no timer. Closing or dropping the manager
+        // disconnects the channel and wakes this thread immediately.
+        match deadline {
+            Some(deadline) => {
+                match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            None => {
+                if receiver.recv().is_err() {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -307,23 +467,28 @@ impl ModelRuntimeLease {
 
 impl Drop for ModelRuntimeLease {
     fn drop(&mut self) {
+        let Some(manager) = self.manager.upgrade() else {
+            let previous = self.entry.leases.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "model runtime lease count underflow");
+            return;
+        };
+        let mut state = manager.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Serialize the final release with acquisition and eviction so an old
+        // release cannot mark a newly acquired model idle or retire its replacement.
         let previous = self.entry.leases.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "model runtime lease count underflow");
         if previous != 1 {
             return;
         }
-        let Some(manager) = self.manager.upgrade() else {
-            return;
-        };
-        let mut state = manager.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let should_remove = state.closed
-            && state
-                .entries
-                .get(&self.key)
-                .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
-        if should_remove {
-            state.entries.remove(&self.key);
+        if let Some(cached) = state.entries.get_mut(&self.key)
+            && Arc::ptr_eq(&cached.entry, &self.entry)
+        {
+            cached.idle_since = Some(Instant::now());
         }
+        let retired = state.retire_idle(manager.policy, Instant::now());
+        state.wake_maintenance();
+        drop(state);
+        drop(retired);
     }
 }
 
@@ -555,6 +720,312 @@ mod tests {
                 truncated: Vec::new(),
             })
         }
+    }
+
+    fn fixture_cache(policy: CachePolicy) -> (ModelRuntimeManager, Arc<AtomicUsize>) {
+        let creations = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&creations);
+        let manager = ModelRuntimeManager::with_policy(
+            Arc::new(move |_, _, _| {
+                count.fetch_add(1, Ordering::AcqRel);
+                Ok(Arc::new(ProgressFixtureModel::new()))
+            }),
+            policy,
+        );
+        (manager, creations)
+    }
+
+    fn acquire_fixture(manager: &ModelRuntimeManager, reference: &str) -> ModelRuntimeLease {
+        manager
+            .acquire(ModelRuntimeRequest::new(
+                reference,
+                ModelConfig::default(),
+                None,
+            ))
+            .expect("fixture lease")
+    }
+
+    fn reap_at(manager: &ModelRuntimeManager, now: Instant) {
+        let retired = manager.lock_state().retire_idle(manager.inner.policy, now);
+        drop(retired);
+    }
+
+    fn idle_since(manager: &ModelRuntimeManager, reference: &str) -> Instant {
+        let key = ModelRuntimeKey::new(reference, &ModelConfig::default());
+        manager.lock_state().entries[&key]
+            .idle_since
+            .expect("idle model")
+    }
+
+    #[test]
+    fn idle_ttl_starts_at_final_release_and_reacquisition_resets_it() {
+        let (manager, creations) = fixture_cache(CachePolicy::default());
+        let first = acquire_fixture(&manager, "first");
+        let model = Arc::downgrade(&first.entry.runtime.model);
+        let second = acquire_fixture(&manager, "first");
+        let ttl = manager.inner.policy.idle_timeout;
+        reap_at(&manager, Instant::now() + ttl);
+        drop(first);
+        reap_at(&manager, Instant::now() + ttl);
+        assert!(
+            model.upgrade().is_some(),
+            "a remaining lease prevents eviction"
+        );
+        drop(second);
+        let first_idle = idle_since(&manager, "first");
+        reap_at(
+            &manager,
+            first_idle + ttl.saturating_sub(Duration::from_nanos(1)),
+        );
+        assert!(model.upgrade().is_some());
+        let reacquired = acquire_fixture(&manager, "first");
+        assert_eq!(creations.load(Ordering::Acquire), 1);
+        reap_at(&manager, first_idle + ttl);
+        assert!(
+            model.upgrade().is_some(),
+            "the previous deadline cannot evict a new lease"
+        );
+        drop(reacquired);
+        let last_idle = idle_since(&manager, "first");
+        reap_at(
+            &manager,
+            last_idle + ttl.saturating_sub(Duration::from_nanos(1)),
+        );
+        assert!(model.upgrade().is_some());
+        reap_at(&manager, last_idle + ttl);
+        assert!(model.upgrade().is_none());
+        let replacement = acquire_fixture(&manager, "first");
+        assert_eq!(creations.load(Ordering::Acquire), 2);
+        drop(replacement);
+        manager.close();
+    }
+
+    #[test]
+    fn capacity_is_soft_for_active_models_and_trims_on_acquisition_and_release() {
+        let (manager, creations) = fixture_cache(CachePolicy::default());
+        let first = acquire_fixture(&manager, "first");
+        let first_model = Arc::downgrade(&first.entry.runtime.model);
+        let second = acquire_fixture(&manager, "second");
+        let second_model = Arc::downgrade(&second.entry.runtime.model);
+        assert_eq!(manager.snapshot().cached_runtimes, 2);
+        assert_eq!(manager.snapshot().active_leases, 2);
+        drop(first);
+        assert!(first_model.upgrade().is_none());
+        assert!(second_model.upgrade().is_some());
+        assert_eq!(manager.snapshot().cached_runtimes, 1);
+        drop(second);
+        let hit = acquire_fixture(&manager, "second");
+        assert_eq!(creations.load(Ordering::Acquire), 2);
+        drop(hit);
+        let third = acquire_fixture(&manager, "third");
+        assert!(
+            second_model.upgrade().is_none(),
+            "a new model evicts the idle cached model"
+        );
+        assert_eq!(manager.snapshot().cached_runtimes, 1);
+        drop(third);
+        manager.close();
+    }
+
+    #[test]
+    fn capacity_retires_the_least_recently_used_idle_model() {
+        let (manager, _) = fixture_cache(CachePolicy {
+            capacity: 2,
+            ..CachePolicy::default()
+        });
+        let first = acquire_fixture(&manager, "first");
+        let first_model = Arc::downgrade(&first.entry.runtime.model);
+        drop(first);
+        let second = acquire_fixture(&manager, "second");
+        let second_model = Arc::downgrade(&second.entry.runtime.model);
+        drop(second);
+        let hit = acquire_fixture(&manager, "first");
+        drop(hit);
+        let third = acquire_fixture(&manager, "third");
+        assert!(first_model.upgrade().is_some());
+        assert!(second_model.upgrade().is_none());
+        assert_eq!(manager.snapshot().cached_runtimes, 2);
+        drop(third);
+        manager.close();
+    }
+
+    #[test]
+    fn shared_lease_owners_remain_protected_until_the_last_owner_releases() {
+        for policy in [
+            CachePolicy {
+                idle_timeout: Duration::ZERO,
+                ..CachePolicy::default()
+            },
+            CachePolicy {
+                capacity: 0,
+                ..CachePolicy::default()
+            },
+        ] {
+            let (manager, _) = fixture_cache(policy);
+            // Writer sessions share their owning Arc with borrowed queries.
+            let writer = Arc::new(acquire_fixture(&manager, "shared"));
+            let borrower = Arc::clone(&writer);
+            let model = Arc::downgrade(&writer.entry.runtime.model);
+            drop(writer);
+            reap_at(&manager, Instant::now() + Duration::from_secs(3600));
+            assert!(model.upgrade().is_some());
+            manager.close();
+            assert!(model.upgrade().is_some());
+            drop(borrower);
+            assert!(model.upgrade().is_none());
+            assert_eq!(manager.snapshot(), ModelRuntimeSnapshot::default());
+        }
+    }
+
+    struct DisposalFixture {
+        inner: ProgressFixtureModel,
+        on_drop: Box<dyn Fn() + Send + Sync>,
+    }
+
+    #[async_trait]
+    impl EmbeddingModel for DisposalFixture {
+        fn info(&self) -> &EmbeddingModelInfo {
+            self.inner.info()
+        }
+
+        async fn embed(
+            &self,
+            inputs: &[Vec<Content>],
+            options: EmbeddingOptions,
+        ) -> Result<EmbeddingResult, ModelError> {
+            self.inner.embed(inputs, options).await
+        }
+    }
+
+    impl Drop for DisposalFixture {
+        fn drop(&mut self) {
+            (self.on_drop)();
+        }
+    }
+
+    #[test]
+    fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
+        let (disposed, observed) = mpsc::channel();
+        let manager = ModelRuntimeManager::with_policy(
+            Arc::new(move |_, _, _| {
+                let disposed = disposed.clone();
+                Ok(Arc::new(DisposalFixture {
+                    inner: ProgressFixtureModel::new(),
+                    on_drop: Box::new(move || {
+                        let _ = disposed.send(());
+                    }),
+                }))
+            }),
+            CachePolicy {
+                idle_timeout: Duration::from_millis(20),
+                ..CachePolicy::default()
+            },
+        );
+        let lease = acquire_fixture(&manager, "first");
+        let model = Arc::downgrade(&lease.entry.runtime.model);
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "active model survives its TTL"
+        );
+        drop(lease);
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background expiration");
+        assert!(model.upgrade().is_none());
+        assert_eq!(manager.snapshot(), ModelRuntimeSnapshot::default());
+        manager.close();
+    }
+
+    #[test]
+    fn dropping_the_manager_releases_idle_models_without_waiting_for_the_ttl() {
+        let (disposed, observed) = mpsc::channel();
+        let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
+            let disposed = disposed.clone();
+            Ok(Arc::new(DisposalFixture {
+                inner: ProgressFixtureModel::new(),
+                on_drop: Box::new(move || {
+                    let _ = disposed.send(());
+                }),
+            }))
+        });
+        drop(acquire_fixture(&manager, "first"));
+        let weak = Arc::downgrade(&manager.inner);
+        drop(manager);
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("manager drop releases cached model");
+        assert!(
+            weak.upgrade().is_none(),
+            "maintenance must not retain its owner"
+        );
+    }
+
+    #[test]
+    fn slow_model_disposal_does_not_hold_the_cache_lock() {
+        let (entered, observed) = mpsc::channel();
+        let (release, wait_for_release) = mpsc::channel();
+        let gate = Arc::new(Mutex::new(wait_for_release));
+        let manager = ModelRuntimeManager::with_factory(move |reference, _, _| {
+            let entered = entered.clone();
+            let gate = Arc::clone(&gate);
+            let blocks = reference == "first";
+            Ok(Arc::new(DisposalFixture {
+                inner: ProgressFixtureModel::new(),
+                on_drop: Box::new(move || {
+                    if blocks {
+                        let _ = entered.send(());
+                        let _ = gate
+                            .lock()
+                            .expect("gate")
+                            .recv_timeout(Duration::from_secs(5));
+                    }
+                }),
+            }))
+        });
+        drop(acquire_fixture(&manager, "first"));
+        let evicting = manager.clone();
+        let eviction = std::thread::spawn(move || acquire_fixture(&evicting, "second"));
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("disposal starts");
+        let (acquired, hit) = mpsc::channel();
+        let acquiring = manager.clone();
+        let acquisition = std::thread::spawn(move || {
+            let lease = acquire_fixture(&acquiring, "second");
+            acquired.send(lease).expect("send hit");
+        });
+        let result = hit.recv_timeout(Duration::from_secs(2));
+        release.send(()).expect("unblock disposal");
+        acquisition.join().expect("acquisition thread");
+        let first = eviction.join().expect("eviction thread");
+        let second = result.expect("cache hit must not wait for disposal");
+        assert!(Arc::ptr_eq(&first.entry, &second.entry));
+        drop((first, second));
+        manager.close();
+    }
+
+    #[test]
+    fn concurrent_final_releases_cannot_mark_new_leases_idle() {
+        let (manager, _) = fixture_cache(CachePolicy::default());
+        for _ in 0..64 {
+            let previous = acquire_fixture(&manager, "first");
+            let barrier = std::sync::Barrier::new(2);
+            let replacement = std::thread::scope(|scope| {
+                let acquisition = scope.spawn(|| {
+                    barrier.wait();
+                    acquire_fixture(&manager, "first")
+                });
+                barrier.wait();
+                drop(previous);
+                acquisition.join().expect("acquisition")
+            });
+            reap_at(&manager, Instant::now() + Duration::from_secs(3600));
+            let shared = acquire_fixture(&manager, "first");
+            assert!(Arc::ptr_eq(&replacement.entry, &shared.entry));
+            assert_eq!(manager.snapshot().active_leases, 2);
+            drop((replacement, shared));
+        }
+        manager.close();
     }
 
     #[test]
@@ -811,6 +1282,12 @@ mod tests {
             }
             assert_eq!(fixture.started.load(Ordering::Acquire), 2);
             assert_eq!(fixture.maximum_active.load(Ordering::Acquire), 2);
+            let pressure = acquire_fixture(&manager, "other-model");
+            reap_at(&manager, Instant::now() + Duration::from_secs(3600));
+            assert_eq!(manager.snapshot().cached_runtimes, 2);
+            assert_eq!(manager.snapshot().active_embeddings, 2);
+            drop(pressure);
+            assert_eq!(manager.snapshot().cached_runtimes, 1);
             fixture.release.add_permits(4);
         };
         let (results, ()) = tokio::join!(embeddings, observe_limit);
@@ -863,6 +1340,32 @@ mod tests {
         let error = cancelled_result.expect_err("queued embedding should be cancelled");
         assert!(error.to_string().contains("cancelled"));
         assert_eq!(fixture.started.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_embedding_future_releases_activity_but_keeps_its_model_lease() {
+        let fixture = Arc::new(GatedFixtureModel::new());
+        let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
+            Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        });
+        let lease = acquire_fixture(&manager, "first");
+        let inputs = [vec![Content::Text("fixture".into())]];
+        let mut embedding = Box::pin(lease.embed(&inputs, EmbeddingOptions::default(), None));
+        tokio::select! {
+            biased;
+            _ = &mut embedding => panic!("embedding is gated"),
+            () = std::future::ready(()) => {},
+        }
+        let pressure = acquire_fixture(&manager, "second");
+        assert_eq!(manager.snapshot().active_embeddings, 1);
+        drop(embedding);
+        assert_eq!(manager.snapshot().active_embeddings, 0);
+        reap_at(&manager, Instant::now() + Duration::from_secs(3600));
+        assert_eq!(manager.snapshot().cached_runtimes, 2);
+        drop(lease);
+        assert_eq!(manager.snapshot().cached_runtimes, 1);
+        drop(pressure);
+        manager.close();
     }
 
     #[test]

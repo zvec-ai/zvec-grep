@@ -42,6 +42,13 @@ Request and reply types are grouped under the matching method name in
 The engine owns a private process-level model runtime manager. Workspaces using
 the same model configuration share one runtime and its loaded weights/tokenizer;
 embedding calls may execute concurrently against those shared resources.
+Idle model runtimes expire 15 minutes after their final lease is released, even
+without another request. The cache has a soft capacity of one runtime: it evicts
+the least recently used idle models on acquisition and final release, while
+active models may temporarily exceed the limit. Reacquiring a model resets its
+idle period. Maintenance stops when the engine is closed or its last owner is
+dropped, and native model destruction runs outside the cache lock.
+
 `IndexOptions::on_progress` accepts an in-process `IndexProgressReporter` and
 surfaces model downloads through `IndexProgress::embedding`. The reporter is
 runtime-only and is omitted from serialized daemon requests.
