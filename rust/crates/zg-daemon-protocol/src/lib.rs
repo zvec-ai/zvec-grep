@@ -279,13 +279,17 @@ mod tests {
         use zg_engine::api::index::options::ScanRules;
         use zg_engine::api::info::{
             InfoResult,
-            result::{IndexStats, InfoSource, WorkspaceIndexInfo, WorkspaceIndexPolicy},
+            result::{
+                IndexCompatibility, IndexStats, InfoSource, WorkspaceIndexInfo,
+                WorkspaceIndexPolicy,
+            },
         };
 
         let count = u64::from(u32::MAX) + 1;
         let reply = super::DaemonReply::Info(Box::new(InfoResult {
             root: "/workspace".into(),
             indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/storage".into(),
@@ -301,7 +305,7 @@ mod tests {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),
-                index_version: Some(1),
+                index_version: Some(2),
 
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
@@ -315,6 +319,10 @@ mod tests {
         }));
 
         let encoded = serde_json::to_value(&reply).expect("info reply should serialize");
+        assert_eq!(
+            encoded["reply"]["compatibility"],
+            serde_json::json!({"status": "compatible", "version": 2})
+        );
         assert_eq!(encoded["reply"]["workspace_index"]["name"], "search-engine");
         assert!(encoded["reply"]["workspace_index"].get("id").is_none());
         assert_eq!(

@@ -122,7 +122,6 @@ impl<'a> FilePayload<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::record::VERSION;
     use super::*;
     use serde_json::{Value, json};
 
@@ -144,9 +143,8 @@ mod tests {
         let mut source = file();
         let encoded = encode_file(&source).expect("encode source");
         let record: Value = serde_json::from_str(&encoded).expect("JSON record");
-        assert_eq!(record["version"], VERSION);
         assert_eq!(
-            record["value"],
+            record,
             json!({
                 "id": 1, "index_status": {"kind": "not_indexed"},
                 "relative_path": {"encoding": "utf8", "value": "nested/tsconfig.json"},
@@ -193,7 +191,7 @@ mod tests {
         let mut record: Value =
             serde_json::from_str(&encode_file(&file()).expect("source")).expect("JSON");
         for invalid in [json!(-1), json!(u64::from(u32::MAX) + 1), json!(1e20)] {
-            record["value"]["id"] = invalid;
+            record["id"] = invalid;
             assert!(decode_file(&record.to_string()).is_err());
         }
     }
@@ -232,29 +230,11 @@ mod tests {
             json!({"kind":"running"}),
             Value::Null,
         ] {
-            record["value"]["index_status"] = invalid;
+            record["index_status"] = invalid;
             assert!(decode_file(&record.to_string()).is_err());
         }
-        record["value"]["index_status"] =
-            json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":0});
-        record["value"]["snapshot"]["content_hash"] = Value::Null;
+        record["index_status"] = json!({"kind":"indexed", "indexed_epoch_ms":1, "entity_count":0});
+        record["snapshot"]["content_hash"] = Value::Null;
         assert!(decode_file(&record.to_string()).is_err());
-    }
-
-    #[test]
-    fn rejects_unsupported_source_record_versions() {
-        let record: Value =
-            serde_json::from_str(&encode_file(&file()).expect("source")).expect("JSON");
-        for version in (1..VERSION).chain([VERSION + 1]) {
-            let mut invalid = record.clone();
-            invalid["version"] = json!(version);
-            let error = decode_file(&invalid.to_string()).expect_err("unsupported version");
-            assert!(
-                error
-                    .message()
-                    .contains(&format!("unsupported stored source file version {version}"))
-            );
-            assert!(error.message().contains("rebuild the index"));
-        }
     }
 }

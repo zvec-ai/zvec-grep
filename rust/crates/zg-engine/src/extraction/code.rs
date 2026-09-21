@@ -239,8 +239,7 @@ fn extract_script_blocks(
     max_chars: usize,
     overlap_chars: usize,
 ) -> Result<Vec<ExtractedEntity>, EngineError> {
-    let lines = source.text.split('\n').collect::<Vec<_>>();
-    let line_offsets = line_byte_offsets(&lines);
+    let line_offsets = line_byte_offsets(&source.text);
     let mut fragments = Vec::new();
     for block in find_script_blocks(&source.text) {
         let mut block_source = source.clone();

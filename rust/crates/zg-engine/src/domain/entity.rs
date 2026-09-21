@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::{EngineError, EngineResult};
 
 use super::{Content, EntityMetadata, FileId, Range};
@@ -51,6 +49,7 @@ impl FragmentId {
 pub(crate) struct Entity {
     pub id: EntityId,
     pub file_id: FileId,
+    /// Range within the original source.
     pub source_range: Range,
     pub content: Content,
     pub metadata: Option<EntityMetadata>,
@@ -61,57 +60,25 @@ pub(crate) struct Entity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EntityFragment {
     pub id: FragmentId,
+    /// Range within the owning entity's content.
     pub range: Range,
 }
 
 impl Entity {
     pub(crate) fn validate(&self) -> EngineResult<()> {
-        let mut fragment_ids = HashSet::new();
         if !content_has_value(&self.content) || self.fragments.is_empty() {
             return Err(EngineError::invalid_argument(
                 "entity requires content and at least one fragment",
             ));
         }
-        // Build line starts once per entity so validating every fragment stays linear
-        // in the content size, rather than rescanning each fragment's prefix.
-        let text_coordinates = match &self.content {
-            Content::Text(text) => Some((
-                text.as_str(),
-                crate::utils::line_byte_offsets(&text.split('\n').collect::<Vec<_>>()),
-            )),
-            _ => None,
-        };
         for fragment in &self.fragments {
-            if !fragment_ids.insert(&fragment.id) {
-                return Err(EngineError::invalid_argument("duplicate fragment id"));
-            }
-            validate_fragment_content(&self.content, fragment.range)?;
-            if let (Range::Byte(range), Some((text, lines))) = (fragment.range, &text_coordinates) {
-                let start = usize::try_from(range.start_offset()).map_err(|_| {
-                    EngineError::invalid_argument("fragment start offset exceeds platform limits")
-                })?;
-                let end = usize::try_from(range.end_offset()).map_err(|_| {
-                    EngineError::invalid_argument("fragment end offset exceeds platform limits")
-                })?;
-                let local = crate::utils::text_range_from_offsets(text, lines, start, end)?;
-                match self.source_range {
-                    Range::Text(origin) => {
-                        crate::utils::map_text_range(local, origin)?;
-                    }
-                    Range::Full => {}
-                    Range::Byte(_) => {
-                        return Err(EngineError::invalid_argument(
-                            "fragment content coordinates cannot be mapped to this entity source",
-                        ));
-                    }
-                }
-            }
+            validate_fragment_range(&self.content, fragment.range)?;
         }
         Ok(())
     }
 }
 
-pub(crate) fn validate_fragment_content(content: &Content, range: Range) -> EngineResult<()> {
+fn validate_fragment_range(content: &Content, range: Range) -> EngineResult<()> {
     match (range, content) {
         (Range::Full, _) => Ok(()),
         (Range::Byte(range), Content::Text(text)) => {

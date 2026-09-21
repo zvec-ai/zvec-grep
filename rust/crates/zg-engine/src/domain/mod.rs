@@ -8,7 +8,7 @@ mod source;
 mod workspace;
 
 // Entities.
-pub(crate) use entity::{Entity, EntityFragment, EntityId, FragmentId, validate_fragment_content};
+pub(crate) use entity::{Entity, EntityFragment, EntityId, FragmentId};
 
 // Glob rules.
 pub use glob::GlobRule;

@@ -499,7 +499,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
                 ))
             })?;
             let content = crate::utils::slice_text(text, start, end).map_err(invalid_fragment)?;
-            let lines = crate::utils::line_byte_offsets(&text.split('\n').collect::<Vec<_>>());
+            let lines = crate::utils::line_byte_offsets(text);
             let local = crate::utils::text_range_from_offsets(text, &lines, start, end)
                 .map_err(invalid_fragment)?;
             let source = match hit.entity.source_range {

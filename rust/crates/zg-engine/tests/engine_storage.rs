@@ -70,7 +70,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(5)
+        Some(2)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -81,8 +81,8 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     );
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
-    assert_eq!(manifest["manifestVersion"], 5);
-    assert_eq!(manifest["indexVersion"], 5);
+    assert!(manifest.get("manifestVersion").is_none());
+    assert_eq!(manifest["indexVersion"], 2);
     assert_eq!(manifest["embeddings"].as_array().expect("models").len(), 1);
     assert_eq!(
         manifest["embeddingRoutes"],
@@ -149,7 +149,6 @@ async fn whitespace_only_ranges_do_not_fail_complete_file_indexing() -> TestResu
         .collect::<Result<Vec<_>, _>>()?;
     let entity = payloads
         .iter()
-        .map(|payload| &payload["value"])
         .find(|entity| entity["content"]["value"] == preamble)
         .expect("canonical content preserves every whitespace byte");
     let mut covered = vec![false; preamble.len()];
@@ -209,7 +208,7 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
             .get_string("payload")?
             .expect("canonical entity"),
     )?;
-    let entity = &payload["value"];
+    let entity = &payload;
     let entity_id = entity["id"].as_str().expect("entity ID");
     assert_eq!(entity_id.len(), 32);
     assert_eq!(entities[0].get_pk(), Some(entity_id));
@@ -686,7 +685,7 @@ async fn initial_build_publishes_successes_and_incrementally_retries_failed_file
     assert!(
         records
             .iter()
-            .all(|record| record["value"]["index_status"]["kind"] == "indexed")
+            .all(|record| record["index_status"]["kind"] == "indexed")
     );
     assert_eq!(
         fts_paths(&engine, root, "nebula").await?,
@@ -837,7 +836,7 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
     // Simulate interruption after recording NotIndexed. Opening the store must
     // preserve this state and any remaining search documents until indexing retries.
     let original: Value = serde_json::from_str(&source)?;
-    let id = u32::try_from(original["value"]["id"].as_u64().expect("file ID"))?;
+    let id = u32::try_from(original["id"].as_u64().expect("file ID"))?;
     set_native_file_status(&index_path, id, "not_indexed")?;
 
     let engine = ZvecGrep::new();
@@ -870,24 +869,20 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         "recovery preserves the source for reindexing"
     );
     let original: Value = serde_json::from_str(&source)?;
-    assert_eq!(original["value"]["index_status"]["kind"], "indexed");
+    assert_eq!(original["index_status"]["kind"], "indexed");
     let recovered: Value = serde_json::from_str(
         &files[0]
             .get_string("payload")?
             .expect("recovered file payload"),
     )?;
-    assert_eq!(recovered["version"], original["version"]);
-    assert!(recovered["value"].get("formats").is_none());
+    assert!(recovered.get("formats").is_none());
     for field in ["id", "relative_path", "snapshot"] {
         assert_eq!(
-            recovered["value"][field], original["value"][field],
+            recovered[field], original[field],
             "recovery preserves {field}"
         );
     }
-    assert_eq!(
-        recovered["value"]["index_status"],
-        json!({"kind": "not_indexed"})
-    );
+    assert_eq!(recovered["index_status"], json!({"kind": "not_indexed"}));
     let collections = fs::read_dir(&index_path)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()

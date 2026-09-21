@@ -392,7 +392,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let descriptor = home.join("storage/schema.json");
     let persisted = fs::read(&descriptor).expect("read descriptor");
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
-    assert_eq!(record["version"], 6);
+    assert_eq!(record, serde_json::json!({"embeddings": [original]}));
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
@@ -489,6 +489,53 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
         }
     }
     assert_eq!(fs::read_dir(path).expect("storage files").count(), 1);
+}
+
+#[test]
+fn initializes_schema_only_in_empty_storage() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("storage");
+    fs::create_dir(&path).expect("empty storage directory");
+    open(directory.path(), false)
+        .close()
+        .expect("initialize empty storage");
+    assert!(path.join("schema.json").is_file());
+    open(directory.path(), true)
+        .close()
+        .expect("reopen initialized storage");
+}
+
+#[test]
+fn rejects_existing_collections_without_schema_before_opening_them() {
+    for collection in ["files", "directories", "entities", "fragments_existing"] {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("storage");
+        let collection_path = path.join(collection);
+        fs::create_dir_all(&collection_path).expect("existing collection");
+        let marker = collection_path.join("preserved");
+        fs::write(&marker, "existing data").expect("existing collection data");
+        for options in [
+            WorkspaceIndexStorageOptions::ReadOnly {
+                storage_path: directory.path().to_owned(),
+            },
+            WorkspaceIndexStorageOptions::ReadWrite {
+                storage_path: directory.path().to_owned(),
+                embeddings: vec![schema()],
+            },
+        ] {
+            let error = IndexStore::open(options)
+                .err()
+                .expect("missing schema must reject existing storage");
+            assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+            assert!(error.message().contains("missing its schema"));
+            assert!(error.message().contains("rebuild the index"));
+            assert!(!path.join("schema.json").exists());
+            assert_eq!(
+                fs::read_to_string(&marker).expect("preserved data"),
+                "existing data"
+            );
+        }
+    }
 }
 
 fn open(path: &Path, read_only: bool) -> IndexStore {

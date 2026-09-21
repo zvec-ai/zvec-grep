@@ -56,24 +56,17 @@ pub(crate) struct IndexStore {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
-    version: u32,
     embeddings: Vec<EmbeddingModelInfo>,
 }
 
 impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
-            version: 6,
             embeddings: embeddings.to_vec(),
         }
     }
 
     fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
-        if self.version != 6 {
-            return Err(EngineError::storage_failure(
-                "unsupported storage schema; rebuild the index",
-            ));
-        }
         validate_models(&self.embeddings).map_err(|error| {
             EngineError::storage_failure(format!(
                 "invalid stored embedding model information: {error}"
@@ -554,6 +547,17 @@ fn load_schema(
             }
         }
         return Ok(schema);
+    }
+    if fs::read_dir(path)
+        .map_err(|error| io_error("inspect storage directory", path, &error))?
+        .next()
+        .transpose()
+        .map_err(|error| io_error("inspect storage entry", path, &error))?
+        .is_some()
+    {
+        return Err(EngineError::storage_failure(
+            "existing workspace storage is missing its schema; rebuild the index",
+        ));
     }
     let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options else {
         return Err(EngineError::not_found(

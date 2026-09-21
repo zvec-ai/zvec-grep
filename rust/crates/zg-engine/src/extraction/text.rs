@@ -1,7 +1,7 @@
 use crate::{
     EngineError,
     domain::{Content, Range},
-    utils::{byte_offset_at_utf16_ceil, line_byte_offsets, utf16_len},
+    utils::{byte_offset_at_utf16_ceil, byte_offset_at_utf16_floor, line_byte_offsets, utf16_len},
 };
 
 use super::{
@@ -73,7 +73,7 @@ fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<TextChu
     }
 
     let lines = text.split('\n').collect::<Vec<_>>();
-    let line_offsets = line_byte_offsets(&lines);
+    let line_offsets = line_byte_offsets(text);
     let mut chunks = Vec::new();
     let mut start_index = 0;
 
@@ -138,7 +138,10 @@ fn split_long_line(
     while byte_offset < line.len() {
         let rest = &line[byte_offset..];
         let slice_chars = find_line_cut(rest, max_chars);
-        let slice_bytes = byte_offset_at_utf16_ceil(rest, slice_chars);
+        let mut slice_bytes = byte_offset_at_utf16_floor(rest, slice_chars);
+        if slice_bytes == 0 {
+            slice_bytes = byte_offset_at_utf16_ceil(rest, slice_chars);
+        }
         let slice = &rest[..slice_bytes];
         if !slice.trim().is_empty() {
             chunks.push(TextChunk {
@@ -192,7 +195,56 @@ mod tests {
     use super::super::test_content;
 
     use super::super::{ChunkOptions, test_source};
-    use super::extract;
+    use super::{chunk_text, extract};
+
+    #[test]
+    fn unicode_chunks_obey_the_budget_and_advance_at_tiny_limits() {
+        for (text, max_chars, expected) in [
+            ("aaa😀z", 4, vec!["aaa", "😀z"]),
+            ("a😀z", 2, vec!["a", "😀", "z"]),
+            ("😀a😀", 1, vec!["😀", "a", "😀"]),
+        ] {
+            let chunks = chunk_text(text, max_chars, 0);
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let mut end = 0;
+            for chunk in chunks {
+                assert!(
+                    crate::utils::utf16_len(&chunk.text) <= max_chars
+                        || (max_chars == 1 && chunk.text.chars().count() == 1)
+                );
+                assert_eq!(chunk.range.start_byte_offset(), end);
+                end = chunk.range.end_byte_offset();
+                assert_eq!(&text[chunk.range.start_byte_offset()..end], chunk.text);
+            }
+            assert_eq!(end, text.len());
+        }
+    }
+
+    #[test]
+    fn long_lines_keep_punctuation_cuts_and_exact_source_coverage() {
+        let prefix = "aaaaaaa.;-";
+        let short = chunk_text(prefix, 10, 0);
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].text, prefix);
+
+        let text = format!("{prefix}{}", "中😀z".repeat(16 * 1024));
+        let chunks = chunk_text(&text, 10, 0);
+        assert_eq!(chunks[0].text, "aaaaaaa.");
+        let mut end = 0;
+        for chunk in chunks {
+            assert!(crate::utils::utf16_len(&chunk.text) <= 10);
+            assert_eq!(chunk.range.start_byte_offset(), end);
+            end = chunk.range.end_byte_offset();
+            assert_eq!(&text[chunk.range.start_byte_offset()..end], chunk.text);
+        }
+        assert_eq!(end, text.len());
+    }
 
     #[test]
     fn validates_chunks_ranges_and_overlap_like_typescript() {

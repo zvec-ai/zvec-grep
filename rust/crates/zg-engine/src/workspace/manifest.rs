@@ -16,13 +16,11 @@ use std::{
 };
 
 pub(crate) const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
-pub(crate) const CURRENT_MANIFEST_VERSION: u32 = 5;
 
 /// Disk metadata owns layout/versioning; domain workspace owns its logical state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "ManifestData", into = "ManifestData")]
 pub(crate) struct WorkspaceManifest {
-    pub manifest_version: u32,
     pub workspace: Workspace,
     /// Root recorded on disk before resolving a moved workspace.
     pub recorded_root: PathBuf,
@@ -44,7 +42,6 @@ enum IndexPolicy {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManifestData {
-    manifest_version: u32,
     name: String,
     path: PathBuf,
     root: PathBuf,
@@ -77,7 +74,6 @@ impl TryFrom<ManifestData> for WorkspaceManifest {
             }),
         };
         let manifest = Self {
-            manifest_version: input.manifest_version,
             recorded_root: input.root.clone(),
             workspace: Workspace {
                 name: input.name,
@@ -103,7 +99,6 @@ impl From<WorkspaceManifest> for ManifestData {
     fn from(manifest: WorkspaceManifest) -> Self {
         let workspace = manifest.workspace;
         Self {
-            manifest_version: manifest.manifest_version,
             name: workspace.name,
             path: manifest.path,
             root: workspace.root,
@@ -138,7 +133,6 @@ impl WorkspaceManifest {
         embedding_runtimes: BTreeMap<String, ModelConfig>,
     ) -> Result<Self, EngineError> {
         let manifest = Self {
-            manifest_version: CURRENT_MANIFEST_VERSION,
             path: home,
             recorded_root: workspace.root.clone(),
             workspace,
@@ -173,7 +167,6 @@ impl WorkspaceManifest {
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
         self.workspace.updated_epoch_ms = updated_epoch_ms;
-        self.manifest_version = CURRENT_MANIFEST_VERSION;
     }
 
     /// Persisted enabled indexes always select a generation; drafts may omit it.
@@ -188,11 +181,12 @@ impl WorkspaceManifest {
     }
 
     pub(crate) fn validate(&self) -> Result<(), EngineError> {
-        if self.manifest_version != CURRENT_MANIFEST_VERSION {
-            return Err(invalid_manifest(format!(
-                "unsupported manifestVersion {}",
-                self.manifest_version
-            )));
+        if self.workspace.index_enabled() {
+            require_current_index_version(self.index_version)?;
+        } else if self.index_version.is_some() || self.storage_generation.is_some() {
+            return Err(invalid_manifest(
+                "an unbuilt workspace cannot select an index version or storage generation",
+            ));
         }
         if let Some(generation) = &self.storage_generation
             && uuid::Uuid::parse_str(generation).is_err()
@@ -212,18 +206,103 @@ pub(crate) fn workspace_manifest_path(home: &Path) -> PathBuf {
     home.join(WORKSPACE_MANIFEST_FILE)
 }
 
-pub(crate) fn read_workspace_manifest(
-    home: &Path,
-) -> Result<Option<WorkspaceManifest>, EngineError> {
+/// Inspect the format header without asking a current-format decoder to read an old index.
+#[derive(Debug)]
+pub(crate) enum ManifestState {
+    Missing,
+    Current(Box<WorkspaceManifest>),
+    RebuildRequired {
+        actual_version: Option<u32>,
+        reason: String,
+    },
+}
+
+impl ManifestState {
+    /// Explicit rebuild uses current configuration only when it is readable.
+    /// Incompatible data is never decoded or migrated to recover old settings.
+    pub(crate) fn into_manifest(
+        self,
+        rebuild: bool,
+    ) -> Result<Option<WorkspaceManifest>, EngineError> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Current(manifest) => Ok(Some(*manifest)),
+            Self::RebuildRequired { .. } if rebuild => Ok(None),
+            Self::RebuildRequired { reason, .. } => Err(rebuild_required(reason)),
+        }
+    }
+}
+
+pub(crate) fn require_current_index_version(version: Option<u32>) -> Result<(), EngineError> {
+    if version != Some(super::CURRENT_INDEX_VERSION) {
+        return Err(rebuild_required(version_mismatch(version)));
+    }
+    Ok(())
+}
+
+fn version_mismatch(version: Option<u32>) -> String {
+    let actual = version.map_or_else(|| "missing".to_owned(), |value| value.to_string());
+    format!(
+        "unsupported index version {actual}; expected {}",
+        super::CURRENT_INDEX_VERSION,
+    )
+}
+
+fn rebuild_required(reason: impl std::fmt::Display) -> EngineError {
+    EngineError::storage_failure(format!(
+        "{reason}; rebuild the index with `zg index --rebuild`"
+    ))
+}
+
+pub(crate) fn inspect_workspace_manifest(home: &Path) -> Result<ManifestState, EngineError> {
     let path = workspace_manifest_path(home);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManifestState::Missing);
+        }
         Err(error) => return Err(manifest_io("read", &path, &error)),
     };
-    let mut manifest: WorkspaceManifest = serde_json::from_str(&text)
-        .map_err(|error| invalid_manifest(format!("path={} cause={error}", path.display())))?;
-    manifest.validate_published()?;
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(ManifestState::RebuildRequired {
+                actual_version: None,
+                reason: format!("invalid workspace manifest: {error}"),
+            });
+        }
+    };
+    let version = value
+        .get("indexVersion")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok());
+    // Only an explicitly unbuilt workspace may omit the version. An enabled index
+    // with a missing version must never be silently replaced by ordinary indexing.
+    let unbuilt = value
+        .get("indexVersion")
+        .is_none_or(serde_json::Value::is_null)
+        && matches!(
+            value.get("indexPolicy").and_then(serde_json::Value::as_str),
+            Some("disabled" | "uninitialized")
+        )
+        && value
+            .get("storageGeneration")
+            .is_none_or(serde_json::Value::is_null);
+    if !unbuilt && version != Some(super::CURRENT_INDEX_VERSION) {
+        return Ok(ManifestState::RebuildRequired {
+            actual_version: version,
+            reason: version_mismatch(version),
+        });
+    }
+    let mut manifest: WorkspaceManifest = match serde_json::from_value(value) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Ok(ManifestState::RebuildRequired {
+                actual_version: version,
+                reason: format!("invalid workspace manifest: {error}"),
+            });
+        }
+    };
     // The directory containing the manifest defines the workspace location.
     // Persisted absolute paths may refer to where the workspace lived before a move.
     manifest.path = std::path::absolute(home)
@@ -233,7 +312,13 @@ pub(crate) fn read_workspace_manifest(
         .parent()
         .ok_or_else(|| invalid_manifest("workspace home has no parent directory"))?
         .to_path_buf();
-    Ok(Some(manifest))
+    Ok(ManifestState::Current(Box::new(manifest)))
+}
+
+pub(crate) fn read_workspace_manifest(
+    home: &Path,
+) -> Result<Option<WorkspaceManifest>, EngineError> {
+    inspect_workspace_manifest(home)?.into_manifest(false)
 }
 
 pub(crate) fn write_workspace_manifest(
@@ -359,18 +444,9 @@ mod tests {
             let error = serde_json::from_value::<WorkspaceManifest>(missing_generation.clone())
                 .expect_err("enabled manifest requires a generation");
             assert!(error.to_string().contains("storageGeneration"));
-            let build = serde_json::json!({
-                "version": 1,
-                "target": missing_generation,
-                "previous": null,
-            });
-            let error = serde_json::from_value::<crate::workspace::build::WorkspaceBuild>(build)
-                .expect_err("build targets use the same manifest persistence contract");
-            assert!(error.to_string().contains("storageGeneration"));
         }
         fs::create_dir(&home).expect("workspace home");
-        let build =
-            crate::workspace::build::prepare_build(draft, None).expect("allocate generation");
+        let build = crate::workspace::build::prepare_build(draft).expect("allocate generation");
         assert!(build.target.storage_generation.is_some());
         assert!(build.target.storage_home().is_dir());
         write_workspace_manifest(&home, &build.target).expect("publish allocated generation");
@@ -436,7 +512,7 @@ mod tests {
     #[test]
     fn enabled_manifest_requires_a_descriptor_and_does_not_persist_runtime_status() {
         let directory = tempdir().expect("workspace");
-        let mut manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         let mut json = serde_json::to_value(&manifest).expect("serialize");
         json["embeddings"] = serde_json::json!([]);
         assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
@@ -445,7 +521,12 @@ mod tests {
             IndexState::Disabled,
             manifest.workspace.index.clone(),
         ] {
+            let mut manifest = manifest.clone();
             manifest.workspace.index = index;
+            if !manifest.workspace.index_enabled() {
+                manifest.index_version = None;
+                manifest.storage_generation = None;
+            }
             let json = serde_json::to_value(&manifest).expect("serialize");
             assert!(json.get("status").is_none());
             assert!(json.get("indexStatus").is_none());
@@ -489,7 +570,7 @@ mod tests {
         let text = fs::read_to_string(workspace_manifest_path(&home)).expect("manifest text");
         let json: serde_json::Value = serde_json::from_str(&text).expect("manifest json");
 
-        assert_eq!(json["manifestVersion"], CURRENT_MANIFEST_VERSION);
+        assert!(json.get("manifestVersion").is_none());
         assert_eq!(
             json["indexVersion"],
             crate::workspace::CURRENT_INDEX_VERSION
@@ -572,19 +653,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_manifests_and_every_other_manifest_version() {
+    fn rejects_other_index_versions_before_decoding_the_manifest_schema() {
         let directory = tempdir().expect("temporary directory");
         let home = directory.path().join(".zvec-grep");
         fs::create_dir_all(&home).expect("workspace home");
-        fs::write(workspace_manifest_path(&home), r#"{"manifestVersion":5}"#)
+        fs::write(workspace_manifest_path(&home), r#"{"indexVersion":2}"#)
             .expect("invalid manifest");
         assert!(read_workspace_manifest(&home).is_err());
         let current = fixture_manifest(&home);
         write_workspace_manifest(&home, &current).expect("current manifest");
         let bytes = fs::read(workspace_manifest_path(&home)).expect("persisted manifest");
-        for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
+        for version in [0, 1, 3, 4, 5, u32::MAX] {
             let mut unsupported = current.clone();
-            unsupported.manifest_version = version;
+            unsupported.index_version = Some(version);
             assert!(write_workspace_manifest(&home, &unsupported).is_err());
             assert_eq!(
                 fs::read(workspace_manifest_path(&home)).expect("preserved manifest"),
@@ -592,13 +673,69 @@ mod tests {
             );
             fs::write(
                 workspace_manifest_path(&home),
-                serde_json::to_vec(&unsupported).expect("unsupported manifest JSON"),
+                // Deliberately omit all current-format fields. The version header
+                // must win over schema errors, including Node.js format version 1.
+                serde_json::to_vec(&serde_json::json!({
+                    "indexVersion": version,
+                    "manifestVersion": 1,
+                    "rootPaths": [],
+                }))
+                .expect("unsupported manifest JSON"),
             )
             .expect("unsupported manifest");
-            let error = read_workspace_manifest(&home).expect_err("unsupported manifest version");
-            assert!(error.message().contains("unsupported manifestVersion"));
+            let error = read_workspace_manifest(&home).expect_err("unsupported index version");
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("unsupported index version {version}"))
+            );
+            assert!(error.message().contains("expected 2"));
+            assert!(error.message().contains("zg index --rebuild"));
             fs::write(workspace_manifest_path(&home), &bytes).expect("restore current manifest");
         }
+    }
+
+    #[test]
+    fn enabled_indexes_cannot_omit_the_version_and_rebuild_can_replace_invalid_metadata() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        let mut manifest = fixture_manifest(&home);
+        write_workspace_manifest(&home, &manifest).expect("current manifest");
+        manifest.index_version = None;
+        assert!(write_workspace_manifest(&home, &manifest).is_err());
+        let value = serde_json::to_value(&manifest).expect("manifest JSON");
+        for missing in [false, true] {
+            let mut invalid = value.clone();
+            if missing {
+                invalid
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("indexVersion");
+            }
+            fs::write(workspace_manifest_path(&home), invalid.to_string()).expect("raw manifest");
+            assert!(
+                read_workspace_manifest(&home)
+                    .expect_err("version required")
+                    .message()
+                    .contains("rebuild")
+            );
+            assert!(
+                inspect_workspace_manifest(&home)
+                    .expect("inspect")
+                    .into_manifest(true)
+                    .expect("rebuild bypasses old data")
+                    .is_none()
+            );
+        }
+        fs::write(workspace_manifest_path(&home), "{broken").expect("corrupt JSON");
+        assert!(read_workspace_manifest(&home).is_err());
+        assert!(
+            inspect_workspace_manifest(&home)
+                .expect("inspect")
+                .into_manifest(true)
+                .expect("rebuild bypasses corrupt data")
+                .is_none()
+        );
     }
 
     #[test]

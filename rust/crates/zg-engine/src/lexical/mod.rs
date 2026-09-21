@@ -616,7 +616,14 @@ impl Sink for MatchSink<'_> {
             let mut offset = 0;
             for (line, bytes) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
                 let selection = grep::matcher::Match::new(0, trim_line_terminator(bytes).len());
-                if !self.record(bytes, line_number + line, line_offset + offset, selection)? {
+                let text = std::str::from_utf8(bytes).ok();
+                let line_starts = text.map(line_byte_offsets).unwrap_or_default();
+                if !self.record(
+                    text.map(|text| (text, line_starts.as_slice())),
+                    line_number + line,
+                    line_offset + offset,
+                    selection,
+                )? {
                     return Ok(false);
                 }
                 offset += bytes.len();
@@ -648,8 +655,15 @@ impl Sink for MatchSink<'_> {
                     })
             })
             .map_err(io::Error::other)?;
+        let text = std::str::from_utf8(bytes).ok();
+        let line_starts = text.map(line_byte_offsets).unwrap_or_default();
         for selection in selections {
-            if !self.record(bytes, line_number, line_offset, selection)? {
+            if !self.record(
+                text.map(|text| (text, line_starts.as_slice())),
+                line_number,
+                line_offset,
+                selection,
+            )? {
                 return Ok(false);
             }
         }
@@ -660,7 +674,7 @@ impl Sink for MatchSink<'_> {
 impl MatchSink<'_> {
     fn record(
         &mut self,
-        bytes: &[u8],
+        text: Option<(&str, &[usize])>,
         line_number: usize,
         line_offset: usize,
         first: grep::matcher::Match,
@@ -673,41 +687,38 @@ impl MatchSink<'_> {
             self.count_truncated.store(true, Ordering::Relaxed);
             return Ok(false);
         }
-        let Ok(text) = std::str::from_utf8(bytes) else {
+        let Some((text, line_starts)) = text else {
             return Ok(true);
         };
-        let (Some(start), Some(end)) = (
-            text_position_at_byte_offset(text, first.start()),
-            text_position_at_byte_offset(text, first.end()),
-        ) else {
+        let Ok(local) =
+            crate::utils::text_range_from_offsets(text, line_starts, first.start(), first.end())
+        else {
             return Ok(true);
         };
         let end_byte_offset = line_offset
-            .checked_add(first.end())
+            .checked_add(local.end_byte_offset())
             .ok_or_else(|| io::Error::other("search match byte offset exceeds usize"))?;
         let end_line = line_number
-            .checked_add(end.0)
+            .checked_add(local.end_line() - 1)
             .ok_or_else(|| io::Error::other("search match line number exceeds usize"))?;
         let range = TextRange::from_coordinates(
-            line_offset + first.start(),
+            line_offset + local.start_byte_offset(),
             end_byte_offset,
-            line_number + start.0,
+            line_number + (local.start_line() - 1),
             end_line,
-            start.1,
-            end.1,
+            local.start_byte_column(),
+            local.end_byte_column(),
         )
         .map_err(io::Error::other)?;
-        let content_start = bytes[..first.start()]
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |offset| offset + 1);
+        let bytes = text.as_bytes();
+        let content_start = line_starts[local.start_line() - 1];
         let content_end = if first.end() > first.start() && bytes[first.end() - 1] == b'\n' {
             first.end()
         } else {
-            bytes[first.end()..]
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(bytes.len(), |offset| first.end() + offset + 1)
+            line_starts
+                .get(local.end_line())
+                .copied()
+                .unwrap_or(bytes.len())
         };
         self.count += 1;
         self.results.push(LexicalMatch {
@@ -932,7 +943,7 @@ impl ContextSource {
     fn read(path: &Path) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
         let text = decode_text(&bytes, true)?.into_owned();
-        let line_starts = line_byte_offsets(&text.split('\n').collect::<Vec<_>>());
+        let line_starts = line_byte_offsets(&text);
         Some(Self { text, line_starts })
     }
 
@@ -1020,13 +1031,6 @@ fn modified_epoch_ms(path: &Path) -> Option<u64> {
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
-fn text_position_at_byte_offset(value: &str, byte_offset: usize) -> Option<(usize, usize)> {
-    let prefix = value.get(..byte_offset)?;
-    let line_offset = prefix.bytes().filter(|byte| *byte == b'\n').count();
-    let last = prefix.rsplit('\n').next().unwrap_or_default();
-    Some((line_offset, last.len()))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1039,7 +1043,7 @@ mod tests {
 
     use super::{
         DEFAULT_MAX_SEARCH_THREADS, LexicalSearchService, TextRange, default_worker_threads,
-        expand_context, text_position_at_byte_offset, worker_threads_for_search,
+        expand_context, worker_threads_for_search,
     };
 
     fn request(pattern: &str) -> LexicalSearchRequest {
@@ -1118,22 +1122,78 @@ mod tests {
         assert_eq!(range.end_byte_offset(), 26);
     }
 
-    #[test]
-    fn byte_positions_preserve_line_endings_and_reject_partial_characters() {
-        let text = "中😀\r\n尾";
-        for (offset, position) in [
-            (0, (0, 0)),
-            (3, (0, 3)),
-            (7, (0, 7)),
-            (8, (0, 8)),
-            (9, (1, 0)),
-            (12, (1, 3)),
-        ] {
-            assert_eq!(text_position_at_byte_offset(text, offset), Some(position));
+    #[tokio::test]
+    async fn multiline_matches_preserve_crlf_and_half_open_coordinates() {
+        let root = TempDir::new().expect("temp dir");
+        let text = "before\r\n中😀\r\n尾\r\nafter\r\n";
+        fs::write(root.path().join("a.txt"), text).expect("fixture");
+        let mut request = request("中😀\\r\\n|尾");
+        request.options.matching.multiline = true;
+        let reply = search(&LexicalSearchService::new(), root.path(), &request).await;
+        assert_eq!(reply.matches.len(), 2);
+        let start = text.find('中').expect("first match");
+        let end = text.find('尾').expect("second match");
+        assert_eq!(
+            reply.matches[0].range,
+            TextRange::from_coordinates(start, end, 2, 3, 0, 0).expect("half-open range")
+        );
+        assert_eq!(reply.matches[0].content, "中😀");
+        assert_eq!(
+            reply.matches[1].range,
+            TextRange::from_coordinates(end, end + '尾'.len_utf8(), 3, 3, 0, 3)
+                .expect("next line range")
+        );
+        assert_eq!(reply.matches[1].content, "尾");
+    }
+
+    #[tokio::test]
+    async fn byte_matches_skip_partial_characters_without_losing_later_lines() {
+        let root = TempDir::new().expect("temp dir");
+        let text = "中😀\r\nneedle\r\n";
+        fs::write(root.path().join("a.txt"), text).expect("fixture");
+        let mut request = request("\\xE4|needle");
+        request.options.matching.no_unicode = true;
+        let reply = search(&LexicalSearchService::new(), root.path(), &request).await;
+        assert_eq!(reply.matches.len(), 1);
+        let start = text.find("needle").expect("complete match");
+        assert_eq!(
+            reply.matches[0].range,
+            TextRange::from_coordinates(start, start + 6, 2, 2, 0, 6).expect("complete range")
+        );
+        assert_eq!(reply.matches[0].content, "needle");
+    }
+
+    #[tokio::test]
+    async fn inverted_matches_keep_valid_lines_and_honor_count_before_invalid_utf8() {
+        let root = TempDir::new().expect("temp dir");
+        fs::write(
+            root.path().join("a.txt"),
+            b"skip\r\nfirst\r\n\xff\r\nlast\r\n",
+        )
+        .expect("fixture");
+        let mut request = request("skip");
+        request.options.matching.invert_match = true;
+        request.options.matching.crlf = true;
+        let service = LexicalSearchService::new();
+        let reply = search(&service, root.path(), &request).await;
+        assert_eq!(reply.matches.len(), 2);
+        for (item, (start, end, line, content)) in reply
+            .matches
+            .iter()
+            .zip([(6, 11, 2, "first"), (16, 20, 4, "last")])
+        {
+            assert_eq!(
+                item.range,
+                TextRange::from_coordinates(start, end, line, line, 0, content.len())
+                    .expect("valid line range")
+            );
+            assert_eq!(item.content, content);
         }
-        for offset in [1, 4, 10, 13] {
-            assert_eq!(text_position_at_byte_offset(text, offset), None);
-        }
+        request.options.matching.max_count = Some(1);
+        let limited = search(&service, root.path(), &request).await;
+        assert_eq!(limited.matches.len(), 1);
+        assert_eq!(limited.matches[0].content, "first");
+        assert!(limited.diagnostics.truncated);
     }
 
     #[tokio::test]

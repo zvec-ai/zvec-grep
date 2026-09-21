@@ -13,7 +13,7 @@ use zg_engine::api::{
         },
     },
     index::IndexResult,
-    info::InfoResult,
+    info::{InfoResult, result::IndexCompatibility},
 };
 
 /// Writes a context reply in the stable CLI text layout.
@@ -290,6 +290,28 @@ pub fn write_info_result(mut writer: impl Write, result: &InfoResult) -> io::Res
     writeln!(writer, "Workspace index: {state}")?;
     writeln!(writer, "Root: {}", result.root.display())?;
     writeln!(writer, "Index path: {}", result.index_path.display())?;
+    match &result.compatibility {
+        IndexCompatibility::Unbuilt => {}
+        IndexCompatibility::Compatible { version } => {
+            writeln!(writer, "Index version: {version}")?;
+        }
+        IndexCompatibility::RebuildRequired {
+            actual_version,
+            expected_version,
+            reason,
+        } => {
+            let actual =
+                actual_version.map_or_else(|| "unknown".to_owned(), |version| version.to_string());
+            writeln!(
+                writer,
+                "Index version: {actual} (expected {expected_version})"
+            )?;
+            writeln!(writer, "Reason: {reason}")?;
+            if result.suggestion.is_none() {
+                writeln!(writer, "Suggestion: zg index --rebuild")?;
+            }
+        }
+    }
     if let Some(index) = &result.workspace_index {
         writeln!(
             writer,
@@ -528,7 +550,9 @@ existing workspace renames it while preserving file IDs and active storage.
 This version indexes text only with one embedding model per workspace.
 New indexes require --embedding, ZVEC_GREP_EMBEDDING, or a configured default.
 Model changes require --rebuild. Failed files are recorded; successful files
-remain searchable after a rebuild. Existing indexes reuse their stored model.
+remain searchable after a rebuild. Compatible indexes reuse their stored model.
+Rebuilding an incompatible index uses --embedding or the configured default;
+provide desired scan rules again.
 
 Environment:
   ZVEC_GREP_MODE         Default client mode: direct, server, or auto
@@ -854,6 +878,36 @@ mod output_tests {
         ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource,
         MatchedBy,
     };
+
+    #[test]
+    fn incompatible_status_shows_versions_reason_and_rebuild_guidance() {
+        use zg_engine::api::info::result::{InfoSource, WorkspaceIndexPolicy};
+        for (actual_version, actual_label) in [(Some(1), "1"), (None, "unknown")] {
+            let result = InfoResult {
+                root: "/workspace".into(),
+                indexed: false,
+                compatibility: IndexCompatibility::RebuildRequired {
+                    actual_version,
+                    expected_version: 2,
+                    reason: "unsupported persisted index".into(),
+                },
+                index_policy: WorkspaceIndexPolicy::Enabled,
+                home: "/workspace/.zvec-grep".into(),
+                index_path: "/workspace/.zvec-grep/storage".into(),
+                source: InfoSource::Unindexed,
+                workspace_index: None,
+                status: None,
+                suggestion: None,
+            };
+            let mut output = Vec::new();
+            write_info_result(&mut output, &result).expect("status output");
+            let output = String::from_utf8(output).expect("UTF-8");
+            assert!(output.contains("Workspace index: rebuild_required"));
+            assert!(output.contains(&format!("Index version: {actual_label} (expected 2)")));
+            assert!(output.contains("unsupported persisted index"));
+            assert!(output.contains("zg index --rebuild"));
+        }
+    }
 
     fn indexed_item() -> ContextItem {
         ContextItem {

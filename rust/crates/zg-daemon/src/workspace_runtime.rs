@@ -825,6 +825,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                 include_status: false,
             })
             .await?;
+        info.compatibility.ensure_compatible()?;
         if !info.indexed {
             // Preserve the engine's missing-index error without silently creating one.
             return engine.context(request).await;
@@ -1241,10 +1242,13 @@ mod tests {
     }
 
     fn inspected_info() -> zg_engine::api::info::InfoResult {
-        use zg_engine::api::info::result::{IndexStats, InfoSource, WorkspaceIndexPolicy};
+        use zg_engine::api::info::result::{
+            IndexCompatibility, IndexStats, InfoSource, WorkspaceIndexPolicy,
+        };
         zg_engine::api::info::InfoResult {
             root: "/workspace".into(),
             indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/storage".into(),

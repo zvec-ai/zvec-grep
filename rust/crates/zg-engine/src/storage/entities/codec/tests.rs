@@ -1,6 +1,5 @@
 use super::*;
 use crate::domain::{CodeMetadata, MarkdownMetadata, SymbolType};
-use crate::storage::record::VERSION;
 use serde_json::{Value, json};
 
 fn text_range() -> Range {
@@ -85,7 +84,7 @@ fn stored_file_identities_reject_values_outside_u32() {
     let mut record: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("entity")).expect("JSON");
     for invalid in [json!(-1), json!(u64::from(u32::MAX) + 1), json!(1e20)] {
-        record["value"]["file_id"] = invalid;
+        record["file_id"] = invalid;
         assert_corrupt_entity(&record);
     }
 }
@@ -96,15 +95,15 @@ fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
     let record: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
     assert_eq!(
-        record["value"]["content"]["value"]["cells"][1]["contents"][1]["value"]["data"],
+        record["content"]["value"]["cells"][1]["contents"][1]["value"]["data"],
         "AAH/"
     );
     assert_eq!(
-        record["value"]["content"]["value"]["cells"][1]["contents"][1]["value"]["format"],
+        record["content"]["value"]["cells"][1]["contents"][1]["value"]["format"],
         "png"
     );
     assert!(
-        record["value"].get("metadata").is_none(),
+        record.get("metadata").is_none(),
         "metadata is supplied by its dedicated storage column"
     );
     for (range, stored_range) in [
@@ -130,7 +129,7 @@ fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
         round_trip(&entity);
         let record: Value =
             serde_json::from_str(&encode_entity(&entity).expect("encode entity")).expect("JSON");
-        assert_eq!(record["value"]["source_range"], stored_range);
+        assert_eq!(record["source_range"], stored_range);
     }
 }
 
@@ -150,41 +149,48 @@ fn fragment_selectors_preserve_utf8_slices_without_repeating_content_or_ownershi
         scope: Some("parent".into()),
     }));
     round_trip(&entity);
+    for source_range in [
+        Range::Full,
+        Range::Byte(ByteRange::new(10, 12).expect("source bytes")),
+        Range::Text(TextRange::from_coordinates(10, 12, 1, 1, 10, 12).expect("source text")),
+    ] {
+        let mut transformed = entity.clone();
+        transformed.source_range = source_range;
+        transformed.fragments.reverse();
+        round_trip(&transformed);
+    }
     let encoded = encode_entity(&entity).expect("encode entity");
     let record: Value = serde_json::from_str(&encoded).expect("JSON");
     assert_eq!(
-        record["value"]["fragments"][1],
+        record["fragments"][1],
         json!({
             "id":entity.fragments[1].id.as_str(), "range":{"kind":"byte", "start_offset":1, "end_offset":7},
         })
     );
     for (start, end) in [(2, 7), (1, 9), (1, 1), (7, 1)] {
         let mut invalid = record.clone();
-        invalid["value"]["fragments"][1]["range"] = json!({
+        invalid["fragments"][1]["range"] = json!({
             "kind":"byte", "start_offset":start, "end_offset":end,
         });
         assert_corrupt_entity(&invalid);
     }
     let mut invalid = record.clone();
-    invalid["value"]["fragments"][1]["range"] = json!({
+    invalid["fragments"][1]["range"] = json!({
         "kind":"text", "start_line":1, "end_line":1, "start_byte_offset":1,
         "end_byte_offset":7, "start_byte_column":1, "end_byte_column":7,
     });
     assert_corrupt_entity(&invalid);
     let mut invalid = record.clone();
-    invalid["value"]["fragments"][1]["range"]["start_line"] = json!(1);
+    invalid["fragments"][1]["range"]["start_line"] = json!(1);
     assert_corrupt_entity(&invalid);
     let mut invalid = record.clone();
-    invalid["value"]["fragments"][1]["content_range"] = json!({"kind":"full"});
+    invalid["fragments"][1]["content_range"] = json!({"kind":"full"});
     assert_corrupt_entity(&invalid);
     let mut invalid = record.clone();
-    invalid["value"]["range"] = invalid["value"]["source_range"].clone();
-    assert_corrupt_entity(&invalid);
-    let mut invalid = record.clone();
-    invalid["value"]["fragments"][1]["id"] = record["value"]["fragments"][0]["id"].clone();
+    invalid["range"] = invalid["source_range"].clone();
     assert_corrupt_entity(&invalid);
     let mut invalid = record;
-    invalid["value"]["fragments"] = json!([]);
+    invalid["fragments"] = json!([]);
     assert_corrupt_entity(&invalid);
 }
 
@@ -199,7 +205,7 @@ fn rejects_invalid_table_geometry_without_allocating_a_dense_grid() {
         ("column", usize::MAX),
     ] {
         let mut record = original.clone();
-        record["value"]["content"]["value"]["cells"][0][field] = json!(value);
+        record["content"]["value"]["cells"][0][field] = json!(value);
         assert_corrupt_entity(&record);
     }
     let mut table = TableContent {
@@ -240,22 +246,11 @@ fn rejects_invalid_table_geometry_without_allocating_a_dense_grid() {
 }
 
 #[test]
-fn rejects_corrupt_versions_identities_images_and_ranges() {
+fn rejects_corrupt_identities_images_and_ranges() {
     let original: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
-    for version in (1..VERSION).chain([VERSION + 1]) {
-        let mut invalid = original.clone();
-        invalid["version"] = json!(version);
-        let error = decode_entity(&invalid.to_string(), None).expect_err("wrong version");
-        assert!(
-            error
-                .message()
-                .contains(&format!("unsupported stored entity version {version}"))
-        );
-        assert!(error.message().contains("rebuild the index"));
-    }
     let mut record = original.clone();
-    record["value"]["file_id"] = json!("");
+    record["file_id"] = json!("");
     assert_corrupt_entity(&record);
     for (field, value) in [
         ("format", json!("rust")),
@@ -265,12 +260,12 @@ fn rejects_corrupt_versions_identities_images_and_ranges() {
         ("data", json!("invalid base64!")),
     ] {
         let mut record = original.clone();
-        record["value"]["content"]["value"]["cells"][1]["contents"][1]["value"][field] = value;
+        record["content"]["value"]["cells"][1]["contents"][1]["value"][field] = value;
         assert_corrupt_entity(&record);
     }
     for (field, value) in [("start_line", 0), ("end_byte_column", 12)] {
         let mut record = original.clone();
-        record["value"]["source_range"][field] = json!(value);
+        record["source_range"][field] = json!(value);
         assert_corrupt_entity(&record);
     }
     assert!(decode_entity("not JSON", None).is_err());

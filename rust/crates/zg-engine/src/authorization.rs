@@ -6,7 +6,7 @@ use crate::{
     utils::{atomic_write, sync_directory},
     workspace::{
         layout::{find_nearest_workspace, workspace_index_location},
-        manifest::{WorkspaceManifest, read_workspace_manifest},
+        manifest::{WorkspaceManifest, inspect_workspace_manifest, read_workspace_manifest},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ pub fn index_authorizations(
         Some(location) => location,
         None => workspace_index_location(&requested_root)?,
     };
-    let existing = read_workspace_manifest(&location.home)?;
+    let existing = inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
     authorizations_for_manifest(options, &location.root, existing.as_ref())
 }
 
@@ -371,7 +371,7 @@ pub fn grant(
 ) -> Result<String, EngineError> {
     let root = root_path(root)?;
     let location = workspace_index_location(&root)?;
-    let manifest = read_workspace_manifest(&location.home)?;
+    let manifest = inspect_workspace_manifest(&location.home)?.into_manifest(true)?;
     let config = crate::config::read()?;
     let model = model
         .map(str::to_owned)
@@ -467,7 +467,12 @@ fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(io(e)),
     };
-    let records: SignedGrants = serde_json::from_slice(&bytes).map_err(json)?;
+    let records: SignedGrants = serde_json::from_slice(&bytes).map_err(|error| {
+        EngineError::invalid_argument(format!(
+            "Invalid workspace authorization format: {error}; run `zg auth revoke \"{}\"`, then authorize again with `zg auth grant`",
+            root.display()
+        ))
+    })?;
     let records = match records {
         SignedGrants::One(record) => vec![record],
         SignedGrants::Many(records) => records,
@@ -492,9 +497,10 @@ fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
                 || signed.grant.capability != "embedding"
                 || signed.grant.scope != "workspace"
             {
-                return Err(EngineError::permission_denied(
-                    "Invalid workspace authorization signature or scope; run zg auth grant again",
-                ));
+                return Err(EngineError::permission_denied(format!(
+                    "Invalid workspace authorization signature or scope; run `zg auth revoke \"{}\"`, then authorize again with `zg auth grant`",
+                    root.display()
+                )));
             }
             Ok(signed.grant)
         })
@@ -599,6 +605,184 @@ mod tests {
         api::index::{IndexOptions, options::EmbeddingModelSpec},
         domain::model::Device,
     };
+
+    fn isolated_authorization_root(test_name: &str) -> Option<PathBuf> {
+        const FIXTURE_ENV: &str = "ZG_AUTHORIZATION_RECOVERY_TEST_ROOT";
+        if let Some(root) = env::var_os(FIXTURE_ENV) {
+            return Some(PathBuf::from(root));
+        }
+        // Child-process configuration keeps signing keys and global settings isolated
+        // without changing environment variables while other unit tests are running.
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = tempfile::tempdir().expect("authorization state");
+        let output = std::process::Command::new(env::current_exe().expect("test executable"))
+            .args(["--exact", test_name, "--nocapture"])
+            .env(FIXTURE_ENV, workspace.path())
+            .env("HOME", state.path())
+            .env("USERPROFILE", state.path())
+            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
+            .env_remove("ZVEC_GREP_EMBEDDING")
+            .env_remove("ZVEC_GREP_ENDPOINT")
+            .output()
+            .expect("isolated authorization test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        None
+    }
+
+    #[test]
+    fn legacy_or_corrupt_authorization_requires_revoke_before_regrant() {
+        let Some(root) = isolated_authorization_root(
+            "authorization::tests::legacy_or_corrupt_authorization_requires_revoke_before_regrant",
+        ) else {
+            return;
+        };
+        let home = root.join(".zvec-grep");
+        fs::create_dir(&home).expect("workspace home");
+        let path = home.join("authorization.json");
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "grants": [{
+                "version": 1,
+                "id": "node-grant",
+                "capability": "embedding",
+                "scope": "workspace",
+                "workspaceRoots": [root],
+                "workspaceFingerprint": "node-workspace",
+                "provider": "qwen",
+                "model": "text-embedding-v4",
+                "endpoint": "https://provider.test/embeddings",
+                "targetFingerprint": "node-target",
+                "grantedAt": 1,
+                "signature": "0123456789abcdef"
+            }]
+        }))
+        .expect("Node authorization fixture");
+        for bytes in [legacy, b"{broken authorization".to_vec()] {
+            fs::write(&path, &bytes).expect("authorization fixture");
+            let options = IndexOptions {
+                root: Some(root.clone()),
+                rebuild: true,
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "qwen/text-embedding-v4".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: Some("https://provider.test/embeddings".into()),
+                    device: Device::Auto,
+                }),
+                ..IndexOptions::default()
+            };
+            let error = index_authorizations(&options).expect_err("old consent is not trusted");
+            assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+            assert!(error.message().contains("zg auth revoke"));
+            assert!(error.message().contains("zg auth grant"));
+            assert!(
+                grant(
+                    &root,
+                    Some("qwen/text-embedding-v4"),
+                    Some("https://provider.test/embeddings")
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&path).expect("preserved consent"), bytes);
+            revoke(&root).expect("explicitly revoke incompatible consent");
+            assert!(!path.exists());
+            grant(
+                &root,
+                Some("qwen/text-embedding-v4"),
+                Some("https://provider.test/embeddings"),
+            )
+            .expect("grant after revoke");
+            assert!(
+                index_authorizations(&options)
+                    .expect("new grant is valid")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_grant_works_before_rebuilding_a_node_index() {
+        let Some(root) = isolated_authorization_root(
+            "authorization::tests::explicit_grant_works_before_rebuilding_a_node_index",
+        ) else {
+            return;
+        };
+        let home = root.join(".zvec-grep");
+        fs::create_dir(&home).expect("workspace home");
+        let path = home.join("manifest.json");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "manifestVersion": 1,
+            "indexVersion": 1,
+            "id": "node-index",
+            "name": "workspace",
+            "path": home,
+            "rootPaths": [{ "absolutePath": root, "recursive": true }],
+            "indexPolicy": "enabled",
+            "embedding": { "provider": "qwen", "model": "text-embedding-v3", "dimension": 1024, "metric": "cosine" },
+            "createdTime": 1,
+            "updatedTime": 1,
+            "embeddingRuntime": {}
+        })).expect("Node manifest fixture");
+        fs::write(&path, &bytes).expect("old manifest");
+        grant(
+            &root,
+            Some("qwen/text-embedding-v4"),
+            Some("https://provider.test/embeddings"),
+        )
+        .expect("explicit authorization before rebuild");
+        let grants = read_grants(&fs::canonicalize(&root).expect("canonical root"))
+            .expect("verified grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].model, "qwen/text-embedding-v4");
+        assert_eq!(grants[0].endpoint, "https://provider.test/embeddings");
+        assert_eq!(fs::read(&path).expect("unchanged manifest"), bytes);
+    }
+
+    #[test]
+    fn invalid_signature_or_scope_explains_revoke_before_regrant() {
+        let Some(root) = isolated_authorization_root(
+            "authorization::tests::invalid_signature_or_scope_explains_revoke_before_regrant",
+        ) else {
+            return;
+        };
+        let root = fs::canonicalize(root).expect("canonical root");
+        let path = root.join(".zvec-grep/authorization.json");
+        for invalid_scope in [false, true] {
+            grant(
+                &root,
+                Some("qwen/text-embedding-v4"),
+                Some("https://provider.test/embeddings"),
+            )
+            .expect("valid authorization");
+            let mut signed: SignedGrant =
+                serde_json::from_slice(&fs::read(&path).expect("grant")).expect("signed grant");
+            if invalid_scope {
+                signed.grant.scope = "once".into();
+                signed.signature = hmac_sha256::HMAC::mac(
+                    serde_json::to_vec(&signed.grant).expect("grant JSON"),
+                    signing_key(false).expect("test signing key"),
+                )
+                .to_vec();
+            } else {
+                signed.signature[0] ^= 1;
+            }
+            let bytes = serde_json::to_vec(&signed).expect("invalid authorization fixture");
+            fs::write(&path, &bytes).expect("invalid authorization");
+            let error = read_grants(&root)
+                .err()
+                .expect("reject invalid authorization");
+            assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
+            assert!(error.message().contains("zg auth revoke"));
+            assert!(error.message().contains("zg auth grant"));
+            assert_eq!(fs::read(&path).expect("preserved invalid consent"), bytes);
+            revoke(&root).expect("revoke invalid authorization");
+        }
+    }
 
     #[test]
     fn single_model_discloses_one_remote_destination() {
@@ -811,7 +995,7 @@ mod tests {
             .next()
             .expect("runtime")
             .endpoint = Some("https://staging.test/embeddings".into());
-        prepare_build(target, Some(&active)).expect("staged build");
+        prepare_build(target).expect("staged build");
         let index = index_authorization(&IndexOptions {
             root: Some(directory.path().into()),
             ..IndexOptions::default()

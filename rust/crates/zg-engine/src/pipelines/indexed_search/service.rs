@@ -11,8 +11,7 @@ use crate::{
     domain::{IndexState, model::ModelConfig},
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
     pipelines::indexing::service::{
-        WorkspaceIndexService, assert_embedding_compatible, assert_index_version,
-        environment_api_key, is_indexed,
+        WorkspaceIndexService, assert_embedding_compatible, environment_api_key, is_indexed,
     },
     storage::{IndexStore, types::WorkspaceIndexStorageOptions},
     workspace::{
@@ -79,7 +78,6 @@ pub(crate) async fn context(
             "workspace index has not been built",
         ));
     }
-    assert_index_version(manifest.index_version)?;
     let mut acquired = Vec::new();
     if request
         .routes

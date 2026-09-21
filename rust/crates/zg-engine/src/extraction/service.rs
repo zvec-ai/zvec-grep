@@ -45,9 +45,6 @@ pub(super) fn extract<'source>(
                     ));
                 }
             }
-            for fragment in &entity.fragments {
-                crate::domain::validate_fragment_content(&entity.content, fragment.range)?;
-            }
         }
     }
     Ok(entities)

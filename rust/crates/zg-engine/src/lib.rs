@@ -85,6 +85,7 @@ impl ZvecGrep {
                 include_status: false,
             })
             .await?;
+        info.compatibility.ensure_compatible()?;
         if !info.indexed {
             return Err(EngineError::invalid_argument(
                 "workspace must have an index before it can be watched",
@@ -93,11 +94,6 @@ impl ZvecGrep {
         let workspace = info
             .workspace_index
             .ok_or_else(|| EngineError::invalid_argument("workspace configuration is missing"))?;
-        if workspace.index_version != Some(crate::workspace::CURRENT_INDEX_VERSION) {
-            return Err(EngineError::storage_failure(
-                "workspace index version is incompatible; rebuild it with `zg index --rebuild`",
-            ));
-        }
         let root = file_selection::ScanPolicy::root_spec(&workspace.root, &workspace.scan)?;
         zg_host_native::NativeWatcherFactory::default()
             .watch(&zg_host_native::WatchRequest { root }, control)

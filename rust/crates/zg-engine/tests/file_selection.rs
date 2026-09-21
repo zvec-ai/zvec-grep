@@ -49,7 +49,7 @@ fn stored_paths(index_path: &Path) -> TestResult<BTreeSet<PathBuf>> {
         .iter()
         .map(|file| {
             PathBuf::from(
-                file["value"]["relative_path"]["value"]
+                file["relative_path"]["value"]
                     .as_str()
                     .expect("UTF-8 fixture path"),
             )
@@ -461,9 +461,9 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     let files = native_file_records(&info.index_path)?;
     let script = files
         .iter()
-        .find(|file| file["value"]["relative_path"]["value"] == "script")
+        .find(|file| file["relative_path"]["value"] == "script")
         .expect("stored script");
-    assert!(script["value"].get("formats").is_none());
+    assert!(script.get("formats").is_none());
 
     fs::write(
         root.join("script"),
@@ -481,9 +481,9 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     let files = native_file_records(&info.index_path)?;
     let script = files
         .iter()
-        .find(|file| file["value"]["relative_path"]["value"] == "script")
+        .find(|file| file["relative_path"]["value"] == "script")
         .expect("reclassified script stays indexed");
-    assert!(script["value"].get("formats").is_none());
+    assert!(script.get("formats").is_none());
     assert_index_and_queries(
         &engine,
         root,

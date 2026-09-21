@@ -47,7 +47,7 @@ use zg_engine::{
         },
         info::{
             InfoOptions, InfoResult,
-            result::{InfoSource, WorkspaceIndexPolicy},
+            result::{IndexCompatibility, InfoSource, WorkspaceIndexPolicy},
         },
     },
 };
@@ -768,6 +768,7 @@ struct IndexDropOutput {
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct IndexStatusOutput {
     status: String,
+    compatibility: IndexCompatibilityOutput,
     root: String,
     indexed: bool,
     index_policy: String,
@@ -775,6 +776,38 @@ struct IndexStatusOutput {
     persistent: PersistentIndexStatusOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<IndexRuntimeStatusOutput>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum IndexCompatibilityOutput {
+    Unbuilt,
+    Compatible {
+        version: u32,
+    },
+    RebuildRequired {
+        actual_version: Option<u32>,
+        expected_version: u32,
+        reason: String,
+    },
+}
+
+impl From<IndexCompatibility> for IndexCompatibilityOutput {
+    fn from(compatibility: IndexCompatibility) -> Self {
+        match compatibility {
+            IndexCompatibility::Unbuilt => Self::Unbuilt,
+            IndexCompatibility::Compatible { version } => Self::Compatible { version },
+            IndexCompatibility::RebuildRequired {
+                actual_version,
+                expected_version,
+                reason,
+            } => Self::RebuildRequired {
+                actual_version,
+                expected_version,
+                reason,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
@@ -1702,6 +1735,7 @@ impl From<InfoResult> for IndexStatusOutput {
         Self {
             root: reply.root.display().to_string(),
             indexed: reply.indexed,
+            compatibility: reply.compatibility.into(),
             status,
             index_policy: index_policy_label(reply.index_policy).to_owned(),
             source: match reply.source {
@@ -1999,6 +2033,47 @@ mod tests {
     }
 
     #[test]
+    fn index_status_exposes_rebuild_compatibility_without_workspace_metadata() {
+        for actual_version in [None, Some(1)] {
+            let root = test_root();
+            let reply = super::InfoResult {
+                home: root.join(".zvec-grep"),
+                index_path: root.join(".zvec-grep/storage"),
+                root,
+                indexed: false,
+                compatibility: super::IndexCompatibility::RebuildRequired {
+                    actual_version,
+                    expected_version: 2,
+                    reason: "unsupported persisted index".into(),
+                },
+                index_policy: super::WorkspaceIndexPolicy::Enabled,
+                source: super::InfoSource::Unindexed,
+                workspace_index: None,
+                status: None,
+                suggestion: Some("zg index --rebuild".into()),
+            };
+            let output = super::info_result_to_tool_result(reply, None)
+                .structured_content
+                .expect("status output");
+            assert_eq!(output["status"], "rebuild_required");
+            assert_eq!(
+                output["compatibility"],
+                serde_json::json!({
+                    "status": "rebuild_required",
+                    "actual_version": actual_version,
+                    "expected_version": 2,
+                    "reason": "unsupported persisted index",
+                })
+            );
+            assert!(output["persistent"].get("files").is_none());
+            assert!(output["persistent"].get("workspace_index").is_none());
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(super::IndexStatusOutput))
+            .expect("status schema");
+        assert!(schema["properties"].get("compatibility").is_some());
+    }
+
+    #[test]
     fn index_status_exposes_exact_source_bytes_without_truncation_statistics() {
         use zg_engine::api::info::result::{IndexStats, WorkspaceIndexInfo};
 
@@ -2009,6 +2084,7 @@ mod tests {
             index_path: root.join(".zvec-grep/storage"),
             root: root.clone(),
             indexed: true,
+            compatibility: super::IndexCompatibility::Compatible { version: 2 },
             index_policy: super::WorkspaceIndexPolicy::Enabled,
             source: super::InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
@@ -2022,7 +2098,7 @@ mod tests {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),
-                index_version: Some(5),
+                index_version: Some(2),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
             }),
@@ -2037,6 +2113,10 @@ mod tests {
             .structured_content
             .expect("status output");
         let files = &output["persistent"]["files"];
+        assert_eq!(
+            output["compatibility"],
+            serde_json::json!({"status": "compatible", "version": 2})
+        );
         let workspace = &output["persistent"]["workspace_index"];
         assert_eq!(workspace["name"], "search-engine");
         assert_eq!(workspace["fts"]["tokenizer"], "jieba");

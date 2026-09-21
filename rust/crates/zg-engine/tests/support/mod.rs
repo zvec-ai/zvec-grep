@@ -55,7 +55,7 @@ pub fn set_native_file_status(
     let document = collection.fetch(&[&key])?.pop().expect("stored file");
     let mut payload: Value =
         serde_json::from_str(&document.get_string("payload")?.expect("file payload"))?;
-    payload["value"]["index_status"] = json!({"kind": status});
+    payload["index_status"] = json!({"kind": status});
     let mut update = zvec_rust::Doc::new()?;
     update.set_pk(&key);
     update.add_string("payload", &serde_json::to_string(&payload)?)?;
@@ -91,11 +91,11 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     let generation = uuid::Uuid::new_v4().to_string();
     fs::create_dir_all(home.join("generations").join(&generation))?;
     let manifest = json!({
-        "manifestVersion": 5, "name": name, "path": home,
+        "name": name, "path": home,
         "root": root, "scan": {},
         "indexPolicy": "enabled", "embeddings": [{ "model": { "provider": "qwen", "name": "text-embedding-v4", "endpoint": format!("http://{address}/embeddings") }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null }],
         "embeddingRoutes": { "text": "qwen/text-embedding-v4" },
-        "indexVersion": null, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
+        "indexVersion": 2, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
         "embeddingRuntimes": { "qwen/text-embedding-v4": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") } }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)

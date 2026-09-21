@@ -27,6 +27,7 @@ pub mod result {
     pub struct InfoResult {
         pub root: PathBuf,
         pub indexed: bool,
+        pub compatibility: IndexCompatibility,
         pub index_policy: WorkspaceIndexPolicy,
         pub home: PathBuf,
         pub index_path: PathBuf,
@@ -40,6 +41,12 @@ pub mod result {
         /// Health observed by this inspection. Merely opening metadata cannot establish readiness.
         #[must_use]
         pub fn index_status(&self) -> IndexStatus {
+            if matches!(
+                self.compatibility,
+                IndexCompatibility::RebuildRequired { .. }
+            ) {
+                return IndexStatus::RebuildRequired;
+            }
             match self.index_policy {
                 WorkspaceIndexPolicy::Disabled => return IndexStatus::Disabled,
                 WorkspaceIndexPolicy::Uninitialized => return IndexStatus::Uninitialized,
@@ -65,6 +72,36 @@ pub mod result {
         }
     }
 
+    /// Whether persisted index data can be used by this engine.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    pub enum IndexCompatibility {
+        Unbuilt,
+        Compatible {
+            version: u32,
+        },
+        RebuildRequired {
+            actual_version: Option<u32>,
+            expected_version: u32,
+            reason: String,
+        },
+    }
+
+    impl IndexCompatibility {
+        /// Rejects persisted data that requires an explicit rebuild.
+        ///
+        /// # Errors
+        /// Returns a storage error with rebuild guidance for incompatible data.
+        pub fn ensure_compatible(&self) -> Result<(), crate::EngineError> {
+            if let Self::RebuildRequired { reason, .. } = self {
+                return Err(crate::EngineError::storage_failure(format!(
+                    "{reason}; rebuild the index with `zg index --rebuild`"
+                )));
+            }
+            Ok(())
+        }
+    }
+
     /// Observed index health, independent of a build job's queued/running/failed state.
     #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(rename_all = "snake_case")]
@@ -73,6 +110,7 @@ pub mod result {
         Uninitialized,
         Disabled,
         Missing,
+        RebuildRequired,
         Ready,
         Stale,
         Failed,
@@ -86,6 +124,7 @@ pub mod result {
                 Self::Uninitialized => "uninitialized",
                 Self::Disabled => "disabled",
                 Self::Missing => "missing",
+                Self::RebuildRequired => "rebuild_required",
                 Self::Ready => "ready",
                 Self::Stale => "stale",
                 Self::Failed => "failed",
@@ -246,6 +285,7 @@ mod tests {
         InfoResult {
             root: "/workspace".into(),
             indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
             index_path: "/workspace/.zvec-grep/storage".into(),
@@ -300,5 +340,48 @@ mod tests {
         assert_eq!(info.index_status(), IndexStatus::Disabled);
         info.index_policy = WorkspaceIndexPolicy::Uninitialized;
         assert_eq!(info.index_status(), IndexStatus::Uninitialized);
+    }
+
+    #[test]
+    fn incompatibility_takes_precedence_over_policy_and_cached_stats() {
+        let mut info = indexed_info();
+        info.compatibility = IndexCompatibility::RebuildRequired {
+            actual_version: Some(1),
+            expected_version: 2,
+            reason: "unsupported index version 1; expected 2".into(),
+        };
+        assert_eq!(info.index_status(), IndexStatus::RebuildRequired);
+        info.indexed = false;
+        info.index_policy = WorkspaceIndexPolicy::Disabled;
+        assert_eq!(info.index_status(), IndexStatus::RebuildRequired);
+        let error = info
+            .compatibility
+            .ensure_compatible()
+            .expect_err("rebuild required");
+        assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
+        assert!(error.message().contains("zg index --rebuild"));
+        assert!(IndexCompatibility::Unbuilt.ensure_compatible().is_ok());
+        assert!(
+            IndexCompatibility::Compatible { version: 2 }
+                .ensure_compatible()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn compatibility_serialization_preserves_missing_version_and_rebuild_reason() {
+        let compatibility = IndexCompatibility::RebuildRequired {
+            actual_version: None,
+            expected_version: 2,
+            reason: "index version is missing".into(),
+        };
+        let value = serde_json::to_value(&compatibility).expect("compatibility");
+        assert_eq!(value["status"], "rebuild_required");
+        assert!(value["actual_version"].is_null());
+        assert_eq!(value["expected_version"], 2);
+        assert_eq!(
+            serde_json::from_value::<IndexCompatibility>(value).expect("round trip"),
+            compatibility
+        );
     }
 }

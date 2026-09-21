@@ -135,14 +135,9 @@ async fn scoped_indexing_finishes_interrupted_updates_and_deletions_after_termin
     let files = native_file_records(&index_path)?;
     assert_eq!(files.len(), 2);
     for file in &files {
-        assert_eq!(file["value"]["index_status"]["kind"], "indexed");
-        let name = file["value"]["relative_path"]["value"]
-            .as_str()
-            .expect("path");
-        assert_eq!(
-            file["value"]["id"].as_u64(),
-            Some(u64::from(identities[name]))
-        );
+        assert_eq!(file["index_status"]["kind"], "indexed");
+        let name = file["relative_path"]["value"].as_str().expect("path");
+        assert_eq!(file["id"].as_u64(), Some(u64::from(identities[name])));
     }
     for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
         assert_eq!(
@@ -159,11 +154,11 @@ fn file_identities(path: &Path) -> TestResult<BTreeMap<String, u32>> {
     native_file_records(path)?
         .into_iter()
         .map(|file| {
-            let name = file["value"]["relative_path"]["value"]
+            let name = file["relative_path"]["value"]
                 .as_str()
                 .expect("path")
                 .to_owned();
-            let id = u32::try_from(file["value"]["id"].as_u64().expect("file ID"))?;
+            let id = u32::try_from(file["id"].as_u64().expect("file ID"))?;
             Ok((name, id))
         })
         .collect()

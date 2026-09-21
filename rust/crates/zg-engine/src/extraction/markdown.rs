@@ -45,7 +45,7 @@ pub(super) fn extract(
             overlap_chars,
         ));
     }
-    let line_offsets = line_byte_offsets(&lines);
+    let line_offsets = line_byte_offsets(&source.text);
     let entities = build_sections(&headings, &lines)
         .into_iter()
         .enumerate()

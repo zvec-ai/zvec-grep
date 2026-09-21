@@ -174,7 +174,7 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
         let crate::domain::Content::Text(content) = &entity.content else {
             continue;
         };
-        let line_offsets = line_byte_offsets(&content.split('\n').collect::<Vec<_>>());
+        let line_offsets = line_byte_offsets(content);
         for fragment in entity.fragments {
             let (Range::Text(source_range), Range::Byte(local_range)) =
                 (entity.source_range, fragment.range)
