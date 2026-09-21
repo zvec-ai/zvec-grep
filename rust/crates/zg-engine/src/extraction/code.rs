@@ -880,14 +880,30 @@ mod tests {
     }
 
     #[test]
+    fn cpp_namespaces_are_scopes_not_entities() {
+        let source = test_source(
+            FileFormat::Cpp,
+            "fixture.cpp",
+            "namespace api { int run() { return 1; } }",
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("symbol extraction");
+        let names = fragments
+            .iter()
+            .filter_map(|fragment| match test_metadata(fragment) {
+                Some(EntityMetadata::Code(metadata)) => metadata.symbol_name.as_deref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["run"]);
+        let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&fragments, "run")) else {
+            panic!("expected code metadata for run");
+        };
+        assert_eq!(metadata.scope.as_deref(), Some("api"));
+    }
+
+    #[test]
     fn extracts_named_modules_and_values_without_local_variable_expansion() {
         let fixtures = [
-            (
-                FileFormat::Cpp,
-                "namespace api { int run() { return 1; } }",
-                "api",
-                SymbolType::Module,
-            ),
             (
                 FileFormat::Rust,
                 "mod api { pub fn run() {} }",
