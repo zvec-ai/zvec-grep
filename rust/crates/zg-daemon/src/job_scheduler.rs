@@ -308,6 +308,12 @@ impl IndexJobScheduler {
             .map(|job| lock(&job.snapshot).clone())
     }
 
+    pub(crate) fn has_active_root(&self, canonical_root: &PathBuf) -> bool {
+        let state = lock(&self.inner.state);
+        state.active_by_root.contains_key(canonical_root)
+            || state.followup_by_root.contains_key(canonical_root)
+    }
+
     pub(crate) fn cancel_root(&self, canonical_root: &PathBuf) -> bool {
         let (active, followup) = {
             let mut state = lock(&self.inner.state);

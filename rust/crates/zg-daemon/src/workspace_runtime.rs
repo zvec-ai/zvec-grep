@@ -36,6 +36,8 @@ use crate::job_scheduler::{
     IndexExecutor, IndexJobCompletion, IndexJobScheduler, IndexJobSnapshot, JobReason, JobState,
     SchedulerConfig, SchedulerError, SchedulerSnapshot,
 };
+mod lifecycle;
+use lifecycle::{RuntimeActivity, RuntimeLifecycle};
 use zg_transport_mcp::{
     IndexOperationError, IndexOperationProvider, IndexOperationResult, IndexOperationState,
     IndexRuntimeSnapshot,
@@ -53,9 +55,12 @@ struct RuntimeManagerInner {
     runtimes: Mutex<HashMap<PathBuf, Arc<WorkspaceRuntime>>>,
     shutdown: CancellationToken,
     closed: AtomicBool,
+    idle_ttl: std::time::Duration,
+    maintenance: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct WorkspaceRuntime {
+    lifecycle: Mutex<RuntimeLifecycle>,
     canonical_root: PathBuf,
     index_template: Mutex<IndexOptions>,
     pending_watcher_configuration: Mutex<Option<(uuid::Uuid, IndexOptions)>>,
@@ -243,6 +248,8 @@ impl WorkspaceRuntimeManager {
                 runtimes: Mutex::new(HashMap::new()),
                 shutdown: CancellationToken::new(),
                 closed: AtomicBool::new(false),
+                idle_ttl: Self::DEFAULT_IDLE_TTL,
+                maintenance: Mutex::new(None),
             }),
         }
     }
@@ -271,7 +278,7 @@ impl WorkspaceRuntimeManager {
         }
         let canonical_root = canonical_root(options.root.as_deref())?;
         options.root = Some(canonical_root.clone());
-        let runtime = self.runtime(canonical_root.clone(), &options);
+        let runtime = self.runtime(canonical_root.clone(), &options)?;
         let reconfigure = options.reset_paths || options.scan != ScanRulesUpdate::default();
         let template = index_template(&options);
         runtime.invalidate_status();
@@ -284,14 +291,21 @@ impl WorkspaceRuntimeManager {
             let manager = self.clone();
             let job_id = submitted.job.id;
             let template = template.clone();
+            let activity = runtime.continuation();
             tokio::spawn(async move {
                 let Ok(completed) = manager.inner.scheduler.wait(job_id).await else {
                     return;
                 };
-                manager.invalidate_status(&completed.job.canonical_root);
+                activity.invalidate_status();
                 if completed.job.state == JobState::Succeeded {
                     let _ = manager
-                        .on_index_succeeded(completed.job, target_revision, template, reconfigure)
+                        .on_index_succeeded(
+                            Arc::clone(&activity),
+                            completed.job,
+                            target_revision,
+                            template,
+                            reconfigure,
+                        )
                         .await;
                 }
             });
@@ -313,6 +327,7 @@ impl WorkspaceRuntimeManager {
         if completed.job.state == JobState::Succeeded
             && let Err(error) = self
                 .on_index_succeeded(
+                    Arc::clone(&runtime),
                     completed.job.clone(),
                     target_revision,
                     template,
@@ -343,7 +358,7 @@ impl WorkspaceRuntimeManager {
     async fn refresh_index(&self, options: IndexOptions, wait: bool) -> Result<(), EngineError> {
         let root = canonical_root(options.root.as_deref())
             .map_err(WorkspaceRuntimeError::into_engine_error)?;
-        let runtime = self.runtime(root.clone(), &options);
+        let runtime = self.runtime(root.clone(), &options)?;
         // Watch submissions always queue a successor to an already running job.
         // A full reconciliation also covers changes still in watcher debounce.
         let mut options = options;
@@ -367,7 +382,7 @@ impl WorkspaceRuntimeManager {
             .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
         {
             let manager = self.clone();
-            let runtime = Arc::clone(&runtime);
+            let runtime = runtime.continuation();
             let job_id = submitted.job.id;
             tokio::spawn(async move {
                 if let Ok(completed) = manager.inner.scheduler.wait(job_id).await {
@@ -378,7 +393,7 @@ impl WorkspaceRuntimeManager {
                     runtime
                         .indexed_revision
                         .fetch_max(revision, Ordering::AcqRel);
-                    if let Err(error) = manager.ensure_watching(runtime).await {
+                    if let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await {
                         warn!(%error, "search refresh watcher activation failed");
                     }
                 }
@@ -398,7 +413,7 @@ impl WorkspaceRuntimeManager {
         runtime
             .indexed_revision
             .fetch_max(revision, Ordering::AcqRel);
-        self.ensure_watching(runtime)
+        self.ensure_watching(Arc::clone(&runtime))
             .await
             .map_err(WorkspaceRuntimeError::into_engine_error)?;
         // Include successor jobs submitted by the watcher while reconciliation ran.
@@ -440,6 +455,7 @@ impl WorkspaceRuntimeManager {
                 "workspace runtimes have been closed",
             ));
         }
+        let _activity = self.existing_activity(options.root.as_deref())?;
         if !options.include_status {
             return engine.info(options).await;
         }
@@ -456,7 +472,7 @@ impl WorkspaceRuntimeManager {
                 root: Some(metadata.root.clone()),
                 ..IndexOptions::default()
             },
-        );
+        )?;
         let epoch = lock(&runtime.index_status).invalidate();
         let observed_job = self
             .job_for_root(&runtime.canonical_root)
@@ -516,6 +532,7 @@ impl WorkspaceRuntimeManager {
     ) -> Result<bool, WorkspaceRuntimeError> {
         let canonical_root = canonical_root(options.root.as_deref())?;
         options.root = Some(canonical_root.clone());
+        let _activity = self.existing_activity(Some(&canonical_root))?;
         self.invalidate_status(&canonical_root);
         self.stop_watching(&canonical_root).await?;
         self.inner.scheduler.cancel_root(&canonical_root);
@@ -524,14 +541,28 @@ impl WorkspaceRuntimeManager {
             .wait_for_root_idle(&canonical_root)
             .await;
         let removed = self.inner.executor.drop_index(options).await?;
-        lock(&self.inner.runtimes).remove(&canonical_root);
-        self.inner.scheduler.forget_root(&canonical_root);
+        let retired = {
+            let mut runtimes = lock(&self.inner.runtimes);
+            let runtime = runtimes.remove(&canonical_root);
+            if let Some(runtime) = &runtime {
+                runtime.retire();
+            }
+            self.inner.scheduler.forget_root(&canonical_root);
+            runtime
+        };
+        if let Some(runtime) = retired {
+            Self::close_watcher(&runtime).await?;
+        }
         Ok(removed)
     }
 
     pub(crate) async fn shutdown_all(&self) -> Result<(), WorkspaceRuntimeError> {
         self.inner.closed.store(true, Ordering::Release);
         self.inner.shutdown.cancel();
+        let maintenance = lock(&self.inner.maintenance).take();
+        if let Some(maintenance) = maintenance {
+            let _ = maintenance.await;
+        }
         let roots = lock(&self.inner.runtimes)
             .keys()
             .cloned()
@@ -553,11 +584,21 @@ impl WorkspaceRuntimeManager {
         }
     }
 
-    fn runtime(&self, canonical_root: PathBuf, options: &IndexOptions) -> Arc<WorkspaceRuntime> {
+    fn runtime(
+        &self,
+        canonical_root: PathBuf,
+        options: &IndexOptions,
+    ) -> Result<RuntimeActivity, EngineError> {
         let mut runtimes = lock(&self.inner.runtimes);
-        Arc::clone(runtimes.entry(canonical_root.clone()).or_insert_with(|| {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(EngineError::resource_closed(
+                "workspace runtimes have been closed",
+            ));
+        }
+        let runtime = runtimes.entry(canonical_root.clone()).or_insert_with(|| {
             let template = index_template(options);
             Arc::new(WorkspaceRuntime {
+                lifecycle: Mutex::new(RuntimeLifecycle::default()),
                 canonical_root,
                 index_template: Mutex::new(template),
                 pending_watcher_configuration: Mutex::new(None),
@@ -567,18 +608,42 @@ impl WorkspaceRuntimeManager {
                 dirty_revision: AtomicU64::new(1),
                 indexed_revision: AtomicU64::new(0),
             })
-        }))
+        });
+        let activity = RuntimeActivity::begin(runtime, true)
+            .ok_or_else(|| EngineError::resource_busy("workspace runtime is retiring"))?;
+        drop(runtimes);
+        self.start_maintenance();
+        Ok(activity)
+    }
+
+    fn existing_activity(
+        &self,
+        root: Option<&Path>,
+    ) -> Result<Option<RuntimeActivity>, EngineError> {
+        let root = canonical_root(root).map_err(WorkspaceRuntimeError::into_engine_error)?;
+        let runtimes = lock(&self.inner.runtimes);
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(EngineError::resource_closed(
+                "workspace runtimes have been closed",
+            ));
+        }
+        // Queries may name a subdirectory or a symlink to an active workspace.
+        Ok(runtimes
+            .iter()
+            .filter(|(candidate, _)| root.starts_with(candidate))
+            .max_by_key(|(candidate, _)| candidate.components().count())
+            .and_then(|(_, runtime)| RuntimeActivity::begin(runtime, true)))
     }
 
     async fn on_index_succeeded(
         &self,
+        runtime: Arc<WorkspaceRuntime>,
         job: IndexJobSnapshot,
         revision: u64,
         template: IndexOptions,
         reconfigure: bool,
     ) -> Result<(), WorkspaceRuntimeError> {
-        let runtime = lock(&self.inner.runtimes).get(&job.canonical_root).cloned();
-        let Some(runtime) = runtime else {
+        let Some(_activity) = RuntimeActivity::begin(&runtime, false) else {
             return Ok(());
         };
         runtime
@@ -601,7 +666,7 @@ impl WorkspaceRuntimeManager {
                     .scheduler
                     .wait_for_root_idle(&runtime.canonical_root)
                     .await;
-                if let Err(error) = manager.ensure_watching(runtime).await {
+                if let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await {
                     warn!(%error, "pending watcher configuration could not be activated");
                 }
             });
@@ -626,7 +691,13 @@ impl WorkspaceRuntimeManager {
         if self.inner.closed.load(Ordering::Acquire) {
             return Ok(());
         }
+        let Some(_activity) = RuntimeActivity::begin(&runtime, false) else {
+            return Ok(());
+        };
         let mut watcher = runtime.watcher.lock().await;
+        if runtime.is_retired() || self.inner.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if let Some(completed) = completed {
             *lock(&runtime.pending_watcher_configuration) = Some(completed);
         }
@@ -652,6 +723,11 @@ impl WorkspaceRuntimeManager {
                 &TaskControl::new(cancellation.clone()),
             )
             .await?;
+        if runtime.is_retired() || self.inner.closed.load(Ordering::Acquire) {
+            cancellation.cancel();
+            session.close().await?;
+            return Ok(());
+        }
         // Prepare the new policy before retiring the current session. A failed
         // initialization leaves the previous watcher running.
         if let Some(previous) = watcher.take() {
@@ -712,6 +788,10 @@ impl WorkspaceRuntimeManager {
         let Some(runtime) = runtime else {
             return Ok(());
         };
+        Self::close_watcher(&runtime).await
+    }
+
+    async fn close_watcher(runtime: &WorkspaceRuntime) -> Result<(), WorkspaceRuntimeError> {
         let handle = runtime.watcher.lock().await.take();
         let Some(handle) = handle else {
             return Ok(());
@@ -769,6 +849,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         if request.rg {
             return engine.context(request).await;
         }
+        let _activity = self.existing_activity(request.root.as_deref())?;
         let policy = request.refresh.unwrap_or(if request.auto_update {
             RefreshPolicy::Background
         } else {
@@ -820,7 +901,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .max_by_key(|root| root.components().count())
             .cloned()
             .unwrap_or(requested_root);
-        wait_for_search_refresh(&request, async {
+        let _refresh_activity = wait_for_search_refresh(&request, async {
             self.inner.scheduler.wait_for_root_idle(&root).await;
             let info = engine
                 .info(InfoOptions {
@@ -829,13 +910,18 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                 })
                 .await?;
             info.compatibility.ensure_compatible()?;
+            let activity = if info.indexed {
+                Some(self.runtime(info.root.clone(), &options)?)
+            } else {
+                None
+            };
             if info.indexed {
                 let mut options = options;
                 options.root = Some(info.root);
                 self.refresh_index(options, true).await?;
             }
             // Preserve the engine's missing-index error without silently creating one.
-            Ok(())
+            Ok(activity)
         })
         .await?;
         let mut reply = engine.context(request).await?;
@@ -959,6 +1045,9 @@ async fn watch_loop(
         if inner.closed.load(Ordering::Acquire) {
             break;
         }
+        let Some(activity) = RuntimeActivity::begin(&runtime, false) else {
+            break;
+        };
         runtime.invalidate_status();
         let target_revision = runtime.dirty_revision.fetch_add(1, Ordering::AcqRel) + 1;
         let mut options = lock(&runtime.index_template).clone();
@@ -982,22 +1071,20 @@ async fn watch_loop(
         let manager = WorkspaceRuntimeManager {
             inner: Arc::clone(&inner),
         };
-        let weak_runtime = Arc::downgrade(&runtime);
         tokio::spawn(async move {
+            let runtime = activity;
             let Ok(completed) = scheduler.wait(submitted.job.id).await else {
                 return;
             };
-            if let Some(runtime) = weak_runtime.upgrade() {
-                runtime.invalidate_status();
-                if completed.job.state != JobState::Succeeded {
-                    return;
-                }
-                runtime
-                    .indexed_revision
-                    .fetch_max(target_revision, Ordering::AcqRel);
-                if let Err(error) = manager.ensure_watching(runtime).await {
-                    warn!(%error, "watch successor could not activate pending configuration");
-                }
+            runtime.invalidate_status();
+            if completed.job.state != JobState::Succeeded {
+                return;
+            }
+            runtime
+                .indexed_revision
+                .fetch_max(target_revision, Ordering::AcqRel);
+            if let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await {
+                warn!(%error, "watch successor could not activate pending configuration");
             }
         });
     }
@@ -1355,7 +1442,9 @@ mod tests {
             }),
             SchedulerConfig::default(),
         );
-        let runtime = manager.runtime(root.clone(), &IndexOptions::default());
+        let runtime = manager
+            .runtime(root.clone(), &IndexOptions::default())
+            .expect("runtime");
         let epoch = super::lock(&runtime.index_status).invalidate();
         assert!(super::lock(&runtime.index_status).record(epoch, &inspected_info(), None));
         let submitted = manager
@@ -1624,7 +1713,9 @@ mod tests {
         assert_eq!(indexed.job.canonical_root, canonical_root);
         assert_eq!(manager.snapshot().active_runtimes, 1);
         assert!(manager.runtime_snapshot(&canonical_root).watcher_active);
-        let runtime = manager.runtime(canonical_root.clone(), &IndexOptions::default());
+        let runtime = manager
+            .runtime(canonical_root.clone(), &IndexOptions::default())
+            .expect("runtime");
         assert!(super::lock(&runtime.index_template).name.is_none());
         assert_eq!(
             watchers
@@ -1923,9 +2014,11 @@ mod tests {
             watchers.clone(),
             SchedulerConfig::default(),
         );
-        let runtime = manager.runtime(root.clone(), &IndexOptions::default());
+        let runtime = manager
+            .runtime(root.clone(), &IndexOptions::default())
+            .expect("runtime");
         manager
-            .ensure_watching(runtime.clone())
+            .ensure_watching(Arc::clone(&runtime))
             .await
             .expect("old watcher");
         watchers.busy.store(true, Ordering::Release);
@@ -2038,7 +2131,9 @@ mod tests {
         assert_eq!(failed.job.state, crate::job_scheduler::JobState::Failed);
         assert_eq!(watchers.watches.lock().expect("watches").len(), 1);
         assert_eq!(watchers.closes.load(Ordering::Acquire), 0);
-        let runtime = manager.runtime(root.clone(), &IndexOptions::default());
+        let runtime = manager
+            .runtime(root.clone(), &IndexOptions::default())
+            .expect("runtime");
         assert_eq!(
             super::lock(&runtime.index_template).embedding_concurrency,
             Some(2)
@@ -2046,4 +2141,6 @@ mod tests {
         assert!(manager.runtime_snapshot(&root).watcher_active);
         manager.shutdown_all().await.expect("shutdown");
     }
+
+    mod lifecycle;
 }

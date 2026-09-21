@@ -74,6 +74,15 @@ legacy synchronous auto-update queries never borrow partial writer state. A
 rebuild's unpublished generation remains private. The daemon preserves the refresh
 policy when invoking the engine and also bounds cancellable waits for scheduled jobs.
 
+The daemon retires workspace runtimes and watchers after four hours without a
+foreground operation. Maintenance runs once per minute and does not renew the
+idle deadline. Active queries, inspections, watcher setup, queued indexing and
+running indexing prevent retirement; background changes and job completion do
+not restart the four-hour timer. Retirement forgets the workspace's finished job
+history and prevents old callbacks from restarting its watcher. A later request
+can activate a new runtime without deleting the persisted index. Model runtimes
+remain shared at engine scope and follow their own lease lifetime.
+
 The native engine supports indexing, indexed FTS and vector search, `zg query
 --rg`, workspace discovery, `info`, and idempotent `drop_index`.
 
