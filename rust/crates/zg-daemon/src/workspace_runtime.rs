@@ -525,6 +525,7 @@ impl WorkspaceRuntimeManager {
             .await;
         let removed = self.inner.executor.drop_index(options).await?;
         lock(&self.inner.runtimes).remove(&canonical_root);
+        self.inner.scheduler.forget_root(&canonical_root);
         Ok(removed)
     }
 
@@ -1645,7 +1646,7 @@ mod tests {
             watchers.clone(),
             SchedulerConfig::default(),
         );
-        manager
+        let indexed = manager
             .submit_index(
                 IndexOptions {
                     root: Some(workspace.path().to_path_buf()),
@@ -1668,6 +1669,11 @@ mod tests {
         assert_eq!(watchers.closes.load(Ordering::Acquire), 1);
         assert_eq!(executor.drops.load(Ordering::Acquire), 1);
         assert_eq!(manager.snapshot().active_runtimes, 0);
+        assert!(manager.job_for_root(&indexed.job.canonical_root).is_none());
+        assert!(matches!(
+            manager.inner.scheduler.wait(indexed.job.id).await,
+            Err(crate::job_scheduler::SchedulerError::UnknownJob(_))
+        ));
     }
 
     #[tokio::test]

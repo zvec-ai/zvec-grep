@@ -1,7 +1,7 @@
 //! Bounded resident index-job scheduling with per-root writer serialization.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -22,6 +22,8 @@ use zg_engine::{
 
 const MAX_PERSISTED_ERROR_CHARS: usize = 512;
 const REDACTED: &str = "[redacted]";
+// Finished jobs remain available for late waiters without growing resident history forever.
+const MAX_RETAINED_FINISHED_JOBS: usize = 256;
 
 #[async_trait]
 pub(crate) trait IndexExecutor: Send + Sync {
@@ -127,6 +129,21 @@ struct SchedulerState {
     active_by_root: HashMap<PathBuf, Arc<ScheduledJob>>,
     followup_by_root: HashMap<PathBuf, Arc<ScheduledJob>>,
     latest_by_root: HashMap<PathBuf, Arc<ScheduledJob>>,
+    finished_job_ids: VecDeque<Uuid>,
+}
+
+impl SchedulerState {
+    fn remove_finished_job(&mut self, id: Uuid) {
+        // Existing waiters own the job independently of these lookup tables.
+        if let Some(job) = self.jobs.remove(&id)
+            && self
+                .latest_by_root
+                .get(&job.canonical_root)
+                .is_some_and(|latest| latest.id == id)
+        {
+            self.latest_by_root.remove(&job.canonical_root);
+        }
+    }
 }
 
 struct ScheduledJob {
@@ -268,29 +285,7 @@ impl IndexJobScheduler {
             .get(&id)
             .cloned()
             .ok_or(SchedulerError::UnknownJob(id))?;
-        let mut previous = None;
-        loop {
-            let notified = job.completed.notified();
-            let snapshot = lock(&job.snapshot).clone();
-            if let Some(reporter) = &reporter
-                && snapshot.progress != previous
-            {
-                if let Some(progress) = &snapshot.progress {
-                    reporter.report(progress.clone());
-                }
-                previous.clone_from(&snapshot.progress);
-            }
-            if job.finished.load(Ordering::Acquire) {
-                return Ok(IndexJobCompletion {
-                    job: snapshot,
-                    result: lock(&job.result).clone(),
-                });
-            }
-            tokio::select! {
-                () = notified => {},
-                () = tokio::time::sleep(std::time::Duration::from_millis(100)), if reporter.is_some() => {},
-            }
-        }
+        Ok(wait_for_job(&job, reporter).await)
     }
 
     pub(crate) fn snapshot(&self) -> SchedulerSnapshot {
@@ -316,25 +311,45 @@ impl IndexJobScheduler {
     pub(crate) fn cancel_root(&self, canonical_root: &PathBuf) -> bool {
         let (active, followup) = {
             let mut state = lock(&self.inner.state);
-            (
-                state.active_by_root.get(canonical_root).cloned(),
-                state.followup_by_root.remove(canonical_root),
-            )
-        };
-        if let Some(ref followup) = followup {
-            followup.cancellation.cancel();
-            finish_cancelled(followup, "indexing was cancelled");
-            if self.inner.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
-                self.inner.drained.notify_waiters();
+            let active = state.active_by_root.get(canonical_root).cloned();
+            let followup = state.followup_by_root.remove(canonical_root);
+            if let Some(ref followup) = followup {
+                followup.cancellation.cancel();
+                finish_cancelled(followup, "indexing was cancelled");
+                mark_finished(&self.inner, &mut state, followup);
             }
-            mark_finished(followup);
-        }
+            (active, followup)
+        };
         if let Some(active) = active {
             active.cancellation.cancel();
             true
         } else {
             followup.is_some()
         }
+    }
+
+    /// Cancel remaining work and release a root's retained history. Call after
+    /// draining the root; otherwise active jobs enter retention when they finish.
+    pub(crate) fn forget_root(&self, canonical_root: &PathBuf) {
+        self.cancel_root(canonical_root);
+        let mut state = lock(&self.inner.state);
+        let forgotten = state
+            .jobs
+            .values()
+            .filter(|job| {
+                job.canonical_root == *canonical_root && job.finished.load(Ordering::Acquire)
+            })
+            .map(|job| job.id)
+            .collect::<Vec<_>>();
+        for id in forgotten {
+            state.remove_finished_job(id);
+        }
+        let SchedulerState {
+            jobs,
+            finished_job_ids,
+            ..
+        } = &mut *state;
+        finished_job_ids.retain(|id| jobs.contains_key(id));
     }
 
     pub(crate) async fn wait_for_root_idle(&self, canonical_root: &PathBuf) {
@@ -346,13 +361,13 @@ impl IndexJobScheduler {
             let Some(active) = active else {
                 return;
             };
-            let _ = self.wait(active.id).await;
+            wait_for_job(&active, None).await;
         }
     }
 
     pub(crate) async fn shutdown(&self) {
         if !self.inner.closed.swap(true, Ordering::AcqRel) {
-            let (active, followups) = {
+            let active = {
                 let mut state = lock(&self.inner.state);
                 let active = state.active_by_root.values().cloned().collect::<Vec<_>>();
                 let followups = state
@@ -360,26 +375,25 @@ impl IndexJobScheduler {
                     .drain()
                     .map(|(_, job)| job)
                     .collect::<Vec<_>>();
-                (active, followups)
+                for job in followups {
+                    job.cancellation.cancel();
+                    finish_cancelled(
+                        &job,
+                        "indexing was cancelled because the daemon is shutting down",
+                    );
+                    mark_finished(&self.inner, &mut state, &job);
+                }
+                active
             };
             for job in active {
                 job.cancellation.cancel();
-            }
-            for job in followups {
-                job.cancellation.cancel();
-                finish_cancelled(
-                    &job,
-                    "indexing was cancelled because the daemon is shutting down",
-                );
-                if self.inner.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
-                    self.inner.drained.notify_waiters();
-                }
-                mark_finished(&job);
             }
             self.inner.permits.close();
         }
         loop {
             let notified = self.inner.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.inner.outstanding.load(Ordering::Acquire) == 0 {
                 return;
             }
@@ -508,9 +522,6 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
 }
 
 fn finish_job(inner: &Arc<SchedulerInner>, job: &Arc<ScheduledJob>) {
-    if inner.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
-        inner.drained.notify_waiters();
-    }
     let followup = {
         let mut state = lock(&inner.state);
         if state
@@ -529,6 +540,8 @@ fn finish_job(inner: &Arc<SchedulerInner>, job: &Arc<ScheduledJob>) {
                 .latest_by_root
                 .insert(job.canonical_root.clone(), Arc::clone(followup));
         }
+        // Publish completion and retention before the root can be observed as idle.
+        mark_finished(inner, &mut state, job);
         followup
     };
     if let Some(followup) = followup {
@@ -539,7 +552,6 @@ fn finish_job(inner: &Arc<SchedulerInner>, job: &Arc<ScheduledJob>) {
             spawn_job(Arc::clone(inner), followup);
         }
     }
-    mark_finished(job);
 }
 
 fn has_selection_update(options: &IndexOptions) -> bool {
@@ -800,9 +812,55 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn mark_finished(job: &ScheduledJob) {
+async fn wait_for_job(
+    job: &ScheduledJob,
+    reporter: Option<zg_engine::api::index::progress::IndexProgressReporter>,
+) -> IndexJobCompletion {
+    let mut previous = None;
+    loop {
+        let notified = job.completed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        // Observe completion before copying the snapshot so a terminal result can
+        // never be returned with an earlier queued/running snapshot.
+        let finished = job.finished.load(Ordering::Acquire);
+        let snapshot = lock(&job.snapshot).clone();
+        if let Some(reporter) = &reporter
+            && snapshot.progress != previous
+        {
+            if let Some(progress) = &snapshot.progress {
+                reporter.report(progress.clone());
+            }
+            previous.clone_from(&snapshot.progress);
+        }
+        if finished {
+            return IndexJobCompletion {
+                job: snapshot,
+                result: lock(&job.result).clone(),
+            };
+        }
+        tokio::select! {
+            () = notified => {},
+            () = tokio::time::sleep(std::time::Duration::from_millis(100)), if reporter.is_some() => {},
+        }
+    }
+}
+
+fn mark_finished(inner: &SchedulerInner, state: &mut SchedulerState, job: &ScheduledJob) {
+    // Queued cancellations never pass their options to the executor. Release
+    // credentials and caller callbacks instead of pinning them in job history.
+    lock(&job.options).take();
+    state.finished_job_ids.push_back(job.id);
+    while state.finished_job_ids.len() > MAX_RETAINED_FINISHED_JOBS {
+        if let Some(oldest) = state.finished_job_ids.pop_front() {
+            state.remove_finished_job(oldest);
+        }
+    }
     job.finished.store(true, Ordering::Release);
     job.completed.notify_waiters();
+    if inner.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
+        inner.drained.notify_waiters();
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -869,6 +927,360 @@ mod tests {
                 ..IndexResult::default()
             })
         }
+    }
+
+    struct ImmediateExecutor;
+
+    #[async_trait]
+    impl IndexExecutor for ImmediateExecutor {
+        async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError> {
+            match options.name.as_deref() {
+                Some("failed") => Err(EngineError::internal("fixture failure")),
+                Some("cancelled") => Err(EngineError::cancelled("fixture cancellation")),
+                _ => Ok(IndexResult::default()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_history_evicts_oldest_jobs_and_their_root_records() {
+        let scheduler =
+            IndexJobScheduler::new(Arc::new(ImmediateExecutor), SchedulerConfig::default());
+        let mut completed = Vec::new();
+        for index in 0..300 {
+            let root = PathBuf::from(format!("/workspace-{index}"));
+            let (name, expected) = match index % 3 {
+                0 => ("succeeded", JobState::Succeeded),
+                1 => ("failed", JobState::Failed),
+                _ => ("cancelled", JobState::Cancelled),
+            };
+            let job = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        name: Some(name.into()),
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("submit");
+            assert_eq!(
+                scheduler
+                    .wait(job.job.id)
+                    .await
+                    .expect("completion")
+                    .job
+                    .state,
+                expected
+            );
+            completed.push((root, job.job.id, expected));
+        }
+        assert_eq!(super::lock(&scheduler.inner.state).jobs.len(), 256);
+        for (index, (root, id, expected)) in completed.into_iter().enumerate() {
+            if index < 44 {
+                assert!(matches!(
+                    scheduler.wait(id).await,
+                    Err(SchedulerError::UnknownJob(_))
+                ));
+                assert!(scheduler.get_by_root(&root).is_none());
+            } else {
+                assert_eq!(
+                    scheduler.wait(id).await.expect("retained job").job.state,
+                    expected
+                );
+                assert_eq!(scheduler.get_by_root(&root).expect("root job").id, id);
+            }
+        }
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn eviction_preserves_active_queued_followup_jobs_and_existing_waiters() {
+        let executor = Arc::new(RecordingExecutor {
+            calls: Mutex::new(Vec::new()),
+            started: Notify::new(),
+            releases: tokio::sync::Semaphore::new(0),
+        });
+        let scheduler = IndexJobScheduler::new(
+            executor.clone(),
+            SchedulerConfig {
+                concurrency: 1,
+                queue_capacity: 8,
+            },
+        );
+        let root = PathBuf::from("/workspace");
+        let first = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("first job");
+        executor.started.notified().await;
+        let first_job = Arc::downgrade(&super::lock(&scheduler.inner.state).jobs[&first.job.id]);
+        let waiter = scheduler.wait(first.job.id);
+        tokio::pin!(waiter);
+        tokio::select! {
+            biased;
+            _ = &mut waiter => panic!("job must still be running"),
+            () = std::future::ready(()) => {},
+        }
+        executor.releases.add_permits(1);
+        scheduler
+            .wait(first.job.id)
+            .await
+            .expect("first completion");
+        let active = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("replacement job");
+        executor.started.notified().await;
+        let followup = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Watch)
+            .expect("followup");
+        let queued_root = PathBuf::from("/queued");
+        let queued = scheduler
+            .submit(
+                queued_root.clone(),
+                IndexOptions::default(),
+                JobReason::Manual,
+            )
+            .expect("queued job");
+        for index in 0..300 {
+            let cancelled_root = PathBuf::from(format!("/cancelled-{index}"));
+            let job = scheduler
+                .submit(
+                    cancelled_root.clone(),
+                    IndexOptions::default(),
+                    JobReason::Manual,
+                )
+                .expect("queued cancellation");
+            scheduler.cancel_root(&cancelled_root);
+            let cancelled = scheduler.wait(job.job.id).await.expect("cancelled");
+            assert_eq!(cancelled.job.state, JobState::Cancelled);
+            assert!(
+                super::lock(&super::lock(&scheduler.inner.state).jobs[&job.job.id].options)
+                    .is_none()
+            );
+        }
+        assert!(matches!(
+            scheduler.wait(first.job.id).await,
+            Err(SchedulerError::UnknownJob(_))
+        ));
+        assert_eq!(super::lock(&scheduler.inner.state).jobs.len(), 259);
+        assert_eq!(scheduler.snapshot().running, 1);
+        assert_eq!(scheduler.snapshot().queued, 2);
+        assert_eq!(
+            scheduler.get_by_root(&root).expect("active root").id,
+            active.job.id
+        );
+        assert_eq!(
+            scheduler.get_by_root(&queued_root).expect("queued root").id,
+            queued.job.id
+        );
+        let completed = waiter.await.expect("attached waiter survives eviction");
+        assert_eq!(completed.job.state, JobState::Succeeded);
+        assert!(completed.result.is_some());
+        assert!(
+            first_job.upgrade().is_none(),
+            "evicted job must be released after its waiter completes"
+        );
+        executor.releases.add_permits(3);
+        for id in [active.job.id, followup.job.id, queued.job.id] {
+            assert_eq!(
+                scheduler.wait(id).await.expect("preserved job").job.state,
+                JobState::Succeeded
+            );
+        }
+        assert_eq!(
+            scheduler.get_by_root(&root).expect("latest followup").id,
+            followup.job.id
+        );
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn forget_root_removes_only_its_finished_history_and_allows_reuse() {
+        let scheduler =
+            IndexJobScheduler::new(Arc::new(ImmediateExecutor), SchedulerConfig::default());
+        let root = PathBuf::from("/forgotten");
+        let other = PathBuf::from("/retained");
+        let mut forgotten = Vec::new();
+        for index in 0..3 {
+            let job = scheduler
+                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+                .expect("submit");
+            scheduler.wait(job.job.id).await.expect("finish");
+            forgotten.push(job.job.id);
+            let retained = scheduler
+                .submit(other.clone(), IndexOptions::default(), JobReason::Manual)
+                .expect("other root");
+            scheduler.wait(retained.job.id).await.expect("finish other");
+            assert_eq!(
+                super::lock(&scheduler.inner.state).finished_job_ids.len(),
+                (index + 1) * 2
+            );
+        }
+        scheduler.wait_for_root_idle(&root).await;
+        scheduler.forget_root(&root);
+        scheduler.forget_root(&root);
+        assert!(scheduler.get_by_root(&root).is_none());
+        assert!(scheduler.get_by_root(&other).is_some());
+        assert_eq!(
+            super::lock(&scheduler.inner.state).finished_job_ids.len(),
+            3
+        );
+        for id in forgotten {
+            assert!(matches!(
+                scheduler.wait(id).await,
+                Err(SchedulerError::UnknownJob(_))
+            ));
+        }
+        let replacement = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("reuse root");
+        assert!(!replacement.reused);
+        scheduler
+            .wait(replacement.job.id)
+            .await
+            .expect("replacement finishes");
+        assert_eq!(
+            scheduler.get_by_root(&root).expect("replacement").id,
+            replacement.job.id
+        );
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_followups_are_retained_and_shutdown_finishes_before_returning() {
+        let executor = Arc::new(GatedExecutor {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let scheduler = IndexJobScheduler::new(executor.clone(), SchedulerConfig::default());
+        let root = PathBuf::from("/workspace");
+        let active = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("running job");
+        executor.started.notified().await;
+        for _ in 0..300 {
+            let followup = scheduler
+                .submit(root.clone(), IndexOptions::default(), JobReason::Watch)
+                .expect("followup");
+            scheduler.cancel_root(&root);
+            assert_eq!(
+                scheduler
+                    .wait(followup.job.id)
+                    .await
+                    .expect("cancelled followup")
+                    .job
+                    .state,
+                JobState::Cancelled
+            );
+        }
+        assert_eq!(
+            super::lock(&scheduler.inner.state).finished_job_ids.len(),
+            256
+        );
+        assert_eq!(super::lock(&scheduler.inner.state).jobs.len(), 257);
+        assert_eq!(
+            scheduler.get_by_root(&root).expect("running root").id,
+            active.job.id
+        );
+        let followup = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Watch)
+            .expect("shutdown followup");
+        let shutting_down = scheduler.shutdown();
+        tokio::pin!(shutting_down);
+        tokio::select! {
+            biased;
+            () = &mut shutting_down => panic!("running executor has not finished"),
+            () = std::future::ready(()) => {},
+        }
+        assert_eq!(
+            scheduler
+                .wait(followup.job.id)
+                .await
+                .expect("shutdown cancellation")
+                .job
+                .state,
+            JobState::Cancelled
+        );
+        executor.release.notify_one();
+        shutting_down.await;
+        assert!(
+            super::lock(&scheduler.inner.state)
+                .active_by_root
+                .is_empty()
+        );
+        assert_eq!(
+            super::lock(&scheduler.inner.state).finished_job_ids.len(),
+            256
+        );
+        assert_eq!(
+            scheduler
+                .wait(active.job.id)
+                .await
+                .expect("executor finished")
+                .job
+                .state,
+            JobState::Succeeded
+        );
+        scheduler.forget_root(&root);
+        assert!(super::lock(&scheduler.inner.state).jobs.is_empty());
+        assert!(
+            super::lock(&scheduler.inner.state)
+                .finished_job_ids
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_busy_root_keeps_active_work_and_attached_waiters_alive() {
+        let executor = Arc::new(CancellationAwareExecutor {
+            started: Notify::new(),
+        });
+        let scheduler = IndexJobScheduler::new(executor.clone(), SchedulerConfig::default());
+        let root = PathBuf::from("/workspace");
+        let active = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+            .expect("running job");
+        executor.started.notified().await;
+        let followup = scheduler
+            .submit(root.clone(), IndexOptions::default(), JobReason::Watch)
+            .expect("followup");
+        let waiter = scheduler.wait(followup.job.id);
+        tokio::pin!(waiter);
+        tokio::select! {
+            biased;
+            _ = &mut waiter => panic!("followup is still queued"),
+            () = std::future::ready(()) => {},
+        }
+        scheduler.forget_root(&root);
+        assert_eq!(
+            scheduler
+                .get_by_root(&root)
+                .expect("active job is preserved")
+                .id,
+            active.job.id
+        );
+        assert!(matches!(
+            scheduler.wait(followup.job.id).await,
+            Err(SchedulerError::UnknownJob(_))
+        ));
+        assert_eq!(
+            waiter.await.expect("attached waiter").job.state,
+            JobState::Cancelled
+        );
+        scheduler.wait_for_root_idle(&root).await;
+        assert_eq!(
+            scheduler
+                .wait(active.job.id)
+                .await
+                .expect("cancelled active job")
+                .job
+                .state,
+            JobState::Cancelled
+        );
+        scheduler.forget_root(&root);
+        assert!(scheduler.get_by_root(&root).is_none());
+        assert!(super::lock(&scheduler.inner.state).jobs.is_empty());
+        scheduler.shutdown().await;
     }
 
     #[tokio::test]
