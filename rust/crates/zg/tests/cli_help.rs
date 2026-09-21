@@ -61,6 +61,14 @@ fn every_documented_help_topic_is_available() {
 }
 
 #[test]
+fn models_help_uses_the_rust_transformers_backend_name() {
+    let help = stdout(&["help", "models"]);
+    assert!(help.contains("local/all-minilm-l6-v2"));
+    assert!(help.contains("  transformers\n"));
+    assert!(!help.contains("transformers-js"));
+}
+
+#[test]
 fn index_help_describes_the_optional_workspace_name() {
     let help = stdout(&["index", "--help"]);
     assert!(help.contains("--name <NAME>"));

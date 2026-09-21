@@ -2,6 +2,9 @@
 
 use std::{fs, io, path::Path};
 
+#[cfg(windows)]
+use uuid::Uuid;
+
 use crate::{EngineError, EngineResult, utils::sync_directory};
 
 /// Publishes a downloaded model artifact and syncs its file and cache directory.
@@ -104,7 +107,7 @@ fn publish_downloaded_file_sync(temporary: &Path, destination: &Path) -> EngineR
     file.sync_all()
         .map_err(|e| failure("during file sync (destination not published)", &e))?;
     drop(file);
-    fs::rename(temporary, destination)
+    rename_replacing(temporary, destination)
         .map_err(|e| failure("during rename (outcome unknown)", &e))?;
     sync_directory(&directory).map_err(|error| {
         EngineError::from_report(crate::ErrorReport {
@@ -115,6 +118,54 @@ fn publish_downloaded_file_sync(temporary: &Path, destination: &Path) -> EngineR
             ..error.into_report()
         })
     })
+}
+
+#[cfg(not(windows))]
+fn rename_replacing(temporary: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn rename_replacing(temporary: &Path, destination: &Path) -> io::Result<()> {
+    match fs::rename(temporary, destination) {
+        Ok(()) => return Ok(()),
+        Err(error)
+            if !destination.is_file()
+                || !matches!(
+                    error.kind(),
+                    io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+                ) =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+
+    // Windows does not atomically replace every existing regular file with
+    // rename. Preserve the previous entry under a unique name until the
+    // verified replacement is installed, then roll it back on failure.
+    let displaced = destination.with_extension(format!(
+        "replaced-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    fs::rename(destination, &displaced)?;
+    match fs::rename(temporary, destination) {
+        Ok(()) => {
+            fs::remove_file(displaced)?;
+            Ok(())
+        }
+        Err(install_error) => {
+            if !destination.exists() {
+                if let Err(restore_error) = fs::rename(&displaced, destination) {
+                    return Err(io::Error::other(format!(
+                        "replacement failed ({install_error}); restoring the previous artifact also failed ({restore_error})"
+                    )));
+                }
+            }
+            Err(install_error)
+        }
+    }
 }
 
 fn validate_destination(path: &Path) -> io::Result<()> {

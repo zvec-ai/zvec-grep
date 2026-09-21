@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -13,7 +13,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use llama_cpp_2::{
     LlamaBackendDevice, LlamaBackendDeviceType,
     context::{LlamaContext, params::LlamaContextParams},
@@ -23,14 +22,14 @@ use llama_cpp_2::{
     model::{AddBos, LlamaModel, params::LlamaModelParams},
     token::LlamaToken,
 };
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    artifacts::publish_downloaded_file,
+    artifact_downloader::{ArtifactSource, ResolveArtifacts, resolve_model_artifacts},
     catalog::LlamaCppConfig,
     compute::ModelComputeRuntime,
-    download_progress::{ArtifactDownloadProgress, ModelDownloadProgressReporter},
+    download_progress::ModelDownloadProgressReporter,
     spi::{
         EmbeddingModel, EmbeddingOptions, ModelError, input_text, validate_inputs, validate_result,
     },
@@ -40,7 +39,6 @@ use crate::domain::model::{
     ModelProgress,
 };
 
-static PARTIAL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static LLAMA_BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
 
 pub(crate) struct LlamaCppEmbeddingModel {
@@ -56,6 +54,7 @@ pub(crate) struct LlamaCppEmbeddingModel {
 struct LoadedLlamaModel {
     contexts: LlamaContextPool,
     model: Arc<LlamaModel>,
+    model_path: PathBuf,
     gpu: bool,
 }
 
@@ -152,12 +151,13 @@ impl LlamaCppEmbeddingModel {
     async fn ensure_loaded(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+        signal: Option<&CancellationToken>,
     ) -> Result<Arc<LoadedLlamaModel>, ModelError> {
         let mut state = self.state.lock().await;
         if let Some(model) = &*state {
             return Ok(Arc::clone(model));
         }
-        let model = Arc::new(self.load_model(on_progress).await?);
+        let model = Arc::new(self.load_model(on_progress, signal).await?);
         *state = Some(Arc::clone(&model));
         Ok(model)
     }
@@ -165,15 +165,48 @@ impl LlamaCppEmbeddingModel {
     async fn load_model(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+        signal: Option<&CancellationToken>,
     ) -> Result<LoadedLlamaModel, ModelError> {
-        let artifact = gguf_artifact_name(self.entry.uri)?.to_owned();
+        let artifact = self
+            .entry
+            .download
+            .artifacts
+            .first()
+            .ok_or_else(|| ModelError::internal("llama.cpp artifact metadata is missing"))?;
         let reporter = ModelDownloadProgressReporter::new(
             self.entry.reference,
             on_progress,
-            [artifact.clone()],
+            [artifact.path.to_owned()],
         );
         reporter.start();
-        let path = self.resolve_model_path(&artifact, &reporter).await?;
+        let model_scope = self
+            .model_cache_dir
+            .join("modelscope")
+            .join("llama-cpp")
+            .join(self.entry.download.model_scope.repo.replace('/', "--"))
+            .join(self.entry.download.model_scope.revision);
+        let resolved = resolve_model_artifacts(
+            &self.client,
+            ResolveArtifacts {
+                model: self.entry.reference,
+                sources: [
+                    ArtifactSource::hugging_face(
+                        self.entry.download.hugging_face,
+                        self.model_cache_dir.clone(),
+                    )
+                    .with_local_path(artifact.path, self.entry.cache_file),
+                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
+                ],
+                artifacts: self.entry.download.artifacts,
+                reporter: &reporter,
+                signal,
+            },
+        )
+        .await?;
+        let path = resolved.paths.get(artifact.path).cloned().ok_or_else(|| {
+            ModelError::storage_failure("Resolved llama.cpp model artifact is missing")
+        })?;
+        validate_gguf_file(&path, self.entry.uri).await?;
         let device = self.device;
         let reporter_for_load = reporter.clone();
         let model = self
@@ -199,10 +232,10 @@ impl LlamaCppEmbeddingModel {
         let warning =
             format!("llama.cpp GPU embedding context failed ({cause}), falling back to CPU.");
         report_warning(self.entry.reference, on_progress.as_ref(), warning);
+        let path = failed.model_path.clone();
         let previous = state.take();
         drop(previous);
         drop(failed);
-        let path = self.model_cache_dir.join(cache_file_name(self.entry.uri));
         let loaded = Arc::new(
             self.compute_runtime
                 .run(move || load_cpu_model(&path))
@@ -210,93 +243,6 @@ impl LlamaCppEmbeddingModel {
         );
         *state = Some(Arc::clone(&loaded));
         Ok(loaded)
-    }
-
-    async fn resolve_model_path(
-        &self,
-        artifact: &str,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<PathBuf, ModelError> {
-        fs::create_dir_all(&self.model_cache_dir)
-            .await
-            .map_err(|error| {
-                ModelError::storage_failure("Unable to create llama.cpp model cache directory")
-                    .with_cause(error)
-            })?;
-        let destination = self.model_cache_dir.join(cache_file_name(self.entry.uri));
-        if is_file(&destination).await {
-            reporter.skip(artifact);
-            validate_gguf_file(&destination, self.entry.uri).await?;
-            return Ok(destination);
-        }
-
-        let url = hugging_face_url(self.entry.uri)?;
-        let partial = partial_path(&destination);
-        let result = self.download(&url, &partial, artifact, reporter).await;
-        if let Err(error) = result {
-            let _ = fs::remove_file(&partial).await;
-            return Err(
-                ModelError::storage_failure("Unable to download llama.cpp model artifact")
-                    .with_cause(error),
-            );
-        }
-        if let Err(error) = publish_downloaded_file(&partial, &destination).await {
-            let _ = fs::remove_file(&partial).await;
-            return Err(
-                ModelError::storage_failure("Unable to publish llama.cpp model artifact")
-                    .with_cause(error),
-            );
-        }
-        validate_gguf_file(&destination, self.entry.uri).await?;
-        Ok(destination)
-    }
-
-    async fn download(
-        &self,
-        url: &str,
-        destination: &Path,
-        artifact: &str,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<(), ModelError> {
-        let response = self.client.get(url).send().await.map_err(|error| {
-            ModelError::storage_failure("Unable to request llama.cpp model artifact")
-                .with_cause(error)
-        })?;
-        if !response.status().is_success() {
-            return Err(ModelError::storage_failure(format!(
-                "Unable to download llama.cpp model artifact: HTTP {}",
-                response.status()
-            )));
-        }
-        let total_bytes = response.content_length();
-        let mut output = fs::File::create(destination).await.map_err(|error| {
-            ModelError::storage_failure("Unable to create partial llama.cpp model artifact")
-                .with_cause(error)
-        })?;
-        let mut downloaded_bytes = 0_u64;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| {
-                ModelError::storage_failure("Unable to read llama.cpp model download")
-                    .with_cause(error)
-            })?;
-            output.write_all(&chunk).await.map_err(|error| {
-                ModelError::storage_failure("Unable to write llama.cpp model download")
-                    .with_cause(error)
-            })?;
-            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-            reporter.report(
-                artifact,
-                ArtifactDownloadProgress {
-                    downloaded_bytes,
-                    total_bytes,
-                },
-            );
-        }
-        output.flush().await.map_err(|error| {
-            ModelError::storage_failure("Unable to flush llama.cpp model download")
-                .with_cause(error)
-        })
     }
 }
 
@@ -316,7 +262,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         })?;
         let on_progress = options.on_progress.clone();
         let model = self
-            .ensure_loaded(options.on_progress)
+            .ensure_loaded(options.on_progress, options.signal.as_ref())
             .await
             .map_err(|error| embed_error(self.entry, error))?;
         let purpose = options.purpose;
@@ -404,7 +350,7 @@ fn load_gpu_model(path: &Path, device_index: usize) -> Result<LoadedLlamaModel, 
         })?
         .with_n_gpu_layers(u32::MAX);
     LlamaModel::load_from_file(llama_backend()?, path, &params)
-        .map(|model| loaded_llama_model(model, true))
+        .map(|model| loaded_llama_model(model, path, true))
         .map_err(|error| {
             ModelError::storage_failure("Unable to load llama.cpp GPU embedding model")
                 .with_cause(error)
@@ -414,18 +360,19 @@ fn load_gpu_model(path: &Path, device_index: usize) -> Result<LoadedLlamaModel, 
 fn load_cpu_model(path: &Path) -> Result<LoadedLlamaModel, ModelError> {
     let params = LlamaModelParams::default().with_n_gpu_layers(0);
     LlamaModel::load_from_file(llama_backend()?, path, &params)
-        .map(|model| loaded_llama_model(model, false))
+        .map(|model| loaded_llama_model(model, path, false))
         .map_err(|error| {
             ModelError::storage_failure("Unable to load llama.cpp embedding model")
                 .with_cause(error)
         })
 }
 
-fn loaded_llama_model(model: LlamaModel, gpu: bool) -> LoadedLlamaModel {
+fn loaded_llama_model(model: LlamaModel, path: &Path, gpu: bool) -> LoadedLlamaModel {
     let model = Arc::new(model);
     LoadedLlamaModel {
         contexts: LlamaContextPool::new(Arc::clone(&model)),
         model,
+        model_path: path.to_path_buf(),
         gpu,
     }
 }
@@ -892,53 +839,25 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError>
     Ok(())
 }
 
-fn hugging_face_url(uri: &str) -> Result<String, ModelError> {
-    let model = uri.strip_prefix("hf:").ok_or_else(|| {
-        ModelError::unsupported(format!("Unsupported llama.cpp model URI: {uri}"))
-    })?;
-    let (repository, file) = model.rsplit_once('/').ok_or_else(|| {
-        ModelError::invalid_argument(format!("Invalid Hugging Face llama.cpp model URI: {uri}"))
-    })?;
-    Ok(format!(
-        "https://huggingface.co/{repository}/resolve/main/{file}"
-    ))
-}
-
-fn gguf_artifact_name(uri: &str) -> Result<&str, ModelError> {
-    uri.rsplit_once('/')
-        .map(|(_, file)| file)
-        .ok_or_else(|| ModelError::invalid_argument(format!("Invalid llama.cpp model URI: {uri}")))
-}
-
-fn cache_file_name(uri: &str) -> String {
-    let without_scheme = uri.strip_prefix("hf:").unwrap_or(uri);
-    let owner = without_scheme.split('/').next().unwrap_or_default();
-    let file = without_scheme.rsplit('/').next().unwrap_or(without_scheme);
-    format!("hf_{owner}_{file}")
-}
-
-fn partial_path(destination: &Path) -> PathBuf {
-    let sequence = PARTIAL_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut name = destination.as_os_str().to_owned();
-    name.push(format!(".partial-{}-{sequence}", std::process::id()));
-    PathBuf::from(name)
-}
-
-async fn is_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .await
-        .is_ok_and(|metadata| metadata.is_file())
-}
-
 async fn validate_gguf_file(path: &Path, uri: &str) -> Result<(), ModelError> {
-    let data = fs::read(path).await.map_err(|error| {
+    use tokio::io::AsyncReadExt;
+
+    let metadata = fs::metadata(path).await.map_err(|error| {
         ModelError::storage_failure("Unable to inspect llama.cpp model artifact").with_cause(error)
     })?;
+    let mut file = fs::File::open(path).await.map_err(|error| {
+        ModelError::storage_failure("Unable to open llama.cpp model artifact").with_cause(error)
+    })?;
+    let mut data = vec![0_u8; 512];
+    let read = file.read(&mut data).await.map_err(|error| {
+        ModelError::storage_failure("Unable to inspect llama.cpp model header").with_cause(error)
+    })?;
+    data.truncate(read);
     if data.starts_with(b"GGUF") {
         return Ok(());
     }
-    let size_kb = data.len() / 1_024;
-    let sniff = String::from_utf8_lossy(&data[..data.len().min(512)]).to_lowercase();
+    let size_kb = metadata.len() / 1_024;
+    let sniff = String::from_utf8_lossy(&data).to_lowercase();
     let is_html = sniff.contains("<!doctype") || sniff.contains("<html");
     let got = String::from_utf8_lossy(&data[..data.len().min(4)]);
     fs::remove_file(path).await.map_err(|error| {
@@ -1013,14 +932,14 @@ mod tests {
     }
 
     #[test]
-    fn resolves_main_compatible_hugging_face_uri_and_cache_name() {
-        let uri = entry("local/embeddinggemma-300m").uri;
+    fn pins_main_compatible_sources_and_cache_name() {
+        let entry = entry("local/embeddinggemma-300m");
         assert_eq!(
-            hugging_face_url(uri).expect("HF URL"),
-            "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"
+            entry.download.hugging_face.revision,
+            "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12"
         );
         assert_eq!(
-            cache_file_name(uri),
+            entry.cache_file,
             "hf_ggml-org_embeddinggemma-300M-Q8_0.gguf"
         );
     }

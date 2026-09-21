@@ -41,7 +41,7 @@ pub fn create_embedding_model(
         EmbeddingCatalogEntry::Qwen(config) => {
             Ok(Arc::new(QwenEmbeddingModel::new(config, options)?))
         }
-        EmbeddingCatalogEntry::TransformersJs(config) => Ok(Arc::new(
+        EmbeddingCatalogEntry::Transformers(config) => Ok(Arc::new(
             TransformersEmbeddingModel::new(config, options, compute_runtime),
         )),
         EmbeddingCatalogEntry::LlamaCpp(config) => Ok(Arc::new(LlamaCppEmbeddingModel::new(

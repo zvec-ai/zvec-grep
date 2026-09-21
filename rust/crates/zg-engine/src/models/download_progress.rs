@@ -56,8 +56,19 @@ impl ModelDownloadProgressReporter {
         });
     }
 
-    pub(crate) fn skip(&self, artifact: &str) {
-        self.lock_artifacts().remove(artifact);
+    pub(crate) fn set_download_plan(&self, artifacts: impl IntoIterator<Item = (String, u64)>) {
+        *self.lock_artifacts() = artifacts
+            .into_iter()
+            .map(|(artifact, total_bytes)| {
+                (
+                    artifact,
+                    ArtifactDownloadProgress {
+                        downloaded_bytes: 0,
+                        total_bytes: Some(total_bytes),
+                    },
+                )
+            })
+            .collect();
     }
 
     pub(crate) fn report(&self, artifact: &str, progress: ArtifactDownloadProgress) {
@@ -132,6 +143,7 @@ mod tests {
             ["model".to_owned(), "tokenizer".to_owned()],
         );
         reporter.start();
+        reporter.set_download_plan([("model".to_owned(), 8), ("tokenizer".to_owned(), 8)]);
         reporter.report(
             "model",
             ArtifactDownloadProgress {
@@ -156,7 +168,7 @@ mod tests {
                 ModelProgress::Downloading {
                     model: "local/test".to_owned(),
                     downloaded_bytes: Some(4),
-                    total_bytes: None,
+                    total_bytes: Some(16),
                 },
                 ModelProgress::Downloading {
                     model: "local/test".to_owned(),

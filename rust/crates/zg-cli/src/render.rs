@@ -681,13 +681,13 @@ const MODELS_HELP: &str = r"Usage:
 Supported text embedding models (one per workspace):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
-  local/all-minilm-l6-v2              local    text         384     256  transformers-js
-  local/bge-small-en-v1.5             local    text         384     512  transformers-js
+  local/all-minilm-l6-v2              local    text         384     256  transformers
+  local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
-  local/gte-modernbert-base           local    text         768    8192  transformers-js
-  local/jina-embeddings-v2-base-code  local    text         768    8192  transformers-js
-  local/multilingual-e5-small         local    text         384     512  transformers-js
-  local/nomic-embed-text-v1.5         local    text         768    8192  transformers-js
+  local/gte-modernbert-base           local    text         768    8192  transformers
+  local/jina-embeddings-v2-base-code  local    text         768    8192  transformers
+  local/multilingual-e5-small         local    text         384     512  transformers
+  local/nomic-embed-text-v1.5         local    text         768    8192  transformers
   local/potion-code-16m-v2            local    text         256    1024  model2vec
   local/potion-multilingual-128m      local    text         256    1024  model2vec
   local/potion-retrieval-32m          local    text         512    1024  model2vec

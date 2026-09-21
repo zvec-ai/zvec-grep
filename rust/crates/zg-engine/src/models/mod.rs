@@ -8,6 +8,7 @@ mod resolution;
 mod spi;
 
 // Runtime and artifact management.
+mod artifact_downloader;
 mod artifacts;
 mod compute;
 mod download_progress;

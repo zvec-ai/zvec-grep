@@ -2,18 +2,16 @@ use crate::domain::Content;
 use std::{
     collections::{HashMap, VecDeque},
     env,
-    ffi::OsString,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use ort::{
     session::{
         Session,
@@ -25,14 +23,14 @@ use tokenizers::{
     PaddingParams, PaddingStrategy, Tokenizer, TruncationParams,
     utils::{padding::PaddingDirection, truncation::TruncationDirection},
 };
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    artifacts::publish_downloaded_file,
+    artifact_downloader::{ArtifactSource, ResolveArtifacts, resolve_model_artifacts},
     catalog::TransformersConfig,
     compute::ModelComputeRuntime,
-    download_progress::{ArtifactDownloadProgress, ModelDownloadProgressReporter},
+    download_progress::ModelDownloadProgressReporter,
     spi::{
         EmbeddingModel, EmbeddingOptions, ModelError, input_text, validate_inputs, validate_result,
     },
@@ -41,8 +39,6 @@ use crate::domain::model::{
     Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
     ModelProgress,
 };
-
-static PARTIAL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct TransformersEmbeddingModel {
     entry: TransformersConfig,
@@ -154,12 +150,13 @@ impl TransformersEmbeddingModel {
     async fn ensure_loaded(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+        signal: Option<&CancellationToken>,
     ) -> Result<Arc<LoadedTransformersModel>, ModelError> {
         let mut state = self.state.lock().await;
         if let Some(loaded) = &*state {
             return Ok(Arc::clone(loaded));
         }
-        let loaded = Arc::new(self.load(on_progress).await?);
+        let loaded = Arc::new(self.load(on_progress, signal).await?);
         *state = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -167,40 +164,55 @@ impl TransformersEmbeddingModel {
     async fn load(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+        signal: Option<&CancellationToken>,
     ) -> Result<LoadedTransformersModel, ModelError> {
         let model_artifact = onnx_artifact(self.entry.dtype)?;
-        let external_artifact = format!("{model_artifact}_data");
         let reporter = ModelDownloadProgressReporter::new(
             self.entry.reference,
             on_progress,
-            [
-                model_artifact.to_owned(),
-                external_artifact.clone(),
-                "tokenizer.json".to_owned(),
-                "config.json".to_owned(),
-                "tokenizer_config.json".to_owned(),
-            ],
+            self.entry
+                .download
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.to_owned()),
         );
         reporter.start();
-        let directory = self.model_directory();
-        let model_path = directory.join(model_artifact);
-        let tokenizer_path = directory.join("tokenizer.json");
-        let config_path = directory.join("config.json");
-        let tokenizer_config_path = directory.join("tokenizer_config.json");
-        let external_path = directory.join(&external_artifact);
-
-        let (model, tokenizer, config, tokenizer_config) = tokio::join!(
-            self.resolve_required(model_artifact, &model_path, &reporter),
-            self.resolve_required("tokenizer.json", &tokenizer_path, &reporter),
-            self.resolve_optional("config.json", &config_path, &reporter),
-            self.resolve_optional("tokenizer_config.json", &tokenizer_config_path, &reporter),
-        );
-        let model_path = model?;
-        let tokenizer_path = tokenizer?;
-        config?;
-        tokenizer_config?;
-        self.resolve_optional(&external_artifact, &external_path, &reporter)
-            .await?;
+        let hugging_face = self
+            .model_cache_dir
+            .join(self.entry.download.hugging_face.repo)
+            .join(self.entry.download.hugging_face.revision);
+        let model_scope = self
+            .model_cache_dir
+            .join("modelscope")
+            // Keep main's cache namespace so Node and Rust reuse the same
+            // verified fallback snapshot; the Rust backend itself is ORT.
+            .join("transformers-js")
+            .join(self.entry.download.model_scope.repo.replace('/', "--"))
+            .join(self.entry.download.model_scope.revision);
+        let resolved = resolve_model_artifacts(
+            &self.client,
+            ResolveArtifacts {
+                model: self.entry.reference,
+                sources: [
+                    ArtifactSource::hugging_face(self.entry.download.hugging_face, hugging_face),
+                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
+                ],
+                artifacts: self.entry.download.artifacts,
+                reporter: &reporter,
+                signal,
+            },
+        )
+        .await?;
+        let model_path = resolved.paths.get(model_artifact).cloned().ok_or_else(|| {
+            ModelError::storage_failure("Resolved Transformers model artifact is missing")
+        })?;
+        let tokenizer_path = resolved
+            .paths
+            .get("tokenizer.json")
+            .cloned()
+            .ok_or_else(|| {
+                ModelError::storage_failure("Resolved Transformers tokenizer artifact is missing")
+            })?;
 
         let tokenizer = fs::read(&tokenizer_path).await.map_err(|error| {
             ModelError::storage_failure("Unable to read Transformers tokenizer").with_cause(error)
@@ -208,7 +220,7 @@ impl TransformersEmbeddingModel {
         let tokenizer = Tokenizer::from_bytes(&tokenizer).map_err(|error| {
             ModelError::new(
                 crate::EngineError::STORAGE_FAILURE,
-                "Transformers.js tokenization failed",
+                "Transformers tokenization failed",
                 Some(format!(
                     "model={} repo={}",
                     self.entry.reference, self.entry.repo
@@ -229,144 +241,11 @@ impl TransformersEmbeddingModel {
         })
     }
 
-    async fn resolve_required(
-        &self,
-        artifact: &str,
-        destination: &Path,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<PathBuf, ModelError> {
-        if usable_file(destination).await {
-            reporter.skip(artifact);
-            return Ok(destination.to_path_buf());
-        }
-        let url = self.artifact_url(artifact);
-        self.download(&url, artifact, destination, reporter)
-            .await
-            .map_err(|error| {
-                ModelError::new(
-                    crate::EngineError::STORAGE_FAILURE,
-                    "Unable to download Transformers.js model artifact",
-                    Some(format!("model={} url={url}", self.entry.reference)),
-                )
-                .with_cause(error)
-            })?;
-        Ok(destination.to_path_buf())
-    }
-
-    async fn resolve_optional(
-        &self,
-        artifact: &str,
-        destination: &Path,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<Option<PathBuf>, ModelError> {
-        if usable_file(destination).await {
-            reporter.skip(artifact);
-            return Ok(Some(destination.to_path_buf()));
-        }
-        let url = self.artifact_url(artifact);
-        let exists = self
-            .client
-            .head(&url)
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success());
-        if !exists {
-            reporter.skip(artifact);
-            return Ok(None);
-        }
-        self.download(&url, artifact, destination, reporter)
-            .await
-            .map_err(|error| {
-                ModelError::new(
-                    crate::EngineError::STORAGE_FAILURE,
-                    "Unable to download Transformers.js model artifact",
-                    Some(format!("model={} url={url}", self.entry.reference)),
-                )
-                .with_cause(error)
-            })?;
-        Ok(Some(destination.to_path_buf()))
-    }
-
-    async fn download(
-        &self,
-        url: &str,
-        artifact: &str,
-        destination: &Path,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<(), ModelError> {
-        let parent = destination
-            .parent()
-            .ok_or_else(|| ModelError::storage_failure("Transformers cache path has no parent"))?;
-        fs::create_dir_all(parent).await.map_err(|error| {
-            ModelError::storage_failure("Unable to create Transformers cache directory")
-                .with_cause(error)
-        })?;
-        let partial = partial_path(destination);
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| ModelError::storage_failure(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(ModelError::storage_failure(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-        let total_bytes = response.content_length();
-        let mut file = fs::File::create(&partial).await.map_err(|error| {
-            ModelError::storage_failure("Unable to create partial Transformers artifact")
-                .with_cause(error)
-        })?;
-        let mut downloaded_bytes = 0_u64;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| ModelError::storage_failure(error.to_string()))?;
-            file.write_all(&chunk).await.map_err(|error| {
-                ModelError::storage_failure("Unable to write Transformers artifact")
-                    .with_cause(error)
-            })?;
-            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-            reporter.report(
-                artifact,
-                ArtifactDownloadProgress {
-                    downloaded_bytes,
-                    total_bytes,
-                },
-            );
-        }
-        file.flush().await.map_err(|error| {
-            ModelError::storage_failure("Unable to flush Transformers artifact").with_cause(error)
-        })?;
-        drop(file);
-        if !usable_file(&partial).await {
-            let _ = fs::remove_file(&partial).await;
-            return Err(ModelError::storage_failure(
-                "Downloaded model artifact is empty",
-            ));
-        }
-        if let Err(error) = publish_downloaded_file(&partial, destination).await {
-            let _ = fs::remove_file(&partial).await;
-            return Err(
-                ModelError::storage_failure("Unable to publish Transformers artifact")
-                    .with_cause(error),
-            );
-        }
-        Ok(())
-    }
-
+    #[cfg(test)]
     fn model_directory(&self) -> PathBuf {
         self.model_cache_dir
-            .join(self.entry.repo)
-            .join(self.entry.revision)
-    }
-
-    fn artifact_url(&self, artifact: &str) -> String {
-        format!(
-            "https://huggingface.co/{}/resolve/{}/{}",
-            self.entry.repo, self.entry.revision, artifact
-        )
+            .join(self.entry.download.hugging_face.repo)
+            .join(self.entry.download.hugging_face.revision)
     }
 }
 
@@ -385,12 +264,12 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             matches!(content, Content::Text(_))
         })?;
         let loaded = self
-            .ensure_loaded(options.on_progress.clone())
+            .ensure_loaded(options.on_progress.clone(), options.signal.as_ref())
             .await
             .map_err(|error| {
                 ModelError::new(
                     crate::EngineError::INTERNAL,
-                    "Transformers.js embedding failed",
+                    "Transformers embedding failed",
                     Some(format!(
                         "model={} repo={}",
                         self.entry.reference, self.entry.repo
@@ -464,7 +343,7 @@ impl SessionPool {
                 Ok(session) => (session, requested),
                 Err(error) => {
                     let warning = format!(
-                        "Transformers.js {} embedding initialization failed ({}), falling back to CPU.",
+                        "Transformers {} embedding initialization failed ({}), falling back to CPU.",
                         requested.name(),
                         error
                     );
@@ -650,7 +529,7 @@ impl SessionPool {
                 for request in requests {
                     complete_coreml_request(
                         &request,
-                        Err("Transformers.js embedding was cancelled".to_owned()),
+                        Err("Transformers embedding was cancelled".to_owned()),
                     );
                 }
                 continue;
@@ -675,7 +554,7 @@ impl SessionPool {
                             .as_ref()
                             .is_some_and(CancellationToken::is_cancelled)
                         {
-                            Err("Transformers.js embedding was cancelled".to_owned())
+                            Err("Transformers embedding was cancelled".to_owned())
                         } else {
                             Err(message.clone())
                         };
@@ -907,7 +786,7 @@ fn embed_batch(
         Ok(result) => Ok(result),
         Err(error) if provider != TransformersExecutionProvider::Cpu => {
             let warning = format!(
-                "Transformers.js {} embedding inference failed ({}), falling back to CPU.",
+                "Transformers {} embedding inference failed ({}), falling back to CPU.",
                 provider.name(),
                 error
             );
@@ -1044,7 +923,7 @@ fn complete_coreml_batch(
         if !was_active {
             complete_coreml_request(
                 request,
-                Err("Transformers.js embedding was cancelled".to_owned()),
+                Err("Transformers embedding was cancelled".to_owned()),
             );
             continue;
         }
@@ -1054,7 +933,7 @@ fn complete_coreml_batch(
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
         {
-            Err("Transformers.js embedding was cancelled".to_owned())
+            Err("Transformers embedding was cancelled".to_owned())
         } else {
             Ok(EmbeddingResult {
                 vectors: result.vectors[offset..end].to_vec(),
@@ -1116,7 +995,7 @@ fn run_session(
     let (shape, data) = output.try_extract_tensor::<f32>().map_err(|error| {
         ModelError::new(
             crate::EngineError::INTERNAL,
-            "Transformers.js returned an unexpected tensor",
+            "Transformers returned an unexpected tensor",
             None,
         )
         .with_cause(error)
@@ -1306,7 +1185,7 @@ fn pool_output(
     }) {
         return Err(ModelError::new(
             crate::EngineError::INTERNAL,
-            "Transformers.js returned a non-finite tensor value",
+            "Transformers returned a non-finite tensor value",
             Some(format!("index={vector_index} offset={value_index}")),
         ));
     }
@@ -1334,7 +1213,7 @@ fn narrow_float(value: f64) -> f32 {
 fn invalid_tensor(entry: TransformersConfig, shape: &[i64]) -> ModelError {
     ModelError::new(
         crate::EngineError::INTERNAL,
-        "Transformers.js returned an unexpected tensor",
+        "Transformers returned an unexpected tensor",
         Some(format!(
             "expected=batchx{} actual={}",
             entry.dimension,
@@ -1350,7 +1229,7 @@ fn invalid_tensor(entry: TransformersConfig, shape: &[i64]) -> ModelError {
 fn tokenization_error(entry: TransformersConfig, cause: impl std::fmt::Display) -> ModelError {
     ModelError::new(
         crate::EngineError::INTERNAL,
-        "Transformers.js tokenization failed",
+        "Transformers tokenization failed",
         Some(format!("model={} repo={}", entry.reference, entry.repo)),
     )
     .with_cause(cause)
@@ -1359,7 +1238,7 @@ fn tokenization_error(entry: TransformersConfig, cause: impl std::fmt::Display) 
 fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError> {
     if signal.is_some_and(CancellationToken::is_cancelled) {
         return Err(ModelError::cancelled(
-            "Transformers.js embedding was cancelled",
+            "Transformers embedding was cancelled",
         ));
     }
     Ok(())
@@ -1379,22 +1258,9 @@ fn onnx_artifact(dtype: &str) -> Result<&'static str, ModelError> {
         "q8" => Ok("onnx/model_quantized.onnx"),
         "q4" => Ok("onnx/model_q4.onnx"),
         value => Err(ModelError::internal(format!(
-            "Unsupported Transformers.js dtype: {value}"
+            "Unsupported Transformers dtype: {value}"
         ))),
     }
-}
-
-async fn usable_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .await
-        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-}
-
-fn partial_path(path: &Path) -> PathBuf {
-    let sequence = PARTIAL_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut partial = OsString::from(path.as_os_str());
-    partial.push(format!(".part-{}-{sequence}", std::process::id()));
-    PathBuf::from(partial)
 }
 
 fn default_model_cache_dir() -> PathBuf {
@@ -1505,12 +1371,19 @@ mod tests {
     use crate::domain::model::Metric;
 
     fn entry(pooling: &'static str, normalize: bool) -> TransformersConfig {
+        let download = crate::models::catalog::get_embedding_model_catalog_entry(
+            "local/multilingual-e5-small",
+        )
+        .and_then(crate::models::catalog::EmbeddingCatalogEntry::transformers_config)
+        .expect("fixture download metadata")
+        .download;
         TransformersConfig {
             reference: "local/test-transformer",
             provider: "local",
             model: "test-transformer",
             repo: "test/model-ONNX",
             revision: "0123456789abcdef",
+            download,
             dtype: "q8",
             dimension: 3,
             metric: Metric::Cosine,
@@ -1590,7 +1463,7 @@ mod tests {
             crate::models::compute::ModelComputeRuntime::shared(),
         );
         let loaded = model
-            .ensure_loaded(None)
+            .ensure_loaded(None, None)
             .await
             .expect("download and load cached ONNX model");
         let tokenizer = Tokenizer::from_file(model.model_directory().join("tokenizer.json"))

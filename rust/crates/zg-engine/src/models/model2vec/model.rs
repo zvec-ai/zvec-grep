@@ -1,19 +1,17 @@
 use crate::domain::Content;
 use std::{
     env,
-    ffi::OsString,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
+#[cfg(windows)]
+use std::ffi::OsString;
+
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use serde_json::Value;
 use tokenizers::Tokenizer;
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::utils::atomic_write;
@@ -23,10 +21,10 @@ use crate::{
         ModelProgress,
     },
     models::{
-        artifacts::publish_downloaded_file,
+        artifact_downloader::{ArtifactSource, ResolveArtifacts, resolve_model_artifacts},
         catalog::Model2VecConfig,
         compute::ModelComputeRuntime,
-        download_progress::{ArtifactDownloadProgress, ModelDownloadProgressReporter},
+        download_progress::ModelDownloadProgressReporter,
         spi::{
             EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, ModelError, input_text,
             validate_inputs, validate_result,
@@ -35,8 +33,6 @@ use crate::{
 };
 
 use super::safetensors::{StaticEmbeddingTable, load_static_embedding_table};
-
-static PARTIAL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct Model2VecEmbeddingModel {
     entry: Model2VecConfig,
@@ -105,12 +101,13 @@ impl Model2VecEmbeddingModel {
     async fn ensure_loaded(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+        signal: Option<&CancellationToken>,
     ) -> Result<Arc<LoadedModel>, ModelError> {
         let mut state = self.state.lock().await;
         if let Some(loaded) = &state.loaded {
             return Ok(Arc::clone(loaded));
         }
-        let loaded = Arc::new(self.load_model(on_progress).await?);
+        let loaded = Arc::new(self.load_model(on_progress, signal).await?);
         state.loaded = Some(Arc::clone(&loaded));
         Ok(loaded)
     }
@@ -118,80 +115,29 @@ impl Model2VecEmbeddingModel {
     async fn load_model(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+        signal: Option<&CancellationToken>,
     ) -> Result<LoadedModel, ModelError> {
         let reporter = ModelDownloadProgressReporter::new(
             self.entry.reference,
             on_progress,
-            [
-                file_name(self.entry.model_file)?.to_owned(),
-                file_name(self.entry.tokenizer_file)?.to_owned(),
-            ],
+            self.entry
+                .download
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.to_owned()),
         );
         reporter.start();
-        self.exclude_cached_artifacts_from_progress(&reporter)
-            .await?;
-        let (model_path, tokenizer_source) = tokio::join!(
-            self.resolve_model_path(&reporter),
-            self.resolve_tokenizer_source(&reporter)
-        );
-        let model_path = model_path?;
-        let tokenizer_source = tokenizer_source?;
-        let table = self
+        let resolved = self
             .dependencies
-            .load_safetensors(
-                &model_path,
-                self.entry.embedding_tensor,
-                self.entry.dimension,
-            )
+            .resolve_artifacts(self.entry, &self.model_cache_dir, &reporter, signal)
             .await?;
-        let tokenizer = self.dependencies.load_tokenizer(&tokenizer_source).await?;
-        reporter.finish();
-        Ok(LoadedModel { tokenizer, table })
-    }
-
-    async fn exclude_cached_artifacts_from_progress(
-        &self,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<(), ModelError> {
-        let model_artifact = file_name(self.entry.model_file)?;
-        if is_usable_model_file(&self.model_directory().join(model_artifact)).await {
-            reporter.skip(model_artifact);
-        }
-
-        let tokenizer_artifact = file_name(self.entry.tokenizer_file)?;
-        let tokenizer_path = self
-            .model_directory()
-            .join("tokenizer")
-            .join("tokenizer.json");
-        if is_usable_model_file(&tokenizer_path).await {
-            reporter.skip(tokenizer_artifact);
-        }
-        Ok(())
-    }
-
-    async fn resolve_model_path(
-        &self,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<PathBuf, ModelError> {
-        let model_path = self
-            .model_directory()
-            .join(file_name(self.entry.model_file)?);
-        self.resolve_cached_file(self.entry.model_file, &model_path, reporter)
-            .await
-    }
-
-    async fn resolve_tokenizer_source(
-        &self,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<PathBuf, ModelError> {
-        let tokenizer_directory = self.model_directory().join("tokenizer");
-        self.resolve_cached_file(
-            self.entry.tokenizer_file,
-            &tokenizer_directory.join("tokenizer.json"),
-            reporter,
-        )
-        .await?;
-        let config_path = tokenizer_directory.join("tokenizer_config.json");
+        let model_path = resolved.model_path;
+        let tokenizer_source = resolved
+            .tokenizer_path
+            .parent()
+            .ok_or_else(|| ModelError::storage_failure("Tokenizer path has no parent"))?
+            .to_path_buf();
+        let config_path = tokenizer_source.join("tokenizer_config.json");
         if !is_usable_model_file(&config_path).await {
             tokio::task::spawn_blocking(move || {
                 atomic_write(
@@ -208,75 +154,17 @@ impl Model2VecEmbeddingModel {
                 ModelError::storage_failure("Unable to write tokenizer config").with_cause(error)
             })?;
         }
-        Ok(tokenizer_directory)
-    }
-
-    async fn resolve_cached_file(
-        &self,
-        remote_file: &str,
-        local_path: &Path,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<PathBuf, ModelError> {
-        let artifact = file_name(remote_file)?;
-        if is_usable_model_file(local_path).await {
-            reporter.skip(artifact);
-            return Ok(local_path.to_path_buf());
-        }
-        let parent = local_path.parent().ok_or_else(|| {
-            ModelError::storage_failure("Model2Vec cache path does not have a parent directory")
-        })?;
-        fs::create_dir_all(parent).await.map_err(|error| {
-            ModelError::storage_failure(format!(
-                "Unable to create Model2Vec cache directory: {error}"
-            ))
-        })?;
-
-        let partial_path = partial_path(local_path);
-        let url = format!(
-            "https://huggingface.co/{}/resolve/{}/{}",
-            self.entry.repo, self.entry.revision, remote_file
-        );
-        let progress_reporter = reporter.clone();
-        let artifact_name = artifact.to_owned();
-        let progress = Arc::new(move |event| {
-            progress_reporter.report(&artifact_name, event);
-        });
-        let result = self
+        let table = self
             .dependencies
-            .download(&url, &partial_path, progress)
-            .await;
-        let result = match result {
-            Ok(()) if is_usable_model_file(&partial_path).await => {
-                publish_downloaded_file(&partial_path, local_path)
-                    .await
-                    .map_err(|error| {
-                        ModelError::storage_failure(format!(
-                            "Unable to publish Model2Vec artifact: {error}"
-                        ))
-                    })
-            }
-            Ok(()) => Err(ModelError::storage_failure(
-                "Downloaded model file is empty",
-            )),
-            Err(error) => Err(error),
-        };
-        if let Err(cause) = result {
-            let _ = fs::remove_file(&partial_path).await;
-            return Err(ModelError::new(
-                crate::EngineError::STORAGE_FAILURE,
-                "Unable to download Model2Vec model artifact",
-                Some(format!("model={} url={url}", self.entry.reference)),
+            .load_safetensors(
+                &model_path,
+                self.entry.embedding_tensor,
+                self.entry.dimension,
             )
-            .with_cause(cause));
-        }
-        Ok(local_path.to_path_buf())
-    }
-
-    fn model_directory(&self) -> PathBuf {
-        self.model_cache_dir
-            .join("model2vec")
-            .join(self.entry.repo.replace('/', "--"))
-            .join(self.entry.revision)
+            .await?;
+        let tokenizer = self.dependencies.load_tokenizer(&tokenizer_source).await?;
+        reporter.finish();
+        Ok(LoadedModel { tokenizer, table })
     }
 }
 
@@ -301,7 +189,9 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
         validate_inputs(&self.info, inputs, |content| {
             matches!(content, Content::Text(_))
         })?;
-        let loaded = self.ensure_loaded(options.on_progress).await?;
+        let loaded = self
+            .ensure_loaded(options.on_progress, options.signal.as_ref())
+            .await?;
         let purpose = options.purpose;
         let prefix = match purpose {
             EmbeddingPurpose::Document => self.entry.document_prefix,
@@ -348,6 +238,14 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
 
 #[async_trait]
 trait Model2VecDependencies: Send + Sync {
+    async fn resolve_artifacts(
+        &self,
+        entry: Model2VecConfig,
+        model_cache_dir: &Path,
+        reporter: &ModelDownloadProgressReporter,
+        signal: Option<&CancellationToken>,
+    ) -> Result<Model2VecResolvedArtifacts, ModelError>;
+
     async fn load_tokenizer(&self, source: &Path) -> Result<Arc<dyn TokenizerRuntime>, ModelError>;
 
     async fn load_safetensors(
@@ -356,13 +254,11 @@ trait Model2VecDependencies: Send + Sync {
         tensor_name: &str,
         dimension: usize,
     ) -> Result<StaticEmbeddingTable, ModelError>;
+}
 
-    async fn download(
-        &self,
-        url: &str,
-        destination: &Path,
-        on_progress: Arc<dyn Fn(ArtifactDownloadProgress) + Send + Sync>,
-    ) -> Result<(), ModelError>;
+struct Model2VecResolvedArtifacts {
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
 }
 
 trait TokenizerRuntime: Send + Sync {
@@ -384,6 +280,60 @@ impl DefaultModel2VecDependencies {
 
 #[async_trait]
 impl Model2VecDependencies for DefaultModel2VecDependencies {
+    async fn resolve_artifacts(
+        &self,
+        entry: Model2VecConfig,
+        model_cache_dir: &Path,
+        reporter: &ModelDownloadProgressReporter,
+        signal: Option<&CancellationToken>,
+    ) -> Result<Model2VecResolvedArtifacts, ModelError> {
+        let local_model = file_name(entry.model_file)?;
+        let hugging_face = model_cache_dir
+            .join("model2vec")
+            .join(entry.download.hugging_face.repo.replace('/', "--"))
+            .join(entry.download.hugging_face.revision);
+        let model_scope = model_cache_dir
+            .join("modelscope")
+            .join("model2vec")
+            .join(entry.download.model_scope.repo.replace('/', "--"))
+            .join(entry.download.model_scope.revision);
+        let sources = [
+            ArtifactSource::hugging_face(entry.download.hugging_face, hugging_face)
+                .with_local_path(entry.model_file, local_model)
+                .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
+            ArtifactSource::model_scope(entry.download.model_scope, model_scope)
+                .with_local_path(entry.model_file, local_model)
+                .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
+        ];
+        let resolved = resolve_model_artifacts(
+            &self.client,
+            ResolveArtifacts {
+                model: entry.reference,
+                sources,
+                artifacts: entry.download.artifacts,
+                reporter,
+                signal,
+            },
+        )
+        .await?;
+        Ok(Model2VecResolvedArtifacts {
+            model_path: resolved
+                .paths
+                .get(entry.model_file)
+                .cloned()
+                .ok_or_else(|| {
+                    ModelError::storage_failure("Resolved Model2Vec model artifact is missing")
+                })?,
+            tokenizer_path: resolved
+                .paths
+                .get(entry.tokenizer_file)
+                .cloned()
+                .ok_or_else(|| {
+                    ModelError::storage_failure("Resolved Model2Vec tokenizer artifact is missing")
+                })?,
+        })
+    }
+
     async fn load_tokenizer(&self, source: &Path) -> Result<Arc<dyn TokenizerRuntime>, ModelError> {
         let tokenizer_path = source.join("tokenizer.json");
         let tokenizer_json = fs::read(&tokenizer_path).await.map_err(|error| {
@@ -406,47 +356,6 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
         dimension: usize,
     ) -> Result<StaticEmbeddingTable, ModelError> {
         load_static_embedding_table(path, tensor_name, dimension).await
-    }
-
-    async fn download(
-        &self,
-        url: &str,
-        destination: &Path,
-        on_progress: Arc<dyn Fn(ArtifactDownloadProgress) + Send + Sync>,
-    ) -> Result<(), ModelError> {
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| ModelError::storage_failure(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(ModelError::storage_failure(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-        let total_bytes = response.content_length();
-        let mut file = fs::File::create(destination).await.map_err(|error| {
-            ModelError::storage_failure(format!("Unable to create partial model artifact: {error}"))
-        })?;
-        let mut downloaded_bytes = 0_u64;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| ModelError::storage_failure(error.to_string()))?;
-            file.write_all(&chunk).await.map_err(|error| {
-                ModelError::storage_failure(format!("Unable to write model artifact: {error}"))
-            })?;
-            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-            on_progress(ArtifactDownloadProgress {
-                downloaded_bytes,
-                total_bytes,
-            });
-        }
-        file.flush().await.map_err(|error| {
-            ModelError::storage_failure(format!("Unable to flush model artifact: {error}"))
-        })?;
-        Ok(())
     }
 }
 
@@ -589,13 +498,6 @@ fn file_name(path: &str) -> Result<&str, ModelError> {
         })
 }
 
-fn partial_path(path: &Path) -> PathBuf {
-    let sequence = PARTIAL_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut partial = OsString::from(path.as_os_str());
-    partial.push(format!(".part-{}-{sequence}", std::process::id()));
-    PathBuf::from(partial)
-}
-
 fn default_model_cache_dir() -> PathBuf {
     env::var_os("ZVEC_GREP_HOME")
         .map(PathBuf::from)
@@ -638,12 +540,13 @@ mod tests {
         domain::model::{EmbeddingPurpose, ModelConfig, ModelProgress},
         models::{
             catalog::Model2VecConfig,
+            download_progress::ArtifactDownloadProgress,
             spi::{EmbeddingModel, EmbeddingOptions},
         },
     };
 
     use super::{
-        ArtifactDownloadProgress, Model2VecDependencies, Model2VecEmbeddingModel,
+        Model2VecDependencies, Model2VecEmbeddingModel, Model2VecResolvedArtifacts,
         ModelDownloadProgressReporter, StaticEmbeddingTable, TokenizerRuntime,
     };
 
@@ -716,7 +619,7 @@ mod tests {
                 ModelProgress::Downloading {
                     model: "local/test-potion".to_owned(),
                     downloaded_bytes: Some(4),
-                    total_bytes: None,
+                    total_bytes: Some(16),
                 },
                 ModelProgress::Downloading {
                     model: "local/test-potion".to_owned(),
@@ -751,48 +654,6 @@ mod tests {
         assert!(
             loaded.upgrade().is_none(),
             "dropping the model releases its loaded resources"
-        );
-    }
-
-    #[tokio::test]
-    async fn publication_failure_preserves_destination_and_removes_partial_artifact() {
-        let root = TempDir::new().expect("temporary directory");
-        let destination = root.path().join("artifact.safetensors");
-        tokio::fs::create_dir(&destination)
-            .await
-            .expect("conflicting destination directory");
-        let model = Model2VecEmbeddingModel::with_dependencies(
-            fixture_entry(),
-            ModelConfig {
-                cache_dir: Some(root.path().to_path_buf()),
-                ..ModelConfig::default()
-            },
-            Arc::new(FixtureDependencies::new(FixtureTokenizerMode::Oracle)),
-            crate::models::compute::ModelComputeRuntime::shared(),
-        );
-        let reporter = ModelDownloadProgressReporter::new(
-            model.entry.reference,
-            None,
-            [model.entry.model_file.to_owned()],
-        );
-
-        let error = model
-            .resolve_cached_file(model.entry.model_file, &destination, &reporter)
-            .await
-            .expect_err("directory destination must reject publication");
-
-        assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
-        assert!(
-            error
-                .cause()
-                .is_some_and(|cause| cause.contains("Unable to publish Model2Vec artifact"))
-        );
-        assert!(destination.is_dir());
-        assert_eq!(
-            std::fs::read_dir(root.path())
-                .expect("cache directory")
-                .count(),
-            1
         );
     }
 
@@ -1015,9 +876,10 @@ mod tests {
 
         assert_eq!(error.code(), crate::EngineError::CANCELLED);
         assert!(
-            error
-                .cause()
-                .is_some_and(|cause| cause.contains("cancelled"))
+            error.to_string().contains("cancelled")
+                || error
+                    .cause()
+                    .is_some_and(|cause| cause.contains("cancelled"))
         );
         model
             .embed(
@@ -1032,12 +894,18 @@ mod tests {
     }
 
     fn fixture_entry() -> Model2VecConfig {
+        let download =
+            crate::models::catalog::get_embedding_model_catalog_entry("local/potion-code-16m-v2")
+                .and_then(crate::models::catalog::EmbeddingCatalogEntry::model2vec_config)
+                .expect("fixture download metadata")
+                .download;
         Model2VecConfig {
             reference: "local/test-potion",
             provider: "local",
             model: "test-potion",
             repo: "test/potion",
             revision: "0123456789abcdef",
+            download,
             model_file: "model.safetensors",
             embedding_tensor: "embeddings",
             tokenizer_file: "tokenizer.json",
@@ -1134,6 +1002,61 @@ mod tests {
 
     #[async_trait]
     impl Model2VecDependencies for FixtureDependencies {
+        async fn resolve_artifacts(
+            &self,
+            entry: Model2VecConfig,
+            model_cache_dir: &Path,
+            reporter: &ModelDownloadProgressReporter,
+            signal: Option<&tokio_util::sync::CancellationToken>,
+        ) -> Result<Model2VecResolvedArtifacts, crate::models::spi::ModelError> {
+            if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+                return Err(crate::models::spi::ModelError::cancelled(
+                    "fixture download cancelled",
+                ));
+            }
+            let directory = model_cache_dir
+                .join("model2vec")
+                .join(entry.repo.replace('/', "--"))
+                .join(entry.revision);
+            let model_path = directory.join(entry.model_file);
+            let tokenizer_path = directory.join("tokenizer/tokenizer.json");
+            let missing = [
+                (!super::is_usable_model_file(&model_path).await)
+                    .then_some((entry.model_file.to_owned(), 8)),
+                (!super::is_usable_model_file(&tokenizer_path).await)
+                    .then_some((entry.tokenizer_file.to_owned(), 8)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            reporter.set_download_plan(missing.clone());
+            for (artifact, total) in missing {
+                self.downloads.fetch_add(1, Ordering::Relaxed);
+                reporter.report(
+                    &artifact,
+                    ArtifactDownloadProgress {
+                        downloaded_bytes: 4,
+                        total_bytes: Some(total),
+                    },
+                );
+                let destination = if artifact == entry.model_file {
+                    &model_path
+                } else {
+                    &tokenizer_path
+                };
+                tokio::fs::create_dir_all(destination.parent().expect("fixture parent"))
+                    .await
+                    .map_err(|error| crate::models::spi::ModelError::internal(error.to_string()))?;
+                tokio::fs::write(destination, b"asset")
+                    .await
+                    .map_err(|error| crate::models::spi::ModelError::internal(error.to_string()))?;
+            }
+            Ok(Model2VecResolvedArtifacts {
+                model_path,
+                tokenizer_path,
+            })
+        }
+
         async fn load_tokenizer(
             &self,
             _source: &Path,
@@ -1154,22 +1077,6 @@ mod tests {
                 dimension: 3,
                 rows: 3,
             })
-        }
-
-        async fn download(
-            &self,
-            _url: &str,
-            destination: &Path,
-            on_progress: Arc<dyn Fn(ArtifactDownloadProgress) + Send + Sync>,
-        ) -> Result<(), crate::models::spi::ModelError> {
-            self.downloads.fetch_add(1, Ordering::Relaxed);
-            on_progress(ArtifactDownloadProgress {
-                downloaded_bytes: 4,
-                total_bytes: Some(8),
-            });
-            tokio::fs::write(destination, b"asset")
-                .await
-                .map_err(|error| crate::models::spi::ModelError::internal(error.to_string()))
         }
     }
 }

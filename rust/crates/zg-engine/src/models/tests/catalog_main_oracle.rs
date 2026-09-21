@@ -3,22 +3,42 @@ use serde_json::{Value, json};
 use crate::{
     domain::model::Metric,
     models::catalog::{
-        EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig, TransformersConfig,
-        list_embedding_models,
+        ArtifactDownloadConfig, EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig,
+        TransformersConfig, list_embedding_models,
     },
 };
+
+// Last commit that changed src/engine/models/catalog.ts when this fixture was refreshed.
+const MAIN_CATALOG_SOURCE_REVISION: &str = "8d0d5e277f37d897e83749cdaa0e9c07f5e92efe";
 
 #[test]
 fn catalog_matches_main_typescript_field_for_field() {
     let expected: Value = serde_json::from_str(include_str!("fixtures/catalog-main-oracle.json"))
-        .expect("checked-in TypeScript catalog oracle must be valid JSON");
-    let actual = Value::Array(
+        .unwrap_or_else(|error| {
+            panic!(
+                "TypeScript catalog oracle from {MAIN_CATALOG_SOURCE_REVISION} must be valid JSON: {error}"
+            )
+        });
+    let actual = actual_catalog();
+    assert_eq!(actual, expected);
+}
+
+fn actual_catalog() -> Value {
+    Value::Array(
         list_embedding_models()
             .into_iter()
             .map(entry_value)
             .collect(),
+    )
+}
+
+#[test]
+#[ignore = "manual fixture refresh helper"]
+fn print_current_catalog_fixture() {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&actual_catalog()).expect("serialize catalog")
     );
-    assert_eq!(actual, expected);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -29,6 +49,8 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
             provider,
             model,
             uri,
+            cache_file,
+            download,
             dimension,
             metric,
             format,
@@ -40,6 +62,9 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
             "provider": provider,
             "model": model,
             "uri": uri,
+            "cacheFile": cache_file,
+            "sources": source_value(download),
+            "artifacts": artifact_value(download),
             "dimension": dimension,
             "metric": metric_name(metric),
             "format": format,
@@ -78,12 +103,13 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
             }
             value
         }
-        EmbeddingCatalogEntry::TransformersJs(TransformersConfig {
+        EmbeddingCatalogEntry::Transformers(TransformersConfig {
             reference,
             provider,
             model,
             repo,
             revision,
+            download,
             dtype,
             dimension,
             metric,
@@ -101,6 +127,8 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
                 "model": model,
                 "repo": repo,
                 "revision": revision,
+                "sources": source_value(download),
+                "artifacts": artifact_value(download),
                 "dtype": dtype,
                 "dimension": dimension,
                 "metric": metric_name(metric),
@@ -126,6 +154,7 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
             model,
             repo,
             revision,
+            download,
             model_file,
             embedding_tensor,
             tokenizer_file,
@@ -135,25 +164,67 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
             max_input_tokens,
             max_batch_size,
             default_concurrency,
-            ..
-        }) => json!({
-            "backend": "model2vec",
-            "reference": reference,
-            "provider": provider,
-            "model": model,
-            "repo": repo,
-            "revision": revision,
-            "modelFile": model_file,
-            "embeddingTensor": embedding_tensor,
-            "tokenizerFile": tokenizer_file,
-            "dimension": dimension,
-            "metric": metric_name(metric),
-            "normalize": normalize,
-            "maxInputTokens": max_input_tokens,
-            "maxBatchSize": max_batch_size,
-            "defaultConcurrency": default_concurrency,
-        }),
+            query_prefix,
+            document_prefix,
+        }) => {
+            let mut value = json!({
+                "backend": "model2vec",
+                "reference": reference,
+                "provider": provider,
+                "model": model,
+                "repo": repo,
+                "revision": revision,
+                "sources": source_value(download),
+                "artifacts": artifact_value(download),
+                "modelFile": model_file,
+                "embeddingTensor": embedding_tensor,
+                "tokenizerFile": tokenizer_file,
+                "dimension": dimension,
+                "metric": metric_name(metric),
+                "normalize": normalize,
+                "maxInputTokens": max_input_tokens,
+                "maxBatchSize": max_batch_size,
+                "defaultConcurrency": default_concurrency,
+            });
+            let object = value.as_object_mut().expect("catalog object");
+            if let Some(prefix) = query_prefix {
+                object.insert("queryPrefix".to_owned(), json!(prefix));
+            }
+            if let Some(prefix) = document_prefix {
+                object.insert("documentPrefix".to_owned(), json!(prefix));
+            }
+            value
+        }
     }
+}
+
+fn source_value(download: &ArtifactDownloadConfig) -> Value {
+    json!({
+        "huggingFace": {
+            "repo": download.hugging_face.repo,
+            "revision": download.hugging_face.revision,
+        },
+        "modelScope": {
+            "repo": download.model_scope.repo,
+            "revision": download.model_scope.revision,
+        },
+    })
+}
+
+fn artifact_value(download: &ArtifactDownloadConfig) -> Value {
+    Value::Array(
+        download
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                json!({
+                    "path": artifact.path,
+                    "size": artifact.size,
+                    "sha256": artifact.sha256,
+                })
+            })
+            .collect(),
+    )
 }
 
 const fn metric_name(metric: Metric) -> &'static str {
