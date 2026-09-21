@@ -136,8 +136,11 @@ async fn scoped_indexing_finishes_interrupted_updates_and_deletions_after_termin
     assert_eq!(files.len(), 2);
     for file in &files {
         assert_eq!(file["index_status"]["kind"], "indexed");
-        let name = file["relative_path"]["value"].as_str().expect("path");
-        assert_eq!(file["id"].as_u64(), Some(u64::from(identities[name])));
+        let name = file["relative_path"]["value"]
+            .as_str()
+            .expect("path")
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        assert_eq!(file["id"].as_u64(), Some(u64::from(identities[&name])));
     }
     for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
         assert_eq!(
