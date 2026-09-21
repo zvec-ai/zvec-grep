@@ -1930,19 +1930,8 @@ fn matched_by_label(value: MatchedBy) -> &'static str {
 fn range_label(range: &ContentRange) -> String {
     match range {
         ContentRange::File => "file".to_owned(),
-        ContentRange::Text {
-            start_line,
-            end_line,
-            start_byte_offset,
-            end_byte_offset,
-            end_byte_column,
-            ..
-        } => {
-            let last_line = if *end_byte_column == 0 && start_byte_offset < end_byte_offset {
-                end_line.saturating_sub(1)
-            } else {
-                *end_line
-            };
+        ContentRange::Text { start_line, .. } => {
+            let last_line = range.last_line().expect("text range has line coordinates");
             if *start_line == last_line {
                 start_line.to_string()
             } else {

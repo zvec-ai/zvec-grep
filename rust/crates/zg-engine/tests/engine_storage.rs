@@ -304,6 +304,7 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
         else {
             panic!("text source excerpt");
         };
+        assert_eq!(Some(&item.content_range), item.excerpt_range.as_ref());
         assert_eq!(
             source.get(*start_byte_offset..*end_byte_offset),
             Some(item.content.as_str())

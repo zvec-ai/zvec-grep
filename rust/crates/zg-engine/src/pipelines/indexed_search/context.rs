@@ -286,6 +286,7 @@ fn search_plan_to_context_items(
                 relative_path: hit.file.relative_path.to_path_buf(),
                 range: hit.entity.source_range.into(),
                 excerpt_range: target.excerpt_range,
+                content_range: target.content_range,
                 content: target.content,
                 outline: None,
                 content_role: Some(target.content_role),
@@ -467,6 +468,7 @@ fn context_item_dedupe_key(item: &ContextItem) -> String {
 
 struct ContextItemTarget {
     content: String,
+    content_range: ContentRange,
     content_role: ContextContentRole,
     excerpt_range: Option<ContentRange>,
 }
@@ -475,6 +477,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     let Some(evidence) = hit.evidence.first() else {
         return Ok(ContextItemTarget {
             content: content_to_text(&hit.entity.content),
+            content_range: hit.entity.source_range.into(),
             content_role: ContextContentRole::Source,
             excerpt_range: None,
         });
@@ -524,6 +527,9 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     };
     Ok(ContextItemTarget {
         content,
+        content_range: excerpt_range
+            .clone()
+            .unwrap_or_else(|| hit.entity.source_range.into()),
         content_role: ContextContentRole::Source,
         excerpt_range,
     })
@@ -719,6 +725,7 @@ mod tests {
         assert_eq!(target.content_role, ContextContentRole::Source);
         assert_eq!(target.content, "中😀\r\nβ");
         assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
+        assert_eq!(target.content_range, fragment_source_range.into());
         assert_eq!(hit.entity.content, Content::Text(source.into()));
         let search = SearchPlanResult {
             routes: Vec::new(),
@@ -738,10 +745,12 @@ mod tests {
         .expect("context items");
         assert_eq!(items[0].range, source_range.into());
         assert_eq!(items[0].excerpt_range, Some(fragment_source_range.into()));
+        assert_eq!(items[0].content_range, fragment_source_range.into());
         assert_eq!(items[0].content, "中😀\r\nβ");
         hit.evidence.reverse();
         let target = super::context_item_target(&hit).expect("full content");
         assert_eq!(target.content, source);
+        assert_eq!(target.content_range, source_range.into());
         assert_eq!(
             target.excerpt_range, None,
             "full fragments do not create an excerpt range"
@@ -752,6 +761,74 @@ mod tests {
             .err()
             .expect("invalid fragment must fail");
         assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
+    }
+
+    #[test]
+    fn markdown_eof_fragments_keep_their_own_source_coordinates() {
+        use crate::{
+            domain::{
+                Content, Entity, EntityFragment, EntityId, FileFormat, FileId, FileIndexStatus,
+                FileRecord, FileSnapshot, FragmentId, Range, SourcePath,
+            },
+            extraction::{ChunkOptions, TextSource, extract_for_indexing},
+            pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit},
+        };
+        for newline in ["", "\n", "\r\n"] {
+            let source = format!("# Heading\nprefix {} needle{newline}", "x".repeat(5_000));
+            let input = TextSource {
+                relative_path: SourcePath::new("sample.md").expect("source path"),
+                formats: vec![FileFormat::Markdown],
+                text: source.clone(),
+            };
+            let extracted = extract_for_indexing(&input, ChunkOptions::default())
+                .expect("default Markdown extraction")
+                .remove(0);
+            let file_id = FileId::new(1);
+            let id = EntityId::new(file_id, &extracted.content, extracted.source_range)
+                .expect("entity ID");
+            let fragment = EntityFragment {
+                id: FragmentId::new(&id, 0),
+                range: extracted.fragments.last().expect("EOF fragment").range,
+            };
+            let Range::Byte(bytes) = fragment.range else {
+                panic!("chunked source")
+            };
+            let hit = SearchHit {
+                entity: Entity {
+                    id,
+                    file_id,
+                    source_range: extracted.source_range,
+                    content: extracted.content,
+                    metadata: extracted.metadata,
+                    fragments: vec![fragment.clone()],
+                },
+                file: FileRecord {
+                    id: file_id,
+                    relative_path: input.relative_path,
+                    snapshot: FileSnapshot {
+                        size_bytes: source.len() as u64,
+                        modified_epoch_ms: None,
+                        content_hash: None,
+                    },
+                    index_status: FileIndexStatus::NotIndexed,
+                },
+                evidence: vec![SearchEvidence { fragment }],
+                rank: 1,
+                score: 1.0,
+                matched_by: MatchedBy::Fts,
+                trace: None,
+            };
+            let target = super::context_item_target(&hit).expect("source fragment");
+            let start = usize::try_from(bytes.start_offset()).expect("start");
+            let end = usize::try_from(bytes.end_offset()).expect("end");
+            assert!(start > "# Heading\nprefix ".len());
+            assert_eq!(target.content, source[start..end]);
+            assert_eq!(target.content_range.start_line(), Some(2));
+            assert_eq!(target.content_range.last_line(), Some(2));
+            assert_eq!(target.excerpt_range, Some(target.content_range));
+            assert_eq!(target.content.ends_with('\n'), !newline.is_empty());
+            assert!(matches!(hit.entity.content, Content::Text(_)));
+        }
     }
 
     #[test]
@@ -954,6 +1031,14 @@ mod tests {
             absolute_path: PathBuf::from("/workspace/source.rs"),
             relative_path: PathBuf::from("source.rs"),
             range: ContentRange::Text {
+                start_line: 1,
+                end_line: 1,
+                start_byte_offset: 0,
+                end_byte_offset: 1,
+                start_byte_column: 0,
+                end_byte_column: 1,
+            },
+            content_range: ContentRange::Text {
                 start_line: 1,
                 end_line: 1,
                 start_byte_offset: 0,

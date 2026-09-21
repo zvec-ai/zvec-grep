@@ -556,6 +556,7 @@ mod tests {
             relative_path: relative.into(),
             range,
             excerpt_range: None,
+            content_range: range,
             content: content.to_owned(),
         }
     }

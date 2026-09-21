@@ -695,21 +695,24 @@ impl MatchSink<'_> {
         else {
             return Ok(true);
         };
-        let end_byte_offset = line_offset
-            .checked_add(local.end_byte_offset())
-            .ok_or_else(|| io::Error::other("search match byte offset exceeds usize"))?;
-        let end_line = line_number
-            .checked_add(local.end_line() - 1)
-            .ok_or_else(|| io::Error::other("search match line number exceeds usize"))?;
-        let range = TextRange::from_coordinates(
-            line_offset + local.start_byte_offset(),
-            end_byte_offset,
-            line_number + (local.start_line() - 1),
-            end_line,
-            local.start_byte_column(),
-            local.end_byte_column(),
-        )
-        .map_err(io::Error::other)?;
+        let map_range = |local: TextRange| {
+            let end_byte_offset = line_offset
+                .checked_add(local.end_byte_offset())
+                .ok_or_else(|| io::Error::other("search match byte offset exceeds usize"))?;
+            let end_line = line_number
+                .checked_add(local.end_line() - 1)
+                .ok_or_else(|| io::Error::other("search match line number exceeds usize"))?;
+            TextRange::from_coordinates(
+                line_offset + local.start_byte_offset(),
+                end_byte_offset,
+                line_number + (local.start_line() - 1),
+                end_line,
+                local.start_byte_column(),
+                local.end_byte_column(),
+            )
+            .map_err(io::Error::other)
+        };
+        let range = map_range(local)?;
         let bytes = text.as_bytes();
         let content_start = line_starts[local.start_line() - 1];
         let content_end = if first.end() > first.start() && bytes[first.end() - 1] == b'\n' {
@@ -720,6 +723,12 @@ impl MatchSink<'_> {
                 .copied()
                 .unwrap_or(bytes.len())
         };
+        let content_end =
+            content_start + trim_line_terminator(&bytes[content_start..content_end]).len();
+        let content_range = map_range(
+            crate::utils::text_range_from_offsets(text, line_starts, content_start, content_end)
+                .map_err(io::Error::other)?,
+        )?;
         self.count += 1;
         self.results.push(LexicalMatch {
             rank: 0,
@@ -727,9 +736,8 @@ impl MatchSink<'_> {
             relative_path: self.relative_path.to_path_buf(),
             range,
             excerpt_range: None,
-            content: text[content_start
-                ..content_start + trim_line_terminator(&bytes[content_start..content_end]).len()]
-                .to_owned(),
+            content_range,
+            content: text[content_start..content_end].to_owned(),
         });
         Ok(true)
     }
@@ -1017,6 +1025,7 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         let content = source.text[start_byte_offset..end_byte_offset].to_owned();
         item.excerpt_range = Some(excerpt);
         item.range = range;
+        item.content_range = range;
         item.content = content;
     }
 }
@@ -1256,6 +1265,7 @@ mod tests {
             assert_eq!(item.range.start_line(), 1);
             assert_eq!(item.range.end_line(), 3);
             assert_eq!(item.range.end_byte_column(), "尾巴".len());
+            assert_eq!(item.content_range, item.range);
             assert_eq!(
                 crate::utils::slice_text(
                     text,
@@ -1303,11 +1313,19 @@ mod tests {
             relative_path: "source-0.txt".into(),
             range,
             excerpt_range: None,
+            content_range: crate::utils::text_range_from_offsets(
+                text,
+                &crate::utils::line_byte_offsets(text),
+                start,
+                start + text[start..end].trim_end_matches("\r\n").len(),
+            )
+            .expect("visible source range"),
             content: text[start..end].trim_end_matches("\r\n").to_owned(),
         }];
         request.options.matching.after_context = 0;
         expand_context(&mut items, &request);
         assert_eq!(items[0].content, &text[..end]);
+        assert_eq!(items[0].content_range, items[0].range);
         assert_eq!(items[0].excerpt_range, Some(range));
         assert_eq!(items[0].range.end_line(), 3);
         assert_eq!(items[0].range.end_byte_column(), 0);

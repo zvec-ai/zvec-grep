@@ -39,6 +39,8 @@ const item = (overrides = {}) => ({
   selection_reason: null,
   coverage_group: null,
   ...overrides,
+  content_range:
+    overrides.content_range ?? overrides.range ?? textRange(10, 33),
 });
 const group = (id, query, role = "primary") => ({ id, query, role });
 const groups = [
@@ -128,6 +130,7 @@ const cases = [
       item({
         range: textRange(1, 100),
         excerpt_range: textRange(50, 52),
+        content_range: textRange(50, 52),
         content: "function resolveContext() {\r\n  return true;\r\n}\r\n",
         metadata: {
           kind: "code",

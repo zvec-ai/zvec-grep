@@ -35,12 +35,11 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             writeln!(writer, "{}", item.relative_path.display())?;
             previous_path = Some(item.relative_path.as_path());
         }
-        writeln!(
-            writer,
-            "  {}: {}",
-            start_line(&item.range),
-            item.content.trim_end()
-        )?;
+        if let Some(first) = item.content_range.start_line() {
+            writeln!(writer, "  {first}: {}", item.content.trim_end())?;
+        } else {
+            writeln!(writer, "  {}", item.content.trim_end())?;
+        }
     }
     Ok(())
 }
@@ -96,24 +95,7 @@ pub fn write_context_with_options(
         if index > 0 {
             writeln!(writer)?;
         }
-        let range = match &item.range {
-            ContentRange::Text {
-                start_line,
-                end_line,
-                start_byte_offset,
-                end_byte_offset,
-                end_byte_column,
-                ..
-            } => {
-                let last_line = if *end_byte_column == 0 && start_byte_offset < end_byte_offset {
-                    end_line.saturating_sub(1)
-                } else {
-                    *end_line
-                };
-                format!("{start_line}-{last_line}")
-            }
-            _ => start_line(&item.range).to_string(),
-        };
+        let range = range_label(&item.range);
         let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
         let label = if options.human {
             format!("{}. {}:{}", item.rank, item.relative_path.display(), range)
@@ -195,10 +177,15 @@ fn write_item_preview(
         PreviewMode::Short => 10,
         PreviewMode::Full => usize::MAX,
     };
-    let first = start_line(item.excerpt_range.as_ref().unwrap_or(&item.range));
+    let first = item.content_range.start_line();
     let lines: Vec<_> = item.content.lines().collect();
-    let anchor = start_line(&item.range)
-        .saturating_sub(first)
+    let anchor = item
+        .excerpt_range
+        .as_ref()
+        .unwrap_or(&item.range)
+        .start_line()
+        .zip(first)
+        .map_or(0, |(matched, first)| matched.saturating_sub(first))
         .min(lines.len().saturating_sub(1));
     let from = if options.preview == PreviewMode::None {
         anchor
@@ -215,12 +202,30 @@ fn write_item_preview(
                 .take(if options.human { 120 } else { 160 })
                 .collect()
         };
-        writeln!(writer, "  {}: {line}", first + offset)?;
+        if let Some(first) = first {
+            writeln!(writer, "  {}: {line}", first + offset)?;
+        } else {
+            writeln!(writer, "  {line}")?;
+        }
     }
     if options.preview == PreviewMode::Short && lines.len() > from + max_lines {
         writeln!(writer, "  …")?;
     }
     Ok(())
+}
+
+fn range_label(range: &ContentRange) -> String {
+    if let (Some(first), Some(last)) = (range.start_line(), range.last_line()) {
+        return format!("{first}-{last}");
+    }
+    if let ContentRange::Byte {
+        start_offset,
+        end_offset,
+    } = range
+    {
+        return format!("bytes:{start_offset}-{end_offset}");
+    }
+    "file".to_owned()
 }
 
 /// Writes workspace status with the requested presentation and color policy.
@@ -863,13 +868,6 @@ Server scope:
 Explicit CLI options take priority. Help output never prints or stores
 environment values.";
 
-fn start_line(range: &ContentRange) -> usize {
-    match range {
-        ContentRange::Text { start_line, .. } => *start_line,
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
 mod output_tests {
     use super::*;
@@ -923,6 +921,14 @@ mod output_tests {
                 start_byte_column: 0,
                 end_byte_column: 6,
             },
+            content_range: ContentRange::Text {
+                start_line: 1,
+                end_line: 20,
+                start_byte_offset: 0,
+                end_byte_offset: 130,
+                start_byte_column: 0,
+                end_byte_column: 6,
+            },
             excerpt_range: None,
             outline: None,
             content: (1..=20)
@@ -940,6 +946,68 @@ mod output_tests {
             query_groups: vec![],
             selection_reason: None,
             coverage_group: None,
+        }
+    }
+
+    #[test]
+    fn preview_numbers_follow_content_range_instead_of_match_or_entity_range() {
+        for trailing_newline in [false, true] {
+            for whole_entity in [false, true] {
+                let mut item = indexed_item();
+                let source = format!(
+                    "# Heading\nprefix needle{}",
+                    if trailing_newline { "\n" } else { "" }
+                );
+                item.range = ContentRange::Text {
+                    start_line: 1,
+                    end_line: if trailing_newline { 3 } else { 2 },
+                    start_byte_offset: 0,
+                    end_byte_offset: source.len(),
+                    start_byte_column: 0,
+                    end_byte_column: if trailing_newline { 0 } else { 13 },
+                };
+                let mut excerpt = item.range.clone();
+                if let ContentRange::Text {
+                    start_line,
+                    start_byte_offset,
+                    start_byte_column,
+                    ..
+                } = &mut excerpt
+                {
+                    *start_line = 2;
+                    *start_byte_offset = 17;
+                    *start_byte_column = 7;
+                }
+                item.excerpt_range = Some(excerpt.clone());
+                item.content_range = if whole_entity {
+                    item.range.clone()
+                } else {
+                    excerpt
+                };
+                item.content = if whole_entity {
+                    source
+                } else {
+                    source[17..].to_owned()
+                };
+                for preview in [PreviewMode::Short, PreviewMode::Full] {
+                    let mut output = Vec::new();
+                    write_item_preview(
+                        &mut output,
+                        &item,
+                        OutputOptions {
+                            preview,
+                            ..OutputOptions::default()
+                        },
+                    )
+                    .expect("source preview");
+                    let expected = if whole_entity {
+                        "  1: # Heading\n  2: prefix needle\n"
+                    } else {
+                        "  2: needle\n"
+                    };
+                    assert_eq!(String::from_utf8(output).expect("UTF-8"), expected);
+                }
+            }
         }
     }
 
@@ -992,6 +1060,7 @@ mod output_tests {
             end_byte_column: 0,
         };
         result.items[0].content.push('\n');
+        result.items[0].content_range = result.items[0].range.clone();
         let mut buffer = Vec::new();
         write_context_with_options(&mut buffer, &result, OutputOptions::default(), false)
             .expect("render trailing newline");

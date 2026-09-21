@@ -39,6 +39,8 @@ pub(crate) struct LexicalMatch {
     pub relative_path: PathBuf,
     pub range: TextRange,
     pub excerpt_range: Option<TextRange>,
+    /// Source coordinates of the returned lines, which may extend beyond the match.
+    pub content_range: TextRange,
     pub content: String,
 }
 

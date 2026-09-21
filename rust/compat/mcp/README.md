@@ -30,3 +30,10 @@ cargo test --manifest-path rust/Cargo.toml -p zg-transport-mcp
 Configure the native library path as for the other Rust workspace tests.
 The legacy provider's unverified freshness is covered separately under
 `mcp-unverified-current-index-freshness` in `allowed-differences.toml`.
+
+Fixtures explicitly declare the source range of each item's content; the capture
+script does not infer it from text length. Node.js still uses a line-count heuristic
+in its formatter. Rust follows the engine's `content_range` instead, including when
+an EOF fragment retains a final empty line. Separate regression cases cover that
+known oracle bug, whole-entity content, and both preview modes under
+`engine-content-source-coordinates` in `allowed-differences.toml`.

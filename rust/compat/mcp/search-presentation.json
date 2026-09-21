@@ -38,7 +38,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           },
           {
             "kind": "indexed_entity",
@@ -66,7 +75,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],
@@ -149,7 +167,16 @@
             ],
             "selection_reason": "coverage",
             "coverage_group": "q1",
-            "outline": "  outline-member-1\n  outline-member-2\n  outline-member-3\n  outline-member-4\n  outline-member-5\n  outline-member-6\n  outline-member-7\n  outline-member-8\n  outline-member-9"
+            "outline": "  outline-member-1\n  outline-member-2\n  outline-member-3\n  outline-member-4\n  outline-member-5\n  outline-member-6\n  outline-member-7\n  outline-member-8\n  outline-member-9",
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           },
           {
             "kind": "indexed_entity",
@@ -176,7 +203,10 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": "global_fill",
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "file"
+            }
           }
         ],
         "group_results": [],
@@ -263,7 +293,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 50,
+              "end_line": 52,
+              "start_byte_offset": 5000,
+              "end_byte_offset": 5201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],
@@ -315,7 +354,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 13,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1301,
+              "start_byte_column": 0,
+              "end_byte_column": 0
+            }
           }
         ],
         "group_results": [],
@@ -363,7 +411,12 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "byte",
+              "start_offset": 3,
+              "end_offset": 9
+            }
           },
           {
             "kind": "indexed_entity",
@@ -392,7 +445,16 @@
             "query_groups": [],
             "selection_reason": null,
             "coverage_group": null,
-            "outline": "available outline only"
+            "outline": "available outline only",
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],
@@ -444,7 +506,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 13,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],
@@ -504,7 +575,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],
@@ -564,7 +644,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],
@@ -616,7 +705,16 @@
             "trace": null,
             "query_groups": [],
             "selection_reason": null,
-            "coverage_group": null
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
           }
         ],
         "group_results": [],

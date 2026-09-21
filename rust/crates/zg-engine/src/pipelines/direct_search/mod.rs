@@ -196,6 +196,7 @@ fn context_from_lexical(
                     relative_path: item.relative_path,
                     range: item.range.into(),
                     excerpt_range: item.excerpt_range.map(Into::into),
+                    content_range: item.content_range.into(),
                     content: item.content,
                     outline: None,
                     content_role: Some(ContextContentRole::Source),
@@ -266,6 +267,16 @@ mod tests {
         assert!(result.workspace_index.is_none());
         assert_eq!(result.items.len(), 1);
         let item = &result.items[0];
+        assert_eq!(item.content_range.start_line(), Some(2));
+        let ContentRange::Text {
+            start_byte_offset,
+            end_byte_offset,
+            ..
+        } = item.content_range
+        else {
+            panic!("source coordinates")
+        };
+        assert_eq!(&source[start_byte_offset..end_byte_offset], item.content);
         assert!(item.entity_id.is_none());
         assert!(item.content.contains("needle"));
         let container = item.container.as_ref().expect("function container");

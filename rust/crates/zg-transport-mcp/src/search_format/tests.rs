@@ -28,6 +28,88 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
     .expect("captured Node.js MCP fixtures")
 }
 
+fn source_range_cases() -> Vec<McpSearchPresentationCase> {
+    let mut cases = Vec::new();
+    for trailing_newline in [false, true] {
+        for whole_entity in [false, true] {
+            let source = format!(
+                "# Heading\nprefix needle{}",
+                if trailing_newline { "\n" } else { "" }
+            );
+            let entity = serde_json::json!({
+                "kind": "text", "start_line": 1,
+                "end_line": if trailing_newline { 3 } else { 2 },
+                "start_byte_offset": 0, "end_byte_offset": source.len(),
+                "start_byte_column": 0,
+                "end_byte_column": if trailing_newline { 0 } else { 13 }
+            });
+            let mut excerpt = entity.clone();
+            excerpt["start_line"] = 2.into();
+            excerpt["start_byte_offset"] = 17.into();
+            excerpt["start_byte_column"] = 7.into();
+            let mut value = fixtures().remove(0).result;
+            value["items"].as_array_mut().expect("items").truncate(1);
+            let item = &mut value["items"][0];
+            item["rank"] = 1.into();
+            item["relative_path"] = "sample.md".into();
+            item["range"] = entity.clone();
+            item["excerpt_range"] = excerpt.clone();
+            item["content_range"] = if whole_entity { entity } else { excerpt };
+            item["content"] = if whole_entity {
+                source.clone()
+            } else {
+                source[17..].to_owned()
+            }
+            .into();
+            let lines = if whole_entity {
+                "1\t# Heading\n2\tprefix needle"
+            } else {
+                "2\tneedle"
+            };
+            let expected = format!(
+                "freshness: fresh\n#1 matchedBy=fts+vector sample.md:1-2\nmatched: 2\nsource:\n{lines}{}",
+                if trailing_newline { "\n3\t" } else { "" }
+            );
+            cases.push(McpSearchPresentationCase {
+                id: format!(
+                    "explicit-content-range-whole-{whole_entity}-newline-{trailing_newline}"
+                ),
+                result: value,
+                expected_short: expected.clone(),
+                expected_full: expected,
+            });
+        }
+    }
+    cases
+}
+
+#[test]
+fn engine_content_range_controls_source_line_numbers() {
+    for case in source_range_cases() {
+        let result: ContextResult = serde_json::from_value(case.result).expect("context");
+        for preview in [SearchPreview::Short, SearchPreview::Full] {
+            assert_eq!(
+                format_search_result(&result, preview),
+                case.expected_full,
+                "{} {preview:?}",
+                case.id
+            );
+        }
+    }
+}
+
+#[test]
+fn content_coordinates_are_required_at_the_engine_boundary() {
+    let mut value = source_range_cases().remove(0).result;
+    value["items"][0]
+        .as_object_mut()
+        .expect("item")
+        .remove("content_range");
+    let error =
+        serde_json::from_value::<ContextResult>(value).expect_err("missing content coordinates");
+    assert!(error.to_string().contains("content_range"));
+}
+
 #[test]
 fn captured_node_search_presentation() {
     for fixture in fixtures() {
@@ -113,7 +195,7 @@ impl IndexOperationProvider for FixedSearch {
 #[tokio::test]
 async fn public_tool_preview_matches_node_without_changing_retrieval() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let cases = fixtures();
+        let cases = fixtures().into_iter().chain(source_range_cases()).collect::<Vec<_>>();
         for toolset in [McpToolset::Agent, McpToolset::Full] {
             let backend = Arc::new(FixedSearch {
                 result: Mutex::new(serde_json::from_value(cases[0].result.clone()).expect("fixture")),

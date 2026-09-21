@@ -76,7 +76,7 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
     items.sort_by(|left, right| {
         left.rank
             .cmp(&right.rank)
-            .then_with(|| start_line(&left.range).cmp(&start_line(&right.range)))
+            .then_with(|| left.range.start_line().cmp(&right.range.start_line()))
             .then_with(|| range_label(&left.range).cmp(&range_label(&right.range)))
     });
     for (position, item) in items.into_iter().enumerate() {
@@ -200,12 +200,12 @@ fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
         return Vec::new();
     }
     let content: Vec<_> = split_lines(&item.content).collect();
-    let first = start_line(content_range(item, content.len()));
+    let first = item.content_range.start_line();
     let (start, end) = if preview == SearchPreview::Short && content.len() > 10 {
         let anchor = item
             .excerpt_range
             .as_ref()
-            .and_then(start_line)
+            .and_then(ContentRange::start_line)
             .map_or(0, |line| {
                 first.map_or(0, |first| line.saturating_sub(first))
             });
@@ -213,7 +213,7 @@ fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
         let before = if item
             .excerpt_range
             .as_ref()
-            .is_some_and(|range| line_count(range) >= 10)
+            .is_some_and(|range| range.line_count().is_some_and(|count| count >= 10))
         {
             0
         } else {
@@ -233,8 +233,10 @@ fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
         let prefix = number.map_or(String::new(), |number| number.to_string());
         let marker = if item.kind == ContextItemKind::LexicalMatch && number.is_some() {
             let range = item.excerpt_range.as_ref().unwrap_or(&item.range);
-            let matched = start_line(range).is_none_or(|start| {
-                number.is_some_and(|number| number >= start && number < start + line_count(range))
+            let matched = range.start_line().is_none_or(|start| {
+                number.is_some_and(|number| {
+                    number >= start && number < start + range.line_count().unwrap_or(1)
+                })
             });
             if matched { ":" } else { "-" }
         } else {
@@ -251,49 +253,6 @@ fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
         lines.push("...".to_owned());
     }
     lines
-}
-
-fn content_range(item: &ContextItem, lines: usize) -> &ContentRange {
-    let Some(excerpt) = &item.excerpt_range else {
-        return &item.range;
-    };
-    if item.kind == ContextItemKind::LexicalMatch {
-        return &item.range;
-    }
-    if start_line(&item.range).is_none()
-        || start_line(excerpt).is_none()
-        || (lines <= line_count(excerpt).saturating_add(2) && lines < line_count(&item.range))
-    {
-        excerpt
-    } else {
-        &item.range
-    }
-}
-
-fn start_line(range: &ContentRange) -> Option<usize> {
-    match range {
-        ContentRange::Text { start_line, .. } => Some(*start_line),
-        _ => None,
-    }
-}
-
-fn line_count(range: &ContentRange) -> usize {
-    match range {
-        ContentRange::Text {
-            start_line,
-            end_line,
-            start_byte_offset,
-            end_byte_offset,
-            end_byte_column,
-            ..
-        } => {
-            let end = end_line.saturating_sub(usize::from(
-                *end_byte_column == 0 && start_byte_offset < end_byte_offset,
-            ));
-            end.saturating_sub(*start_line).saturating_add(1)
-        }
-        _ => 1,
-    }
 }
 
 fn split_lines(content: &str) -> impl Iterator<Item = &str> {

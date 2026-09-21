@@ -172,6 +172,15 @@ matched ranges, source line numbers, and available code or Markdown metadata.
 The current engine supplies source snapshots without generated outlines; the
 optional outline is displayed only when provided with a result.
 
+The engine provides `content_range` for the exact source coordinates of returned
+content, independently of the entity `range` and matched `excerpt_range`. CLI and
+MCP use these coordinates for source numbering; preview never infers a range from
+the number of content lines. The engine also interprets half-open line bounds.
+The required field changes the internal daemon reply contract (version 12).
+Restart older resident daemons when updating the CLI; replies without
+`content_range` are rejected during deserialization. Direct and server rendering
+consume the same engine contract.
+
 Public search reports `freshness: fresh` or `freshness: possibly_stale`.
 `results: served_from_current_index` describes where results came from, with
 `background_refresh` reported separately. A provider that only reports current

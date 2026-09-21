@@ -12,7 +12,7 @@ use zg_engine::api::{
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 11;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
