@@ -1,0 +1,432 @@
+use super::*;
+use crate::job_scheduler::JobReason;
+
+fn fixture(
+    executor: Arc<dyn IndexExecutor>,
+) -> (WorkspaceRuntimeManager, mpsc::Sender<WorkspaceChangeBatch>) {
+    let (sender, receiver) = mpsc::channel(8);
+    (
+        WorkspaceRuntimeManager::new(
+            executor,
+            Arc::new(ManualWatcherFactory {
+                receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+                watches: Mutex::new(Vec::new()),
+                closes: Arc::new(AtomicUsize::new(0)),
+            }),
+            SchedulerConfig::default(),
+        ),
+        sender,
+    )
+}
+
+async fn deliver(
+    manager: &WorkspaceRuntimeManager,
+    sender: &mpsc::Sender<WorkspaceChangeBatch>,
+    root: &std::path::Path,
+    change: WorkspaceChange,
+) {
+    sender
+        .send(WorkspaceChangeBatch {
+            changes: vec![change],
+        })
+        .await
+        .expect("event");
+    let runtime = manager
+        .runtime(root.to_path_buf(), &IndexOptions::default())
+        .expect("runtime");
+    manager.flush_watcher(&runtime).await.expect("flush");
+    runtime.settle_jobs(&manager.inner.scheduler, None).await;
+}
+
+#[tokio::test]
+async fn repeated_clean_refreshes_and_narrow_changes_do_not_rescan() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let executor = Arc::new(RecordingExecutor::default());
+    let (manager, sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    assert!(
+        manager
+            .refresh_index(options.clone(), true)
+            .await
+            .expect("first reconcile")
+    );
+    for wait in [true, false, true, false] {
+        assert!(
+            !manager
+                .refresh_index(options.clone(), wait)
+                .await
+                .expect("clean")
+        );
+    }
+    assert_eq!(executor.calls.lock().expect("calls").len(), 1);
+    deliver(
+        &manager,
+        &sender,
+        &root,
+        WorkspaceChange::Upsert("changed.rs".into()),
+    )
+    .await;
+    assert!(
+        !manager
+            .refresh_index(options.clone(), true)
+            .await
+            .expect("narrow change indexed")
+    );
+    assert_eq!(
+        executor.calls.lock().expect("calls")[1].changes,
+        [IndexChange::Upsert("changed.rs".into())]
+    );
+    deliver(&manager, &sender, &root, WorkspaceChange::Rescan).await;
+    assert!(
+        !manager
+            .refresh_index(options, true)
+            .await
+            .expect("watcher rescan is sufficient")
+    );
+    assert_eq!(executor.calls.lock().expect("calls").len(), 3);
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn concurrent_waits_share_a_refresh_and_background_does_not_wait_for_it() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (manager, _sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root),
+        ..IndexOptions::default()
+    };
+    let first = tokio::spawn({
+        let manager = manager.clone();
+        let options = options.clone();
+        async move { manager.refresh_index(options, true).await }
+    });
+    jobs.recv().await.expect("first refresh");
+    let second = tokio::spawn({
+        let manager = manager.clone();
+        let options = options.clone();
+        async move { manager.refresh_index(options, true).await }
+    });
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.refresh_index(options, false)
+        )
+        .await
+        .expect("background returns")
+        .expect("scheduled")
+    );
+    executor.release.add_permits(1);
+    assert!(first.await.expect("task").expect("refreshed"));
+    assert!(!second.await.expect("task").expect("reused proof"));
+    assert!(jobs.try_recv().is_err());
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_new_recovery_epoch_cannot_be_cleared_by_an_older_full_refresh() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (manager, _sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    let waiting = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.refresh_index(options, true).await }
+    });
+    jobs.recv().await.expect("first refresh");
+    manager
+        .runtime(root, &IndexOptions::default())
+        .expect("runtime")
+        .require_reconciliation();
+    executor.release.add_permits(1);
+    let second = jobs
+        .recv()
+        .await
+        .expect("new recovery needs another refresh");
+    assert_eq!(second.changes, [IndexChange::Rescan]);
+    assert!(!waiting.is_finished());
+    executor.release.add_permits(1);
+    waiting.await.expect("task").expect("fresh");
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let executor = Arc::new(RecordingExecutor::default());
+    let (manager, sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial refresh");
+    executor.fail.store(true, Ordering::Release);
+    deliver(
+        &manager,
+        &sender,
+        &root,
+        WorkspaceChange::Upsert("failed.rs".into()),
+    )
+    .await;
+    executor.fail.store(false, Ordering::Release);
+    deliver(
+        &manager,
+        &sender,
+        &root,
+        WorkspaceChange::Upsert("later.rs".into()),
+    )
+    .await;
+    assert!(
+        !manager
+            .runtime(root, &options)
+            .expect("runtime")
+            .is_reconciled()
+    );
+    assert!(
+        manager
+            .refresh_index(options, true)
+            .await
+            .expect("repair lost batch")
+    );
+    assert_eq!(executor.calls.lock().expect("calls").len(), 4);
+    assert_eq!(
+        executor.calls.lock().expect("calls")[3].changes,
+        [IndexChange::Rescan]
+    );
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn restarting_a_watcher_requires_a_new_reconciliation() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let executor = Arc::new(RecordingExecutor::default());
+    let (manager, _sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial refresh");
+    manager.stop_watching(&root).await.expect("watcher stopped");
+    assert!(
+        manager
+            .refresh_index(options, true)
+            .await
+            .expect("repair watcher gap")
+    );
+    assert_eq!(executor.calls.lock().expect("calls").len(), 2);
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+struct PartiallyFailingExecutor;
+#[async_trait]
+impl IndexExecutor for PartiallyFailingExecutor {
+    async fn index(&self, _options: IndexOptions) -> Result<IndexResult, EngineError> {
+        Ok(IndexResult {
+            files_failed: 1,
+            ..IndexResult::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn partial_index_failure_is_not_cached_as_fresh_or_retried_forever() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (manager, _sender) = fixture(Arc::new(PartiallyFailingExecutor));
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.refresh_index(options.clone(), true),
+    )
+    .await
+    .expect("bounded failure")
+    .expect_err("not fresh");
+    assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+    assert!(
+        !manager
+            .runtime(root, &options)
+            .expect("runtime")
+            .is_reconciled()
+    );
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn cancelled_wait_releases_refresh_coordination_without_losing_the_job_proof() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (manager, _sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root),
+        ..IndexOptions::default()
+    };
+    let first = tokio::spawn({
+        let manager = manager.clone();
+        let options = options.clone();
+        async move { manager.refresh_index(options, true).await }
+    });
+    jobs.recv().await.expect("first refresh");
+    first.abort();
+    assert!(first.await.expect_err("cancelled").is_cancelled());
+    executor.release.add_permits(1);
+    assert!(
+        !manager
+            .refresh_index(options, true)
+            .await
+            .expect("finish existing work")
+    );
+    assert!(jobs.try_recv().is_err());
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn native_watcher_clean_refreshes_reuse_the_initial_reconciliation() {
+    use zg_engine::api::index::options::EmbeddingModelSpec;
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = Arc::new(zg_engine::ZvecGrep::new());
+    let manager = WorkspaceRuntimeManager::native(engine.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        embedding: Some(EmbeddingModelSpec {
+            reference: "qwen/text-embedding-v4".into(),
+            revision: None,
+            cache_dir: None,
+            endpoint: None,
+            device: zg_engine::api::index::options::Device::Cpu,
+        }),
+        endpoint: Some("http://127.0.0.1:1/empty-index".into()),
+        api_key: Some("fixture-key".into()),
+        allow_remote: true,
+        ..IndexOptions::default()
+    };
+    manager
+        .submit_index(options.clone(), true)
+        .await
+        .expect("empty index");
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial watcher reconciliation");
+    let id = manager.job_for_root(&root).expect("initial job").id;
+    for wait in [true, false, true] {
+        assert!(
+            !manager
+                .refresh_index(options.clone(), wait)
+                .await
+                .expect("unchanged workspace")
+        );
+        assert_eq!(manager.job_for_root(&root).expect("same job").id, id);
+    }
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn rejected_watcher_batches_require_full_repair_after_queue_pressure_ends() {
+    let workspace = tempdir().expect("workspace");
+    let other = tempdir().expect("other workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(1),
+    });
+    let (sender, receiver) = mpsc::channel(8);
+    let manager = WorkspaceRuntimeManager::new(
+        executor.clone(),
+        Arc::new(ManualWatcherFactory {
+            receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+            watches: Mutex::new(Vec::new()),
+            closes: Arc::new(AtomicUsize::new(0)),
+        }),
+        SchedulerConfig {
+            concurrency: 1,
+            queue_capacity: 0,
+        },
+    );
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial refresh");
+    jobs.recv().await.expect("initial scan");
+    let blocker = manager
+        .inner
+        .scheduler
+        .submit(
+            other.path().to_path_buf(),
+            IndexOptions::default(),
+            JobReason::Manual,
+        )
+        .expect("other writer");
+    jobs.recv().await.expect("other writer running");
+    deliver(
+        &manager,
+        &sender,
+        &root,
+        WorkspaceChange::Upsert("lost.rs".into()),
+    )
+    .await;
+    assert!(
+        !manager
+            .runtime(root, &options)
+            .expect("runtime")
+            .is_reconciled()
+    );
+    executor.release.add_permits(1);
+    manager
+        .inner
+        .scheduler
+        .wait(blocker.job.id)
+        .await
+        .expect("other writer finishes");
+    executor.release.add_permits(1);
+    assert!(
+        manager
+            .refresh_index(options, true)
+            .await
+            .expect("repair rejected change")
+    );
+    assert_eq!(
+        jobs.recv().await.expect("repair job").changes,
+        [IndexChange::Rescan]
+    );
+    manager.shutdown_all().await.expect("shutdown");
+}

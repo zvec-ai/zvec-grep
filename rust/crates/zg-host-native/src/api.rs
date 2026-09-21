@@ -251,6 +251,12 @@ pub trait WorkspaceWatchSessionPort: Send + Sync {
         Ok(())
     }
 
+    /// Publishes events already delivered by the backend without requesting a scan
+    /// merely because a reader is waiting. Conservative backends may use `flush`.
+    async fn flush_pending(&self) -> Result<(), HostError> {
+        self.flush().await
+    }
+
     async fn next_changes(&self, control: &TaskControl) -> Result<WorkspaceChangeBatch, HostError>;
 
     async fn close(&self) -> Result<(), HostError>;

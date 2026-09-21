@@ -177,8 +177,14 @@ struct NativeWatchSession {
 }
 
 #[derive(Debug)]
+struct FlushRequest {
+    reconcile: bool,
+    acknowledge: oneshot::Sender<()>,
+}
+
+#[derive(Debug)]
 struct WatchSessionInner {
-    flush_sender: mpsc::Sender<oneshot::Sender<()>>,
+    flush_sender: mpsc::Sender<FlushRequest>,
     receiver: Mutex<mpsc::Receiver<WorkspaceChangeBatch>>,
     close: CancellationToken,
     task: StdMutex<Option<JoinHandle<()>>>,
@@ -195,18 +201,31 @@ impl Drop for WatchSessionInner {
     }
 }
 
-#[async_trait]
-impl WorkspaceWatchSessionPort for NativeWatchSession {
-    async fn flush(&self) -> Result<(), HostError> {
+impl NativeWatchSession {
+    async fn flush_changes(&self, reconcile: bool) -> Result<(), HostError> {
         let (sender, receiver) = oneshot::channel();
         self.inner
             .flush_sender
-            .send(sender)
+            .send(FlushRequest {
+                reconcile,
+                acknowledge: sender,
+            })
             .await
             .map_err(|_| HostError::resource_closed("workspace watcher has stopped"))?;
         receiver
             .await
             .map_err(|_| HostError::resource_closed("workspace watcher flush was interrupted"))
+    }
+}
+
+#[async_trait]
+impl WorkspaceWatchSessionPort for NativeWatchSession {
+    async fn flush(&self) -> Result<(), HostError> {
+        self.flush_changes(true).await
+    }
+
+    async fn flush_pending(&self) -> Result<(), HostError> {
+        self.flush_changes(false).await
     }
 
     async fn next_changes(&self, control: &TaskControl) -> Result<WorkspaceChangeBatch, HostError> {
@@ -246,7 +265,7 @@ impl WorkspaceWatchSessionPort for NativeWatchSession {
 }
 
 struct WatchLoop {
-    flush_receiver: mpsc::Receiver<oneshot::Sender<()>>,
+    flush_receiver: mpsc::Receiver<FlushRequest>,
     root: RootSpec,
     root_is_file: bool,
     config: NativeWatcherConfig,
@@ -277,12 +296,39 @@ async fn watch_loop(mut state: WatchLoop) {
     let mut stable_deadline = Some(Instant::now() + Duration::from_secs(1));
     let mut consecutive_errors = 0_u32;
     let mut recovery_reconcile_pending = false;
+    let mut pending_flush: Option<oneshot::Sender<()>> = None;
 
     loop {
+        // Drain delivered raw events before acknowledging a reader's barrier.
+        // Events not delivered by the OS are covered by recovery/periodic rescans.
+        if pending_flush.is_some() && state.raw_receiver.is_empty() {
+            if state.overflowed.swap(false, Ordering::AcqRel)
+                || state.watcher.is_none()
+                || retry_deadline.is_some()
+            {
+                changes.require_full_rescan();
+                if let Err(error) = refresh_watcher(&mut state).await {
+                    warn!(%error, "could not refresh watcher registrations at reader barrier");
+                    retry_deadline = Some(Instant::now() + retry_delay(consecutive_errors));
+                }
+            }
+            if !flush_changes(&mut changes, &state.batch_sender, &state.close).await {
+                break;
+            }
+            debounce_deadline = None;
+            max_wait_deadline = None;
+            if let Some(acknowledge) = pending_flush.take() {
+                let _ = acknowledge.send(());
+            }
+        }
         let mut refresh_registration = false;
         tokio::select! {
             () = state.close.cancelled() => break,
-            Some(acknowledge) = state.flush_receiver.recv() => {
+            Some(request) = state.flush_receiver.recv(), if pending_flush.is_none() => {
+                if !request.reconcile {
+                    pending_flush = Some(request.acknowledge);
+                    continue;
+                }
                 // Reconciliation covers native events still pending delivery or normalization.
                 refresh_registration = true;
                 changes.require_full_rescan();
@@ -291,7 +337,7 @@ async fn watch_loop(mut state: WatchLoop) {
                 }
                 debounce_deadline = None;
                 max_wait_deadline = None;
-                let _ = acknowledge.send(());
+                let _ = request.acknowledge.send(());
             }
             () = sleep_until_option(debounce_deadline) => {
                 if !flush_changes(&mut changes, &state.batch_sender, &state.close).await {
@@ -1343,4 +1389,6 @@ mod tests {
                 .contains_key(&directory.join("src/deep"))
         );
     }
+
+    mod flush;
 }

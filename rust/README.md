@@ -186,6 +186,17 @@ invalid responses, declined forms, cancellation and timeouts never grant consent
 Cancelling the originating request also sends a cancellation notification for its
 pending consent form; clients control how that notification is presented.
 
+Daemon freshness checks reuse successful reconciliation proofs while the watcher
+is active and all observed revisions are indexed. `Wait` drains delivered watcher
+events and queued successors; concurrent waiters share one refresh. A clean
+`Background` query reports `idle` without submitting another job. Initial watcher
+installation, recovery, overflow, rejected batches, and failed indexing require a
+full reconciliation. Proofs retain their original revision and recovery epoch so
+an older completion cannot clear newer changes; partial file failures are never
+cached as fresh. Native `flush_pending` drains delivered events without forcing a
+scan, while explicit `flush` and periodic/recovery checks retain full rescans.
+Explicit `info` inspection still reads current disk status.
+
 ## MCP request lifecycle
 
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both

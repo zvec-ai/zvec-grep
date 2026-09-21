@@ -43,6 +43,9 @@ use zg_transport_mcp::{
     IndexRuntimeSnapshot,
 };
 
+mod freshness;
+use freshness::Freshness;
+
 #[derive(Clone)]
 pub(crate) struct WorkspaceRuntimeManager {
     inner: Arc<RuntimeManagerInner>,
@@ -69,6 +72,8 @@ struct WorkspaceRuntime {
     watcher_active: AtomicBool,
     dirty_revision: AtomicU64,
     indexed_revision: AtomicU64,
+    freshness: Mutex<Freshness>,
+    refresh: tokio::sync::Mutex<()>,
 }
 
 /// The epoch prevents a scan started before a mutation from restoring an invalidated snapshot.
@@ -281,12 +286,10 @@ impl WorkspaceRuntimeManager {
         let runtime = self.runtime(canonical_root.clone(), &options)?;
         let reconfigure = options.reset_paths || options.scan != ScanRulesUpdate::default();
         let template = index_template(&options);
-        runtime.invalidate_status();
+        runtime.require_reconciliation();
         let target_revision = runtime.dirty_revision.load(Ordering::Acquire);
-        let submitted = self
-            .inner
-            .scheduler
-            .submit(canonical_root, options, JobReason::Manual)?;
+        let submitted =
+            runtime.submit_tracked(&self.inner.scheduler, options, JobReason::Manual)?;
         {
             let manager = self.clone();
             let job_id = submitted.job.id;
@@ -294,9 +297,10 @@ impl WorkspaceRuntimeManager {
             let activity = runtime.continuation();
             tokio::spawn(async move {
                 let Ok(completed) = manager.inner.scheduler.wait(job_id).await else {
+                    activity.forget_job_proof(job_id);
                     return;
                 };
-                activity.invalidate_status();
+                activity.complete_job(&completed);
                 if completed.job.state == JobState::Succeeded {
                     let _ = manager
                         .on_index_succeeded(
@@ -323,7 +327,7 @@ impl WorkspaceRuntimeManager {
             .scheduler
             .wait_with_progress(submitted.job.id, reporter)
             .await?;
-        runtime.invalidate_status();
+        runtime.complete_job(&completed);
         if completed.job.state == JobState::Succeeded
             && let Err(error) = self
                 .on_index_succeeded(
@@ -355,73 +359,105 @@ impl WorkspaceRuntimeManager {
         Ok(submission(completed, submitted.reused))
     }
 
-    async fn refresh_index(&self, options: IndexOptions, wait: bool) -> Result<(), EngineError> {
+    /// Returns whether refresh work was scheduled or is already in flight.
+    async fn refresh_index(
+        &self,
+        mut options: IndexOptions,
+        wait: bool,
+    ) -> Result<bool, EngineError> {
         let root = canonical_root(options.root.as_deref())
             .map_err(WorkspaceRuntimeError::into_engine_error)?;
         let runtime = self.runtime(root.clone(), &options)?;
-        // Watch submissions always queue a successor to an already running job.
-        // A full reconciliation also covers changes still in watcher debounce.
-        let mut options = options;
+        let _refresh = if wait {
+            runtime.refresh.lock().await
+        } else {
+            let Ok(refresh) = runtime.refresh.try_lock() else {
+                return Ok(true);
+            };
+            refresh
+        };
         let reporter = options.on_progress.take();
         if !wait {
+            // A submitted background job outlives the request that created it.
             options.signal = None;
         }
-        options.changes = vec![IndexChange::Rescan];
-        if wait {
+        let mut scheduled = false;
+        loop {
+            let busy = self
+                .job_for_root(&root)
+                .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running));
+            if !wait && busy {
+                return Ok(true);
+            }
             self.ensure_watching(Arc::clone(&runtime))
                 .await
                 .map_err(WorkspaceRuntimeError::into_engine_error)?;
             self.flush_watcher(&runtime).await?;
-        }
-        runtime.invalidate_status();
-        let revision = runtime.dirty_revision.load(Ordering::Acquire);
-        let submitted = self
-            .inner
-            .scheduler
-            .submit(root.clone(), options, JobReason::Watch)
-            .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
-        {
-            let manager = self.clone();
-            let runtime = runtime.continuation();
-            let job_id = submitted.job.id;
-            tokio::spawn(async move {
-                if let Ok(completed) = manager.inner.scheduler.wait(job_id).await {
-                    runtime.invalidate_status();
-                    if completed.job.state != JobState::Succeeded {
+            if !wait
+                && self
+                    .job_for_root(&root)
+                    .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running))
+            {
+                return Ok(true);
+            }
+            // Apply proofs ourselves as well: completion callbacks can be scheduled
+            // after scheduler waiters, and must not cause a duplicate reconciliation.
+            if wait {
+                runtime
+                    .settle_jobs(&self.inner.scheduler, reporter.clone())
+                    .await;
+                self.inner.scheduler.wait_for_root_idle(&root).await;
+            } else if !runtime.settle_completed_jobs(&self.inner.scheduler) {
+                return Ok(true);
+            }
+            if runtime.is_reconciled() {
+                return Ok(scheduled);
+            }
+            runtime.invalidate_status();
+            options.changes = vec![IndexChange::Rescan];
+            let submitted = runtime
+                .submit_tracked(&self.inner.scheduler, options.clone(), JobReason::Watch)
+                .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
+            scheduled = true;
+            {
+                let manager = self.clone();
+                let runtime = runtime.continuation();
+                let job_id = submitted.job.id;
+                tokio::spawn(async move {
+                    let Ok(completed) = manager.inner.scheduler.wait(job_id).await else {
+                        runtime.forget_job_proof(job_id);
                         return;
-                    }
-                    runtime
-                        .indexed_revision
-                        .fetch_max(revision, Ordering::AcqRel);
-                    if let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await {
+                    };
+                    runtime.complete_job(&completed);
+                    if completed.job.state == JobState::Succeeded
+                        && let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await
+                    {
                         warn!(%error, "search refresh watcher activation failed");
                     }
-                }
-            });
+                });
+            }
+            if !wait {
+                return Ok(true);
+            }
+            let completed = self
+                .inner
+                .scheduler
+                .wait_with_progress(submitted.job.id, reporter.clone())
+                .await
+                .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
+            runtime.complete_job(&completed);
+            ensure_refresh_succeeded(&completed.job)?;
+            if completed
+                .result
+                .as_ref()
+                .is_none_or(|result| result.files_failed != 0)
+            {
+                return Err(EngineError::storage_failure(
+                    "index refresh left failed files",
+                ));
+            }
+            // Flush again after indexing to include events that arrived during it.
         }
-        if !wait {
-            return Ok(());
-        }
-        let completed = self
-            .inner
-            .scheduler
-            .wait_with_progress(submitted.job.id, reporter)
-            .await
-            .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
-        runtime.invalidate_status();
-        ensure_refresh_succeeded(&completed.job)?;
-        runtime
-            .indexed_revision
-            .fetch_max(revision, Ordering::AcqRel);
-        self.ensure_watching(Arc::clone(&runtime))
-            .await
-            .map_err(WorkspaceRuntimeError::into_engine_error)?;
-        // Include successor jobs submitted by the watcher while reconciliation ran.
-        self.inner.scheduler.wait_for_root_idle(&root).await;
-        if let Some(job) = self.job_for_root(&root) {
-            ensure_refresh_succeeded(&job)?;
-        }
-        Ok(())
     }
 
     async fn flush_watcher(&self, runtime: &WorkspaceRuntime) -> Result<(), EngineError> {
@@ -431,7 +467,11 @@ impl WorkspaceRuntimeManager {
                 "workspace watcher is not active",
             ));
         };
-        handle.session.flush().await.map_err(map_host_error)?;
+        handle
+            .session
+            .flush_pending()
+            .await
+            .map_err(map_host_error)?;
         let (sender, receiver) = oneshot::channel();
         handle
             .barrier
@@ -607,6 +647,8 @@ impl WorkspaceRuntimeManager {
                 watcher_active: AtomicBool::new(false),
                 dirty_revision: AtomicU64::new(1),
                 indexed_revision: AtomicU64::new(0),
+                freshness: Mutex::new(Freshness::default()),
+                refresh: tokio::sync::Mutex::new(()),
             })
         });
         let activity = RuntimeActivity::begin(runtime, true)
@@ -710,6 +752,7 @@ impl WorkspaceRuntimeManager {
             lock(&runtime.pending_watcher_configuration).take();
             return Ok(());
         }
+        runtime.require_reconciliation();
         let cancellation = self.inner.shutdown.child_token();
         let session = self
             .inner
@@ -885,7 +928,8 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             options.root = Some(reply.root.clone());
             reply.freshness = Some("served_from_current_index".to_owned());
             reply.background_refresh = Some(match self.refresh_index(options, false).await {
-                Ok(()) => "scheduled".to_owned(),
+                Ok(true) => "scheduled".to_owned(),
+                Ok(false) => "idle".to_owned(),
                 Err(error) => {
                     warn!(%error, "search background refresh could not be scheduled");
                     "failed".to_owned()
@@ -1049,7 +1093,7 @@ async fn watch_loop(
             break;
         };
         runtime.invalidate_status();
-        let target_revision = runtime.dirty_revision.fetch_add(1, Ordering::AcqRel) + 1;
+        runtime.dirty_revision.fetch_add(1, Ordering::AcqRel);
         let mut options = lock(&runtime.index_template).clone();
         // One-operation consent must never authorize later watcher jobs.
         options.allow_remote = false;
@@ -1060,10 +1104,10 @@ async fn watch_loop(
         options.root = Some(runtime.canonical_root.clone());
         options.rebuild = false;
         options.changes = batch.changes.into_iter().map(map_change).collect();
-        let Ok(submitted) =
-            inner
-                .scheduler
-                .submit(runtime.canonical_root.clone(), options, JobReason::Watch)
+        if options.changes.contains(&IndexChange::Rescan) {
+            runtime.require_reconciliation();
+        }
+        let Ok(submitted) = runtime.submit_tracked(&inner.scheduler, options, JobReason::Watch)
         else {
             continue;
         };
@@ -1074,22 +1118,20 @@ async fn watch_loop(
         tokio::spawn(async move {
             let runtime = activity;
             let Ok(completed) = scheduler.wait(submitted.job.id).await else {
+                runtime.forget_job_proof(submitted.job.id);
                 return;
             };
-            runtime.invalidate_status();
+            runtime.complete_job(&completed);
             if completed.job.state != JobState::Succeeded {
                 return;
             }
-            runtime
-                .indexed_revision
-                .fetch_max(target_revision, Ordering::AcqRel);
             if let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await {
                 warn!(%error, "watch successor could not activate pending configuration");
             }
         });
     }
     if let Some(runtime) = weak_runtime.upgrade() {
-        runtime.invalidate_status();
+        runtime.require_reconciliation();
         runtime.watcher_active.store(false, Ordering::Release);
     }
 }
@@ -1642,12 +1684,12 @@ mod tests {
         let waiting =
             tokio::spawn(async move { waiting_manager.refresh_index(options, true).await });
         tokio::time::timeout(Duration::from_secs(2), async {
-            while manager.snapshot().jobs.queued == 0 {
+            while !manager.runtime_snapshot(&root).watcher_active {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("refresh must queue behind the running job");
+        .expect("refresh waits for the running job after flushing its watcher");
         assert!(!waiting.is_finished());
         executor.release.add_permits(1);
         let refresh = jobs.recv().await.expect("refresh started");
@@ -2142,5 +2184,6 @@ mod tests {
         manager.shutdown_all().await.expect("shutdown");
     }
 
+    mod freshness;
     mod lifecycle;
 }
