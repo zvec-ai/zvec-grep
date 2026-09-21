@@ -190,7 +190,16 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
     assert_eq!(remaining, ids[..ids.len() - 1]);
 }
 
+// TODO: re-enable on macOS once the zvec native binary registers the
+// `array_take` Arrow compute kernel. See bug report: `fetch_with_options`
+// silently returns a field-stripped Doc on macOS, so `mark_deleting`
+// (fetch → mutate → upsert) persists a corrupted record and the follow-up
+// `fetch` panics with "Field not found in document".
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "zvec macOS native missing array_take kernel; corrupts fetch→upsert path"
+)]
 fn deleting_preserves_file_projections_until_record_removal() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
