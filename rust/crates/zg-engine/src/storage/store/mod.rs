@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord, model::Metric},
+    domain::{Entity, FileId, FileIndexStatus, FileRecord},
     utils::{atomic_write as write_record, sync_directory},
 };
 
@@ -514,11 +514,6 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
             schema.dimension,
             vector.len()
         )));
-    }
-    if schema.metric == Metric::Cosine && vector.iter().all(|value| *value == 0.0) {
-        return Err(EngineError::invalid_argument(
-            "cosine vectors must have a non-zero norm",
-        ));
     }
     Ok(())
 }

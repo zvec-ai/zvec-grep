@@ -1,6 +1,7 @@
 use super::super::types::StoragePathFilter;
 use super::*;
 use crate::domain::SourcePath;
+use crate::domain::model::Metric;
 use crate::domain::{
     CodeMetadata, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileRecord,
     FileSnapshot, FragmentId, Range, SymbolType, TableCell, TableCellRole, TableContent,
@@ -840,7 +841,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         "healthy document",
         vec![1.0, 0.0, 0.0],
     );
-    for invalid in [vec![1.0], vec![f32::NAN, 0.0, 0.0], vec![0.0, 0.0, 0.0]] {
+    for invalid in [vec![1.0], vec![f32::NAN, 0.0, 0.0]] {
         entry.vector = invalid;
         assert_eq!(
             storage
@@ -934,6 +935,35 @@ fn rejects_invalid_writes_without_poisoning_storage() {
         1
     );
     storage.close().expect("close writer");
+}
+
+#[test]
+fn persists_zero_cosine_vector_without_failing_its_file() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let writer = open(directory.path(), false);
+    let (file, entry) = fixture(
+        Some(&writer),
+        "zero",
+        "hexadecimal shading data",
+        vec![0.0, 0.0, 0.0],
+    );
+    writer
+        .replace_fixture_file(&file, &[entry])
+        .expect("zvec accepts a zero vector");
+    writer.close().expect("persist zero vector");
+
+    let reader = open(directory.path(), true);
+    let files = reader.list_files().expect("read indexed file");
+    assert_eq!(files.len(), 1);
+    assert!(files[0].index_status.is_indexed());
+    assert_eq!(
+        reader
+            .search_fts("hexadecimal", 10, None)
+            .expect("search text from zero-vector fragment")
+            .len(),
+        1
+    );
+    reader.close().expect("close reader");
 }
 
 #[test]

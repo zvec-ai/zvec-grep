@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::model::Metric;
 use crate::domain::{
     ByteRange, CodeMetadata, Content, EntityFragment, EntityId, EntityMetadata, FileSnapshot,
     FragmentId, Range, SourcePath, SymbolType, TextRange,
