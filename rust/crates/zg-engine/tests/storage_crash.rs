@@ -154,10 +154,11 @@ fn file_identities(path: &Path) -> TestResult<BTreeMap<String, u32>> {
     native_file_records(path)?
         .into_iter()
         .map(|file| {
+            // Stored relative_path uses native separators; callers key by forward slash.
             let name = file["relative_path"]["value"]
                 .as_str()
                 .expect("path")
-                .to_owned();
+                .replace(std::path::MAIN_SEPARATOR, "/");
             let id = u32::try_from(file["id"].as_u64().expect("file ID"))?;
             Ok((name, id))
         })
