@@ -6,3 +6,5 @@ mod path_filter;
 mod pipeline;
 pub(crate) mod service;
 pub(crate) mod storage;
+
+pub(crate) mod writer;

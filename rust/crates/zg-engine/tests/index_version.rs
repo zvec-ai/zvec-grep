@@ -274,10 +274,13 @@ async fn rebuilding_node_index_preserves_old_data_until_successful_publication()
     assert_eq!(cancelled.code(), EngineError::CANCELLED);
     assert_node_index_preserved(root, &manifest)?;
     assert!(!home.join("build.json").exists());
+    assert!(
+        !home.join("generations").exists(),
+        "cancelled admission must not prepare generation storage"
+    );
 
     // Fail stage creation after the ownership record is written, without touching
     // either legacy collection or its active manifest.
-    fs::remove_dir(home.join("generations"))?;
     fs::write(
         home.join("generations"),
         "cannot create a generation below a file",

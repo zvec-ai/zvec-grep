@@ -5,7 +5,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
 use std::sync::Arc;
 
 use zg_host_native::NativeScanner;
@@ -38,7 +37,7 @@ use crate::{
             WorkspaceIndexLocation, find_nearest_workspace, reset_workspace_index,
             workspace_index_location,
         },
-        lock::{LockMode, acquire_home_lock},
+        lock::{FileLock, LockMode, LockWait},
         manifest::{
             ManifestState, WorkspaceManifest, inspect_workspace_manifest, read_workspace_manifest,
             write_workspace_manifest,
@@ -55,6 +54,7 @@ const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
+    pub(crate) writers: crate::pipelines::indexed_search::writer::WriterContexts,
     scanner: NativeScanner,
     registry: Option<WorkspaceRegistry>,
     #[cfg(test)]
@@ -66,6 +66,7 @@ pub(crate) struct WorkspaceIndexService {
 impl WorkspaceIndexService {
     pub(crate) fn new() -> Self {
         Self {
+            writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
             scanner: NativeScanner::default(),
             registry: None,
             #[cfg(test)]
@@ -79,6 +80,7 @@ impl WorkspaceIndexService {
     pub(crate) fn with_test_registry() -> Self {
         let directory = Arc::new(tempfile::tempdir().expect("test workspace registry"));
         Self {
+            writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
             scanner: NativeScanner::default(),
             registry: Some(
                 WorkspaceRegistry::at(directory.path().join("workspaces.json"))
@@ -163,15 +165,19 @@ impl WorkspaceIndexService {
         let location = find_nearest_workspace(&requested_root)?
             .map_or_else(|| workspace_index_location(&requested_root), Ok)?;
         options.root = Some(location.root.clone());
-        let _lock = acquire_home_lock(
-            &location.home,
-            LockMode::Write,
-            if options.rebuild {
-                "index.rebuild"
-            } else {
-                "index"
-            },
-        )?;
+        let home_lock = Arc::new(
+            LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?
+                .acquire(
+                    &location.home,
+                    LockMode::Write,
+                    if options.rebuild {
+                        "index.rebuild"
+                    } else {
+                        "index"
+                    },
+                )
+                .await?,
+        );
         // Check the on-disk version before any registry, recovery or storage mutation.
         let mut existing =
             inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
@@ -238,7 +244,9 @@ impl WorkspaceIndexService {
             None
         };
         let pending = build.clone();
-        let result = self.run_index(manifest, build, acquired, options).await;
+        let result = self
+            .run_index(manifest, build, acquired, options, Arc::clone(&home_lock))
+            .await;
         if result.is_err()
             && let Some(build) = pending
         {
@@ -255,18 +263,30 @@ impl WorkspaceIndexService {
         build: Option<WorkspaceBuild>,
         models: Vec<ModelRuntimeLease>,
         options: IndexOptions,
+        home_lock: Arc<FileLock>,
     ) -> Result<IndexResult, EngineError> {
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: manifest.storage_home(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
         })?;
-        let embedding_models = models
+        let writer = self.writers.register(
+            crate::pipelines::indexed_search::writer::WriterSession::new(
+                storage,
+                models,
+                manifest.clone(),
+                home_lock,
+            ),
+            build.is_none(),
+        );
+        let embedding_models = writer
+            .session
+            .models
             .iter()
             .map(|model| model as &dyn IndexEmbeddingRuntime)
             .collect::<Vec<_>>();
         let result = index_workspace(&IndexingContext {
             workspace_index: &manifest.workspace,
-            storage: &storage,
+            storage: &writer.session.storage,
             scanner: &self.scanner,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
@@ -286,7 +306,8 @@ impl WorkspaceIndexService {
         });
         // Closing precedes publication: all checkpoints and native handles belong
         // to the completed generation before the active manifest can select it.
-        let close_result = storage.close();
+        writer.retire().await;
+        let close_result = writer.session.storage.close();
         let indexed = result?;
         close_result?;
         if options
@@ -311,8 +332,11 @@ impl WorkspaceIndexService {
     pub(in crate::pipelines) async fn workspace_needs_refresh(
         &self,
         location: &WorkspaceIndexLocation,
+        wait: &LockWait<'_>,
     ) -> Result<bool, EngineError> {
-        let _lock = acquire_home_lock(&location.home, LockMode::Read, "context.refresh")?;
+        let _lock = wait
+            .acquire(&location.home, LockMode::Read, "context.refresh")
+            .await?;
         let Some(manifest) = read_workspace_manifest(&location.home)? else {
             return Ok(false);
         };
@@ -343,7 +367,9 @@ impl WorkspaceIndexService {
                 WorkspaceIndexPolicy::Uninitialized,
             ));
         };
-        let _lock = acquire_home_lock(&location.home, LockMode::Read, "info")?;
+        let _lock = LockWait::new(None, None)?
+            .acquire(&location.home, LockMode::Read, "info")
+            .await?;
         let mut manifest = match inspect_workspace_manifest(&location.home)? {
             ManifestState::Current(manifest) => manifest,
             ManifestState::Missing => {
@@ -409,7 +435,7 @@ impl WorkspaceIndexService {
         })
     }
 
-    pub(crate) fn drop_index(&self, options: &InfoOptions) -> Result<bool, EngineError> {
+    pub(crate) async fn drop_index(&self, options: &InfoOptions) -> Result<bool, EngineError> {
         let location = workspace_index_location_from_option(options.root.as_deref())?;
         let registry = self.registry()?;
         let name = registry.name_for_root(&location.root)?;
@@ -424,7 +450,9 @@ impl WorkspaceIndexService {
         })? {
             return registry.unregister_missing(&location.root);
         }
-        let _lock = acquire_home_lock(&location.home, LockMode::Write, "index.drop")?;
+        let _lock = LockWait::new(None, None)?
+            .acquire(&location.home, LockMode::Write, "index.drop")
+            .await?;
         let registration = if let Some(name) = registry.name_for_root(&location.root)? {
             Some((name, location.root.clone()))
         } else {
@@ -1072,8 +1100,8 @@ mod tests {
         models.close();
     }
 
-    #[test]
-    fn dropping_a_missing_index_is_an_idempotent_no_op() {
+    #[tokio::test]
+    async fn dropping_a_missing_index_is_an_idempotent_no_op() {
         let directory = tempdir().expect("temporary directory");
 
         assert!(
@@ -1082,12 +1110,13 @@ mod tests {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
                 })
+                .await
                 .expect("missing index should be an idempotent no-op")
         );
     }
 
-    #[test]
-    fn dropping_orphaned_generation_storage_does_not_require_a_manifest() {
+    #[tokio::test]
+    async fn dropping_orphaned_generation_storage_does_not_require_a_manifest() {
         let directory = tempdir().expect("workspace");
         let home = directory.path().join(".zvec-grep");
         let storage = home
@@ -1102,12 +1131,18 @@ mod tests {
         };
         assert!(!home.join("manifest.json").exists());
         assert!(!home.join("build.json").exists());
-        assert!(service.drop_index(&options).expect("drop orphaned storage"));
+        assert!(
+            service
+                .drop_index(&options)
+                .await
+                .expect("drop orphaned storage")
+        );
         assert!(!storage.exists());
         assert!(home.join("generations").is_dir());
         assert!(
             !service
                 .drop_index(&options)
+                .await
                 .expect("empty container is not an index")
         );
     }
@@ -1299,7 +1334,10 @@ mod tests {
         let location = super::workspace_index_location(directory.path()).expect("location");
         assert!(
             !service
-                .workspace_needs_refresh(&location)
+                .workspace_needs_refresh(
+                    &location,
+                    &super::LockWait::new(None, None).expect("wait")
+                )
                 .await
                 .expect("refresh decision")
         );
@@ -1309,6 +1347,7 @@ mod tests {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false
                 })
+                .await
                 .expect("drop incomplete build")
         );
         assert!(!super::has_build(&home));
@@ -1357,10 +1396,16 @@ mod tests {
         assert!(
             service
                 .drop_index(&options)
+                .await
                 .expect("drop deleted workspace")
         );
         assert!(!deleted.exists());
-        assert!(!service.drop_index(&options).expect("idempotent cleanup"));
+        assert!(
+            !service
+                .drop_index(&options)
+                .await
+                .expect("idempotent cleanup")
+        );
         let name = "shared".to_owned();
         let registry = service.registry().expect("registry");
         assert_eq!(registry.root_for_name(&name).expect("released name"), None);
@@ -1408,6 +1453,7 @@ mod tests {
                     root: Some(moved.clone()),
                     include_status: false,
                 })
+                .await
                 .expect("drop moved workspace")
         );
         let name = "shared".to_owned();
@@ -1781,6 +1827,7 @@ mod tests {
                     root: Some(moved),
                     include_status: false,
                 })
+                .await
                 .expect("drop the moved workspace before rename replay")
         );
         let registry = service.registry().expect("registry");
@@ -1874,10 +1921,11 @@ mod tests {
         assert!(
             service
                 .drop_index(&info)
+                .await
                 .expect("drop reservation without manifest")
         );
         assert_eq!(registry.root_for_name(&name).expect("released name"), None);
-        assert!(!service.drop_index(&info).expect("idempotent drop"));
+        assert!(!service.drop_index(&info).await.expect("idempotent drop"));
         models.close();
     }
 
@@ -2004,7 +2052,7 @@ mod tests {
         assert!(rebuilt.workspace.created_epoch_ms >= manifest.workspace.created_epoch_ms);
         assert_ne!(rebuilt.storage_generation, manifest.storage_generation);
 
-        assert!(service.drop_index(&info_options).expect("drop index"));
+        assert!(service.drop_index(&info_options).await.expect("drop index"));
         assert!(!super::IndexStore::exists(&rebuilt.storage_home()).expect("storage was deleted"));
         models.close();
     }

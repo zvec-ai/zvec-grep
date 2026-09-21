@@ -91,7 +91,7 @@ impl EngineService {
     /// Returns an engine error when index removal fails or no storage backend is configured.
     pub(crate) async fn drop_index(&self, options: InfoOptions) -> Result<bool, EngineError> {
         self.ensure_open()?;
-        std::future::ready(self.indexing.drop_index(&options)).await
+        self.indexing.drop_index(&options).await
     }
 
     /// Closes this service and rejects subsequent requests.

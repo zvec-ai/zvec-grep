@@ -7,6 +7,9 @@ use std::{
 
 use crate::EngineError;
 
+mod wait;
+pub(crate) use wait::{LockWait, try_home_read};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LockMode {
     Read,
@@ -16,17 +19,55 @@ pub(crate) enum LockMode {
 #[derive(Debug)]
 pub(crate) struct FileLock {
     // Release the cache barrier before allowing new home readers.
-    read_cache: Option<File>,
+    _read_cache: Option<File>,
     // Closing the file releases the lock. Keep its path in place so every
     // process continues to lock the same file.
     _file: File,
+    // Keep writer intent until both residency and the home lock are released.
+    _intent: Option<File>,
 }
 
+#[cfg(test)]
 pub(crate) fn acquire_home_lock(
     home: &Path,
     mode: LockMode,
     operation: &str,
 ) -> Result<FileLock, EngineError> {
+    check_home_parent(home, operation)?;
+    let lock = acquire_read_write_lock(&home.join("locks/home"), mode, operation)?;
+    if matches!(mode, LockMode::Write) {
+        crate::storage::read_session::release_for_write(home);
+        let cache_path = home.join("locks/read-cache");
+        let cache_lock = open_lock_file(&cache_path, operation)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match cache_lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    // Remote cache maintenance observes our exclusive home lock
+                    // and closes idle native handles before releasing residency.
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(EngineError::resource_busy(format!(
+                        "timed out draining index read caches: lock={} operation={operation}",
+                        cache_path.display()
+                    )));
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(EngineError::from_io("drain index read caches", &error));
+                }
+            }
+        }
+        return Ok(FileLock {
+            _read_cache: Some(cache_lock),
+            ..lock
+        });
+    }
+    Ok(lock)
+}
+
+fn check_home_parent(home: &Path, operation: &str) -> Result<(), EngineError> {
     let error = |source| {
         EngineError::from_io(
             format!(
@@ -53,34 +94,7 @@ pub(crate) fn acquire_home_lock(
             "workspace root is not a directory",
         )));
     }
-    let mut lock = acquire_read_write_lock(&home.join("locks/home"), mode, operation)?;
-    if matches!(mode, LockMode::Write) {
-        crate::storage::read_session::release_for_write(home);
-        let cache_path = home.join("locks/read-cache");
-        let cache_lock = open_lock_file(&cache_path, operation)?;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match cache_lock.try_lock() {
-                Ok(()) => break,
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    // Remote cache maintenance observes our exclusive home lock
-                    // and closes idle native handles before releasing residency.
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(TryLockError::WouldBlock) => {
-                    return Err(EngineError::resource_busy(format!(
-                        "timed out draining index read caches: lock={} operation={operation}",
-                        cache_path.display()
-                    )));
-                }
-                Err(TryLockError::Error(error)) => {
-                    return Err(EngineError::from_io("drain index read caches", &error));
-                }
-            }
-        }
-        lock.read_cache = Some(cache_lock);
-    }
-    Ok(lock)
+    Ok(())
 }
 
 pub(crate) fn acquire_read_write_lock(
@@ -108,7 +122,8 @@ pub(crate) fn acquire_read_write_lock(
     })?;
     Ok(FileLock {
         _file: file,
-        read_cache: None,
+        _read_cache: None,
+        _intent: None,
     })
 }
 
@@ -141,7 +156,8 @@ pub(crate) fn acquire_exclusive_lock(
     })?;
     Ok(FileLock {
         _file: file,
-        read_cache: None,
+        _read_cache: None,
+        _intent: None,
     })
 }
 
@@ -190,6 +206,28 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn queued_writer_waits_for_an_active_reader() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        let reader = acquire_home_lock(&home, LockMode::Read, "query").expect("reader");
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            started.send(()).expect("announce writer");
+            LockWait::new(None, None)
+                .expect("wait budget")
+                .acquire(&home, LockMode::Write, "index")
+                .await
+        });
+        waiting.await.expect("writer started");
+        tokio::task::yield_now().await;
+        drop(reader);
+        writer
+            .await
+            .expect("writer task")
+            .expect("writer waits instead of failing busy");
+    }
 
     #[test]
     fn home_lock_requires_an_existing_workspace_root() {

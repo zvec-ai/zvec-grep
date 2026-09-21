@@ -237,6 +237,10 @@ impl fmt::Debug for ModelRuntimeManager {
 }
 
 impl ModelRuntimeLease {
+    pub(super) fn matches_request_impl(&self, request: &ModelRuntimeRequest) -> bool {
+        self.key == ModelRuntimeKey::new(&request.reference, &request.options)
+    }
+
     pub(super) fn concurrency_defaults_impl(&self) -> EmbeddingConcurrencyDefaults {
         self.entry.runtime.model.concurrency_defaults()
     }

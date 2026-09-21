@@ -79,6 +79,9 @@ pub mod options {
         pub max_file_size_bytes: Option<u64>,
         pub follow: bool,
         pub embedding_concurrency: Option<usize>,
+        /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub lock_timeout_ms: Option<u64>,
         /// Allows remote embedding for this operation without persisting a grant.
         #[serde(default)]
         pub allow_remote: bool,
@@ -162,6 +165,7 @@ pub mod options {
                 max_file_size_bytes: None,
                 follow: false,
                 embedding_concurrency: None,
+                lock_timeout_ms: None,
                 allow_remote: false,
                 authorized_remote: Vec::new(),
                 api_key: None,

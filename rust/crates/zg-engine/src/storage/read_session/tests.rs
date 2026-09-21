@@ -401,14 +401,24 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
         .await
         .expect("first query");
     assert_eq!(first.items.len(), 1);
-    let session = Arc::downgrade(&lock(&cache.inner.state).entries[&fixture.home].session);
+    let session = Arc::downgrade(
+        &lock(&lock(&cache.inner.state).entries[&fixture.home].entry)
+            .as_ref()
+            .expect("session")
+            .session,
+    );
     let second = context(&indexing, &models, &options, Some(&cache))
         .await
         .expect("warm query");
     assert_eq!(first.items, second.items);
     assert!(Weak::ptr_eq(
         &session,
-        &Arc::downgrade(&lock(&cache.inner.state).entries[&fixture.home].session)
+        &Arc::downgrade(
+            &lock(&lock(&cache.inner.state).entries[&fixture.home].entry)
+                .as_ref()
+                .expect("session")
+                .session
+        )
     ));
     assert_eq!(
         models.snapshot().cached_runtimes,
@@ -460,4 +470,51 @@ async fn benchmark_warm_queries() {
             durations[25], durations[47]
         );
     }
+}
+
+#[test]
+fn cold_open_does_not_block_another_workspaces_cache_hit() {
+    let cold = Fixture::new();
+    let warm = Fixture::new();
+    let cache = cache();
+    let (home_lock, lease) = warm.read(&cache);
+    drop(lease);
+    drop(home_lock);
+    let (started, opening) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let cache = &cache;
+        scope.spawn(move || {
+            let _home = acquire_home_lock(&cold.home, LockMode::Read, "cold").expect("reader");
+            cache
+                .acquire_with(&cold.home, &cold.storage_home, || {
+                    started.send(()).expect("opening");
+                    released.recv().expect("allow native open");
+                    IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                        storage_path: cold.storage_home.clone(),
+                    })
+                })
+                .expect("cold query");
+        });
+        opening.recv().expect("cold open in progress");
+        let (completed, completion) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let (_home, lease) = warm.read(cache);
+            completed
+                .send(
+                    lease
+                        .storage()
+                        .search_fts("orchard", 10, None)
+                        .expect("warm search")
+                        .len(),
+                )
+                .expect("result");
+        });
+        let result = completion.recv_timeout(Duration::from_secs(2));
+        release.send(()).expect("release cold open even on failure");
+        assert_eq!(
+            result.expect("warm cache hit must not wait for another workspace"),
+            1
+        );
+    });
 }

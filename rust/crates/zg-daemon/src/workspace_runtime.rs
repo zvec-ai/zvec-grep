@@ -774,7 +774,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             RefreshPolicy::Off
         });
         request.auto_update = false;
-        request.refresh = Some(RefreshPolicy::Off);
+        request.refresh = Some(policy);
         if policy == RefreshPolicy::Off {
             let mut reply = engine.context(request).await?;
             reply.freshness = Some("served_from_current_index".to_owned());
@@ -790,6 +790,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             api_key: request.api_key.clone(),
             endpoint: request.endpoint.clone(),
             embedding_concurrency: request.embedding_concurrency,
+            lock_timeout_ms: request.lock_timeout_ms,
             device: request.device,
             model_cache: request.model_cache.clone(),
             ..IndexOptions::default()
@@ -818,21 +819,24 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .max_by_key(|root| root.components().count())
             .cloned()
             .unwrap_or(requested_root);
-        self.inner.scheduler.wait_for_root_idle(&root).await;
-        let info = engine
-            .info(InfoOptions {
-                root: request.root.clone(),
-                include_status: false,
-            })
-            .await?;
-        info.compatibility.ensure_compatible()?;
-        if !info.indexed {
+        wait_for_search_refresh(&request, async {
+            self.inner.scheduler.wait_for_root_idle(&root).await;
+            let info = engine
+                .info(InfoOptions {
+                    root: request.root.clone(),
+                    include_status: false,
+                })
+                .await?;
+            info.compatibility.ensure_compatible()?;
+            if info.indexed {
+                let mut options = options;
+                options.root = Some(info.root);
+                self.refresh_index(options, true).await?;
+            }
             // Preserve the engine's missing-index error without silently creating one.
-            return engine.context(request).await;
-        }
-        let mut options = options;
-        options.root = Some(info.root);
-        self.refresh_index(options, true).await?;
+            Ok(())
+        })
+        .await?;
         let mut reply = engine.context(request).await?;
         reply.freshness = Some("fresh".to_owned());
         reply.background_refresh = Some("idle".to_owned());
@@ -877,6 +881,29 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                 })
             }),
         })
+    }
+}
+
+async fn wait_for_search_refresh<T>(
+    request: &ContextOptions,
+    work: impl std::future::Future<Output = Result<T, EngineError>>,
+) -> Result<T, EngineError> {
+    let timeout = std::time::Duration::from_millis(request.lock_timeout_ms.unwrap_or(30_000));
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| EngineError::invalid_argument("workspace lock timeout is too large"))?;
+    let cancelled = async {
+        match &request.signal {
+            Some(signal) => signal.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        biased;
+        () = cancelled => Err(EngineError::cancelled("search refresh wait was cancelled")),
+        result = tokio::time::timeout_at(deadline, work) => result.unwrap_or_else(|_| {
+            Err(EngineError::resource_busy("timed out waiting for search refresh"))
+        }),
     }
 }
 
@@ -1011,6 +1038,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     // Configuration patches and one-operation controls must never be replayed.
     template.name = None;
     template.signal = None;
+    template.lock_timeout_ms = None;
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
@@ -1412,6 +1440,83 @@ mod tests {
             .scheduler
             .wait_for_root_idle(&workspace.path().canonicalize().expect("root"))
             .await;
+        manager.shutdown_all().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn waiting_search_can_cancel_or_time_out_behind_a_running_job() {
+        use zg_engine::{
+            ZvecGrep,
+            api::context::{ContextOptions, options::RefreshPolicy},
+        };
+        use zg_transport_mcp::IndexOperationProvider;
+        let workspace = tempdir().expect("workspace");
+        let (started, mut jobs) = mpsc::unbounded_channel();
+        let executor = Arc::new(GatedExecutor {
+            started,
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let (_sender, receiver) = mpsc::channel(4);
+        let manager = WorkspaceRuntimeManager::new(
+            executor.clone(),
+            Arc::new(ManualWatcherFactory {
+                receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+                watches: Mutex::new(Vec::new()),
+                closes: Arc::new(AtomicUsize::new(0)),
+            }),
+            SchedulerConfig::default(),
+        );
+        let root = workspace.path().canonicalize().expect("root");
+        manager
+            .submit_index(
+                IndexOptions {
+                    root: Some(root.clone()),
+                    ..IndexOptions::default()
+                },
+                false,
+            )
+            .await
+            .expect("submit writer");
+        jobs.recv().await.expect("writer running");
+        let signal = tokio_util::sync::CancellationToken::new();
+        let request = ContextOptions {
+            root: Some(root.clone()),
+            refresh: Some(RefreshPolicy::Wait),
+            signal: Some(signal.clone()),
+            ..ContextOptions::default()
+        };
+        let waiting = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.search(&ZvecGrep::new(), request).await }
+        });
+        tokio::task::yield_now().await;
+        signal.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("cancel promptly")
+            .expect("search task")
+            .expect_err("cancelled search");
+        assert_eq!(error.code(), EngineError::CANCELLED);
+        let error = manager
+            .search(
+                &ZvecGrep::new(),
+                ContextOptions {
+                    root: Some(root.clone()),
+                    refresh: Some(RefreshPolicy::Wait),
+                    lock_timeout_ms: Some(10),
+                    ..ContextOptions::default()
+                },
+            )
+            .await
+            .expect_err("bounded wait");
+        assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
+        assert_eq!(
+            manager.snapshot().jobs.running,
+            1,
+            "other callers' job remains active"
+        );
+        executor.release.add_permits(1);
+        manager.inner.scheduler.wait_for_root_idle(&root).await;
         manager.shutdown_all().await.expect("shutdown");
     }
 

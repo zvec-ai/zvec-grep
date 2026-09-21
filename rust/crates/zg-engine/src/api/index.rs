@@ -35,6 +35,9 @@ pub mod options {
         /// Maximum embedding batch tasks for this index operation.
         /// The model default is used when omitted.
         pub embedding_concurrency: Option<usize>,
+        /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub lock_timeout_ms: Option<u64>,
         /// Allows remote embedding for this operation without persisting a grant.
         #[serde(default)]
         pub allow_remote: bool,

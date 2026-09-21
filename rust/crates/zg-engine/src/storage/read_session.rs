@@ -3,7 +3,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -25,12 +28,17 @@ pub(crate) struct ReadSessionCache {
 struct CacheInner {
     state: Mutex<CacheState>,
     idle_timeout: Duration,
+    closed: AtomicBool,
 }
 
 #[derive(Default)]
 struct CacheState {
-    closed: bool,
-    entries: HashMap<PathBuf, CachedSession>,
+    entries: HashMap<PathBuf, Arc<SessionSlot>>,
+}
+
+#[derive(Default)]
+struct SessionSlot {
+    entry: Mutex<Option<CachedSession>>,
 }
 
 struct CachedSession {
@@ -47,8 +55,7 @@ struct ReadSession {
 
 pub(crate) struct ReadSessionLease {
     session: Arc<ReadSession>,
-    home: PathBuf,
-    cache: Weak<CacheInner>,
+    cache: Weak<SessionSlot>,
     cached: bool,
 }
 
@@ -57,6 +64,7 @@ impl ReadSessionCache {
         let inner = Arc::new(CacheInner {
             state: Mutex::new(CacheState::default()),
             idle_timeout,
+            closed: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&inner);
         // A native thread can release idle handles even when a synchronous writer
@@ -84,54 +92,74 @@ impl ReadSessionCache {
         home: &Path,
         storage_home: &Path,
     ) -> EngineResult<ReadSessionLease> {
-        let mut state = lock(&self.inner.state);
-        if state.closed {
+        self.acquire_with(home, storage_home, || {
+            IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                storage_path: storage_home.to_path_buf(),
+            })
+        })
+    }
+
+    fn acquire_with(
+        &self,
+        home: &Path,
+        storage_home: &Path,
+        open: impl FnOnce() -> EngineResult<IndexStore>,
+    ) -> EngineResult<ReadSessionLease> {
+        let slot = {
+            let mut state = lock(&self.inner.state);
+            if self.inner.closed.load(Ordering::Acquire) {
+                return Err(EngineError::resource_closed(
+                    "index read cache has been closed",
+                ));
+            }
+            Arc::clone(state.entries.entry(home.to_path_buf()).or_default())
+        };
+        // Only this workspace waits for native open/close; the map owns entries,
+        // never native I/O. Concurrent misses for one workspace share this slot.
+        let mut entry = lock(&slot.entry);
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(EngineError::resource_closed(
                 "index read cache has been closed",
             ));
         }
-        if state
-            .entries
-            .get(home)
+        if entry
+            .as_ref()
             .is_some_and(|entry| entry.session.storage_home != storage_home)
         {
-            state.entries.remove(home);
+            entry.take();
         }
-        // Opening under the cache lock also single-flights concurrent misses.
-        let entry = match state.entries.entry(home.to_path_buf()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let residency = acquire_read_write_lock(
-                    &home.join("locks/read-cache"),
-                    LockMode::Read,
-                    "context.cache",
-                )?;
-                let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-                    storage_path: storage_home.to_path_buf(),
-                })?;
-                entry.insert(CachedSession {
-                    session: Arc::new(ReadSession {
-                        storage,
-                        storage_home: storage_home.to_path_buf(),
-                        _residency: Some(residency),
-                    }),
-                    last_used: Instant::now(),
-                })
-            }
-        };
+        if entry.is_none() {
+            let residency = acquire_read_write_lock(
+                &home.join("locks/read-cache"),
+                LockMode::Read,
+                "context.cache",
+            )?;
+            let storage = open()?;
+            *entry = Some(CachedSession {
+                session: Arc::new(ReadSession {
+                    storage,
+                    storage_home: storage_home.to_path_buf(),
+                    _residency: Some(residency),
+                }),
+                last_used: Instant::now(),
+            });
+        }
+        let session = Arc::clone(&entry.as_ref().expect("initialized session").session);
         Ok(ReadSessionLease {
-            session: Arc::clone(&entry.session),
-            home: home.to_path_buf(),
-            cache: Arc::downgrade(&self.inner),
+            session,
+            cache: Arc::downgrade(&slot),
             cached: true,
         })
     }
 
     pub(crate) fn close(&self) {
-        let mut state = lock(&self.inner.state);
-        state.closed = true;
-        // In-flight queries retain their own Arc until they finish.
-        state.entries.clear();
+        self.inner.closed.store(true, Ordering::Release);
+        let entries = std::mem::take(&mut lock(&self.inner.state).entries);
+        // In-flight queries retain their own Arc until they finish. Native close
+        // runs after releasing the map lock, under the workspace's own slot lock.
+        for slot in entries.into_values() {
+            lock(&slot.entry).take();
+        }
     }
 }
 
@@ -146,21 +174,44 @@ impl std::fmt::Debug for ReadSessionCache {
 
 impl CacheInner {
     fn reap(&self, now: Instant) -> bool {
-        let mut state = lock(&self.state);
-        if state.closed {
+        if self.closed.load(Ordering::Acquire) {
             return false;
         }
-        state.entries.retain(|home, entry| {
-            if Arc::strong_count(&entry.session) > 1 {
-                return true;
+        let entries = lock(&self.state)
+            .entries
+            .iter()
+            .map(|(home, slot)| (home.clone(), Arc::clone(slot)))
+            .collect::<Vec<_>>();
+        for (home, slot) in entries {
+            // A cold open or another retirement must not stall maintenance of
+            // other workspaces. It will be considered on the next pass.
+            let Ok(mut entry) = slot.entry.try_lock() else {
+                continue;
+            };
+            if let Some(cached) = entry.as_ref() {
+                if Arc::strong_count(&cached.session) > 1 {
+                    continue;
+                }
+                // A writer first owns the home lock, then waits for residency locks.
+                // Releasing on any probe failure is conservative and never serves old data.
+                if now.saturating_duration_since(cached.last_used) < self.idle_timeout
+                    && home_allows_cached_reads(&home)
+                {
+                    continue;
+                }
+                entry.take();
             }
-            if now.saturating_duration_since(entry.last_used) >= self.idle_timeout {
-                return false;
+            drop(entry);
+            let mut state = lock(&self.state);
+            if Arc::strong_count(&slot) == 2
+                && state
+                    .entries
+                    .get(&home)
+                    .is_some_and(|current| Arc::ptr_eq(current, &slot))
+            {
+                state.entries.remove(&home);
             }
-            // A writer first owns the home lock, then waits for residency locks.
-            // Releasing on any probe failure is conservative and never serves old data.
-            home_allows_cached_reads(home)
-        });
+        }
         true
     }
 }
@@ -175,7 +226,6 @@ impl ReadSessionLease {
                 storage_home: storage_home.to_path_buf(),
                 _residency: None,
             }),
-            home: PathBuf::new(),
             cache: Weak::new(),
             cached: false,
         })
@@ -198,14 +248,11 @@ impl Drop for ReadSessionLease {
         let Some(cache) = self.cache.upgrade() else {
             return;
         };
-        let mut state = lock(&cache.state);
-        if let Some(entry) = state.entries.get_mut(&self.home)
+        let mut entry = lock(&cache.entry);
+        if let Some(entry) = entry.as_mut()
             && Arc::ptr_eq(&entry.session, &self.session)
         {
             entry.last_used = Instant::now();
-            if cache.idle_timeout.is_zero() {
-                state.entries.remove(&self.home);
-            }
         }
     }
 }
@@ -220,7 +267,10 @@ pub(crate) fn release_for_write(home: &Path) {
         .filter_map(Weak::upgrade)
         .collect::<Vec<_>>();
     for cache in caches {
-        lock(&cache.state).entries.remove(home);
+        let slot = lock(&cache.state).entries.remove(home);
+        if let Some(slot) = slot {
+            lock(&slot.entry).take();
+        }
     }
 }
 

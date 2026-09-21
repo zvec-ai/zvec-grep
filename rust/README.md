@@ -53,11 +53,26 @@ own model settings. Standalone engine instances can opt in with
 `ZvecGrep::enable_read_session_cache()`; `close()` retires the cache while
 in-flight queries retain their handles until completion.
 
-Workspace writes and drops retire local cached handles before opening storage.
-Across Rust processes, writers acquire the workspace home lock and wait up to
-two seconds for cached readers to release their residency locks. Cache maintenance
-checks for writers every 50 milliseconds, independently of the async executor.
-Active queries retain the existing shared home lock and continue to exclude writes.
+Native open and close run under a per-workspace slot; the cache map lock only
+manages entries, so a cold open or retirement cannot block another workspace's
+cache hit.
+
+Workspace reads and writes queue asynchronously. A cross-process writer-intent
+lock prevents new reads from overtaking waiting writers while active readers
+drain. Writers then retire cached handles before opening writable storage.
+`ContextOptions::lock_timeout_ms` and `IndexOptions::lock_timeout_ms` bound lock
+waits (30 seconds by default), including idle-cache draining; their cancellation
+tokens interrupt waiting. Cache maintenance checks for writers every 50 milliseconds,
+independently of the async executor. Cancelled, timed-out and aborted waiters
+release admission without leaving pending writer markers.
+
+Within one engine, queries using `Off` or `Background` refresh may borrow an active
+incremental writer when the effective model configuration matches (including
+credentials, endpoint, device and model cache). Borrowed queries keep storage,
+models and the home lock alive; publication waits for them to finish. `Wait` and
+legacy synchronous auto-update queries never borrow partial writer state. A
+rebuild's unpublished generation remains private. The daemon preserves the refresh
+policy when invoking the engine and also bounds cancellable waits for scheduled jobs.
 
 The native engine supports indexing, indexed FTS and vector search, `zg query
 --rg`, workspace discovery, `info`, and idempotent `drop_index`.

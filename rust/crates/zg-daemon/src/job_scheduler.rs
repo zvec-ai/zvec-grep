@@ -642,6 +642,10 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     merge_update(&mut current.device, incoming.device.take());
     merge_update(&mut current.model_cache, incoming.model_cache.take());
     merge_update(
+        &mut current.lock_timeout_ms,
+        incoming.lock_timeout_ms.take(),
+    );
+    merge_update(
         &mut current.embedding_concurrency,
         incoming.embedding_concurrency.take(),
     );
@@ -1233,6 +1237,7 @@ mod tests {
             endpoint: Some("https://example.test/embeddings".into()),
             device: Some(Device::Cpu),
             model_cache: Some("/models".into()),
+            lock_timeout_ms: Some(1_000),
             embedding_concurrency: Some(4),
             embedding: Some(EmbeddingModelSpec {
                 reference: "qwen/new-model".into(),
@@ -1251,6 +1256,7 @@ mod tests {
                     ..ScanRulesUpdate::default()
                 },
                 embedding_concurrency: Some(8),
+                lock_timeout_ms: Some(2_000),
                 ..IndexOptions::default()
             },
         );
@@ -1268,6 +1274,7 @@ mod tests {
         assert_eq!(merged.device, Some(Device::Cpu));
         assert_eq!(merged.model_cache, Some("/models".into()));
         assert_eq!(merged.embedding_concurrency, Some(8));
+        assert_eq!(merged.lock_timeout_ms, Some(2_000));
         assert_eq!(merged.scan.globs, Some(Vec::new()));
     }
 

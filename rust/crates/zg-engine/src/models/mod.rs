@@ -71,6 +71,10 @@ impl runtime::ModelRuntimeRequest {
 }
 
 impl runtime::ModelRuntimeLease {
+    pub(crate) fn matches_request(&self, request: &ModelRuntimeRequest) -> bool {
+        self.matches_request_impl(request)
+    }
+
     pub(crate) fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         self.concurrency_defaults_impl()
     }
