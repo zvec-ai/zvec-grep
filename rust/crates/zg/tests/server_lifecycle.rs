@@ -709,6 +709,11 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "{response}"
     );
     assert!(response.contains("\"isError\":false"), "{response}");
+    assert!(response.contains("freshness: possibly_stale"), "{response}");
+    assert!(
+        response.contains("results: served_from_current_index"),
+        "{response}"
+    );
     assert!(response.contains("background_refresh: off"), "{response}");
 
     std::fs::write(
@@ -725,7 +730,11 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     let response = post_json(port, Some(&session), &wait_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
     assert!(response.contains("freshness: fresh"), "{response}");
-    assert!(response.contains("background_refresh: idle"), "{response}");
+    assert!(!response.contains("background_refresh:"), "{response}");
+    assert!(
+        !response.contains("results: served_from_current_index"),
+        "{response}"
+    );
     assert!(response.contains("\"isError\":false"), "{response}");
 
     let background_search = json!({
@@ -736,8 +745,13 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &background_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
+    assert!(response.contains("freshness: possibly_stale"), "{response}");
     assert!(
-        response.contains("freshness: served_from_current_index"),
+        response.contains("results: served_from_current_index"),
+        "{response}"
+    );
+    assert!(
+        !response.contains("freshness: served_from_current_index"),
         "{response}"
     );
     assert!(
