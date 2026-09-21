@@ -255,6 +255,9 @@ pub(crate) async fn resolve_model_artifacts(
         match download_source_snapshot(client, &request, source, manifest).await {
             Ok(()) => return resolved_result(source, request.artifacts),
             Err(error) => {
+                if error.kind == FailureKind::Cancelled {
+                    return Err(error.into_model_error());
+                }
                 if index == 0 {
                     if !error.fallback_allowed() {
                         return Err(error.into_model_error());
@@ -1400,19 +1403,33 @@ fn lock_is_abandoned(
 }
 
 fn inspect_lock(path: &Path) -> io::Result<Option<LockObservation>> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(metadata) = lock_component(fs::metadata(path))? else {
+        return Ok(None);
     };
+    inspect_existing_lock(path, &metadata)
+}
+
+fn inspect_existing_lock(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> io::Result<Option<LockObservation>> {
     let mut newest = metadata.modified().unwrap_or(UNIX_EPOCH);
     let mut owners = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file()
-            && entry.file_name().to_string_lossy().starts_with(".owner-")
-        {
-            newest = newest.max(entry.metadata()?.modified().unwrap_or(UNIX_EPOCH));
+    let Some(entries) = lock_component(fs::read_dir(path))? else {
+        return Ok(None);
+    };
+    for entry in entries {
+        let Some(entry) = lock_component(entry)? else {
+            return Ok(None);
+        };
+        let Some(file_type) = lock_component(entry.file_type())? else {
+            return Ok(None);
+        };
+        if file_type.is_file() && entry.file_name().to_string_lossy().starts_with(".owner-") {
+            let Some(metadata) = lock_component(entry.metadata())? else {
+                return Ok(None);
+            };
+            newest = newest.max(metadata.modified().unwrap_or(UNIX_EPOCH));
             owners.push(entry.path());
         }
     }
@@ -1421,6 +1438,14 @@ fn inspect_lock(path: &Path) -> io::Result<Option<LockObservation>> {
         newest_heartbeat: newest,
         dead_owner,
     }))
+}
+
+fn lock_component<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn is_known_dead_owner(owner_path: &Path) -> bool {
@@ -1829,6 +1854,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modelscope_fallback_preserves_cancellation_code() {
+        let root = tempfile::tempdir().expect("cache root");
+        let server = TestServer::spawn(1, |_index, request, stream| {
+            assert!(request.contains("/owner/model/"));
+            respond(stream, 503, b"");
+        });
+        let signal = CancellationToken::new();
+        let cancel_on_fallback = signal.clone();
+        let reporter = ModelDownloadProgressReporter::new(
+            "local/test-model",
+            Some(Arc::new(move |event| {
+                if matches!(event, ModelProgress::Warning { .. }) {
+                    cancel_on_fallback.cancel();
+                }
+            })),
+            ARTIFACTS.iter().map(|artifact| artifact.path.to_owned()),
+        );
+        let error = resolve_model_artifacts(
+            &reqwest::Client::new(),
+            ResolveArtifacts {
+                model: "local/test-model",
+                sources: sources(root.path(), Some(&server.base_url)),
+                artifacts: ARTIFACTS,
+                reporter: &reporter,
+                signal: Some(&signal),
+            },
+        )
+        .await
+        .expect_err("ModelScope cancellation must be preserved");
+
+        assert_eq!(error.code(), crate::EngineError::CANCELLED);
+        assert_eq!(server.finish(), 1);
+    }
+
+    #[tokio::test]
     async fn response_header_timeout_falls_back_without_total_download_deadline() {
         let root = tempfile::tempdir().expect("cache root");
         let server = TestServer::spawn(2, |_index, request, stream| {
@@ -1982,5 +2042,34 @@ mod tests {
                     .expect("recover dead owner")
             );
         }
+    }
+
+    #[test]
+    fn disappearing_lock_components_request_an_acquire_retry() {
+        let root = tempfile::tempdir().expect("lock root");
+        let lock_path = root.path().join("artifact.lock");
+        fs::create_dir(&lock_path).expect("create lock");
+        let metadata = fs::metadata(&lock_path).expect("lock metadata");
+        fs::remove_dir(&lock_path).expect("release lock");
+        assert!(
+            inspect_existing_lock(&lock_path, &metadata)
+                .expect("disappearing lock is not an error")
+                .is_none()
+        );
+
+        fs::create_dir(&lock_path).expect("recreate lock");
+        let owner_path = lock_path.join(".owner-racing");
+        fs::write(&owner_path, b"{}").expect("write owner");
+        let owner = fs::read_dir(&lock_path)
+            .expect("read lock")
+            .next()
+            .expect("owner entry")
+            .expect("read owner entry");
+        fs::remove_file(&owner_path).expect("release owner");
+        assert!(
+            lock_component(owner.metadata())
+                .expect("disappearing owner is not an error")
+                .is_none()
+        );
     }
 }

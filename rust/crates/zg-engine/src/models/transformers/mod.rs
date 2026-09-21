@@ -267,15 +267,13 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             .ensure_loaded(options.on_progress.clone(), options.signal.as_ref())
             .await
             .map_err(|error| {
-                ModelError::new(
-                    crate::EngineError::INTERNAL,
+                error.wrap(
                     "Transformers embedding failed",
                     Some(format!(
                         "model={} repo={}",
                         self.entry.reference, self.entry.repo
                     )),
                 )
-                .with_cause(error)
             })?;
         let purpose = options.purpose;
         let prefix = match purpose {
@@ -1440,6 +1438,33 @@ mod tests {
             onnx_artifact("q8").expect("q8"),
             "onnx/model_quantized.onnx"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_initial_load_preserves_cancellation_code() {
+        let cache = tempfile::tempdir().expect("model cache");
+        let model = TransformersEmbeddingModel::new(
+            entry("mean", true),
+            ModelConfig {
+                cache_dir: Some(cache.path().to_owned()),
+                ..ModelConfig::default()
+            },
+            crate::models::compute::ModelComputeRuntime::shared(),
+        );
+        let signal = CancellationToken::new();
+        signal.cancel();
+        let error = model
+            .embed(
+                &[vec![Content::Text("cancel before loading".to_owned())]],
+                EmbeddingOptions {
+                    signal: Some(signal),
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect_err("cancelled load");
+
+        assert_eq!(error.code(), crate::EngineError::CANCELLED);
     }
 
     #[tokio::test]
