@@ -77,7 +77,10 @@ export interface WorkspaceIndexStorage {
   close(): void;
 }
 
-export { createWorkspaceIndexStorage } from "./zvec.js";
+export {
+  createWorkspaceIndexStorage,
+  probeWorkspaceIndexStorage,
+} from "./zvec.js";
 export {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,

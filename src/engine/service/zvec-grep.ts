@@ -15,6 +15,8 @@ import {
   detail,
   EngineError,
   errorDetails,
+  isEngineError,
+  redactErrorText,
 } from "../errors.js";
 import {
   createEmbeddingModel,
@@ -30,6 +32,7 @@ import {
 import type {
   WorkspaceIndexEmbeddingSchema,
   WorkspaceIndexInfo,
+  WorkspaceIndexStatus,
   Content,
   FileInfo,
   IndexResult,
@@ -48,6 +51,7 @@ import {
   writeWorkspaceManifest,
 } from "../manifest.js";
 import { validateRootPaths } from "../pipeline/indexing/root-paths.js";
+import { probeWorkspaceIndexStorage } from "../storage/index.js";
 import {
   findNearestWorkspace,
   hasWorkspaceIndex,
@@ -85,6 +89,7 @@ const DEFAULT_CONTEXT_TOTAL_LIMIT = 30;
 const DEFAULT_LOCAL_EMBEDDING = "local/potion-code-16m-v2";
 const PROVIDER_API_KEY_IDENTITY_SECRET = randomBytes(32);
 const MAX_RECOVERED_EMBEDDING_MODELS = 4;
+const STORAGE_ERROR_PREFIX = "ZVEC_GREP.ENGINE.STORAGE.";
 
 export type EmbeddingModelIdentity = Pick<
   EmbeddingModelInfo,
@@ -488,11 +493,31 @@ class ZvecGrepService implements ZvecGrep {
 
     return await withHomeReadLock(nearest.location.home, "info", async () => {
       const workspaceIndex = readWorkspaceManifest(nearest.location.home);
-      const indexed =
+      const isConfiguredIndexed =
         workspaceIndex !== null &&
         workspaceIndex.indexPolicy !== "disabled" &&
-        isWorkspaceIndexed(workspaceIndex) &&
-        hasWorkspaceIndex(nearest.location);
+        isWorkspaceIndexed(workspaceIndex);
+
+      let status: WorkspaceIndexStatus | null = null;
+      let storageError: EngineError | null = null;
+      if (isConfiguredIndexed) {
+        // Both branches read manifest.path, the storage a query opens, so a
+        // moved or copied workspace reports the failure its next query hits.
+        try {
+          if (options.includeStatus === false) {
+            probeWorkspaceIndexStorage(workspaceIndex.path);
+          } else {
+            status = await readWorkspaceIndexStatus(workspaceIndex);
+          }
+        } catch (error) {
+          if (!isWorkspaceIndexStorageError(error)) {
+            throw error;
+          }
+          storageError = error;
+        }
+      }
+
+      const indexed = isConfiguredIndexed && storageError === null;
 
       return {
         root: nearest.location.root,
@@ -504,11 +529,20 @@ class ZvecGrepService implements ZvecGrep {
         workspaceIndex: workspaceIndex
           ? workspaceIndexInfoFromManifest(workspaceIndex)
           : undefined,
-        status:
-          indexed && options.includeStatus !== false
-            ? await workspaceIndexStatus(workspaceIndex, nearest.location)
-            : null,
-        suggestion: workspaceInfoSuggestion(workspaceIndex),
+        status,
+        suggestion: workspaceInfoSuggestion(workspaceIndex, storageError),
+        error: storageError
+          ? {
+              code: storageError.code,
+              message: storageError.message,
+              context: storageError.context
+                ? redactErrorText(storageError.context, 4_096)
+                : undefined,
+              cause: storageError.cause
+                ? redactErrorText(String(storageError.cause), 512)
+                : undefined,
+            }
+          : undefined,
       };
     });
   }
@@ -1263,9 +1297,18 @@ function findNearestWorkspaceIndex(start: string): WorkspaceIndexRecord | null {
   return info ? { location, info } : null;
 }
 
+function isWorkspaceIndexStorageError(error: unknown): error is EngineError {
+  return isEngineError(error) && error.code.startsWith(STORAGE_ERROR_PREFIX);
+}
+
 function workspaceInfoSuggestion(
   workspaceIndex: WorkspaceIndexInfo | null,
+  storageError: EngineError | null,
 ): string | undefined {
+  if (storageError) {
+    return "zg --index --rebuild";
+  }
+
   if (!workspaceIndex) {
     return "zg --index or zg --rg";
   }
@@ -1519,6 +1562,12 @@ async function workspaceIndexStatus(
     return null;
   }
 
+  return await readWorkspaceIndexStatus(info);
+}
+
+async function readWorkspaceIndexStatus(
+  info: WorkspaceIndexInfo,
+): Promise<WorkspaceIndexStatus> {
   const workspaceIndex = new WorkspaceIndex(info, { mode: "read" });
   try {
     return await workspaceIndex.status();
