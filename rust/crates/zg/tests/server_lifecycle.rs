@@ -754,7 +754,13 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         !response.contains("freshness: served_from_current_index"),
         "{response}"
     );
-    assert!(response.contains("background_refresh: idle"), "{response}");
+    // A native watcher can deliver delayed or duplicate notifications after the
+    // preceding fresh query. Controlled runtime tests cover the quiet idle case.
+    assert!(
+        response.contains("background_refresh: idle")
+            || response.contains("background_refresh: scheduled"),
+        "{response}"
+    );
     assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;

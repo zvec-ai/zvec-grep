@@ -430,3 +430,75 @@ async fn rejected_watcher_batches_require_full_repair_after_queue_pressure_ends(
     );
     manager.shutdown_all().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn background_refresh_accounts_for_late_watcher_notifications() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(1),
+    });
+    let (manager, sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial reconciliation");
+    jobs.recv().await.expect("initial job");
+    assert!(
+        !manager
+            .refresh_index(options.clone(), false)
+            .await
+            .expect("idle without events")
+    );
+
+    // Native backends can deliver another notification after a fresh query returns.
+    sender
+        .send(WorkspaceChangeBatch {
+            changes: vec![WorkspaceChange::Upsert("fresh.txt".into())],
+        })
+        .await
+        .expect("late notification");
+    let runtime = manager.runtime(root, &options).expect("runtime");
+    manager
+        .flush_watcher(&runtime)
+        .await
+        .expect("notification delivered");
+    let incremental = jobs.recv().await.expect("watcher job started");
+    assert_eq!(
+        incremental.changes,
+        [IndexChange::Upsert("fresh.txt".into())]
+    );
+    let scheduled = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.refresh_index(options.clone(), false),
+    )
+    .await
+    .expect("background does not wait for watcher job")
+    .expect("background status");
+    assert!(scheduled, "the late watcher job is still running");
+
+    executor.release.add_permits(1);
+    assert!(
+        !manager
+            .refresh_index(options.clone(), true)
+            .await
+            .expect("drain existing update")
+    );
+    assert!(
+        !manager
+            .refresh_index(options, false)
+            .await
+            .expect("idle again")
+    );
+    assert!(
+        jobs.try_recv().is_err(),
+        "no unnecessary full reconciliation"
+    );
+    manager.shutdown_all().await.expect("shutdown");
+}
