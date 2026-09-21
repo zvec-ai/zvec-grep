@@ -59,6 +59,7 @@ pub(crate) async fn run_server(
     config: ServerConfig,
     engine: Arc<ZvecGrep>,
 ) -> Result<(), DaemonError> {
+    engine.enable_read_session_cache()?;
     let token = crate::resolve_token(config.token_file.as_deref())?;
     let mut instance = InstanceLock::acquire(&config).await?;
     let listener = match tokio::net::TcpListener::bind(config.listen.socket_addr()).await {

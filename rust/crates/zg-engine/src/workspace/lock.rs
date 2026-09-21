@@ -2,6 +2,7 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions, TryLockError},
     io,
     path::Path,
+    time::{Duration, Instant},
 };
 
 use crate::EngineError;
@@ -14,6 +15,8 @@ pub(crate) enum LockMode {
 
 #[derive(Debug)]
 pub(crate) struct FileLock {
+    // Release the cache barrier before allowing new home readers.
+    read_cache: Option<File>,
     // Closing the file releases the lock. Keep its path in place so every
     // process continues to lock the same file.
     _file: File,
@@ -50,7 +53,34 @@ pub(crate) fn acquire_home_lock(
             "workspace root is not a directory",
         )));
     }
-    acquire_read_write_lock(&home.join("locks/home"), mode, operation)
+    let mut lock = acquire_read_write_lock(&home.join("locks/home"), mode, operation)?;
+    if matches!(mode, LockMode::Write) {
+        crate::storage::read_session::release_for_write(home);
+        let cache_path = home.join("locks/read-cache");
+        let cache_lock = open_lock_file(&cache_path, operation)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match cache_lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    // Remote cache maintenance observes our exclusive home lock
+                    // and closes idle native handles before releasing residency.
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(EngineError::resource_busy(format!(
+                        "timed out draining index read caches: lock={} operation={operation}",
+                        cache_path.display()
+                    )));
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(EngineError::from_io("drain index read caches", &error));
+                }
+            }
+        }
+        lock.read_cache = Some(cache_lock);
+    }
+    Ok(lock)
 }
 
 pub(crate) fn acquire_read_write_lock(
@@ -76,7 +106,22 @@ pub(crate) fn acquire_read_write_lock(
             &error,
         ),
     })?;
-    Ok(FileLock { _file: file })
+    Ok(FileLock {
+        _file: file,
+        read_cache: None,
+    })
+}
+
+/// Probe without creating paths that may have been removed with the workspace.
+pub(crate) fn home_allows_cached_reads(home: &Path) -> bool {
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.join("locks/home"))
+    else {
+        return false;
+    };
+    file.try_lock_shared().is_ok()
 }
 
 /// Serialize short metadata updates shared by otherwise independent workspaces.
@@ -94,7 +139,10 @@ pub(crate) fn acquire_exclusive_lock(
             &error,
         )
     })?;
-    Ok(FileLock { _file: file })
+    Ok(FileLock {
+        _file: file,
+        read_cache: None,
+    })
 }
 
 fn open_lock_file(lock_path: &Path, operation: &str) -> Result<File, EngineError> {

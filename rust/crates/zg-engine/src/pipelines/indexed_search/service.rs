@@ -13,7 +13,10 @@ use crate::{
     pipelines::indexing::service::{
         WorkspaceIndexService, assert_embedding_compatible, environment_api_key, is_indexed,
     },
-    storage::{IndexStore, types::WorkspaceIndexStorageOptions},
+    storage::{
+        IndexStore,
+        read_session::{ReadSessionCache, ReadSessionLease},
+    },
     workspace::{
         layout::find_nearest_workspace,
         lock::{LockMode, acquire_home_lock},
@@ -30,6 +33,7 @@ pub(crate) async fn context(
     indexing: &WorkspaceIndexService,
     models: &ModelRuntimeManager,
     options: &ContextOptions,
+    read_sessions: Option<&ReadSessionCache>,
 ) -> Result<ContextResult, EngineError> {
     let requested_root =
         std::path::absolute(options.root.as_deref().unwrap_or_else(|| Path::new(".")))
@@ -105,14 +109,15 @@ pub(crate) async fn context(
         .iter()
         .map(|runtime| runtime as &dyn SearchEmbeddingRuntime)
         .collect::<Vec<_>>();
-    let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-        storage_path: manifest.storage_home(),
-    })?;
+    let storage = match read_sessions {
+        Some(cache) => cache.acquire(&location.home, &manifest.storage_home())?,
+        None => ReadSessionLease::open(&manifest.storage_home())?,
+    };
     let result = context_from_index(
         &location.root,
         &manifest.workspace,
         &manifest.path,
-        &storage,
+        storage.storage(),
         &embedding_models,
         options,
         &request,

@@ -99,6 +99,8 @@ impl ServerConfig {
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    #[error(transparent)]
+    Engine(#[from] zg_engine::EngineError),
     #[error("invalid daemon listen address {0:?}; expected a loopback host and non-zero port")]
     InvalidListen(String),
     #[error("cannot determine zvec-grep home; pass --home or set ZVEC_GREP_HOME")]

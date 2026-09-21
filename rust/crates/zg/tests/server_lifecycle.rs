@@ -812,6 +812,124 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Exercise update, rebuild and drop in one resident daemon lifecycle"
+)]
+fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let embedding = EmbeddingServer::start()?;
+    let endpoint = format!("http://{}/embeddings", embedding.address);
+    let direct = |extra: &[&str]| {
+        let mut command = Command::new(&binary);
+        command
+            .current_dir(workspace.path())
+            .env("ZVEC_GREP_HOME", home.path())
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                home.path().join("workspaces.json"),
+            )
+            .env("ZVEC_GREP_API_KEY", "local-test-key")
+            .args(["index", "--mode", "direct"])
+            .args(extra);
+        if !extra.contains(&"--drop") {
+            command.arg("--allow-remote");
+        }
+        command.output()
+    };
+    std::fs::write(workspace.path().join("source.txt"), "orchard documentation")?;
+    assert_command_success(&direct(&[
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &endpoint,
+    ])?);
+    // CLI writers are separate processes, not children of the native cache owner.
+    // This also avoids inheriting the native library's open lock descriptors.
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
+        command.env(
+            "ZVEC_GREP_WORKSPACE_REGISTRY",
+            home.path().join("workspaces.json"),
+        );
+    })?;
+    let port = guard.listen.parse::<SocketAddr>()?.port();
+    let initialize = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "read-cache-test", "version": "1" } }
+    });
+    let response = post_json(port, None, &initialize.to_string())?;
+    let session = response
+        .lines()
+        .find_map(|line| line.strip_prefix("mcp-session-id:").map(str::trim))
+        .ok_or("missing MCP session")?;
+    post_json(
+        port,
+        Some(session),
+        &json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        })
+        .to_string(),
+    )?;
+    let search = |query: &str| {
+        post_json(
+            port,
+            Some(session),
+            &json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "zvec_grep_search", "arguments": {
+                    "root": workspace.path(), "fts": query, "autoUpdate": false
+                } }
+            })
+            .to_string(),
+        )
+    };
+    for _ in 0..2 {
+        let response = search("orchard")?;
+        assert!(
+            response.contains("source.txt") && response.contains("\"isError\":false"),
+            "{response}"
+        );
+    }
+    std::fs::write(
+        workspace.path().join("source.txt"),
+        "vineyard documentation",
+    )?;
+    assert_command_success(&direct(&[])?);
+    let response = search("vineyard")?;
+    assert!(
+        response.contains("source.txt") && response.contains("\"isError\":false"),
+        "{response}"
+    );
+    let response = search("orchard")?;
+    assert!(
+        !response.contains("source.txt"),
+        "old index contents remained cached: {response}"
+    );
+
+    let manifest_path = workspace.path().join(".zvec-grep/manifest.json");
+    let before: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    assert_command_success(&direct(&["--rebuild"])?);
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    assert_ne!(before["storageGeneration"], after["storageGeneration"]);
+    let response = search("vineyard")?;
+    assert!(
+        response.contains("source.txt") && response.contains("\"isError\":false"),
+        "{response}"
+    );
+    assert_command_success(&direct(&["--drop", "--yes"])?);
+    let response = search("vineyard")?;
+    assert!(
+        response.contains("\"isError\":true"),
+        "dropped index remained cached: {response}"
+    );
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+#[test]
 fn stdio_remote_consent_controls_transmission_and_persistence() -> Result<(), Box<dyn Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;

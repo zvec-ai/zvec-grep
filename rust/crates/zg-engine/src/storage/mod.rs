@@ -4,6 +4,7 @@ mod entities;
 mod files;
 mod fragments;
 mod path;
+pub(crate) mod read_session;
 mod record;
 mod store;
 pub(crate) mod types;

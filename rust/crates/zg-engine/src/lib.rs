@@ -112,6 +112,19 @@ impl ZvecGrep {
         self.service.close();
     }
 
+    /// Reuses index read handles between requests, closing them after 60 idle seconds.
+    /// Workspace writes retire cached handles before opening writable storage.
+    /// Repeated calls are idempotent; ordinary engine instances remain uncached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine is closed or cache maintenance cannot start.
+    pub fn enable_read_session_cache(&self) -> EngineResult<()> {
+        self.service
+            .enable_read_session_cache()
+            .map_err(|error| error.report_here())
+    }
+
     #[must_use]
     pub fn runtime_snapshot(&self) -> EngineRuntimeSnapshot {
         self.service.runtime_snapshot()

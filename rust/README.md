@@ -46,6 +46,19 @@ embedding calls may execute concurrently against those shared resources.
 surfaces model downloads through `IndexProgress::embedding`. The reporter is
 runtime-only and is omitted from serialized daemon requests.
 
+The daemon enables an index read-session cache with a 60-second idle timeout.
+Sequential and concurrent queries reuse the same generation's native storage
+handles. Each request still reads current workspace metadata and resolves its
+own model settings. Standalone engine instances can opt in with
+`ZvecGrep::enable_read_session_cache()`; `close()` retires the cache while
+in-flight queries retain their handles until completion.
+
+Workspace writes and drops retire local cached handles before opening storage.
+Across Rust processes, writers acquire the workspace home lock and wait up to
+two seconds for cached readers to release their residency locks. Cache maintenance
+checks for writers every 50 milliseconds, independently of the async executor.
+Active queries retain the existing shared home lock and continue to exclude writes.
+
 The native engine supports indexing, indexed FTS and vector search, `zg query
 --rg`, workspace discovery, `info`, and idempotent `drop_index`.
 
