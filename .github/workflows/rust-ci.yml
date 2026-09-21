@@ -3,14 +3,20 @@ name: Rust CI
 on:
   push:
     branches: [main, dev/rust]
-    paths-ignore:
-      - "**/*.md"
-      - LICENSE
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-ci.yml"
+      - ".github/actions/**"
+      - ".gitignore"
+      - "!**/*.md"
   pull_request:
     types: [opened, synchronize, reopened, edited]
-    paths-ignore:
-      - "**/*.md"
-      - LICENSE
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-ci.yml"
+      - ".github/actions/**"
+      - ".gitignore"
+      - "!**/*.md"
   workflow_dispatch:
 
 permissions: {}
@@ -35,6 +41,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: >-
+          node --input-type=module --eval
+          "const title = process.env.PR_TITLE ?? '';
+          const valid = /^(feat|fix|perf|refactor|docs|test|build|ci|chore|revert)(\([^)]+\))?!?: .+/.test(title);
+          if (!valid) { console.error('PR title must use Conventional Commits syntax'); process.exit(1); }"
+        working-directory: ${{ github.workspace }}
       - uses: actions/checkout@v6
         with:
           persist-credentials: false

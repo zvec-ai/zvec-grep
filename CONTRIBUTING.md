@@ -4,8 +4,17 @@ Thank you for helping make zvec-grep better.
 
 This guide covers the TypeScript / Node.js implementation at the repository root.
 For the Rust workspace in `rust/`, see the [Rust contributor guide](rust/CONTRIBUTING.md).
-The two implementations have separate CI workflows; changes affecting both should
-run both sets of checks.
+The two implementations have separate CI workflows, selected by changed paths:
+
+- Changes under `rust/` or to `.github/workflows/rust-ci.yml` run Rust CI only.
+- Other changes run the TypeScript CI only.
+- Changes to shared `.github/actions/` or the root `.gitignore`, or changes
+  affecting both implementations, run both workflows.
+
+Markdown-only changes skip both workflows. The TypeScript CI also skips changes
+limited to `LICENSE`, `.github/assets/`, or `.github/scripts/readme-demo.py`.
+These filters apply to pull requests and pushes to each workflow's configured
+branches; manual runs always run the selected workflow's full set of checks.
 
 ## Development setup
 
