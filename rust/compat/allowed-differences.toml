@@ -12,3 +12,9 @@ id = "filesystem-root-containment"
 owner = "watcher/scanner"
 reason = "Rust 使用路径组件判断包含关系，修复 TypeScript 对文件系统根目录执行字符串前缀判断时无法识别子路径的问题。"
 removal_condition = "TypeScript 兼容层退役，或 TypeScript 实现改用路径组件判断。"
+
+[[difference]]
+id = "mcp-unverified-current-index-freshness"
+owner = "MCP/workspace-runtime"
+reason = "现有 Rust provider 用 served_from_current_index 表达读取来源，没有确认整个索引的新鲜度。公共 MCP 将其保守映射为 possibly_stale，并单独输出 results 来源；不能仅凭返回片段未过期就宣称整个索引 fresh。已确认的 fresh/possibly_stale 与 Node.js 保持一致。"
+removal_condition = "MCP-02 的 runtime 对齐完成，provider 能提供独立、可靠的索引 freshness 时，移除旧来源字符串的兼容映射。"

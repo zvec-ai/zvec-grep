@@ -924,6 +924,7 @@ mod output_tests {
                 end_byte_column: 6,
             },
             excerpt_range: None,
+            outline: None,
             content: (1..=20)
                 .map(|n| format!("line{n}"))
                 .collect::<Vec<_>>()

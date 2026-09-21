@@ -5,6 +5,9 @@
 
 mod consent;
 mod request;
+mod search_format;
+
+pub use search_format::SearchPreview;
 
 use std::{
     fmt::{self, Write as _},
@@ -74,7 +77,7 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     "- Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.\n",
     "- `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.\n",
     "- For a fused mixed search, use arguments such as {\"root\":\"/absolute/workspace\",\"query\":\"how are results ranked and fused\",\"fts\":[\"RRF\",\"score\"],\"fuse\":true}.\n",
-    "- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
+    "- Search results include bounded source snippets by default. Set preview: \"full\" for all available content of each retrieved item; this does not retrieve the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
     "- If semantic retrieval remains irrelevant, fall back to native Grep or rg.\n",
     "- Stop searching once the available evidence is sufficient for the requested task. Continue only to resolve a material gap or ambiguity; do not repeat similar searches or broaden the investigation merely to reconfirm what is already established.\n",
     "- Do not launch a sub-agent solely to locate workspace material.\n",
@@ -89,6 +92,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "- Use zvec_grep_rg first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.\n",
     "- Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.\n",
     "- For mixed tasks, call zvec_grep_search with the semantic intent and verified exact anchors, then use Read or zvec_grep_rg for focused verification.\n",
+    "- Search results include bounded source snippets by default. Set preview: \"full\" for all available source and outline of each retrieved item without changing retrieval or ranking.\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Read freshness and background_refresh from zvec_grep_search without a status preflight. Call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
     "- Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.\n",
@@ -308,7 +312,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_search",
-        description = "Search an existing workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets and query-group metadata; treat sufficient snippets as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient.",
+        description = "Search an existing workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: \"full\" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient.",
         annotations(
             title = "Search with zvec-grep",
             read_only_hint = false,
@@ -322,6 +326,7 @@ impl ZvecGrepMcpServer {
         Parameters(input): Parameters<SearchInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let preview = input.preview;
         let mut request = input
             .into_request()
             .map_err(|message| ErrorData::invalid_params(message, None))?;
@@ -336,7 +341,9 @@ impl ZvecGrepMcpServer {
         .await;
 
         Ok(match result {
-            Ok(reply) => context_result_to_tool_result(&reply),
+            Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
+                search_format::format_search_result(&reply, preview),
+            )]),
             Err(error) => error_result(&error),
         })
     }
@@ -592,6 +599,9 @@ pub struct SearchInput {
     /// Maximum returned items per query group or fused plan.
     #[schemars(range(min = 1, max = 50))]
     pub limit: Option<usize>,
+    /// Source display only: short bounds snippets; full preserves all available retrieved content and outline without changing retrieval or ranking.
+    #[serde(default)]
+    pub preview: SearchPreview,
     /// Ordered path glob rules; later matching rules take precedence.
     #[schemars(length(max = 128))]
     pub globs: Option<Vec<GlobInput>>,
@@ -1996,6 +2006,7 @@ mod tests {
             fts: Some(QueryListInput::One("run".to_owned())),
             vector: None,
             limit: Some(8),
+            preview: super::SearchPreview::Short,
             globs: Some(vec![super::GlobInput {
                 pattern: "*.rs".to_owned(),
                 case_insensitive: false,
@@ -2014,6 +2025,16 @@ mod tests {
             trace: Some(true),
             freshness: FreshnessInput::Eventual,
             auto_update: true,
+        }
+    }
+
+    #[test]
+    fn search_accepts_short_and_full_preview() {
+        for preview in ["short", "full"] {
+            serde_json::from_value::<SearchInput>(serde_json::json!({
+                "root": test_root(), "query": "call chain", "preview": preview
+            }))
+            .expect("public search accepts the Node.js preview modes");
         }
     }
 

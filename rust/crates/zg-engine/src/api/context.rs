@@ -418,6 +418,9 @@ pub mod result {
         pub range: ContentRange,
         pub excerpt_range: Option<ContentRange>,
         pub content: String,
+        /// Optional structural context supplied with the retrieved source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub outline: Option<String>,
         pub content_role: Option<ContextContentRole>,
         pub status: ContextItemStatus,
         pub score: Option<f64>,

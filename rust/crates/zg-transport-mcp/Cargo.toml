@@ -21,6 +21,7 @@ zg-cli = { path = "../zg-cli" }
 zg-engine = { path = "../zg-engine" }
 
 [dev-dependencies]
+zg-testkit = { path = "../zg-testkit" }
 rmcp = { workspace = true, features = ["client", "transport-io"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

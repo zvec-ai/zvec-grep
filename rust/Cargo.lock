@@ -3944,6 +3944,7 @@ dependencies = [
  "uuid",
  "zg-cli",
  "zg-engine",
+ "zg-testkit",
 ]
 
 [[package]]

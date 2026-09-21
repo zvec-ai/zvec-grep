@@ -163,6 +163,21 @@ pending consent form; clients control how that notification is presented.
 
 ## MCP request lifecycle
 
+Search accepts `preview: "short"` (the default) or `preview: "full"` in both
+toolsets. Short preview shows up to ten source lines around the matched range
+and seven available outline lines. Full preview preserves all available source
+and outline content of each retrieved item; it neither reads whole files nor
+changes retrieval or ranking. Responses include query groups, selection reasons,
+matched ranges, source line numbers, and available code or Markdown metadata.
+The current engine supplies source snapshots without generated outlines; the
+optional outline is displayed only when provided with a result.
+
+Public search reports `freshness: fresh` or `freshness: possibly_stale`.
+`results: served_from_current_index` describes where results came from, with
+`background_refresh` reported separately. A provider that only reports current
+index provenance without verified freshness is conservatively shown as
+`possibly_stale`; a successful waited refresh reports `fresh`.
+
 Both HTTP and stdio expose the same tools. Search accepts `device`; index accepts
 `debug: true` to return completed statistics, timings and at most 100 skipped files.
 Use `wait: true` to obtain these diagnostics in the index response; background

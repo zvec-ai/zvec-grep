@@ -1,0 +1,681 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "long-source-and-rank-order",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          },
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n...\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n...",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24"
+    },
+    {
+      "id": "groups-outline-and-matched-window",
+      "result": {
+        "query": "call chain",
+        "freshness": "possibly_stale",
+        "background_refresh": "running (12/20)",
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 20,
+              "end_line": 21,
+              "start_byte_offset": 2000,
+              "end_byte_offset": 2101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "code",
+              "symbol_type": "function",
+              "symbol_name": "resolveContext",
+              "scope": "Workspace",
+              "signature": null,
+              "documentation": null
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [
+              {
+                "id": "q1",
+                "query": "call chain",
+                "role": "primary",
+                "rank": 2,
+                "matched_by": "vector"
+              },
+              {
+                "id": "fts1",
+                "query": "Runtime",
+                "role": "supplemental",
+                "rank": 1,
+                "matched_by": "fts"
+              }
+            ],
+            "selection_reason": "coverage",
+            "coverage_group": "q1",
+            "outline": "  outline-member-1\n  outline-member-2\n  outline-member-3\n  outline-member-4\n  outline-member-5\n  outline-member-6\n  outline-member-7\n  outline-member-8\n  outline-member-9"
+          },
+          {
+            "kind": "indexed_entity",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "notes/design.md",
+            "range": {
+              "kind": "file"
+            },
+            "excerpt_range": null,
+            "content": "# Design\r\n\r\nRetain local evidence.\r\n\r\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "markdown",
+              "heading": "Design",
+              "level": 1,
+              "scope": "Search / Design"
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": "global_fill",
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": {
+            "hits_returned": 2,
+            "query_groups": [
+              {
+                "id": "q1",
+                "query": "call chain",
+                "role": "primary"
+              },
+              {
+                "id": "q2",
+                "query": "refresh",
+                "role": "primary"
+              },
+              {
+                "id": "fts1",
+                "query": "Runtime",
+                "role": "supplemental"
+              }
+            ],
+            "routes": []
+          },
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: possibly_stale\nresults: served_from_current_index\nbackground_refresh: running (12/20)\nquery groups (3):\n  q1 [primary]: call chain\n  q2 [primary]: refresh\n  fts1 [supplemental]: Runtime\nselection: primary-group coverage then global_fill; prioritized<=6; all candidates detailed\n\n#1 [group_coverage: q1] matchedBy=fts+vector src/sample.ts:10-33\ngroups: q1#2 (vector), fts1#1 (fts)\nsymbol: function resolveContext scope: Workspace\noutline:\n  outline-member-1\n  outline-member-2\n  outline-member-3\n  outline-member-4\n  outline-member-5\n  outline-member-6\n  outline-member-7\n...\nmatched: 20-21\nsource:\n...\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n...\n\n#2 [global_fill] matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\nsource:\n\t# Design\n\t\n\tRetain local evidence.\n\t\n\t",
+      "expected_full": "freshness: possibly_stale\nresults: served_from_current_index\nbackground_refresh: running (12/20)\nquery groups (3):\n  q1 [primary]: call chain\n  q2 [primary]: refresh\n  fts1 [supplemental]: Runtime\nselection: primary-group coverage then global_fill; prioritized<=6; all candidates detailed\n\n#1 [group_coverage: q1] matchedBy=fts+vector src/sample.ts:10-33\ngroups: q1#2 (vector), fts1#1 (fts)\nsymbol: function resolveContext scope: Workspace\noutline:\n  outline-member-1\n  outline-member-2\n  outline-member-3\n  outline-member-4\n  outline-member-5\n  outline-member-6\n  outline-member-7\n  outline-member-8\n  outline-member-9\nmatched: 20-21\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24\n\n#2 [global_fill] matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\nsource:\n\t# Design\n\t\n\tRetain local evidence.\n\t\n\t"
+    },
+    {
+      "id": "excerpt-only-source-and-redundant-symbol",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 100,
+              "start_byte_offset": 100,
+              "end_byte_offset": 10001,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 50,
+              "end_line": 52,
+              "start_byte_offset": 5000,
+              "end_byte_offset": 5201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "function resolveContext() {\r\n  return true;\r\n}\r\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "code",
+              "symbol_type": "function",
+              "symbol_name": "resolveContext",
+              "scope": null,
+              "signature": null,
+              "documentation": null
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:1-100\nmatched: 50-52\nsource:\n50\tfunction resolveContext() {\n51\t  return true;\n52\t}\n53\t",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:1-100\nmatched: 50-52\nsource:\n50\tfunction resolveContext() {\n51\t  return true;\n52\t}\n53\t"
+    },
+    {
+      "id": "half-open-range",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 13,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1301,
+              "start_byte_column": 0,
+              "end_byte_column": 0
+            },
+            "excerpt_range": null,
+            "content": "first\nsecond\nthird\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-12\nsource:\n10\tfirst\n11\tsecond\n12\tthird\n13\t",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-12\nsource:\n10\tfirst\n11\tsecond\n12\tthird\n13\t"
+    },
+    {
+      "id": "byte-range-and-empty-source",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "byte",
+              "start_offset": 3,
+              "end_offset": 9
+            },
+            "excerpt_range": null,
+            "content": "fragment",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          },
+          {
+            "kind": "indexed_entity",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "outline": "available outline only"
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:bytes:3-9\nsource:\n\tfragment\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\noutline:\navailable outline only",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:bytes:3-9\nsource:\n\tfragment\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\noutline:\navailable outline only"
+    },
+    {
+      "id": "unicode-and-final-carriage-return",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 13,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\r\n\tindent🙂\n\nlast\r",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-13\nsource:\n10\t界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界...\n11\t\tindent🙂\n12\t\n13\tlast\r",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-13\nsource:\n10\t界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n11\t\tindent🙂\n12\t\n13\tlast\r"
+    },
+    {
+      "id": "long-matched-window",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 20,
+              "end_line": 31,
+              "start_byte_offset": 2000,
+              "end_byte_offset": 3101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-33\nmatched: 20-31\nsource:\n...\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n...",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-33\nmatched: 20-31\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24"
+    },
+    {
+      "id": "matched-window-near-end",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 32,
+              "end_line": 33,
+              "start_byte_offset": 3200,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-33\nmatched: 32-33\nsource:\n...\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24",
+      "expected_full": "freshness: fresh\n#1 matchedBy=fts+vector src/sample.ts:10-33\nmatched: 32-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24"
+    },
+    {
+      "id": "stale-hit",
+      "result": {
+        "query": "call chain",
+        "freshness": "possibly_stale",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "changed",
+            "content_role": "source",
+            "status": "possibly_stale",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: possibly_stale\n#1 matchedBy=fts+vector src/sample.ts:10-33\nstatus: possibly_stale\nsource:\n10\tchanged",
+      "expected_full": "freshness: possibly_stale\n#1 matchedBy=fts+vector src/sample.ts:10-33\nstatus: possibly_stale\nsource:\n10\tchanged"
+    },
+    {
+      "id": "empty-stale-index",
+      "result": {
+        "query": "call chain",
+        "freshness": "possibly_stale",
+        "background_refresh": "queued",
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: possibly_stale\nresults: served_from_current_index\nbackground_refresh: queued\nNo matches.",
+      "expected_full": "freshness: possibly_stale\nresults: served_from_current_index\nbackground_refresh: queued\nNo matches."
+    },
+    {
+      "id": "no-searchable-files",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": "no_searchable_files",
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_short": "freshness: fresh\nNo searchable files.",
+      "expected_full": "freshness: fresh\nNo searchable files."
+    }
+  ]
+}
