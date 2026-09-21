@@ -665,11 +665,7 @@ async fn index_candidates(
 
         if prepared.fragments.is_empty() {
             let commit_started = Instant::now();
-            if let Err(error) = commit_file(context.storage, prepared, Vec::new(), &mut stats) {
-                let reason =
-                    mark_file_failed(context.storage, &error.file, "commit", &error.error)?;
-                record_file_failed(&mut stats, &error.file, &reason);
-            }
+            commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
             timings.record("index_commit", commit_started.elapsed(), 1);
             report_indexing(context, &stats, diff, progress_base, None, None);
             continue;
@@ -781,11 +777,7 @@ fn apply_embedding_files(
             EmbeddedFileOutcome::Success { file, vectors } => {
                 let path = file.file.relative_path.clone();
                 let commit_started = Instant::now();
-                if let Err(error) = commit_file(context.storage, file, vectors, stats) {
-                    let file = error.file;
-                    let reason = mark_file_failed(context.storage, &file, "commit", &error.error)?;
-                    record_file_failed(stats, &file, &reason);
-                }
+                commit_file(context.storage, file, vectors, stats)?;
                 timings.record("index_commit", commit_started.elapsed(), 1);
                 report_indexing(
                     context,
@@ -818,26 +810,18 @@ fn apply_embedding_files(
     Ok(())
 }
 
-struct CommitError {
-    file: Box<FileRecord>,
-    error: EngineError,
-}
-
 fn commit_file(
     storage: &dyn IndexStorage,
     file: PreparedFile,
     vectors: Vec<Vec<f32>>,
     stats: &mut IndexWriteStats,
-) -> Result<(), CommitError> {
+) -> Result<(), EngineError> {
     if file.fragments.len() != vectors.len() {
-        return Err(CommitError {
-            file: Box::new(file.file),
-            error: EngineError::internal(format!(
-                "entity/vector count mismatch: fragments={} vectors={}",
-                file.fragments.len(),
-                vectors.len()
-            )),
-        });
+        return Err(EngineError::internal(format!(
+            "entity/vector count mismatch: fragments={} vectors={}",
+            file.fragments.len(),
+            vectors.len()
+        )));
     }
     let public_entities = file.entities.len();
     let entries = file
@@ -852,12 +836,7 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage
-        .replace_file(&file.file, &file.entities, &entries)
-        .map_err(|error| CommitError {
-            file: Box::new(file.file.clone()),
-            error,
-        })?;
+    storage.replace_file(&file.file, &file.entities, &entries)?;
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
     Ok(())
@@ -2279,6 +2258,7 @@ mod tests {
         identities: Mutex<HashMap<PathBuf, FileId>>,
         resolved_paths: Mutex<Vec<Vec<PathBuf>>>,
         finalized: AtomicUsize,
+        failed_markers: AtomicUsize,
         fail_replacements_once: Mutex<HashSet<FileId>>,
     }
 
@@ -2345,7 +2325,6 @@ mod tests {
             vectors.clone(),
             &mut IndexWriteStats::default(),
         )
-        .map_err(|error| error.error)
         .expect("commit prepared fragments");
         let entries = storage.entries.lock().expect("stored entries");
         for (((entry, body), vector), ordinal) in entries[&file_id]
@@ -2431,6 +2410,7 @@ mod tests {
         }
 
         fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
+            self.failed_markers.fetch_add(1, Ordering::AcqRel);
             self.entries
                 .lock()
                 .expect("stored entries")
@@ -2508,6 +2488,7 @@ mod tests {
         calls: AtomicUsize,
         active: AtomicUsize,
         maximum_active: AtomicUsize,
+        fail_embeddings: bool,
     }
 
     struct UnknownModifiedScanner(NativeScanner);
@@ -2558,6 +2539,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 active: AtomicUsize::new(0),
                 maximum_active: AtomicUsize::new(0),
+                fail_embeddings: false,
             }
         }
     }
@@ -2582,6 +2564,9 @@ mod tests {
             _progress: Option<IndexProgressReporter>,
         ) -> Result<EmbeddingResult, ModelError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
+            if self.fail_embeddings {
+                return Err(ModelError::internal("injected embedding failure"));
+            }
             let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
             self.maximum_active.fetch_max(active, Ordering::AcqRel);
             sleep(Duration::from_millis(10)).await;
@@ -2615,6 +2600,89 @@ mod tests {
             created_epoch_ms: 1,
             updated_epoch_ms: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn replacement_errors_abort_without_file_retry_or_checkpoint() {
+        // Zero-byte files are skipped by scanning; whitespace reaches the no-fragment commit.
+        for (source, embedding_calls) in [("indexable text", 1), (" \n", 0)] {
+            let directory = tempdir().expect("workspace");
+            std::fs::write(directory.path().join("file.txt"), source).expect("source");
+            let workspace = workspace(directory.path());
+            let scanner = RecordingScanner::new();
+            let storage = MemoryStorage::default();
+            let file_id = storage
+                .resolve_file_ids(&[PathBuf::from("file.txt")])
+                .expect("file identity")[0];
+            storage
+                .fail_replacements_once
+                .lock()
+                .expect("failure injection")
+                .insert(file_id);
+            let model = ConcurrentModel::new();
+
+            let error = index_workspace(&IndexingContext {
+                workspace_index: &workspace,
+                storage: &storage,
+                scanner: &scanner,
+                embedding_models: &[&model],
+                embedding_concurrency: None,
+                on_progress: None,
+                signal: None,
+                changes: &[],
+            })
+            .await
+            .expect_err("a storage failure must abort indexing");
+
+            assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+            assert!(error.to_string().contains("injected replacement failure"));
+            assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
+            assert_eq!(model.calls.load(Ordering::Acquire), embedding_calls);
+            // These storage operations remain usable after the replacement fails,
+            // so neither failed-file recovery nor finalization may hide the error.
+            assert_eq!(storage.failed_markers.load(Ordering::Acquire), 0);
+            assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+            assert!(storage.list_files().expect("stored files").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_errors_remain_file_failures_after_retry() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("file.txt"), "indexable text").expect("source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let mut model = ConcurrentModel::new();
+        model.fail_embeddings = true;
+
+        let result = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("embedding errors allow the index to finish");
+
+        assert_eq!(result.files_failed, 1);
+        assert_eq!(storage.failed_markers.load(Ordering::Acquire), 2);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 1);
+        let requests = scanner.requests.lock().expect("scan requests");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].scope_paths,
+            vec![directory.path().join("file.txt")]
+        );
+        let files = storage.list_files().expect("stored files");
+        let FileIndexStatus::Failed { error } = &files[0].index_status else {
+            panic!("embedding failure must remain attached to the file");
+        };
+        assert!(error.contains("injected embedding failure"));
     }
 
     #[tokio::test]
@@ -3025,11 +3093,6 @@ mod tests {
                 .expect("repair file")
                 .id
         };
-        storage
-            .fail_replacements_once
-            .lock()
-            .expect("failure injection")
-            .insert(repair_id);
         std::fs::remove_file(root.join("missing.txt")).expect("remove source");
         std::fs::write(root.join("requested.txt"), "requested changed").expect("change source");
         workspace.scan.globs.push("!excluded.txt".into());
@@ -3047,7 +3110,7 @@ mod tests {
         .await
         .expect("repair during scoped update");
         assert_eq!(result.files_deleted, 3);
-        assert_eq!(result.files_pending, 2);
+        assert_eq!(result.files_pending, 1);
         assert_eq!(result.files_failed, 0);
         assert_eq!(result.files_modified, 1);
         let files = storage.list_files().expect("stored files");
@@ -3067,8 +3130,7 @@ mod tests {
             "delete intent must win over source existence"
         );
         let requests = scanner.requests.lock().expect("scan requests");
-        assert_eq!(requests.len(), 3, "one retry after the failed replacement");
-        assert_eq!(requests[2].scope_paths, vec![root.join("repair.txt")]);
+        assert_eq!(requests.len(), 2);
         let scope = &requests[1].scope_paths;
         assert!(scope.contains(&root.join("repair.txt")));
         assert!(!scope.contains(&root.join("failed.txt")));
