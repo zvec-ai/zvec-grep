@@ -5,6 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crossterm::{
+    cursor::{MoveToColumn, MoveUp},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    queue,
+    terminal::{self, Clear, ClearType},
+};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 use uuid::Uuid;
@@ -225,6 +231,114 @@ fn resolve_agents<'a>(
             "Choose integrations to remove"
         }
     );
+    prompt_agent_selection(detected)
+}
+
+struct SelectionRawMode {
+    was_raw: bool,
+}
+
+impl SelectionRawMode {
+    fn enable() -> io::Result<Self> {
+        let was_raw = terminal::is_raw_mode_enabled()?;
+        terminal::enable_raw_mode()?;
+        Ok(Self { was_raw })
+    }
+}
+
+impl Drop for SelectionRawMode {
+    fn drop(&mut self) {
+        if !self.was_raw {
+            let _ = terminal::disable_raw_mode();
+        }
+    }
+}
+
+fn prompt_agent_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, InstallError> {
+    if env::var("TERM").is_ok_and(|term| term == "dumb") {
+        return prompt_agent_line_selection(detected);
+    }
+    let Ok(_raw_mode) = SelectionRawMode::enable() else {
+        return prompt_agent_line_selection(detected);
+    };
+    let mut active_index = Agent::ALL
+        .iter()
+        .position(|agent| detected.contains(agent))
+        .unwrap_or(0);
+    let mut output = io::stdout().lock();
+    render_agent_selection(&mut output, active_index, detected, false)?;
+    loop {
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if let Some(selected) = select_agent_key(&mut active_index, key) {
+            write!(output, "\r\n")?;
+            output.flush()?;
+            return Ok(selected);
+        }
+        render_agent_selection(&mut output, active_index, detected, true)?;
+    }
+}
+
+fn select_agent_key(active_index: &mut usize, key: KeyEvent) -> Option<Vec<Agent>> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => Some(Vec::new()),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Vec::new()),
+        KeyCode::Up => {
+            *active_index = (*active_index + Agent::ALL.len() - 1) % Agent::ALL.len();
+            None
+        }
+        KeyCode::Down => {
+            *active_index = (*active_index + 1) % Agent::ALL.len();
+            None
+        }
+        KeyCode::Enter => Some(vec![Agent::ALL[*active_index]]),
+        _ => None,
+    }
+}
+
+fn render_agent_selection(
+    output: &mut impl Write,
+    active_index: usize,
+    detected: &BTreeSet<Agent>,
+    redraw: bool,
+) -> io::Result<()> {
+    if redraw {
+        queue!(
+            output,
+            MoveUp(u16::try_from(Agent::ALL.len() + 2).expect("small agent list"))
+        )?;
+    }
+    let label_width = Agent::ALL
+        .iter()
+        .map(|agent| agent.label().len())
+        .max()
+        .unwrap_or(0);
+    for (index, agent) in Agent::ALL.iter().enumerate() {
+        queue!(output, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+        let marker = if index == active_index { "●" } else { "○" };
+        let status = if detected.contains(agent) {
+            "detected"
+        } else {
+            "not found"
+        };
+        write!(
+            output,
+            "  {marker} {:label_width$}  {status}\r\n",
+            agent.label()
+        )?;
+    }
+    queue!(output, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+    write!(output, "\r\n")?;
+    queue!(output, Clear(ClearType::CurrentLine))?;
+    write!(output, "  Use ↑↓ to move · Enter to select\r\n")?;
+    output.flush()
+}
+
+fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, InstallError> {
     for (index, agent) in Agent::ALL.iter().enumerate() {
         println!(
             "  {}. {} ({})",
@@ -1815,6 +1929,52 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_selection_wraps_and_confirms_one_agent() {
+        let mut active = 0;
+        assert_eq!(select_agent_key(&mut active, KeyCode::Up.into()), None);
+        assert_eq!(active, Agent::ALL.len() - 1);
+        assert_eq!(select_agent_key(&mut active, KeyCode::Down.into()), None);
+        assert_eq!(active, 0);
+        select_agent_key(&mut active, KeyCode::Down.into());
+        assert_eq!(
+            select_agent_key(&mut active, KeyCode::Enter.into()),
+            Some(vec![Agent::ALL[1]])
+        );
+    }
+
+    #[test]
+    fn keyboard_selection_cancels_and_ignores_unrelated_keys() {
+        let mut active = 2;
+        for key in [
+            KeyCode::Esc.into(),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(select_agent_key(&mut active, key), Some(Vec::new()));
+        }
+        for key in [
+            KeyCode::Char('c').into(),
+            KeyCode::Char(' ').into(),
+            KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Release),
+        ] {
+            assert_eq!(select_agent_key(&mut active, key), None);
+            assert_eq!(active, 2);
+        }
+    }
+
+    #[test]
+    fn keyboard_menu_shows_selection_and_detection_status() {
+        let detected = BTreeSet::from([Agent::Qwen]);
+        let mut output = Vec::new();
+        render_agent_selection(&mut output, 4, &detected, false).expect("render menu");
+        let output = String::from_utf8(output).expect("utf8 menu");
+        assert_eq!(output.matches('●').count(), 1);
+        assert_eq!(output.matches('○').count(), Agent::ALL.len() - 1);
+        assert!(output.contains("● Qwen Code    detected"));
+        assert_eq!(output.matches("not found").count(), Agent::ALL.len() - 1);
+        assert!(output.contains("Use ↑↓ to move · Enter to select"));
+    }
 
     #[test]
     fn target_aliases_match_typescript_order() {
