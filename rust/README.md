@@ -27,7 +27,7 @@ let reply = zg.context(ContextOptions {
 zg.close();
 ```
 
-`zg install --target opencode` respects a nonempty `OPENCODE_CONFIG` override.
+`zg --install --target opencode` respects a nonempty `OPENCODE_CONFIG` override.
 Otherwise it selects an existing `opencode.jsonc` before `opencode.json` under
 `${XDG_CONFIG_HOME:-~/.config}/opencode`, creating `opencode.json` when neither
 exists. Installation reports the selected path and explains when both files

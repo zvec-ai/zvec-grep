@@ -411,7 +411,7 @@ fn opencode_jsonc_preserves_comments_trailing_commas_and_other_settings() {
     let path = directory.join("opencode.jsonc");
     let source = "{\n  // Keep model.\n  \"model\": \"custom/model\",\n  \"array\": [\"literal ,} and ,]\",],\n  \"mcp\": {\n    /* Keep other server. */\n    \"other\": {\"type\": \"remote\", \"url\": \"https://example.test/mcp\",},\n  },\n}\n";
     fs::write(&path, source).expect("write");
-    let stdout = run_ok(&mut opencode_command("install", root));
+    let stdout = run_ok(&mut opencode_command("--install", root));
     assert!(
         stdout.contains(&format!("Config    {}", path.display())),
         "expected configuration path {}, stdout:\n{stdout}",
@@ -420,9 +420,9 @@ fn opencode_jsonc_preserves_comments_trailing_commas_and_other_settings() {
     assert!(!directory.join("opencode.json").exists());
     let installed = fs::read_to_string(&path).expect("read");
     assert!(installed.contains("\"zvec_grep\""));
-    run_ok(&mut opencode_command("install", root));
+    run_ok(&mut opencode_command("--install", root));
     assert_eq!(fs::read_to_string(&path).expect("read"), installed);
-    run_ok(&mut opencode_command("uninstall", root));
+    run_ok(&mut opencode_command("--uninstall", root));
     let removed = fs::read_to_string(&path).expect("read");
     assert!(!removed.contains("\"zvec_grep\""));
     for line in source.lines().filter(|line| {
@@ -434,7 +434,7 @@ fn opencode_jsonc_preserves_comments_trailing_commas_and_other_settings() {
         assert!(installed.contains(line));
         assert!(removed.contains(line));
     }
-    run_ok(&mut opencode_command("install", root));
+    run_ok(&mut opencode_command("--install", root));
 }
 
 #[test]
@@ -452,12 +452,12 @@ fn opencode_selects_jsonc_and_cleans_both_global_files() {
         "{\n  // Active config\n  \"model\": \"jsonc/model\"\n}\n",
     )
     .expect("write");
-    let stdout = run_ok(&mut opencode_command("install", root));
+    let stdout = run_ok(&mut opencode_command("--install", root));
     assert!(
         stdout.contains("both opencode.jsonc and opencode.json exist; selected opencode.jsonc")
     );
     assert_eq!(fs::read_to_string(&json_path).expect("read"), legacy);
-    run_ok(&mut opencode_command("uninstall", root));
+    run_ok(&mut opencode_command("--uninstall", root));
     assert!(json(&json_path)["mcp"].get("zvec_grep").is_none());
     assert_eq!(
         json(&json_path)["mcp"]["other"]["url"],
@@ -472,12 +472,12 @@ fn opencode_selects_jsonc_and_cleans_both_global_files() {
 fn opencode_explicit_override_is_trimmed_and_scopes_uninstall() {
     let temporary = TempDir::new().expect("tempdir");
     let root = temporary.path();
-    run_ok(&mut opencode_command("install", root));
+    run_ok(&mut opencode_command("--install", root));
     let global = root.join("config/opencode/opencode.json");
     let original = fs::read_to_string(&global).expect("read");
     let custom = root.join("custom.jsonc");
     fs::write(&custom, "{\n // Keep custom\n}\n").expect("write");
-    for action in ["install", "uninstall"] {
+    for action in ["--install", "--uninstall"] {
         run_ok(
             opencode_command(action, root)
                 .env("OPENCODE_CONFIG", "  custom.jsonc  ")
@@ -492,7 +492,7 @@ fn opencode_explicit_override_is_trimmed_and_scopes_uninstall() {
     );
     // Blank overrides fall back to the home configuration directory.
     run_ok(
-        opencode_command("install", root)
+        opencode_command("--install", root)
             .env("OPENCODE_CONFIG", " ")
             .env("XDG_CONFIG_HOME", " "),
     );
@@ -506,17 +506,17 @@ fn opencode_jsonc_conflicts_and_invalid_containers_do_not_modify_files() {
     let path = root.join("custom.jsonc");
     let unmanaged = "{\n // Keep unmanaged\n \"mcp\": {\"zvec_grep\": {\"url\": \"https://example.test/unmanaged\"},},\n}\n";
     fs::write(&path, unmanaged).expect("write");
-    let output = opencode_command("install", root)
+    let output = opencode_command("--install", root)
         .env("OPENCODE_CONFIG", &path)
         .output()
         .expect("run");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--force"));
     assert_eq!(fs::read_to_string(&path).expect("read"), unmanaged);
-    run_ok(opencode_command("uninstall", root).env("OPENCODE_CONFIG", &path));
+    run_ok(opencode_command("--uninstall", root).env("OPENCODE_CONFIG", &path));
     assert_eq!(fs::read_to_string(&path).expect("read"), unmanaged);
     run_ok(
-        opencode_command("install", root)
+        opencode_command("--install", root)
             .env("OPENCODE_CONFIG", &path)
             .arg("--force"),
     );
@@ -527,7 +527,7 @@ fn opencode_jsonc_conflicts_and_invalid_containers_do_not_modify_files() {
     );
     for source in ["{\"mcp\":null}", "{\"mcp\":[]}", "{,}", "{\"mcp\": {,,}}"] {
         fs::write(&path, source).expect("write");
-        for action in ["install", "uninstall"] {
+        for action in ["--install", "--uninstall"] {
             let output = opencode_command(action, root)
                 .env("OPENCODE_CONFIG", &path)
                 .output()

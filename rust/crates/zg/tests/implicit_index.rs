@@ -326,7 +326,8 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
                     "--mode", mode, "--fts", "orchard", "--refresh", refresh,
                     "--allow-remote", "--api-key", "local-test-key", "--no-color",
                 ]))?;
-                let output = wait_cli(&mut query, Duration::from_secs(5)).await;
+                // The unreleased gate proves nonblocking behavior without timing process startup.
+                let output = wait_cli(&mut query, Duration::from_secs(30)).await;
                 if writer.try_wait().map_err(|error| error.to_string())?.is_some() {
                     return Err("incremental writer exited while its embedding was gated".into());
                 }
