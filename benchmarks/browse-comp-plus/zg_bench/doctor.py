@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 from .artifacts import utc_now
 from .config import BenchmarkConfig
 from .process import resolve_executable, run_command
+from .zg_cli import compatibility_issues
 
 
 @dataclass(frozen=True)
@@ -54,17 +56,26 @@ def _authentication(codex_bin: str) -> Check:
     )
 
 
-def _zvec_version() -> Check:
+def check_zvec_cli() -> Check:
     executable = resolve_executable("zg")
     if executable is None:
         return Check("zvec-grep", False, "'zg' was not found")
-    result = run_command([executable, "--version"], timeout=30)
-    value = result.stdout.strip()
-    return Check(
-        "zvec-grep",
-        result.ok and bool(value),
-        f"{value or 'unknown'} ({executable})",
-    )
+    try:
+        result = run_command([executable, "--version"], timeout=30)
+        value = result.stdout.strip()
+        if not result.ok or not value:
+            return Check("zvec-grep", False, f"could not read version ({executable})")
+        issues = compatibility_issues(executable)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return Check("zvec-grep", False, f"could not inspect {executable}: {error}")
+    detail = f"{value} ({executable})"
+    if issues:
+        detail += (
+            " has an incompatible CLI: " + "; ".join(issues)
+            + ". Install a compatible zvec-grep release, or use the benchmark "
+            "from the same release as your installed zg."
+        )
+    return Check("zvec-grep", not issues, detail)
 
 
 def run_doctor(
@@ -85,7 +96,7 @@ def run_doctor(
             system in {"Darwin", "Linux"},
             f"{system} {platform.machine()}; native macOS and Linux are supported",
         ),
-        _zvec_version(),
+        check_zvec_cli(),
         _command("Codex", codex_bin, ["--version"]),
         _authentication(codex_bin),
     ]
