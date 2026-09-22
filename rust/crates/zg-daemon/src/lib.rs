@@ -81,7 +81,8 @@ impl FromStr for ListenAddress {
 pub struct ServerConfig {
     pub listen: ListenAddress,
     pub home: PathBuf,
-    pub mcp_toolset: McpToolset,
+    /// None reuses an existing daemon profile and defaults new daemons to agent.
+    pub mcp_toolset: Option<McpToolset>,
     pub token_file: Option<PathBuf>,
 }
 
@@ -91,7 +92,7 @@ impl ServerConfig {
         Self {
             listen,
             home,
-            mcp_toolset: McpToolset::Agent,
+            mcp_toolset: None,
             token_file: None,
         }
     }

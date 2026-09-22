@@ -65,22 +65,34 @@ pub const FULL_TOOL_NAMES: [&str; 6] = [
     "zvec_grep_server_status",
 ];
 
+macro_rules! workspace_evidence_rules {
+    () => { concat!(
+        "- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n",
+        "- A workspace may contain any mix of code, documents, configuration, and data.\n",
+        "- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n",
+    ) };
+}
+
+macro_rules! search_routing_rules {
+    ($exact:literal, $focused:literal) => { concat!(
+        "- Use ", $exact, " first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.\n",
+        "- Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.\n",
+        "- When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use ", $focused, " for focused verification.\n",
+        "- For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.\n",
+        "- Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.\n",
+        "- `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.\n",
+        "- For a fused mixed search, use arguments such as {\"root\":\"/absolute/workspace\",\"query\":\"how are results ranked and fused\",\"fts\":[\"RRF\",\"score\"],\"fuse\":true}.\n",
+        "- Search results include bounded source snippets by default. Set preview: \"full\" for all available content of each retrieved item; this does not retrieve the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
+        "- If semantic retrieval remains irrelevant, fall back to ", $exact, ".\n",
+        "- Stop searching once the available evidence is sufficient for the requested task. Continue only to resolve a material gap or ambiguity; do not repeat similar searches or broaden the investigation merely to reconfirm what is already established.\n",
+        "- Do not launch a sub-agent solely to locate workspace material.\n",
+    ) };
+}
+
 pub const AGENT_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval rules:\n",
-    "- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n",
-    "- A workspace may contain any mix of code, documents, configuration, and data.\n",
-    "- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n",
-    "- Use native Grep or rg first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.\n",
-    "- Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.\n",
-    "- When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use Read, Grep, or rg for focused verification.\n",
-    "- For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.\n",
-    "- Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.\n",
-    "- `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.\n",
-    "- For a fused mixed search, use arguments such as {\"root\":\"/absolute/workspace\",\"query\":\"how are results ranked and fused\",\"fts\":[\"RRF\",\"score\"],\"fuse\":true}.\n",
-    "- Search results include bounded source snippets by default. Set preview: \"full\" for all available content of each retrieved item; this does not retrieve the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
-    "- If semantic retrieval remains irrelevant, fall back to native Grep or rg.\n",
-    "- Stop searching once the available evidence is sufficient for the requested task. Continue only to resolve a material gap or ambiguity; do not repeat similar searches or broaden the investigation merely to reconfirm what is already established.\n",
-    "- Do not launch a sub-agent solely to locate workspace material.\n",
+    workspace_evidence_rules!(),
+    search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.\n",
     "- When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.\n",
@@ -89,18 +101,17 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
 
 pub const FULL_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval and lifecycle rules:\n",
-    "- Use zvec_grep_rg first only when exact lookup alone is sufficient, such as locating one definition, literal, filename, configuration key, error message, regex match, or exhaustive occurrence list.\n",
-    "- Use zvec_grep_search first when wording or location is unknown, or when the answer requires architecture, lifecycle, call relationships, dependencies, data or control flow, design rationale, comparison, or synthesis across files or components.\n",
-    "- For mixed tasks, call zvec_grep_search with the semantic intent and verified exact anchors, then use Read or zvec_grep_rg for focused verification.\n",
-    "- Search results include bounded source snippets by default. Set preview: \"full\" for all available source and outline of each retrieved item without changing retrieval or ranking.\n",
+    workspace_evidence_rules!(),
+    search_routing_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
-    "- Read freshness and background_refresh from zvec_grep_search without a status preflight. Call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
+    "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
+    "- Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
+    "- When results are served_from_current_index, use them immediately when they are sufficient; do not call status merely because a background refresh is active.\n",
     "- Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.\n",
-    "- This version indexes text only with one embedding model per workspace. For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.\n",
-    "- zvec_grep_index wait defaults to false. Poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.\n",
+    "- For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.\n",
+    "- zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.\n",
     "- Use zvec_grep_index with drop: true, or zvec_grep_index_drop, only when index deletion is explicitly requested.\n",
-    "- Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.\n",
-    "- Stop searching once the available evidence is sufficient.\n",
+    "- Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.",
 );
 
 const MAX_QUERY_GROUPS: usize = 32;
@@ -249,12 +260,22 @@ pub struct ZvecGrepMcpServer {
 
 impl ZvecGrepMcpServer {
     #[must_use]
-    pub fn agent(engine: Arc<ZvecGrep>) -> Self {
+    /// Direct engine adapter without daemon watchers or background scheduling.
+    pub fn agent_direct(engine: Arc<ZvecGrep>) -> Self {
         Self::build(engine, McpToolset::Agent, None)
     }
 
     #[must_use]
-    pub fn full(engine: Arc<ZvecGrep>, status: Arc<dyn ServerStatusProvider>) -> Self {
+    pub fn agent_with_index_operations(
+        engine: Arc<ZvecGrep>,
+        index_operations: Arc<dyn IndexOperationProvider>,
+    ) -> Self {
+        Self::build_with_index_operations(engine, McpToolset::Agent, None, index_operations)
+    }
+
+    #[must_use]
+    /// Direct engine adapter without daemon watchers or background scheduling.
+    pub fn full_direct(engine: Arc<ZvecGrep>, status: Arc<dyn ServerStatusProvider>) -> Self {
         Self::build(engine, McpToolset::Full, Some(status))
     }
 
@@ -286,6 +307,18 @@ impl ZvecGrepMcpServer {
         index_operations: Arc<dyn IndexOperationProvider>,
     ) -> Self {
         let mut router = Self::tool_router();
+        if toolset == McpToolset::Full {
+            let search = router.map.get_mut(AGENT_TOOL_NAME).expect("search route");
+            search.attr.description = search.attr.description.as_ref().map(|description| {
+                description
+                    .replace("Use native Grep or rg instead", "Use zvec_grep_rg instead")
+                    .replace(
+                        "from the response without a status preflight",
+                        "from the response",
+                    )
+                    .into()
+            });
+        }
         if toolset == McpToolset::Agent {
             for name in FULL_TOOL_NAMES {
                 if name != AGENT_TOOL_NAME {
@@ -2245,8 +2278,39 @@ mod tests {
     }
 
     #[test]
+    fn toolset_metadata_matches_node() {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../../compat/mcp/toolsets.json"))
+                .expect("Node.js toolset metadata");
+        for (profile, server) in [
+            (
+                "agent",
+                ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new())),
+            ),
+            (
+                "full",
+                ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus)),
+            ),
+        ] {
+            assert_eq!(
+                server.get_info().instructions.as_deref(),
+                expected[profile]["instructions"].as_str()
+            );
+            let search = server
+                .listed_tools()
+                .into_iter()
+                .find(|tool| tool.name == AGENT_TOOL_NAME)
+                .expect("search tool");
+            assert_eq!(
+                search.description.as_deref(),
+                expected[profile]["search_description"].as_str()
+            );
+        }
+    }
+
+    #[test]
     fn agent_server_exposes_only_search() {
-        let server = ZvecGrepMcpServer::agent(Arc::new(ZvecGrep::new()));
+        let server = ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new()));
         let tools = server.listed_tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, AGENT_TOOL_NAME);
@@ -2255,7 +2319,8 @@ mod tests {
 
     #[test]
     fn full_server_exposes_all_six_tools() {
-        let server = ZvecGrepMcpServer::full(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
+        let server =
+            ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
         let names = server
             .listed_tools()
             .into_iter()

@@ -78,8 +78,10 @@ pub(crate) async fn run_server(
         engine: Arc::clone(&engine),
     });
     let index_operations: Arc<dyn IndexOperationProvider> = Arc::new(runtimes.clone());
-    let mcp_server = match config.mcp_toolset {
-        McpToolset::Agent => ZvecGrepMcpServer::agent(Arc::clone(&engine)),
+    let mcp_server = match config.mcp_toolset.unwrap_or_default() {
+        McpToolset::Agent => {
+            ZvecGrepMcpServer::agent_with_index_operations(Arc::clone(&engine), index_operations)
+        }
         McpToolset::Full => ZvecGrepMcpServer::full_with_index_operations(
             Arc::clone(&engine),
             status,

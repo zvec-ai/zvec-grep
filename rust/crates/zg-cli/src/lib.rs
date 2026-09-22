@@ -596,13 +596,8 @@ pub struct ServerStartArgs {
     pub listen: String,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
-    #[arg(
-        long,
-        env = "ZVEC_GREP_MCP_TOOLSET",
-        value_enum,
-        default_value = "agent"
-    )]
-    pub mcp_toolset: McpToolset,
+    #[arg(long, env = "ZVEC_GREP_MCP_TOOLSET", value_enum)]
+    pub mcp_toolset: Option<McpToolset>,
     #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
     pub token_file: Option<PathBuf>,
 }
@@ -1249,15 +1244,14 @@ fn server_plan(args: ServerArgs) -> Result<ServerPlan, CliError> {
             listen: args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned()),
             home: args.home,
             mcp_toolset: match args.mcp_toolset {
-                Some(toolset) => toolset,
+                Some(toolset) => Some(toolset),
                 None => std::env::var("ZVEC_GREP_MCP_TOOLSET")
                     .ok()
                     .map(|value| {
                         <McpToolset as ValueEnum>::from_str(&value, false)
                             .map_err(|_| CliError::InvalidToolsetEnvironment)
                     })
-                    .transpose()?
-                    .unwrap_or_default(),
+                    .transpose()?,
             },
             token_file: args.token_file,
         }));
@@ -1272,7 +1266,7 @@ fn server_plan(args: ServerArgs) -> Result<ServerPlan, CliError> {
                 child.listen = listen;
             }
             if let Some(toolset) = args.mcp_toolset {
-                child.mcp_toolset = toolset;
+                child.mcp_toolset = Some(toolset);
             }
             Ok(if run {
                 ServerPlan::Run(child)
@@ -1424,7 +1418,7 @@ mod tests {
         assert_eq!(args.listen, "127.0.0.1:8123");
         assert_eq!(args.home, Some("state".into()));
         assert_eq!(args.token_file, Some("token".into()));
-        assert_eq!(args.mcp_toolset, super::McpToolset::Full);
+        assert_eq!(args.mcp_toolset, Some(super::McpToolset::Full));
     }
 
     #[test]

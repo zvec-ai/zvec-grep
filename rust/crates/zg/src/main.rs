@@ -210,30 +210,18 @@ async fn start_installed_server(outcome: &InstallOutcome) -> Result<DaemonStatus
     let home = zg_daemon::resolve_home(None)?;
     let mut config = ServerConfig::new(listen, home);
     config.mcp_toolset = match outcome.mcp_toolset {
-        Some(McpToolset::Agent) => DaemonMcpToolset::Agent,
-        Some(McpToolset::Full) => DaemonMcpToolset::Full,
-        None => {
-            if let Some(environment) = std::env::var_os("ZVEC_GREP_MCP_TOOLSET") {
-                match environment.to_string_lossy().as_ref() {
-                    "agent" => DaemonMcpToolset::Agent,
-                    "full" => DaemonMcpToolset::Full,
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "ZVEC_GREP_MCP_TOOLSET must be agent or full",
-                        )
-                        .into());
-                    }
-                }
-            } else {
-                let current = zg_daemon::server_status(&config.home).await?;
-                if current.running && current.mcp_toolset.as_deref() == Some("full") {
-                    DaemonMcpToolset::Full
-                } else {
-                    DaemonMcpToolset::Agent
-                }
-            }
-        }
+        Some(McpToolset::Agent) => Some(DaemonMcpToolset::Agent),
+        Some(McpToolset::Full) => Some(DaemonMcpToolset::Full),
+        None => std::env::var_os("ZVEC_GREP_MCP_TOOLSET")
+            .map(|environment| match environment.to_string_lossy().as_ref() {
+                "agent" => Ok(DaemonMcpToolset::Agent),
+                "full" => Ok(DaemonMcpToolset::Full),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ZVEC_GREP_MCP_TOOLSET must be agent or full",
+                )),
+            })
+            .transpose()?,
     };
     let executable = std::env::current_exe()?;
     Ok(zg_daemon::start_server(&executable, &config).await?)
@@ -652,10 +640,10 @@ fn server_config(args: ServerStartArgs) -> Result<ServerConfig, Box<dyn Error>> 
     let home = zg_daemon::resolve_home(args.home)?;
     let mut config = ServerConfig::new(listen, home);
     config.token_file = args.token_file;
-    config.mcp_toolset = match args.mcp_toolset {
+    config.mcp_toolset = args.mcp_toolset.map(|toolset| match toolset {
         McpToolset::Agent => DaemonMcpToolset::Agent,
         McpToolset::Full => DaemonMcpToolset::Full,
-    };
+    });
     Ok(config)
 }
 

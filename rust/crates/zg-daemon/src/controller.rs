@@ -173,7 +173,7 @@ impl InstanceLock {
                 server_url: config.listen.server_url(),
                 listen: config.listen.to_string(),
                 ready: false,
-                mcp_toolset: config.mcp_toolset.to_string(),
+                mcp_toolset: config.mcp_toolset.unwrap_or_default().to_string(),
             };
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
@@ -251,8 +251,9 @@ pub async fn start_server(
 async fn existing_server(config: &ServerConfig) -> Result<Option<DaemonStatus>, DaemonError> {
     let current = server_status(&config.home).await?;
     if current.running {
-        let requested_toolset = config.mcp_toolset.to_string();
-        if current.mcp_toolset.as_deref() != Some(requested_toolset.as_str()) {
+        if let Some(requested_toolset) = config.mcp_toolset
+            && current.mcp_toolset.as_deref() != Some(requested_toolset.to_string().as_str())
+        {
             return Err(DaemonError::ToolsetMismatch {
                 active: current.mcp_toolset.unwrap_or_else(|| "unknown".to_owned()),
             });
@@ -291,7 +292,7 @@ async fn start_server_with_lock(
         .arg("server")
         .arg("run")
         .arg("--mcp-toolset")
-        .arg(config.mcp_toolset.to_string())
+        .arg(config.mcp_toolset.unwrap_or_default().to_string())
         .arg("--listen")
         .arg(config.listen.to_string())
         .arg("--home")
