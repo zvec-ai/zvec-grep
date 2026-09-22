@@ -546,7 +546,7 @@ async fn has_valid_complete_marker(
         };
         if !metadata.is_file()
             || metadata.len() != artifact.size
-            || complete_file_stamp(&metadata) != *expected
+            || !complete_file_stamps_match(&complete_file_stamp(&metadata), expected)
         {
             return Ok(false);
         }
@@ -575,16 +575,34 @@ async fn validate_artifact(
     if !metadata.is_file() || metadata.len() != artifact.size {
         return Ok(false);
     }
-    let mut file = async_fs::File::open(&path).await.map_err(|error| {
-        filesystem_error(source, Some(artifact.path), "open cached artifact", error)
-    })?;
+    let mut file = match async_fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(filesystem_error(
+                source,
+                Some(artifact.path),
+                "open cached artifact",
+                error,
+            ));
+        }
+    };
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         use tokio::io::AsyncReadExt;
-        let count = file.read(&mut buffer).await.map_err(|error| {
-            filesystem_error(source, Some(artifact.path), "hash cached artifact", error)
-        })?;
+        let count = match file.read(&mut buffer).await {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(filesystem_error(
+                    source,
+                    Some(artifact.path),
+                    "hash cached artifact",
+                    error,
+                ));
+            }
+        };
         if count == 0 {
             break;
         }
@@ -1066,6 +1084,19 @@ fn complete_file_stamp(metadata: &fs::Metadata) -> CompleteFileStamp {
     }
 }
 
+fn complete_file_stamps_match(actual: &CompleteFileStamp, expected: &CompleteFileStamp) -> bool {
+    actual.size == expected.size
+        && json_timestamp_matches(actual.mtime_ms, expected.mtime_ms)
+        && json_timestamp_matches(actual.ctime_ms, expected.ctime_ms)
+}
+
+fn json_timestamp_matches(actual: f64, expected: f64) -> bool {
+    actual.is_finite()
+        && expected.is_finite()
+        && actual.is_sign_positive() == expected.is_sign_positive()
+        && actual.to_bits().abs_diff(expected.to_bits()) <= 1
+}
+
 #[cfg(unix)]
 #[expect(
     clippy::cast_precision_loss,
@@ -1209,6 +1240,22 @@ impl Drop for CleanupPath {
     }
 }
 
+struct CleanupDirectory {
+    path: PathBuf,
+}
+
+impl CleanupDirectory {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for CleanupDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 struct CacheLock {
     lock_path: PathBuf,
     owner_path: PathBuf,
@@ -1263,6 +1310,7 @@ impl CacheLock {
             .unwrap_or("artifact.lock");
         let staging = parent.join(format!(".{name}.pending-{}-{token}", std::process::id()));
         fs::create_dir(&staging)?;
+        let _staging_cleanup = CleanupDirectory::new(staging.clone());
         let owner_name = format!(".owner-{token}");
         let staging_owner = staging.join(&owner_name);
         let owner = LockOwner {
@@ -1275,30 +1323,28 @@ impl CacheLock {
         fs::write(&staging_owner, owner_json)?;
         match fs::rename(&staging, lock_path) {
             Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::AlreadyExists
-                        | io::ErrorKind::DirectoryNotEmpty
-                        | io::ErrorKind::PermissionDenied
-                ) && fs::symlink_metadata(lock_path).is_ok() =>
-            {
-                let _ = fs::remove_dir_all(&staging);
+            Err(error) if is_directory_conflict(&error, lock_path) => {
                 return Ok(None);
             }
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
         let lock = Self {
             lock_path: lock_path.to_path_buf(),
             owner_path: lock_path.join(owner_name),
             last_heartbeat: std::sync::Mutex::new(UNIX_EPOCH),
         };
-        lock.assert_owned()
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        Ok(Some(lock))
+        lock.finish_acquire()
+    }
+
+    fn finish_acquire(self) -> io::Result<Option<Self>> {
+        match self.refresh_owner() {
+            Ok(()) => Ok(Some(self)),
+            // A stale-lock contender can displace us after rename succeeds but
+            // before the first heartbeat. Retry instead of returning a lock we
+            // no longer own or failing the entire model load.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn touch(&self) -> Result<(), ArtifactDownloadError> {
@@ -1320,12 +1366,16 @@ impl CacheLock {
     }
 
     fn assert_owned(&self) -> Result<(), ArtifactDownloadError> {
-        touch_owner(&self.owner_path).map_err(|error| {
+        self.refresh_owner().map_err(|error| {
             ArtifactDownloadError::new(
                 FailureKind::Filesystem,
                 format!("model cache lock ownership was lost: {error}"),
             )
-        })?;
+        })
+    }
+
+    fn refresh_owner(&self) -> io::Result<()> {
+        touch_owner(&self.owner_path)?;
         *self
             .last_heartbeat
             .lock()
@@ -1370,19 +1420,25 @@ fn remove_stale_lock_at(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
         Err(error) => return Err(error),
     }
-    let moved = inspect_lock(&stale)?.unwrap_or(LockObservation {
-        newest_heartbeat: UNIX_EPOCH,
-        dead_owner: false,
-    });
+    let Some(moved) = inspect_lock(&stale)? else {
+        return Ok(true);
+    };
     if !lock_is_abandoned(&moved, now, stale_after) {
-        if fs::rename(&stale, lock_path).is_err() {
-            // A successor owns lock_path. Leave the newly refreshed displaced
-            // owner intact rather than deleting another process's lease.
+        match fs::rename(&stale, lock_path) {
+            Ok(()) => {}
+            Err(error) if is_directory_conflict(&error, lock_path) => {
+                // A successor owns lock_path. Leave the newly refreshed displaced
+                // owner intact rather than deleting another process's lease.
+            }
+            Err(error) => return Err(error),
         }
         return Ok(false);
     }
-    fs::remove_dir_all(stale)?;
-    Ok(true)
+    match fs::remove_dir_all(stale) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
 }
 
 struct LockObservation {
@@ -1449,6 +1505,20 @@ fn lock_component<T>(result: io::Result<T>) -> io::Result<Option<T>> {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+fn is_directory_conflict(error: &io::Error, path: &Path) -> bool {
+    match error.kind() {
+        // These errors already prove that rename observed a competing target.
+        // The target may be released before a follow-up metadata lookup.
+        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty => true,
+        // Windows may report PermissionDenied when the target is an existing
+        // directory. Preserve genuine permission failures when it is not.
+        io::ErrorKind::PermissionDenied => {
+            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        }
+        _ => false,
     }
 }
 
@@ -1693,6 +1763,36 @@ mod tests {
                 .await
                 .expect("validate marker")
         );
+    }
+
+    #[test]
+    fn completion_stamps_allow_only_json_round_trip_precision() {
+        let timestamp = 1_790_048_381_253.380_1_f64;
+        let stamp = CompleteFileStamp {
+            size: 23,
+            mtime_ms: timestamp,
+            ctime_ms: timestamp,
+        };
+        let adjacent = CompleteFileStamp {
+            size: 23,
+            mtime_ms: f64::from_bits(timestamp.to_bits() - 1),
+            ctime_ms: f64::from_bits(timestamp.to_bits() + 1),
+        };
+        assert!(complete_file_stamps_match(&stamp, &adjacent));
+
+        let changed = CompleteFileStamp {
+            size: 23,
+            mtime_ms: f64::from_bits(timestamp.to_bits() - 2),
+            ctime_ms: timestamp,
+        };
+        assert!(!complete_file_stamps_match(&stamp, &changed));
+        assert!(!complete_file_stamps_match(
+            &stamp,
+            &CompleteFileStamp {
+                size: 24,
+                ..stamp.clone()
+            }
+        ));
     }
 
     #[tokio::test]
@@ -2077,6 +2177,64 @@ mod tests {
         assert!(
             lock_entry_metadata(&owner)
                 .expect("disappearing owner is not an error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn directory_conflicts_survive_release_without_hiding_permission_errors() {
+        let root = tempfile::tempdir().expect("lock root");
+        let lock_path = root.path().join("artifact.lock");
+        let error = |kind| io::Error::new(kind, "rename fixture");
+
+        // The competing directory may disappear after rename reports the
+        // conflict, so these error kinds must not depend on a second lookup.
+        assert!(is_directory_conflict(
+            &error(io::ErrorKind::AlreadyExists),
+            &lock_path
+        ));
+        assert!(is_directory_conflict(
+            &error(io::ErrorKind::DirectoryNotEmpty),
+            &lock_path
+        ));
+
+        // PermissionDenied is Windows' ambiguous spelling: it is contention
+        // only while the target is an actual directory.
+        assert!(!is_directory_conflict(
+            &error(io::ErrorKind::PermissionDenied),
+            &lock_path
+        ));
+        fs::create_dir(&lock_path).expect("competing lock directory");
+        assert!(is_directory_conflict(
+            &error(io::ErrorKind::PermissionDenied),
+            &lock_path
+        ));
+        fs::remove_dir(&lock_path).expect("remove competing lock directory");
+        fs::write(&lock_path, b"not a lock directory").expect("unrelated file");
+        assert!(!is_directory_conflict(
+            &error(io::ErrorKind::PermissionDenied),
+            &lock_path
+        ));
+        assert!(!is_directory_conflict(
+            &error(io::ErrorKind::Other),
+            &lock_path
+        ));
+    }
+
+    #[test]
+    fn initial_owner_disappearance_requests_an_acquire_retry() {
+        let root = tempfile::tempdir().expect("lock root");
+        let lock_path = root.path().join("artifact.lock");
+        let owner_path = lock_path.join(".owner-displaced");
+        let lock = CacheLock {
+            lock_path,
+            owner_path,
+            last_heartbeat: std::sync::Mutex::new(UNIX_EPOCH),
+        };
+
+        assert!(
+            lock.finish_acquire()
+                .expect("missing initial owner is not an error")
                 .is_none()
         );
     }
