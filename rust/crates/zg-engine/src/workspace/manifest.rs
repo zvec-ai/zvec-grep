@@ -250,7 +250,7 @@ fn version_mismatch(version: Option<u32>) -> String {
 
 fn rebuild_required(reason: impl std::fmt::Display) -> EngineError {
     EngineError::storage_failure(format!(
-        "{reason}; rebuild the index with `zg index --rebuild`"
+        "{reason}; rebuild the index with `zg --index --rebuild`"
     ))
 }
 
@@ -690,7 +690,7 @@ mod tests {
                     .contains(&format!("unsupported index version {version}"))
             );
             assert!(error.message().contains("expected 2"));
-            assert!(error.message().contains("zg index --rebuild"));
+            assert!(error.message().contains("zg --index --rebuild"));
             fs::write(workspace_manifest_path(&home), &bytes).expect("restore current manifest");
         }
     }

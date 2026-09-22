@@ -43,7 +43,7 @@ impl Fixture {
     }
     fn grant(&self) {
         self.success(&[
-            "auth",
+            "--auth",
             "grant",
             ".",
             "--capability",
@@ -59,7 +59,7 @@ impl Fixture {
 struct Stop<'a>(&'a Fixture);
 impl Drop for Stop<'_> {
     fn drop(&mut self) {
-        self.0.run(&["server", "off"]);
+        self.0.run(&["--server", "off"]);
     }
 }
 
@@ -68,14 +68,14 @@ fn grants_are_signed_scoped_and_revocable_without_remote_requests() {
     let fixture = Fixture::new();
     assert!(
         fixture
-            .success(&["auth", "status"])
+            .success(&["--auth", "status"])
             .contains("not authorized")
     );
     assert!(!fixture.root.path().join(".zvec-grep").exists());
     fixture.grant();
     assert!(
         fixture
-            .success(&["auth", "status", "."])
+            .success(&["--auth", "status", "."])
             .contains("Model: qwen/text-embedding-v4")
     );
     assert!(
@@ -100,7 +100,7 @@ fn grants_are_signed_scoped_and_revocable_without_remote_requests() {
         &original,
     )
     .expect("authorization test fixture operation");
-    assert!(!other.run(&["auth", "status"]).status.success());
+    assert!(!other.run(&["--auth", "status"]).status.success());
     let mut value: serde_json::Value =
         serde_json::from_slice(&original).expect("authorization test fixture operation");
     value["grant"]["endpoint"] = "https://example.test/embeddings".into();
@@ -109,12 +109,12 @@ fn grants_are_signed_scoped_and_revocable_without_remote_requests() {
         serde_json::to_vec(&value).expect("authorization test fixture operation"),
     )
     .expect("authorization test fixture operation");
-    assert!(!fixture.run(&["auth", "status"]).status.success());
-    fixture.success(&["auth", "revoke"]);
-    fixture.success(&["auth", "revoke"]);
+    assert!(!fixture.run(&["--auth", "status"]).status.success());
+    fixture.success(&["--auth", "revoke"]);
+    fixture.success(&["--auth", "revoke"]);
     assert!(
         fixture
-            .success(&["auth", "status"])
+            .success(&["--auth", "status"])
             .contains("not authorized")
     );
 }
@@ -124,7 +124,7 @@ fn remembered_model_grants_coexist_and_remain_independently_signed() {
     let fixture = Fixture::new();
     fixture.grant();
     fixture.success(&[
-        "auth",
+        "--auth",
         "grant",
         ".",
         "--capability",
@@ -140,18 +140,18 @@ fn remembered_model_grants_coexist_and_remain_independently_signed() {
         serde_json::from_slice(&fs::read(&path).expect("grants")).expect("signed grant list");
     assert_eq!(grants.as_array().expect("two destinations").len(), 2);
     for model in ["qwen/text-embedding-v4", "qwen/qwen3-vl-embedding"] {
-        let status = fixture.success(&["auth", "status"]);
+        let status = fixture.success(&["--auth", "status"]);
         assert!(status.contains(model));
-        let output = fixture.run(&["index", "--mode", "direct", "--embedding", model]);
+        let output = fixture.run(&["--index", "--mode", "direct", "--embedding", model]);
         assert!(String::from_utf8_lossy(&output.stderr).contains("requires an API key"));
     }
     grants[1]["grant"]["endpoint"] = "https://unapproved.example.test/embeddings".into();
     fs::write(&path, serde_json::to_vec(&grants).expect("tampered grant")).expect("write grant");
-    assert!(!fixture.run(&["auth", "status"]).status.success());
-    fixture.success(&["auth", "revoke"]);
+    assert!(!fixture.run(&["--auth", "status"]).status.success());
+    fixture.success(&["--auth", "revoke"]);
     assert!(
         fixture
-            .success(&["auth", "status"])
+            .success(&["--auth", "status"])
             .contains("not authorized")
     );
 }
@@ -160,7 +160,7 @@ fn remembered_model_grants_coexist_and_remain_independently_signed() {
 fn indexing_requires_matching_consent_before_credentials_or_network() {
     let fixture = Fixture::new();
     let args = [
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--embedding",
@@ -172,7 +172,7 @@ fn indexing_requires_matching_consent_before_credentials_or_network() {
     let approved = fixture.run(&args);
     assert!(String::from_utf8_lossy(&approved.stderr).contains("requires an API key"));
     let changed = fixture.run(&[
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--embedding",
@@ -181,9 +181,9 @@ fn indexing_requires_matching_consent_before_credentials_or_network() {
         "https://example.test/embeddings",
     ]);
     assert!(String::from_utf8_lossy(&changed.stderr).contains("authorization required"));
-    fixture.success(&["auth", "revoke"]);
+    fixture.success(&["--auth", "revoke"]);
     let once = fixture.run(&[
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--embedding",
@@ -193,7 +193,7 @@ fn indexing_requires_matching_consent_before_credentials_or_network() {
     assert!(String::from_utf8_lossy(&once.stderr).contains("requires an API key"));
     assert!(
         fixture
-            .success(&["auth", "status"])
+            .success(&["--auth", "status"])
             .contains("not authorized")
     );
     assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));
@@ -204,7 +204,7 @@ fn rejects_unsupported_scope_capability_and_local_models() {
     let fixture = Fixture::new();
     for args in [
         vec![
-            "auth",
+            "--auth",
             "grant",
             "--capability",
             "embedding",
@@ -212,7 +212,7 @@ fn rejects_unsupported_scope_capability_and_local_models() {
             "once",
         ],
         vec![
-            "auth",
+            "--auth",
             "grant",
             "--capability",
             "other",
@@ -220,7 +220,7 @@ fn rejects_unsupported_scope_capability_and_local_models() {
             "workspace",
         ],
         vec![
-            "auth",
+            "--auth",
             "grant",
             "--capability",
             "embedding",
@@ -246,9 +246,9 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
         .to_string();
     drop(socket);
     let _stop = Stop(&fixture);
-    fixture.success(&["server", "on", "--listen", &address]);
+    fixture.success(&["--server", "on", "--listen", &address]);
     let args = [
-        "index",
+        "--index",
         "--mode",
         "server",
         "--embedding",
@@ -260,23 +260,15 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
     fixture.grant();
     // An empty workspace initializes the remote runtime without sending content.
     fixture.success(&args);
-    let search = [
-        "query",
-        "--mode",
-        "server",
-        "--vector",
-        "needle",
-        "--refresh",
-        "off",
-    ];
+    let search = ["--mode", "server", "--vector", "needle", "--refresh", "off"];
     assert!(String::from_utf8_lossy(&fixture.run(&search).stderr).contains("requires an API key"));
-    fixture.success(&["auth", "revoke"]);
+    fixture.success(&["--auth", "revoke"]);
     assert!(
         String::from_utf8_lossy(&fixture.run(&search).stderr).contains("authorization required")
     );
     assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));
     fixture.success(&[
-        "index",
+        "--index",
         "--mode",
         "server",
         "--embedding",
@@ -287,7 +279,7 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
     ]);
     assert!(
         fixture
-            .success(&["auth", "status"])
+            .success(&["--auth", "status"])
             .contains("not authorized")
     );
     assert!(String::from_utf8_lossy(&fixture.run(&args).stderr).contains("authorization required"));

@@ -93,7 +93,7 @@ export async function snapshotIndex({
   try {
     result = await runStatus(
       cli,
-      ["status", root, "--mode", "direct", "--check-ready", "--debug"],
+      ["--status", root, "--mode", "direct", "--check-ready", "--debug"],
       { env, cwd: root },
     );
   } catch (error) {

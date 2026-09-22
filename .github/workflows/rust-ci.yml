@@ -110,4 +110,4 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --workspace --all-targets
       - name: Smoke test the CLI
-        run: cargo run --locked -p zg -- query --rg "zvec-grep Rust rewrite" README.md
+        run: cargo run --locked -p zg -- --rg "zvec-grep Rust rewrite" README.md

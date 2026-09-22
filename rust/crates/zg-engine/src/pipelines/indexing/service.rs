@@ -388,7 +388,7 @@ impl WorkspaceIndexService {
                     expected_version: CURRENT_INDEX_VERSION,
                     reason,
                 };
-                info.suggestion = Some("rebuild the index with `zg index --rebuild`".to_owned());
+                info.suggestion = Some("rebuild the index with `zg --index --rebuild`".to_owned());
                 return Ok(info);
             }
         };
@@ -843,7 +843,7 @@ fn unindexed_info(location: WorkspaceIndexLocation, policy: WorkspaceIndexPolicy
         source: InfoSource::Unindexed,
         workspace_index: None,
         status: None,
-        suggestion: Some("run index to create a workspace index".to_owned()),
+        suggestion: Some("run zg --index to create a workspace index".to_owned()),
     }
 }
 

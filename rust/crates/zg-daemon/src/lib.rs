@@ -109,7 +109,7 @@ pub enum DaemonError {
     #[error("zvec-grep server is already running with PID {pid}")]
     AlreadyRunning { pid: u32 },
     #[error(
-        "zvec-grep server is already running with MCP toolset {active:?}; run `zg server off` before changing toolsets"
+        "zvec-grep server is already running with MCP toolset {active:?}; run `zg --server off` before changing toolsets"
     )]
     ToolsetMismatch { active: String },
     #[error("server address {0} is already in use")]

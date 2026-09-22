@@ -29,7 +29,7 @@ struct ServerGuard {
 impl ServerGuard {
     fn stop(&mut self) -> Result<Output, std::io::Error> {
         let mut command = Command::new(&self.binary);
-        command.args(["server", "off", "--home"]).arg(&self.home);
+        command.args(["--server", "off", "--home"]).arg(&self.home);
         if let Some(token_file) = &self.token_file {
             command.arg("--token-file").arg(token_file);
         }
@@ -103,7 +103,7 @@ fn start_server(
     start_on_available_port(binary, home, token_file, |listen| {
         let mut command = Command::new(binary);
         command
-            .args(["server", "on", "--home"])
+            .args(["--server", "on", "--home"])
             .arg(home.path())
             .args(["--listen", listen, "--mcp-toolset", toolset]);
         if let Some(token_file) = token_file {
@@ -201,7 +201,7 @@ impl StdioBridge {
         let mut command = Command::new(binary);
         command.env_remove("ZVEC_GREP_MCP_TOOLSET");
         command.args([
-            "server",
+            "--server",
             "--stdio",
             "--home",
             path_text(home)?,
@@ -402,7 +402,7 @@ fn server_start_retries_a_bind_race_without_stopping_the_port_owner() -> Result<
         }
         server_start_output(
             Command::new(&binary)
-                .args(["server", "on", "--home"])
+                .args(["--server", "on", "--home"])
                 .arg(home.path())
                 .args(["--listen", listen, "--mcp-toolset", "full"]),
         )
@@ -501,7 +501,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     // CLI administration uses the typed daemon protocol rather than the
     // public MCP toolset, so status remains available with the agent profile.
     let cli_status = Command::new(&guard.binary)
-        .args(["status", "--mode", "server", "--home"])
+        .args(["--status", "--mode", "server", "--home"])
         .arg(&guard.home)
         .arg(home.path())
         .output()?;
@@ -532,7 +532,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     let consent = Command::new(&binary)
         .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
-            "auth",
+            "--auth",
             "grant",
             path_text(workspace.path())?,
             "--capability",
@@ -1119,7 +1119,7 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
     }
 
     let status = Command::new(&binary)
-        .args(["server", "status", "--home"])
+        .args(["--server", "status", "--home"])
         .arg(home.path())
         .output()?;
     assert_command_success(&status);
@@ -1153,7 +1153,7 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
                 home.path().join("workspaces.json"),
             )
             .env("ZVEC_GREP_API_KEY", "local-test-key")
-            .args(["index", "--mode", "direct"])
+            .args(["--index", "--mode", "direct"])
             .args(extra);
         if !extra.contains(&"--drop") {
             command.arg("--allow-remote");
@@ -1266,7 +1266,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         .env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry)
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
-            "index",
+            "--index",
             "--mode",
             "direct",
             "--allow-remote",
@@ -1297,7 +1297,6 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
                 .env("ZVEC_GREP_HOME", home.path())
                 .env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry)
                 .args([
-                    "query",
                     "--mode",
                     mode,
                     "--fts",
@@ -1585,7 +1584,7 @@ fn token_file_protects_daemon_requests_and_is_forwarded_to_child() -> Result<(),
     let workspace = TempDir::new()?;
     let status = Command::new(&binary)
         .current_dir(workspace.path())
-        .args(["status", "--mode", "server", "--home"])
+        .args(["--status", "--mode", "server", "--home"])
         .arg(home.path())
         .env_remove("ZVEC_GREP_SERVER_TOKEN")
         .env("ZVEC_GREP_SERVER_TOKEN_FILE", &token_file)
@@ -1596,7 +1595,7 @@ fn token_file_protects_daemon_requests_and_is_forwarded_to_child() -> Result<(),
         String::from_utf8_lossy(&status.stderr)
     );
     let stopped = Command::new(&binary)
-        .args(["server", "off", "--home"])
+        .args(["--server", "off", "--home"])
         .arg(home.path())
         .arg("--token-file")
         .arg(&token_file)

@@ -7,7 +7,7 @@ use crate::parse_byte_size;
 
 #[derive(Debug, Error)]
 pub enum ManagedRgArgumentError {
-    #[error("zg query --rg requires a pattern")]
+    #[error("zg --rg requires a pattern")]
     MissingPattern,
     #[error("unsupported --rg option: {0}")]
     UnsupportedOption(String),
@@ -185,6 +185,18 @@ fn apply_switch(name: &str, request: &mut ContextOptions) -> Result<(), ManagedR
         _ => return Err(ManagedRgArgumentError::UnsupportedOption(name.to_owned())),
     }
     Ok(())
+}
+
+pub(crate) fn takes_separate_value(argument: &str) -> bool {
+    if argument.starts_with("--") {
+        return takes_value(argument);
+    }
+    argument.starts_with('-')
+        && argument
+            .char_indices()
+            .skip(1)
+            .find(|(_, flag)| short_option(*flag).is_some_and(takes_value))
+            .is_some_and(|(offset, flag)| offset + flag.len_utf8() == argument.len())
 }
 
 fn takes_value(name: &str) -> bool {

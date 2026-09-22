@@ -469,7 +469,7 @@ fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
     };
     let records: SignedGrants = serde_json::from_slice(&bytes).map_err(|error| {
         EngineError::invalid_argument(format!(
-            "Invalid workspace authorization format: {error}; run `zg auth revoke \"{}\"`, then authorize again with `zg auth grant`",
+            "Invalid workspace authorization format: {error}; run `zg --auth revoke \"{}\"`, then authorize again with `zg --auth grant`",
             root.display()
         ))
     })?;
@@ -498,7 +498,7 @@ fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
                 || signed.grant.scope != "workspace"
             {
                 return Err(EngineError::permission_denied(format!(
-                    "Invalid workspace authorization signature or scope; run `zg auth revoke \"{}\"`, then authorize again with `zg auth grant`",
+                    "Invalid workspace authorization signature or scope; run `zg --auth revoke \"{}\"`, then authorize again with `zg --auth grant`",
                     root.display()
                 )));
             }
@@ -593,7 +593,7 @@ pub(crate) fn require(
         return Ok(());
     }
     Err(EngineError::permission_denied(format!(
-        "Remote embedding authorization required for {model} at {endpoint}. Run zg auth grant \"{}\" --capability embedding --scope workspace --embedding {model} --endpoint \"{endpoint}\", or pass --allow-remote for this command only.",
+        "Remote embedding authorization required for {model} at {endpoint}. Run zg --auth grant \"{}\" --capability embedding --scope workspace --embedding {model} --endpoint \"{endpoint}\", or pass --allow-remote for this command only.",
         root.display()
     )))
 }
@@ -678,8 +678,8 @@ mod tests {
             };
             let error = index_authorizations(&options).expect_err("old consent is not trusted");
             assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
-            assert!(error.message().contains("zg auth revoke"));
-            assert!(error.message().contains("zg auth grant"));
+            assert!(error.message().contains("zg --auth revoke"));
+            assert!(error.message().contains("zg --auth grant"));
             assert!(
                 grant(
                     &root,
@@ -777,8 +777,8 @@ mod tests {
                 .err()
                 .expect("reject invalid authorization");
             assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
-            assert!(error.message().contains("zg auth revoke"));
-            assert!(error.message().contains("zg auth grant"));
+            assert!(error.message().contains("zg --auth revoke"));
+            assert!(error.message().contains("zg --auth grant"));
             assert_eq!(fs::read(&path).expect("preserved invalid consent"), bytes);
             revoke(&root).expect("revoke invalid authorization");
         }

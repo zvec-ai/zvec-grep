@@ -21,7 +21,7 @@ prompt, corpus, Codex settings, and limits:
 
 - **Baseline:** Codex with its standard set of tools.
 - **zvec-grep:** the same Codex setup, with only the zvec-grep MCP tools and
-  usage instructions added by `zg install`.
+  usage instructions added by `zg --install`.
 
 The benchmark records answer quality, token usage, wall-clock time, tool calls,
 and complete Codex trajectories.

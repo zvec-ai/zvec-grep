@@ -69,6 +69,23 @@ pub(crate) fn string(value: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(str::to_owned)
 }
 
+/// Selects a local model for CLI-only implicit indexing, never a remote default.
+/// # Errors
+/// Returns configuration I/O, validation, and invalid environment model errors.
+pub fn implicit_embedding_reference() -> Result<String, EngineError> {
+    let config = read()?;
+    let configured = crate::models::resolve_embedding_reference(
+        crate::models::ResolveEmbeddingReferenceOptions {
+            global_default: string(&config, &["defaults", "embedding"]),
+            ..crate::models::ResolveEmbeddingReferenceOptions::default()
+        },
+    )
+    .map_err(crate::models::ModelError::into_engine_error)?;
+    Ok(configured
+        .filter(|reference| reference.starts_with("local/"))
+        .unwrap_or_else(|| "local/potion-code-16m-v2".to_owned()))
+}
+
 pub(crate) fn device(value: &Value, reference: &str) -> Option<Device> {
     serde_json::from_value(value["models"][reference]["device"].clone()).ok()
 }
@@ -127,12 +144,12 @@ pub fn set_model(
 ) -> Result<PathBuf, EngineError> {
     if crate::models::get_embedding_model_catalog_entry(reference).is_none() {
         return Err(EngineError::invalid_argument(
-            "Unsupported embedding model; run zg help models",
+            "Unsupported embedding model; run zg --help models",
         ));
     }
     if endpoint.is_none() && device.is_none() && !default_model {
         return Err(EngineError::invalid_argument(
-            "zg config model set requires --endpoint, --device, or --default",
+            "zg --config model set requires --endpoint, --device, or --default",
         ));
     }
     let local = reference.starts_with("local/");

@@ -48,7 +48,7 @@ fn explicit_options(root: &Path, address: SocketAddr) -> IndexOptions {
 fn assert_rebuild_error(error: &EngineError) {
     assert_eq!(error.code(), EngineError::STORAGE_FAILURE, "{error}");
     assert!(error.message().contains("rebuild"), "{error}");
-    assert!(error.message().contains("zg index --rebuild"), "{error}");
+    assert!(error.message().contains("zg --index --rebuild"), "{error}");
 }
 
 fn assert_manifest_unchanged(root: &Path, expected: &[u8]) -> TestResult {

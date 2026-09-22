@@ -26,7 +26,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.run(&["server", "off"]);
+        self.run(&["--server", "off"]);
     }
 }
 
@@ -39,7 +39,7 @@ fn direct_and_server_report_index_progress_on_stderr() {
     let socket = TcpListener::bind("127.0.0.1:0").expect("port");
     let address = socket.local_addr().expect("address").to_string();
     drop(socket);
-    let started = fixture.run(&["server", "on", "--listen", &address]);
+    let started = fixture.run(&["--server", "on", "--listen", &address]);
     assert!(
         started.status.success(),
         "{}",
@@ -47,7 +47,7 @@ fn direct_and_server_report_index_progress_on_stderr() {
     );
     for mode in ["direct", "server"] {
         let output = fixture.run(&[
-            "index",
+            "--index",
             "--mode",
             mode,
             "--embedding",
@@ -69,7 +69,7 @@ fn direct_and_server_report_index_progress_on_stderr() {
         assert!(!stdout.contains("Scanning") && !stdout.contains("Downloading"));
     }
     let failed = fixture.run(&[
-        "index",
+        "--index",
         "--mode",
         "server",
         "--rebuild",

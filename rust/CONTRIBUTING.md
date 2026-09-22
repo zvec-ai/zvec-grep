@@ -10,7 +10,7 @@ From the repository root:
 ```sh
 cd rust
 bash scripts/check.sh
-cargo run -p zg -- query --rg needle .
+cargo run -p zg -- --rg needle .
 ```
 
 The workspace pins its Rust toolchain in `rust-toolchain.toml`. Lexical search

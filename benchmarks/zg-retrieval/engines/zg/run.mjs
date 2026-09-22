@@ -316,7 +316,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "installation";
     const install = await runCandidate(
       candidate,
-      ["install", "--target", "opencode", "--yes", "--mcp-transport", "stdio"],
+      ["--install", "--target", "opencode", "--yes", "--mcp-transport", "stdio"],
       { env, cwd: root },
     );
     await writeJson(join(output, "installation/install.json"), install);
@@ -333,7 +333,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       command,
     };
     // Installation may start the daemon. Close it before the independent index build.
-    await runCandidate(candidate, ["server", "off"], {
+    await runCandidate(candidate, ["--server", "off"], {
       env,
       cwd: root,
     });
@@ -344,7 +344,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       const indexed = await runCandidate(
         candidate,
         [
-          "index",
+          "--index",
           root,
           "--mode",
           "direct",
@@ -541,7 +541,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     if (client) await client.close().catch(() => undefined);
     if (env) {
       try {
-        await runCandidate(candidate, ["server", "off"], {
+        await runCandidate(candidate, ["--server", "off"], {
           env,
           cwd: root,
           timeout: 60_000,

@@ -313,13 +313,13 @@ mod tests {
     #[test]
     fn serializes_the_transport_report() {
         let error = EngineError::not_found("workspace index does not exist")
-            .with_help("Run `zg index` to build it.");
+            .with_help("Run `zg --index` to build it.");
         let report = error.report();
         let value = serde_json::to_value(&report).expect("error report should serialize");
 
         assert_eq!(value["code"], "ZG.ENGINE.NOT_FOUND");
         assert_eq!(value["message"], "workspace index does not exist");
-        assert_eq!(value["help"], "Run `zg index` to build it.");
+        assert_eq!(value["help"], "Run `zg --index` to build it.");
         assert!(value.get("reported_at").is_none());
 
         let decoded = serde_json::from_value(value).expect("error report should deserialize");

@@ -95,7 +95,7 @@ pub mod result {
         pub fn ensure_compatible(&self) -> Result<(), crate::EngineError> {
             if let Self::RebuildRequired { reason, .. } = self {
                 return Err(crate::EngineError::storage_failure(format!(
-                    "{reason}; rebuild the index with `zg index --rebuild`"
+                    "{reason}; rebuild the index with `zg --index --rebuild`"
                 )));
             }
             Ok(())
@@ -359,7 +359,7 @@ mod tests {
             .ensure_compatible()
             .expect_err("rebuild required");
         assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
-        assert!(error.message().contains("zg index --rebuild"));
+        assert!(error.message().contains("zg --index --rebuild"));
         assert!(IndexCompatibility::Unbuilt.ensure_compatible().is_ok());
         assert!(
             IndexCompatibility::Compatible { version: 2 }

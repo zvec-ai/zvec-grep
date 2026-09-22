@@ -3,7 +3,7 @@
   "id": "cli.managed-rg.no-match",
   "description": "Managed ripgrep reports a successful exhaustive search with no matches.",
   "input": {
-    "argv": ["query", "--mode", "server", "--rg", "missing-needle", "."],
+    "argv": ["--mode", "server", "--rg", "missing-needle", "."],
     "cwd_fixture": "empty-workspace",
     "env": { "NO_COLOR": "1" }
   },

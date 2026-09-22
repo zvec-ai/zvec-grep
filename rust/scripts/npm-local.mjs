@@ -260,7 +260,7 @@ async function smoke(options) {
     throw new Error("packing replaced or invalidated the linked local zg binary");
   }
 
-  const query = ["query", "--rg", "-F", "zvec-grep Rust rewrite", "README.md"];
+  const query = ["--rg", "-F", "zvec-grep Rust rewrite", "README.md"];
   const directOutput = runInstalled(binary, query, "direct");
   const serverOutput = runInstalled(binary, query, "server");
   if (directOutput !== serverOutput) {

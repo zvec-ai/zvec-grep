@@ -15,7 +15,7 @@ Indexing reserves a name before the first build. A failed or interrupted build k
 An explicit new name on an existing workspace renames its registry entry:
 
 ```sh
-zg index /path/to/workspace --name search-engine
+zg --index /path/to/workspace --name search-engine
 ```
 
 The registry is authoritative. Read-only `info` and `context` report its current name without writing metadata. The next index operation reconciles a stale manifest with the registry. Renaming itself retains file IDs and active storage and does not require a rebuild.

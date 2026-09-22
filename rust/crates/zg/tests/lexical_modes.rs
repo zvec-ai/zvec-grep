@@ -26,7 +26,7 @@ fn managed_rg_preserves_patterns_and_case_insensitive_globs() -> Result<(), Box<
         for (args, expected) in cases {
             let output = Command::new(env!("CARGO_BIN_EXE_zg"))
                 .current_dir(root.path())
-                .args(["query", "--mode", mode, "--rg"])
+                .args(["--mode", mode, "--rg"])
                 .args(*args)
                 .output()?;
             assert!(
@@ -55,15 +55,7 @@ fn direct_and_server_modes_share_embedded_lexical_behavior() -> Result<(), Box<d
     let run = |mode: &str| {
         Command::new(binary)
             .current_dir(root.path())
-            .args([
-                "query",
-                "--mode",
-                mode,
-                "--rg",
-                "-F",
-                "resident keyword",
-                ".",
-            ])
+            .args(["--mode", mode, "--rg", "-F", "resident keyword", "."])
             .output()
     };
 
@@ -101,7 +93,6 @@ fn managed_rg_preserves_mixed_glob_order_before_and_across_rg() -> Result<(), Bo
     for (args, included) in cases {
         let output = Command::new(env!("CARGO_BIN_EXE_zg"))
             .current_dir(root.path())
-            .arg("query")
             .args(*args)
             .args(["needle", "."])
             .output()?;

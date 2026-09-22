@@ -186,13 +186,18 @@ test("successful status retains its existing snapshot identity", async (t) => {
     cli: "zg",
     root: "/tmp/corpus",
     output,
-    runStatus: async () => ({
-      stdout,
-      stderr: "",
-      code: 0,
-      signal: null,
-      timed_out: false,
-    }),
+    runStatus: async (cli, args) => {
+      assert.equal(cli, "zg");
+      assert.deepEqual(args, [
+        "--status",
+        "/tmp/corpus",
+        "--mode",
+        "direct",
+        "--check-ready",
+        "--debug",
+      ]);
+      return { stdout, stderr: "", code: 0, signal: null, timed_out: false };
+    },
   });
   assert.equal(summary.files, 10);
   assert.equal(summary.fragments, 42);

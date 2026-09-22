@@ -24,6 +24,7 @@ const GUIDANCE_END: &str = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_PERMISSION: &str = "mcp__zvec_grep__*";
 const SEARCH_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_search";
 const RG_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_rg";
+// Persisted ownership markers stay stable across CLI grammar migrations.
 const QODER_DESCRIPTION: &str = "Managed by zg install";
 const QODER_OWNERSHIP_PREFIX: &str = "Managed by zg install; managed permissions=";
 
@@ -897,7 +898,7 @@ fn qoder_ide_server(options: &AgentOptions) -> Result<Value, InstallError> {
 }
 
 fn stdio_args(toolset: Option<McpToolset>) -> Vec<&'static str> {
-    let mut args = vec!["server", "--stdio"];
+    let mut args = vec!["--server", "--stdio"];
     if let Some(toolset) = toolset {
         args.extend([
             "--mcp-toolset",
@@ -955,7 +956,7 @@ fn guidance_block(search: &str, rg: &str, qoder_recovery: bool) -> String {
         format!("`{rg}` when it is listed by the current host; otherwise native Grep or `rg`");
     let recovery = if qoder_recovery {
         format!(
-            "\n\n### Qoder Remote Embedding authorization recovery\n- When `{search}` needs `remote_embedding_authorization` and the current Qoder host returns `code = 51500 message = method not found: No request handler configured` without showing an authorization form, returns `The connected MCP host does not support the Remote Embedding authorization interaction required by elicitation/create. The agent should use the current host's built-in user-question tool; for Qoder, the exact name is ask_user_question in Qoder IDE or AskUserQuestion in Qoder CLI/SDK. Ask the user to choose: allow Remote Embedding for this workspace, use local FTS only, or cancel. No user decision was received, and no remote data was sent.`, or reports that authorization was declined or cancelled without showing the user an authorization form, treat it as a Qoder client interaction limitation: the host lacks the server-to-client `elicitation/create` request handler. The outer MCP `tools/call` has already reached the registered MCP server and tool, so do not diagnose this error as a disconnected or missing MCP server or as a missing tool. Apply this recovery only to the Remote Embedding authorization path, not to arbitrary 51500 failures. Do not immediately fall back to broad file reads, do not treat it as a missing API credential, and do not grant access silently. If the user actually declined a displayed authorization form, respect that decision and do not ask again.\n- Use the current Qoder host's built-in user-question tool (`ask_user_question` in Qoder IDE or `AskUserQuestion` in Qoder CLI/SDK) to offer exactly these choices: allow Remote Embedding for this workspace, use local FTS only, or cancel. Explain that workspace approval may send query text and selected workspace content to the configured provider and endpoint and may incur provider charges.\n- Only after the user explicitly chooses workspace approval, run `zg auth grant \"<absolute-root>\" --capability embedding --scope workspace`, substituting the same absolute root used by the failed search, and then retry the original search call once. Do not use `--allow-remote`; it applies only to one CLI command and does not authorize the MCP retry.\n- If the user chooses local FTS, retry `{search}` once with the original search text in `fts`, omit `query`, `queries`, and `vector`, set `autoUpdate` to `false` and `freshness` to `eventual`, and preserve `root`, filters, and limits. This route is lexical-only, does not refresh the remote-embedding index, and sends no query text or workspace content to a remote Embedding provider.\n- If the user cancels, the grant command fails, or interactive user input is unavailable, stop and report that no remote data was sent. Provider credentials and Remote Embedding data authorization are separate; never request or modify an API key merely to resolve this interaction error."
+            "\n\n### Qoder Remote Embedding authorization recovery\n- When `{search}` needs `remote_embedding_authorization` and the current Qoder host returns `code = 51500 message = method not found: No request handler configured` without showing an authorization form, returns `The connected MCP host does not support the Remote Embedding authorization interaction required by elicitation/create. The agent should use the current host's built-in user-question tool; for Qoder, the exact name is ask_user_question in Qoder IDE or AskUserQuestion in Qoder CLI/SDK. Ask the user to choose: allow Remote Embedding for this workspace, use local FTS only, or cancel. No user decision was received, and no remote data was sent.`, or reports that authorization was declined or cancelled without showing the user an authorization form, treat it as a Qoder client interaction limitation: the host lacks the server-to-client `elicitation/create` request handler. The outer MCP `tools/call` has already reached the registered MCP server and tool, so do not diagnose this error as a disconnected or missing MCP server or as a missing tool. Apply this recovery only to the Remote Embedding authorization path, not to arbitrary 51500 failures. Do not immediately fall back to broad file reads, do not treat it as a missing API credential, and do not grant access silently. If the user actually declined a displayed authorization form, respect that decision and do not ask again.\n- Use the current Qoder host's built-in user-question tool (`ask_user_question` in Qoder IDE or `AskUserQuestion` in Qoder CLI/SDK) to offer exactly these choices: allow Remote Embedding for this workspace, use local FTS only, or cancel. Explain that workspace approval may send query text and selected workspace content to the configured provider and endpoint and may incur provider charges.\n- Only after the user explicitly chooses workspace approval, run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace`, substituting the same absolute root used by the failed search, and then retry the original search call once. Do not use `--allow-remote`; it applies only to one CLI command and does not authorize the MCP retry.\n- If the user chooses local FTS, retry `{search}` once with the original search text in `fts`, omit `query`, `queries`, and `vector`, set `autoUpdate` to `false` and `freshness` to `eventual`, and preserve `root`, filters, and limits. This route is lexical-only, does not refresh the remote-embedding index, and sends no query text or workspace content to a remote Embedding provider.\n- If the user cancels, the grant command fails, or interactive user input is unavailable, stop and report that no remote data was sent. Provider credentials and Remote Embedding data authorization are separate; never request or modify an API key merely to resolve this interaction error."
         )
     } else {
         String::new()
@@ -1143,7 +1144,10 @@ fn is_qoder_ide_stdio_args(value: &Value) -> bool {
     };
     (args.len() == 3 || args.len() == 5)
         && args.first().and_then(Value::as_str).is_some()
-        && args.get(1).and_then(Value::as_str) == Some("server")
+        && matches!(
+            args.get(1).and_then(Value::as_str),
+            Some("--server" | "server")
+        )
         && args.get(2).and_then(Value::as_str) == Some("--stdio")
         && (args.len() == 3
             || (args.get(3).and_then(Value::as_str) == Some("--mcp-toolset")
@@ -1155,7 +1159,10 @@ fn is_stdio_args(value: &Value) -> bool {
         return false;
     };
     (args.len() == 2 || args.len() == 4)
-        && args.first().and_then(Value::as_str) == Some("server")
+        && matches!(
+            args.first().and_then(Value::as_str),
+            Some("--server" | "server")
+        )
         && args.get(1).and_then(Value::as_str) == Some("--stdio")
         && (args.len() == 2
             || (args.get(2).and_then(Value::as_str) == Some("--mcp-toolset")
@@ -2104,6 +2111,28 @@ mod tests {
 
     #[test]
     fn managed_stdio_shapes_are_recognized() {
+        assert_eq!(stdio_args(None), ["--server", "--stdio"]);
+        assert_eq!(
+            stdio_args(Some(McpToolset::Full)),
+            ["--server", "--stdio", "--mcp-toolset", "full"]
+        );
+        for toolset in [None, Some(McpToolset::Agent), Some(McpToolset::Full)] {
+            assert!(is_managed_json_server(
+                &json!({"command":"zg","args":stdio_args(toolset)})
+            ));
+            assert!(is_managed_json_server(
+                &json!({"type":"local","command":stdio_command(toolset)})
+            ));
+            assert!(is_managed_qwen(
+                &json!({"command":"zg","args":stdio_args(toolset)})
+            ));
+            assert!(is_managed_qoder_ide(&json!({
+                "command": "/path/to/zg",
+                "args": stdio_args(toolset),
+                "description": QODER_DESCRIPTION
+            })));
+        }
+        // Previously generated configurations must still be upgradeable/removable.
         assert!(is_managed_json_server(
             &json!({"command":"zg","args":["server","--stdio"]})
         ));

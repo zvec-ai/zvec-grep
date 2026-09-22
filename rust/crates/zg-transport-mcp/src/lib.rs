@@ -2095,7 +2095,7 @@ mod tests {
                 source: super::InfoSource::Unindexed,
                 workspace_index: None,
                 status: None,
-                suggestion: Some("zg index --rebuild".into()),
+                suggestion: Some("zg --index --rebuild".into()),
             };
             let output = super::info_result_to_tool_result(reply, None)
                 .structured_content

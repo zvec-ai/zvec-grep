@@ -113,7 +113,7 @@ async fn ask(
         .is_some_and(|cap| cap.form.is_some() || cap.url.is_none());
     if !supported {
         return Err(EngineError::permission_denied(
-            "Remote embedding requires consent. This MCP client does not support form elicitation; grant workspace authorization with `zg auth` or use FTS with autoUpdate: false.",
+            "Remote embedding requires consent. This MCP client does not support form elicitation; grant workspace authorization with `zg --auth` or use FTS with autoUpdate: false.",
         ));
     }
     let mut choices = vec!["once", "workspace", "cancel"];

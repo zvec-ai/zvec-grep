@@ -49,7 +49,7 @@ impl Fixture {
 fn config_merges_settings_and_index_consumes_model_defaults() {
     let fixture = Fixture::new();
     let output = fixture.success(&[
-        "config",
+        "--config",
         "provider",
         "set",
         "qwen",
@@ -58,7 +58,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     ]);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("test-secret"));
     fixture.success(&[
-        "config",
+        "--config",
         "model",
         "set",
         "local/potion-code-16m-v2",
@@ -67,7 +67,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
         "--default",
     ]);
     fixture.success(&[
-        "config",
+        "--config",
         "model",
         "set",
         "qwen/text-embedding-v4",
@@ -94,7 +94,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
             0o600
         );
     }
-    fixture.success(&["index", "--mode", "direct", "--model-cache", "cache"]);
+    fixture.success(&["--index", "--mode", "direct", "--model-cache", "cache"]);
     let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
     )
@@ -107,7 +107,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
         manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
         "cpu"
     );
-    let status = fixture.success(&["status", "--mode", "direct"]);
+    let status = fixture.success(&["--status", "--mode", "direct"]);
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("FTS: tokenizer=jieba filters=lowercase")
     );
@@ -118,7 +118,7 @@ fn invalid_config_commands_leave_no_config_file() {
     let fixture = Fixture::new();
     for args in [
         vec![
-            "config",
+            "--config",
             "provider",
             "set",
             "local",
@@ -126,7 +126,7 @@ fn invalid_config_commands_leave_no_config_file() {
             "test-key",
         ],
         vec![
-            "config",
+            "--config",
             "model",
             "set",
             "local/potion-code-16m-v2",
@@ -134,14 +134,14 @@ fn invalid_config_commands_leave_no_config_file() {
             "https://example.test",
         ],
         vec![
-            "config",
+            "--config",
             "model",
             "set",
             "qwen/text-embedding-v4",
             "--device",
             "cpu",
         ],
-        vec!["config", "model", "set", "qwen/text-embedding-v4"],
+        vec!["--config", "model", "set", "qwen/text-embedding-v4"],
     ] {
         assert!(!fixture.run(&args).status.success());
     }
@@ -149,25 +149,38 @@ fn invalid_config_commands_leave_no_config_file() {
 }
 
 #[test]
-fn binary_consumes_human_color_and_debug_options() {
+fn binary_consumes_compact_color_and_debug_options() {
     let fixture = Fixture::new();
     fs::write(fixture.root.path().join("sample.txt"), "needle\n").expect("source");
     let output = fixture.success(&[
-        "query", "--rg", "--human", "--color", "always", "--debug", "needle",
+        "--rg",
+        "--compact",
+        "--color",
+        "always",
+        "--debug",
+        "needle",
     ]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Context"));
+    assert!(!stdout.contains("Context"));
+    assert!(stdout.contains("sample.txt"));
+    assert!(stdout.contains("1: needle"));
     assert!(stdout.contains("\x1b["));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Diagnostics:"));
-    let output = fixture.success(&["query", "--rg", "--color", "never", "needle"]);
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("\x1b["));
+    let output = fixture.success(&["--rg", "--color", "never", "needle"]);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "sample.txt\n  1: needle\n"
+    );
+    let removed = fixture.run(&["--rg", "--human", "needle"]);
+    assert!(!removed.status.success());
+    assert!(String::from_utf8_lossy(&removed.stderr).contains("--human"));
 }
 
 #[test]
 fn explicit_remote_credentials_and_consent_reach_index_execution() {
     let fixture = Fixture::new();
     fixture.success(&[
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--embedding",
@@ -187,7 +200,7 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
         "https://example.test/embeddings"
     );
     fixture.success(&[
-        "index",
+        "--index",
         "--mode",
         "direct",
         "--api-key",

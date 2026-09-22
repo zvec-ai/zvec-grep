@@ -13,7 +13,7 @@
 每个问题均通过相互独立的配对 trial 进行评测；每次评测都使用相同的模型、prompt、语料库、Codex 配置和限制：
 
 - **Baseline：** Codex 使用其标准工具集。
-- **zvec-grep：** 保持相同的 Codex 配置，仅通过 `zg install` 增加 zvec-grep MCP 工具和使用指引。
+- **zvec-grep：** 保持相同的 Codex 配置，仅通过 `zg --install` 增加 zvec-grep MCP 工具和使用指引。
 
 Benchmark 记录回答质量、Token 用量、Agent 执行耗时、工具调用次数和完整的 Codex 轨迹。
 

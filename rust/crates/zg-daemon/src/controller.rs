@@ -289,7 +289,7 @@ async fn start_server_with_lock(
     let stderr = stdout.try_clone()?;
     let mut command = Command::new(executable);
     command
-        .arg("server")
+        .arg("--server")
         .arg("run")
         .arg("--mcp-toolset")
         .arg(config.mcp_toolset.unwrap_or_default().to_string())

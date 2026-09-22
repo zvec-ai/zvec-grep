@@ -161,7 +161,7 @@ def prepare_profiles(
     install = run_command(
         [
             zg,
-            "install",
+            "--install",
             "--target",
             "codex",
             "--mcp-transport",
@@ -233,7 +233,7 @@ def prepare_profiles(
             "zvec_mcp": True,
             "zvec_guidance": True,
             "install_command": (
-                "zg install --target codex --mcp-transport http --yes"
+                "zg --install --target codex --mcp-transport http --yes"
             ),
         },
         "install_stdout": install.stdout,
@@ -321,7 +321,7 @@ def ensure_server(
         raise RuntimeError("zvec-grep executable not found: zg")
     environment = server_environment(config, artifacts)
     check = run_command(
-        [executable, "server", "status", "--check-ready"],
+        [executable, "--server", "status", "--check-ready"],
         env=environment,
         timeout=30,
     )
@@ -329,7 +329,7 @@ def ensure_server(
         return
     if check.ok:
         stop = run_command(
-            [executable, "server", "off"],
+            [executable, "--server", "off"],
             env=environment,
             timeout=60,
         )
@@ -338,7 +338,7 @@ def ensure_server(
     start = run_command(
         [
             executable,
-            "server",
+            "--server",
             "on",
             "--listen",
             f"127.0.0.1:{config.zvec_grep.server_port}",
@@ -351,7 +351,7 @@ def ensure_server(
     if not start.ok:
         raise RuntimeError(start.stderr.strip() or start.stdout.strip())
     check = run_command(
-        [executable, "server", "status", "--check-ready"],
+        [executable, "--server", "status", "--check-ready"],
         env=environment,
         timeout=30,
     )
@@ -364,7 +364,7 @@ def stop_server(config: BenchmarkConfig, artifacts: Path) -> None:
     if executable is None:
         raise RuntimeError("zvec-grep executable not found: zg")
     result = run_command(
-        [executable, "server", "off"],
+        [executable, "--server", "off"],
         env=server_environment(config, artifacts),
         timeout=60,
     )
@@ -393,7 +393,6 @@ def prepare_search_runtime(
     warmup = run_command(
         [
             executable,
-            "query",
             "benchmark runtime readiness",
             "--mode",
             "server",
