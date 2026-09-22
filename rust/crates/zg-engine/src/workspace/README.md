@@ -32,7 +32,7 @@ Each generation contains three shared collections: `directories`, `files`, and `
 
 This version enables exactly one embedding model and one `text` route per workspace. Every fragment belongs to that model's `fragments_<fingerprint>` collection, which holds the selected fragment text with the fixed FTS index, vector, canonical IDs and indexed filtering fields. There is no separate FTS collection or separate vector collection. Search loads a canonical entity through its entity ID and verifies that the hit's independent fragment ID belongs to that entity.
 
-`--embedding` selects the workspace model. Images and other unsupported sources are reported as skipped before extraction or embedding. Changing the model, vector compatibility or input limits requires explicit `index --rebuild`; runtime credentials, concurrency and timeout changes do not require rebuilding.
+`--embedding` selects the workspace model. Images and other unsupported sources are reported as skipped before extraction or embedding. Changing the model, vector compatibility or input limits requires explicit `zg --index --rebuild`; runtime credentials, concurrency and timeout changes do not require rebuilding.
 
 FTS and vector retrieval use the same model collection. Vector queries use the model that built the index. The current version does not accept content-route configuration or query multiple embedding models.
 

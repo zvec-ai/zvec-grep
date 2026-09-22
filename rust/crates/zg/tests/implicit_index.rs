@@ -1,11 +1,20 @@
 use std::{
     fs,
     net::TcpListener,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
+    sync::Arc,
+    time::Duration,
 };
 
 use serde_json::json;
 use tempfile::TempDir;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    process::Child,
+    sync::Semaphore,
+    task::{JoinHandle, JoinSet},
+};
 
 struct Fixture {
     root: TempDir,
@@ -84,6 +93,268 @@ fn success(output: Output) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+struct GatedEmbedding {
+    endpoint: String,
+    entered: Arc<Semaphore>,
+    release: Arc<Semaphore>,
+    server: JoinHandle<()>,
+}
+
+impl GatedEmbedding {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake embedding listener");
+        let endpoint = format!(
+            "http://{}/embeddings",
+            listener.local_addr().expect("address")
+        );
+        let entered = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let server = tokio::spawn({
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            async move {
+                let mut handlers = JoinSet::new();
+                loop {
+                    tokio::select! {
+                        connection = listener.accept() => {
+                            let (stream, _) = connection.expect("embedding connection");
+                            let entered = Arc::clone(&entered);
+                            let release = Arc::clone(&release);
+                            handlers.spawn(async move {
+                                respond_embedding(stream, &entered, &release).await
+                            });
+                        }
+                        result = handlers.join_next(), if !handlers.is_empty() => {
+                            result.expect("embedding handler").expect("embedding task")
+                                .expect("embedding response");
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            endpoint,
+            entered,
+            release,
+            server,
+        }
+    }
+}
+
+impl Drop for GatedEmbedding {
+    fn drop(&mut self) {
+        self.release.close();
+        self.server.abort();
+    }
+}
+
+struct ReleaseIndexGate(Arc<Semaphore>);
+
+impl Drop for ReleaseIndexGate {
+    fn drop(&mut self) {
+        // Closing also lets any queued background refresh finish during cleanup.
+        self.0.close();
+    }
+}
+
+async fn respond_embedding(
+    mut stream: TcpStream,
+    entered: &Semaphore,
+    release: &Semaphore,
+) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 4096];
+    let (body_start, body_length) = loop {
+        let count = stream.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if let Some(end) = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .expect("content length")
+                .trim()
+                .parse::<usize>()
+                .expect("length");
+            break (end + 4, length);
+        }
+    };
+    while bytes.len() < body_start + body_length {
+        let count = stream.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    let request: serde_json::Value =
+        serde_json::from_slice(&bytes[body_start..body_start + body_length])?;
+    let inputs = request["input"].as_array().expect("text inputs");
+    if inputs
+        .iter()
+        .any(|input| input.as_str().expect("text").contains("hold-index"))
+    {
+        entered.add_permits(1);
+        if let Ok(permit) = release.acquire().await {
+            permit.forget();
+        }
+    }
+    let dimension =
+        usize::try_from(request["dimensions"].as_u64().expect("dimensions")).expect("dimension");
+    let mut vector = vec![0.0_f32; dimension];
+    vector[0] = 1.0;
+    let body = serde_json::to_vec(&json!({
+        "data": inputs.iter().enumerate()
+            .map(|(index, _)| json!({"index": index, "embedding": vector}))
+            .collect::<Vec<_>>()
+    }))?;
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(&body).await
+}
+
+fn spawn_cli(command: Command) -> Result<Child, String> {
+    tokio::process::Command::from(command)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn CLI: {error}"))
+}
+
+async fn wait_cli(child: &mut Child, limit: Duration) -> Result<Output, String> {
+    let mut stdout = child.stdout.take().expect("CLI stdout");
+    let mut stderr = child.stderr.take().expect("CLI stderr");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let result = tokio::time::timeout(limit, async {
+        tokio::try_join!(
+            child.wait(),
+            stdout.read_to_end(&mut out),
+            stderr.read_to_end(&mut err),
+        )
+    })
+    .await;
+    let failure = match result {
+        Ok(Ok((status, _, _))) if status.success() => {
+            return Ok(Output {
+                status,
+                stdout: out,
+                stderr: err,
+            });
+        }
+        Ok(Ok((status, _, _))) => format!("CLI exited with {status}"),
+        result => {
+            // Kill and reap before returning a timeout or I/O failure.
+            let cleanup = child.kill().await;
+            format!("CLI did not finish within {limit:?}: {result:?}; kill/reap: {cleanup:?}")
+        }
+    };
+    Err(format!(
+        "{failure}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
+    let mut embedding = GatedEmbedding::start().await;
+    let mut fixture = Fixture::new();
+    // Drop the release guard before Fixture stops the daemon, even on panic.
+    let release = ReleaseIndexGate(Arc::clone(&embedding.release));
+    fs::write(
+        fixture.root.path().join("anchor.txt"),
+        "orchard anchor documentation",
+    )
+    .expect("anchor");
+    fs::write(
+        fixture.root.path().join("changing.txt"),
+        "original documentation",
+    )
+    .expect("changing source");
+    let index_args = |mode| {
+        [
+            "--index",
+            "--mode",
+            mode,
+            "--embedding",
+            "qwen/text-embedding-v4",
+            "--endpoint",
+            embedding.endpoint.as_str(),
+            "--allow-remote",
+            "--api-key",
+            "local-test-key",
+            "--no-color",
+        ]
+    };
+    // Build before starting the daemon so no watcher can race the explicit update.
+    let mut initial = spawn_cli(fixture.command(&index_args("direct"))).expect("initial CLI");
+    wait_cli(&mut initial, Duration::from_secs(30))
+        .await
+        .expect("initial index");
+    fixture.start_server();
+    fs::write(
+        fixture.root.path().join("changing.txt"),
+        "hold-index vineyard documentation",
+    )
+    .expect("changed source");
+    let mut writer = spawn_cli(fixture.command(&index_args("server"))).expect("incremental CLI");
+    let result: Result<(), String> = async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::select! {
+                permit = embedding.entered.acquire() => {
+                    permit.map_err(|error| error.to_string())?.forget();
+                    Ok(())
+                }
+                status = writer.wait() => Err(format!("index exited before embedding gate: {status:?}")),
+            }
+        }).await.map_err(|error| format!("index did not reach embedding gate: {error}"))??;
+        for mode in ["server", "auto"] {
+            for refresh in ["off", "background"] {
+                let mut query = spawn_cli(fixture.command(&[
+                    "--mode", mode, "--fts", "orchard", "--refresh", refresh,
+                    "--allow-remote", "--api-key", "local-test-key", "--no-color",
+                ]))?;
+                let output = wait_cli(&mut query, Duration::from_secs(5)).await;
+                if writer.try_wait().map_err(|error| error.to_string())?.is_some() {
+                    return Err("incremental writer exited while its embedding was gated".into());
+                }
+                let output = output.map_err(|error| format!(
+                    "--mode {mode} --refresh {refresh} blocked while incremental embedding remained gated: {error}"
+                ))?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stdout.contains("anchor.txt") {
+                    return Err(format!("--mode {mode} --refresh {refresh} did not return anchor.txt: {stdout}"));
+                }
+            }
+        }
+        Ok(())
+    }.await;
+
+    // Finish cleanup before surfacing the regression assertion.
+    drop(release);
+    let indexed = wait_cli(&mut writer, Duration::from_secs(30)).await;
+    let stopped = fixture.command(&["--server", "off"]).output();
+    if stopped.as_ref().is_ok_and(|output| output.status.success()) {
+        fixture.server_started = false;
+    }
+    drop(fixture);
+    embedding.server.abort();
+    let _ = (&mut embedding.server).await;
+    indexed.expect("incremental index completes after gate release");
+    success(stopped.expect("stop daemon"));
+    result.expect("indexed CLI queries must finish before the writer is released");
 }
 
 #[test]

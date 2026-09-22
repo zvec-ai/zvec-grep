@@ -256,8 +256,39 @@ async fn execute_request(
     }
     let server = use_server(mode, home).await?;
     zg_cli::finalize_refresh(&mut request, server);
-    ensure_query_index(&request, server, home, output).await?;
     authorize_query(&mut request, server, home).await?;
+    match execute_context(request.clone(), server, home, output).await {
+        Err(error) if is_not_found(error.as_ref()) => {
+            // Probing first would block searches that can borrow an active writer.
+            if !ensure_query_index(&request, server, home, output).await? {
+                return Err(error);
+            }
+            authorize_query(&mut request, server, home).await?;
+            execute_context(request, server, home, output).await
+        }
+        result => result,
+    }
+}
+
+fn is_not_found(error: &(dyn Error + 'static)) -> bool {
+    if let Some(error) = error.downcast_ref::<EngineError>() {
+        return error.code() == EngineError::NOT_FOUND;
+    }
+    match error.downcast_ref::<zg_daemon::DaemonError>() {
+        Some(zg_daemon::DaemonError::Remote { report, .. }) => {
+            report.code == EngineError::NOT_FOUND
+        }
+        Some(zg_daemon::DaemonError::Engine(error)) => error.code() == EngineError::NOT_FOUND,
+        _ => false,
+    }
+}
+
+async fn execute_context(
+    request: ContextOptions,
+    server: bool,
+    home: Option<&Path>,
+    output: zg_cli::OutputOptions,
+) -> Result<(), Box<dyn Error>> {
     if server {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
         let reply = zg_daemon::execute_command(&home, DaemonCommand::Context(request)).await?;
@@ -286,7 +317,7 @@ async fn ensure_query_index(
     server: bool,
     home: Option<&Path>,
     output: zg_cli::OutputOptions,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<bool, Box<dyn Error>> {
     use zg_engine::api::{
         index::{IndexOptions, options::EmbeddingModelSpec},
         info::{InfoOptions, result::WorkspaceIndexPolicy},
@@ -314,7 +345,7 @@ async fn ensure_query_index(
         info?
     };
     if info.indexed || info.index_policy == WorkspaceIndexPolicy::Disabled {
-        return Ok(());
+        return Ok(false);
     }
 
     let embedding = zg_engine::config::implicit_embedding_reference()?;
@@ -351,7 +382,7 @@ async fn ensure_query_index(
     };
     progress.finish();
     result?;
-    Ok(())
+    Ok(true)
 }
 
 async fn authorize_query(

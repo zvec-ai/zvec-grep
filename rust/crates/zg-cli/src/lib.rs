@@ -742,10 +742,7 @@ impl Cli {
     {
         let arguments = arguments.into_iter().map(Into::into).collect::<Vec<_>>();
         let arguments = normalize_command(arguments)?;
-        let literal_value_count = arguments
-            .iter()
-            .position(|argument| argument == OsStr::new("--"))
-            .map_or(0, |index| arguments.len() - index - 1);
+        let (arguments, literal_value_count) = normalize_query_argument_order(arguments);
         let command = arguments
             .get(1)
             .and_then(|value| value.to_str())
@@ -753,7 +750,7 @@ impl Cli {
             .to_owned();
         let matches = Self::command()
             .bin_name("zg")
-            .try_get_matches_from(normalize_query_argument_order(arguments))
+            .try_get_matches_from(arguments)
             .map_err(|mut error| {
                 use clap::error::{ContextKind, ContextValue};
                 if let Some(ContextValue::StyledStr(usage)) = error.get(ContextKind::Usage) {
@@ -984,9 +981,9 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
     Ok(arguments)
 }
 
-fn normalize_query_argument_order(arguments: Vec<OsString>) -> Vec<OsString> {
+fn normalize_query_argument_order(arguments: Vec<OsString>) -> (Vec<OsString>, usize) {
     if arguments.get(1).and_then(|value| value.to_str()) != Some("query") {
-        return arguments;
+        return (arguments, 0);
     }
     let mut prefix = arguments[..2].to_vec();
     let mut options = Vec::new();
@@ -1007,7 +1004,13 @@ fn normalize_query_argument_order(arguments: Vec<OsString>) -> Vec<OsString> {
             continue;
         }
         let text = argument.to_string_lossy();
-        if query_option_without_value(&text) || query_attached_option(&text) {
+        if let Some(text) = argument
+            .to_str()
+            .filter(|text| query_attached_option(text) && !text.starts_with("--"))
+        {
+            options.push(text[..2].into());
+            options.push(text[2..].into());
+        } else if query_option_without_value(&text) || query_attached_option(&text) {
             options.push(argument.clone());
         } else if query_option_with_value(&text) {
             options.push(argument.clone());
@@ -1027,12 +1030,14 @@ fn normalize_query_argument_order(arguments: Vec<OsString>) -> Vec<OsString> {
         index += 1;
     }
     prefix.extend(options);
-    prefix.extend(values);
-    if after_separator {
+    if !values.is_empty() || after_separator {
+        // Keep clap from consuming a literal `--` inside a managed-rg option value.
         prefix.push("--".into());
-        prefix.extend(literal);
     }
-    prefix
+    prefix.extend(values);
+    let literal_value_count = literal.len();
+    prefix.extend(literal);
+    (prefix, literal_value_count)
 }
 
 fn query_option_without_value(value: &str) -> bool {
@@ -1680,6 +1685,35 @@ mod tests {
                 };
                 assert_eq!(request.queries, [pattern]);
                 assert!(output.human);
+            }
+        }
+    }
+
+    #[test]
+    fn rg_separator_pattern_does_not_hide_following_options_or_literal_paths() {
+        for option in ["-e", "-Fe", "--regexp"] {
+            for literal_path in [false, true] {
+                let mut arguments = vec!["zg", "--rg", option, "--", "--limit", "3", "--compact"];
+                if literal_path {
+                    arguments.extend(["--", "--human"]);
+                }
+                let CliPlan::Query {
+                    request, output, ..
+                } = plan(&arguments, true)
+                else {
+                    panic!("separator pattern must remain search input")
+                };
+                assert_eq!(request.queries, ["--"]);
+                assert_eq!(request.limit, Some(3));
+                assert!(!output.human);
+                assert_eq!(
+                    request.rg_paths,
+                    if literal_path {
+                        vec![PathBuf::from("--human")]
+                    } else {
+                        vec![]
+                    }
+                );
             }
         }
     }

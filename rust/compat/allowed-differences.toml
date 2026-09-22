@@ -24,3 +24,9 @@ id = "engine-content-source-coordinates"
 owner = "engine/presentation"
 reason = "Rust engine 显式返回 content_range，CLI 与 MCP 直接使用内容坐标。Node.js formatter 根据内容行数猜测实体或片段范围，在带末尾换行且行数相等时可能错标源码行号；Rust 不保留该错误。半开区间行号解释也由 engine 统一提供。"
 removal_condition = "Node.js 同样提供明确的内容范围并移除行数猜测后，统一更新对照用例。"
+
+[[difference]]
+id = "cli-managed-rg-option-values"
+owner = "CLI"
+reason = "Rust treats managed-rg option values such as -e --index and -e -- as literal patterns, not management actions or argument separators. This preserves ripgrep semantics rather than reproducing the TypeScript action scanner's option-value bug (PR #196)."
+removal_condition = "The TypeScript CLI also skips option values during action and separator scanning, or the TypeScript compatibility layer is retired."

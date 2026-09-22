@@ -52,12 +52,16 @@ fn literal_flags_and_command_words_do_not_warn_or_run_actions() {
     let root = tempfile::tempdir().expect("workspace");
     std::fs::write(
         root.path().join("source.txt"),
-        "query\n--index\n--human\n--help\n",
+        "query\n--index\n--human\n--help\n--\n",
     )
     .expect("fixture");
-    for word in ["query", "--index", "--human", "--help"] {
-        for pattern_option in ["--", "-e"] {
-            let output = run(root.path(), &["--rg", pattern_option, word, "source.txt"]);
+    for word in ["query", "--index", "--human", "--help", "--"] {
+        for pattern_option in ["--", "-e", "-Fe", "--regexp"] {
+            let mut arguments = vec!["--rg", pattern_option, word, "source.txt"];
+            if pattern_option != "--" {
+                arguments.extend(["--limit", "3", "--compact"]);
+            }
+            let output = run(root.path(), &arguments);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success(), "{word}: {stderr}");

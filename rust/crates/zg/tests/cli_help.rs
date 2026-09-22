@@ -90,6 +90,21 @@ fn index_help_describes_the_optional_workspace_name() {
 }
 
 #[test]
+fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
+    let help = stdout(&["--help", "index"]);
+    assert!(
+        help.contains("Explicit zg --index requires --embedding"),
+        "{help}"
+    );
+    assert!(
+        help.contains("Search automatically creates a missing index"),
+        "{help}"
+    );
+    assert!(help.contains("local/potion-code-16m-v2"), "{help}");
+    assert!(help.contains("never a remote model"), "{help}");
+}
+
+#[test]
 fn version_flags_print_the_installed_version() {
     let expected = "0.0.1\n";
     assert_eq!(stdout(&["-v"]), expected);

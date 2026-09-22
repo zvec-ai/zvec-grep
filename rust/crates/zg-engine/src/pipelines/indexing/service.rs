@@ -109,7 +109,7 @@ impl WorkspaceIndexService {
             manifest.workspace.name = name;
         } else if let Some(previous) = registry.root_for_name(&manifest.workspace.name)? {
             return Err(EngineError::invalid_argument(format!(
-                "workspace name '{}' is already registered at {}; use index --name to choose another name",
+                "workspace name '{}' is already registered at {}; use zg --index --name to choose another name",
                 manifest.workspace.name,
                 previous.display()
             )));

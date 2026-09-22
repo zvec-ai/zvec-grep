@@ -316,7 +316,14 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "installation";
     const install = await runCandidate(
       candidate,
-      ["--install", "--target", "opencode", "--yes", "--mcp-transport", "stdio"],
+      [
+        "--install",
+        "--target",
+        "opencode",
+        "--yes",
+        "--mcp-transport",
+        "stdio",
+      ],
       { env, cwd: root },
     );
     await writeJson(join(output, "installation/install.json"), install);
