@@ -406,13 +406,17 @@ fn opencode_command(action: &str, root: &Path) -> Command {
 fn opencode_jsonc_preserves_comments_trailing_commas_and_other_settings() {
     let temporary = TempDir::new().expect("tempdir");
     let root = temporary.path();
-    let directory = root.join("config/opencode");
+    let directory = root.join("config").join("opencode");
     fs::create_dir_all(&directory).expect("mkdir");
     let path = directory.join("opencode.jsonc");
     let source = "{\n  // Keep model.\n  \"model\": \"custom/model\",\n  \"array\": [\"literal ,} and ,]\",],\n  \"mcp\": {\n    /* Keep other server. */\n    \"other\": {\"type\": \"remote\", \"url\": \"https://example.test/mcp\",},\n  },\n}\n";
     fs::write(&path, source).expect("write");
     let stdout = run_ok(&mut opencode_command("install", root));
-    assert!(stdout.contains(&format!("Config    {}", path.display())));
+    assert!(
+        stdout.contains(&format!("Config    {}", path.display())),
+        "expected configuration path {}, stdout:\n{stdout}",
+        path.display()
+    );
     assert!(!directory.join("opencode.json").exists());
     let installed = fs::read_to_string(&path).expect("read");
     assert!(installed.contains("\"zvec_grep\""));
@@ -437,7 +441,7 @@ fn opencode_jsonc_preserves_comments_trailing_commas_and_other_settings() {
 fn opencode_selects_jsonc_and_cleans_both_global_files() {
     let temporary = TempDir::new().expect("tempdir");
     let root = temporary.path();
-    let directory = root.join("config/opencode");
+    let directory = root.join("config").join("opencode");
     fs::create_dir_all(&directory).expect("mkdir");
     let json_path = directory.join("opencode.json");
     let jsonc_path = directory.join("opencode.jsonc");

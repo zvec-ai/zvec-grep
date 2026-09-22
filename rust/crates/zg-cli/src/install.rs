@@ -130,15 +130,14 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
 
     println!("\nInstalling integrations\n");
     for agent in &agents {
-        install_agent(*agent, &options)?;
+        let result = install_agent(*agent, &options)?;
         println!("  ✓ {}", agent.label());
         println!("    MCP       configured");
-        if *agent == Agent::OpenCode {
-            let config = resolve_opencode_config();
-            println!("    Config    {}", config.path.display());
-            if let Some(note) = config.note {
-                println!("    Note      {note}");
-            }
+        if let Some(path) = result.config_path {
+            println!("    Config    {}", path.display());
+        }
+        if let Some(note) = result.config_note {
+            println!("    Note      {note}");
         }
         println!();
     }
@@ -522,15 +521,22 @@ fn qoder_ide_candidates() -> Vec<PathBuf> {
     ]
 }
 
-fn install_agent(agent: Agent, options: &AgentOptions) -> Result<(), InstallError> {
+#[derive(Default)]
+struct AgentInstallResult {
+    config_path: Option<PathBuf>,
+    config_note: Option<&'static str>,
+}
+
+fn install_agent(agent: Agent, options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
     match agent {
         Agent::Claude => install_claude(options),
         Agent::Codex => install_codex(options),
-        Agent::OpenCode => install_opencode(options),
+        Agent::OpenCode => return install_opencode(options),
         Agent::Cursor => install_cursor(options),
         Agent::Qwen => install_qwen(options),
         Agent::Qoder => install_qoder(options),
-    }
+    }?;
+    Ok(AgentInstallResult::default())
 }
 
 fn uninstall_agent(agent: Agent) -> Result<(), InstallError> {
@@ -684,7 +690,7 @@ fn resolve_opencode_config() -> OpenCodeConfig {
     }
 }
 
-fn install_opencode(options: &AgentOptions) -> Result<(), InstallError> {
+fn install_opencode(options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
     let config = resolve_opencode_config();
     let path = config.path;
     let server = match options.transport {
@@ -727,7 +733,11 @@ fn install_opencode(options: &AgentOptions) -> Result<(), InstallError> {
         true,
         None,
         None,
-    )
+    )?;
+    Ok(AgentInstallResult {
+        config_path: Some(path),
+        config_note: config.note,
+    })
 }
 
 fn uninstall_opencode() -> Result<(), InstallError> {
