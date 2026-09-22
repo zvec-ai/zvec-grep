@@ -727,8 +727,21 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
             "autoUpdate": false, "freshness": "wait_for_fresh"
         } }
     });
-    let response = post_json(port, Some(&session), &wait_search.to_string())?;
-    assert!(response.contains("fresh.txt"), "{response}");
+    // Resident Wait drains delivered notifications; OS delivery itself is
+    // asynchronous. Controlled runtime tests verify waiting for in-flight jobs.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let response = loop {
+        let response = post_json(port, Some(&session), &wait_search.to_string())?;
+        assert!(response.contains("\"isError\":false"), "{response}");
+        if response.contains("fresh.txt") {
+            break response;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not deliver change: {response}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(response.contains("freshness: fresh"), "{response}");
     assert!(!response.contains("background_refresh:"), "{response}");
     assert!(

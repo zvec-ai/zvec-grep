@@ -34,6 +34,7 @@ pub(crate) async fn context(
     models: &ModelRuntimeManager,
     options: &ContextOptions,
     read_sessions: Option<&ReadSessionCache>,
+    refresh_completed: bool,
 ) -> Result<ContextResult, EngineError> {
     let wait = LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?;
     wait.check_cancelled()?;
@@ -59,9 +60,11 @@ pub(crate) async fn context(
             "index storage is missing",
         ));
     }
-    if options.refresh.map_or(options.auto_update, |policy| {
-        policy == crate::api::context::options::RefreshPolicy::Wait
-    }) && indexing.workspace_needs_refresh(&location, &wait).await?
+    if !refresh_completed
+        && options.refresh.map_or(options.auto_update, |policy| {
+            policy == crate::api::context::options::RefreshPolicy::Wait
+        })
+        && indexing.workspace_needs_refresh(&location, &wait).await?
     {
         indexing
             .index(models, refresh_options(options, location.root.clone()))

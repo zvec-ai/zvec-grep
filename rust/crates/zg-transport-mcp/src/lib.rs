@@ -630,7 +630,9 @@ pub struct SearchInput {
     pub modified_before: Option<TimeInput>,
     /// Include per-hit search trace.
     pub trace: Option<bool>,
-    /// Search now or wait for the active index to become fresh.
+    /// Search now or wait for delivered workspace changes to be indexed.
+    /// Resident servers cover watcher notifications received before the refresh
+    /// barrier; OS notifications delivered later require a subsequent refresh.
     #[serde(default)]
     pub freshness: FreshnessInput,
     /// Allow eventual search to schedule a background index update.

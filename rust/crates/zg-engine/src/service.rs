@@ -49,6 +49,21 @@ impl EngineService {
         &self,
         options: ContextOptions,
     ) -> Result<ContextResult, EngineError> {
+        self.context_with_refresh(options, false).await
+    }
+
+    pub(crate) async fn context_after_refresh(
+        &self,
+        options: ContextOptions,
+    ) -> Result<ContextResult, EngineError> {
+        self.context_with_refresh(options, true).await
+    }
+
+    async fn context_with_refresh(
+        &self,
+        options: ContextOptions,
+        refresh_completed: bool,
+    ) -> Result<ContextResult, EngineError> {
         self.ensure_open()?;
         options.validate_file_selection()?;
         if options.rg {
@@ -59,8 +74,14 @@ impl EngineService {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            indexed_search::service::context(&self.indexing, &self.models, &options, cache.as_ref())
-                .await
+            indexed_search::service::context(
+                &self.indexing,
+                &self.models,
+                &options,
+                cache.as_ref(),
+                refresh_completed,
+            )
+            .await
         }
     }
 

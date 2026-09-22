@@ -502,3 +502,241 @@ async fn background_refresh_accounts_for_late_watcher_notifications() {
     );
     manager.shutdown_all().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn concurrent_waiters_receive_progress_before_shared_refresh_finishes() {
+    use zg_engine::api::index::progress::{
+        IndexProgress, IndexProgressPhase, IndexProgressReporter,
+    };
+    let workspace = tempdir().expect("workspace");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (manager, _sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(workspace.path().to_path_buf()),
+        ..IndexOptions::default()
+    };
+    let first = tokio::spawn({
+        let manager = manager.clone();
+        let options = options.clone();
+        async move { manager.refresh_index(options, true).await }
+    });
+    let running = jobs.recv().await.expect("shared job");
+    let (progress, mut received) = mpsc::unbounded_channel();
+    let second = tokio::spawn({
+        let manager = manager.clone();
+        async move {
+            manager
+                .refresh_index(
+                    IndexOptions {
+                        on_progress: Some(IndexProgressReporter::new(move |event| {
+                            let _ = progress.send(event);
+                        })),
+                        ..options
+                    },
+                    true,
+                )
+                .await
+        }
+    });
+    running
+        .on_progress
+        .expect("scheduler reporter")
+        .report(IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: Some(7),
+            files_indexed: Some(2),
+            files_failed: Some(0),
+            detail: None,
+            embedding: None,
+        });
+    let event = tokio::time::timeout(Duration::from_secs(2), received.recv())
+        .await
+        .expect("second waiter receives live progress")
+        .expect("event");
+    assert_eq!(event.files_total, Some(7));
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    executor.release.add_permits(1);
+    first.await.expect("first task").expect("first refresh");
+    second.await.expect("second task").expect("second refresh");
+    assert!(jobs.try_recv().is_err());
+    manager.shutdown_all().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn public_wait_reuses_reconciliation_without_engine_rescan() {
+    use zg_engine::api::{
+        context::options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+        index::options::EmbeddingModelSpec,
+    };
+    use zg_transport_mcp::IndexOperationProvider;
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = zg_engine::ZvecGrep::new();
+    engine
+        .index(IndexOptions {
+            root: Some(root.clone()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/text-embedding-v4".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: zg_engine::api::index::options::Device::Cpu,
+            }),
+            endpoint: Some("http://127.0.0.1:1/empty-index".into()),
+            api_key: Some("fixture-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        })
+        .await
+        .expect("empty index");
+    let executor = Arc::new(RecordingExecutor::default());
+    let (manager, _sender) = fixture(executor.clone());
+    let request = zg_engine::api::context::ContextOptions {
+        root: Some(root.clone()),
+        refresh: Some(RefreshPolicy::Wait),
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Fts,
+            query: "probe".into(),
+        }],
+        ..Default::default()
+    };
+    manager
+        .search(&engine, request.clone())
+        .await
+        .expect("initial reconciliation");
+    // Keep the controlled watcher quiet. Resident Wait covers delivered events,
+    // so an unreported file must not trigger another engine disk scan/index job.
+    std::fs::write(root.join("probe.txt"), "probe").expect("scan probe");
+    for _ in 0..2 {
+        let reply = manager
+            .search(&engine, request.clone())
+            .await
+            .expect("reuse daemon proof");
+        assert_eq!(reply.freshness.as_deref(), Some("fresh"));
+    }
+    assert_eq!(executor.calls.lock().expect("calls").len(), 1);
+    assert_eq!(
+        engine
+            .context(request)
+            .await
+            .expect_err("direct Wait checks disk")
+            .code(),
+        EngineError::PERMISSION_DENIED
+    );
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+struct BufferedWatcher {
+    session: ManualWatchSession,
+    sender: mpsc::Sender<WorkspaceChangeBatch>,
+    pending: AtomicBool,
+    flushed: mpsc::UnboundedSender<()>,
+}
+
+#[async_trait]
+impl WorkspaceWatchSessionPort for BufferedWatcher {
+    async fn next_changes(&self, control: &TaskControl) -> Result<WorkspaceChangeBatch, HostError> {
+        self.session.next_changes(control).await
+    }
+
+    async fn flush_pending(&self) -> Result<(), HostError> {
+        if self.pending.swap(false, Ordering::AcqRel) {
+            self.sender
+                .send(WorkspaceChangeBatch {
+                    changes: vec![WorkspaceChange::Upsert("during-index.txt".into())],
+                })
+                .await
+                .expect("buffered event");
+        }
+        let _ = self.flushed.send(());
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), HostError> {
+        Ok(())
+    }
+}
+
+struct BufferedWatcherFactory(Arc<BufferedWatcher>);
+
+#[async_trait]
+impl WorkspaceWatcherFactoryPort for BufferedWatcherFactory {
+    async fn watch(
+        &self,
+        _request: &WatchRequest,
+        _control: &TaskControl,
+    ) -> Result<Arc<dyn WorkspaceWatchSessionPort>, HostError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn waiting_for_existing_job_flushes_events_buffered_during_that_job() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(1),
+    });
+    let (sender, receiver) = mpsc::channel(8);
+    let (flushed, mut barriers) = mpsc::unbounded_channel();
+    let watcher = Arc::new(BufferedWatcher {
+        session: ManualWatchSession {
+            receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+            closes: Arc::new(AtomicUsize::new(0)),
+        },
+        sender,
+        pending: AtomicBool::new(false),
+        flushed,
+    });
+    let manager = WorkspaceRuntimeManager::new(
+        executor.clone(),
+        Arc::new(BufferedWatcherFactory(watcher.clone())),
+        SchedulerConfig::default(),
+    );
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial reconcile");
+    jobs.recv().await.expect("initial job");
+    watcher
+        .sender
+        .send(WorkspaceChangeBatch {
+            changes: vec![WorkspaceChange::Upsert("before-index.txt".into())],
+        })
+        .await
+        .expect("first event");
+    jobs.recv().await.expect("existing job");
+    while barriers.try_recv().is_ok() {}
+    let waiting = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.refresh_index(options, true).await }
+    });
+    barriers.recv().await.expect("pre-wait flush");
+    watcher.pending.store(true, Ordering::Release);
+    executor.release.add_permits(1);
+    let followup = tokio::time::timeout(Duration::from_secs(2), jobs.recv())
+        .await
+        .expect("post-wait flush schedules buffered event")
+        .expect("followup");
+    assert_eq!(
+        followup.changes,
+        [IndexChange::Upsert("during-index.txt".into())]
+    );
+    assert!(!waiting.is_finished());
+    executor.release.add_permits(1);
+    waiting.await.expect("wait task").expect("fresh");
+    assert!(!watcher.pending.load(Ordering::Acquire));
+    manager.shutdown_all().await.expect("shutdown");
+}

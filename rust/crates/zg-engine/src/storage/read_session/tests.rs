@@ -397,7 +397,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     let models = ModelRuntimeManager::new();
     let cache = cache();
     let (mut manifest, options) = fixture.publish();
-    let first = context(&indexing, &models, &options, Some(&cache))
+    let first = context(&indexing, &models, &options, Some(&cache), false)
         .await
         .expect("first query");
     assert_eq!(first.items.len(), 1);
@@ -407,7 +407,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
             .expect("session")
             .session,
     );
-    let second = context(&indexing, &models, &options, Some(&cache))
+    let second = context(&indexing, &models, &options, Some(&cache), false)
         .await
         .expect("warm query");
     assert_eq!(first.items, second.items);
@@ -434,7 +434,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
         write_workspace_manifest(&fixture.home, &manifest).expect("disable index");
     }
     assert!(
-        context(&indexing, &models, &options, Some(&cache))
+        context(&indexing, &models, &options, Some(&cache), false)
             .await
             .is_err()
     );
@@ -451,14 +451,14 @@ async fn benchmark_warm_queries() {
     let cache = cache();
     for (name, selected_cache) in [("uncached", None), ("resident", Some(&cache))] {
         for _ in 0..3 {
-            context(&indexing, &models, &options, selected_cache)
+            context(&indexing, &models, &options, selected_cache, false)
                 .await
                 .expect("warmup");
         }
         let mut durations = Vec::new();
         for _ in 0..50 {
             let started = Instant::now();
-            let result = context(&indexing, &models, &options, selected_cache)
+            let result = context(&indexing, &models, &options, selected_cache, false)
                 .await
                 .expect("query");
             durations.push(started.elapsed());

@@ -56,6 +56,21 @@ impl ZvecGrep {
             .map_err(|error| error.report_here())
     }
 
+    /// Queries an index after a resident coordinator has completed its refresh.
+    /// The caller must drain delivered watcher events and wait for indexing
+    /// before each call. OS notifications still in flight are outside that
+    /// guarantee. No disk freshness scan is repeated here; the request's
+    /// refresh policy still controls whether an active writer may be borrowed.
+    pub async fn context_after_refresh(
+        &self,
+        options: ContextOptions,
+    ) -> EngineResult<ContextResult> {
+        self.service
+            .context_after_refresh(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
     pub async fn index(&self, options: IndexOptions) -> EngineResult<IndexResult> {
         self.service
             .index(options)

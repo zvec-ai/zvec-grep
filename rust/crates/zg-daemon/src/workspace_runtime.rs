@@ -368,14 +368,6 @@ impl WorkspaceRuntimeManager {
         let root = canonical_root(options.root.as_deref())
             .map_err(WorkspaceRuntimeError::into_engine_error)?;
         let runtime = self.runtime(root.clone(), &options)?;
-        let _refresh = if wait {
-            runtime.refresh.lock().await
-        } else {
-            let Ok(refresh) = runtime.refresh.try_lock() else {
-                return Ok(true);
-            };
-            refresh
-        };
         let reporter = options.on_progress.take();
         if !wait {
             // A submitted background job outlives the request that created it.
@@ -383,6 +375,14 @@ impl WorkspaceRuntimeManager {
         }
         let mut scheduled = false;
         loop {
+            let refresh = if wait {
+                runtime.refresh.lock().await
+            } else {
+                let Ok(refresh) = runtime.refresh.try_lock() else {
+                    return Ok(true);
+                };
+                refresh
+            };
             let busy = self
                 .job_for_root(&root)
                 .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running));
@@ -402,13 +402,25 @@ impl WorkspaceRuntimeManager {
             }
             // Apply proofs ourselves as well: completion callbacks can be scheduled
             // after scheduler waiters, and must not cause a duplicate reconciliation.
-            if wait {
+            if !runtime.settle_completed_jobs(&self.inner.scheduler)
+                || self.inner.scheduler.has_active_root(&root)
+            {
+                if !wait {
+                    return Ok(true);
+                }
+                // Coordination covers admission only. Every waiting request can
+                // subscribe to shared jobs while another request waits for them.
+                drop(refresh);
+                self.inner
+                    .scheduler
+                    .wait_for_root_idle_with_progress(&root, reporter.clone())
+                    .await;
                 runtime
                     .settle_jobs(&self.inner.scheduler, reporter.clone())
                     .await;
-                self.inner.scheduler.wait_for_root_idle(&root).await;
-            } else if !runtime.settle_completed_jobs(&self.inner.scheduler) {
-                return Ok(true);
+                // The watcher may have buffered changes during the existing job.
+                // Reacquire coordination and drain it before trusting the proof.
+                continue;
             }
             if runtime.is_reconciled() {
                 return Ok(scheduled);
@@ -439,6 +451,7 @@ impl WorkspaceRuntimeManager {
             if !wait {
                 return Ok(true);
             }
+            drop(refresh);
             let completed = self
                 .inner
                 .scheduler
@@ -946,7 +959,10 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .cloned()
             .unwrap_or(requested_root);
         let _refresh_activity = wait_for_search_refresh(&request, async {
-            self.inner.scheduler.wait_for_root_idle(&root).await;
+            self.inner
+                .scheduler
+                .wait_for_root_idle_with_progress(&root, request.on_progress.clone())
+                .await;
             let info = engine
                 .info(InfoOptions {
                     root: request.root.clone(),
@@ -968,7 +984,9 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             Ok(activity)
         })
         .await?;
-        let mut reply = engine.context(request).await?;
+        // Resident Wait reconciles delivered watcher events. OS notifications
+        // still in flight belong to a later refresh, not a second disk scan.
+        let mut reply = engine.context_after_refresh(request).await?;
         reply.freshness = Some("fresh".to_owned());
         reply.background_refresh = Some("idle".to_owned());
         Ok(reply)
@@ -1609,19 +1627,38 @@ mod tests {
             )
             .await
             .expect("submit writer");
-        jobs.recv().await.expect("writer running");
+        let running = jobs.recv().await.expect("writer running");
+        let (progress, mut updates) = mpsc::unbounded_channel();
+        let reporter = zg_engine::api::index::progress::IndexProgressReporter::new(move |event| {
+            let _ = progress.send(event);
+        });
         let signal = tokio_util::sync::CancellationToken::new();
         let request = ContextOptions {
             root: Some(root.clone()),
             refresh: Some(RefreshPolicy::Wait),
             signal: Some(signal.clone()),
+            on_progress: Some(reporter),
             ..ContextOptions::default()
         };
         let waiting = tokio::spawn({
             let manager = manager.clone();
             async move { manager.search(&ZvecGrep::new(), request).await }
         });
-        tokio::task::yield_now().await;
+        running.on_progress.expect("scheduler reporter").report(
+            zg_engine::api::index::progress::IndexProgress {
+                phase: zg_engine::api::index::progress::IndexProgressPhase::Indexing,
+                files_total: Some(7),
+                files_indexed: Some(2),
+                files_failed: Some(0),
+                detail: None,
+                embedding: None,
+            },
+        );
+        let event = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+            .await
+            .expect("public Wait receives live progress")
+            .expect("progress event");
+        assert_eq!(event.files_total, Some(7));
         signal.cancel();
         let error = tokio::time::timeout(Duration::from_secs(2), waiting)
             .await

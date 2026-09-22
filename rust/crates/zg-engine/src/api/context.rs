@@ -183,6 +183,8 @@ pub mod options {
     #[serde(rename_all = "snake_case")]
     pub enum RefreshPolicy {
         Background,
+        /// Direct queries check disk freshness. Resident queries wait for indexing
+        /// of delivered watcher events; later OS notifications need another refresh.
         Wait,
         Off,
     }

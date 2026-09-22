@@ -359,6 +359,15 @@ impl IndexJobScheduler {
     }
 
     pub(crate) async fn wait_for_root_idle(&self, canonical_root: &PathBuf) {
+        self.wait_for_root_idle_with_progress(canonical_root, None)
+            .await;
+    }
+
+    pub(crate) async fn wait_for_root_idle_with_progress(
+        &self,
+        canonical_root: &PathBuf,
+        reporter: Option<zg_engine::api::index::progress::IndexProgressReporter>,
+    ) {
         loop {
             let active = lock(&self.inner.state)
                 .active_by_root
@@ -367,7 +376,7 @@ impl IndexJobScheduler {
             let Some(active) = active else {
                 return;
             };
-            wait_for_job(&active, None).await;
+            wait_for_job(&active, reporter.clone()).await;
         }
     }
 
