@@ -27,6 +27,15 @@ let reply = zg.context(ContextOptions {
 zg.close();
 ```
 
+`zg install --target opencode` respects a nonempty `OPENCODE_CONFIG` override.
+Otherwise it selects an existing `opencode.jsonc` before `opencode.json` under
+`${XDG_CONFIG_HOME:-~/.config}/opencode`, creating `opencode.json` when neither
+exists. Installation reports the selected path and explains when both files
+exist. JSONC comments, trailing commas, unrelated settings and other MCP entries
+are preserved. Uninstall removes managed entries from both global files, or only
+from the explicit override, and removes managed guidance from the adjacent
+`AGENTS.md`.
+
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
 typed `context`, `index`, `info`, and `drop_index` methods. It

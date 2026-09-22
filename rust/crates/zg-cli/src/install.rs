@@ -132,7 +132,15 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
     for agent in &agents {
         install_agent(*agent, &options)?;
         println!("  ✓ {}", agent.label());
-        println!("    MCP       configured\n");
+        println!("    MCP       configured");
+        if *agent == Agent::OpenCode {
+            let config = resolve_opencode_config();
+            println!("    Config    {}", config.path.display());
+            if let Some(note) = config.note {
+                println!("    Note      {note}");
+            }
+        }
+        println!();
     }
 
     Ok(InstallOutcome {
@@ -643,9 +651,42 @@ fn uninstall_claude() -> Result<(), InstallError> {
     remove_marked_file(&directory.join("CLAUDE.md"), GUIDANCE_START, GUIDANCE_END)
 }
 
+struct OpenCodeConfig {
+    path: PathBuf,
+    cleanup_paths: Vec<PathBuf>,
+    note: Option<&'static str>,
+}
+
+fn resolve_opencode_config() -> OpenCodeConfig {
+    let trimmed_path = |name| non_empty_env(name).map(|value| absolute_path(value.trim()));
+    if let Some(path) = trimmed_path("OPENCODE_CONFIG") {
+        return OpenCodeConfig {
+            cleanup_paths: vec![path.clone()],
+            path,
+            note: None,
+        };
+    }
+    let directory = trimmed_path("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| absolute_path(home_dir().join(".config")))
+        .join("opencode");
+    let jsonc = directory.join("opencode.jsonc");
+    let json = directory.join("opencode.json");
+    let has_jsonc = jsonc.exists();
+    OpenCodeConfig {
+        path: if has_jsonc {
+            jsonc.clone()
+        } else {
+            json.clone()
+        },
+        note: (has_jsonc && json.exists())
+            .then_some("both opencode.jsonc and opencode.json exist; selected opencode.jsonc"),
+        cleanup_paths: vec![jsonc, json],
+    }
+}
+
 fn install_opencode(options: &AgentOptions) -> Result<(), InstallError> {
-    let path = env_path("OPENCODE_CONFIG")
-        .unwrap_or_else(|| home_dir().join(".config/opencode/opencode.json"));
+    let config = resolve_opencode_config();
+    let path = config.path;
     let server = match options.transport {
         McpInstallTransport::Stdio => json!({
             "type": "local", "command": stdio_command(options.toolset), "enabled": true,
@@ -662,7 +703,15 @@ fn install_opencode(options: &AgentOptions) -> Result<(), InstallError> {
             server
         }
     };
-    install_strict_json_server(&path, "mcp", server, options.force, "OpenCode")?;
+    update_jsonc_container(
+        &path,
+        &server,
+        options.force,
+        "OpenCode",
+        is_managed_json_server,
+        "mcp",
+        true,
+    )?;
     write_marked_file(
         &path
             .parent()
@@ -682,9 +731,18 @@ fn install_opencode(options: &AgentOptions) -> Result<(), InstallError> {
 }
 
 fn uninstall_opencode() -> Result<(), InstallError> {
-    let path = env_path("OPENCODE_CONFIG")
-        .unwrap_or_else(|| home_dir().join(".config/opencode/opencode.json"));
-    remove_strict_json_server(&path, "mcp")?;
+    let config = resolve_opencode_config();
+    let path = config.path;
+    // Clean legacy managed entries from both global files; explicit overrides stay scoped.
+    for cleanup_path in config.cleanup_paths {
+        remove_jsonc_container(
+            &cleanup_path,
+            "OpenCode",
+            is_managed_json_server,
+            "mcp",
+            true,
+        )?;
+    }
     remove_marked_file(
         &path
             .parent()
@@ -1521,24 +1579,33 @@ fn update_jsonc_server(
     label: &str,
     managed: fn(&Value) -> bool,
 ) -> Result<(), InstallError> {
+    update_jsonc_container(path, server, force, label, managed, "mcpServers", false)
+}
+
+fn update_jsonc_container(
+    path: &Path,
+    server: &Value,
+    force: bool,
+    label: &str,
+    managed: fn(&Value) -> bool,
+    container: &str,
+    allow_trailing_comma: bool,
+) -> Result<(), InstallError> {
     let existing = read_if_exists(path)?;
     let source = if existing.trim().is_empty() {
         "{}\n".to_owned()
     } else {
         existing
     };
-    let root = parse_jsonc_object(path, &source, label)?;
-    if root
-        .get("mcpServers")
-        .is_some_and(|value| !value.is_object())
-    {
+    let root = parse_jsonc_object_options(path, &source, label, allow_trailing_comma)?;
+    if root.get(container).is_some_and(|value| !value.is_object()) {
         return Err(InstallError::Message(format!(
-            "Invalid mcpServers configuration in {}.",
+            "Invalid {container} configuration in {}.",
             path.display()
         )));
     }
     let current = root
-        .get("mcpServers")
+        .get(container)
         .and_then(Value::as_object)
         .and_then(|servers| servers.get("zvec_grep"));
     if current.is_some_and(|value| !managed(value)) && !force {
@@ -1550,7 +1617,7 @@ fn update_jsonc_server(
     if current == Some(server) {
         return Ok(());
     }
-    let next = jsonc_set_path(&source, &["mcpServers", "zvec_grep"], server)?;
+    let next = jsonc_set_path(&source, &[container, "zvec_grep"], server)?;
     atomic_write(path, &ensure_newline(next))
 }
 
@@ -1559,21 +1626,37 @@ fn remove_jsonc_server(
     label: &str,
     managed: fn(&Value) -> bool,
 ) -> Result<(), InstallError> {
+    remove_jsonc_container(path, label, managed, "mcpServers", false)
+}
+
+fn remove_jsonc_container(
+    path: &Path,
+    label: &str,
+    managed: fn(&Value) -> bool,
+    container: &str,
+    allow_trailing_comma: bool,
+) -> Result<(), InstallError> {
     let source = read_if_exists(path)?;
     if source.trim().is_empty() {
         return Ok(());
     }
-    let root = parse_jsonc_object(path, &source, label)?;
-    let Some(servers) = root.get("mcpServers").and_then(Value::as_object) else {
+    let root = parse_jsonc_object_options(path, &source, label, allow_trailing_comma)?;
+    if root.get(container).is_some_and(|value| !value.is_object()) {
+        return Err(InstallError::Message(format!(
+            "Invalid {container} configuration in {}.",
+            path.display()
+        )));
+    }
+    let Some(servers) = root.get(container).and_then(Value::as_object) else {
         return Ok(());
     };
     if !servers.get("zvec_grep").is_some_and(managed) {
         return Ok(());
     }
     let path_to_remove: &[&str] = if servers.len() == 1 && !has_jsonc_comments(&source) {
-        &["mcpServers"]
+        &[container]
     } else {
-        &["mcpServers", "zvec_grep"]
+        &[container, "zvec_grep"]
     };
     let next = jsonc_remove_path(&source, path_to_remove)?;
     if next != source {
@@ -1625,7 +1708,24 @@ fn parse_jsonc_object(
     source: &str,
     label: &str,
 ) -> Result<Map<String, Value>, InstallError> {
-    let stripped = strip_jsonc_comments(source)?;
+    parse_jsonc_object_options(path, source, label, false)
+}
+
+fn parse_jsonc_object_options(
+    path: &Path,
+    source: &str,
+    label: &str,
+    allow_trailing_comma: bool,
+) -> Result<Map<String, Value>, InstallError> {
+    let mut stripped = strip_jsonc_comments(source)?;
+    if allow_trailing_comma {
+        stripped = crate::jsonc::without_trailing_commas(&stripped).map_err(|_| {
+            InstallError::Message(format!(
+                "Invalid {label} configuration in {}.",
+                path.display()
+            ))
+        })?;
+    }
     let value: Value = serde_json::from_str(&stripped).map_err(|_| {
         InstallError::Message(format!(
             "Invalid {label} configuration in {}.",
@@ -1928,6 +2028,15 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trailing_commas_are_only_enabled_for_opencode() {
+        let path = std::path::Path::new("settings.json");
+        let source = "{\"mcpServers\": {},}";
+        assert!(super::parse_jsonc_object(path, source, "Qwen Code").is_err());
+        assert!(super::parse_jsonc_object(path, source, "Qoder").is_err());
+        assert!(super::parse_jsonc_object_options(path, source, "OpenCode", true).is_ok());
+    }
+
     use super::*;
 
     #[test]

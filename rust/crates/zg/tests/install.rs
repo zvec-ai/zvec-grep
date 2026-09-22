@@ -390,3 +390,146 @@ fn jsonc(source: &str) -> Value {
     }
     serde_json::from_str(&stripped).expect("valid JSONC")
 }
+
+fn opencode_command(action: &str, root: &Path) -> Command {
+    let mut command = zg();
+    command
+        .args([action, "--target", "opencode", "--yes"])
+        .env_remove("OPENCODE_CONFIG")
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("HOME", root)
+        .env("USERPROFILE", root);
+    command
+}
+
+#[test]
+fn opencode_jsonc_preserves_comments_trailing_commas_and_other_settings() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let directory = root.join("config/opencode");
+    fs::create_dir_all(&directory).expect("mkdir");
+    let path = directory.join("opencode.jsonc");
+    let source = "{\n  // Keep model.\n  \"model\": \"custom/model\",\n  \"array\": [\"literal ,} and ,]\",],\n  \"mcp\": {\n    /* Keep other server. */\n    \"other\": {\"type\": \"remote\", \"url\": \"https://example.test/mcp\",},\n  },\n}\n";
+    fs::write(&path, source).expect("write");
+    let stdout = run_ok(&mut opencode_command("install", root));
+    assert!(stdout.contains(&format!("Config    {}", path.display())));
+    assert!(!directory.join("opencode.json").exists());
+    let installed = fs::read_to_string(&path).expect("read");
+    assert!(installed.contains("\"zvec_grep\""));
+    run_ok(&mut opencode_command("install", root));
+    assert_eq!(fs::read_to_string(&path).expect("read"), installed);
+    run_ok(&mut opencode_command("uninstall", root));
+    let removed = fs::read_to_string(&path).expect("read");
+    assert!(!removed.contains("\"zvec_grep\""));
+    for line in source.lines().filter(|line| {
+        line.contains("Keep")
+            || line.contains("\"model\"")
+            || line.contains("\"array\"")
+            || line.contains("\"other\"")
+    }) {
+        assert!(installed.contains(line));
+        assert!(removed.contains(line));
+    }
+    run_ok(&mut opencode_command("install", root));
+}
+
+#[test]
+fn opencode_selects_jsonc_and_cleans_both_global_files() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let directory = root.join("config/opencode");
+    fs::create_dir_all(&directory).expect("mkdir");
+    let json_path = directory.join("opencode.json");
+    let jsonc_path = directory.join("opencode.jsonc");
+    let legacy = "{\"model\":\"json/model\",\"mcp\":{\"zvec_grep\":{\"type\":\"remote\",\"url\":\"http://127.0.0.1:7999/mcp\",\"enabled\":true},\"other\":{\"url\":\"https://example.test/mcp\"}}}\n";
+    fs::write(&json_path, legacy).expect("write");
+    fs::write(
+        &jsonc_path,
+        "{\n  // Active config\n  \"model\": \"jsonc/model\"\n}\n",
+    )
+    .expect("write");
+    let stdout = run_ok(&mut opencode_command("install", root));
+    assert!(
+        stdout.contains("both opencode.jsonc and opencode.json exist; selected opencode.jsonc")
+    );
+    assert_eq!(fs::read_to_string(&json_path).expect("read"), legacy);
+    run_ok(&mut opencode_command("uninstall", root));
+    assert!(json(&json_path)["mcp"].get("zvec_grep").is_none());
+    assert_eq!(
+        json(&json_path)["mcp"]["other"]["url"],
+        "https://example.test/mcp"
+    );
+    let removed = fs::read_to_string(&jsonc_path).expect("read");
+    assert!(removed.contains("// Active config"));
+    assert_eq!(jsonc(&removed)["mcp"], serde_json::json!({}));
+}
+
+#[test]
+fn opencode_explicit_override_is_trimmed_and_scopes_uninstall() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    run_ok(&mut opencode_command("install", root));
+    let global = root.join("config/opencode/opencode.json");
+    let original = fs::read_to_string(&global).expect("read");
+    let custom = root.join("custom.jsonc");
+    fs::write(&custom, "{\n // Keep custom\n}\n").expect("write");
+    for action in ["install", "uninstall"] {
+        run_ok(
+            opencode_command(action, root)
+                .env("OPENCODE_CONFIG", "  custom.jsonc  ")
+                .current_dir(root),
+        );
+        assert_eq!(fs::read_to_string(&global).expect("read"), original);
+    }
+    assert!(
+        !fs::read_to_string(&custom)
+            .expect("read")
+            .contains("\"zvec_grep\"")
+    );
+    // Blank overrides fall back to the home configuration directory.
+    run_ok(
+        opencode_command("install", root)
+            .env("OPENCODE_CONFIG", " ")
+            .env("XDG_CONFIG_HOME", " "),
+    );
+    assert!(root.join(".config/opencode/opencode.json").exists());
+}
+
+#[test]
+fn opencode_jsonc_conflicts_and_invalid_containers_do_not_modify_files() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let path = root.join("custom.jsonc");
+    let unmanaged = "{\n // Keep unmanaged\n \"mcp\": {\"zvec_grep\": {\"url\": \"https://example.test/unmanaged\"},},\n}\n";
+    fs::write(&path, unmanaged).expect("write");
+    let output = opencode_command("install", root)
+        .env("OPENCODE_CONFIG", &path)
+        .output()
+        .expect("run");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--force"));
+    assert_eq!(fs::read_to_string(&path).expect("read"), unmanaged);
+    run_ok(opencode_command("uninstall", root).env("OPENCODE_CONFIG", &path));
+    assert_eq!(fs::read_to_string(&path).expect("read"), unmanaged);
+    run_ok(
+        opencode_command("install", root)
+            .env("OPENCODE_CONFIG", &path)
+            .arg("--force"),
+    );
+    assert!(
+        fs::read_to_string(&path)
+            .expect("read")
+            .contains("// Keep unmanaged")
+    );
+    for source in ["{\"mcp\":null}", "{\"mcp\":[]}", "{,}", "{\"mcp\": {,,}}"] {
+        fs::write(&path, source).expect("write");
+        for action in ["install", "uninstall"] {
+            let output = opencode_command(action, root)
+                .env("OPENCODE_CONFIG", &path)
+                .output()
+                .expect("run");
+            assert!(!output.status.success(), "{action}: {source}");
+            assert_eq!(fs::read_to_string(&path).expect("read"), source);
+        }
+    }
+}

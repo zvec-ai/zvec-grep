@@ -131,9 +131,6 @@ impl<'a> Parser<'a> {
                 comma_after,
             });
             self.skip_trivia()?;
-            if comma_after.is_some() && self.byte() == Some(b'}') {
-                return Err(JsoncEditError::Invalid);
-            }
             if comma_after.is_none() && self.byte() != Some(b'}') {
                 return Err(JsoncEditError::Invalid);
             }
@@ -164,9 +161,6 @@ impl<'a> Parser<'a> {
             };
             elements.push(Element { value, comma_after });
             self.skip_trivia()?;
-            if comma_after.is_some() && self.byte() == Some(b']') {
-                return Err(JsoncEditError::Invalid);
-            }
             if comma_after.is_none() && self.byte() != Some(b']') {
                 return Err(JsoncEditError::Invalid);
             }
@@ -422,9 +416,17 @@ fn insert_property(
     } else {
         format!("\n{child_indent}")
     };
-    let insertion = format!("{begins}{property}\n{parent_indent}");
+    let trailing_comma = if properties
+        .last()
+        .is_some_and(|last| last.comma_after.is_some())
+    {
+        ","
+    } else {
+        ""
+    };
+    let insertion = format!("{begins}{property}{trailing_comma}\n{parent_indent}");
     let mut next = source.to_owned();
-    if let Some(last) = properties.last() {
+    if let Some(last) = properties.last().filter(|last| last.comma_after.is_none()) {
         next.insert(last.value.end, ',');
         next.insert_str(close + usize::from(last.value.end <= close), &insertion);
     } else {
@@ -486,6 +488,39 @@ fn format_value(value: &Value, base_indent: &str, unit: &str) -> Result<String, 
     Ok(formatted)
 }
 
+// Normalize only for validation; edits continue to use the original source ranges.
+pub(crate) fn without_trailing_commas(source: &str) -> Result<String, JsoncEditError> {
+    fn collect(node: &Node, commas: &mut Vec<usize>) {
+        match &node.kind {
+            Kind::Object(properties) => {
+                for property in properties {
+                    collect(&property.value, commas);
+                }
+                if let Some(comma) = properties.last().and_then(|property| property.comma_after) {
+                    commas.push(comma);
+                }
+            }
+            Kind::Array(elements) => {
+                for element in elements {
+                    collect(&element.value, commas);
+                }
+                if let Some(comma) = elements.last().and_then(|element| element.comma_after) {
+                    commas.push(comma);
+                }
+            }
+            Kind::Scalar => {}
+        }
+    }
+    let root = Parser::parse(source)?;
+    let mut commas = Vec::new();
+    collect(&root, &mut commas);
+    let mut result = source.to_owned();
+    for comma in commas {
+        result.replace_range(comma..=comma, " ");
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,8 +544,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_trailing_commas() {
-        assert!(Parser::parse("{\"a\":1,}").is_err());
-        assert!(Parser::parse("[1,]").is_err());
+    fn edits_trailing_commas_without_duplicating_separators() {
+        let source = "{\"mcp\": {\"other\": [1,],},}";
+        let installed =
+            set_path(source, &["mcp", "zvec_grep"], &json!({"enabled": true})).expect("edit");
+        let normalized = without_trailing_commas(&installed).expect("normalize");
+        let parsed: Value = serde_json::from_str(&normalized).expect("valid JSON");
+        assert_eq!(parsed["mcp"]["other"], json!([1]));
+        assert_eq!(parsed["mcp"]["zvec_grep"]["enabled"], true);
+        let removed = remove_path(&installed, &["mcp", "zvec_grep"]).expect("remove");
+        let normalized = without_trailing_commas(&removed).expect("normalize");
+        assert_eq!(
+            serde_json::from_str::<Value>(&normalized).expect("valid JSON"),
+            json!({"mcp": {"other": [1]}})
+        );
     }
 }
