@@ -259,7 +259,7 @@ pub(in crate::pipelines) fn refresh_options(
         endpoint: options.endpoint.clone(),
         embedding_concurrency: options.embedding_concurrency,
         lock_timeout_ms: options.lock_timeout_ms,
-        device: options.device,
+        runtime_device: options.device,
         model_cache: options.model_cache.clone(),
         ..IndexOptions::default()
     }

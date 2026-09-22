@@ -657,6 +657,7 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
             .is_some_and(|endpoint| current.endpoint.as_ref() != Some(endpoint));
     if destination_changed {
         current.allow_remote = incoming.allow_remote;
+        current.authorized_remote.clear();
         current.api_key = None;
         current.endpoint = None;
     }
@@ -667,6 +668,7 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     merge_update(&mut current.api_key, incoming.api_key.take());
     merge_update(&mut current.endpoint, incoming.endpoint.take());
     merge_update(&mut current.device, incoming.device.take());
+    merge_update(&mut current.runtime_device, incoming.runtime_device.take());
     merge_update(&mut current.model_cache, incoming.model_cache.take());
     merge_update(
         &mut current.lock_timeout_ms,
@@ -680,6 +682,11 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     merge_update(&mut current.on_progress, incoming.on_progress.take());
     // Consent is scoped to this coalesced job. Runtime watch templates clear it.
     current.allow_remote |= incoming.allow_remote;
+    for target in incoming.authorized_remote.drain(..) {
+        if !current.authorized_remote.contains(&target) {
+            current.authorized_remote.push(target);
+        }
+    }
 }
 
 fn merge_update<T>(current: &mut Option<T>, incoming: Option<T>) {
@@ -1610,6 +1617,54 @@ mod tests {
         let reset = pending.expect("pending reset");
         assert!(reset.reset_paths);
         assert_eq!(reset.scan.nested_git, None);
+    }
+
+    #[test]
+    fn merged_refresh_preserves_target_scoped_once_consent() {
+        let target = zg_engine::authorization::IndexAuthorization {
+            root: std::env::temp_dir(),
+            workspace_roots: vec![std::env::temp_dir()],
+            model: "qwen/text-embedding-v4".into(),
+            endpoint: "https://a.test/embeddings".into(),
+            endpoint_host: "a.test".into(),
+        };
+        let mut pending = Some(IndexOptions::default());
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                authorized_remote: vec![target.clone()],
+                ..IndexOptions::default()
+            },
+        );
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                authorized_remote: vec![target.clone()],
+                runtime_device: Some(zg_engine::api::index::options::Device::Cpu),
+                ..IndexOptions::default()
+            },
+        );
+        let merged = pending.as_ref().expect("merged");
+        assert_eq!(merged.authorized_remote, [target]);
+        assert!(!merged.allow_remote);
+        assert!(merged.device.is_none());
+        assert_eq!(
+            merged.runtime_device,
+            Some(zg_engine::api::index::options::Device::Cpu)
+        );
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                endpoint: Some("https://b.test/embeddings".into()),
+                ..IndexOptions::default()
+            },
+        );
+        assert!(
+            pending
+                .expect("new destination")
+                .authorized_remote
+                .is_empty()
+        );
     }
 
     #[test]

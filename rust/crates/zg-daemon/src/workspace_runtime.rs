@@ -929,7 +929,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             endpoint: request.endpoint.clone(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
-            device: request.device,
+            runtime_device: request.device,
             model_cache: request.model_cache.clone(),
             ..IndexOptions::default()
         };
@@ -1037,10 +1037,6 @@ async fn wait_for_search_refresh<T>(
     request: &ContextOptions,
     work: impl std::future::Future<Output = Result<T, EngineError>>,
 ) -> Result<T, EngineError> {
-    let timeout = std::time::Duration::from_millis(request.lock_timeout_ms.unwrap_or(30_000));
-    let deadline = tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| EngineError::invalid_argument("workspace lock timeout is too large"))?;
     let cancelled = async {
         match &request.signal {
             Some(signal) => signal.cancelled().await,
@@ -1050,10 +1046,21 @@ async fn wait_for_search_refresh<T>(
     tokio::select! {
         biased;
         () = cancelled => Err(EngineError::cancelled("search refresh wait was cancelled")),
-        result = tokio::time::timeout_at(deadline, work) => result.unwrap_or_else(|_| {
-            Err(EngineError::resource_busy("timed out waiting for search refresh"))
-        }),
+        result = work => result,
     }
+}
+
+async fn wait_for_search_admission(
+    request: &ContextOptions,
+    work: impl std::future::Future<Output = ()>,
+) -> Result<(), EngineError> {
+    let timeout = std::time::Duration::from_millis(request.lock_timeout_ms.unwrap_or(30_000));
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| EngineError::invalid_argument("workspace lock timeout is too large"))?;
+    tokio::time::timeout_at(deadline, work)
+        .await
+        .map_err(|_| EngineError::resource_busy("timed out waiting for search refresh admission"))
 }
 
 fn ensure_refresh_succeeded(job: &IndexJobSnapshot) -> Result<(), EngineError> {
@@ -1190,6 +1197,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
+    template.runtime_device = None;
     template.rebuild = false;
     template.reset_paths = false;
     template.changes.clear();
@@ -1549,6 +1557,20 @@ mod tests {
         assert_eq!(error.code(), EngineError::INTERNAL);
         assert_eq!(error.message(), "fixture index failed");
         manager.shutdown_all().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn search_refresh_execution_can_exceed_lock_timeout() {
+        let request = zg_engine::api::context::ContextOptions {
+            lock_timeout_ms: Some(1),
+            ..Default::default()
+        };
+        super::wait_for_search_refresh(&request, async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        })
+        .await
+        .expect("admitted work is not bounded by the lock timeout");
     }
 
     #[tokio::test]

@@ -51,6 +51,9 @@ pub mod options {
         pub endpoint: Option<String>,
         #[serde(default)]
         pub device: Option<crate::api::index::options::Device>,
+        /// Device override for this operation only; never written to workspace settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub runtime_device: Option<crate::api::index::options::Device>,
         #[serde(default)]
         pub model_cache: Option<PathBuf>,
         /// Receives in-process indexing and model download progress.
