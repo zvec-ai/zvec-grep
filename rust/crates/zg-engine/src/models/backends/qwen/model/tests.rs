@@ -341,6 +341,16 @@ fn provider_failures_expose_structured_retry_and_failure_scope() {
         assert!(error.should_fail_fast(), "status={status}");
     }
 
+    for (code, message) in [
+        ("InvalidApiKey", "request rejected"),
+        ("bad_request", "unauthorized API key"),
+    ] {
+        let authentication = response(400);
+        let error = provider_error(entry, &authentication, &body(code, message));
+        assert!(!error.is_retryable(), "code={code}");
+        assert!(error.should_fail_fast(), "code={code}");
+    }
+
     let permanent = response(400);
     let error = provider_error(
         entry,

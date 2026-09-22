@@ -493,6 +493,7 @@ fn classify_provider_failure(
         return error.transient(retry_after);
     }
     if matches!(status, 401 | 403 | 404)
+        || is_authentication_failure(provider_code, provider_message)
         || (status == 400 && is_permanent_model_bad_request(provider_code, provider_message))
     {
         return error.shared();
@@ -510,6 +511,31 @@ fn is_rate_limit_text(value: &str) -> bool {
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
+}
+
+fn is_authentication_failure(provider_code: Option<&str>, provider_message: Option<&str>) -> bool {
+    [provider_code, provider_message]
+        .into_iter()
+        .flatten()
+        .any(|value| {
+            let compact = value
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .map(|character| character.to_ascii_lowercase())
+                .collect::<String>();
+            [
+                "invalidkey",
+                "invalidapikey",
+                "missingkey",
+                "missingapikey",
+                "unauthorizedkey",
+                "unauthorizedapikey",
+                "forbiddenkey",
+                "forbiddenapikey",
+            ]
+            .iter()
+            .any(|marker| compact.contains(marker))
+        })
 }
 
 fn is_permanent_model_bad_request(

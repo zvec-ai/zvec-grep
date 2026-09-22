@@ -756,8 +756,11 @@ async fn index_candidates(
 
         if running.len() >= scheduler.task_concurrency()
             && let Some(outcome) = running.next().await
+            && let Err(error) =
+                apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)
         {
-            apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)?;
+            drain_embedding_futures(&mut running).await;
+            return Err(error);
         }
     }
 
@@ -766,7 +769,12 @@ async fn index_candidates(
         push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
     }
     while let Some(outcome) = running.next().await {
-        apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)?;
+        if let Err(error) =
+            apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)
+        {
+            drain_embedding_futures(&mut running).await;
+            return Err(error);
+        }
     }
     throw_if_cancelled(context.signal.as_ref())?;
     Ok(stats)
@@ -816,6 +824,10 @@ fn push_embedding<'context>(
         context.signal.clone(),
         context.on_progress.clone(),
     )));
+}
+
+async fn drain_embedding_futures(running: &mut FuturesUnordered<EmbeddingFuture<'_>>) {
+    while running.next().await.is_some() {}
 }
 
 fn apply_embedding_outcome(
@@ -1299,6 +1311,7 @@ async fn embed_file(
     progress: Option<IndexProgressReporter>,
 ) -> Result<EmbeddingResult, ModelError> {
     let maximum = model.info().max_batch_size;
+    let batch_signal = signal.map_or_else(CancellationToken::new, CancellationToken::child_token);
     let mut running = FuturesUnordered::new();
     for (batch_index, fragments) in fragments.chunks(maximum).enumerate() {
         running.push(embed_fragment_batch(
@@ -1306,14 +1319,30 @@ async fn embed_file(
             fragments,
             model,
             scheduler,
-            signal,
+            Some(&batch_signal),
             progress.clone(),
         ));
     }
 
     let mut batches = Vec::new();
+    let mut first_error = None;
     while let Some(result) = running.next().await {
-        batches.push(result?);
+        match result {
+            Ok(batch) => batches.push(batch),
+            Err(error) => {
+                if error.should_fail_fast() {
+                    batch_signal.cancel();
+                }
+                if first_error.as_ref().is_none_or(|first: &ModelError| {
+                    !first.should_fail_fast() && error.should_fail_fast()
+                }) {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     batches.sort_by_key(|batch| batch.start);
     let mut vectors = Vec::with_capacity(fragments.len());
@@ -2196,8 +2225,9 @@ impl TimingCollector {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    use futures_util::FutureExt;
     use tempfile::tempdir;
     use tokio::time::sleep;
     use zg_host_native::NativeScanner;
@@ -2528,6 +2558,17 @@ mod tests {
         rejected_text: Option<&'static str>,
     }
 
+    struct DrainingFailureModel {
+        info: EmbeddingModelInfo,
+        calls: AtomicUsize,
+        active: AtomicUsize,
+        calls_changed: Notify,
+        failure_emitted: AtomicBool,
+        failure_changed: Notify,
+        released: AtomicBool,
+        release_changed: Notify,
+    }
+
     struct UnknownModifiedScanner(NativeScanner);
 
     #[async_trait]
@@ -2583,6 +2624,57 @@ mod tests {
                 transient_failures: AtomicUsize::new(0),
                 rejected_text: None,
             }
+        }
+    }
+
+    impl DrainingFailureModel {
+        fn new() -> Self {
+            Self {
+                info: EmbeddingModelInfo {
+                    model: crate::domain::model::ModelInfo {
+                        provider: "local".to_owned(),
+                        name: "test".to_owned(),
+                        endpoint: None,
+                    },
+                    dimension: 2,
+                    metric: Metric::Cosine,
+                    max_batch_size: 1,
+                    max_input_tokens: Some(64),
+                    max_image_bytes: None,
+                },
+                calls: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+                calls_changed: Notify::new(),
+                failure_emitted: AtomicBool::new(false),
+                failure_changed: Notify::new(),
+                released: AtomicBool::new(false),
+                release_changed: Notify::new(),
+            }
+        }
+
+        async fn wait_for_both_calls(&self) {
+            loop {
+                let notified = self.calls_changed.notified();
+                if self.calls.load(Ordering::Acquire) >= 2 {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        async fn wait_for_release(&self) {
+            loop {
+                let notified = self.release_changed.notified();
+                if self.released.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            self.release_changed.notify_waiters();
         }
     }
 
@@ -2668,6 +2760,71 @@ mod tests {
                 vectors: contents.iter().map(|_| vec![1.0, 0.0]).collect(),
                 truncated: Vec::new(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl IndexEmbeddingRuntime for DrainingFailureModel {
+        fn info(&self) -> &EmbeddingModelInfo {
+            &self.info
+        }
+
+        fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
+            EmbeddingConcurrencyDefaults {
+                initial: 2,
+                maximum: 2,
+            }
+        }
+
+        async fn prepare(
+            &self,
+            _options: EmbeddingPrepareOptions,
+            _progress: Option<IndexProgressReporter>,
+        ) -> Result<(), ModelError> {
+            Ok(())
+        }
+
+        async fn embed(
+            &self,
+            contents: &[Vec<Content>],
+            _options: EmbeddingOptions,
+            _progress: Option<IndexProgressReporter>,
+        ) -> Result<EmbeddingResult, ModelError> {
+            let call = self.calls.fetch_add(1, Ordering::AcqRel);
+            self.active.fetch_add(1, Ordering::AcqRel);
+            self.calls_changed.notify_waiters();
+            self.wait_for_both_calls().await;
+
+            if call == 0 {
+                self.active.fetch_sub(1, Ordering::AcqRel);
+                self.failure_emitted.store(true, Ordering::Release);
+                self.failure_changed.notify_waiters();
+                return Err(ModelError::storage_failure(
+                    "injected terminal embedding failure",
+                ));
+            }
+
+            // Intentionally ignore cancellation to model native work that has already
+            // entered a blocking inference runtime and must be drained by its caller.
+            self.wait_for_release().await;
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            Ok(EmbeddingResult {
+                vectors: contents.iter().map(|_| vec![1.0, 0.0]).collect(),
+                truncated: Vec::new(),
+            })
+        }
+    }
+
+    fn prepared_fragment(text: &str, ordinal: u32) -> PreparedFragment {
+        let content = Content::Text(text.to_owned());
+        let entity_id =
+            EntityId::new(FileId::new(91), &content, Range::Full).expect("fixture entity ID");
+        PreparedFragment {
+            model: "local/test".to_owned(),
+            fragment_id: FragmentId::new(&entity_id, ordinal),
+            entity_id,
+            embedding_content: vec![content],
+            fts_text: text.to_owned(),
         }
     }
 
@@ -2863,6 +3020,97 @@ mod tests {
         assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
         assert_eq!(storage.failed_markers.load(Ordering::Acquire), 0);
         assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn fail_fast_drains_other_index_batches_before_returning() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("first.txt"), "first text").expect("first source");
+        std::fs::write(directory.path().join("second.txt"), "second text").expect("second source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let model = DrainingFailureModel::new();
+        let context = IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: Some(2),
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        let operation = index_workspace(&context);
+        tokio::pin!(operation);
+
+        loop {
+            let failure = model.failure_changed.notified();
+            if model.failure_emitted.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::select! {
+                result = operation.as_mut() => {
+                    panic!(
+                        "indexing returned before the other embedding batch settled: result={result:?}, active={}",
+                        model.active.load(Ordering::Acquire)
+                    );
+                }
+                () = failure => {}
+            }
+        }
+
+        assert_eq!(model.calls.load(Ordering::Acquire), 2);
+        assert_eq!(model.active.load(Ordering::Acquire), 1);
+        assert!(operation.as_mut().now_or_never().is_none());
+
+        model.release();
+        let error = operation
+            .await
+            .expect_err("the original terminal failure must be returned");
+        assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+        assert_eq!(model.active.load(Ordering::Acquire), 0);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn fail_fast_drains_other_fragment_batches_before_returning() {
+        let model = DrainingFailureModel::new();
+        let scheduler = EmbeddingScheduler::new(
+            resolve_embedding_policy(Some(2), model.concurrency_defaults())
+                .expect("concurrency policy"),
+        );
+        let fragments = vec![
+            prepared_fragment("first fragment", 0),
+            prepared_fragment("second fragment", 1),
+        ];
+        let operation = embed_file(&fragments, &model, &scheduler, None, None);
+        tokio::pin!(operation);
+
+        loop {
+            let failure = model.failure_changed.notified();
+            if model.failure_emitted.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::select! {
+                result = operation.as_mut() => {
+                    let _ = result;
+                    panic!("file embedding returned before the other fragment batch settled");
+                }
+                () = failure => {}
+            }
+        }
+
+        assert_eq!(model.calls.load(Ordering::Acquire), 2);
+        assert_eq!(model.active.load(Ordering::Acquire), 1);
+        assert!(operation.as_mut().now_or_never().is_none());
+
+        model.release();
+        let error = operation
+            .await
+            .expect_err("the original terminal failure must be returned");
+        assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+        assert_eq!(model.active.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
