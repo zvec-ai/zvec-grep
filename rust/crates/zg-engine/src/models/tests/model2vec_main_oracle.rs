@@ -8,7 +8,7 @@ use crate::{
         Content,
         model::{EmbeddingPurpose, ModelConfig},
     },
-    models::{factory::create_embedding_model, spi::EmbeddingOptions},
+    models::{backends::create_embedding_model, spi::EmbeddingOptions},
 };
 
 #[derive(Deserialize)]
@@ -41,7 +41,7 @@ async fn model2vec_matches_the_main_typescript_vector_bit_for_bit() {
             cache_dir: Some(cache_dir),
             ..ModelConfig::default()
         }),
-        crate::models::compute::ModelComputeRuntime::shared(),
+        crate::models::runtime::ModelComputeRuntime::shared(),
     )
     .expect("pinned Model2Vec model must be available");
     let inputs = oracle

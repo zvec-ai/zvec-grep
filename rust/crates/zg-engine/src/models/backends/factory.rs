@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use super::{
-    catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
-    compute::ModelComputeRuntime,
-    llama_cpp::LlamaCppEmbeddingModel,
-    model2vec::Model2VecEmbeddingModel,
-    qwen::QwenEmbeddingModel,
-    spi::{EmbeddingModel, ModelError},
-    transformers::TransformersEmbeddingModel,
+    llama_cpp::LlamaCppEmbeddingModel, model2vec::Model2VecEmbeddingModel,
+    qwen::QwenEmbeddingModel, transformers::TransformersEmbeddingModel,
 };
 use crate::domain::model::ModelConfig;
+use crate::models::{
+    catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
+    runtime::ModelComputeRuntime,
+    spi::{EmbeddingModel, ModelError},
+};
 
 /// Creates a catalog-backed embedding model.
 ///
@@ -72,7 +72,7 @@ mod tests {
             let model = create_embedding_model(
                 entry.reference(),
                 options,
-                crate::models::compute::ModelComputeRuntime::shared(),
+                crate::models::runtime::ModelComputeRuntime::shared(),
             )
             .expect("catalog backend should construct without loading model assets");
             model.info().validate().expect("valid catalog model info");
@@ -84,7 +84,7 @@ mod tests {
         let unknown = create_embedding_model(
             "missing",
             None,
-            crate::models::compute::ModelComputeRuntime::shared(),
+            crate::models::runtime::ModelComputeRuntime::shared(),
         )
         .err()
         .expect("unknown model should fail catalog lookup");

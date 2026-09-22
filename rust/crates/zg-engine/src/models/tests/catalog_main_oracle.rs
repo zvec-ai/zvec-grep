@@ -2,9 +2,12 @@ use serde_json::{Value, json};
 
 use crate::{
     domain::model::Metric,
-    models::catalog::{
-        ArtifactDownloadConfig, EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig,
-        TransformersConfig, list_embedding_models,
+    models::{
+        artifacts::ArtifactDownloadConfig,
+        catalog::{
+            EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig, TransformersConfig,
+            list_embedding_models,
+        },
     },
 };
 

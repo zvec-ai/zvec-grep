@@ -8,7 +8,7 @@ use std::{
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use tokio::sync::oneshot;
 
-use super::spi::ModelError;
+use crate::models::spi::ModelError;
 
 #[derive(Clone)]
 pub(crate) struct ModelComputeRuntime {
