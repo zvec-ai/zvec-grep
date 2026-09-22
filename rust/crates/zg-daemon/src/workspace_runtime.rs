@@ -902,6 +902,10 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         engine: &ZvecGrep,
         mut request: ContextOptions,
     ) -> Result<ContextResult, EngineError> {
+        // In-process callers without a request token must still be interruptible at shutdown.
+        if request.signal.is_none() {
+            request.signal = Some(self.inner.shutdown.child_token());
+        }
         if request.rg {
             return engine.context(request).await;
         }
@@ -959,16 +963,20 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .cloned()
             .unwrap_or(requested_root);
         let _refresh_activity = wait_for_search_refresh(&request, async {
-            self.inner
-                .scheduler
-                .wait_for_root_idle_with_progress(&root, request.on_progress.clone())
-                .await;
-            let info = engine
-                .info(InfoOptions {
-                    root: request.root.clone(),
-                    include_status: false,
-                })
-                .await?;
+            let info = wait_for_search_admission(&request, async {
+                self.inner
+                    .scheduler
+                    .wait_for_root_idle_with_progress(&root, request.on_progress.clone())
+                    .await;
+                // Metadata admission also waits on writers outside this daemon.
+                engine
+                    .info(InfoOptions {
+                        root: request.root.clone(),
+                        include_status: false,
+                    })
+                    .await
+            })
+            .await?;
             info.compatibility.ensure_compatible()?;
             let activity = if info.indexed {
                 Some(self.runtime(info.root.clone(), &options)?)
@@ -1050,17 +1058,17 @@ async fn wait_for_search_refresh<T>(
     }
 }
 
-async fn wait_for_search_admission(
+async fn wait_for_search_admission<T>(
     request: &ContextOptions,
-    work: impl std::future::Future<Output = ()>,
-) -> Result<(), EngineError> {
+    work: impl std::future::Future<Output = Result<T, EngineError>>,
+) -> Result<T, EngineError> {
     let timeout = std::time::Duration::from_millis(request.lock_timeout_ms.unwrap_or(30_000));
     let deadline = tokio::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| EngineError::invalid_argument("workspace lock timeout is too large"))?;
     tokio::time::timeout_at(deadline, work)
         .await
-        .map_err(|_| EngineError::resource_busy("timed out waiting for search refresh admission"))
+        .map_err(|_| EngineError::resource_busy("timed out waiting for search refresh admission"))?
 }
 
 fn ensure_refresh_succeeded(job: &IndexJobSnapshot) -> Result<(), EngineError> {
@@ -1571,6 +1579,63 @@ mod tests {
         })
         .await
         .expect("admitted work is not bounded by the lock timeout");
+    }
+
+    #[tokio::test]
+    async fn search_refresh_can_cancel_non_resolving_work() {
+        let signal = tokio_util::sync::CancellationToken::new();
+        let request = zg_engine::api::context::ContextOptions {
+            signal: Some(signal.clone()),
+            ..Default::default()
+        };
+        let waiter = tokio::spawn(async move {
+            super::wait_for_search_refresh::<()>(&request, std::future::pending()).await
+        });
+        tokio::task::yield_now().await;
+        signal.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("cancel stuck work")
+            .expect("waiter")
+            .expect_err("cancelled");
+        assert_eq!(error.code(), EngineError::CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn waiting_search_bounds_external_workspace_lock_admission() {
+        use zg_engine::{
+            ZvecGrep,
+            api::context::{ContextOptions, options::RefreshPolicy},
+        };
+        use zg_transport_mcp::IndexOperationProvider;
+        let workspace = tempdir().expect("workspace");
+        let home = workspace.path().join(".zvec-grep");
+        std::fs::create_dir_all(home.join("locks")).expect("lock directory");
+        std::fs::write(home.join("manifest.json"), "{}").expect("manifest marker");
+        let writer = std::fs::File::create(home.join("locks/home")).expect("writer lock");
+        writer.lock().expect("exclusive workspace lock");
+        let engine = Arc::new(ZvecGrep::new());
+        let manager = WorkspaceRuntimeManager::native(engine.clone());
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.search(
+                &engine,
+                ContextOptions {
+                    root: Some(workspace.path().to_path_buf()),
+                    refresh: Some(RefreshPolicy::Wait),
+                    lock_timeout_ms: Some(25),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("request timeout must cover the external file lock");
+        assert_eq!(
+            result.expect_err("writer is still active").code(),
+            EngineError::RESOURCE_BUSY
+        );
+        drop(writer);
+        manager.shutdown_all().await.expect("shutdown");
     }
 
     #[tokio::test]

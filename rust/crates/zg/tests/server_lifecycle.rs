@@ -1035,7 +1035,10 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    let before_edit = embedding.requests.load(Ordering::SeqCst);
     std::fs::write(&source, "harvest documentation")?;
+    // Wait covers delivered watcher events; OS delivery can lag behind the write.
+    embedding.wait_for_request_after(before_edit);
     let response = search(workspace.path(), "harvest", "wait_for_fresh", false)?;
     assert!(response.contains("source.txt"), "{response}");
     assert!(response.contains("freshness: fresh"), "{response}");
@@ -1056,7 +1059,9 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(50));
     }
     embedding.fail.store(true, Ordering::Release);
+    let before_failure = embedding.requests.load(Ordering::SeqCst);
     std::fs::write(&source, "winter documentation")?;
+    embedding.wait_for_request_after(before_failure);
     let response = search(workspace.path(), "winter", "wait_for_fresh", false)?;
     assert!(
         response.contains("\"isError\":true"),
@@ -1412,6 +1417,17 @@ struct EmbeddingServer {
 }
 
 impl EmbeddingServer {
+    fn wait_for_request_after(&self, previous: usize) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while self.requests.load(Ordering::SeqCst) <= previous {
+            assert!(
+                Instant::now() < deadline,
+                "watcher did not submit the edited file"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;

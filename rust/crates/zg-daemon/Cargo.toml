@@ -33,7 +33,7 @@ zg-transport-mcp = { path = "../zg-transport-mcp" }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-spawn.workspace = true

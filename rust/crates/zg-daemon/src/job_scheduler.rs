@@ -501,10 +501,15 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
             finish_job(&inner, &job);
             return;
         }
-        lock(&job.snapshot).state = JobState::Running;
-        let mut options = lock(&job.options)
-            .take()
-            .expect("a queued daemon job must retain its index options");
+        let mut options = {
+            // submit inspects state and merges options under this same lock.
+            // Claiming must be atomic with that decision or a queued grant can be lost.
+            let _state = lock(&inner.state);
+            lock(&job.snapshot).state = JobState::Running;
+            lock(&job.options)
+                .take()
+                .expect("a queued daemon job must retain its index options")
+        };
         options.signal = Some(job.cancellation.clone());
         let weak_job = Arc::downgrade(&job);
         options.on_progress = Some(
@@ -966,6 +971,36 @@ mod tests {
                 _ => Ok(IndexResult::default()),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claiming_a_job_is_serialized_with_submission() {
+        let scheduler =
+            IndexJobScheduler::new(Arc::new(ImmediateExecutor), SchedulerConfig::default());
+        let root = std::env::temp_dir().join("claim-serialization");
+        let permits = scheduler
+            .inner
+            .permits
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .expect("permits");
+        let submitted = scheduler
+            .submit(root, IndexOptions::default(), JobReason::Watch)
+            .expect("submit");
+        {
+            let state = super::lock(&scheduler.inner.state);
+            let job = state.jobs.get(&submitted.job.id).expect("job");
+            drop(permits);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert_eq!(
+                super::lock(&job.snapshot).state,
+                JobState::Queued,
+                "a worker must not claim options while submit owns scheduler state"
+            );
+        }
+        scheduler.wait(submitted.job.id).await.expect("completion");
+        scheduler.shutdown().await;
     }
 
     #[tokio::test]
