@@ -15,7 +15,7 @@ use crate::{
     models::{
         artifacts::ArtifactDownloadProgress,
         catalog::Model2VecConfig,
-        spi::{EmbeddingModel, EmbeddingOptions},
+        spi::{EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions},
     },
 };
 
@@ -42,6 +42,18 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
 
     let progress = Arc::new(StdMutex::new(Vec::new()));
     let captured = Arc::clone(&progress);
+    model
+        .prepare(EmbeddingPrepareOptions {
+            on_progress: Some(Arc::new(move |event| {
+                captured
+                    .lock()
+                    .expect("progress lock should not be poisoned")
+                    .push(event);
+            })),
+            ..EmbeddingPrepareOptions::default()
+        })
+        .await
+        .expect("fixture model should prepare");
     let result = model
         .embed(
             &[
@@ -51,12 +63,6 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
             ],
             EmbeddingOptions {
                 purpose: EmbeddingPurpose::Query,
-                on_progress: Some(Arc::new(move |event| {
-                    captured
-                        .lock()
-                        .expect("progress lock should not be poisoned")
-                        .push(event);
-                })),
                 ..EmbeddingOptions::default()
             },
         )

@@ -233,6 +233,8 @@ async fn invalid_json_and_provider_errors_match_main() {
         .await
         .expect_err("invalid JSON");
     assert_eq!(error.code(), crate::EngineError::INTERNAL);
+    assert!(error.is_retryable());
+    assert!(error.should_fail_fast());
 
     let invalid_provider_body = QwenHttpResponse {
         status: 429,
@@ -245,6 +247,8 @@ async fn invalid_json_and_provider_errors_match_main() {
     )
     .expect_err("non-JSON provider error");
     assert_eq!(error.code(), crate::EngineError::RESOURCE_BUSY);
+    assert!(error.is_rate_limited());
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(1)));
 
     let provider_error_response = Arc::new(MockHttp {
         response: Mutex::new(Some(QwenHttpResponse {
@@ -275,6 +279,9 @@ async fn invalid_json_and_provider_errors_match_main() {
         .await
         .expect_err("provider error");
     assert_eq!(error.code(), crate::EngineError::RESOURCE_BUSY);
+    assert!(error.is_rate_limited());
+    assert!(error.should_fail_fast());
+    assert_eq!(error.retry_after(), Some(Duration::from_millis(1_500)));
     let context = error.context().expect("provider context");
     assert!(context.contains("status=429 retryAfterMs=1500"));
     assert!(context.contains("providerCode=rate_limit"));
@@ -298,6 +305,59 @@ async fn invalid_json_and_provider_errors_match_main() {
     );
     assert_eq!(provider_error_code(429), crate::EngineError::RESOURCE_BUSY);
     assert_eq!(provider_error_code(500), crate::EngineError::INTERNAL);
+}
+
+#[test]
+fn provider_failures_expose_structured_retry_and_failure_scope() {
+    let entry = config("text", "text-embedding-v4", 3);
+    let response = |status| QwenHttpResponse {
+        status,
+        retry_after: Some("0".to_owned()),
+        body: Vec::new(),
+    };
+    let body = |code: &str, message: &str| {
+        json!({
+            "error": {
+                "code": code,
+                "type": "fixture",
+                "message": message,
+            }
+        })
+    };
+
+    for status in [408, 500, 503] {
+        let response = response(status);
+        let error = provider_error(entry, &response, &body("temporary", "try again"));
+        assert!(error.is_retryable(), "status={status}");
+        assert!(!error.is_rate_limited(), "status={status}");
+        assert!(error.should_fail_fast(), "status={status}");
+        assert_eq!(error.retry_after(), Some(Duration::ZERO));
+    }
+
+    for status in [401, 403, 404] {
+        let response = response(status);
+        let error = provider_error(entry, &response, &body("denied", "configuration failure"));
+        assert!(!error.is_retryable(), "status={status}");
+        assert!(error.should_fail_fast(), "status={status}");
+    }
+
+    let permanent = response(400);
+    let error = provider_error(
+        entry,
+        &permanent,
+        &body("INVALID--MODEL", "model does not exist"),
+    );
+    assert!(!error.is_retryable());
+    assert!(error.should_fail_fast());
+
+    let request_specific = response(400);
+    let error = provider_error(
+        entry,
+        &request_specific,
+        &body("invalid_input", "input is too long"),
+    );
+    assert!(!error.is_retryable());
+    assert!(!error.should_fail_fast());
 }
 
 #[test]

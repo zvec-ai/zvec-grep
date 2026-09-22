@@ -37,7 +37,8 @@ use crate::models::{
     catalog::TransformersConfig,
     runtime::ModelComputeRuntime,
     spi::{
-        EmbeddingModel, EmbeddingOptions, ModelError, input_text, validate_inputs, validate_result,
+        EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
+        validate_inputs, validate_result,
     },
 };
 
@@ -254,6 +255,23 @@ impl TransformersEmbeddingModel {
 impl EmbeddingModel for TransformersEmbeddingModel {
     fn info(&self) -> &EmbeddingModelInfo {
         &self.info
+    }
+
+    async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
+        self.ensure_loaded(options.on_progress, options.signal.as_ref())
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                error
+                    .wrap(
+                        "Transformers model preparation failed",
+                        Some(format!(
+                            "model={} repo={}",
+                            self.entry.reference, self.entry.repo
+                        )),
+                    )
+                    .shared()
+            })
     }
 
     async fn embed(

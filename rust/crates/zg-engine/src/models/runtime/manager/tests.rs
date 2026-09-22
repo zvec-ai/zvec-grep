@@ -135,11 +135,7 @@ impl EmbeddingModel for ProgressFixtureModel {
         &self.info
     }
 
-    async fn embed(
-        &self,
-        inputs: &[Vec<Content>],
-        options: EmbeddingOptions,
-    ) -> Result<EmbeddingResult, ModelError> {
+    async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
         if let Some(on_progress) = options.on_progress {
             on_progress(crate::domain::model::ModelProgress::Preparing {
                 model: self.info.model.reference(),
@@ -157,6 +153,14 @@ impl EmbeddingModel for ProgressFixtureModel {
                 model: self.info.model.reference(),
             });
         }
+        Ok(())
+    }
+
+    async fn embed(
+        &self,
+        inputs: &[Vec<Content>],
+        _options: EmbeddingOptions,
+    ) -> Result<EmbeddingResult, ModelError> {
         Ok(EmbeddingResult {
             vectors: inputs.iter().map(|_| vec![1.0]).collect(),
             truncated: Vec::new(),
@@ -614,7 +618,7 @@ async fn reuses_one_runtime_and_allows_shared_concurrent_embeddings() {
 }
 
 #[tokio::test]
-async fn forwards_model_progress_to_both_callbacks_with_effective_concurrency() {
+async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurrency() {
     use crate::domain::model::ModelProgress;
 
     let fixture = Arc::new(ProgressFixtureModel::new());
@@ -632,19 +636,16 @@ async fn forwards_model_progress_to_both_callbacks_with_effective_concurrency() 
     let captured_model_events = Arc::clone(&model_events);
     let reported_events = Arc::new(StdMutex::new(Vec::new()));
     let captured_reported_events = Arc::clone(&reported_events);
-    let inputs = [vec![Content::Text("fixture".to_owned())]];
-
     lease
-        .embed(
-            &inputs,
-            EmbeddingOptions {
+        .prepare(
+            EmbeddingPrepareOptions {
                 on_progress: Some(Arc::new(move |progress| {
                     captured_model_events
                         .lock()
                         .expect("model event lock should not be poisoned")
                         .push(progress);
                 })),
-                ..EmbeddingOptions::default()
+                ..EmbeddingPrepareOptions::default()
             },
             Some(ModelProgressReporter::new(move |progress, concurrency| {
                 captured_reported_events
@@ -654,7 +655,7 @@ async fn forwards_model_progress_to_both_callbacks_with_effective_concurrency() 
             })),
         )
         .await
-        .expect("fixture embedding should complete");
+        .expect("fixture preparation should complete");
 
     let model_events = model_events
         .lock()

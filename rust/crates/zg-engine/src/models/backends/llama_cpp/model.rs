@@ -36,7 +36,8 @@ use crate::models::{
     catalog::LlamaCppConfig,
     runtime::ModelComputeRuntime,
     spi::{
-        EmbeddingModel, EmbeddingOptions, ModelError, input_text, validate_inputs, validate_result,
+        EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
+        validate_inputs, validate_result,
     },
 };
 
@@ -251,6 +252,13 @@ impl LlamaCppEmbeddingModel {
 impl EmbeddingModel for LlamaCppEmbeddingModel {
     fn info(&self) -> &EmbeddingModelInfo {
         &self.info
+    }
+
+    async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
+        self.ensure_loaded(options.on_progress, options.signal.as_ref())
+            .await
+            .map(|_| ())
+            .map_err(|error| embed_error(self.entry, error).shared())
     }
 
     async fn embed(

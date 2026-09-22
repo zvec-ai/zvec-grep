@@ -46,7 +46,8 @@ impl QwenEmbeddingModel {
                     "model={}\nhint=Pass --api-key, set ZVEC_GREP_API_KEY, or configure the qwen provider API key.",
                     entry.reference
                 )),
-            ));
+            )
+            .shared());
         }
         let endpoint = options.endpoint.map_or_else(
             || entry.default_endpoint.to_owned(),
@@ -57,7 +58,8 @@ impl QwenEmbeddingModel {
                 crate::EngineError::INVALID_ARGUMENT,
                 format!("{display_name} model requires an endpoint"),
                 Some(format!("model={}", entry.reference)),
-            ));
+            )
+            .shared());
         }
         Ok(Self {
             entry,
@@ -373,10 +375,19 @@ fn qwen_http_error(message: &str, endpoint: &str, error: reqwest::Error) -> Mode
         "endpoint={endpoint} timeoutMs={}",
         REMOTE_TIMEOUT.as_millis()
     ));
-    if error.is_timeout() {
-        ModelError::new(crate::EngineError::DEADLINE_EXCEEDED, message, context).with_cause(error)
+    let timed_out = error.is_timeout();
+    let transient = !error.is_builder()
+        && (timed_out || error.is_connect() || error.is_request() || error.is_body());
+    let code = if timed_out {
+        crate::EngineError::DEADLINE_EXCEEDED
     } else {
-        ModelError::new(crate::EngineError::INTERNAL, message, context).with_cause(error)
+        crate::EngineError::INTERNAL
+    };
+    let error = ModelError::new(code, message, context).with_cause(error);
+    if transient {
+        error.transient(None)
+    } else {
+        error.shared()
     }
 }
 
@@ -390,15 +401,21 @@ fn parse_response_body(
         } else {
             provider_error_code(response.status)
         };
-        ModelError::new(
-            code,
-            format!("{} response was not valid JSON", model_name(entry)),
-            Some(format!(
-                "model={} status={}",
-                entry.reference, response.status
-            )),
+        classify_provider_failure(
+            ModelError::new(
+                code,
+                format!("{} response was not valid JSON", model_name(entry)),
+                Some(format!(
+                    "model={} status={}",
+                    entry.reference, response.status
+                )),
+            )
+            .with_cause(error),
+            response.status,
+            response.retry_after.as_deref().and_then(retry_after_millis),
+            None,
+            None,
         )
-        .with_cause(error)
     })
 }
 
@@ -439,14 +456,119 @@ fn provider_error(entry: QwenConfig, response: &QwenHttpResponse, body: &Value) 
         .as_deref()
         .and_then(retry_after_millis)
         .map_or_else(String::new, |millis| format!(" retryAfterMs={millis}"));
-    ModelError::new(
-        provider_error_code(response.status),
-        format!("{} request returned an error", model_name(entry)),
-        Some(format!(
-            "model={} status={}{} providerCode={} providerType={} providerMessage={}",
-            entry.model, response.status, retry_after, code, error_type, message
-        )),
+    classify_provider_failure(
+        ModelError::new(
+            provider_error_code(response.status),
+            format!("{} request returned an error", model_name(entry)),
+            Some(format!(
+                "model={} status={}{} providerCode={} providerType={} providerMessage={}",
+                entry.model, response.status, retry_after, code, error_type, message
+            )),
+        ),
+        response.status,
+        response.retry_after.as_deref().and_then(retry_after_millis),
+        Some(code),
+        Some(message),
     )
+}
+
+fn classify_provider_failure(
+    error: ModelError,
+    status: u16,
+    retry_after_millis: Option<u128>,
+    provider_code: Option<&str>,
+    provider_message: Option<&str>,
+) -> ModelError {
+    let retry_after = retry_after_millis
+        .map(|millis| Duration::from_millis(u64::try_from(millis).unwrap_or(u64::MAX)));
+    let rate_limited = status == 429
+        || [provider_code, provider_message]
+            .into_iter()
+            .flatten()
+            .any(is_rate_limit_text);
+    if rate_limited {
+        return error.rate_limited(retry_after);
+    }
+    if status == 408 || (500..=599).contains(&status) {
+        return error.transient(retry_after);
+    }
+    if matches!(status, 401 | 403 | 404)
+        || (status == 400 && is_permanent_model_bad_request(provider_code, provider_message))
+    {
+        return error.shared();
+    }
+    error
+}
+
+fn is_rate_limit_text(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase().replace(['_', '-'], " ");
+    [
+        "rate limit",
+        "quota exceeded",
+        "too many requests",
+        "request rate increased too quickly",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn is_permanent_model_bad_request(
+    provider_code: Option<&str>,
+    provider_message: Option<&str>,
+) -> bool {
+    const PERMANENT_CODES: &[&str] = &[
+        "invalid_model",
+        "model_not_found",
+        "unsupported_model",
+        "invalid_dimension",
+        "invalid_dimensions",
+        "unsupported_dimension",
+        "unsupported_dimensions",
+        "dimension_out_of_range",
+        "invalid_embedding_dimension",
+        "unsupported_embedding_dimension",
+    ];
+    let normalized_code = provider_code.map(|code| {
+        code.split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|part| !part.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>()
+            .join("_")
+    });
+    if normalized_code
+        .as_deref()
+        .is_some_and(|code| PERMANENT_CODES.contains(&code))
+    {
+        return true;
+    }
+    let Some(message) = provider_message.map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    let model_failure = message.contains("model")
+        && [
+            "invalid",
+            "unsupported",
+            "unknown",
+            "not found",
+            "does not exist",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker));
+    let dimension_failure = message.contains("dimension")
+        && [
+            "invalid",
+            "unsupported",
+            "not supported",
+            "out of range",
+            "must",
+            "should",
+            "expected",
+            "between",
+            "only support",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker));
+    model_failure || dimension_failure
 }
 
 fn provider_error_code(status: u16) -> &'static str {

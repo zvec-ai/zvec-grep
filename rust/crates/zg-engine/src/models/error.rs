@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 
 use crate::{EngineError, ErrorSite};
@@ -9,7 +11,17 @@ pub struct ModelError {
     message: String,
     context: Option<String>,
     cause: Option<String>,
-    origin: ErrorSite,
+    disposition: FailureDisposition,
+    origin: Box<ErrorSite>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureDisposition {
+    Input,
+    Shared,
+    Operation,
+    Transient(Option<u32>),
+    RateLimited(Option<u32>),
 }
 
 impl ModelError {
@@ -24,7 +36,8 @@ impl ModelError {
             message: message.into(),
             context,
             cause: None,
-            origin: ErrorSite::capture(),
+            disposition: FailureDisposition::Input,
+            origin: Box::new(ErrorSite::capture()),
         }
     }
 
@@ -40,12 +53,14 @@ impl ModelError {
 
     #[track_caller]
     pub(crate) fn storage_failure(message: impl Into<String>) -> Self {
-        Self::new(EngineError::STORAGE_FAILURE, message, None)
+        Self::new(EngineError::STORAGE_FAILURE, message, None).shared()
     }
 
     #[track_caller]
     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
-        Self::new(EngineError::CANCELLED, message, None)
+        let mut error = Self::new(EngineError::CANCELLED, message, None);
+        error.disposition = FailureDisposition::Operation;
+        error
     }
 
     #[track_caller]
@@ -58,12 +73,30 @@ impl ModelError {
         self
     }
 
+    pub(crate) fn shared(mut self) -> Self {
+        if self.disposition == FailureDisposition::Input {
+            self.disposition = FailureDisposition::Shared;
+        }
+        self
+    }
+
+    pub(crate) fn transient(mut self, retry_after: Option<Duration>) -> Self {
+        self.disposition = FailureDisposition::Transient(retry_after.map(retry_after_millis));
+        self
+    }
+
+    pub(crate) fn rate_limited(mut self, retry_after: Option<Duration>) -> Self {
+        self.disposition = FailureDisposition::RateLimited(retry_after.map(retry_after_millis));
+        self
+    }
+
     pub(crate) fn wrap(self, message: impl Into<String>, context: Option<String>) -> Self {
         let Self {
             code,
             message: cause_message,
             context: cause_context,
             cause,
+            disposition,
             origin,
         } = self;
         Self {
@@ -71,6 +104,7 @@ impl ModelError {
             message: message.into(),
             context,
             cause: Some(compose_message(cause_message, cause_context, cause)),
+            disposition,
             origin,
         }
     }
@@ -81,9 +115,10 @@ impl ModelError {
             message,
             context,
             cause,
+            disposition: _,
             origin,
         } = self;
-        EngineError::new_at(code, compose_message(message, context, cause), origin)
+        EngineError::new_at(code, compose_message(message, context, cause), *origin)
     }
 
     #[must_use]
@@ -100,6 +135,41 @@ impl ModelError {
     pub fn cause(&self) -> Option<&str> {
         self.cause.as_deref()
     }
+
+    #[must_use]
+    pub(crate) const fn is_retryable(&self) -> bool {
+        matches!(
+            self.disposition,
+            FailureDisposition::Transient(_) | FailureDisposition::RateLimited(_)
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn is_rate_limited(&self) -> bool {
+        matches!(self.disposition, FailureDisposition::RateLimited(_))
+    }
+
+    #[must_use]
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        let millis = match self.disposition {
+            FailureDisposition::Transient(millis) | FailureDisposition::RateLimited(millis) => {
+                millis
+            }
+            FailureDisposition::Input
+            | FailureDisposition::Shared
+            | FailureDisposition::Operation => None,
+        };
+        millis.map(|millis| Duration::from_millis(u64::from(millis)))
+    }
+
+    #[must_use]
+    pub(crate) const fn should_fail_fast(&self) -> bool {
+        !matches!(self.disposition, FailureDisposition::Input)
+    }
+}
+
+fn retry_after_millis(duration: Duration) -> u32 {
+    duration.as_millis().try_into().unwrap_or(u32::MAX)
 }
 
 fn compose_message(mut message: String, context: Option<String>, cause: Option<String>) -> String {
@@ -116,6 +186,8 @@ fn compose_message(mut message: String, context: Option<String>, cause: Option<S
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::ModelError;
 
     #[test]
@@ -132,5 +204,24 @@ mod tests {
             error.message(),
             "embedding failed: model=test; cause: model operation failed"
         );
+    }
+
+    #[test]
+    fn wrapping_preserves_structured_failure_metadata() {
+        let error = ModelError::internal("request timed out")
+            .transient(Some(Duration::from_millis(25)))
+            .wrap("embedding failed", None);
+
+        assert!(error.is_retryable());
+        assert!(!error.is_rate_limited());
+        assert!(error.should_fail_fast());
+        assert_eq!(error.retry_after(), Some(Duration::from_millis(25)));
+
+        let input = ModelError::invalid_argument("bad input");
+        assert!(!input.is_retryable());
+        assert!(!input.should_fail_fast());
+
+        let shared = ModelError::storage_failure("model load failed");
+        assert!(shared.should_fail_fast());
     }
 }

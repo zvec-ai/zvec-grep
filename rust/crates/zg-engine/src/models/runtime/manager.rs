@@ -23,8 +23,8 @@ use crate::domain::{
 use crate::models::{
     backends::create_embedding_model,
     spi::{
-        EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, ModelError,
-        ModelProgressReporter,
+        EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
+        ModelError, ModelProgressReporter,
     },
 };
 
@@ -411,6 +411,24 @@ impl ModelRuntimeLease {
 
     pub(crate) fn info(&self) -> &EmbeddingModelInfo {
         self.entry.runtime.model.info()
+    }
+
+    pub(crate) async fn prepare(
+        &self,
+        mut options: EmbeddingPrepareOptions,
+        progress: Option<ModelProgressReporter>,
+    ) -> Result<(), ModelError> {
+        if let Some(reporter) = progress {
+            let model_progress = options.on_progress.take();
+            let concurrency = self.operation.limit;
+            options.on_progress = Some(Arc::new(move |progress| {
+                if let Some(model_progress) = &model_progress {
+                    model_progress(progress.clone());
+                }
+                reporter.report(progress, concurrency);
+            }));
+        }
+        self.entry.runtime.model.prepare(options).await
     }
 
     pub(crate) async fn embed(

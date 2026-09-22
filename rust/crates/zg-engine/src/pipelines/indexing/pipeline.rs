@@ -40,7 +40,10 @@ use crate::{
         vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
-    models::{EmbeddingConcurrencyDefaults, EmbeddingOptions, ModelError, ModelRuntimeLease},
+    models::{
+        EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelError,
+        ModelRuntimeLease,
+    },
     storage::types::IndexedFragment,
     utils::{collapse_whitespace, decode_index_text, sha256_hex},
 };
@@ -65,6 +68,12 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults;
 
+    async fn prepare(
+        &self,
+        options: EmbeddingPrepareOptions,
+        progress: Option<IndexProgressReporter>,
+    ) -> Result<(), ModelError>;
+
     async fn embed(
         &self,
         contents: &[Vec<Content>],
@@ -81,6 +90,15 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         self.concurrency_defaults()
+    }
+
+    async fn prepare(
+        &self,
+        options: EmbeddingPrepareOptions,
+        progress: Option<IndexProgressReporter>,
+    ) -> Result<(), ModelError> {
+        self.prepare(options, progress.map(model_progress::for_index))
+            .await
     }
 
     async fn embed(
@@ -111,8 +129,9 @@ pub(crate) async fn index_workspace(
     validate_context(context)?;
     let started = Instant::now();
     let mut timings = TimingCollector::default();
+    let mut model_prepared = false;
 
-    let first = run_index_pass(context, &mut timings, None, &[]).await?;
+    let first = run_index_pass(context, &mut timings, None, &[], &mut model_prepared).await?;
     let mut passes = vec![first];
     if passes[0].stats.files_failed > 0 {
         let succeeded = passes[0].stats.files_indexed;
@@ -140,6 +159,7 @@ pub(crate) async fn index_workspace(
                     files_total,
                 }),
                 &passes[0].stats.failed_files,
+                &mut model_prepared,
             )
             .await?,
         );
@@ -344,6 +364,7 @@ async fn run_index_pass(
     timings: &mut TimingCollector,
     progress_base: Option<ProgressBase>,
     retry_paths: &[PathBuf],
+    model_prepared: &mut bool,
 ) -> Result<IndexPassResult, EngineError> {
     throw_if_cancelled(context.signal.as_ref())?;
     report(
@@ -425,7 +446,35 @@ async fn run_index_pass(
     );
 
     let delete_started = Instant::now();
-    for file in &diff.deleted {
+    delete_stale_files(context, &diff.deleted)?;
+    timings.record(
+        "index_delete_stale",
+        delete_started.elapsed(),
+        diff.deleted.len(),
+    );
+
+    let stats = index_candidates(
+        context,
+        &control,
+        &mut diff,
+        timings,
+        progress_base,
+        model_prepared,
+    )
+    .await?;
+    Ok(IndexPassResult {
+        files_scanned: diff.files_scanned,
+        diff,
+        stats,
+        skipped,
+    })
+}
+
+fn delete_stale_files(
+    context: &IndexingContext<'_>,
+    deleted: &[FileRecord],
+) -> Result<(), EngineError> {
+    for file in deleted {
         throw_if_cancelled(context.signal.as_ref())?;
         context.storage.delete_file(file.id).map_err(|error| {
             EngineError::storage_failure(format!(
@@ -434,19 +483,7 @@ async fn run_index_pass(
             ))
         })?;
     }
-    timings.record(
-        "index_delete_stale",
-        delete_started.elapsed(),
-        diff.deleted.len(),
-    );
-
-    let stats = index_candidates(context, &control, &mut diff, timings, progress_base).await?;
-    Ok(IndexPassResult {
-        files_scanned: diff.files_scanned,
-        diff,
-        stats,
-        skipped,
-    })
+    Ok(())
 }
 
 fn resolve_scanned_identities(
@@ -584,7 +621,7 @@ enum PreparedCandidate {
 }
 
 type EmbeddingFuture<'context> =
-    Pin<Box<dyn Future<Output = EmbeddingBatchOutcome> + Send + 'context>>;
+    Pin<Box<dyn Future<Output = Result<EmbeddingBatchOutcome, ModelError>> + Send + 'context>>;
 
 #[expect(
     clippy::too_many_lines,
@@ -596,6 +633,7 @@ async fn index_candidates(
     diff: &mut DiffPlan,
     timings: &mut TimingCollector,
     progress_base: Option<ProgressBase>,
+    model_prepared: &mut bool,
 ) -> Result<IndexWriteStats, EngineError> {
     let policy = resolve_embedding_policy(
         context.embedding_concurrency,
@@ -673,6 +711,7 @@ async fn index_candidates(
 
         if prepared.fragments.len() > max_batch_size {
             if !current_batch.is_empty() {
+                ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
                     &mut running,
                     std::mem::take(&mut current_batch),
@@ -681,6 +720,7 @@ async fn index_candidates(
                 );
                 current_fragments = 0;
             }
+            ensure_model_prepared(context, model_prepared).await?;
             push_embedding(
                 &mut running,
                 vec![prepared],
@@ -691,6 +731,7 @@ async fn index_candidates(
             if current_fragments > 0
                 && current_fragments + prepared.fragments.len() > max_batch_size
             {
+                ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
                     &mut running,
                     std::mem::take(&mut current_batch),
@@ -702,6 +743,7 @@ async fn index_candidates(
             current_fragments += prepared.fragments.len();
             current_batch.push(prepared);
             if current_fragments == max_batch_size {
+                ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
                     &mut running,
                     std::mem::take(&mut current_batch),
@@ -720,6 +762,7 @@ async fn index_candidates(
     }
 
     if !current_batch.is_empty() {
+        ensure_model_prepared(context, model_prepared).await?;
         push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
     }
     while let Some(outcome) = running.next().await {
@@ -727,6 +770,37 @@ async fn index_candidates(
     }
     throw_if_cancelled(context.signal.as_ref())?;
     Ok(stats)
+}
+
+async fn ensure_model_prepared(
+    context: &IndexingContext<'_>,
+    prepared: &mut bool,
+) -> Result<(), EngineError> {
+    if *prepared {
+        return Ok(());
+    }
+    throw_if_cancelled(context.signal.as_ref())?;
+    let model = context.embedding_models[0];
+    model
+        .prepare(
+            EmbeddingPrepareOptions {
+                signal: context.signal.clone(),
+                ..EmbeddingPrepareOptions::default()
+            },
+            context.on_progress.clone(),
+        )
+        .await
+        .map_err(|error| {
+            error
+                .wrap(
+                    "Unable to prepare embedding model",
+                    Some(format!("model={}", model.info().model.reference())),
+                )
+                .into_engine_error()
+        })?;
+    throw_if_cancelled(context.signal.as_ref())?;
+    *prepared = true;
+    Ok(())
 }
 
 fn push_embedding<'context>(
@@ -750,8 +824,9 @@ fn apply_embedding_outcome(
     progress_base: Option<ProgressBase>,
     timings: &mut TimingCollector,
     stats: &mut IndexWriteStats,
-    outcome: EmbeddingBatchOutcome,
+    outcome: Result<EmbeddingBatchOutcome, ModelError>,
 ) -> Result<(), EngineError> {
+    let outcome = outcome.map_err(ModelError::into_engine_error)?;
     timings.record("index_embedding", outcome.duration, outcome.outcomes.len());
     apply_embedding_files(
         context,
@@ -1103,7 +1178,7 @@ async fn embed_prepared_files(
     scheduler: Arc<EmbeddingScheduler>,
     signal: Option<CancellationToken>,
     progress: Option<IndexProgressReporter>,
-) -> EmbeddingBatchOutcome {
+) -> Result<EmbeddingBatchOutcome, ModelError> {
     let started = Instant::now();
     if files.len() == 1 && files[0].fragments.len() > model.info().max_batch_size {
         let file = files.into_iter().next().expect("one prepared file");
@@ -1120,15 +1195,16 @@ async fn embed_prepared_files(
                 file,
                 vectors: embedding.vectors,
             },
+            Err(error) if error.should_fail_fast() => return Err(error),
             Err(error) => EmbeddedFileOutcome::Failed {
                 file,
                 reason: model_error_text(&error),
             },
         };
-        return EmbeddingBatchOutcome {
+        return Ok(EmbeddingBatchOutcome {
             outcomes: vec![outcome],
             duration: started.elapsed(),
-        };
+        });
     }
     let contents = files
         .iter()
@@ -1149,16 +1225,7 @@ async fn embed_prepared_files(
     .await;
     let outcomes = match result {
         Ok(embedding) => split_embedding(files, embedding),
-        Err(error) if classify_embedding_retry(&error).retryable => {
-            let reason = model_error_text(&error);
-            files
-                .into_iter()
-                .map(|file| EmbeddedFileOutcome::Failed {
-                    file,
-                    reason: reason.clone(),
-                })
-                .collect()
-        }
+        Err(error) if error.should_fail_fast() => return Err(error),
         Err(_) => {
             let mut outcomes = Vec::with_capacity(files.len());
             for file in files {
@@ -1175,6 +1242,7 @@ async fn embed_prepared_files(
                         file,
                         vectors: embedding.vectors,
                     }),
+                    Err(error) if error.should_fail_fast() => return Err(error),
                     Err(error) => outcomes.push(EmbeddedFileOutcome::Failed {
                         file,
                         reason: model_error_text(&error),
@@ -1184,10 +1252,10 @@ async fn embed_prepared_files(
             outcomes
         }
     };
-    EmbeddingBatchOutcome {
+    Ok(EmbeddingBatchOutcome {
         outcomes,
         duration: started.elapsed(),
-    }
+    })
 }
 
 fn split_embedding(
@@ -1282,9 +1350,7 @@ async fn embed_fragment_batch(
         .collect::<Vec<_>>();
     match embed_with_retry(model, &contents, scheduler, signal, progress.clone()).await {
         Ok(embedding) => Ok(FragmentBatchResult { start, embedding }),
-        Err(error) if fragments.len() == 1 || classify_embedding_retry(&error).retryable => {
-            Err(error)
-        }
+        Err(error) if fragments.len() == 1 || error.should_fail_fast() => Err(error),
         Err(_) => {
             let mut vectors = Vec::with_capacity(fragments.len());
             let mut truncated = Vec::new();
@@ -1298,16 +1364,16 @@ async fn embed_fragment_batch(
                 )
                 .await
                 .map_err(|error| {
-                    ModelError::internal(format!(
-                        "fragment {} failed after one-by-one fallback: {}",
-                        fragment.fragment_id.as_str(),
-                        model_error_text(&error)
-                    ))
+                    error.wrap(
+                        "Embedding fragment failed after one-by-one fallback",
+                        Some(format!("fragmentId={}", fragment.fragment_id.as_str())),
+                    )
                 })?;
                 let Some(vector) = embedding.vectors.into_iter().next() else {
                     return Err(ModelError::internal(
                         "embedding returned no vector for a fragment",
-                    ));
+                    )
+                    .shared());
                 };
                 vectors.push(vector);
                 if !embedding.truncated.is_empty() {
@@ -1374,26 +1440,10 @@ struct RetryClassification {
 }
 
 fn classify_embedding_retry(error: &ModelError) -> RetryClassification {
-    let text = model_error_text(error);
-    let normalized = text.to_ascii_lowercase();
-    let status = number_after(&normalized, "status=");
-    let rate_limited = status == Some(429)
-        || normalized.contains("rate limit")
-        || normalized.contains("quota exceeded")
-        || normalized.contains("too many requests")
-        || normalized.contains("request rate increased too quickly");
-    let server_error = status.is_some_and(|status| (500..=599).contains(&status));
-    let retry_after = number_after(&normalized, "retryafterms=")
-        .map(Duration::from_millis)
-        .or_else(|| {
-            float_after(&normalized, "retryafter=")
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-                .map(Duration::from_secs_f64)
-        });
     RetryClassification {
-        retryable: rate_limited || server_error,
-        rate_limited,
-        retry_after,
+        retryable: error.is_retryable(),
+        rate_limited: error.is_rate_limited(),
+        retry_after: error.retry_after(),
     }
 }
 
@@ -1457,24 +1507,6 @@ fn model_error_text(error: &ModelError) -> String {
         parts.push(cause.to_owned());
     }
     parts.join(": ")
-}
-
-fn number_after(text: &str, marker: &str) -> Option<u64> {
-    let start = text.find(marker)? + marker.len();
-    let digits = text[start..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
-}
-
-fn float_after(text: &str, marker: &str) -> Option<f64> {
-    let start = text.find(marker)? + marker.len();
-    let value = text[start..]
-        .chars()
-        .take_while(|character| character.is_ascii_digit() || *character == '.')
-        .collect::<String>();
-    (!value.is_empty()).then(|| value.parse().ok()).flatten()
 }
 
 fn pseudo_jitter() -> u64 {
@@ -2485,10 +2517,15 @@ mod tests {
 
     struct ConcurrentModel {
         info: EmbeddingModelInfo,
+        prepare_calls: AtomicUsize,
+        prepare_failures: AtomicUsize,
         calls: AtomicUsize,
         active: AtomicUsize,
         maximum_active: AtomicUsize,
         fail_embeddings: bool,
+        fail_shared: bool,
+        transient_failures: AtomicUsize,
+        rejected_text: Option<&'static str>,
     }
 
     struct UnknownModifiedScanner(NativeScanner);
@@ -2536,10 +2573,15 @@ mod tests {
                     max_input_tokens: Some(64),
                     max_image_bytes: None,
                 },
+                prepare_calls: AtomicUsize::new(0),
+                prepare_failures: AtomicUsize::new(0),
                 calls: AtomicUsize::new(0),
                 active: AtomicUsize::new(0),
                 maximum_active: AtomicUsize::new(0),
                 fail_embeddings: false,
+                fail_shared: false,
+                transient_failures: AtomicUsize::new(0),
+                rejected_text: None,
             }
         }
     }
@@ -2557,6 +2599,33 @@ mod tests {
             }
         }
 
+        async fn prepare(
+            &self,
+            options: EmbeddingPrepareOptions,
+            _progress: Option<IndexProgressReporter>,
+        ) -> Result<(), ModelError> {
+            self.prepare_calls.fetch_add(1, Ordering::AcqRel);
+            if options
+                .signal
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(ModelError::cancelled("fixture preparation was cancelled"));
+            }
+            if self
+                .prepare_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ModelError::storage_failure(
+                    "injected model preparation failure",
+                ));
+            }
+            Ok(())
+        }
+
         async fn embed(
             &self,
             contents: &[Vec<Content>],
@@ -2564,8 +2633,32 @@ mod tests {
             _progress: Option<IndexProgressReporter>,
         ) -> Result<EmbeddingResult, ModelError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
+            if self
+                .transient_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ModelError::internal("injected transient embedding failure")
+                    .transient(Some(Duration::ZERO)));
+            }
+            if self.fail_shared {
+                return Err(ModelError::storage_failure(
+                    "injected shared embedding failure",
+                ));
+            }
             if self.fail_embeddings {
                 return Err(ModelError::internal("injected embedding failure"));
+            }
+            if self.rejected_text.is_some_and(|rejected| {
+                contents.iter().flatten().any(
+                    |content| matches!(content, Content::Text(text) if text.contains(rejected)),
+                )
+            }) {
+                return Err(ModelError::invalid_argument(
+                    "injected request-specific embedding failure",
+                ));
             }
             let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
             self.maximum_active.fetch_max(active, Ordering::AcqRel);
@@ -2637,6 +2730,11 @@ mod tests {
             assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
             assert!(error.to_string().contains("injected replacement failure"));
             assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
+            assert_eq!(
+                model.prepare_calls.load(Ordering::Acquire),
+                embedding_calls,
+                "only a real embedding batch prepares the model"
+            );
             assert_eq!(model.calls.load(Ordering::Acquire), embedding_calls);
             // These storage operations remain usable after the replacement fails,
             // so neither failed-file recovery nor finalization may hide the error.
@@ -2683,6 +2781,191 @@ mod tests {
             panic!("embedding failure must remain attached to the file");
         };
         assert!(error.contains("injected embedding failure"));
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 1);
+        assert_eq!(model.calls.load(Ordering::Acquire), 4);
+    }
+
+    #[tokio::test]
+    async fn preparation_failure_aborts_once_and_a_later_operation_can_retry() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("file.txt"), "indexable text").expect("source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let model = ConcurrentModel::new();
+        model.prepare_failures.store(1, Ordering::Release);
+        let context = IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+
+        let error = index_workspace(&context)
+            .await
+            .expect_err("shared preparation failure must abort indexing");
+        assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+        assert!(
+            error
+                .to_string()
+                .contains("injected model preparation failure")
+        );
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 1);
+        assert_eq!(model.calls.load(Ordering::Acquire), 0);
+        assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
+        assert_eq!(storage.failed_markers.load(Ordering::Acquire), 0);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+
+        let result = index_workspace(&context)
+            .await
+            .expect("a later indexing operation retries preparation");
+        assert_eq!(result.files_failed, 0);
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 2);
+        assert_eq!(model.calls.load(Ordering::Acquire), 1);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_embedding_failure_aborts_without_file_or_pass_fallback() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("file.txt"), "indexable text").expect("source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let mut model = ConcurrentModel::new();
+        model.fail_shared = true;
+
+        let error = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect_err("shared embedding failure must abort indexing");
+
+        assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+        assert!(
+            error
+                .to_string()
+                .contains("injected shared embedding failure")
+        );
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 1);
+        assert_eq!(model.calls.load(Ordering::Acquire), 1);
+        assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
+        assert_eq!(storage.failed_markers.load(Ordering::Acquire), 0);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn exhausted_transient_failure_aborts_after_one_bounded_retry_budget() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("file.txt"), "indexable text").expect("source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let model = ConcurrentModel::new();
+        model
+            .transient_failures
+            .store(EMBEDDING_TRANSIENT_MAX_RETRIES + 1, Ordering::Release);
+
+        index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect_err("exhausted transient failures must abort indexing");
+
+        assert_eq!(
+            model.calls.load(Ordering::Acquire),
+            EMBEDDING_TRANSIENT_MAX_RETRIES + 1
+        );
+        assert_eq!(scanner.requests.lock().expect("scan requests").len(), 1);
+        assert_eq!(storage.failed_markers.load(Ordering::Acquire), 0);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn request_specific_failure_keeps_targeted_file_fallback() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("good.txt"), "good content").expect("good source");
+        std::fs::write(directory.path().join("bad.txt"), "bad content").expect("bad source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let mut model = ConcurrentModel::new();
+        model.info.max_batch_size = 32;
+        model.rejected_text = Some("bad");
+
+        let result = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("request-specific failures remain file failures");
+
+        assert_eq!(result.files_failed, 1);
+        assert_eq!(result.entities_created, 1);
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 1);
+        assert_eq!(model.calls.load(Ordering::Acquire), 5);
+        let files = storage.list_files().expect("stored files");
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files
+                .iter()
+                .filter(|file| file.index_status.is_indexed())
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_index_does_not_prepare_the_model() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("file.txt"), "indexable text").expect("source");
+        let workspace = workspace(directory.path());
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let model = ConcurrentModel::new();
+        let signal = CancellationToken::new();
+        signal.cancel();
+
+        let error = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: Some(signal),
+            changes: &[],
+        })
+        .await
+        .expect_err("pre-cancelled indexing must stop before preparation");
+
+        assert_eq!(error.code(), EngineError::CANCELLED);
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 0);
+        assert_eq!(model.calls.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
@@ -2764,9 +3047,15 @@ mod tests {
             changes: &[],
         };
         index_workspace(&context).await.expect("initial index");
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), 1);
         let id = storage.list_files().expect("files")[0].id;
         assert_eq!(storage.resolved_paths.lock().expect("calls").len(), 1);
         index_workspace(&context).await.expect("unchanged index");
+        assert_eq!(
+            model.prepare_calls.load(Ordering::Acquire),
+            1,
+            "an unchanged operation must not prepare the model"
+        );
         assert_eq!(storage.resolved_paths.lock().expect("calls").len(), 1);
 
         assert_eq!(
@@ -2958,10 +3247,12 @@ mod tests {
         );
 
         let calls = model.calls.load(Ordering::Acquire);
+        let prepare_calls = model.prepare_calls.load(Ordering::Acquire);
         let second = index_workspace(&context).await.expect("unchanged index");
         assert_eq!(second.files_unchanged, 4);
         assert_eq!(second.entities_created, 0);
         assert_eq!(model.calls.load(Ordering::Acquire), calls);
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), prepare_calls);
 
         std::fs::write(directory.path().join("file-0.txt"), "changed and longer")
             .expect("modified file");

@@ -60,6 +60,12 @@ pub struct EmbeddingOptions {
     pub(crate) trace_headers: Option<EmbeddingTraceHeaders>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct EmbeddingPrepareOptions {
+    pub(crate) signal: Option<CancellationToken>,
+    pub(crate) on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct EmbeddingTraceHeaders {
     pub(crate) traceparent: String,
@@ -104,6 +110,12 @@ pub trait EmbeddingModel: Send + Sync {
         EmbeddingConcurrencyDefaults::default()
     }
 
+    /// Loads shared local resources before an operation dispatches embedding work.
+    /// Remote and already-ready models may keep the default no-op implementation.
+    async fn prepare(&self, _options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
+        Ok(())
+    }
+
     /// Embeds a batch of inputs, producing one vector per inner content list.
     /// Content items within an input are ordered; each backend validates supported combinations.
     async fn embed(
@@ -119,7 +131,9 @@ pub(crate) fn validate_inputs(
     accepts: impl Fn(&Content) -> bool,
 ) -> Result<(), ModelError> {
     info.validate().map_err(|error| {
-        ModelError::internal("Embedding model returned invalid metadata").with_cause(error)
+        ModelError::internal("Embedding model returned invalid metadata")
+            .with_cause(error)
+            .shared()
     })?;
     if inputs.is_empty() {
         return Err(ModelError::new(
@@ -235,7 +249,8 @@ pub(crate) fn validate_result(
                     info.dimension,
                     vector.len()
                 )),
-            ));
+            )
+            .shared());
         }
         if let Some(value_index) = vector.iter().position(|value| !value.is_finite()) {
             return Err(ModelError::new(

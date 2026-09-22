@@ -28,8 +28,8 @@ use crate::{
         catalog::Model2VecConfig,
         runtime::ModelComputeRuntime,
         spi::{
-            EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, ModelError, input_text,
-            validate_inputs, validate_result,
+            EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions,
+            EmbeddingPrepareOptions, ModelError, input_text, validate_inputs, validate_result,
         },
     },
 };
@@ -181,6 +181,13 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
             initial: self.entry.default_concurrency.max(1),
             maximum: self.entry.default_concurrency.max(1),
         }
+    }
+
+    async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
+        self.ensure_loaded(options.on_progress, options.signal.as_ref())
+            .await
+            .map(|_| ())
+            .map_err(ModelError::shared)
     }
 
     async fn embed(
