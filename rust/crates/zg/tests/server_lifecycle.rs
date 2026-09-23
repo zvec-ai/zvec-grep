@@ -801,7 +801,7 @@ fn new_daemon_defaults_to_agent_without_a_toolset() -> Result<(), Box<dyn Error>
         server_start_output(
             Command::new(&binary)
                 .env_remove("ZVEC_GREP_MCP_TOOLSET")
-                .args(["server", "on", "--home"])
+                .args(["--server", "on", "--home"])
                 .arg(home.path())
                 .args(["--listen", listen]),
         )
@@ -842,7 +842,7 @@ fn default_connections_reuse_either_toolset_and_explicit_conflicts_fail()
         ] {
             let mut command = Command::new(&binary);
             command
-                .args(["server", "on", "--home"])
+                .args(["--server", "on", "--home"])
                 .arg(home.path())
                 .env_remove("ZVEC_GREP_MCP_TOOLSET");
             if let Some(argument) = argument {
@@ -928,7 +928,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         )
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
-            "index",
+            "--index",
             "--mode",
             "direct",
             "--allow-remote",
@@ -943,7 +943,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let consent = Command::new(&binary)
         .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
-            "auth",
+            "--auth",
             "grant",
             path_text(workspace.path())?,
             "--capability",
