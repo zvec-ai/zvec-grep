@@ -36,6 +36,13 @@ are preserved. Uninstall removes managed entries from both global files, or only
 from the explicit override, and removes managed guidance from the adjacent
 `AGENTS.md`.
 
+`zg --install --target copilot` configures the user-level Copilot MCP server and
+CLI instructions under `${COPILOT_HOME:-~/.copilot}`. `--target vscode` updates
+every detected Stable and Insiders user profile, using `VSCODE_USER_DIR`,
+`VSCODE_PORTABLE`, or `VSCODE_APPDATA` when set. It also registers the server in
+Copilot's home because the shared instructions are read by both clients.
+Uninstall preserves that shared server until both integrations are removed.
+
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
 typed `context`, `index`, `info`, and `drop_index` methods. It
