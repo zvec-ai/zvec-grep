@@ -572,7 +572,7 @@ fn copilot_installs_and_removes_managed_configuration() {
     .expect("config");
     fs::write(home.join("copilot-instructions.md"), "# My instructions\n").expect("guidance");
 
-    let stdout = run_ok(&mut copilot_command("--install", root).args([
+    let stdout = run_ok(copilot_command("--install", root).args([
         "--mcp-toolset",
         "full",
         "--mcp-tool-timeout",
@@ -587,14 +587,14 @@ fn copilot_installs_and_removes_managed_configuration() {
         serde_json::json!({
             "type": "local", "command": "zg",
             "args": ["--server", "--stdio", "--mcp-toolset", "full"],
-            "tools": ["*"], "timeout": 900000
+            "tools": ["*"], "timeout": 900_000
         })
     );
     let guidance = fs::read_to_string(home.join("copilot-instructions.md")).expect("guidance");
     assert!(guidance.contains("# My instructions"));
     assert!(guidance.contains("<!-- ZVEC_GREP_START -->"));
 
-    run_ok(&mut copilot_command("--install", root).args([
+    run_ok(copilot_command("--install", root).args([
         "--mcp-transport",
         "http",
         "--mcp-token-env",
@@ -640,7 +640,7 @@ fn vscode_preserves_jsonc_and_shared_guidance_lifecycle() {
     assert!(installed.contains("\"type\": \"stdio\""));
     assert_eq!(
         json(&copilot.join("mcp-config.json"))["mcpServers"]["zvec_grep"]["timeout"],
-        600000
+        600_000
     );
     let instructions = fs::read_to_string(&guidance).expect("guidance");
     assert!(instructions.starts_with("---\napplyTo: '**'\n---\n"));
@@ -682,7 +682,7 @@ fn vscode_preflights_conflicts_and_keeps_copilot_entry_until_both_targets_leave(
     assert_eq!(fs::read_to_string(&config).expect("config"), unmanaged);
     assert!(!copilot.join("mcp-config.json").exists());
 
-    run_ok(&mut vscode_command("--install", root).arg("--force"));
+    run_ok(vscode_command("--install", root).arg("--force"));
     run_ok(&mut copilot_command("--install", root));
     run_ok(&mut copilot_command("--uninstall", root));
     assert!(
@@ -787,7 +787,7 @@ fn vscode_portable_http_uses_supported_schema_and_env_token() {
         })
     );
     let copilot = json(&root.join("copilot/mcp-config.json"));
-    assert_eq!(copilot["mcpServers"]["zvec_grep"]["timeout"], 900000);
+    assert_eq!(copilot["mcpServers"]["zvec_grep"]["timeout"], 900_000);
     assert_eq!(
         copilot["mcpServers"]["zvec_grep"]["headers"]["Authorization"],
         "Bearer ${TOKEN}"
