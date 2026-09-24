@@ -29,6 +29,7 @@ httpdate = "1.0.3"
 llama-cpp-2 = { version = "0.1.154", default-features = false }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-27", "copy-dylibs", "download-binaries", "std", "tls-rustls"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
 serde.workspace = true
 serde_json.workspace = true
@@ -65,6 +66,7 @@ dunce = "1.0.5"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
 
 [dev-dependencies]
+rusqlite = { version = "0.37", features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
