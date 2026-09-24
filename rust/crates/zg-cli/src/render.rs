@@ -667,10 +667,10 @@ Environment:
 See zg --help environment for daemon startup scope.";
 
 const INSTALL_HELP: &str = r"Usage:
-  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
 
 Options:
-  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, auto, or all; repeatable
+  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, auto, or all; repeatable
   --mcp-transport <stdio|http>      MCP connection mode (default: stdio)
   --mcp-toolset <agent|full>        Daemon MCP toolset (default: agent)
   --mcp-tool-timeout <seconds>      MCP tool timeout where supported (default: 600)
@@ -679,11 +679,13 @@ Options:
   --force                           Replace conflicting unmanaged configuration
 
 The qoder target configures Qoder CLI and Qoder IDE together.
+The copilot target configures GitHub Copilot CLI and Agent Host. The vscode
+target configures detected VS Code profiles and shared Copilot instructions.
 
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
-Codex, Claude Code, Qwen Code, Qoder CLI, and OpenCode also receive managed
+Codex, Claude Code, Qwen Code, Qoder CLI, OpenCode, Copilot, and VS Code receive managed
 guidance. Qoder IDE has no supported global Rules file, so only its MCP
 configuration is managed.
 Codex and Claude Code receive local tool pre-approval. Remote Embedding
@@ -692,7 +694,7 @@ use. Restart the agent or open a new session after installation. This does not
 install the npm package.";
 
 const UNINSTALL_HELP: &str = r"Usage:
-  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
 guidance. The qoder target removes the managed Qoder CLI and IDE integration
@@ -864,6 +866,10 @@ Agent integration paths:
   QODER_IDE_EXECUTABLE  Qoder IDE executable used by automatic install-target detection
   OPENCODE_CONFIG       OpenCode configuration file used by zg --install
   CURSOR_CONFIG_DIR     Cursor configuration directory used by zg --install
+  COPILOT_HOME          GitHub Copilot configuration and instructions directory
+  VSCODE_USER_DIR       Complete VS Code User profile directory override
+  VSCODE_PORTABLE       VS Code portable installation directory
+  VSCODE_APPDATA        Base directory for VS Code release channels
 
 Precedence:
   Embedding runtime                 CLI > Workspace snapshot > Global config > Environment

@@ -65,7 +65,7 @@ fn start_on_available_port<T>(
             token_file: token_file.map(Path::to_owned),
             active: true,
         };
-        let log_path = home.path().join("daemon/server.log");
+        let log_path = home.path().join("daemon").join("bootstrap.log");
         let log_start = std::fs::metadata(&log_path).map_or(0, |metadata| metadata.len());
         match start(&guard.listen) {
             Ok(value) => return Ok((guard, value)),
@@ -197,7 +197,8 @@ impl StdioBridge {
     ) -> Result<Self, Box<dyn Error>> {
         let stderr = NamedTempFile::new()?;
         let daemon_log_start =
-            std::fs::metadata(home.join("daemon/server.log")).map_or(0, |metadata| metadata.len());
+            std::fs::metadata(home.join("daemon").join("logs").join("server.log"))
+                .map_or(0, |metadata| metadata.len());
         let mut command = Command::new(binary);
         command.env_remove("ZVEC_GREP_MCP_TOOLSET");
         command.args([
@@ -343,7 +344,7 @@ impl StdioBridge {
             Ok(None) => "running".to_owned(),
             Err(error) => format!("unavailable: {error}"),
         };
-        let log_path = self.home.join("daemon/server.log");
+        let log_path = self.home.join("daemon").join("logs").join("server.log");
         format!(
             "stdio response failed: {reason}; id={}, method={}, tool={}, choice={choice:?}, prompts={prompts}, elapsed={:?}, child={child_status}, last_message={last_message}\nbridge stderr:\n{}\ndaemon log ({}):\n{}",
             request["id"], request["method"], request["params"]["name"], started.elapsed(),
@@ -428,6 +429,88 @@ fn server_start_does_not_retry_unrelated_failures() -> Result<(), Box<dyn Error>
     assert_eq!(attempts, 1);
     let error = result.err().ok_or("unexpected startup success")?;
     assert!(error.to_string().contains("fixture setup failed"));
+    Ok(())
+}
+
+#[test]
+fn server_run_failure_is_written_to_bootstrap_and_rotating_logs() -> Result<(), Box<dyn Error>> {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let listen = listener.local_addr()?.to_string();
+    let daemon_dir = home.path().join("daemon");
+    std::fs::create_dir_all(&daemon_dir)?;
+    let bootstrap_path = daemon_dir.join("bootstrap.log");
+    let output = Command::new(&binary)
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .args(["--server", "run", "--home"])
+        .arg(home.path())
+        .args(["--listen", &listen])
+        .stderr(Stdio::from(std::fs::File::create(&bootstrap_path)?))
+        .output()?;
+    assert!(!output.status.success());
+
+    let bootstrap = std::fs::read_to_string(&bootstrap_path)?;
+    assert!(bootstrap.contains("Error:"), "{bootstrap}");
+    let log = std::fs::read_to_string(daemon_dir.join("logs").join("server.log"))?;
+    assert!(
+        log.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|record| record["fields"]["message"] == "daemon failed")
+        }),
+        "{log}"
+    );
+    Ok(())
+}
+
+#[test]
+fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Error>> {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let config_home = TempDir::new()?;
+    let config_dir = config_home.path().join(".zvec-grep");
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::write(
+        config_dir.join("config.json"),
+        r#"{"version":1,"log":{"maxBytes":1,"keep":1}}"#,
+    )?;
+
+    let (mut guard, _) = start_server(&binary, &home, "agent", None, |command| {
+        command
+            .env("HOME", config_home.path())
+            .env("USERPROFILE", config_home.path());
+    })?;
+    let log_dir = home.path().join("daemon").join("logs");
+    let active_path = log_dir.join("server.log");
+    let backup_path = log_dir.join("server.log.1");
+    let active_before = std::fs::read(&active_path)?;
+    let backup_before = std::fs::read(&backup_path)?;
+    assert!(!backup_before.is_empty());
+
+    let duplicate = Command::new(&binary)
+        .env("HOME", config_home.path())
+        .env("USERPROFILE", config_home.path())
+        .args(["--server", "run", "--home"])
+        .arg(home.path())
+        .args(["--listen", &guard.listen])
+        .output()?;
+    assert!(!duplicate.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("already running"),
+        "{}",
+        String::from_utf8_lossy(&duplicate.stderr)
+    );
+    assert_eq!(std::fs::read(&active_path)?, active_before);
+    assert_eq!(std::fs::read(&backup_path)?, backup_before);
+
+    let status = Command::new(&binary)
+        .args(["--server", "status", "--home"])
+        .arg(home.path())
+        .arg("--check-ready")
+        .output()?;
+    assert_command_success(&status);
+    assert_command_success(&guard.stop()?);
     Ok(())
 }
 
@@ -808,6 +891,14 @@ fn new_daemon_defaults_to_agent_without_a_toolset() -> Result<(), Box<dyn Error>
     })?;
     assert!(String::from_utf8_lossy(&output.stdout).contains("MCP toolset: agent"));
     assert_command_success(&guard.stop()?);
+    let log = std::fs::read_to_string(home.path().join("daemon").join("logs").join("server.log"))?;
+    assert!(
+        log.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|record| record["fields"]["message"] == "zvec-grep daemon ready")
+        }),
+        "{log}"
+    );
     Ok(())
 }
 
@@ -1054,7 +1145,10 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         assert!(
             Instant::now() < deadline,
             "watcher did not refresh: {response}\n{}",
-            log_tail(&home.path().join("daemon/server.log"), 0)
+            log_tail(
+                &home.path().join("daemon").join("logs").join("server.log"),
+                0
+            )
         );
         std::thread::sleep(Duration::from_millis(50));
     }

@@ -36,6 +36,13 @@ are preserved. Uninstall removes managed entries from both global files, or only
 from the explicit override, and removes managed guidance from the adjacent
 `AGENTS.md`.
 
+`zg --install --target copilot` configures the user-level Copilot MCP server and
+CLI instructions under `${COPILOT_HOME:-~/.copilot}`. `--target vscode` updates
+every detected Stable and Insiders user profile, using `VSCODE_USER_DIR`,
+`VSCODE_PORTABLE`, or `VSCODE_APPDATA` when set. It also registers the server in
+Copilot's home because the shared instructions are read by both clients.
+Uninstall preserves that shared server until both integrations are removed.
+
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
 typed `context`, `index`, `info`, and `drop_index` methods. It
@@ -108,6 +115,12 @@ Search directly with `zg "where authentication is validated"`, `zg --fts
 `zg --install`, and `zg --uninstall`. Bare words such as `query`, `index`, and
 `help` are literal search text, not commands. Use `zg --help [topic]` (for example,
 `zg --help search`) and `zg --version` for help and version information.
+
+The resident daemon writes JSON Lines to `<home>/daemon/logs/server.log`.
+It rotates at 10 MiB and keeps five numbered backups by default. The global
+`~/.zvec-grep/config.json` accepts `log.maxBytes`, `log.keep`, and `log.level`
+(`info` or `debug`); restart the daemon after changing them. Bootstrap failures
+are written to `<home>/daemon/bootstrap.log`.
 
 Terminal searches default to human-readable output with full source previews;
 piped output is compact. `--compact` forces compact output, and

@@ -27,6 +27,8 @@ const RG_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_rg";
 // Persisted ownership markers stay stable across CLI grammar migrations.
 const QODER_DESCRIPTION: &str = "Managed by zg install";
 const QODER_OWNERSHIP_PREFIX: &str = "Managed by zg install; managed permissions=";
+const VSCODE_INSTRUCTIONS_FILE: &str = "zvec-grep.instructions.md";
+const VSCODE_FRONTMATTER: &str = "---\napplyTo: '**'\n---\n";
 
 #[derive(Debug, Error)]
 pub enum InstallError {
@@ -53,16 +55,20 @@ enum Agent {
     Cursor,
     Qwen,
     Qoder,
+    Copilot,
+    VsCode,
 }
 
 impl Agent {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
         Self::Cursor,
         Self::Qwen,
         Self::Qoder,
+        Self::Copilot,
+        Self::VsCode,
     ];
 
     const fn label(self) -> &'static str {
@@ -73,6 +79,8 @@ impl Agent {
             Self::Cursor => "Cursor",
             Self::Qwen => "Qwen Code",
             Self::Qoder => "Qoder",
+            Self::Copilot => "GitHub Copilot",
+            Self::VsCode => "VS Code",
         }
     }
 
@@ -84,6 +92,8 @@ impl Agent {
             Self::Cursor => "cursor",
             Self::Qwen => "qwen",
             Self::Qoder => "qoder",
+            Self::Copilot => "copilot",
+            Self::VsCode => "vscode",
         }
     }
 }
@@ -414,6 +424,12 @@ fn agents_from_tokens(
             "6" | "qoder" => {
                 selected.insert(Agent::Qoder);
             }
+            "7" | "copilot" | "github-copilot" | "copilot-cli" => {
+                selected.insert(Agent::Copilot);
+            }
+            "8" | "vscode" | "vs-code" | "code" => {
+                selected.insert(Agent::VsCode);
+            }
             _ => {
                 return Err(InstallError::Message(format!(
                     "Unknown install target: {token}"
@@ -442,6 +458,12 @@ fn detect_agents() -> BTreeSet<Agent> {
                     || executable_available("qoder-ide")
                     || qoder_ide_available()
             }
+            Agent::Copilot => executable_available("copilot"),
+            Agent::VsCode => {
+                executable_available("code")
+                    || executable_available("code-insiders")
+                    || vscode_user_directories().iter().any(|path| path.exists())
+            }
         })
         .collect()
 }
@@ -469,8 +491,8 @@ fn executable_available(name: &str) -> bool {
 }
 
 fn qoder_ide_available() -> bool {
-    if let Some(configured) = non_empty_env("QODER_IDE_EXECUTABLE") {
-        return executable_path(&absolute_path(&configured));
+    if let Some(configured) = trimmed_env_path("QODER_IDE_EXECUTABLE") {
+        return executable_path(&configured);
     }
     qoder_ide_candidates()
         .iter()
@@ -501,18 +523,15 @@ fn qoder_ide_candidates() -> Vec<PathBuf> {
         PathBuf::from("/Applications/Qoder.app/Contents/MacOS/Qoder"),
     ];
     #[cfg(windows)]
-    return vec![
-        PathBuf::from(
-            env::var_os("LOCALAPPDATA")
-                .unwrap_or_else(|| home.join("AppData/Local").into_os_string()),
-        )
-        .join("Programs/Qoder IDE/Qoder IDE.exe"),
-        PathBuf::from(
-            env::var_os("LOCALAPPDATA")
-                .unwrap_or_else(|| home.join("AppData/Local").into_os_string()),
-        )
-        .join("Programs/Qoder/Qoder.exe"),
-    ];
+    return qoder_ide_windows_candidates(
+        &home,
+        env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        env::var_os("ProgramFiles")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+    );
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     vec![
         PathBuf::from("/usr/share/qoder-ide/qoder-ide"),
@@ -522,10 +541,32 @@ fn qoder_ide_candidates() -> Vec<PathBuf> {
     ]
 }
 
+#[cfg(any(windows, test))]
+fn qoder_ide_windows_candidates(
+    home: &Path,
+    local_app_data: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let local_programs = local_app_data
+        .unwrap_or_else(|| home.join("AppData/Local"))
+        .join("Programs");
+    let mut candidates = vec![
+        local_programs.join("Qoder IDE/Qoder IDE.exe"),
+        local_programs.join("Qoder/Qoder.exe"),
+    ];
+    if let Some(program_files) = program_files {
+        candidates.extend([
+            program_files.join("Qoder IDE/Qoder IDE.exe"),
+            program_files.join("Qoder/Qoder.exe"),
+        ]);
+    }
+    candidates
+}
+
 #[derive(Default)]
 struct AgentInstallResult {
     config_path: Option<PathBuf>,
-    config_note: Option<&'static str>,
+    config_note: Option<String>,
 }
 
 fn install_agent(agent: Agent, options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
@@ -536,6 +577,14 @@ fn install_agent(agent: Agent, options: &AgentOptions) -> Result<AgentInstallRes
         Agent::Cursor => install_cursor(options),
         Agent::Qwen => install_qwen(options),
         Agent::Qoder => install_qoder(options),
+        Agent::Copilot => {
+            install_copilot(options)?;
+            return Ok(AgentInstallResult {
+                config_path: Some(copilot_config_path()),
+                config_note: None,
+            });
+        }
+        Agent::VsCode => return install_vscode(options),
     }?;
     Ok(AgentInstallResult::default())
 }
@@ -548,6 +597,8 @@ fn uninstall_agent(agent: Agent) -> Result<(), InstallError> {
         Agent::Cursor => uninstall_cursor(),
         Agent::Qwen => uninstall_qwen(),
         Agent::Qoder => uninstall_qoder(),
+        Agent::Copilot => uninstall_copilot(),
+        Agent::VsCode => uninstall_vscode(),
     }
 }
 
@@ -661,7 +712,7 @@ fn uninstall_claude() -> Result<(), InstallError> {
 struct OpenCodeConfig {
     path: PathBuf,
     cleanup_paths: Vec<PathBuf>,
-    note: Option<&'static str>,
+    note: Option<String>,
 }
 
 fn resolve_opencode_config() -> OpenCodeConfig {
@@ -685,8 +736,9 @@ fn resolve_opencode_config() -> OpenCodeConfig {
         } else {
             json.clone()
         },
-        note: (has_jsonc && json.exists())
-            .then_some("both opencode.jsonc and opencode.json exist; selected opencode.jsonc"),
+        note: (has_jsonc && json.exists()).then(|| {
+            "both opencode.jsonc and opencode.json exist; selected opencode.jsonc".to_owned()
+        }),
         cleanup_paths: vec![jsonc, json],
     }
 }
@@ -855,6 +907,278 @@ fn uninstall_qoder() -> Result<(), InstallError> {
     remove_marked_file(&home.join("AGENTS.md"), GUIDANCE_START, GUIDANCE_END)
 }
 
+fn copilot_home() -> PathBuf {
+    env_path_non_empty("COPILOT_HOME").unwrap_or_else(|| home_dir().join(".copilot"))
+}
+
+fn trimmed_env_path(name: &str) -> Option<PathBuf> {
+    non_empty_env(name).map(|value| absolute_path(value.trim()))
+}
+
+fn copilot_config_path() -> PathBuf {
+    copilot_home().join("mcp-config.json")
+}
+
+fn copilot_cli_guidance_path() -> PathBuf {
+    copilot_home().join("copilot-instructions.md")
+}
+
+fn vscode_guidance_path() -> PathBuf {
+    copilot_home()
+        .join("instructions")
+        .join(VSCODE_INSTRUCTIONS_FILE)
+}
+
+fn copilot_server(options: &AgentOptions) -> Result<Value, InstallError> {
+    let timeout = options.timeout_seconds.saturating_mul(1000);
+    let mut server = match options.transport {
+        McpInstallTransport::Stdio => json!({
+            "type": "local", "command": "zg", "args": stdio_args(options.toolset),
+            "tools": ["*"], "timeout": timeout
+        }),
+        McpInstallTransport::Http => json!({
+            "type": "http", "url": resolve_server_url()?,
+            "tools": ["*"], "timeout": timeout
+        }),
+    };
+    if options.transport == McpInstallTransport::Http
+        && let Some(token) = &options.token_env
+    {
+        server["headers"] = json!({"Authorization": format!("Bearer ${{{token}}}")});
+    }
+    Ok(server)
+}
+
+fn install_copilot(options: &AgentOptions) -> Result<(), InstallError> {
+    install_strict_json_server(
+        &copilot_config_path(),
+        "mcpServers",
+        copilot_server(options)?,
+        options.force,
+        "GitHub Copilot",
+    )?;
+    write_marked_file(
+        &copilot_cli_guidance_path(),
+        GUIDANCE_START,
+        GUIDANCE_END,
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        true,
+        None,
+        None,
+    )
+}
+
+fn uninstall_copilot() -> Result<(), InstallError> {
+    remove_marked_file(&copilot_cli_guidance_path(), GUIDANCE_START, GUIDANCE_END)?;
+    if !file_has_managed_block(&vscode_guidance_path())? {
+        remove_strict_json_server(&copilot_config_path(), "mcpServers")?;
+    }
+    Ok(())
+}
+
+fn vscode_appdata() -> PathBuf {
+    if let Some(path) = trimmed_env_path("VSCODE_APPDATA") {
+        return path;
+    }
+    #[cfg(windows)]
+    return trimmed_env_path("APPDATA").unwrap_or_else(|| home_dir().join("AppData/Roaming"));
+    #[cfg(target_os = "macos")]
+    return home_dir().join("Library/Application Support");
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    trimmed_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home_dir().join(".config"))
+}
+
+fn vscode_user_directories() -> Vec<PathBuf> {
+    if let Some(path) = trimmed_env_path("VSCODE_USER_DIR") {
+        return vec![path];
+    }
+    if let Some(path) = trimmed_env_path("VSCODE_PORTABLE") {
+        return vec![path.join("user-data/User")];
+    }
+    let appdata = vscode_appdata();
+    let channels = [("code", "Code"), ("code-insiders", "Code - Insiders")];
+    let detected = channels
+        .iter()
+        .filter_map(|(executable, product)| {
+            let path = appdata.join(product).join("User");
+            (executable_available(executable) || path.exists()).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    if detected.is_empty() {
+        vec![appdata.join("Code/User")]
+    } else {
+        detected
+    }
+}
+
+fn vscode_config_paths() -> Vec<PathBuf> {
+    vscode_user_directories()
+        .into_iter()
+        .map(|path| path.join("mcp.json"))
+        .collect()
+}
+
+fn vscode_server(options: &AgentOptions) -> Result<Value, InstallError> {
+    Ok(match options.transport {
+        McpInstallTransport::Stdio => json!({
+            "type": "stdio", "command": "zg", "args": stdio_args(options.toolset)
+        }),
+        McpInstallTransport::Http => {
+            let mut server = json!({"type": "http", "url": resolve_server_url()?});
+            if let Some(token) = &options.token_env {
+                server["headers"] = json!({"Authorization": format!("Bearer ${{env:{token}}}")});
+            }
+            server
+        }
+    })
+}
+
+fn install_vscode(options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
+    let paths = vscode_config_paths();
+    let copilot_path = copilot_config_path();
+    let guidance_path = vscode_guidance_path();
+    for path in &paths {
+        preflight_jsonc_container(
+            path,
+            options.force,
+            "VS Code",
+            is_managed_json_server,
+            "servers",
+            true,
+        )?;
+    }
+    preflight_strict_json_server(&copilot_path, "mcpServers", options.force, "GitHub Copilot")?;
+    let existing_guidance = read_if_exists(&guidance_path)?;
+    let _ = instructions_with_apply_to_all(&existing_guidance, &guidance_path)?;
+
+    let server = vscode_server(options)?;
+    let shared_server = copilot_server(options)?;
+    for path in &paths {
+        update_jsonc_container(
+            path,
+            &server,
+            options.force,
+            "VS Code",
+            is_managed_json_server,
+            "servers",
+            true,
+        )?;
+    }
+    install_strict_json_server(
+        &copilot_path,
+        "mcpServers",
+        shared_server,
+        options.force,
+        "GitHub Copilot",
+    )?;
+    let frontmatter = instructions_with_apply_to_all(&existing_guidance, &guidance_path)?;
+    if frontmatter != existing_guidance {
+        atomic_write(&guidance_path, &frontmatter)?;
+    }
+    write_marked_file(
+        &guidance_path,
+        GUIDANCE_START,
+        GUIDANCE_END,
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        true,
+        None,
+        None,
+    )?;
+    let note = (paths.len() > 1).then(|| {
+        format!(
+            "every detected VS Code profile: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    Ok(AgentInstallResult {
+        config_path: paths.first().cloned(),
+        config_note: note,
+    })
+}
+
+fn uninstall_vscode() -> Result<(), InstallError> {
+    for path in vscode_config_paths() {
+        remove_jsonc_container(&path, "VS Code", is_managed_json_server, "servers", true)?;
+    }
+    remove_vscode_guidance(&vscode_guidance_path())?;
+    if !file_has_managed_block(&copilot_cli_guidance_path())? {
+        remove_strict_json_server(&copilot_config_path(), "mcpServers")?;
+    }
+    Ok(())
+}
+
+fn instructions_with_apply_to_all(source: &str, path: &Path) -> Result<String, InstallError> {
+    if source.trim().is_empty() {
+        return Ok(VSCODE_FRONTMATTER.to_owned());
+    }
+    let lines = source.lines().collect::<Vec<_>>();
+    if lines.first().is_none_or(|line| line.trim() != "---") {
+        return Ok(format!("{VSCODE_FRONTMATTER}\n{source}"));
+    }
+    let closing = lines
+        .iter()
+        .skip(1)
+        .position(|line| line.trim() == "---")
+        .map(|index| index + 1)
+        .ok_or_else(|| {
+            InstallError::Message(format!(
+                "Invalid instructions frontmatter in {}.",
+                path.display()
+            ))
+        })?;
+    if let Some(value) = lines.iter().skip(1).take(closing - 1).find_map(|line| {
+        let (key, value) = line.trim().split_once(':')?;
+        key.trim().eq_ignore_ascii_case("applyTo").then_some(value)
+    }) {
+        let covers_all = value
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|entry| entry.trim().trim_matches(['\'', '"']))
+            .any(|entry| entry == "**" || entry == "**/*");
+        if !covers_all {
+            return Err(InstallError::Message(format!(
+                "{} scopes its instructions with applyTo:{value}. zvec-grep guidance must apply to every file; add ** to its applyTo globs or remove the file, then re-run.",
+                path.display()
+            )));
+        }
+        return Ok(source.to_owned());
+    }
+    let mut result = Vec::with_capacity(lines.len() + 1);
+    result.push(lines[0]);
+    result.push("applyTo: '**'");
+    result.extend_from_slice(&lines[1..]);
+    Ok(result.join("\n") + if source.ends_with('\n') { "\n" } else { "" })
+}
+
+fn remove_vscode_guidance(path: &Path) -> Result<(), InstallError> {
+    remove_marked_file(path, GUIDANCE_START, GUIDANCE_END)?;
+    let remaining = read_if_exists(path)?;
+    if remaining.is_empty() {
+        return Ok(());
+    }
+    let next = if let Some(rest) = remaining.strip_prefix(VSCODE_FRONTMATTER) {
+        rest.to_owned()
+    } else {
+        remaining.clone()
+    };
+    if next.trim().is_empty() {
+        fs::remove_file(path)?;
+    } else if next != remaining {
+        atomic_write(path, &next)?;
+    }
+    Ok(())
+}
+
+fn file_has_managed_block(path: &Path) -> Result<bool, InstallError> {
+    Ok(replace_marked_block(&read_if_exists(path)?, GUIDANCE_START, GUIDANCE_END, "").is_some())
+}
+
 fn qwen_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     Ok(match options.transport {
@@ -978,6 +1302,32 @@ fn install_strict_json_server(
     reject_unmanaged(container.get("zvec_grep"), force, path, label)?;
     container.insert("zvec_grep".to_owned(), server);
     write_json_object(path, &root)
+}
+
+fn preflight_strict_json_server(
+    path: &Path,
+    container_key: &str,
+    force: bool,
+    label: &str,
+) -> Result<(), InstallError> {
+    let root = read_json_object(path)?;
+    if root
+        .get(container_key)
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(InstallError::Message(format!(
+            "Expected {container_key} in {} to be a JSON object",
+            path.display()
+        )));
+    }
+    reject_unmanaged(
+        root.get(container_key)
+            .and_then(Value::as_object)
+            .and_then(|servers| servers.get("zvec_grep")),
+        force,
+        path,
+        label,
+    )
 }
 
 fn remove_strict_json_server(path: &Path, container_key: &str) -> Result<(), InstallError> {
@@ -1448,7 +1798,7 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 fn qoder_ide_path() -> PathBuf {
-    env_path_non_empty("QODER_IDE_MCP_PATH").unwrap_or_else(|| home_dir().join(".qoder/mcp.json"))
+    trimmed_env_path("QODER_IDE_MCP_PATH").unwrap_or_else(|| home_dir().join(".qoder/mcp.json"))
 }
 
 fn resolve_qwen_home() -> Result<PathBuf, InstallError> {
@@ -1688,8 +2038,19 @@ fn preflight_jsonc_server(
     label: &str,
     managed: fn(&Value) -> bool,
 ) -> Result<(), InstallError> {
+    preflight_jsonc_container(path, force, label, managed, "mcpServers", false)
+}
+
+fn preflight_jsonc_container(
+    path: &Path,
+    force: bool,
+    label: &str,
+    managed: fn(&Value) -> bool,
+    container: &str,
+    allow_trailing_comma: bool,
+) -> Result<(), InstallError> {
     let source = read_if_exists(path)?;
-    let root = parse_jsonc_object(
+    let root = parse_jsonc_object_options(
         path,
         if source.trim().is_empty() {
             "{}\n"
@@ -1697,18 +2058,16 @@ fn preflight_jsonc_server(
             &source
         },
         label,
+        allow_trailing_comma,
     )?;
-    if root
-        .get("mcpServers")
-        .is_some_and(|value| !value.is_object())
-    {
+    if root.get(container).is_some_and(|value| !value.is_object()) {
         return Err(InstallError::Message(format!(
-            "Invalid mcpServers configuration in {}.",
+            "Invalid {container} configuration in {}.",
             path.display()
         )));
     }
     let current = root
-        .get("mcpServers")
+        .get(container)
         .and_then(Value::as_object)
         .and_then(|servers| servers.get("zvec_grep"));
     if current.is_some_and(|value| !managed(value)) && !force {
@@ -1903,17 +2262,21 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
             owned.insert(permission.to_owned());
         }
     }
-    let mut always = current
-        .and_then(|server| server.get("alwaysAllow"))
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut always = if current_managed {
+        current
+            .and_then(|server| server.get("alwaysAllow"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     for tool in ["zvec_grep_search", "zvec_grep_rg"] {
         if !always.iter().any(|value| value == tool) {
             always.push(tool.to_owned());
@@ -2046,12 +2409,13 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn trailing_commas_are_only_enabled_for_opencode() {
+    fn trailing_commas_are_enabled_for_opencode_and_vscode() {
         let path = std::path::Path::new("settings.json");
         let source = "{\"mcpServers\": {},}";
         assert!(super::parse_jsonc_object(path, source, "Qwen Code").is_err());
         assert!(super::parse_jsonc_object(path, source, "Qoder").is_err());
         assert!(super::parse_jsonc_object_options(path, source, "OpenCode", true).is_ok());
+        assert!(super::parse_jsonc_object_options(path, source, "VS Code", true).is_ok());
     }
 
     use super::*;
@@ -2097,7 +2461,9 @@ mod tests {
         let output = String::from_utf8(output).expect("utf8 menu");
         assert_eq!(output.matches('●').count(), 1);
         assert_eq!(output.matches('○').count(), Agent::ALL.len() - 1);
-        assert!(output.contains("● Qwen Code    detected"));
+        assert!(output.lines().any(|line| {
+            line.contains("● Qwen Code") && line.trim_end().ends_with("detected")
+        }));
         assert_eq!(output.matches("not found").count(), Agent::ALL.len() - 1);
         assert!(output.contains("Use ↑↓ to move · Enter to select"));
     }
@@ -2107,6 +2473,38 @@ mod tests {
         let agents = agents_from_tokens(&["cc,5,2".to_owned()], &BTreeSet::new()).expect("targets");
         assert_eq!(agents, vec![Agent::Claude, Agent::Codex, Agent::Qwen]);
         assert!(agents_from_tokens(&["qoder-ide".to_owned()], &BTreeSet::new()).is_err());
+        assert_eq!(
+            agents_from_tokens(&["copilot-cli,vs-code".to_owned()], &BTreeSet::new())
+                .expect("targets"),
+            vec![Agent::Copilot, Agent::VsCode]
+        );
+    }
+
+    #[test]
+    fn windows_qoder_candidates_include_program_files_installations() {
+        let home = Path::new("home");
+        let local_app_data = PathBuf::from("local-app-data");
+        let program_files = PathBuf::from("program-files");
+        assert_eq!(
+            qoder_ide_windows_candidates(
+                home,
+                Some(local_app_data.clone()),
+                Some(program_files.clone())
+            ),
+            vec![
+                local_app_data.join("Programs/Qoder IDE/Qoder IDE.exe"),
+                local_app_data.join("Programs/Qoder/Qoder.exe"),
+                program_files.join("Qoder IDE/Qoder IDE.exe"),
+                program_files.join("Qoder/Qoder.exe"),
+            ]
+        );
+        assert_eq!(
+            qoder_ide_windows_candidates(home, None, None),
+            vec![
+                home.join("AppData/Local/Programs/Qoder IDE/Qoder IDE.exe"),
+                home.join("AppData/Local/Programs/Qoder/Qoder.exe"),
+            ]
+        );
     }
 
     #[test]

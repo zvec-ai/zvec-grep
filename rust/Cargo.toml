@@ -40,7 +40,7 @@ thiserror = "2.0.16"
 tokio = "1.47.1"
 tokio-util = "0.7.16"
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 tree-sitter = "0.27.0"
 tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23.4"

@@ -163,6 +163,79 @@ fn qoder_manages_owned_permissions_and_both_clients() {
 }
 
 #[test]
+fn qoder_trims_ide_environment_paths() {
+    let temporary = TempDir::new().expect("tempdir");
+    let home = temporary.path().join(".qoder");
+    let ide = home.join("mcp.json");
+    let executable = temporary.path().join("Qoder IDE");
+    let empty_path = temporary.path().join("empty-bin");
+    fs::create_dir_all(&empty_path).expect("mkdir");
+    fs::write(&executable, "#!/bin/sh\n").expect("executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&executable).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("permissions");
+    }
+
+    let stdout = run_ok(
+        zg().args(["--install", "--yes"])
+            .env("PATH", &empty_path)
+            .env("HOME", temporary.path())
+            .env("USERPROFILE", temporary.path())
+            .env("QODER_CONFIG_DIR", &home)
+            .env(
+                "QODER_IDE_EXECUTABLE",
+                format!("  {}  ", executable.display()),
+            )
+            .env("QODER_IDE_MCP_PATH", format!("  {}  ", ide.display())),
+    );
+
+    assert!(stdout.contains("Qoder"));
+    assert!(home.join("settings.json").is_file());
+    assert!(ide.is_file());
+}
+
+#[test]
+fn qoder_force_drops_unmanaged_always_allow_tools() {
+    let temporary = TempDir::new().expect("tempdir");
+    let home = temporary.path().join(".qoder");
+    let settings = home.join("settings.json");
+    let ide = home.join("mcp.json");
+    fs::create_dir_all(&home).expect("mkdir");
+    fs::write(
+        &settings,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "zvec_grep": {
+                    "type": "http",
+                    "url": "https://example.test/user-owned-mcp",
+                    "alwaysAllow": ["user_tool", "zvec_grep_search"]
+                }
+            },
+            "permissions": {
+                "allow": ["mcp__zvec_grep__zvec_grep_search"]
+            }
+        }))
+        .expect("serialize"),
+    )
+    .expect("settings");
+
+    run_ok(
+        zg().args(["--install", "--target", "qoder", "--yes", "--force"])
+            .env("QODER_CONFIG_DIR", &home)
+            .env("QODER_IDE_MCP_PATH", &ide),
+    );
+
+    let installed = json(&settings);
+    assert_eq!(
+        installed["mcpServers"]["zvec_grep"]["alwaysAllow"],
+        serde_json::json!(["zvec_grep_search", "zvec_grep_rg"])
+    );
+}
+
+#[test]
 fn http_token_requires_an_explicit_http_transport() {
     let output = zg()
         .args([
@@ -536,4 +609,260 @@ fn opencode_jsonc_conflicts_and_invalid_containers_do_not_modify_files() {
             assert_eq!(fs::read_to_string(&path).expect("read"), source);
         }
     }
+}
+
+fn copilot_command(action: &str, root: &Path) -> Command {
+    let mut command = zg();
+    command
+        .args([action, "--target", "copilot", "--yes"])
+        .env("COPILOT_HOME", root.join("copilot"))
+        .env("HOME", root)
+        .env("USERPROFILE", root);
+    command
+}
+
+fn vscode_command(action: &str, root: &Path) -> Command {
+    let mut command = zg();
+    command
+        .args([action, "--target", "vscode", "--yes"])
+        .env("VSCODE_USER_DIR", root.join("profile"))
+        .env("COPILOT_HOME", root.join("copilot"))
+        .env("HOME", root)
+        .env("USERPROFILE", root);
+    command
+}
+
+#[test]
+fn copilot_installs_and_removes_managed_configuration() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let home = root.join("copilot");
+    fs::create_dir_all(&home).expect("mkdir");
+    fs::write(
+        home.join("mcp-config.json"),
+        "{\"mcpServers\":{\"other\":{\"command\":\"npx\"}}}\n",
+    )
+    .expect("config");
+    fs::write(home.join("copilot-instructions.md"), "# My instructions\n").expect("guidance");
+
+    let stdout = run_ok(copilot_command("--install", root).args([
+        "--mcp-toolset",
+        "full",
+        "--mcp-tool-timeout",
+        "900",
+    ]));
+    let path = home.join("mcp-config.json");
+    assert!(stdout.contains(&format!("Config    {}", path.display())));
+    let installed = json(&path);
+    assert_eq!(installed["mcpServers"]["other"]["command"], "npx");
+    assert_eq!(
+        installed["mcpServers"]["zvec_grep"],
+        serde_json::json!({
+            "type": "local", "command": "zg",
+            "args": ["--server", "--stdio", "--mcp-toolset", "full"],
+            "tools": ["*"], "timeout": 900_000
+        })
+    );
+    let guidance = fs::read_to_string(home.join("copilot-instructions.md")).expect("guidance");
+    assert!(guidance.contains("# My instructions"));
+    assert!(guidance.contains("<!-- ZVEC_GREP_START -->"));
+
+    run_ok(copilot_command("--install", root).args([
+        "--mcp-transport",
+        "http",
+        "--mcp-token-env",
+        "TOKEN",
+        "--mcp-tool-timeout",
+        "45",
+    ]));
+    let http = json(&path);
+    assert_eq!(
+        http["mcpServers"]["zvec_grep"],
+        serde_json::json!({
+            "type": "http", "url": "http://127.0.0.1:7999/mcp",
+            "headers": {"Authorization": "Bearer ${TOKEN}"},
+            "tools": ["*"], "timeout": 45000
+        })
+    );
+    run_ok(&mut copilot_command("--uninstall", root));
+    assert!(json(&path)["mcpServers"].get("zvec_grep").is_none());
+    assert!(
+        fs::read_to_string(home.join("copilot-instructions.md"))
+            .expect("guidance")
+            .contains("# My instructions")
+    );
+}
+
+#[test]
+fn vscode_preserves_jsonc_and_shared_guidance_lifecycle() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let profile = root.join("profile");
+    let copilot = root.join("copilot");
+    fs::create_dir_all(&profile).expect("mkdir");
+    fs::create_dir_all(copilot.join("instructions")).expect("mkdir");
+    let config = profile.join("mcp.json");
+    let guidance = copilot.join("instructions/zvec-grep.instructions.md");
+    fs::write(&config, "{\n  // Keep server\n  \"servers\": {\"other\": {\"command\": \"npx\"},},\n  \"inputs\": [],\n}\n").expect("config");
+    fs::write(&guidance, "My notes.\n").expect("guidance");
+
+    run_ok(&mut vscode_command("--install", root));
+    let installed = fs::read_to_string(&config).expect("config");
+    assert!(installed.contains("// Keep server"));
+    assert!(installed.contains("\"zvec_grep\""));
+    assert!(installed.contains("\"type\": \"stdio\""));
+    assert_eq!(
+        json(&copilot.join("mcp-config.json"))["mcpServers"]["zvec_grep"]["timeout"],
+        600_000
+    );
+    let instructions = fs::read_to_string(&guidance).expect("guidance");
+    assert!(instructions.starts_with("---\napplyTo: '**'\n---\n"));
+    assert!(instructions.contains("My notes."));
+    run_ok(&mut vscode_command("--install", root));
+    assert_eq!(fs::read_to_string(&config).expect("config"), installed);
+    assert_eq!(
+        fs::read_to_string(&guidance).expect("guidance"),
+        instructions
+    );
+
+    run_ok(&mut vscode_command("--uninstall", root));
+    let removed = fs::read_to_string(&config).expect("config");
+    assert!(removed.contains("// Keep server"));
+    assert!(!removed.contains("\"zvec_grep\""));
+    assert_eq!(
+        fs::read_to_string(&guidance).expect("guidance"),
+        "\nMy notes.\n"
+    );
+    assert!(
+        json(&copilot.join("mcp-config.json"))
+            .get("mcpServers")
+            .is_none()
+    );
+}
+
+#[test]
+fn vscode_preflights_conflicts_and_keeps_copilot_entry_until_both_targets_leave() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let profile = root.join("profile");
+    let copilot = root.join("copilot");
+    fs::create_dir_all(&profile).expect("mkdir");
+    let config = profile.join("mcp.json");
+    let unmanaged = "{\"servers\":{\"zvec_grep\":{\"command\":\"other\"}}}\n";
+    fs::write(&config, unmanaged).expect("config");
+    let output = vscode_command("--install", root).output().expect("run");
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&config).expect("config"), unmanaged);
+    assert!(!copilot.join("mcp-config.json").exists());
+
+    run_ok(vscode_command("--install", root).arg("--force"));
+    run_ok(&mut copilot_command("--install", root));
+    run_ok(&mut copilot_command("--uninstall", root));
+    assert!(
+        json(&copilot.join("mcp-config.json"))["mcpServers"]
+            .get("zvec_grep")
+            .is_some()
+    );
+    run_ok(&mut vscode_command("--uninstall", root));
+    assert!(
+        json(&copilot.join("mcp-config.json"))
+            .get("mcpServers")
+            .is_none()
+    );
+}
+
+#[test]
+fn vscode_configures_all_existing_profiles_and_preflights_guidance() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let appdata = root.join("appdata");
+    let stable = appdata.join("Code/User");
+    let insiders = appdata.join("Code - Insiders/User");
+    let copilot = root.join("copilot");
+    let guidance = copilot.join("instructions/zvec-grep.instructions.md");
+    fs::create_dir_all(&stable).expect("mkdir");
+    fs::create_dir_all(&insiders).expect("mkdir");
+    fs::create_dir_all(guidance.parent().expect("parent")).expect("mkdir");
+    fs::write(&guidance, "---\napplyTo: 'src/**'\n---\nMy notes.\n").expect("guidance");
+    let mut install = zg();
+    install
+        .args(["--install", "--target", "vscode", "--yes"])
+        .env_remove("VSCODE_USER_DIR")
+        .env_remove("VSCODE_PORTABLE")
+        .env("VSCODE_APPDATA", &appdata)
+        .env("COPILOT_HOME", &copilot)
+        .env("HOME", root)
+        .env("USERPROFILE", root);
+    let output = install.output().expect("run");
+    assert!(!output.status.success());
+    assert!(!stable.join("mcp.json").exists());
+    assert!(!insiders.join("mcp.json").exists());
+    assert!(!copilot.join("mcp-config.json").exists());
+
+    fs::write(&guidance, "My notes.\n").expect("guidance");
+    run_ok(&mut install);
+    for profile in [&stable, &insiders] {
+        assert!(
+            jsonc(&fs::read_to_string(profile.join("mcp.json")).expect("config"))["servers"]
+                .get("zvec_grep")
+                .is_some()
+        );
+    }
+    let mut uninstall = zg();
+    uninstall
+        .args(["--uninstall", "--target", "vscode", "--yes"])
+        .env_remove("VSCODE_USER_DIR")
+        .env_remove("VSCODE_PORTABLE")
+        .env("VSCODE_APPDATA", &appdata)
+        .env("COPILOT_HOME", &copilot)
+        .env("HOME", root)
+        .env("USERPROFILE", root);
+    run_ok(&mut uninstall);
+    for profile in [&stable, &insiders] {
+        assert!(
+            jsonc(&fs::read_to_string(profile.join("mcp.json")).expect("config"))["servers"]
+                .get("zvec_grep")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn vscode_portable_http_uses_supported_schema_and_env_token() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let mut install = zg();
+    install
+        .args([
+            "--install",
+            "--target",
+            "vscode",
+            "--mcp-transport",
+            "http",
+            "--mcp-token-env",
+            "TOKEN",
+            "--mcp-tool-timeout",
+            "900",
+            "--yes",
+        ])
+        .env_remove("VSCODE_USER_DIR")
+        .env("VSCODE_PORTABLE", root)
+        .env("COPILOT_HOME", root.join("copilot"))
+        .env("HOME", root)
+        .env("USERPROFILE", root);
+    run_ok(&mut install);
+    let profile = json(&root.join("user-data/User/mcp.json"));
+    assert_eq!(
+        profile["servers"]["zvec_grep"],
+        serde_json::json!({
+            "type": "http", "url": "http://127.0.0.1:7999/mcp",
+            "headers": {"Authorization": "Bearer ${env:TOKEN}"}
+        })
+    );
+    let copilot = json(&root.join("copilot/mcp-config.json"));
+    assert_eq!(copilot["mcpServers"]["zvec_grep"]["timeout"], 900_000);
+    assert_eq!(
+        copilot["mcpServers"]["zvec_grep"]["headers"]["Authorization"],
+        "Bearer ${TOKEN}"
+    );
 }

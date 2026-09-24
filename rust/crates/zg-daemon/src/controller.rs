@@ -280,10 +280,11 @@ async fn start_server_with_lock(
     assert_address_available(&config.listen).await?;
     let daemon_dir = daemon_dir(&config.home);
     create_private_dir(&daemon_dir)?;
-    let log_path = daemon_dir.join("server.log");
+    let log_path = daemon_dir.join("bootstrap.log");
     let stdout = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)?;
     set_private_file(&stdout)?;
     let stderr = stdout.try_clone()?;

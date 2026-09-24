@@ -40,7 +40,7 @@ fn read_at(path: &Path) -> Result<Value, EngineError> {
             "Unsupported global config version",
         ));
     }
-    for key in ["defaults", "providers", "models", "client", "server"] {
+    for key in ["defaults", "providers", "models", "client", "server", "log"] {
         if value.get(key).is_some_and(|value| !value.is_object()) {
             return Err(EngineError::invalid_argument(format!(
                 "Invalid global config field: {key}"
@@ -58,7 +58,47 @@ fn read_at(path: &Path) -> Result<Value, EngineError> {
             }
         }
     }
+    if let Some(log) = value.get("log").and_then(Value::as_object) {
+        for (key, value) in log {
+            let valid = match key.as_str() {
+                "maxBytes" => value
+                    .as_u64()
+                    .is_some_and(|size| size > 0 && size <= 9_007_199_254_740_991),
+                "keep" => value
+                    .as_u64()
+                    .is_some_and(|count| count <= 9_007_199_254_740_991),
+                "level" => matches!(value.as_str(), Some("info" | "debug")),
+                _ => false,
+            };
+            if !valid {
+                return Err(EngineError::invalid_argument(format!(
+                    "Invalid global config field: log.{key}"
+                )));
+            }
+        }
+    }
     Ok(value)
+}
+
+/// Size-based daemon log limits shared with the TypeScript server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DaemonLogOptions {
+    pub max_bytes: u64,
+    pub keep: u64,
+    pub debug: bool,
+}
+
+/// Reads the daemon logging settings from the per-user global configuration.
+/// # Errors
+/// Returns configuration I/O and validation errors.
+pub fn daemon_log_options() -> Result<DaemonLogOptions, EngineError> {
+    let config = read()?;
+    let log = &config["log"];
+    Ok(DaemonLogOptions {
+        max_bytes: log["maxBytes"].as_u64().unwrap_or(10 * 1024 * 1024),
+        keep: log["keep"].as_u64().unwrap_or(5),
+        debug: log["level"] == "debug",
+    })
 }
 
 pub(crate) fn string(value: &Value, path: &[&str]) -> Option<String> {
@@ -269,6 +309,32 @@ mod tests {
         )
         .expect("configuration");
         read_at(&path).expect("single model defaults");
+    }
+
+    #[test]
+    fn daemon_log_settings_match_the_global_config_contract() {
+        let directory = tempfile::tempdir().expect("config directory");
+        let path = directory.path().join("config.json");
+        for log in [
+            json!({"maxBytes": 0}),
+            json!({"keep": -1}),
+            json!({"keep": 9_007_199_254_740_992_u64}),
+            json!({"level": "trace"}),
+            json!({"unknown": true}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({"version": 1, "log": log})).expect("json"),
+            )
+            .expect("configuration");
+            assert!(read_at(&path).is_err());
+        }
+        fs::write(
+            &path,
+            br#"{"version":1,"log":{"maxBytes":1024,"keep":0,"level":"debug"}}"#,
+        )
+        .expect("configuration");
+        assert!(read_at(&path).is_ok());
     }
 
     #[test]
