@@ -1,6 +1,11 @@
 use std::borrow::Cow;
 
+use encoding_rs::Encoding;
+
 use crate::domain::FileFormat;
+
+/// How much of a file is searched for an in-band encoding declaration.
+const DECLARATION_WINDOW: usize = 1024;
 
 /// Decodes a known text format for indexing. Format sniffing remains strict.
 pub(crate) fn decode_index_text<'a>(
@@ -10,15 +15,79 @@ pub(crate) fn decode_index_text<'a>(
     if has_bom(bytes) {
         return decode_text(bytes, true);
     }
-    if formats.contains(&FileFormat::Python) && python_declares_latin_one(bytes) {
-        return Some(Cow::Owned(
-            bytes.iter().map(|byte| char::from(*byte)).collect(),
-        ));
+    let declared = declared_encoding(formats, bytes);
+    // Python honours its cookie even when the bytes happen to be valid UTF-8.
+    if formats.contains(&FileFormat::Python) && declared == Some(Declared::Latin1) {
+        return Some(Cow::Owned(decode_latin_one(bytes)));
     }
     if let Some(text) = decode_text(bytes, true) {
         return Some(text);
     }
-    (!looks_binary(bytes)).then(|| String::from_utf8_lossy(bytes))
+    if looks_binary(bytes) {
+        return None;
+    }
+    Some(match declared {
+        Some(Declared::Latin1) => Cow::Owned(decode_latin_one(bytes)),
+        Some(Declared::Other(encoding)) => encoding.decode_without_bom_handling(bytes).0,
+        None => String::from_utf8_lossy(bytes),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Declared {
+    /// True ISO-8859-1, where every byte maps to the code point of the same value.
+    Latin1,
+    Other(&'static Encoding),
+}
+
+fn declared_encoding(formats: &[FileFormat], bytes: &[u8]) -> Option<Declared> {
+    let head = &bytes[..bytes.len().min(DECLARATION_WINDOW)];
+    let has = |format| formats.contains(&format);
+    // HTML and CSS follow the Encoding Standard, which reads latin1 as windows-1252.
+    if has(FileFormat::Html) {
+        return html_meta_charset(head).and_then(web_label);
+    }
+    if has(FileFormat::Css) || has(FileFormat::Less) || has(FileFormat::Sass) {
+        return css_charset(head).and_then(web_label);
+    }
+    let label = if has(FileFormat::Xml) || has(FileFormat::Svg) {
+        xml_declared_encoding(head)
+    } else if has(FileFormat::Python) {
+        coding_comment(head, starts_with_hash, |first| {
+            let first = first.trim_ascii_start();
+            first.is_empty() || first[0] == b'#'
+        })
+    } else if has(FileFormat::Ruby) {
+        coding_comment(head, starts_with_hash, is_shebang)
+    } else {
+        coding_comment(head, |line| find(line, b"-*-").is_some(), is_shebang)
+            .map(strip_emacs_eol_suffix)
+    };
+    label.and_then(legacy_label)
+}
+
+/// Resolves a label the way browsers do.
+fn web_label(label: &[u8]) -> Option<Declared> {
+    Encoding::for_label(label)
+        .filter(|encoding| encoding.is_ascii_compatible())
+        .map(Declared::Other)
+}
+
+/// Resolves a label from a format whose latin1 means true ISO-8859-1.
+fn legacy_label(label: &[u8]) -> Option<Declared> {
+    if is_latin_one_alias(label) {
+        return Some(Declared::Latin1);
+    }
+    // Python and Ruby spell names like euc_jp with underscores.
+    let dashed: Vec<u8> = label
+        .iter()
+        .map(|byte| if *byte == b'_' { b'-' } else { *byte })
+        .collect();
+    web_label(label).or_else(|| web_label(&dashed))
+}
+
+fn decode_latin_one(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| char::from(*byte)).collect()
 }
 
 fn has_bom(bytes: &[u8]) -> bool {
@@ -34,44 +103,138 @@ fn looks_binary(bytes: &[u8]) -> bool {
         .any(|byte| matches!(*byte, 0 | 1..=8 | 11 | 14..=31))
 }
 
-fn python_declares_latin_one(bytes: &[u8]) -> bool {
-    let mut lines = bytes.split(|byte| *byte == b'\n');
-    let first = lines.next().unwrap_or_default();
-    if let Some(label) = python_encoding_cookie(first) {
-        return is_latin_one_alias(label);
-    }
+fn starts_with_hash(line: &[u8]) -> bool {
+    line.trim_ascii_start().starts_with(b"#")
+}
 
-    // Python only checks line two if line one contains no code.
-    let remainder = first.trim_ascii_start();
-    if !remainder.is_empty() && !matches!(remainder[0], b'#' | b'\r') {
-        return false;
+fn is_shebang(line: &[u8]) -> bool {
+    line.starts_with(b"#!")
+}
+
+/// Reads a `coding[:=] label` comment from line one, or from line two when
+/// `line_two_allowed` accepts line one.
+fn coding_comment(
+    head: &[u8],
+    is_declaration_line: fn(&[u8]) -> bool,
+    line_two_allowed: fn(&[u8]) -> bool,
+) -> Option<&[u8]> {
+    let mut lines = head.split(|byte| *byte == b'\n');
+    let first = lines.next().unwrap_or_default();
+    if is_declaration_line(first)
+        && let Some(label) = coding_label(first)
+    {
+        return Some(label);
+    }
+    if !line_two_allowed(first) {
+        return None;
     }
     lines
         .next()
-        .and_then(python_encoding_cookie)
-        .is_some_and(is_latin_one_alias)
+        .filter(|line| is_declaration_line(line))
+        .and_then(coding_label)
 }
 
-fn python_encoding_cookie(line: &[u8]) -> Option<&[u8]> {
-    let comment = line.trim_ascii_start().strip_prefix(b"#")?;
-    for (start, _) in comment.windows(6).enumerate() {
-        if &comment[start..start + 6] != b"coding" {
+fn coding_label(line: &[u8]) -> Option<&[u8]> {
+    let mut rest = line;
+    while let Some(start) = find(rest, b"coding") {
+        rest = &rest[start + 6..];
+        let Some(after) = rest.strip_prefix(b":").or_else(|| rest.strip_prefix(b"=")) else {
             continue;
-        }
-        let rest = comment[start + 6..]
-            .strip_prefix(b":")
-            .or_else(|| comment[start + 6..].strip_prefix(b"="));
-        let Some(rest) = rest else { continue };
-        let label = rest.trim_ascii_start();
-        let end = label
-            .iter()
-            .position(|byte| !byte.is_ascii_alphanumeric() && !matches!(*byte, b'-' | b'_' | b'.'))
-            .unwrap_or(label.len());
-        if end > 0 {
-            return Some(&label[..end]);
+        };
+        let label = take_label(after.trim_ascii_start());
+        if !label.is_empty() {
+            return Some(label);
         }
     }
     None
+}
+
+/// Emacs appends the end-of-line convention, as in `latin-1-unix`.
+fn strip_emacs_eol_suffix(label: &[u8]) -> &[u8] {
+    [b"-unix".as_slice(), b"-dos", b"-mac"]
+        .iter()
+        .find_map(|suffix| {
+            label
+                .len()
+                .checked_sub(suffix.len())
+                .filter(|split| label[*split..].eq_ignore_ascii_case(suffix))
+                .map(|split| &label[..split])
+        })
+        .unwrap_or(label)
+}
+
+/// Reads `encoding="..."` from an XML declaration, which must open the file.
+fn xml_declared_encoding(head: &[u8]) -> Option<&[u8]> {
+    let declaration = head.strip_prefix(b"<?xml")?;
+    let declaration = &declaration[..find(declaration, b"?>")?];
+    let rest = &declaration[find(declaration, b"encoding")? + 8..];
+    let rest = rest
+        .trim_ascii_start()
+        .strip_prefix(b"=")?
+        .trim_ascii_start();
+    let quote = *rest
+        .first()
+        .filter(|quote| matches!(**quote, b'"' | b'\''))?;
+    let value = &rest[1..];
+    Some(&value[..value.iter().position(|byte| *byte == quote)?])
+}
+
+/// Reads `charset` from the first `<meta>` tag that declares one. This covers
+/// both `<meta charset=...>` and `http-equiv` content, not the full HTML prescan.
+fn html_meta_charset(head: &[u8]) -> Option<&[u8]> {
+    let mut rest = head;
+    while let Some(start) = find_ignore_case(rest, b"<meta") {
+        rest = &rest[start + 5..];
+        let tag = &rest[..rest
+            .iter()
+            .position(|byte| *byte == b'>')
+            .unwrap_or(rest.len())];
+        if let Some(position) = find_ignore_case(tag, b"charset") {
+            let value = tag[position + 7..].trim_ascii_start();
+            let Some(value) = value.strip_prefix(b"=") else {
+                continue;
+            };
+            let value = value.trim_ascii_start();
+            let value = value
+                .strip_prefix(b"\"")
+                .or_else(|| value.strip_prefix(b"'"))
+                .unwrap_or(value);
+            let label = take_label(value);
+            if !label.is_empty() {
+                return Some(label);
+            }
+        }
+    }
+    None
+}
+
+/// Reads the `@charset "...";` rule, which CSS only honours byte-for-byte at the start.
+fn css_charset(head: &[u8]) -> Option<&[u8]> {
+    let value = head.strip_prefix(b"@charset \"")?;
+    let end = value.iter().position(|byte| *byte == b'"')?;
+    value[end + 1..].starts_with(b";").then(|| &value[..end])
+}
+
+fn take_label(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|byte| {
+            !byte.is_ascii_alphanumeric() && !matches!(*byte, b'-' | b'_' | b'.' | b':')
+        })
+        .unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_ignore_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn is_latin_one_alias(label: &[u8]) -> bool {
@@ -79,6 +242,7 @@ fn is_latin_one_alias(label: &[u8]) -> bool {
         b"latin1".as_slice(),
         b"latin-1".as_slice(),
         b"latin_1".as_slice(),
+        b"iso-latin-1".as_slice(),
         b"iso-8859-1".as_slice(),
         b"iso_8859_1".as_slice(),
         b"iso8859-1".as_slice(),
@@ -223,5 +387,76 @@ mod tests {
             packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
         }
         assert!(decode_index_text(&[FileFormat::TypeScript], &transport).is_none());
+    }
+
+    #[test]
+    fn xml_declaration_keeps_true_latin_one() {
+        // 0x80 is a C1 control in ISO-8859-1 but the euro sign in windows-1252.
+        let bytes = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<a>Caf\xe9 \x80</a>\n";
+        let text = decode_index_text(&[FileFormat::Xml], bytes).expect("Latin-1 XML");
+        assert!(text.contains("Caf\u{e9} \u{80}"));
+
+        let svg =
+            b"<?xml version='1.0' encoding='Shift_JIS'?><svg><text>\x93\xfa\x96\x7b</text></svg>";
+        let text = decode_index_text(&[FileFormat::Svg], svg).expect("Shift_JIS SVG");
+        assert!(text.contains("日本"));
+    }
+
+    #[test]
+    fn html_meta_charset_follows_the_encoding_standard() {
+        let bytes = b"<html><head><meta charset=\"iso-8859-1\"></head><p>Caf\xe9 \x80</p>";
+        let text = decode_index_text(&[FileFormat::Html], bytes).expect("windows-1252 HTML");
+        assert!(text.contains("Café €"));
+
+        let bytes = b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=gbk\">\xd6\xd0\xce\xc4";
+        let text = decode_index_text(&[FileFormat::Html], bytes).expect("GBK HTML");
+        assert!(text.contains("中文"));
+    }
+
+    #[test]
+    fn css_charset_rule_must_open_the_file() {
+        let bytes = b"@charset \"windows-1252\";\n/* \xe9viter */\n";
+        let text = decode_index_text(&[FileFormat::Css], bytes).expect("windows-1252 CSS");
+        assert!(text.contains("éviter"));
+
+        let late = b"\n@charset \"windows-1252\";\n/* \xe9viter */\n";
+        let text = decode_index_text(&[FileFormat::Css], late).expect("ignored @charset");
+        assert!(text.contains("\u{fffd}viter"));
+    }
+
+    #[test]
+    fn ruby_and_emacs_coding_comments_are_honoured() {
+        let ruby = b"#!/usr/bin/env ruby\n# -*- encoding: euc_jp -*-\nputs '\xc6\xfc\xcb\xdc'\n";
+        let text = decode_index_text(&[FileFormat::Ruby], ruby).expect("EUC-JP Ruby");
+        assert!(text.contains("日本"));
+
+        let c = b"/* -*- mode: c; coding: latin-1-unix -*- */\nchar *s = \"Caf\xe9 \x80\";\n";
+        let text = decode_index_text(&[FileFormat::C], c).expect("Latin-1 C");
+        assert!(text.contains("Caf\u{e9} \u{80}"));
+    }
+
+    #[test]
+    fn python_cookie_decodes_other_declared_encodings() {
+        let bytes = b"# -*- coding: cp1252 -*-\nname = 'Caf\xe9 \x80'\n";
+        let text = decode_index_text(&[FileFormat::Python], bytes).expect("cp1252 Python");
+        assert!(text.contains("Café €"));
+    }
+
+    #[test]
+    fn declarations_do_not_override_valid_utf_eight() {
+        let bytes = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a>Café</a>";
+        let text = decode_index_text(&[FileFormat::Xml], bytes.as_bytes()).expect("UTF-8 XML");
+        assert_eq!(text, bytes);
+    }
+
+    #[test]
+    fn unknown_or_ascii_incompatible_declarations_fall_back_to_replacement() {
+        for bytes in [
+            b"<?xml version=\"1.0\" encoding=\"no-such-charset\"?><a>Caf\xe9</a>".as_slice(),
+            b"<?xml version=\"1.0\" encoding=\"UTF-16\"?><a>Caf\xe9</a>",
+        ] {
+            let text = decode_index_text(&[FileFormat::Xml], bytes).expect("replacement");
+            assert!(text.contains("Caf\u{fffd}"));
+        }
     }
 }
