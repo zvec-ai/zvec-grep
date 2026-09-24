@@ -299,6 +299,38 @@ test("indexed rg-style globs match nested basenames and honor later overrides", 
   );
 });
 
+test("indexed path filtering yields during large searches and rejects excessive rule counts", async () => {
+  const fixture = createFixture();
+  const files = Array.from({ length: 5000 }, (_, index) =>
+    file(`file-${index}`, `src/module-${index}.ts`),
+  );
+  fixture.context.storage.listFiles = () => files;
+  let eventLoopRan = false;
+  const immediate = setImmediate(() => {
+    eventLoopRan = true;
+  });
+  try {
+    const result = await searchWorkspaceIndex(
+      { routes: [{ mode: "fts", query: "symbol" }], globs: ["*.missing"] },
+      fixture.context,
+    );
+    assert.equal(result.hits.length, 0);
+    assert.equal(eventLoopRan, true);
+  } finally {
+    clearImmediate(immediate);
+  }
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "symbol" }],
+        globs: Array(10001).fill("*.ts"),
+      },
+      fixture.context,
+    ),
+    /rule limit/,
+  );
+});
+
 test("entity and file diagnosis handle missing targets and fallback entity selection", async () => {
   const fixture = createFixture();
   await assert.rejects(

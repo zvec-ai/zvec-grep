@@ -1,11 +1,12 @@
+import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import {
-  lstat,
-  open,
-  readFile,
-  readdir,
-  realpath,
-  stat,
-} from "node:fs/promises";
+  chargeGlobWork,
+  checkGlobRuleCount,
+  globWorkNeedsYield,
+  withGlobBudget,
+} from "../../../utils/glob-budget.js";
+import { compileGlob } from "../../../utils/glob-matcher.js";
 import {
   basename,
   dirname,
@@ -30,6 +31,7 @@ import {
   type FileTypePatterns,
 } from "../../../utils/file-selection.js";
 import {
+  hasPathGlob,
   normalizePathPattern,
   pathPatternMatches,
   pathPatternMightMatchDescendant,
@@ -45,6 +47,9 @@ import {
 const BINARY_SNIFF_BYTES = 8192;
 const BINARY_CONTROL_CHAR_RATIO = 0.3;
 const MAX_GITIGNORE_CACHE_ENTRIES = 4_096;
+const MAX_IGNORE_FILE_BYTES = 1_048_576;
+const MAX_GITIGNORE_CACHE_CHARS = 8_388_608;
+let gitIgnoreCacheChars = 0;
 
 const DEFAULT_IGNORED_DIRECTORY_NAMES = [
   "node_modules",
@@ -179,6 +184,16 @@ export async function scanRootPaths(
   rootPaths: readonly RootPath[],
   options: ScanOptions = {},
 ): Promise<ScanResult> {
+  return withGlobBudget(() =>
+    scanRootPathsImpl(workspaceIndexId, rootPaths, options),
+  );
+}
+
+async function scanRootPathsImpl(
+  workspaceIndexId: string,
+  rootPaths: readonly RootPath[],
+  options: ScanOptions = {},
+): Promise<ScanResult> {
   const validatedRootPaths = validateRootPaths(rootPaths);
   const files: FileInfo[] = [];
   const diagnostics = createScanDiagnostics();
@@ -200,6 +215,17 @@ export async function scanRootPaths(
 }
 
 export async function scanFilePath(
+  workspaceIndexId: string,
+  rootPaths: readonly RootPath[],
+  absolutePath: string,
+  options: ScanOptions = {},
+): Promise<ScanResult> {
+  return withGlobBudget(() =>
+    scanFilePathImpl(workspaceIndexId, rootPaths, absolutePath, options),
+  );
+}
+
+async function scanFilePathImpl(
   workspaceIndexId: string,
   rootPaths: readonly RootPath[],
   absolutePath: string,
@@ -262,6 +288,16 @@ export async function pathCanAffectIndex(
   absolutePath: string,
   isDirectory: boolean,
 ): Promise<boolean> {
+  return withGlobBudget(() =>
+    pathCanAffectIndexImpl(rootPaths, absolutePath, isDirectory),
+  );
+}
+
+async function pathCanAffectIndexImpl(
+  rootPaths: readonly RootPath[],
+  absolutePath: string,
+  isDirectory: boolean,
+): Promise<boolean> {
   for (const configuredRoot of rootPaths) {
     const root = normalizeRootPath(configuredRoot);
     const pathFromRoot = relative(root.absolutePath, absolutePath);
@@ -316,6 +352,17 @@ export async function pathCanAffectIndex(
 }
 
 export async function scanDirectoryPath(
+  workspaceIndexId: string,
+  rootPaths: readonly RootPath[],
+  absolutePath: string,
+  options: ScanOptions = {},
+): Promise<ScanResult> {
+  return withGlobBudget(() =>
+    scanDirectoryPathImpl(workspaceIndexId, rootPaths, absolutePath, options),
+  );
+}
+
+async function scanDirectoryPathImpl(
   workspaceIndexId: string,
   rootPaths: readonly RootPath[],
   absolutePath: string,
@@ -581,6 +628,7 @@ async function walk(
       ? []
       : await readGitIgnoreRules(rootPath, currentPath)),
   ];
+  checkGlobRuleCount(ignoreRules.length);
 
   try {
     entries = await readdir(currentPath, { withFileTypes: true });
@@ -588,7 +636,10 @@ async function walk(
     return;
   }
 
+  let entriesProcessed = 0;
   for (const entry of entries) {
+    if (++entriesProcessed % 128 === 0 || globWorkNeedsYield())
+      await yieldToEventLoop();
     throwIfAborted(signal);
     const absolutePath = join(currentPath, entry.name);
     const relativePath = toDisplayPath(
@@ -718,10 +769,12 @@ async function readGitIgnoreRules(
   currentPath: string,
 ): Promise<IgnoreRule[]> {
   const ignorePath = join(currentPath, ".gitignore");
-  const content = await readFile(ignorePath, "utf8").catch(() => null);
+  const content = await readIgnoreFile(ignorePath, true);
   const basePath = toDisplayPath(relative(rootPath.absolutePath, currentPath));
   const cacheKey = `${ignorePath}\0${basePath}`;
   if (content === null) {
+    gitIgnoreCacheChars -=
+      gitIgnoreRuleCache.get(cacheKey)?.content.length ?? 0;
     gitIgnoreRuleCache.delete(cacheKey);
     return [];
   }
@@ -730,10 +783,17 @@ async function readGitIgnoreRules(
   if (cached?.content === content) {
     return cached.rules;
   }
-  const rules = parseGitIgnoreRules(content, basePath);
+  const rules = parseGitIgnoreRules(content, basePath, ignorePath);
+  gitIgnoreCacheChars -= cached?.content.length ?? 0;
+  gitIgnoreCacheChars += content.length;
   gitIgnoreRuleCache.set(cacheKey, { content, rules });
-  if (gitIgnoreRuleCache.size > MAX_GITIGNORE_CACHE_ENTRIES) {
-    gitIgnoreRuleCache.delete(gitIgnoreRuleCache.keys().next().value!);
+  while (
+    gitIgnoreRuleCache.size > MAX_GITIGNORE_CACHE_ENTRIES ||
+    gitIgnoreCacheChars > MAX_GITIGNORE_CACHE_CHARS
+  ) {
+    const oldest = gitIgnoreRuleCache.keys().next().value!;
+    gitIgnoreCacheChars -= gitIgnoreRuleCache.get(oldest)!.content.length;
+    gitIgnoreRuleCache.delete(oldest);
   }
   return rules;
 }
@@ -742,23 +802,67 @@ async function readConfiguredIgnoreRules(
   rootPath: RootPath,
 ): Promise<IgnoreRule[]> {
   const rules: IgnoreRule[] = [];
+  checkGlobRuleCount(rootPath.ignoreFiles?.length ?? 0);
   for (const path of rootPath.ignoreFiles ?? []) {
     const absolutePath = isAbsolute(path)
       ? path
       : resolve(rootPath.absolutePath, path);
-    const content = await readFile(absolutePath, "utf8");
-    rules.push(...parseGitIgnoreRules(content, ""));
+    const content = await readIgnoreFile(absolutePath, false);
+    rules.push(...parseGitIgnoreRules(content!, "", absolutePath));
+    checkGlobRuleCount(rules.length);
   }
   return rules;
 }
 
-function parseGitIgnoreRules(content: string, basePath: string): IgnoreRule[] {
+async function readIgnoreFile(
+  path: string,
+  optional: boolean,
+): Promise<string | null> {
+  const handle = await open(path, "r").catch((error: unknown) => {
+    if (optional && (error as NodeJS.ErrnoException).code === "ENOENT")
+      return null;
+    throw error;
+  });
+  if (!handle) return null;
+  try {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for (;;) {
+      const buffer = Buffer.alloc(
+        Math.min(65_536, MAX_IGNORE_FILE_BYTES + 1 - size),
+      );
+      const { bytesRead } = await handle.read(buffer);
+      if (bytesRead === 0) return Buffer.concat(chunks).toString("utf8");
+      size += bytesRead;
+      chargeGlobWork(bytesRead);
+      if (size > MAX_IGNORE_FILE_BYTES)
+        throw new Error(
+          `Ignore file exceeds the ${MAX_IGNORE_FILE_BYTES}-byte limit: ${path}`,
+        );
+      chunks.push(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseGitIgnoreRules(
+  content: string,
+  basePath: string,
+  source: string,
+): IgnoreRule[] {
   const rules: IgnoreRule[] = [];
 
-  for (const rawLine of content.split(/\r?\n/)) {
-    const rule = parseGitIgnoreRule(rawLine, basePath);
-    if (rule) {
-      rules.push(rule);
+  for (const [line, rawLine] of content.split(/\r?\n/).entries()) {
+    try {
+      const rule = parseGitIgnoreRule(rawLine, basePath);
+      if (rule) rules.push(rule);
+      checkGlobRuleCount(rules.length);
+    } catch (error) {
+      throw new Error(
+        `Invalid ignore rule at ${source}:${line + 1}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   }
 
@@ -793,6 +897,9 @@ function parseGitIgnoreRule(line: string, basePath: string): IgnoreRule | null {
     return null;
   }
 
+  // Validate before scanning any files, preserving the source/line in errors.
+  if (hasPathGlob(pattern)) compileGlob(pattern, false);
+
   return {
     basePath,
     pattern,
@@ -808,6 +915,7 @@ function matchIgnoreRules(
   isDirectory: boolean,
   rules: readonly IgnoreRule[],
 ): IgnoreMatch {
+  checkGlobRuleCount(rules.length);
   let ignored = false;
   let matchedNegation = false;
   let matchedRule: IgnoreRule | undefined;
