@@ -423,12 +423,14 @@ fn parse_loopback_origin(value: &str) -> Option<LoopbackOrigin> {
     } else {
         return None;
     };
-    let port = authority
-        .port()
-        .map(|port| port.as_str().parse::<u16>())
-        .transpose()
-        .ok()?
-        .unwrap_or(80);
+    let has_explicit_port = authority_text
+        .rfind(':')
+        .is_some_and(|colon| !authority_text[colon..].starts_with("::"));
+    let port = match authority.port() {
+        Some(port) => port.as_str().parse::<u16>().ok()?,
+        None if has_explicit_port => return None,
+        None => 80,
+    };
     Some(LoopbackOrigin { host, port })
 }
 
@@ -471,16 +473,20 @@ mod tests {
 
     #[test]
     fn shutdown_accepts_native_and_exact_origin_requests() {
-        for (host, origins) in [
-            ("127.0.0.1:7999", Vec::new()),
-            ("127.0.0.1:7999", vec!["http://127.0.0.1:7999"]),
-            ("[::1]:7999", vec!["http://[::1]:7999"]),
-            ("LOCALHOST:7999", vec!["HTTP://LOCALHOST:7999"]),
+        for (host, origins, port) in [
+            ("127.0.0.1:7999", Vec::new(), 7999),
+            ("127.0.0.1:7999", vec!["http://127.0.0.1:7999"], 7999),
+            ("[::1]:7999", vec!["http://[::1]:7999"], 7999),
+            ("LOCALHOST:7999", vec!["HTTP://LOCALHOST:7999"], 7999),
+            ("localhost:80", Vec::new(), 80),
+            ("localhost:80", vec!["http://localhost:80"], 80),
+            ("localhost", Vec::new(), 80),
+            ("localhost", vec!["http://localhost"], 80),
         ] {
             let shutdown = CancellationToken::new();
             let headers = headers(host, &origins);
 
-            let (status, _) = shutdown_response(&shutdown, 7999, &headers);
+            let (status, _) = shutdown_response(&shutdown, port, &headers);
 
             assert_eq!(status, StatusCode::ACCEPTED, "host={host}");
             assert!(shutdown.is_cancelled(), "host={host}");
@@ -489,25 +495,31 @@ mod tests {
 
     #[test]
     fn shutdown_rejects_mismatched_and_malformed_authorities() {
-        for (host, origin) in [
-            ("localhost:8000", None),
-            ("localhost", None),
-            ("untrusted.example:7999", None),
-            ("localhost:7999", Some("http://127.0.0.1:7999")),
-            ("localhost:7999", Some("http://localhost:8000")),
-            ("localhost:7999", Some("https://localhost:7999")),
-            ("localhost:7999", Some("null")),
-            ("localhost:7999", Some("")),
-            ("localhost:7999", Some("not-an-origin")),
-            ("localhost:7999", Some("http://localhost:65536")),
-            ("localhost:7999", Some("http://localhost:7999/")),
-            ("localhost:7999", Some("http://localhost:7999?")),
-            ("localhost:7999", Some("http://localhost:7999#")),
-            ("localhost:7999", Some("http://user@localhost:7999")),
+        for (host, origin, port) in [
+            ("localhost:8000", None, 7999),
+            ("localhost", None, 7999),
+            ("untrusted.example:7999", None, 7999),
+            ("localhost:7999", Some("http://127.0.0.1:7999"), 7999),
+            ("localhost:7999", Some("http://localhost:8000"), 7999),
+            ("localhost:7999", Some("https://localhost:7999"), 7999),
+            ("localhost:7999", Some("null"), 7999),
+            ("localhost:7999", Some(""), 7999),
+            ("localhost:7999", Some("not-an-origin"), 7999),
+            ("localhost:7999", Some("http://localhost:65536"), 7999),
+            ("localhost:7999", Some("http://localhost:7999/"), 7999),
+            ("localhost:7999", Some("http://localhost:7999?"), 7999),
+            ("localhost:7999", Some("http://localhost:7999#"), 7999),
+            ("localhost:7999", Some("http://user@localhost:7999"), 7999),
+            // Invalid explicit port in Host must be rejected even when daemon listens on 80.
+            ("localhost:bogus", None, 80),
+            ("localhost:99999", None, 80),
+            ("127.0.0.1:bogus", None, 80),
+            // Invalid explicit port in Origin must be rejected.
+            ("localhost:80", Some("http://localhost:bogus"), 80),
         ] {
             let origins = origin.into_iter().collect::<Vec<_>>();
             assert!(
-                !valid_shutdown_origin(&headers(host, &origins), 7999),
+                !valid_shutdown_origin(&headers(host, &origins), port),
                 "host={host}, origin={origin:?}"
             );
         }
