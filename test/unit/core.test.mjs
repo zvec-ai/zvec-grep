@@ -906,6 +906,24 @@ test("glob and path helpers cover literal, wildcard, and descendant matching", (
   assert.equal(toDisplayPath(parent).includes("\\"), false);
 });
 
+test("glob character class treats ] after [ or [! as literal", () => {
+  // POSIX: ']' right after '[' (or '[!' / '[^') is a literal member of the
+  // class, not the closing bracket.
+  assert.equal(pathPatternMatches("[]]", "]"), true);
+  assert.equal(pathPatternMatches("[]]", "a"), false);
+  // [!]] is a class matching any single char except ']'.
+  assert.equal(pathPatternMatches("[!]]", "a"), true);
+  assert.equal(pathPatternMatches("[!]]", "]"), false);
+  assert.equal(ripgrepGlobMatches("[]]", "]"), true);
+  assert.equal(ripgrepGlobMatches("[!]]", "a"), true);
+  assert.equal(ripgrepGlobMatches("[!]]", "]"), false);
+  // Normal character classes still work.
+  assert.equal(pathPatternMatches("[abc]", "b"), true);
+  assert.equal(pathPatternMatches("[abc]", "d"), false);
+  assert.equal(pathPatternMatches("[!abc]", "d"), true);
+  assert.equal(pathPatternMatches("[!abc]", "a"), false);
+});
+
 test("file type filters accept extension aliases for ripgrep types", async () => {
   const types = await resolveFileTypePatterns([".h", "cc"], undefined);
   assert.equal(matchesFileSelection("include/api.h", {}, types), true);
