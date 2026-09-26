@@ -219,12 +219,19 @@ pub(crate) async fn search_workspace_index(
 
     let fusion_started = Instant::now();
     let fused = fuse_candidates(candidates);
-    let selected = fused.into_iter().take(limit).collect::<Vec<_>>();
     let fusion_duration = fusion_started.elapsed();
 
     let load_started = Instant::now();
-    let hits = load_candidates(selected, limit, plan.trace, storage)?;
+    // Every recalled entity must be eligible for structural boosts before cutoff.
+    let hits = load_candidates(fused, limit, plan.trace, storage)?;
     let load_duration = load_started.elapsed();
+    let ranking_started = Instant::now();
+    let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
+        .iter()
+        .map(|_| 1.0 / (RRF_K + 1.0))
+        .sum();
+    let hits = super::ranking::rank(hits, &routes, &plan.filter, maximum_rrf, limit);
+    let ranking_duration = ranking_started.elapsed();
 
     Ok(SearchPlanResult {
         routes,
@@ -236,6 +243,7 @@ pub(crate) async fn search_workspace_index(
             timing("recall", recall_duration),
             timing("fusion", fusion_duration),
             timing("load_results", load_duration),
+            timing("ranking", ranking_duration),
             timing("search_total", total_started.elapsed()),
         ],
     })
@@ -600,6 +608,7 @@ fn candidate_to_hit(
         matched_by,
         trace: trace.then_some(SearchHitTrace {
             recall: candidate.recall,
+            ranking: None,
             fusion: SearchFusionTrace {
                 rank: candidate.rank,
                 score: candidate.score,
@@ -1031,6 +1040,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn promotes_symbol_definition_before_result_cutoff() {
+        let reference_file = file(1, "src/plugin.ts", 100);
+        let definition_file = file(2, "src/core.ts", 100);
+        let mut reference = entity(&reference_file, "vitest: Vitest");
+        let mut definition = entity(&definition_file, "class Vitest {}");
+        let definition_id = definition.entity.id.clone();
+        for (stored, kind, name) in [
+            (&mut reference, crate::domain::SymbolType::Value, "vitest"),
+            (&mut definition, crate::domain::SymbolType::Class, "Vitest"),
+        ] {
+            stored.entity.metadata = Some(crate::domain::EntityMetadata::Code(
+                crate::domain::CodeMetadata {
+                    symbol_type: Some(kind),
+                    symbol_name: Some(name.to_owned()),
+                    scope: None,
+                    signature: None,
+                    documentation: None,
+                },
+            ));
+        }
+        let mut storage = pushdown_storage();
+        storage.files = vec![reference_file, definition_file];
+        storage.fts.insert(
+            "Vitest".to_owned(),
+            vec![
+                hit(&reference, 0, StorageSearchPath::Fts, 1.0),
+                hit(&definition, 0, StorageSearchPath::Fts, 0.9),
+            ],
+        );
+        storage
+            .entities
+            .insert(reference.entity.id.as_str().to_owned(), reference);
+        storage
+            .entities
+            .insert(definition.entity.id.as_str().to_owned(), definition);
+        let mut request = plan(vec![SearchRoute {
+            mode: SearchRouteMode::Fts,
+            query: "Vitest".to_owned(),
+        }]);
+        request.limit = Some(1);
+        let root = tempfile::tempdir().expect("workspace");
+        let result = search_workspace_index(root.path(), request, &storage, &[])
+            .await
+            .expect("search");
+        assert_eq!(result.hits[0].entity.id, definition_id);
+    }
+
+    #[tokio::test]
     async fn fuses_fts_and_vector_routes_with_main_compatible_rrf() {
         let file = file(1, "src/lib.rs", 100);
         let entity_a = entity(&file, "alpha entity");
@@ -1098,10 +1155,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loads_only_selected_entities_once_after_adaptive_recall() {
+    async fn loads_all_candidates_once_before_rule_ranking() {
         let source = file(1, "src/lib.rs", 100);
         let selected = entity(&source, "selected source");
         let discarded = entity(&source, "discarded source");
+        let discarded_id = discarded.entity.id.clone();
         let mut fts = (0..205)
             .map(|index| hit(&selected, index, StorageSearchPath::Fts, 1.0))
             .collect::<Vec<_>>();
@@ -1155,12 +1213,15 @@ mod tests {
         assert!(trace.recall.iter().all(|recall| recall.rank == Some(1)));
         let batches = storage.load_batches.lock().expect("load batches");
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 205);
-        assert!(
+        assert_eq!(batches[0].len(), 206);
+        assert_eq!(
             batches[0]
                 .iter()
-                .all(|hit| hit.entity_id == selected.entity.id)
+                .filter(|hit| hit.entity_id == selected.entity.id)
+                .count(),
+            205
         );
+        assert!(batches[0].iter().any(|hit| hit.entity_id == discarded_id));
         assert_eq!(storage.filters.lock().expect("filters").len(), 4);
     }
 

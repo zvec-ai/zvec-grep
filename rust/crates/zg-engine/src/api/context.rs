@@ -313,7 +313,35 @@ pub mod result {
     pub struct SearchHitTrace {
         pub recall: Vec<SearchRecallTrace>,
         pub fusion: SearchFusionTrace,
+        /// Rule scores are not calibrated relevance probabilities.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ranking: Option<SearchRankingTrace>,
         pub final_selection: SearchFinalTrace,
+    }
+
+    /// Explains rule scoring and the state when an entity was selected.
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct SearchRankingTrace {
+        pub policy: String,
+        pub query_features: Vec<String>,
+        pub normalized_base: f64,
+        pub symbol_match: String,
+        pub symbol_bonus: f64,
+        pub definition_bonus: f64,
+        #[serde(default)]
+        pub path_bonus: f64,
+        #[serde(default)]
+        pub file_support_bonus: f64,
+        #[serde(default)]
+        pub file_support_count: u32,
+        pub path_roles: Vec<String>,
+        pub path_overrides: Vec<String>,
+        pub path_factor: f64,
+        pub static_score: f64,
+        pub file_count_at_selection: u32,
+        pub diversity_factor: f64,
+        pub score: f64,
+        pub rank: usize,
     }
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -643,6 +671,19 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn search_traces_allow_omitted_ranking() {
+        let value = json!({
+            "recall": [],
+            "fusion": {"rank": 1, "score": 0.01, "forced": false},
+            "final_selection": {"returned_by_limit": true, "cutoff_rank": 10}
+        });
+        let trace: result::SearchHitTrace =
+            serde_json::from_value(value.clone()).expect("trace without ranking");
+        assert!(trace.ranking.is_none());
+        assert_eq!(serde_json::to_value(trace).expect("trace"), value);
+    }
 
     #[test]
     fn source_line_bounds_respect_half_open_and_empty_ranges() {

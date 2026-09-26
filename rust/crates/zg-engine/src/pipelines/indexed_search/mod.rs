@@ -4,6 +4,7 @@ pub(crate) mod context;
 mod format_filter;
 mod path_filter;
 mod pipeline;
+mod ranking;
 pub(crate) mod service;
 pub(crate) mod storage;
 
