@@ -60,7 +60,8 @@ fn declared_encoding(formats: &[FileFormat], bytes: &[u8]) -> Option<Declared> {
     } else if has(FileFormat::Ruby) {
         coding_comment(head, starts_with_hash, is_shebang)
     } else {
-        coding_comment(head, |line| find(line, b"-*-").is_some(), is_shebang)
+        // Emacs reads a coding tag from either of the first two lines.
+        coding_comment(head, |line| find(line, b"-*-").is_some(), |_| true)
             .map(strip_emacs_eol_suffix)
     };
     label.and_then(legacy_label)
@@ -179,33 +180,109 @@ fn xml_declared_encoding(head: &[u8]) -> Option<&[u8]> {
     Some(&value[..value.iter().position(|byte| *byte == quote)?])
 }
 
-/// Reads `charset` from the first `<meta>` tag that declares one. This covers
-/// both `<meta charset=...>` and `http-equiv` content, not the full HTML prescan.
+/// Reads the charset from the first `<meta>` tag that declares one, either as a
+/// `charset` attribute or as `http-equiv="Content-Type"` content. Comments are
+/// skipped; this is a subset of the HTML prescan, not the full algorithm.
 fn html_meta_charset(head: &[u8]) -> Option<&[u8]> {
     let mut rest = head;
-    while let Some(start) = find_ignore_case(rest, b"<meta") {
-        rest = &rest[start + 5..];
-        let tag = &rest[..rest
-            .iter()
-            .position(|byte| *byte == b'>')
-            .unwrap_or(rest.len())];
-        if let Some(position) = find_ignore_case(tag, b"charset") {
-            let value = tag[position + 7..].trim_ascii_start();
-            let Some(value) = value.strip_prefix(b"=") else {
-                continue;
-            };
-            let value = value.trim_ascii_start();
-            let value = value
-                .strip_prefix(b"\"")
-                .or_else(|| value.strip_prefix(b"'"))
-                .unwrap_or(value);
-            let label = take_label(value);
-            if !label.is_empty() {
-                return Some(label);
-            }
+    while let Some(start) = rest.iter().position(|byte| *byte == b'<') {
+        rest = &rest[start..];
+        if let Some(comment) = rest.strip_prefix(b"<!--") {
+            rest = find(comment, b"-->").map_or(&[][..], |end| &comment[end + 3..]);
+            continue;
+        }
+        let is_meta = rest.len() > 5
+            && rest[1..5].eq_ignore_ascii_case(b"meta")
+            && (rest[5].is_ascii_whitespace() || rest[5] == b'/');
+        if !is_meta {
+            rest = &rest[1..];
+            continue;
+        }
+        let (attributes, after) = meta_attributes(&rest[5..]);
+        rest = after;
+        if let Some(label) = meta_charset(&attributes) {
+            return Some(label);
         }
     }
     None
+}
+
+fn meta_charset<'a>(attributes: &[Attribute<'a>]) -> Option<&'a [u8]> {
+    let value = |name: &[u8]| {
+        attributes
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| *value)
+    };
+    if let Some(charset) = value(b"charset") {
+        return Some(take_label(charset.trim_ascii())).filter(|label| !label.is_empty());
+    }
+    if !value(b"http-equiv")?
+        .trim_ascii()
+        .eq_ignore_ascii_case(b"content-type")
+    {
+        return None;
+    }
+    let content = value(b"content")?;
+    let after = &content[find_ignore_case(content, b"charset")? + 7..];
+    let after = after
+        .trim_ascii_start()
+        .strip_prefix(b"=")?
+        .trim_ascii_start();
+    let after = after
+        .strip_prefix(b"\"")
+        .or_else(|| after.strip_prefix(b"'"))
+        .unwrap_or(after);
+    Some(take_label(after)).filter(|label| !label.is_empty())
+}
+
+/// A tag attribute's name and unquoted value.
+type Attribute<'a> = (&'a [u8], &'a [u8]);
+
+/// Parses tag attributes up to the closing `>`, honouring quoted values.
+fn meta_attributes(mut rest: &[u8]) -> (Vec<Attribute<'_>>, &[u8]) {
+    let mut attributes = Vec::new();
+    loop {
+        rest = rest.trim_ascii_start();
+        match rest.first() {
+            None => return (attributes, rest),
+            Some(b'>') => return (attributes, &rest[1..]),
+            Some(b'/') => {
+                rest = &rest[1..];
+                continue;
+            }
+            Some(_) => {}
+        }
+        let end = rest
+            .iter()
+            .position(|byte| byte.is_ascii_whitespace() || matches!(*byte, b'=' | b'>' | b'/'))
+            .unwrap_or(rest.len());
+        let name = &rest[..end];
+        rest = rest[end..].trim_ascii_start();
+        let Some(after) = rest.strip_prefix(b"=") else {
+            attributes.push((name, &[][..]));
+            continue;
+        };
+        rest = after.trim_ascii_start();
+        let value;
+        if let Some(&quote) = rest.first().filter(|byte| matches!(**byte, b'"' | b'\'')) {
+            let body = &rest[1..];
+            let end = body
+                .iter()
+                .position(|byte| *byte == quote)
+                .unwrap_or(body.len());
+            value = &body[..end];
+            rest = body.get(end + 1..).unwrap_or_default();
+        } else {
+            let end = rest
+                .iter()
+                .position(|byte| byte.is_ascii_whitespace() || *byte == b'>')
+                .unwrap_or(rest.len());
+            value = &rest[..end];
+            rest = &rest[end..];
+        }
+        attributes.push((name, value));
+    }
 }
 
 /// Reads the `@charset "...";` rule, which CSS only honours byte-for-byte at the start.
@@ -237,19 +314,32 @@ fn find_ignore_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
+/// Matches the ISO-8859-1 names used by Python, Ruby, Emacs, and IANA (for XML).
 fn is_latin_one_alias(label: &[u8]) -> bool {
+    let normalized: Vec<u8> = label
+        .iter()
+        .map(|byte| match byte.to_ascii_lowercase() {
+            b'-' | b':' => b'_',
+            byte => byte,
+        })
+        .collect();
     [
-        b"latin1".as_slice(),
-        b"latin-1".as_slice(),
-        b"latin_1".as_slice(),
-        b"iso-latin-1".as_slice(),
-        b"iso-8859-1".as_slice(),
-        b"iso_8859_1".as_slice(),
-        b"iso8859-1".as_slice(),
-        b"iso8859_1".as_slice(),
+        b"8859".as_slice(),
+        b"cp819",
+        b"csisolatin1",
+        b"ibm819",
+        b"iso8859",
+        b"iso8859_1",
+        b"iso_8859_1",
+        b"iso_8859_1_1987",
+        b"iso_ir_100",
+        b"iso_latin_1",
+        b"l1",
+        b"latin",
+        b"latin1",
+        b"latin_1",
     ]
-    .iter()
-    .any(|alias| label.eq_ignore_ascii_case(alias))
+    .contains(&normalized.as_slice())
 }
 
 /// Decodes UTF-8, or UTF-16/32 with a BOM, without replacing invalid input.
@@ -458,5 +548,49 @@ mod tests {
             let text = decode_index_text(&[FileFormat::Xml], bytes).expect("replacement");
             assert!(text.contains("Caf\u{fffd}"));
         }
+    }
+
+    #[test]
+    fn html_ignores_charset_text_outside_declarations() {
+        for bytes in [
+            b"<meta name=\"description\" content=\"charset=windows-1252\"><p>Caf\xe9</p>"
+                .as_slice(),
+            b"<!-- <meta charset=\"windows-1252\"> --><p>Caf\xe9</p>",
+            b"<metadata charset=\"windows-1252\"><p>Caf\xe9</p>",
+        ] {
+            let text = decode_index_text(&[FileFormat::Html], bytes).expect("replacement");
+            assert!(text.contains("Caf\u{fffd}"));
+        }
+
+        let bytes = b"<!-- note --><meta content='x>y' charset=windows-1252><p>Caf\xe9</p>";
+        let text = decode_index_text(&[FileFormat::Html], bytes).expect("declared after comment");
+        assert!(text.contains("Café"));
+    }
+
+    #[test]
+    fn python_latin_one_aliases_keep_true_latin_one() {
+        for label in [
+            "L1",
+            "latin",
+            "iso8859",
+            "cp819",
+            "ISO_8859-1:1987",
+            "iso-ir-100",
+        ] {
+            let bytes = [
+                format!("# coding: {label}\nname = '").as_bytes(),
+                b"\x80'\n",
+            ]
+            .concat();
+            let text = decode_index_text(&[FileFormat::Python], &bytes).expect(label);
+            assert!(text.contains('\u{80}'), "{label}");
+        }
+    }
+
+    #[test]
+    fn emacs_coding_tag_on_line_two_without_shebang() {
+        let c = b"// header\n/* -*- coding: latin-1 -*- */\nchar *s = \"Caf\xe9 \x80\";\n";
+        let text = decode_index_text(&[FileFormat::C], c).expect("Latin-1 C");
+        assert!(text.contains("Caf\u{e9} \u{80}"));
     }
 }
