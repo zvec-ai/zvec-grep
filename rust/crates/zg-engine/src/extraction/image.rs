@@ -43,8 +43,9 @@ mod tests {
     fn source_router_and_indexing_preserve_the_image_fragment() {
         let source = image_source(vec![4, 5, 6]);
         let direct = extract_source(&source, ChunkOptions::default()).expect("direct extraction");
-        let indexing =
-            extract_for_indexing(&source, ChunkOptions::default()).expect("indexing extraction");
+        let indexing = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("indexing extraction")
+            .fragments;
 
         assert_eq!(indexing.len(), 1);
         assert_eq!(direct, indexing);

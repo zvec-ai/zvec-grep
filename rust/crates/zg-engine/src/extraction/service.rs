@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 use super::TextSource;
-use super::{ChunkOptions, ExtractedEntity, Source, SourceKind, code, image, markdown, text};
+use super::{
+    ChunkOptions, ExtractedEntity, ExtractionOutput, Source, SourceKind, code, image, markdown,
+    text,
+};
 use crate::{
     EngineError,
     domain::{
@@ -16,23 +19,39 @@ pub(super) fn extract<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
 ) -> Result<Vec<ExtractedEntity>, EngineError> {
+    Ok(extract_for_indexing(source, options)?.fragments)
+}
+
+pub(super) fn extract_for_indexing<'source>(
+    source: impl Into<Source<'source>>,
+    options: ChunkOptions,
+) -> Result<ExtractionOutput, EngineError> {
     let source = source.into();
     let source_text = match &source {
         Source::Text(source) => Some(source.text.as_str()),
         Source::Image(_) => None,
     };
-    let entities = match source {
+    let output = match source {
         Source::Text(source) if is_code_source(&source.formats) => {
             code::extract_for_indexing(source, options)
         }
-        Source::Image(source) => Ok(image::extract(source)),
+        Source::Image(source) => Ok(ExtractionOutput {
+            fragments: image::extract(source),
+            graph: None,
+        }),
         Source::Text(source) if source.formats.contains(&FileFormat::Markdown) => {
-            markdown::extract(source, options)
+            Ok(ExtractionOutput {
+                fragments: markdown::extract(source, options)?,
+                graph: None,
+            })
         }
-        Source::Text(source) => text::extract(source, options),
+        Source::Text(source) => Ok(ExtractionOutput {
+            fragments: text::extract(source, options)?,
+            graph: None,
+        }),
     }?;
     if let Some(source_text) = source_text {
-        for entity in &entities {
+        for entity in &output.fragments {
             if let Range::Text(range) = &entity.source_range {
                 let original = crate::utils::slice_text(
                     source_text,
@@ -47,14 +66,7 @@ pub(super) fn extract<'source>(
             }
         }
     }
-    Ok(entities)
-}
-
-pub(super) fn extract_for_indexing<'source>(
-    source: impl Into<Source<'source>>,
-    options: ChunkOptions,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
-    extract(source, options)
+    Ok(output)
 }
 
 pub(super) fn source_kind(formats: &[FileFormat]) -> Option<SourceKind> {
@@ -198,6 +210,7 @@ fn vector_metadata_text(metadata: Option<&EntityMetadata>, max_chars: Option<usi
             scope,
             signature,
             documentation,
+            ..
         }) => vec![
             match (symbol_type, symbol_name) {
                 (Some(kind), Some(name)) => Some(format!("symbol: {} {name}", kind.as_str())),

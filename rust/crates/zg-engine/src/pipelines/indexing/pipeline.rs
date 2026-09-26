@@ -974,7 +974,7 @@ async fn prepare_candidate(
         text: source_text.into_owned(),
     };
     let extracted = extract_for_indexing(&text, chunk_options)?;
-    let entities = bind_entities(file.id, extracted)?;
+    let entities = bind_entities(file.id, extracted.fragments)?;
     let owners = entities
         .iter()
         .map(|entity| {
@@ -2256,8 +2256,8 @@ mod tests {
         };
         let extracted = extract_for_indexing(&source, options).expect("extract markdown");
         let file_id = FileId::new(42);
-        let entities = bind_entities(file_id, extracted.clone()).expect("bind entities");
-        let mut reordered = extracted;
+        let entities = bind_entities(file_id, extracted.fragments.clone()).expect("bind entities");
+        let mut reordered = extracted.fragments;
         reordered.reverse();
         for (index, entity) in reordered.iter_mut().enumerate() {
             entity.index = index + 100;

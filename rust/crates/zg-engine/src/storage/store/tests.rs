@@ -597,6 +597,8 @@ fn fixture(
                 symbol_name: Some("quoted'\\name\0suffix".to_owned()),
                 scope: None,
                 signature: None,
+                visibility: None,
+                language: None,
                 documentation: None,
             })),
         },
