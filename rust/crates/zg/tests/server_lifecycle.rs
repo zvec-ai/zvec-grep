@@ -303,7 +303,7 @@ impl StdioBridge {
         request: &serde_json::Value,
         choice: Option<&str>,
     ) -> Result<(serde_json::Value, usize), Box<dyn Error>> {
-        let id = request.get("id").ok_or("request has no id")?;
+        let mut id = request.get("id").ok_or("request has no id")?.clone();
         let started = Instant::now();
         self.notify(request).map_err(|error| {
             self.response_error(request, choice, 0, started, "none", &error.to_string())
@@ -358,7 +358,7 @@ impl StdioBridge {
                 self.notify(&json!({"jsonrpc": "2.0", "id": response["id"], "result": {
                     "action": "accept", "content": {"choice": choice}
                 }}))?;
-            } else if response.get("id") == Some(id) {
+            } else if response.get("id") == Some(&id) {
                 if response["result"]["resultType"] == "input_required"
                     && let Some(choice) = choice
                 {
@@ -370,6 +370,11 @@ impl StdioBridge {
                         _ => "cancel",
                     };
                     let mut retry = request.clone();
+                    // A continuation is a new JSON-RPC request. Give it a fresh
+                    // ID so completion of the previous HTTP response stream
+                    // cannot clear the transport's pending continuation.
+                    id = json!(format!("{}-continuation-{prompts}", request["id"]));
+                    retry["id"] = id.clone();
                     retry["params"]["requestState"] = response["result"]["requestState"].clone();
                     retry["params"]["inputResponses"] = json!({"remote_embedding_authorization": {"action":"accept", "content":{"decision":decision}}});
                     self.notify(&retry)?;
