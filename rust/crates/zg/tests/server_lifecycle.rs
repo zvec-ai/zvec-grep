@@ -1503,6 +1503,112 @@ fn stdio_remote_consent_controls_transmission_and_persistence() -> Result<(), Bo
     Ok(())
 }
 
+#[test]
+fn direct_index_failures_match_readiness_and_recover() -> Result<(), Box<dyn Error>> {
+    index_failures_match_readiness_and_recover("direct")
+}
+
+#[test]
+fn server_index_failures_match_readiness_and_recover() -> Result<(), Box<dyn Error>> {
+    index_failures_match_readiness_and_recover("server")
+}
+
+fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn Error>> {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let embedding = EmbeddingServer::start_with_failure_status(400)?;
+    let endpoint = format!("http://{}/embeddings", embedding.address);
+    let configure = |command: &mut Command| {
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("ZVEC_GREP_") {
+                command.env_remove(key);
+            }
+        }
+        command
+            .current_dir(workspace.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("ZVEC_GREP_HOME", home.path())
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                home.path().join("workspaces.json"),
+            )
+            .env_remove("DASHSCOPE_API_KEY")
+            .env_remove("QWEN_API_KEY");
+    };
+    let run = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        configure(&mut command);
+        command
+            .args(args)
+            .args(["--mode", mode, "--no-color"])
+            .output()
+    };
+    let mut guard = if mode == "server" {
+        Some(start_server(&binary, &home, "full", None, configure)?.0)
+    } else {
+        None
+    };
+    let good = workspace.path().join("good.txt");
+    let broken = workspace.path().join("broken.txt");
+    std::fs::write(&good, "Stable orchard baseline.\n")?;
+    // An incomplete BOM-marked UTF-16 code unit must fail extraction.
+    std::fs::write(&broken, [255_u8, 254, 255])?;
+    let index_args = [
+        "--index",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &endpoint,
+        "--api-key",
+        "local-test-key",
+        "--allow-remote",
+    ];
+    for failed_path in ["broken.txt", "good.txt"] {
+        let failed = run(&index_args)?;
+        let stdout = String::from_utf8_lossy(&failed.stdout);
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert_eq!(failed.status.code(), Some(1), "{mode}: {stdout}\n{stderr}");
+        assert!(
+            stdout.starts_with("Workspace index: failed\n"),
+            "{mode}: {stdout}\n{stderr}"
+        );
+        assert!(!stdout.contains("Workspace index: ready"), "{stdout}");
+        assert!(stdout.contains("failed=1"), "{stdout}");
+        assert!(
+            stderr.contains("indexing completed with 1 failed file"),
+            "{stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("Failed: {failed_path}:")),
+            "{stdout}"
+        );
+        let status = run(&["--status", "--check-ready"])?;
+        assert_eq!(status.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(stdout.contains("indexed=1 pending=1 failed=1"), "{stdout}");
+        assert!(stdout.contains("Workspace index: failed"), "{stdout}");
+        std::fs::write(&broken, "Recovered readable nebula documentation.\n")?;
+        embedding.fail.store(false, Ordering::Release);
+        let recovered = run(&index_args)?;
+        assert_command_success(&recovered);
+        let stdout = String::from_utf8_lossy(&recovered.stdout);
+        assert!(stdout.starts_with("Workspace index: ready\n"), "{stdout}");
+        assert!(stdout.contains("failed=0"), "{stdout}");
+        assert_command_success(&run(&["--status", "--check-ready"])?);
+        if failed_path == "broken.txt" {
+            std::fs::write(&good, "Modified orchard baseline.\n")?;
+            embedding.fail.store(true, Ordering::Release);
+        }
+    }
+    assert!(embedding.requests.load(Ordering::Acquire) > 0);
+    if let Some(guard) = &mut guard {
+        assert_command_success(&guard.stop()?);
+    }
+    Ok(())
+}
+
 struct EmbeddingServer {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -1524,6 +1630,10 @@ impl EmbeddingServer {
     }
 
     fn start() -> std::io::Result<Self> {
+        Self::start_with_failure_status(401)
+    }
+
+    fn start_with_failure_status(failure_status: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1542,6 +1652,7 @@ impl EmbeddingServer {
                     respond_embedding(
                         stream.expect("mock embedding connection"),
                         fail.load(Ordering::Acquire),
+                        failure_status,
                     )
                     .expect("mock embedding response");
                 }
@@ -1570,7 +1681,11 @@ impl Drop for EmbeddingServer {
     }
 }
 
-fn respond_embedding(mut stream: TcpStream, fail: bool) -> std::io::Result<()> {
+fn respond_embedding(
+    mut stream: TcpStream,
+    fail: bool,
+    failure_status: u16,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -1590,8 +1705,14 @@ fn respond_embedding(mut stream: TcpStream, fail: bool) -> std::io::Result<()> {
     let mut body = vec![0; content_length.expect("request body length")];
     reader.read_exact(&mut body)?;
     if fail {
-        return stream.write_all(
-            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        return write!(
+            stream,
+            "HTTP/1.1 {failure_status} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            if failure_status == 401 {
+                "Unauthorized"
+            } else {
+                "Bad Request"
+            }
         );
     }
     let request: serde_json::Value = serde_json::from_slice(&body)?;
