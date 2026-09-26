@@ -9,6 +9,7 @@ mod controller;
 pub use authentication::resolve_token;
 mod http_client;
 mod job_scheduler;
+mod mcp_sessions;
 pub mod rolling_log;
 mod runtime;
 mod stdio;

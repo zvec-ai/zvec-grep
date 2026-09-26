@@ -624,7 +624,7 @@ fn with_process<T>(pid: u32, action: impl FnOnce(&sysinfo::Process) -> T) -> Opt
     system.process(pid).map(action)
 }
 
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     with_process(pid, |_| ()).is_some()
 }
 

@@ -81,13 +81,17 @@ struct WorkspaceRuntime {
 struct CachedIndexStatus {
     epoch: u64,
     snapshot: Option<IndexStatusSnapshot>,
+    /// Running jobs may use these counts after the public status is invalidated.
+    completion_baseline: Option<IndexStatusSnapshot>,
     job: Option<(uuid::Uuid, JobState)>,
 }
 
 impl CachedIndexStatus {
     fn invalidate(&mut self) -> u64 {
         self.epoch = self.epoch.wrapping_add(1);
-        self.snapshot = None;
+        if let Some(snapshot) = self.snapshot.take() {
+            self.completion_baseline = Some(snapshot);
+        }
         self.epoch
     }
 
@@ -101,7 +105,7 @@ impl CachedIndexStatus {
             return false;
         }
         self.job = job;
-        self.snapshot = Some(IndexStatusSnapshot {
+        let snapshot = IndexStatusSnapshot {
             status: info.index_status(),
             stats: info.status.clone(),
             checked_epoch_ms: u64::try_from(
@@ -111,7 +115,9 @@ impl CachedIndexStatus {
                     .as_millis(),
             )
             .unwrap_or(u64::MAX),
-        });
+        };
+        self.completion_baseline = Some(snapshot.clone());
+        self.snapshot = Some(snapshot);
         true
     }
 }
@@ -1035,10 +1041,10 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         let runtime = lock(&self.inner.runtimes).get(&canonical_root).cloned()?;
         let snapshot = WorkspaceRuntimeManager::runtime_snapshot(self, &canonical_root);
         let job = self.job_for_root(&canonical_root);
-        let index_status = if job
+        let active = job
             .as_ref()
-            .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running))
-        {
+            .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running));
+        let index_status = if active {
             None
         } else {
             let cache = lock(&runtime.index_status);
@@ -1049,6 +1055,9 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         };
         Some(IndexRuntimeSnapshot {
             index_status,
+            completion_baseline: active
+                .then(|| lock(&runtime.index_status).completion_baseline.clone())
+                .flatten(),
             watcher_active: snapshot.watcher_active,
             dirty_revision: snapshot.dirty_revision,
             indexed_revision: snapshot.indexed_revision,
@@ -1473,6 +1482,25 @@ mod tests {
             status: Some(IndexStats::default()),
             suggestion: None,
         }
+    }
+
+    #[test]
+    fn invalidating_status_keeps_only_the_completion_baseline() {
+        let mut cached = super::CachedIndexStatus::default();
+        let mut info = inspected_info();
+        let stats = info.status.as_mut().expect("index status");
+        stats.files_scanned = 1001;
+        stats.files_unchanged = 1000;
+        let epoch = cached.invalidate();
+        assert!(cached.record(epoch, &info, None));
+        cached.invalidate();
+        assert!(cached.snapshot.is_none());
+        let stats = cached
+            .completion_baseline
+            .as_ref()
+            .and_then(|baseline| baseline.stats.as_ref())
+            .expect("completion baseline");
+        assert_eq!((stats.files_unchanged, stats.files_scanned), (1000, 1001));
     }
 
     #[test]

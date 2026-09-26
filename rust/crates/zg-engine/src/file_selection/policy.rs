@@ -28,6 +28,7 @@ pub(crate) struct ScanPolicy {
     root: PathBuf,
     options: ScanRules,
     matcher: GlobMatcher,
+    types: ignore::types::Types,
     defaults: Gitignore,
     control_paths: Mutex<Vec<PathBuf>>,
     cache: Mutex<IgnoreCache>,
@@ -61,10 +62,12 @@ impl ScanPolicy {
                 .map_err(|error| ignore_error(&error))?;
         }
         let control_paths = control_paths(root, &options);
+        let types = super::file_types(&options.file_types, &options.excluded_file_types)?;
         Ok(Self {
             root: root.to_path_buf(),
             options,
             matcher,
+            types,
             defaults: defaults.build().map_err(|error| ignore_error(&error))?,
             control_paths: Mutex::new(control_paths),
             cache: Mutex::new(IgnoreCache::default()),
@@ -118,6 +121,9 @@ impl ScanPolicy {
 
     fn matches_rules(&self, absolute: &Path, directory: bool) -> Result<bool, HostError> {
         let relative = absolute.strip_prefix(&self.root).unwrap_or(absolute);
+        if !directory && self.types.matched(relative, false).is_ignore() {
+            return Ok(false);
+        }
         match self.matcher.path_match(relative, directory) {
             Match::Ignore(()) => return Ok(false),
             Match::Whitelist(()) => return Ok(true),

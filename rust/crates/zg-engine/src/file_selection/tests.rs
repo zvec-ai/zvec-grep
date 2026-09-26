@@ -489,3 +489,39 @@ fn nested_ignore_symlinks_are_controls_without_following_source_symlinks() {
             .expect("included")
     );
 }
+
+#[tokio::test]
+async fn ripgrep_type_names_filter_scans_and_explicit_globs() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    for path in ["src/a.h", "src/b.hpp", "src/c.cpp", "src/d.ts", "src/e.py"] {
+        write(root, path, "fixture");
+    }
+    let rules = ScanRules {
+        file_types: vec!["h".into()],
+        ..ScanRules::default()
+    };
+    let result = scan(root, &[], &rules, vec![]).await;
+    assert!(result.contains(&PathBuf::from("src/a.h")));
+    assert!(result.contains(&PathBuf::from("src/b.hpp")));
+    assert!(!result.contains(&PathBuf::from("src/c.cpp")));
+    let excluded = ScanRules {
+        excluded_file_types: vec!["h".into()],
+        ..rules
+    };
+    assert!(
+        scan(root, &["src/**".into()], &excluded, vec![])
+            .await
+            .is_empty()
+    );
+    assert!(
+        ScanPolicy::new(
+            root,
+            &ScanRules {
+                file_types: vec!["not-a-real-type".into()],
+                ..ScanRules::default()
+            }
+        )
+        .is_err()
+    );
+}

@@ -54,6 +54,7 @@ impl DirectSearchService {
         let modified_after_epoch_ms = options.rg_options.modified_after_epoch_ms;
         let modified_before_epoch_ms = options.rg_options.modified_before_epoch_ms;
         let request = LexicalSearchRequest {
+            signal: options.signal.clone(),
             root: Some(root.clone()),
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),

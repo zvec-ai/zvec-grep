@@ -77,7 +77,18 @@ pub mod options {
     #[serde(default, deny_unknown_fields)]
     pub struct ScanRulesUpdate {
         #[serde(skip_serializing_if = "Option::is_none")]
+        pub file_types: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub excluded_file_types: Option<Vec<String>>,
+        /// Replaces the complete ordered list, including both case categories.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub globs: Option<Vec<GlobRule>>,
+        /// Replaces only case-sensitive rules when supplied separately.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub sensitive_globs: Option<Vec<GlobRule>>,
+        /// Replaces only case-insensitive rules when supplied separately.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub insensitive_globs: Option<Vec<GlobRule>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub hidden: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,8 +115,33 @@ pub mod options {
     impl ScanRulesUpdate {
         /// Applies only the fields supplied by this request.
         pub fn apply(&self, target: &mut ScanRules) {
-            if let Some(value) = &self.globs {
-                target.globs.clone_from(value);
+            if let Some(value) = &self.file_types {
+                target.file_types.clone_from(value);
+            }
+            if let Some(value) = &self.excluded_file_types {
+                target.excluded_file_types.clone_from(value);
+            }
+            if let Some(rules) = &self.globs {
+                target.globs.clone_from(rules);
+            }
+            if self.sensitive_globs.is_some() || self.insensitive_globs.is_some() {
+                let mut rules = self.sensitive_globs.clone().unwrap_or_else(|| {
+                    target
+                        .globs
+                        .iter()
+                        .filter(|rule| !rule.case_insensitive)
+                        .cloned()
+                        .collect()
+                });
+                rules.extend(self.insensitive_globs.clone().unwrap_or_else(|| {
+                    target
+                        .globs
+                        .iter()
+                        .filter(|rule| rule.case_insensitive)
+                        .cloned()
+                        .collect()
+                }));
+                target.globs = rules;
             }
             if let Some(value) = self.hidden {
                 target.hidden = value;
@@ -171,6 +207,30 @@ pub mod options {
     #[cfg(test)]
     mod selection_update_tests {
         use super::*;
+
+        #[test]
+        fn complete_glob_updates_replace_old_rules_and_preserve_order() {
+            let mut scan = ScanRules {
+                globs: vec![GlobRule {
+                    pattern: "!secret/**".to_owned(),
+                    case_insensitive: true,
+                }],
+                ..Default::default()
+            };
+            let replacement = vec![GlobRule::from("secret/**")];
+            ScanRulesUpdate {
+                globs: Some(replacement.clone()),
+                ..Default::default()
+            }
+            .apply(&mut scan);
+            assert_eq!(scan.globs, replacement);
+            ScanRulesUpdate {
+                globs: Some(Vec::new()),
+                ..Default::default()
+            }
+            .apply(&mut scan);
+            assert!(scan.globs.is_empty());
+        }
 
         #[test]
         fn updates_preserve_omission_and_apply_false_empty_and_null() {
@@ -419,6 +479,9 @@ pub mod result {
         pub duration_micros: u64,
         pub timings: Vec<TimingEntry>,
         pub skipped: Vec<SkippedFile>,
+        /// Full skip counts, independent of the bounded diagnostic samples.
+        #[serde(default)]
+        pub skipped_counts: std::collections::BTreeMap<String, usize>,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -46,7 +46,7 @@ where
                     sequence = sequence.saturating_add(1);
                     // An event sequence stays monotonic across scanning, downloading and indexing.
                     let notification = ProgressNotificationParam::new(token.clone(), f64::from(sequence))
-                        .with_message(serde_json::json!(progress).to_string());
+                        .with_message(progress_message(&progress));
                     tokio::select! {
                         biased;
                         () = signal.cancelled() => return Err(EngineError::cancelled("MCP request was cancelled")),
@@ -57,6 +57,40 @@ where
             }
         }
     }
+}
+
+fn progress_message(progress: &IndexProgress) -> String {
+    let phase = match progress.phase {
+        zg_engine::api::index::progress::IndexProgressPhase::Scanning => "scanning",
+        zg_engine::api::index::progress::IndexProgressPhase::Indexing => "indexing",
+        zg_engine::api::index::progress::IndexProgressPhase::Done => "done",
+    };
+    let counts = match (progress.files_indexed, progress.files_total) {
+        (Some(completed), Some(total)) => format!(" {completed}/{total} files"),
+        (_, Some(total)) => format!(" {total} files"),
+        _ => String::new(),
+    };
+    if let Some(embedding) = &progress.embedding {
+        if let Some(message) = &embedding.message {
+            return message.clone();
+        }
+        if let Some(downloaded) = embedding.downloaded_bytes {
+            return format!(
+                "Downloading {}: {downloaded}/{} bytes",
+                embedding.model.as_deref().unwrap_or("embedding model"),
+                embedding
+                    .total_bytes
+                    .map_or_else(|| "unknown".to_owned(), |total| total.to_string())
+            );
+        }
+    }
+    format!(
+        "{phase}{counts}{}",
+        progress
+            .detail
+            .as_ref()
+            .map_or(String::new(), |detail| format!(": {detail}"))
+    )
 }
 
 #[cfg(test)]

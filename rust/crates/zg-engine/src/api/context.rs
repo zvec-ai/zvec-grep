@@ -28,6 +28,9 @@ pub mod options {
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(default, deny_unknown_fields)]
     pub struct QueryFilter {
+        /// Ripgrep type names, independently of extractor formats.
+        pub file_types: Vec<String>,
+        pub excluded_file_types: Vec<String>,
         /// Ordered path rules relative to the workspace root.
         pub globs: Vec<GlobRule>,
         /// Formats matched by the catalog's explicit, case-sensitive filename rules.

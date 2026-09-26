@@ -83,9 +83,19 @@ impl LexicalSearchService {
             ));
         }
 
-        let _search_slot = self.search_slots.acquire().await.map_err(|_| {
-            EngineError::internal("lexical search concurrency limiter closed unexpectedly")
-        })?;
+        let signal = request.signal.as_ref().map_or_else(
+            tokio_util::sync::CancellationToken::new,
+            tokio_util::sync::CancellationToken::child_token,
+        );
+        let _cancel_on_drop = signal.clone().drop_guard();
+        if signal.is_cancelled() {
+            return Err(EngineError::cancelled("lexical search was cancelled"));
+        }
+        let search_slot = tokio::select! {
+            biased;
+            () = signal.cancelled() => return Err(EngineError::cancelled("lexical search was cancelled")),
+            permit = Arc::clone(&self.search_slots).acquire_owned() => permit.map_err(|_| EngineError::internal("lexical search concurrency limiter closed unexpectedly"))?,
+        };
         let checked_paths = check_paths(root, &request.paths);
         if !request.paths.is_empty() && checked_paths.existing.is_empty() {
             return Ok(empty_reply(root, request, &checked_paths));
@@ -93,8 +103,14 @@ impl LexicalSearchService {
 
         let worker_threads = worker_threads_for_search(root, request, self.worker_threads);
         let root = root.to_path_buf();
-        let request = request.clone();
-        run_blocking(move || search_sync(&root, &request, &checked_paths, worker_threads)).await
+        let mut request = request.clone();
+        request.signal = Some(signal);
+        run_blocking(move || {
+            // A cancelled caller must not release admission while its worker is still running.
+            let _search_slot = search_slot;
+            search_sync(&root, &request, &checked_paths, worker_threads)
+        })
+        .await
     }
 }
 
@@ -147,12 +163,25 @@ where
         .map_err(|error| EngineError::internal(format!("embedded grep worker failed: {error}")))?
 }
 
+fn check_cancelled(request: &LexicalSearchRequest) -> Result<(), EngineError> {
+    if request
+        .signal
+        .as_ref()
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+    {
+        Err(EngineError::cancelled("lexical search was cancelled"))
+    } else {
+        Ok(())
+    }
+}
+
 fn search_sync(
     root: &Path,
     request: &LexicalSearchRequest,
     checked_paths: &CheckedPaths,
     worker_threads: usize,
 ) -> Result<LexicalSearchReply, EngineError> {
+    check_cancelled(request)?;
     let patterns = load_patterns(root, request)?;
     if patterns.is_empty() {
         return Ok(empty_reply(root, request, checked_paths));
@@ -172,6 +201,7 @@ fn search_sync(
         search_paths_parallel(root, request, &matcher, &walker, &count_truncated)?
     };
 
+    check_cancelled(request)?;
     expand_context(&mut lexical_matches, request);
     debug_assert!(lexical_matches.iter().all(|item| {
         Range::Text(item.range)
@@ -220,6 +250,7 @@ fn search_paths_serial(
     let mut lexical_matches = Vec::new();
     let mut searcher = build_searcher(request);
     for result in walker.build() {
+        check_cancelled(request)?;
         let entry = result.map_err(|error| {
             EngineError::storage_failure(format!("failed to traverse workspace: {error}"))
         })?;
@@ -262,7 +293,12 @@ fn search_paths_parallel(
         let stopped = &stopped;
         let mut searcher = build_searcher(request);
         Box::new(move |result| {
-            if stopped.load(Ordering::Acquire) {
+            if stopped.load(Ordering::Acquire)
+                || request
+                    .signal
+                    .as_ref()
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
                 return WalkState::Quit;
             }
             let entry = match result {
@@ -534,6 +570,23 @@ fn build_file_types(request: &LexicalSearchRequest) -> Result<ignore::types::Typ
     })
 }
 
+struct CancellableReader<'a, R> {
+    reader: R,
+    signal: Option<&'a tokio_util::sync::CancellationToken>,
+}
+
+impl<R: io::Read> io::Read for CancellableReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self
+            .signal
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(io::Error::other("lexical search was cancelled"));
+        }
+        self.reader.read(buffer)
+    }
+}
+
 fn search_file(
     root: &Path,
     path: &Path,
@@ -548,7 +601,10 @@ fn search_file(
         .strip_prefix(root)
         .map_or_else(|_| absolute_path.clone(), Path::to_path_buf);
     let search_result = (|| {
-        let mut reader = io::BufReader::new(std::fs::File::open(&absolute_path)?);
+        let mut reader = io::BufReader::new(CancellableReader {
+            reader: std::fs::File::open(&absolute_path)?,
+            signal: request.signal.as_ref(),
+        });
         let header = reader.fill_buf()?;
         let encoded_unicode = header.starts_with(b"\xff\xfe")
             || header.starts_with(b"\xfe\xff")
@@ -566,6 +622,7 @@ fn search_file(
         }
         let sink = MatchSink {
             matcher,
+            signal: request.signal.as_ref(),
             absolute_path: &absolute_path,
             relative_path: &relative_path,
             results,
@@ -578,6 +635,7 @@ fn search_file(
             None => searcher.search_reader(matcher, reader, sink),
         }
     })();
+    check_cancelled(request)?;
     if let Err(error) = search_result {
         return Err(EngineError::from_io(
             format!("failed to search {}", absolute_path.display()),
@@ -588,6 +646,7 @@ fn search_file(
 }
 
 struct MatchSink<'a> {
+    signal: Option<&'a tokio_util::sync::CancellationToken>,
     matcher: &'a RegexMatcher,
     absolute_path: &'a Path,
     relative_path: &'a Path,
@@ -605,6 +664,12 @@ impl Sink for MatchSink<'_> {
         searcher: &grep::searcher::Searcher,
         matched: &SinkMatch<'_>,
     ) -> Result<bool, Self::Error> {
+        if self
+            .signal
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Ok(false);
+        }
         let bytes = matched.bytes();
         let line_number = matched
             .line_number()
@@ -1482,5 +1547,50 @@ mod tests {
         unfiltered.options.no_ignore = true;
         let reply = search(&LexicalSearchService::new(), root.path(), &unfiltered).await;
         assert_eq!(reply.matches.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_reader_stops_before_reading_more_source() {
+        let signal = tokio_util::sync::CancellationToken::new();
+        let mut reader = CancellableReader {
+            reader: io::Cursor::new(b"source"),
+            signal: Some(&signal),
+        };
+        let mut buffer = [0; 2];
+        assert_eq!(reader.read(&mut buffer).expect("initial read"), 2);
+        signal.cancel();
+        assert!(reader.read(&mut buffer).is_err());
+        assert_eq!(reader.reader.position(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_search_does_not_wait_for_admission() {
+        let service = LexicalSearchService::new().with_max_searches(1);
+        let _slot = service.search_slots.acquire().await.expect("occupied slot");
+        let signal = tokio_util::sync::CancellationToken::new();
+        let request = LexicalSearchRequest {
+            patterns: vec!["needle".into()],
+            signal: Some(signal.clone()),
+            ..LexicalSearchRequest::default()
+        };
+        let search = service.search(Path::new("."), &request);
+        let cancel = async {
+            tokio::task::yield_now().await;
+            signal.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(search, cancel)
+        })
+        .await
+        .expect("cancel releases waiter");
+        assert_eq!(
+            result.expect_err("cancelled").code(),
+            EngineError::CANCELLED
+        );
     }
 }

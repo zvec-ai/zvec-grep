@@ -154,6 +154,9 @@ impl IndexState {
 #[serde(default, deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ScanRules {
+    /// Ripgrep type names used by scanning and watcher admission.
+    pub file_types: Vec<String>,
+    pub excluded_file_types: Vec<String>,
     /// Ordered path rules relative to the workspace root.
     pub globs: Vec<GlobRule>,
     pub hidden: bool,
@@ -171,6 +174,8 @@ impl Default for ScanRules {
     fn default() -> Self {
         Self {
             globs: Vec::new(),
+            file_types: Vec::new(),
+            excluded_file_types: Vec::new(),
             hidden: false,
             follow_symlinks: false,
             max_depth: None,

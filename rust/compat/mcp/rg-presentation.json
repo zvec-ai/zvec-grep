@@ -1,0 +1,661 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "context",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 11,
+              "end_line": 11,
+              "start_byte_offset": 1100,
+              "end_byte_offset": 1101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter"
+    },
+    {
+      "id": "long-unbounded",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 20,
+              "start_byte_offset": 100,
+              "end_byte_offset": 2001,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 12,
+              "end_line": 12,
+              "start_byte_offset": 1200,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "line-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-2-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-3-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-4-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-5-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-6-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-7-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-8-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-9-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-10-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-11-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-12-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-13-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-14-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-15-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-16-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-17-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-18-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline-19-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 20,
+              "start_byte_offset": 100,
+              "end_byte_offset": 2001,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  1-\tline-0-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  2-\tline-1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  3-\tline-2-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  4-\tline-3-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  5-\tline-4-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  6-\tline-5-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  7-\tline-6-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  8-\tline-7-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  9-\tline-8-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  10-\tline-9-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  11-\tline-10-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  12:\tline-11-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  13-\tline-12-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  14-\tline-13-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  15-\tline-14-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  16-\tline-15-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  17-\tline-16-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  18-\tline-17-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  19-\tline-18-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n  20-\tline-19-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "id": "explicit-head",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_truncated",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 11,
+              "end_line": 11,
+              "start_byte_offset": 1100,
+              "end_byte_offset": 1101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter\n\nMore matches were omitted by the explicit output bound. Remove or increase the trailing `head` bound to see them."
+    },
+    {
+      "id": "no-matches",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "No matches."
+    },
+    {
+      "id": "symbol",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 11,
+              "end_line": 11,
+              "start_byte_offset": 1100,
+              "end_byte_offset": 1101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": {
+              "entity_id": "function-id",
+              "range": {
+                "kind": "text",
+                "start_line": 1,
+                "end_line": 20,
+                "start_byte_offset": 100,
+                "end_byte_offset": 2001,
+                "start_byte_column": 0,
+                "end_byte_column": 1
+              },
+              "metadata": {
+                "kind": "code",
+                "symbol_type": "function",
+                "symbol_name": "lookup",
+                "scope": "Store"
+              }
+            },
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  1-20 [function Store.lookup]\n    10-\tbefore\n    11:\tneedle\n    12-\tafter"
+    },
+    {
+      "id": "symbol-overlap",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 11,
+              "end_line": 11,
+              "start_byte_offset": 1100,
+              "end_byte_offset": 1101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": {
+              "entity_id": "function-id",
+              "range": {
+                "kind": "text",
+                "start_line": 1,
+                "end_line": 20,
+                "start_byte_offset": 100,
+                "end_byte_offset": 2001,
+                "start_byte_column": 0,
+                "end_byte_column": 1
+              },
+              "metadata": {
+                "kind": "code",
+                "symbol_type": "function",
+                "symbol_name": "lookup",
+                "scope": "Store"
+              }
+            },
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          },
+          {
+            "kind": "lexical_match",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 12,
+              "end_line": 12,
+              "start_byte_offset": 1200,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": {
+              "entity_id": "function-id",
+              "range": {
+                "kind": "text",
+                "start_line": 1,
+                "end_line": 20,
+                "start_byte_offset": 100,
+                "end_byte_offset": 2001,
+                "start_byte_column": 0,
+                "end_byte_column": 1
+              },
+              "metadata": {
+                "kind": "code",
+                "symbol_type": "function",
+                "symbol_name": "lookup",
+                "scope": "Store"
+              }
+            },
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  1-20 [function Store.lookup]\n    10-\tbefore\n    11:\tneedle\n    12:\tafter"
+    },
+    {
+      "id": "declaration",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 1,
+              "start_byte_offset": 100,
+              "end_byte_offset": 101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 1,
+              "start_byte_offset": 100,
+              "end_byte_offset": 101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "function lookup() {}",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": {
+              "entity_id": "function-id",
+              "range": {
+                "kind": "text",
+                "start_line": 1,
+                "end_line": 20,
+                "start_byte_offset": 100,
+                "end_byte_offset": 2001,
+                "start_byte_column": 0,
+                "end_byte_column": 1
+              },
+              "metadata": {
+                "kind": "code",
+                "symbol_type": "function",
+                "symbol_name": "lookup",
+                "scope": "Store"
+              }
+            },
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 1,
+              "start_byte_offset": 100,
+              "end_byte_offset": 101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  1:\tfunction lookup() {}"
+    },
+    {
+      "id": "files",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "rg",
+        "coverage": "rg_exhaustive",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "lexical_match",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 11,
+              "end_line": 11,
+              "start_byte_offset": 1100,
+              "end_byte_offset": 1101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          },
+          {
+            "kind": "lexical_match",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "other.txt",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 11,
+              "end_line": 11,
+              "start_byte_offset": 1100,
+              "end_byte_offset": 1101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "before\nneedle\nafter",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "lexical",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 12,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 1201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected": "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter\nother.txt\n  10-\tbefore\n  11:\tneedle\n  12-\tafter"
+    }
+  ]
+}

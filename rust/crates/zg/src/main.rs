@@ -85,7 +85,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let runtime = Builder::new_multi_thread().enable_all().build()?;
 
-    runtime.block_on(async move { execute_plan(plan).await })
+    runtime.block_on(Box::pin(execute_plan(plan)))
 }
 
 #[cfg(target_os = "macos")]
@@ -121,7 +121,7 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
             home,
             request,
             output,
-        } => execute_request(mode, home.as_deref(), *request, output).await,
+        } => Box::pin(execute_request(mode, home.as_deref(), *request, output)).await,
         CliPlan::Index {
             mode,
             home,

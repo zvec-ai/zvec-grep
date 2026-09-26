@@ -367,3 +367,25 @@ async fn send_failure_is_reported_and_closes_both_transports() {
     assert!(client.closed.load(Ordering::SeqCst));
     assert!(daemon.closed.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn unreadable_status_does_not_interrupt_a_live_daemon_relay() {
+    let home = tempfile::tempdir().expect("home");
+    // A regular file cannot be read as a daemon state directory on any platform.
+    let invalid_home = home.path().join("not-a-directory");
+    std::fs::write(&invalid_home, "fixture").expect("invalid home");
+    let connected = status(std::process::id(), "http://127.0.0.1:7999/mcp");
+    let (downstream, mut client) = transport();
+    let (upstream, mut daemon) = transport();
+    let task =
+        tokio::spawn(async move { relay(downstream, upstream, &connected, &invalid_home).await });
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    client.send(json!({"jsonrpc":"2.0", "id":1, "method":"ping"}));
+    let request = daemon.receive().await;
+    request.complete.send(Ok(())).expect("request");
+    daemon.send(json!({"jsonrpc":"2.0", "id":1, "result":{}}));
+    let response = client.receive().await;
+    response.complete.send(Ok(())).expect("response");
+    drop(client.incoming);
+    finish_relay(task).await.expect("normal shutdown");
+}

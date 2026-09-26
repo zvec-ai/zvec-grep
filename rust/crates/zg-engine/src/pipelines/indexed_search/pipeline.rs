@@ -693,6 +693,12 @@ fn search_plan_to_storage_filter(
 ) -> Result<Option<StorageSearchFilter>, EngineError> {
     // Compile even when pushdown is available so invalid rules have one error path.
     let matcher = GlobMatcher::new(workspace_root, &plan.filter.globs)?;
+    let types = crate::file_selection::file_types(
+        &plan.filter.file_types,
+        &plan.filter.excluded_file_types,
+    )?;
+    let has_types =
+        !plan.filter.file_types.is_empty() || !plan.filter.excluded_file_types.is_empty();
     let has_globs = !plan.filter.globs.is_empty();
     let glob_path = if has_globs {
         compile_path_filter(&plan.filter.globs, storage)?
@@ -709,6 +715,7 @@ fn search_plan_to_storage_filter(
         Some(resolve_filtered_paths(
             plan,
             &matcher,
+            &types,
             residual_format,
             attributes.iter().map(|file| {
                 (
@@ -718,11 +725,12 @@ fn search_plan_to_storage_filter(
                 )
             }),
         ))
-    } else if residual_format.is_some() || (has_globs && glob_path.is_none()) {
+    } else if has_types || residual_format.is_some() || (has_globs && glob_path.is_none()) {
         let paths = storage.list_file_paths()?;
         Some(resolve_filtered_paths(
             plan,
             &matcher,
+            &types,
             residual_format,
             paths.iter().map(|(id, path)| (*id, path.as_path(), None)),
         ))
@@ -750,6 +758,7 @@ fn search_plan_to_storage_filter(
 fn resolve_filtered_paths<'a>(
     plan: &SearchPlan,
     matcher: &GlobMatcher,
+    types: &ignore::types::Types,
     format: Option<&StoragePathFilter>,
     files: impl IntoIterator<Item = (FileId, &'a Path, Option<u64>)>,
 ) -> Vec<FileId> {
@@ -757,6 +766,7 @@ fn resolve_filtered_paths<'a>(
         .into_iter()
         .filter(|(_, relative, modified)| {
             matcher.matches_path(relative)
+                && !types.matched(relative, false).is_ignore()
                 && plan
                     .filter
                     .modified_after_epoch_ms
@@ -786,6 +796,10 @@ fn resolve_filtered_file_ids(
     Ok(resolve_filtered_paths(
         plan,
         &matcher,
+        &crate::file_selection::file_types(
+            &plan.filter.file_types,
+            &plan.filter.excluded_file_types,
+        )?,
         format.as_ref(),
         files.iter().map(|file| {
             (
@@ -1389,6 +1403,38 @@ mod tests {
             filters: Arc::default(),
             load_batches: Mutex::default(),
         }
+    }
+
+    #[test]
+    fn ripgrep_types_intersect_globs_and_use_the_path_projection() {
+        let mut storage = pushdown_storage();
+        storage.forbid_enumeration = false;
+        storage.paths_only = true;
+        storage.files = vec![
+            file(1, "src/a.h", 1),
+            file(2, "src/b.hpp", 1),
+            file(3, "src/c.cpp", 1),
+            file(4, "other.h", 1),
+        ];
+        let mut plan = plan(Vec::new());
+        plan.filter.file_types = vec!["h".into()];
+        plan.filter.globs = glob_rules(&["src/**"]);
+        let filter = super::search_plan_to_storage_filter(Path::new("/workspace"), &plan, &storage)
+            .expect("types")
+            .expect("filter");
+        assert_eq!(
+            selected_file_ids(&storage, &filter),
+            vec![storage.files[0].id, storage.files[1].id]
+        );
+        plan.filter.excluded_file_types = vec!["h".into()];
+        let filter = super::search_plan_to_storage_filter(Path::new("/workspace"), &plan, &storage)
+            .expect("types")
+            .expect("filter");
+        assert!(selected_file_ids(&storage, &filter).is_empty());
+        plan.filter.file_types = vec!["nonexistent-type".into()];
+        assert!(
+            super::search_plan_to_storage_filter(Path::new("/workspace"), &plan, &storage).is_err()
+        );
     }
 
     #[test]

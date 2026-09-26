@@ -14,8 +14,11 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zg_host_native::{
     DiscoveredFile, HostError, HostErrorSite, ReadBatchRequest, RootSpec, ScanRequest,
-    ScanSnapshot, SourceFile as HostSource, TaskControl, WorkspaceScannerPort,
+    SourceFile as HostSource, TaskControl, WorkspaceScannerPort,
 };
+
+#[cfg(test)]
+use zg_host_native::ScanSnapshot;
 
 use crate::{
     EngineError, ErrorSite,
@@ -292,6 +295,7 @@ struct IndexPassResult {
     diff: DiffPlan,
     stats: IndexWriteStats,
     skipped: Vec<SkippedFile>,
+    skipped_counts: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -411,7 +415,6 @@ async fn run_index_pass(
         )
         .await
         .map_err(map_host_error)?;
-    let mut skipped = skipped_files(&snapshot);
     let (scanned, classification_skips) = classify_files(
         context.workspace_index,
         snapshot.files,
@@ -419,8 +422,7 @@ async fn run_index_pass(
         &control,
     )
     .await?;
-    skipped.extend(classification_skips);
-    skipped.truncate(MAX_SKIPPED_FILE_SAMPLES);
+    let (skipped, skipped_counts) = collect_skips(&snapshot.diagnostics, classification_skips);
     let mut scanned = scope.filter_scanned(&context.workspace_index.root, scanned);
     resolve_scanned_identities(context.storage, &mut scanned)?;
     timings.record("index_scan", scan_started.elapsed(), scanned.len());
@@ -467,6 +469,7 @@ async fn run_index_pass(
         diff,
         stats,
         skipped,
+        skipped_counts,
     })
 }
 
@@ -1999,9 +2002,41 @@ async fn read_source(
     Ok(source)
 }
 
-fn skipped_files(snapshot: &ScanSnapshot) -> Vec<SkippedFile> {
-    snapshot
-        .diagnostics
+fn count_skips(
+    native: &zg_host_native::SkippedByReason,
+    classified: &[SkippedFile],
+) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::from([
+        ("empty".to_owned(), native.empty),
+        ("too_large".to_owned(), native.too_large),
+        ("unsupported".to_owned(), native.unsupported),
+        ("binary".to_owned(), native.binary),
+    ]);
+    for file in classified {
+        let reason = match file.reason {
+            SkippedFileReason::Empty => "empty",
+            SkippedFileReason::TooLarge => "too_large",
+            SkippedFileReason::Unsupported => "unsupported",
+            SkippedFileReason::Binary => "binary",
+        };
+        *counts.entry(reason.to_owned()).or_default() += 1;
+    }
+    counts
+}
+
+fn collect_skips(
+    diagnostics: &zg_host_native::ScanDiagnostics,
+    classified: Vec<SkippedFile>,
+) -> (Vec<SkippedFile>, std::collections::BTreeMap<String, usize>) {
+    let counts = count_skips(&diagnostics.skipped_by_reason, &classified);
+    let mut skipped = skipped_files(diagnostics);
+    skipped.extend(classified);
+    skipped.truncate(MAX_SKIPPED_FILE_SAMPLES);
+    (skipped, counts)
+}
+
+fn skipped_files(diagnostics: &zg_host_native::ScanDiagnostics) -> Vec<SkippedFile> {
+    diagnostics
         .skipped_samples
         .iter()
         .map(|skipped| SkippedFile {
@@ -2198,6 +2233,7 @@ fn build_index_result(
         duration_micros: duration.as_micros().try_into().unwrap_or(u64::MAX),
         timings: timings.entries,
         skipped: first.skipped.clone(),
+        skipped_counts: first.skipped_counts.clone(),
     }
 }
 

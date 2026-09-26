@@ -317,6 +317,7 @@ impl ScanArgs {
             max_depth: self.max_depth.map(Some),
             max_file_size_bytes: self.max_file_size_bytes.map(Some),
             follow_symlinks: self.follow_symlinks,
+            ..ScanRulesUpdate::default()
         }
     }
 
@@ -2164,6 +2165,30 @@ mod tests {
         let model = request.embedding.expect("selected model");
         assert_eq!(model.reference, "local/potion-code-16m-v2");
         assert_eq!(model.device, super::Device::Cpu);
+    }
+
+    #[test]
+    fn cli_glob_list_replaces_saved_insensitive_rules() {
+        let rules = vec![
+            super::GlobRule::from("secret/**"),
+            super::GlobRule {
+                pattern: "*.MD".to_owned(),
+                case_insensitive: true,
+            },
+        ];
+        let args = super::ScanArgs {
+            glob_rules: rules.clone(),
+            ..Default::default()
+        };
+        let mut scan = zg_engine::api::index::options::ScanRules {
+            globs: vec![super::GlobRule {
+                pattern: "!secret/**".to_owned(),
+                case_insensitive: true,
+            }],
+            ..Default::default()
+        };
+        args.update().apply(&mut scan);
+        assert_eq!(scan.globs, rules);
     }
 
     #[test]

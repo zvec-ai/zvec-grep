@@ -222,6 +222,15 @@ cached as fresh. Native `flush_pending` drains delivered events without forcing 
 scan, while explicit `flush` and periodic/recovery checks retain full rescans.
 Explicit `info` inspection still reads current disk status.
 
+For protocol `2026-07-28`, remote consent uses `input_required`. Echo the exact
+`requestState` and unchanged tool arguments with
+`inputResponses.remote_embedding_authorization = {"action":"accept","content":{"decision":"allow_once"}}`.
+Other choices are `allow_workspace`, `use_local_search` (search only), and `cancel`.
+The opaque state is kept in bounded daemon memory, expires after ten minutes,
+binds the caller, tool, arguments and disclosed targets, and is consumed once.
+Restarting the daemon invalidates pending prompts; request a new prompt. Older
+clients retain reverse form elicitation. Consent is rechecked before execution.
+
 ## MCP request lifecycle
 
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both
@@ -237,7 +246,10 @@ The engine provides `content_range` for the exact source coordinates of returned
 content, independently of the entity `range` and matched `excerpt_range`. CLI and
 MCP use these coordinates for source numbering; preview never infers a range from
 the number of content lines. The engine also interprets half-open line bounds.
-The required field changes the internal daemon reply contract (version 12).
+The required field changes the internal daemon reply contract. Version 13 also
+adds native ripgrep type filters to query and persisted scan rules. Version 14
+separates case-sensitive and case-insensitive glob updates on the daemon wire.
+Version 15 distinguishes complete ordered glob replacement from category updates.
 Restart older resident daemons when updating the CLI; replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
@@ -248,6 +260,30 @@ Public search reports `freshness: fresh` or `freshness: possibly_stale`.
 index provenance without verified freshness is conservatively shown as
 `possibly_stale`; a successful waited refresh reports `fresh`.
 
+Search and index accept `globs` and `insensitiveGlobs` as a string or list;
+case-insensitive string rules follow case-sensitive string rules. Index string
+parameters update only the supplied case category. Typed glob lists and CLI glob
+arguments replace the complete ordered list. `fileTypes` and
+`excludedFileTypes` use the embedded ripgrep catalog, including `h`, `cpp`, `ts`
+and `py`, independently of extractor `formats`. Index also accepts `follow`.
+Search never changes persisted scan policy: `hidden`, `noIgnore`, `ignoreFiles`,
+`maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
+indexed-search path ignores these options; Rust rejects them explicitly.
+Unknown search/index fields and public nulls are rejected, except index
+`maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
+Existing typed globs, `formats/categories`, `enum`, `name`, `nestedGit`, diagnostic
+extensions and their compatibility boundaries are recorded in
+[`allowed-differences.toml`](compat/allowed-differences.toml).
+
+Managed rg uses a file/line/context presentation and preserves all requested
+matches and context. Only an explicit trailing `head` bounds output, with an
+omission notice. Commands are parsed as arguments and never passed to a shell.
+Legacy HTTP sessions are capped at 256 and expire after 30 idle minutes; active
+request streams are protected. Discovery and tools/list advertise a one-hour
+private cache lifetime. The stdio bridge tolerates unreadable daemon state while
+the connected process is alive, and closes when that process exits or a new
+instance replaces it.
+
 Both HTTP and stdio expose the same tools. Public search rejects per-request
 `device` and `apiKey` overrides. Index accepts `device` and `debug: true` to return
 completed statistics, timings and at most 100 skipped files. Use `wait: true` to
@@ -256,8 +292,8 @@ state instead of pretending that indexing has completed.
 
 Index and search requests carrying `_meta.progressToken` receive coalesced MCP
 progress notifications during indexing, synchronous refresh and model download.
-The progress number is a monotonic event sequence; `message` contains the engine's
-JSON progress snapshot, including phase and file/download counters.
+The progress number is a monotonic event sequence; `message` describes the phase
+and file/download counters in readable text. Structured counters remain in status.
 
 Cancellation stops waiting and signals request-owned work cooperatively. An
 exclusive synchronous index job can be cancelled; shared jobs, watcher refreshes

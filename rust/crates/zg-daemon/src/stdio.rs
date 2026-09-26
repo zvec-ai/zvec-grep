@@ -99,7 +99,18 @@ where
                 }
             }
             _ = monitor.tick() => {
-                let current = server_status(home).await.unwrap_or_default();
+                let current = match server_status(home).await {
+                    Ok(current) => current,
+                    Err(error) => {
+                        warn!(%error, "daemon status temporarily unavailable during MCP relay");
+                        DaemonStatus::default()
+                    }
+                };
+                if current.pid.is_none()
+                    && connected.pid.is_some_and(crate::controller::process_is_alive)
+                {
+                    continue;
+                }
                 if stop_check.should_stop(connected, &current) {
                     break Err(DaemonError::McpBridge(
                         "daemon stopped or changed while stdio was connected".to_owned(),

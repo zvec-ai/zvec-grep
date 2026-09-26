@@ -1,5 +1,9 @@
 //! Remote embedding consent uses the same signed grants as the CLI.
 
+mod continuation;
+use continuation::ContinuationApproval;
+pub(crate) use continuation::ContinuationState;
+
 use rmcp::{
     RoleServer,
     model::{ElicitRequestParams, ElicitResult, ElicitationAction},
@@ -106,6 +110,18 @@ async fn ask(
 ) -> Result<Decision, EngineError> {
     if context.ct.is_cancelled() {
         return Err(EngineError::cancelled("MCP authorization was cancelled"));
+    }
+    if let Some(approval) = context.extensions.get::<ContinuationApproval>() {
+        if approval.targets.iter().any(|required| {
+            &required.target == target
+                && required.query_text == query_text
+                && required.workspace_content == workspace_content
+        }) {
+            return Ok(approval.decision);
+        }
+        return Err(EngineError::permission_denied(
+            "Remote authorization scope changed; retry consent",
+        ));
     }
     let supported = context
         .client_capabilities()

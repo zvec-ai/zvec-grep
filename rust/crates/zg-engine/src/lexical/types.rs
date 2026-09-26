@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::TextRange;
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct LexicalSearchRequest {
+    #[serde(skip)]
+    pub signal: Option<tokio_util::sync::CancellationToken>,
     pub root: Option<PathBuf>,
     pub patterns: Vec<String>,
     pub pattern_files: Vec<PathBuf>,

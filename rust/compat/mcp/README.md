@@ -37,3 +37,25 @@ in its formatter. Rust follows the engine's `content_range` instead, including w
 an EOF fragment retains a final empty line. Separate regression cases cover that
 known oracle bug, whole-entity content, and both preview modes under
 `engine-content-source-coordinates` in `allowed-differences.toml`.
+
+`rg-presentation.json` captures eight responses from the real Node MCP rg handler:
+context, long unbounded output, explicit head truncation, empty results, symbols,
+overlapping symbol matches, redundant declarations and multiple files. Regenerate
+with `node rust/scripts/capture-mcp-rg-presentation.mjs` after `npm run build`.
+`rg_format::tests::captured_node_rg_presentation` compares the text verbatim.
+
+The regular `cargo test --workspace --all-targets` entry point also runs:
+
+- MCP input mapping, native type selection, scan diagnostics, preview and metadata;
+- real duplex protocol consent, progress and cancellation tests;
+- daemon session admission/idle expiry and stdio failure-tolerance tests;
+- actual daemon HTTP discovery, tools/list, validation, origin checks and remote
+  consent continuation for `2026-07-28`;
+- actual legacy HTTP and new/legacy stdio remote consent, index lifecycle, runtime
+  refresh and direct/server source-coordinate regressions.
+
+These tests are part of the existing Linux/Windows/macOS Rust CI matrix. They use
+local HTTP fixtures, temporary roots and mock embedding responses. Standalone test
+runs in a restricted filesystem should set `ZVEC_GREP_WORKSPACE_REGISTRY` to a
+writable temporary file. Deferred MCP-01 remains separate: these focused cases do
+not claim to be a complete snapshot of every public Node schema and response.

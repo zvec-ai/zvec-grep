@@ -30,3 +30,39 @@ id = "cli-managed-rg-option-values"
 owner = "CLI"
 reason = "Rust treats managed-rg option values such as -e --index and -e -- as literal patterns, not management actions or argument separators. This preserves ripgrep semantics rather than reproducing the TypeScript action scanner's option-value bug (PR #196)."
 removal_condition = "The TypeScript CLI also skips option values during action and separator scanning, or the TypeScript compatibility layer is retired."
+
+[[difference]]
+id = "mcp-indexed-scan-options-explicit-rejection"
+owner = "MCP/file-selection"
+reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递 hidden/noIgnore/ignoreFiles/maxDepth/maxFileSizeBytes/follow；Rust 不复制接受后静默忽略的行为，而返回 invalid params 并指向 index 工具。查询不修改持久扫描配置。客户端应在 index 请求设置这些参数。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验。"
+removal_condition = "Node.js 为这些 indexed-search 参数提供实际语义后重新对照；不得仅为 schema 相同而忽略参数。"
+
+[[difference]]
+id = "mcp-typed-filter-and-index-extensions"
+owner = "MCP/engine"
+reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力；均为可选扩展，不代替 Node 的 fileTypes、follow、scan_diagnostics 和 status 字段。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
+removal_condition = "Node.js 提供同等能力或这些扩展不再有客户端时，按字段评估统一；不能删除引擎能力来简化协议。"
+
+[[difference]]
+id = "mcp-strict-input-validation"
+owner = "MCP/security"
+reason = "Rust 对 search/index 未知字段和非法 null 返回 invalid params，而 Node 对未知字段做丢弃；Rust 同时拒绝 root/path 中的父目录组件。显式错误避免拼错过滤参数或误传凭据后得到非预期范围。合法普通参数仍兼容；客户端需删除未知字段并规范化路径。验证：public_globs_types_and_follow_map_without_format_aliases、search_does_not_expose_runtime_credentials、maps_full_rg_without_using_a_shell_and_enforces_root_scope。"
+removal_condition = "公共契约明确要求容忍未知字段或父目录路径时，保留范围校验并重新设计兼容适配。"
+
+[[difference]]
+id = "mcp-process-local-continuations"
+owner = "MCP/authorization"
+reason = "新版授权使用不可预测的 opaque requestState 引用有界服务端状态，SHA-256 摘要绑定调用方、工具、参数及目标；十分钟过期、原子单次消费、最多 4096 个待授权请求。客户端不需解析令牌；daemon 重启后需重新请求授权。避免引入锁定 rmcp request-state feature 当前无法解析的 hmac 依赖，也不持久化一次请求的凭据。验证：wire_continuation_binds_arguments_expires_and_redeems_atomically、modern_http_discovery_tools_errors_and_remote_continuation、新旧 stdio 真实远程授权测试。"
+removal_condition = "SDK 签名依赖可用且确有跨 daemon 重启续传需求时评估迁移，仍须保留请求/调用方/目标绑定与原子防重放。"
+
+[[difference]]
+id = "mcp-legacy-session-capacity-status"
+owner = "MCP/HTTP"
+reason = "旧会话达到 256 个时拒绝创建；rmcp SessionManager 错误通过 SDK 返回 HTTP 500，Node 返回 503。客户端均应退避并等待旧会话关闭/过期。暂时保留 SDK 错误边界，避免按 SDK 私有错误文案重写 HTTP 响应。验证：bounds_sessions_and_expires_only_idle_work；新协议不占旧会话名额。"
+removal_condition = "rmcp 提供 SessionManager 错误到 HTTP 状态的稳定映射后改为 503。"
+
+[[difference]]
+id = "mcp-workspace-status-storage-metadata"
+owner = "MCP/storage"
+reason = "Rust workspace_index.id 使用持久工作区名称而非 Node 的内部标识格式；调用方应将其视为不透明标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
+removal_condition = "底层存储支持截断统计或统一工作区标识后补齐字段，并添加真实索引回归。"

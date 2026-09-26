@@ -56,5 +56,68 @@ pub(crate) async fn authenticate(
                 .into_response();
         }
     }
+    if request.uri().path().starts_with("/mcp") && !valid_mcp_origin(&request) {
+        return (axum::http::StatusCode::FORBIDDEN, "forbidden_origin").into_response();
+    }
     next.run(request).await
+}
+
+fn valid_mcp_origin(request: &axum::extract::Request) -> bool {
+    let mut origins = request.headers().get_all(axum::http::header::ORIGIN).iter();
+    let Some(value) = origins.next() else {
+        return true;
+    };
+    if origins.next().is_some() {
+        return false;
+    }
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Ok(uri) = value.parse::<http::Uri>() else {
+        return false;
+    };
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    uri.scheme_str() == Some("http")
+        && value == format!("http://{authority}")
+        && !authority.as_str().contains('@')
+        && matches!(
+            authority.host(),
+            "localhost" | "127.0.0.1" | "[::1]" | "::1"
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mcp_origin_accepts_only_bare_loopback_http_origins() {
+        for origin in [
+            "http://localhost:4567",
+            "http://127.0.0.1",
+            "http://[::1]:7999",
+        ] {
+            let request = http::Request::builder()
+                .header("origin", origin)
+                .body(axum::body::Body::empty())
+                .expect("valid test fixture");
+            assert!(valid_mcp_origin(&request), "{origin}");
+        }
+        for origin in [
+            "null",
+            "https://localhost",
+            "http://evil.example",
+            "http://localhost/",
+            "http://localhost?x=1",
+            "http://user@localhost",
+            "http://localhost#fragment",
+        ] {
+            let request = http::Request::builder()
+                .header("origin", origin)
+                .body(axum::body::Body::empty())
+                .expect("valid test fixture");
+            assert!(!valid_mcp_origin(&request), "{origin}");
+        }
+    }
 }
