@@ -1101,6 +1101,8 @@ mod output_tests {
                 symbol_name: Some("User".into()),
                 scope: Some("app".into()),
                 signature: None,
+                visibility: None,
+                language: None,
                 documentation: None,
             }));
             let mut buffer = Vec::new();

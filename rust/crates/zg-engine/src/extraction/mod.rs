@@ -15,7 +15,7 @@ pub(crate) use spi::{ImageSource, Source, SourceKind, TextSource};
 pub(crate) use spi::ChunkOptions;
 
 // Indexing output.
-pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment};
+pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, ExtractionOutput};
 
 use crate::{
     EngineError,
@@ -42,7 +42,7 @@ pub(crate) fn extract<'source>(
 pub(crate) fn extract_for_indexing<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
+) -> Result<ExtractionOutput, EngineError> {
     service::extract_for_indexing(source, options)
 }
 

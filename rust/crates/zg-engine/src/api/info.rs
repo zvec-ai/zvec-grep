@@ -347,8 +347,8 @@ mod tests {
         let mut info = indexed_info();
         info.compatibility = IndexCompatibility::RebuildRequired {
             actual_version: Some(1),
-            expected_version: 2,
-            reason: "unsupported index version 1; expected 2".into(),
+            expected_version: 8,
+            reason: "unsupported index version 1; expected 8".into(),
         };
         assert_eq!(info.index_status(), IndexStatus::RebuildRequired);
         info.indexed = false;

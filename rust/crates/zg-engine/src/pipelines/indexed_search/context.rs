@@ -782,6 +782,7 @@ mod tests {
             };
             let extracted = extract_for_indexing(&input, ChunkOptions::default())
                 .expect("default Markdown extraction")
+                .fragments
                 .remove(0);
             let file_id = FileId::new(1);
             let id = EntityId::new(file_id, &extracted.content, extracted.source_range)

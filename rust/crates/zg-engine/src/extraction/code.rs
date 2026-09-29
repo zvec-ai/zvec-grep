@@ -10,8 +10,9 @@ use crate::{
 
 use self::adapter::{LanguageAdapter, named_children, resolve_adapter};
 use super::{
-    ChunkOptions, ExtractedEntity, TextRange, TextSource, chunk_options_for_metadata,
-    chunking::text_fragments, text::extract_plain_text_entities, validate_formats,
+    ChunkOptions, ExtractedEntity, ExtractionOutput, TextRange, TextSource,
+    chunk_options_for_metadata, chunking::text_fragments, text::extract_plain_text_entities,
+    validate_formats,
 };
 
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
@@ -21,7 +22,7 @@ const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Sv
 pub(super) fn extract_for_indexing(
     source: &TextSource,
     options: ChunkOptions,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
+) -> Result<ExtractionOutput, EngineError> {
     let jsx = source
         .relative_path
         .extension()
@@ -33,9 +34,12 @@ fn extract_code(
     source: &TextSource,
     options: ChunkOptions,
     jsx: bool,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
+) -> Result<ExtractionOutput, EngineError> {
     if !super::service::is_code_source(&source.formats) {
-        return Ok(Vec::new());
+        return Ok(ExtractionOutput {
+            fragments: Vec::new(),
+            graph: None,
+        });
     }
     validate_formats(&source.formats)?;
     let (max_chars, overlap_chars) = resolve_options(options)?;
@@ -47,9 +51,15 @@ fn extract_code(
     {
         let fragments = extract_script_blocks(source, max_chars, overlap_chars)?;
         return if fragments.is_empty() {
-            Ok(fallback(source, max_chars, overlap_chars))
+            Ok(ExtractionOutput {
+                fragments: fallback(source, max_chars, overlap_chars),
+                graph: None,
+            })
         } else {
-            Ok(fragments)
+            Ok(ExtractionOutput {
+                fragments,
+                graph: None,
+            })
         };
     }
 
@@ -65,15 +75,24 @@ fn extract_code(
     let Some((adapter, language)) =
         format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?)))
     else {
-        return Ok(fallback(source, max_chars, overlap_chars));
+        return Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        });
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
-        return Ok(fallback(source, max_chars, overlap_chars));
+        return Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        });
     }
     let Some(tree) = parser.parse(&source.text, None) else {
-        return Ok(fallback(source, max_chars, overlap_chars));
+        return Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        });
     };
     let bytes = source.text.as_bytes();
     let mut entities = Vec::new();
@@ -84,9 +103,15 @@ fn extract_code(
         append_entity(source, &entity, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
-        Ok(fallback(source, max_chars, overlap_chars))
+        Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        })
     } else {
-        Ok(output)
+        Ok(ExtractionOutput {
+            fragments: output,
+            graph: None,
+        })
     }
 }
 
@@ -223,6 +248,8 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         scope: (!entity.breadcrumb.is_empty()).then(|| entity.breadcrumb.join("::")),
         signature: entity.signature.clone(),
         documentation: entity.documentation.clone(),
+        visibility: None,
+        language: None,
     })
 }
 
@@ -252,7 +279,8 @@ fn extract_script_blocks(
                 chunk_overlap_chars: Some(overlap_chars),
             },
             block.jsx,
-        )?;
+        )?
+        .fragments;
         let remapped = remap_script_block_entities(
             source,
             block_fragments,
@@ -493,6 +521,8 @@ mod tests {
                 symbol_name: Some("add".to_owned()),
                 scope: None,
                 signature: Some("async function add(value: number): Promise<number>".to_owned()),
+                visibility: None,
+                language: None,
                 documentation: Some("Adds one.".to_owned()),
             }))
         );
@@ -507,6 +537,8 @@ mod tests {
                 symbol_name: Some("create".to_owned()),
                 scope: Some("Box".to_owned()),
                 signature: Some("static create()".to_owned()),
+                visibility: None,
+                language: None,
                 documentation: None,
             }))
         );
@@ -549,6 +581,8 @@ mod tests {
                 symbol_name: Some("Widget".to_owned()),
                 scope: None,
                 signature: Some("typedef struct Widget {} Widget".to_owned()),
+                visibility: None,
+                language: None,
                 documentation: None,
             }))
         );
@@ -576,6 +610,8 @@ mod tests {
                 symbol_name: Some("Value".to_owned()),
                 scope: Some("Widget".to_owned()),
                 signature: Some("func (w *Widget) Value() int".to_owned()),
+                visibility: None,
+                language: None,
                 documentation: None,
             }))
         );
@@ -604,6 +640,8 @@ mod tests {
                 symbol_name: Some("fetch".to_owned()),
                 scope: Some("Service".to_owned()),
                 signature: Some("@staticmethod\nasync def fetch(value: str) -> str:".to_owned()),
+                visibility: None,
+                language: None,
                 documentation: None,
             }))
         );
@@ -1161,7 +1199,8 @@ mod tests {
                     chunk_overlap_chars: Some(18),
                 },
             )
-            .expect("structured source");
+            .expect("structured source")
+            .fragments;
             let entity = &entities[0];
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
