@@ -267,7 +267,12 @@ pub fn write_index_result(
     root: &Path,
     result: &IndexResult,
 ) -> io::Result<()> {
-    writeln!(writer, "Workspace index: ready")?;
+    let state = if result.files_failed > 0 {
+        "failed"
+    } else {
+        "ready"
+    };
+    writeln!(writer, "Workspace index: {state}")?;
     writeln!(writer, "Root: {}", root.display())?;
     writeln!(
         writer,
@@ -893,6 +898,37 @@ mod output_tests {
         ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource,
         MatchedBy,
     };
+
+    #[test]
+    fn index_result_distinguishes_failed_files_from_retried_work() {
+        use zg_engine::api::info::result::FailedFile;
+        let root = std::env::temp_dir().join("workspace");
+        for (failed, state) in [(0, "ready"), (1, "failed")] {
+            let result = IndexResult {
+                files_scanned: 2,
+                // This counts retry candidates processed by the build, not remaining work.
+                files_pending: 1,
+                files_failed: failed,
+                failed_files: if failed > 0 {
+                    vec![FailedFile {
+                        path: "broken.txt".into(),
+                        reason: "prepare: invalid text encoding".into(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                ..IndexResult::default()
+            };
+            let mut output = Vec::new();
+            write_index_result(&mut output, &root, &result).expect("index output");
+            let output = String::from_utf8(output).expect("UTF-8");
+            assert!(output.starts_with(&format!("Workspace index: {state}\n")));
+            assert!(output.contains(&format!("failed={failed}")));
+            if failed > 0 {
+                assert!(output.contains("Failed: broken.txt: prepare: invalid text encoding"));
+            }
+        }
+    }
 
     #[test]
     fn incompatible_status_shows_versions_reason_and_rebuild_guidance() {

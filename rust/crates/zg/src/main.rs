@@ -586,6 +586,18 @@ async fn execute_index(
             if output.debug {
                 eprintln!("Index diagnostics: {}", serde_json::to_string(&result)?);
             }
+            if result.files_failed > 0 {
+                return Err(io::Error::other(format!(
+                    "indexing completed with {} failed {}; workspace index is not ready",
+                    result.files_failed,
+                    if result.files_failed == 1 {
+                        "file"
+                    } else {
+                        "files"
+                    }
+                ))
+                .into());
+            }
         }
         IndexOperation::Drop(request) => {
             let removed = if server {
