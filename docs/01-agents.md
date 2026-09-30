@@ -22,9 +22,10 @@ managed-rg route.
 | Cursor | `cursor` | `~/.cursor/mcp.json` |
 | GitHub Copilot | `copilot` | `~/.copilot/mcp-config.json` and `~/.copilot/copilot-instructions.md` |
 | VS Code | `vscode` | the `mcp.json` of every detected VS Code profile, `~/.copilot/mcp-config.json`, and `~/.copilot/instructions/zvec-grep.instructions.md` |
+| Grok Build | `grok` | `~/.grok/config.toml` and `~/.grok/rules/zvec-grep.md` |
 
 The standard environment overrides used by each agent are respected, including
-`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
 `QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`,
 `CURSOR_CONFIG_DIR`, `COPILOT_HOME`, `VSCODE_PORTABLE`, and `VSCODE_APPDATA`.
 `VSCODE_USER_DIR` overrides the complete VS Code `User` profile directory, for
@@ -62,6 +63,7 @@ zg --install --target qwen --yes
 zg --install --target qoder --yes
 zg --install --target copilot --yes
 zg --install --target vscode --yes
+zg --install --target grok --yes
 zg --install --target all --yes
 ```
 
@@ -70,8 +72,8 @@ The installer:
 1. adds a managed `zvec_grep` MCP entry;
 2. adds search guidance where the agent supports it;
 3. adds local MCP tool approval for Codex and Claude Code, managed server trust
-   for Qwen Code and Qoder CLI, and exact search/rg allow rules for Qoder's
-   CLI-backed runtime;
+   for Qwen Code and Qoder CLI, exact search/rg allow rules for Qoder's
+   CLI-backed runtime, and a managed permission allow rule for Grok Build;
 4. starts the local zvec-grep server when possible.
 
 The [Server guide](./06-server.md) explains when the daemon is useful and how its
@@ -202,6 +204,29 @@ guidance in two files, because Copilot CLI applies `copilot-instructions.md` on
 every turn while a modular `.instructions.md` file is path-scoped. Uninstall
 removes the managed block, drops the header when the installer added it, and
 deletes the instructions file once nothing else remains in it.
+
+For Grok Build, the installer manages three files under
+`${GROK_HOME:-~/.grok}`. The MCP entry lives in the user-level `config.toml`
+and, in stdio mode, sets `startup_timeout_sec = 120` because first-run daemon
+and local-model warmup can exceed Grok Build's 30-second startup default; an
+HTTP entry references `--mcp-token-env` as a `Bearer ${NAME}` Authorization
+header, which Grok Build expands at load time. Search guidance is written to
+`rules/zvec-grep.md`, a global rules file Grok Build loads in every project, so
+no existing instructions file is modified. Tool pre-approval is a managed
+`[permission]` table with `allow = ["MCPTool(zvec_grep__*)"]`. TOML allows only
+one `[permission]` table per file, so when the configuration already defines
+one — including the inline `rules` array form — the installer leaves it
+untouched, skips the managed table, and reports the compact rule to add
+manually.
+
+Grok Build renders the Remote Embedding authorization request as a native
+elicitation card, so no question-tool fallback is needed. In non-interactive
+sessions (`grok -p`, pipelines) the card cannot appear; the managed guidance
+directs the agent to stop and ask the user to run `zg --auth grant` manually.
+Grok Build also scans Claude Code and Cursor configuration for MCP servers, so
+an existing `claude` or `cursor` install may already expose the zg server
+there; the `grok` target replaces that compat-sourced entry with a native one
+and adds the guidance and pre-approval those sources cannot provide.
 
 Restart the selected agent, or open a new session, after installation.
 

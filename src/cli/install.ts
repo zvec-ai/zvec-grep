@@ -127,10 +127,21 @@ const AGENT_INSTALLERS: readonly AgentInstaller[] = [
     install: installVsCodeIntegration,
     uninstall: uninstallVsCodeIntegration,
   },
+  {
+    id: "grok",
+    aliases: ["grok-build", "grok-cli"],
+    label: "Grok Build",
+    executables: ["grok"],
+    detect: grokHomeIsAvailable,
+    install: installGrokIntegration,
+    uninstall: uninstallGrokIntegration,
+  },
 ];
 
 const ZVEC_GREP_CONFIG_START = "# ZVEC_GREP_START";
 const ZVEC_GREP_CONFIG_END = "# ZVEC_GREP_END";
+const GROK_PERMISSION_RULE_START = "# ZVEC_GREP_PERMISSION_START";
+const GROK_PERMISSION_RULE_END = "# ZVEC_GREP_PERMISSION_END";
 const ZVEC_GREP_AGENTS_START = "<!-- ZVEC_GREP_START -->";
 const ZVEC_GREP_AGENTS_END = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_MCP_PERMISSION = "mcp__zvec_grep__*";
@@ -343,6 +354,84 @@ async function uninstallCodexIntegration(): Promise<InstallAgentResult> {
   });
 
   return { files: [configPath, agentsPath] };
+}
+
+async function installGrokIntegration(
+  options: InstallAgentOptions,
+): Promise<InstallAgentResult> {
+  const grokHome = resolveGrokHome();
+  const configPath = resolve(grokHome, "config.toml");
+  const guidancePath = resolve(grokHome, "rules", "zvec-grep.md");
+
+  await writeMarkedFile({
+    path: configPath,
+    startMarker: ZVEC_GREP_CONFIG_START,
+    endMarker: ZVEC_GREP_CONFIG_END,
+    block: grokConfigBlock(options),
+    force: options.force,
+    hasConflict: hasCodexMcpServerConfig,
+    conflictMessage: `Existing [mcp_servers.zvec_grep] found in ${configPath}. Re-run with --force after removing or moving that table into the zvec-grep managed block.`,
+    removeConflict: removeCodexMcpServerConfig,
+  });
+
+  let configNote: string | undefined;
+  const existingConfig = await readTextFileIfExists(configPath);
+  if (
+    existingConfig !== undefined &&
+    !existingConfig.includes(GROK_PERMISSION_RULE_START) &&
+    hasGrokPermissionTable(existingConfig)
+  ) {
+    // TOML allows only one [permission] table and forbids extending an inline
+    // rules array, so user-owned permission config is never spliced.
+    configNote = `${configPath} already defines [permission]; add "MCPTool(zvec_grep__*)" to permission.allow to skip tool approval prompts.`;
+  } else {
+    await writeMarkedFile({
+      path: configPath,
+      startMarker: GROK_PERMISSION_RULE_START,
+      endMarker: GROK_PERMISSION_RULE_END,
+      block: grokPermissionBlock(),
+      force: true,
+    });
+  }
+
+  await writeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+    block: grokGuidanceBlock(),
+    force: true,
+  });
+
+  return { files: [configPath, guidancePath], configNote };
+}
+
+async function uninstallGrokIntegration(): Promise<InstallAgentResult> {
+  const grokHome = resolveGrokHome();
+  const configPath = resolve(grokHome, "config.toml");
+  const guidancePath = resolve(grokHome, "rules", "zvec-grep.md");
+
+  await removeMarkedFile({
+    path: configPath,
+    startMarker: GROK_PERMISSION_RULE_START,
+    endMarker: GROK_PERMISSION_RULE_END,
+  });
+  await removeMarkedFile({
+    path: configPath,
+    startMarker: ZVEC_GREP_CONFIG_START,
+    endMarker: ZVEC_GREP_CONFIG_END,
+  });
+  await removeMarkedFile({
+    path: guidancePath,
+    startMarker: ZVEC_GREP_AGENTS_START,
+    endMarker: ZVEC_GREP_AGENTS_END,
+  });
+
+  const remainingGuidance = await readTextFileIfExists(guidancePath);
+  if (remainingGuidance !== undefined && !remainingGuidance.trim()) {
+    await unlinkFileIfExists(guidancePath);
+  }
+
+  return { files: [configPath, guidancePath] };
 }
 
 async function installOpenCodeIntegration(
@@ -1238,6 +1327,10 @@ function resolveCodexHome(): string {
   return resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"));
 }
 
+function resolveGrokHome(): string {
+  return resolve(process.env.GROK_HOME ?? resolve(homedir(), ".grok"));
+}
+
 function resolveClaudeConfigDirectory(): string {
   return resolve(
     process.env.CLAUDE_CONFIG_DIR ?? resolve(homedir(), ".claude"),
@@ -1384,6 +1477,10 @@ async function vsCodeUserDirectoryIsAvailable(): Promise<boolean> {
     if (await pathExists(directory)) return true;
   }
   return false;
+}
+
+async function grokHomeIsAvailable(): Promise<boolean> {
+  return pathExists(resolveGrokHome());
 }
 
 function resolveQoderHome(): string {
@@ -2809,14 +2906,64 @@ default_tools_approval_mode = "approve"
 ${ZVEC_GREP_CONFIG_END}`;
 }
 
+function grokConfigBlock(options: InstallAgentOptions): string {
+  const entry =
+    options.transport === "stdio"
+      ? `command = "zg"
+args = ${tomlStringArray(stdioArgs(options.mcpToolset))}
+# First-run daemon and local-model warmup can exceed Grok's 30s startup default.
+startup_timeout_sec = 120`
+      : `url = "${resolveServerUrl()}"${
+          options.mcpTokenEnv
+            ? `
+headers = { Authorization = "Bearer \${${options.mcpTokenEnv}}" }`
+            : ""
+        }`;
+  return `${ZVEC_GREP_CONFIG_START}
+[mcp_servers.zvec_grep]
+${entry}
+${ZVEC_GREP_CONFIG_END}`;
+}
+
+function grokPermissionBlock(): string {
+  return `${GROK_PERMISSION_RULE_START}
+[permission]
+allow = ["MCPTool(zvec_grep__*)"]
+${GROK_PERMISSION_RULE_END}`;
+}
+
+function hasGrokPermissionTable(existing: string): boolean {
+  return existing
+    .split(/\r?\n/)
+    .some((line) =>
+      /^\s*\[\[?\s*"?permission"?(?:\.[^\]]*)?\s*\]\]?/.test(line),
+    );
+}
+
+function grokGuidanceBlock(): string {
+  return agentGuidanceBlock({
+    hostPreamble: formatPromptRules("### Grok Build host notes", [
+      "MCP tools are reached through `use_tool` with the catalog names `zvec_grep__zvec_grep_search` and `zvec_grep__zvec_grep_rg`; the unprefixed tool names below refer to the same tools.",
+      "When `zvec_grep_search` needs `remote_embedding_authorization`, respond to the elicitation card this host renders natively instead of looking for another approval mechanism.",
+      'In non-interactive sessions (`grok -p`, pipelines) the card cannot appear: stop and ask the user to run `zg --auth grant "<absolute-root>" --capability embedding --scope workspace` with the same absolute root used by the failed search, then retry the original search once. Never grant silently and never request credentials for this.',
+    ]),
+  });
+}
+
 function agentGuidanceBlock(toolNames?: {
-  search: string;
-  rg: string;
+  search?: string;
+  rg?: string;
   qoderAuthorizationRecovery?: boolean;
+  hostPreamble?: string;
 }): string {
   const searchTool = toolNames?.search ?? "zvec_grep_search";
   const rgTool = toolNames?.rg ?? "zvec_grep_rg";
   const exactLookupRoute = `\`${rgTool}\` when it is listed by the current host; otherwise native Grep or \`rg\``;
+  const hostPreamble = toolNames?.hostPreamble
+    ? `
+${toolNames.hostPreamble}
+`
+    : "";
   const qoderAuthorizationRecovery = toolNames?.qoderAuthorizationRecovery
     ? `
 
@@ -2830,7 +2977,7 @@ ${formatPromptRules("### Qoder Remote Embedding authorization recovery", [
     : "";
   return `${ZVEC_GREP_AGENTS_START}
 ## zvec-grep
-
+${hostPreamble}
 Choose the evidence source before the retrieval mode.
 
 ${formatPromptRules(

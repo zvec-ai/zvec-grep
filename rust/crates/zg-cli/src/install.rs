@@ -19,6 +19,8 @@ use crate::{InstallArgs, McpInstallTransport, McpToolset, UninstallArgs};
 
 const CONFIG_START: &str = "# ZVEC_GREP_START";
 const CONFIG_END: &str = "# ZVEC_GREP_END";
+const GROK_PERMISSION_START: &str = "# ZVEC_GREP_PERMISSION_START";
+const GROK_PERMISSION_END: &str = "# ZVEC_GREP_PERMISSION_END";
 const GUIDANCE_START: &str = "<!-- ZVEC_GREP_START -->";
 const GUIDANCE_END: &str = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_PERMISSION: &str = "mcp__zvec_grep__*";
@@ -57,10 +59,11 @@ enum Agent {
     Qoder,
     Copilot,
     VsCode,
+    Grok,
 }
 
 impl Agent {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
@@ -69,6 +72,7 @@ impl Agent {
         Self::Qoder,
         Self::Copilot,
         Self::VsCode,
+        Self::Grok,
     ];
 
     const fn label(self) -> &'static str {
@@ -81,6 +85,7 @@ impl Agent {
             Self::Qoder => "Qoder",
             Self::Copilot => "GitHub Copilot",
             Self::VsCode => "VS Code",
+            Self::Grok => "Grok Build",
         }
     }
 
@@ -94,6 +99,7 @@ impl Agent {
             Self::Qoder => "qoder",
             Self::Copilot => "copilot",
             Self::VsCode => "vscode",
+            Self::Grok => "grok",
         }
     }
 }
@@ -430,6 +436,9 @@ fn agents_from_tokens(
             "8" | "vscode" | "vs-code" | "code" => {
                 selected.insert(Agent::VsCode);
             }
+            "9" | "grok" | "grok-build" | "grok-cli" => {
+                selected.insert(Agent::Grok);
+            }
             _ => {
                 return Err(InstallError::Message(format!(
                     "Unknown install target: {token}"
@@ -464,6 +473,7 @@ fn detect_agents() -> BTreeSet<Agent> {
                     || executable_available("code-insiders")
                     || vscode_user_directories().iter().any(|path| path.exists())
             }
+            Agent::Grok => executable_available("grok") || grok_home().exists(),
         })
         .collect()
 }
@@ -585,6 +595,7 @@ fn install_agent(agent: Agent, options: &AgentOptions) -> Result<AgentInstallRes
             });
         }
         Agent::VsCode => return install_vscode(options),
+        Agent::Grok => return install_grok(options),
     }?;
     Ok(AgentInstallResult::default())
 }
@@ -599,6 +610,7 @@ fn uninstall_agent(agent: Agent) -> Result<(), InstallError> {
         Agent::Qoder => uninstall_qoder(),
         Agent::Copilot => uninstall_copilot(),
         Agent::VsCode => uninstall_vscode(),
+        Agent::Grok => uninstall_grok(),
     }
 }
 
@@ -619,7 +631,7 @@ fn install_codex(options: &AgentOptions) -> Result<(), InstallError> {
         &guidance,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
         true,
         None,
         None,
@@ -630,6 +642,68 @@ fn uninstall_codex() -> Result<(), InstallError> {
     let home = env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex"));
     remove_marked_file(&home.join("config.toml"), CONFIG_START, CONFIG_END)?;
     remove_marked_file(&home.join("AGENTS.md"), GUIDANCE_START, GUIDANCE_END)
+}
+
+fn install_grok(options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
+    let home = grok_home();
+    let config = home.join("config.toml");
+    let guidance = home.join("rules").join("zvec-grep.md");
+    write_marked_file(
+        &config,
+        CONFIG_START,
+        CONFIG_END,
+        &grok_config_block(options),
+        options.force,
+        Some(codex_conflict),
+        Some(remove_codex_conflict),
+    )?;
+    let existing = read_if_exists(&config)?;
+    let note = if !existing.contains(GROK_PERMISSION_START) && has_grok_permission_table(&existing)
+    {
+        // TOML allows only one [permission] table and forbids extending an
+        // inline rules array, so user-owned permission config is never spliced.
+        Some(format!(
+            "{} already defines [permission]; add \"MCPTool(zvec_grep__*)\" to permission.allow to skip tool approval prompts.",
+            config.display()
+        ))
+    } else {
+        write_marked_file(
+            &config,
+            GROK_PERMISSION_START,
+            GROK_PERMISSION_END,
+            &grok_permission_block(),
+            true,
+            None,
+            None,
+        )?;
+        None
+    };
+    write_marked_file(
+        &guidance,
+        GUIDANCE_START,
+        GUIDANCE_END,
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, grok_host_notes()),
+        true,
+        None,
+        None,
+    )?;
+    Ok(AgentInstallResult {
+        config_path: Some(config),
+        config_note: note,
+    })
+}
+
+fn uninstall_grok() -> Result<(), InstallError> {
+    let home = grok_home();
+    let config = home.join("config.toml");
+    let guidance = home.join("rules").join("zvec-grep.md");
+    remove_marked_file(&config, GROK_PERMISSION_START, GROK_PERMISSION_END)?;
+    remove_marked_file(&config, CONFIG_START, CONFIG_END)?;
+    remove_marked_file(&guidance, GUIDANCE_START, GUIDANCE_END)?;
+    if guidance.exists() && read_if_exists(&guidance)?.trim().is_empty() {
+        fs::remove_file(&guidance)?;
+    }
+    Ok(())
 }
 
 fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
@@ -690,7 +764,7 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
         &directory.join("CLAUDE.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
         true,
         None,
         None,
@@ -782,6 +856,7 @@ fn install_opencode(options: &AgentOptions) -> Result<AgentInstallResult, Instal
             "zvec_grep_zvec_grep_search",
             "zvec_grep_zvec_grep_rg",
             false,
+            "",
         ),
         true,
         None,
@@ -852,7 +927,7 @@ fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
         &home.join("QWEN.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, false),
+        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, false, ""),
         true,
         None,
         None,
@@ -893,7 +968,7 @@ fn install_qoder(options: &AgentOptions) -> Result<(), InstallError> {
         &home.join("AGENTS.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, true),
+        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, true, ""),
         true,
         None,
         None,
@@ -961,7 +1036,7 @@ fn install_copilot(options: &AgentOptions) -> Result<(), InstallError> {
         &copilot_cli_guidance_path(),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
         true,
         None,
         None,
@@ -1079,7 +1154,7 @@ fn install_vscode(options: &AgentOptions) -> Result<AgentInstallResult, InstallE
         &guidance_path,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
         true,
         None,
         None,
@@ -1275,7 +1350,64 @@ fn toml_string_array(values: &[&str]) -> String {
     )
 }
 
-fn guidance_block(search: &str, rg: &str, qoder_recovery: bool) -> String {
+fn grok_home() -> PathBuf {
+    env_path("GROK_HOME").unwrap_or_else(|| home_dir().join(".grok"))
+}
+
+fn grok_config_block(options: &AgentOptions) -> String {
+    let connection = match options.transport {
+        McpInstallTransport::Stdio => format!(
+            "command = \"zg\"\nargs = {}\n# First-run daemon and local-model warmup can exceed Grok's 30s startup default.\nstartup_timeout_sec = 120",
+            toml_string_array(&stdio_args(options.toolset))
+        ),
+        McpInstallTransport::Http => {
+            let token = options
+                .token_env
+                .as_ref()
+                .map_or_else(String::new, |token| {
+                    format!("\nheaders = {{ Authorization = \"Bearer ${{{token}}}\" }}")
+                });
+            format!(
+                "url = \"{}\"{token}",
+                resolve_server_url().unwrap_or_else(|_| "http://127.0.0.1:7999/mcp".to_owned())
+            )
+        }
+    };
+    format!("{CONFIG_START}\n[mcp_servers.zvec_grep]\n{connection}\n{CONFIG_END}")
+}
+
+fn grok_permission_block() -> String {
+    format!(
+        "{GROK_PERMISSION_START}\n[permission]\nallow = [\"MCPTool(zvec_grep__*)\"]\n{GROK_PERMISSION_END}"
+    )
+}
+
+fn has_grok_permission_table(existing: &str) -> bool {
+    existing.lines().any(|line| {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix('[') {
+            let rest = rest.strip_prefix('[').unwrap_or(rest);
+            let Some(table) = rest.split(']').next() else {
+                return false;
+            };
+            let table = table.trim().trim_matches(|c| c == '"' || c == '\'');
+            return table == "permission" || table.starts_with("permission.");
+        }
+        // TOML forbids redefining a key as a table, so any root-level
+        // `permission` definition (dotted key, inline table, or scalar)
+        // makes a later [permission] table invalid; match it and skip.
+        let Some(rest) = line.strip_prefix("permission") else {
+            return false;
+        };
+        rest.starts_with('.') || rest.starts_with(|c: char| c == '=' || c.is_whitespace())
+    })
+}
+
+fn grok_host_notes() -> &'static str {
+    "\n### Grok Build host notes\n- MCP tools are reached through `use_tool` with the catalog names `zvec_grep__zvec_grep_search` and `zvec_grep__zvec_grep_rg`; the unprefixed tool names below refer to the same tools.\n- When `zvec_grep_search` needs `remote_embedding_authorization`, respond to the elicitation card this host renders natively instead of looking for another approval mechanism.\n- In non-interactive sessions (`grok -p`, pipelines) the card cannot appear: stop and ask the user to run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace` with the same absolute root used by the failed search, then retry the original search once. Never grant silently and never request credentials for this.\n"
+}
+
+fn guidance_block(search: &str, rg: &str, qoder_recovery: bool, host_notes: &str) -> String {
     let exact =
         format!("`{rg}` when it is listed by the current host; otherwise native Grep or `rg`");
     let recovery = if qoder_recovery {
@@ -1286,7 +1418,7 @@ fn guidance_block(search: &str, rg: &str, qoder_recovery: bool) -> String {
         String::new()
     };
     format!(
-        "{GUIDANCE_START}\n## zvec-grep\n\nChoose the evidence source before the retrieval mode.\n\n### Workspace evidence\n- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n- A workspace may contain any mix of code, documents, configuration, and data.\n- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n\n### Retrieval routing\n- When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use {exact}.\n- Use `{search}` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.\n- For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call `{search}` with the concept and anchors, then use {exact} for focused follow-up.\n- When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused `{search}` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.\n- Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.\n\n### Search evidence\n- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and read a cited file only when a required detail falls outside the snippet.\n\n### Freshness and index lifecycle\n- Pass a daemon-visible absolute `root` on every zvec-grep workspace call.\n- Read `freshness` and `background_refresh` from search results without a status preflight.\n- When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.\n- If the index is missing but exact or regex lookup can answer the task, use {exact}.\n- Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.{recovery}\n{GUIDANCE_END}"
+        "{GUIDANCE_START}\n## zvec-grep\n{host_notes}\nChoose the evidence source before the retrieval mode.\n\n### Workspace evidence\n- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n- A workspace may contain any mix of code, documents, configuration, and data.\n- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n\n### Retrieval routing\n- When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use {exact}.\n- Use `{search}` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.\n- For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call `{search}` with the concept and anchors, then use {exact} for focused follow-up.\n- When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused `{search}` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.\n- Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.\n\n### Search evidence\n- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and read a cited file only when a required detail falls outside the snippet.\n\n### Freshness and index lifecycle\n- Pass a daemon-visible absolute `root` on every zvec-grep workspace call.\n- Read `freshness` and `background_refresh` from search results without a status preflight.\n- When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.\n- If the index is missing but exact or regex lookup can answer the task, use {exact}.\n- Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.{recovery}\n{GUIDANCE_END}"
     )
 }
 
@@ -2408,6 +2540,85 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grok_aliases_and_numeric_target_resolve() {
+        let agents =
+            agents_from_tokens(&["grok-build".to_owned()], &BTreeSet::new()).expect("targets");
+        assert_eq!(agents, vec![Agent::Grok]);
+        let agents =
+            agents_from_tokens(&["9,grok-cli".to_owned()], &BTreeSet::new()).expect("targets");
+        assert_eq!(agents, vec![Agent::Grok]);
+    }
+
+    #[test]
+    fn grok_config_block_varies_by_transport() {
+        let stdio = grok_config_block(&AgentOptions {
+            force: false,
+            transport: McpInstallTransport::Stdio,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: None,
+        });
+        assert!(stdio.contains("[mcp_servers.zvec_grep]"));
+        assert!(stdio.contains("args = [\"--server\", \"--stdio\"]"));
+        assert!(stdio.contains("startup_timeout_sec = 120"));
+        assert!(!stdio.contains("tool_timeout_sec"));
+        let http = grok_config_block(&AgentOptions {
+            force: false,
+            transport: McpInstallTransport::Http,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: Some("ZVEC_GREP_SERVER_TOKEN".to_owned()),
+        });
+        assert!(http.starts_with("# ZVEC_GREP_START\n[mcp_servers.zvec_grep]\nurl = \""));
+        assert!(
+            http.contains("headers = { Authorization = \"Bearer ${ZVEC_GREP_SERVER_TOKEN}\" }")
+        );
+        assert!(!http.contains("startup_timeout_sec"));
+    }
+
+    #[test]
+    fn grok_permission_table_detection_matches_owned_and_user_tables() {
+        assert!(has_grok_permission_table("[permission]\nallow = []"));
+        assert!(has_grok_permission_table(
+            "x = 1\n\n[[permission.rules]]\naction = \"allow\"\n"
+        ));
+        assert!(has_grok_permission_table("[permission.allow]"));
+        assert!(has_grok_permission_table("[\"permission\"]"));
+        assert!(has_grok_permission_table("['permission']"));
+        assert!(!has_grok_permission_table(
+            "[mcp_servers.zvec_grep]\ncommand = \"zg\""
+        ));
+        assert!(!has_grok_permission_table("[permissions]\nallow = []"));
+        // TOML forbids redefining a key as a table: a root-level
+        // `permission` definition makes a later [permission] table
+        // invalid, so every root-level spelling must match.
+        assert!(has_grok_permission_table(
+            "permission.allow = [\"Bash(git *)\"]"
+        ));
+        assert!(has_grok_permission_table(
+            "permission = { allow = [\"Bash(git *)\"] }"
+        ));
+        assert!(has_grok_permission_table("permission = true"));
+        assert!(!has_grok_permission_table("permissionx = true"));
+    }
+
+    #[test]
+    fn grok_guidance_includes_host_notes_preamble() {
+        let block = guidance_block("zvec_grep_search", "zvec_grep_rg", false, grok_host_notes());
+        assert!(block.contains("### Grok Build host notes"));
+        assert!(block.contains("zvec_grep__zvec_grep_search"));
+        assert!(block.contains("zg --auth grant"));
+        assert!(block.contains("Choose the evidence source before the retrieval mode."));
+        let plain = guidance_block("zvec_grep_search", "zvec_grep_rg", false, "");
+        assert!(!plain.contains("Grok Build host notes"));
+        assert!(
+            plain.starts_with(
+                "<!-- ZVEC_GREP_START -->\n## zvec-grep\n\nChoose the evidence source"
+            )
+        );
+    }
+
     #[test]
     fn trailing_commas_are_enabled_for_opencode_and_vscode() {
         let path = std::path::Path::new("settings.json");

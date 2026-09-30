@@ -47,6 +47,7 @@ test("interactive installer marker follows the active agent", () => {
   assert.match(qwen[4], /● Qwen Code\s+not found/);
   assert.match(qwen[6], /○ GitHub Copilot\s+not found/);
   assert.match(qwen[7], /○ VS Code\s+not found/);
+  assert.match(qwen[8], /○ Grok Build\s+not found/);
   assert.match(codex.at(-1), /Use ↑↓ to move · Enter to select/);
   assert.doesNotMatch(codex.join("\n"), /Space|\[●\]/);
 });
@@ -527,6 +528,159 @@ test("Codex installer refreshes legacy managed guidance", async (t) => {
   assert.doesNotMatch(agents, /Remote data authorization/);
   assert.doesNotMatch(agents, /zg (?:--)?status/);
   assert.doesNotMatch(agents, /legacy guidance/);
+});
+
+test("Grok Build installer writes MCP entry, pre-approval, and global guidance", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  const configPath = join(grokHome, "config.toml");
+  const guidancePath = join(grokHome, "rules", "zvec-grep.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("grok", { GROK_HOME: grokHome });
+  await installTarget("grok", { GROK_HOME: grokHome });
+
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+  assert.match(config, /^command = "zg"$/m);
+  assert.match(config, /^args = \["--server", "--stdio"\]$/m);
+  assert.match(config, /^startup_timeout_sec = 120$/m);
+  assert.doesNotMatch(config, /^tool_timeout_sec\s*=/m);
+  assert.doesNotMatch(config, /^url\s*=/m);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_START"), 1);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_END"), 1);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_PERMISSION_START"), 1);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_PERMISSION_END"), 1);
+  assert.match(config, /^\[permission\]$/m);
+  assert.match(config, /^allow = \["MCPTool\(zvec_grep__\*\)"\]$/m);
+  assert.doesNotMatch(
+    config.slice(0, config.indexOf("# ZVEC_GREP_PERMISSION_START")),
+    /^\[permission\]$/m,
+  );
+
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_START -->"), 1);
+  assert.match(guidance, /## zvec-grep/);
+  assert.match(guidance, /### Grok Build host notes/);
+  assert.match(guidance, /zvec_grep__zvec_grep_search/);
+  assert.match(guidance, /zg --auth grant/);
+  assert.match(
+    guidance,
+    /Choose the evidence source before the retrieval mode/,
+  );
+  for (const rule of ZVEC_GREP_WORKSPACE_EVIDENCE_RULES) {
+    assert.ok(guidance.includes(`- ${rule}`));
+  }
+});
+
+test("Grok Build installer skips pre-approval when a [permission] table exists", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-permission-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  const configPath = join(grokHome, "config.toml");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(grokHome, { recursive: true });
+  const existing = [
+    '[model."custom"]',
+    'name = "custom"',
+    "",
+    "[permission]",
+    'allow = ["Bash(git *)"]',
+    "",
+  ].join("\n");
+  await writeFile(configPath, existing);
+
+  const { stdout } = await installTarget("grok", { GROK_HOME: grokHome });
+
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+  assert.match(config, /allow = \["Bash\(git \*\)"\]/);
+  assert.doesNotMatch(config, /ZVEC_GREP_PERMISSION/);
+  assert.match(stdout, /MCPTool\(zvec_grep__\*\)/);
+});
+
+test("Grok Build installer accepts grok-build and grok-cli aliases", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-aliases-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  for (const target of ["grok-build", "grok-cli"]) {
+    const grokHome = join(temporaryDirectory, target);
+    await installTarget(target, { GROK_HOME: grokHome });
+    const config = await readFile(join(grokHome, "config.toml"), "utf8");
+    assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+  }
+});
+
+test("Grok Build installer writes HTTP transport with token header expansion", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-http-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("grok", { GROK_HOME: grokHome }, [
+    "--mcp-transport",
+    "http",
+    "--mcp-token-env",
+    "ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = await readFile(join(grokHome, "config.toml"), "utf8");
+  assert.match(config, /^url = "http:\/\//m);
+  assert.match(
+    config,
+    /^headers = \{ Authorization = "Bearer \$\{ZVEC_GREP_SERVER_TOKEN\}" \}$/m,
+  );
+  assert.doesNotMatch(config, /startup_timeout_sec/);
+});
+
+test("Grok Build uninstaller removes only managed blocks and an empty rules file", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-grok-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  const configPath = join(grokHome, "config.toml");
+  const guidancePath = join(grokHome, "rules", "zvec-grep.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(join(grokHome, "rules"), { recursive: true });
+  await writeFile(
+    configPath,
+    '[mcp_servers.other]\ncommand = "other"\n\n[permission]\nallow = ["Bash(git *)"]\n',
+  );
+  await writeFile(guidancePath, "# Existing rules\n");
+
+  await installTarget("grok", { GROK_HOME: grokHome });
+  await uninstallTarget("grok", { GROK_HOME: grokHome });
+  await uninstallTarget("grok", { GROK_HOME: grokHome });
+
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, /\[mcp_servers\.other\]\ncommand = "other"/);
+  assert.match(config, /allow = \["Bash\(git \*\)"\]/);
+  assert.doesNotMatch(config, /ZVEC_GREP|mcp_servers\.zvec_grep/);
+  assert.match(await readFile(guidancePath, "utf8"), /# Existing rules/);
+  assert.doesNotMatch(await readFile(guidancePath, "utf8"), /zvec-grep/);
+
+  const bareHome = join(temporaryDirectory, "bare");
+  await installTarget("grok", { GROK_HOME: bareHome });
+  await uninstallTarget("grok", { GROK_HOME: bareHome });
+  await assert.rejects(stat(join(bareHome, "rules", "zvec-grep.md")));
 });
 
 test("Claude Code installer configures MCP trust and guidance", async (t) => {
