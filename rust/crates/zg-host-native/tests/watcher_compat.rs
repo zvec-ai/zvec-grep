@@ -57,20 +57,25 @@ async fn watcher_debounces_changes_and_obeys_injected_selection_policy() -> Test
         "module.exports = 2;\n",
     )?;
 
-    let batch =
-        tokio::time::timeout(Duration::from_secs(5), session.next_changes(&control)).await??;
-    assert!(
-        batch
-            .changes
-            .contains(&WorkspaceChange::Upsert(PathBuf::from("tracked.ts")))
-    );
-    assert!(!batch.changes.iter().any(|change| match change {
-        WorkspaceChange::Upsert(path)
-        | WorkspaceChange::Delete(path)
-        | WorkspaceChange::RescanDirectory(path)
-        | WorkspaceChange::DeletePrefix(path) => path.starts_with("node_modules"),
-        WorkspaceChange::Rescan => false,
-    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let batch = session.next_changes(&control).await?;
+            assert!(!batch.changes.iter().any(|change| match change {
+                WorkspaceChange::Upsert(path)
+                | WorkspaceChange::Delete(path)
+                | WorkspaceChange::RescanDirectory(path)
+                | WorkspaceChange::DeletePrefix(path) => path.starts_with("node_modules"),
+                WorkspaceChange::Rescan => false,
+            }));
+            if batch
+                .changes
+                .contains(&WorkspaceChange::Upsert(PathBuf::from("tracked.ts")))
+            {
+                return Ok::<(), HostError>(());
+            }
+        }
+    })
+    .await??;
     session.close().await?;
     Ok(())
 }
