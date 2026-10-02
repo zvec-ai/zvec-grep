@@ -24,6 +24,7 @@ import {
   redactErrorText,
 } from "../../dist/engine/errors.js";
 import { makeEntityId } from "../../dist/engine/extraction/ids.js";
+import { validateRootPaths } from "../../dist/engine/pipeline/indexing/root-paths.js";
 import { detectFileType } from "../../dist/engine/file-type.js";
 import {
   getEmbeddingModelCatalogEntry,
@@ -905,6 +906,40 @@ test("glob and path helpers cover literal, wildcard, and descendant matching", (
   assert.equal(isPathInside(parent, resolve(parent, "..", "other")), false);
   assert.equal(toDisplayPath(parent).includes("\\"), false);
 });
+
+test(
+  "index roots reject Windows paths on POSIX without rejecting drive-like directories",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), "zvec-grep-root-style-"),
+    );
+    t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+    const driveLikeDirectory = join(temporaryDirectory, "C:");
+    await mkdir(driveLikeDirectory);
+    const driveLikeFile = join(driveLikeDirectory, "x.ts");
+    await writeFile(driveLikeFile, "export const DriveLike = 1;\n");
+
+    const windowsRoot = String.raw`C:\Users\user\project`;
+    for (const rootPath of [
+      windowsRoot,
+      join(temporaryDirectory, windowsRoot),
+    ]) {
+      assert.throws(
+        () => validateRootPaths([rootPath]),
+        (error) =>
+          error.code === "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_INVALID" &&
+          String(error.context).includes(windowsRoot),
+      );
+    }
+
+    assert.deepEqual(validateRootPaths([driveLikeFile]), [
+      { absolutePath: driveLikeFile, recursive: true },
+    ]);
+    assert.equal(normalizePath("C:/x.ts"), resolve("C:/x.ts"));
+    assert.equal(isPathInside(temporaryDirectory, driveLikeFile), true);
+  },
+);
 
 test("file type filters accept extension aliases for ripgrep types", async () => {
   const types = await resolveFileTypePatterns([".h", "cc"], undefined);
