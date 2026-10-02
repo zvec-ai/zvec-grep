@@ -174,6 +174,7 @@ function chunkText(
       lines,
       startIndex,
       endIndex,
+      maxChars,
       overlapChars,
     );
   }
@@ -197,6 +198,7 @@ function computeNextStartLine(
   lines: readonly string[],
   startIndex: number,
   endIndex: number,
+  maxChars: number,
   overlapChars: number,
 ): number {
   if (overlapChars === 0) {
@@ -213,6 +215,14 @@ function computeNextStartLine(
   ) {
     overlapCount += lines[index].length + 1;
     overlapLines++;
+  }
+
+  // The next chunk must still have room for the line after the overlap,
+  // otherwise it stops at `endIndex` again and only repeats emitted lines.
+  const nextLineLength = lines[endIndex].length + 1;
+  while (overlapLines > 0 && overlapCount + nextLineLength > maxChars) {
+    overlapCount -= lines[endIndex - overlapLines].length + 1;
+    overlapLines--;
   }
 
   const nextStart = endIndex - overlapLines;
