@@ -89,7 +89,7 @@ test("file detection covers special, code, data, text, image, binary, and unknow
   );
 });
 
-test("file-size policy uses type-aware defaults and honors explicit overrides", () => {
+test("file-size policy uses type-aware defaults and honors explicit overrides", async () => {
   assert.equal(resolveMaxFileSizeBytes("code"), 1 * 1024 * 1024);
   assert.equal(resolveMaxFileSizeBytes("text"), 256 * 1024 * 1024);
   assert.equal(resolveMaxFileSizeBytes("data"), 16 * 1024 * 1024);
@@ -142,18 +142,24 @@ test("root path validation detects missing and overlapping scan domains", async 
     include: ["src/**", "README.md"],
     exclude: ["**/*.test.ts"],
   };
-  assert.equal(matchesRootPatterns("src/main.ts", filtered), true);
-  assert.equal(matchesRootPatterns("src/main.test.ts", filtered), false);
-  assert.equal(matchesRootPatterns("other.txt", filtered), false);
-  assert.equal(matchesRootIncludePatterns("README.md", filtered), true);
-  assert.equal(matchesRootExcludePatterns("src/a.test.ts", filtered), true);
+  assert.equal(await matchesRootPatterns("src/main.ts", filtered), true);
+  assert.equal(await matchesRootPatterns("src/main.test.ts", filtered), false);
+  assert.equal(await matchesRootPatterns("other.txt", filtered), false);
+  assert.equal(await matchesRootIncludePatterns("README.md", filtered), true);
   assert.equal(
-    fileBelongsToRootPath(join(root, "src/main.ts"), filtered),
+    await matchesRootExcludePatterns("src/a.test.ts", filtered),
     true,
   );
-  assert.equal(fileBelongsToRootPath(join(root, "other.txt"), filtered), false);
   assert.equal(
-    fileBelongsToRootPath(join(root, "..", "outside.ts"), filtered),
+    await fileBelongsToRootPath(join(root, "src/main.ts"), filtered),
+    true,
+  );
+  assert.equal(
+    await fileBelongsToRootPath(join(root, "other.txt"), filtered),
+    false,
+  );
+  assert.equal(
+    await fileBelongsToRootPath(join(root, "..", "outside.ts"), filtered),
     false,
   );
 });
