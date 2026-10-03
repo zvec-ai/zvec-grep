@@ -6,6 +6,7 @@ import {
   type ZvecGrepInfoResult,
 } from "../engine/service/index.js";
 import type { CreateZvecGrepOptions } from "../engine/service/types.js";
+import { workspaceIndexLocation } from "../engine/service/root.js";
 import { DaemonError } from "./errors.js";
 import { DEFAULT_WATCHER_IDLE_TIMEOUT_MS } from "./config.js";
 import type {
@@ -115,25 +116,20 @@ export class RuntimeManager {
       requestedRoot,
       true,
     );
-    const activeRequestedRoot = this.runtimes.get(
-      this.aliases.get(canonicalRequestedRoot) ?? canonicalRequestedRoot,
+    const canonicalRoot = await resolveRequestedRoot(
+      workspaceIndexLocation(canonicalRequestedRoot).root,
+      true,
     );
+    // Query aliases may point to an ancestor. Index writes use the exact root.
+    this.aliases.set(canonicalRequestedRoot, canonicalRoot);
+    const activeRequestedRoot = this.runtimes.get(canonicalRoot);
     if (activeRequestedRoot) {
       return activeRequestedRoot;
     }
-    const creatingRequestedRoot = this.creating.get(
-      this.aliases.get(canonicalRequestedRoot) ?? canonicalRequestedRoot,
-    );
+    const creatingRequestedRoot = this.creating.get(canonicalRoot);
     if (creatingRequestedRoot) {
       return creatingRequestedRoot;
     }
-    const info = await inspectRoot(
-      canonicalRequestedRoot,
-      this.options.serviceOptions,
-      false,
-    );
-    const canonicalRoot = await resolveRequestedRoot(info.root, true);
-    this.aliases.set(canonicalRequestedRoot, canonicalRoot);
     return this.getOrCreate(canonicalRoot);
   }
 
@@ -311,6 +307,7 @@ export async function inspectRoot(
   requestedRoot: string,
   serviceOptions: CreateZvecGrepOptions = {},
   includeStatus = true,
+  exactRoot = false,
 ): Promise<ZvecGrepInfoResult> {
   const canonicalRequestedRoot = await resolveRequestedRoot(
     requestedRoot,
@@ -321,7 +318,11 @@ export async function inspectRoot(
     root: canonicalRequestedRoot,
   });
   try {
-    return await service.info({ root: canonicalRequestedRoot, includeStatus });
+    return await service.info({
+      root: canonicalRequestedRoot,
+      includeStatus,
+      exactRoot,
+    });
   } finally {
     await service.close();
   }

@@ -65,6 +65,8 @@ export type ZvecGrepWriterContext = (
 export type ZvecGrepInfoOptions = {
   root?: string;
   includeStatus?: boolean;
+  /** Inspect only this root, without inheriting an ancestor workspace. */
+  exactRoot?: boolean;
 };
 
 export type ZvecGrepInfoResult = {

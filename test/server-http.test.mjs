@@ -309,7 +309,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   );
   const refreshed = await clients[0].callTool({
     name: "zvec_grep_index",
-    arguments: { root: join(root, "src"), wait: true },
+    arguments: { root, wait: true },
   });
   assert.equal(refreshed.structuredContent.root, canonicalRoot);
   await backend.scheduler.waitForRootIdle(canonicalRoot);
@@ -452,6 +452,27 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
     arguments: { root: unindexedRoot },
   });
   assert.equal(droppedStatus.structuredContent.indexed, false);
+
+  const nestedRoot = join(root, "src");
+  const nestedIndex = await clients[0].callTool({
+    name: "zvec_grep_index",
+    arguments: {
+      root: nestedRoot,
+      embedding: "test/deterministic",
+      wait: true,
+    },
+  });
+  assert.equal(nestedIndex.isError, undefined);
+  assert.equal(nestedIndex.structuredContent.state, "succeeded");
+  assert.equal(nestedIndex.structuredContent.root, join(canonicalRoot, "src"));
+  await access(join(nestedRoot, ".zvec-grep", "manifest.json"));
+  const nestedSearch = await clients[1].callTool({
+    name: "zvec_grep_search",
+    arguments: { root: nestedRoot, fts: "updatedAnswer" },
+  });
+  assert.equal(nestedSearch.isError, undefined);
+  assertAdminSearchStructured(nestedSearch);
+  assert.match(nestedSearch.content[0].text, /answer\.ts:/);
 });
 
 test("full MCP toolset restores all tools on the public endpoint", async (t) => {

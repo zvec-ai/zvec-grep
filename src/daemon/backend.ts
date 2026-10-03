@@ -172,6 +172,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       input.root,
       this.options.serviceOptions,
       input.rebuild !== true,
+      true,
     );
     let modelLoadRequest: EmbeddingModelLoadRequest;
     try {
@@ -770,6 +771,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const before = await this.inspectRoot(
       runtime.canonicalRoot,
       includeInitialStatus,
+      true,
     );
     if (includeInitialStatus) {
       this.statusCache.set(runtime.canonicalRoot, before);
@@ -866,6 +868,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const after = await this.inspectRoot(
       runtime.canonicalRoot,
       includeFinalStatus,
+      true,
     );
     if (includeFinalStatus) {
       this.statusCache.set(runtime.canonicalRoot, after);
@@ -1365,11 +1368,13 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   private async inspectRoot(
     root: string,
     includeStatus: boolean,
+    exactRoot = false,
   ): Promise<ZvecGrepInfoResult> {
     return await (this.options.inspectRoot ?? inspectRoot)(
       root,
       this.options.serviceOptions,
       includeStatus,
+      exactRoot,
     );
   }
 }
