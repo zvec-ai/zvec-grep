@@ -14,7 +14,7 @@ from .corpus import materialize, prepared_corpus, workspace_root
 from .dataset import fetch, prepared_dataset
 from .doctor import format_report, run_doctor
 from .evaluate import evaluate, evaluation_complete
-from .index import build_index, index_is_ready, prepared_index
+from .index import build_index, index_is_ready, prepared_index, resumable_index
 from .report import generate_report
 from .runner import RunTerminated, resume_benchmark, run_benchmark
 
@@ -398,15 +398,20 @@ def main(argv: list[str] | None = None) -> int:
             config,
             artifacts,
         )
-        rebuild_index = index_dir.is_dir() and not reuse_index
+        resume_index = not reuse_index and resumable_index(config, artifacts)
+        rebuild_index = index_dir.is_dir() and not reuse_index and not resume_index
         if not reuse_index and not args.yes:
             if not sys.stdin.isatty():
-                action = "rebuild" if rebuild_index else "build"
+                action = (
+                    "resume" if resume_index else "rebuild" if rebuild_index else "build"
+                )
                 raise SystemExit(f"error: index {action} requires --yes")
             prompt = (
                 "Existing index cannot be reused and will be rebuilt. "
                 "Continue? [y/N] "
                 if rebuild_index
+                else "Resume the interrupted index build? [y/N] "
+                if resume_index
                 else "Build the reusable zvec-grep index now? [y/N] "
             )
             answer = console.prompt(
@@ -424,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
             if reuse_index
             else "Rebuilding existing index"
             if rebuild_index
+            else "Resuming interrupted index"
+            if resume_index
             else "Building reusable index"
         )
         console.activity(activity)
@@ -454,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{float(index_state['build_wall_seconds']):,.1f}s",
         )
         console.blank()
+        if not index_state.get("build_time_complete", True):
+            console.warning("Build time is a lower bound: an interrupted attempt has no recorded duration.")
         console.success("Preparation complete")
         return 0
     if args.command == "run":
