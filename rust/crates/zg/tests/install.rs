@@ -62,6 +62,51 @@ fn codex_install_and_uninstall_preserve_user_files() {
 }
 
 #[test]
+fn codex_http_install_rejects_invalid_global_config_before_writing() {
+    let temporary = TempDir::new().expect("tempdir");
+    let home = temporary.path().join("home");
+    let codex_home = temporary.path().join("codex");
+    fs::create_dir_all(home.join(".zvec-grep")).expect("config dir");
+    fs::create_dir_all(&codex_home).expect("codex dir");
+    fs::write(
+        home.join(".zvec-grep/config.json"),
+        "{\"version\":1,\"server\":{\"host\":\"0.0.0.0\"}}\n",
+    )
+    .expect("global config");
+    let config_path = codex_home.join("config.toml");
+    let existing = "[mcp_servers.other]\ncommand = \"other\"\n";
+    fs::write(&config_path, existing).expect("codex config");
+
+    let output = zg()
+        .args([
+            "--install",
+            "--target",
+            "codex",
+            "--mcp-transport",
+            "http",
+            "--yes",
+        ])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("CODEX_HOME", &codex_home)
+        .env_remove("ZVEC_GREP_SERVER_URL")
+        .output()
+        .expect("run zg");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Server listen host must be loopback"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("codex config"),
+        existing
+    );
+    assert!(!codex_home.join("AGENTS.md").exists());
+}
+
+#[test]
 fn qwen_jsonc_install_is_comment_preserving_and_idempotent() {
     let temporary = TempDir::new().expect("tempdir");
     let home = temporary.path().join(".qwen");

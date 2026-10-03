@@ -55,8 +55,6 @@ pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_with_options,
 };
 
-const DEFAULT_LISTEN: &str = "127.0.0.1:7999";
-
 #[derive(Debug, Parser)]
 #[command(
     name = "zg",
@@ -460,8 +458,8 @@ fn ordered_glob_rules(matches: &clap::ArgMatches) -> Vec<GlobRule> {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct QueryArgs {
-    #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
-    pub mode: ClientMode,
+    #[arg(long)]
+    pub mode: Option<ClientMode>,
     #[arg(long = "force-direct")]
     pub force_direct: bool,
     #[arg(long)]
@@ -523,8 +521,8 @@ pub struct IndexArgs {
     /// Set or rename the unique workspace name; new workspaces default to the root directory name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
-    #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
-    pub mode: ClientMode,
+    #[arg(long)]
+    pub mode: Option<ClientMode>,
     #[arg(long)]
     pub rebuild: bool,
     #[arg(long)]
@@ -564,8 +562,8 @@ pub struct IndexArgs {
 #[allow(clippy::struct_excessive_bools)]
 pub struct StatusArgs {
     pub root: Option<PathBuf>,
-    #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
-    pub mode: ClientMode,
+    #[arg(long)]
+    pub mode: Option<ClientMode>,
     #[arg(long = "check-ready")]
     pub check_ready: bool,
     #[arg(long)]
@@ -605,8 +603,8 @@ pub enum ServerAction {
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStartArgs {
-    #[arg(long, default_value = DEFAULT_LISTEN)]
-    pub listen: String,
+    #[arg(long)]
+    pub listen: Option<String>,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
     #[arg(long, env = "ZVEC_GREP_MCP_TOOLSET", value_enum)]
@@ -725,10 +723,14 @@ pub enum CliError {
     StdioWithServerAction,
     #[error("ZVEC_GREP_MCP_TOOLSET must be agent or full")]
     InvalidToolsetEnvironment,
+    #[error("ZVEC_GREP_MODE must be direct, server, or auto")]
+    InvalidModeEnvironment,
     #[error("--mcp-token-env requires --mcp-transport http")]
     InstallTokenRequiresHttp,
     #[error(transparent)]
     ManagedRg(#[from] ManagedRgArgumentError),
+    #[error(transparent)]
+    Config(#[from] zg_engine::EngineError),
 }
 
 impl Cli {
@@ -814,7 +816,7 @@ impl Cli {
             CommandLine::Query(args) => query_plan(args, current_dir, terminal),
             CommandLine::Index(args) => index_plan(args, &current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
-                mode: args.mode,
+                mode: resolve_client_mode(args.mode)?,
                 home: args.home,
                 request: InfoOptions {
                     root: Some(resolve_from(&current_dir, args.root.as_deref())),
@@ -1148,6 +1150,34 @@ pub fn finalize_refresh(request: &mut ContextOptions, server: bool) {
     }
 }
 
+fn resolve_client_mode(explicit: Option<ClientMode>) -> Result<ClientMode, CliError> {
+    if let Some(mode) = explicit {
+        return Ok(mode);
+    }
+    if let Some(value) = std::env::var_os("ZVEC_GREP_MODE").filter(|value| !value.is_empty()) {
+        return match value.to_str() {
+            Some("direct") => Ok(ClientMode::Direct),
+            Some("server") => Ok(ClientMode::Server),
+            Some("auto") => Ok(ClientMode::Auto),
+            _ => Err(CliError::InvalidModeEnvironment),
+        };
+    }
+    match zg_engine::config::client_mode()?.as_deref() {
+        Some("direct") => Ok(ClientMode::Direct),
+        Some("server") => Ok(ClientMode::Server),
+        Some("auto") | None => Ok(ClientMode::Auto),
+        _ => unreachable!("global client mode is validated when read"),
+    }
+}
+
+fn resolve_query_mode(args: &QueryArgs) -> Result<ClientMode, CliError> {
+    if args.rg {
+        Ok(ClientMode::Direct)
+    } else {
+        resolve_client_mode(args.mode)
+    }
+}
+
 fn context_refresh_policy(
     mode: ClientMode,
     refresh: Option<RefreshMode>,
@@ -1165,8 +1195,8 @@ fn context_refresh_policy(
     }
 }
 
-fn validate_query(args: &QueryArgs) -> Result<(), CliError> {
-    if args.force_direct && args.mode != ClientMode::Direct {
+fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
+    if args.force_direct && mode != ClientMode::Direct {
         return Err(CliError::ForceDirectMode);
     }
     if args.rg
@@ -1217,8 +1247,8 @@ fn query_plan(
     current_dir: PathBuf,
     terminal: bool,
 ) -> Result<CliPlan, CliError> {
-    validate_query(&args)?;
-    let mode = args.mode;
+    let mode = resolve_query_mode(&args)?;
+    validate_query(&args, mode)?;
     let home = args.home.clone();
     let human = terminal && !args.compact;
     let output = OutputOptions {
@@ -1322,7 +1352,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         .model_cache
         .map(|path| resolve_from(current_dir, Some(&path)));
     let root = resolve_from(current_dir, args.root.as_deref());
-    let mode = args.mode;
+    let mode = resolve_client_mode(args.mode)?;
     let home = args.home.clone();
     let output = OutputOptions {
         debug: args.debug,
@@ -1404,7 +1434,7 @@ fn server_plan(args: ServerArgs) -> Result<ServerPlan, CliError> {
             return Err(CliError::StdioWithServerAction);
         }
         return Ok(ServerPlan::Stdio(ServerStartArgs {
-            listen: args.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned()),
+            listen: args.listen,
             home: args.home,
             mcp_toolset: match args.mcp_toolset {
                 Some(toolset) => Some(toolset),
@@ -1426,7 +1456,7 @@ fn server_plan(args: ServerArgs) -> Result<ServerPlan, CliError> {
             child.home = child.home.or(args.home);
             child.token_file = child.token_file.or(args.token_file);
             if let Some(listen) = args.listen {
-                child.listen = listen;
+                child.listen = Some(listen);
             }
             if let Some(toolset) = args.mcp_toolset {
                 child.mcp_toolset = Some(toolset);
@@ -1848,7 +1878,7 @@ mod tests {
         let CliPlan::Server(super::ServerPlan::Run(args)) = plan else {
             panic!("server run")
         };
-        assert_eq!(args.listen, "127.0.0.1:8123");
+        assert_eq!(args.listen.as_deref(), Some("127.0.0.1:8123"));
         assert_eq!(args.home, Some("state".into()));
         assert_eq!(args.token_file, Some("token".into()));
         assert_eq!(args.mcp_toolset, Some(super::McpToolset::Full));

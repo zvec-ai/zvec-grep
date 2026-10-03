@@ -798,7 +798,11 @@ async fn execute_server_plan(plan: ServerPlan) -> Result<(), Box<dyn Error>> {
 
 fn server_config(args: ServerStartArgs) -> Result<ServerConfig, Box<dyn Error>> {
     zg_daemon::resolve_token(args.token_file.as_deref())?;
-    let listen = args.listen.parse::<ListenAddress>()?;
+    let address = match args.listen {
+        Some(listen) => listen,
+        None => zg_engine::config::server_listen()?,
+    };
+    let listen = address.parse::<ListenAddress>()?;
     let home = zg_daemon::resolve_home(args.home)?;
     let mut config = ServerConfig::new(listen, home);
     config.token_file = args.token_file;
