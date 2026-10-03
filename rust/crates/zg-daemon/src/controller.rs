@@ -89,7 +89,7 @@ impl StartupLock {
                 }
                 Err(error) => return Err(error),
             };
-            if existing.hostname == hostname() && process_is_alive(existing.pid) {
+            if record_owner_alive(&existing.hostname, existing.pid) {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(DaemonError::Timeout { action: "start" });
                 }
@@ -210,9 +210,7 @@ async fn acquire_instance_record(path: &Path, candidate: &Path) -> Result<(), Da
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 match read_instance_record_path(path).await {
-                    Ok(Some(existing))
-                        if existing.hostname == hostname() && process_is_alive(existing.pid) =>
-                    {
+                    Ok(Some(existing)) if record_owner_alive(&existing.hostname, existing.pid) => {
                         return Err(DaemonError::AlreadyRunning { pid: existing.pid });
                     }
                     Ok(_) | Err(DaemonError::InvalidRecord(_)) => {
@@ -628,6 +626,14 @@ pub(crate) fn process_is_alive(pid: u32) -> bool {
     with_process(pid, |_| ()).is_some()
 }
 
+/// Reports whether a lock record still belongs to a live process other than
+/// this one. A record naming the current PID was left by an earlier process:
+/// containers restart the daemon as PID 1 with the same hostname, so the PID
+/// and hostname alone would make a crashed daemon's lock look live forever.
+fn record_owner_alive(host: &str, pid: u32) -> bool {
+    pid != std::process::id() && host == hostname() && process_is_alive(pid)
+}
+
 fn signal_process(pid: u32, signal: Signal) {
     let _ = with_process(pid, |process| {
         process.kill_with(signal).unwrap_or_else(|| process.kill())
@@ -743,7 +749,10 @@ async fn remove_file_if_exists(path: &Path) -> Result<(), std::io::Error> {
 mod tests {
     use tempfile::TempDir;
 
-    use super::{DaemonInstanceRecord, InstanceLock, instance_path, read_instance_record};
+    use super::{
+        DaemonInstanceRecord, InstanceLock, STARTUP_FILE, StartupLock, StartupRecord, daemon_dir,
+        hostname, instance_path, read_instance_record,
+    };
     use crate::ServerConfig;
 
     #[tokio::test]
@@ -792,5 +801,63 @@ mod tests {
         );
 
         lock.release().await.expect("release instance lock");
+    }
+
+    #[tokio::test]
+    async fn instance_lock_replaces_a_record_left_under_the_current_pid() {
+        // A container restart runs the new daemon with the crashed one's PID
+        // and hostname, so the leftover record names this very process.
+        let home = TempDir::new().expect("temp home");
+        let config = ServerConfig::new(
+            "127.0.0.1:7999".parse().expect("listen address"),
+            home.path().to_owned(),
+        );
+        let path = instance_path(home.path());
+        std::fs::create_dir_all(path.parent().expect("daemon directory"))
+            .expect("daemon directory");
+        let stale = DaemonInstanceRecord {
+            pid: std::process::id(),
+            hostname: hostname(),
+            instance_token: uuid::Uuid::new_v4(),
+            started_at: 1,
+            updated_at: 1,
+            server_url: "http://127.0.0.1:7999".to_owned(),
+            listen: "127.0.0.1:7999".to_owned(),
+            ready: true,
+            mcp_toolset: "full".to_owned(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&stale).expect("stale record"))
+            .expect("write stale record");
+
+        let lock = InstanceLock::acquire(&config).await.expect("instance lock");
+        let current = read_instance_record(home.path())
+            .await
+            .expect("current record")
+            .expect("current record exists");
+        assert_ne!(current.instance_token, stale.instance_token);
+
+        lock.release().await.expect("release instance lock");
+    }
+
+    #[tokio::test]
+    async fn startup_lock_replaces_a_record_left_under_the_current_pid() {
+        let home = TempDir::new().expect("temp home");
+        let path = daemon_dir(home.path()).join(STARTUP_FILE);
+        std::fs::create_dir_all(path.parent().expect("daemon directory"))
+            .expect("daemon directory");
+        let stale = StartupRecord {
+            pid: std::process::id(),
+            hostname: hostname(),
+            token: uuid::Uuid::new_v4(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&stale).expect("stale record"))
+            .expect("write stale record");
+
+        let lock = StartupLock::acquire(home.path())
+            .await
+            .expect("startup lock");
+        assert_ne!(lock.record.token, stale.token);
+
+        lock.release().await.expect("release startup lock");
     }
 }
