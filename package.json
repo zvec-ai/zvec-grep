@@ -82,6 +82,6 @@
     "zod": "4.2.0"
   },
   "optionalDependencies": {
-    "node-llama-cpp": "3.18.1"
+    "node-llama-cpp": "3.22.1"
   }
 }

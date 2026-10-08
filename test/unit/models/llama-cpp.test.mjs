@@ -298,6 +298,35 @@ test("local embedding loads GGUF, formats and truncates text, parallelizes, cach
   );
 });
 
+test("EmbeddingGemma 2 formats code-search queries and document text", async (t) => {
+  const modelFile = await ggufFile(t);
+  const setup = createDependencies(modelFile.path, { trainContextSize: 8192 });
+  const model = new LlamaCppEmbeddingModel(
+    entry({ format: "embeddinggemma2", contextSize: 8192 }),
+    {
+      modelCacheDir: modelFile.root,
+      device: "cpu",
+    },
+    setup.dependencies,
+  );
+
+  try {
+    await model.embed([{ kind: "text", text: "find the router" }], {
+      purpose: "query",
+    });
+    await model.embed([{ kind: "text", text: "function routeRequest() {}" }], {
+      purpose: "document",
+    });
+
+    assert.deepEqual(setup.calls.texts, [
+      "task: code retrieval | query: find the router",
+      "title: none | text: function routeRequest() {}",
+    ]);
+  } finally {
+    await model.dispose();
+  }
+});
+
 test("local embedding uses the resolved ModelScope path and reports source fallback once", async (t) => {
   const cacheDirectory = await createTemporaryDirectory(t, "zvec-llama-ms-");
   const modelPath = join(

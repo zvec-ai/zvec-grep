@@ -18,6 +18,20 @@ const EXPECTED_LOCAL_METADATA = {
     artifactManifestSha256:
       "837b9fcffa1628422e6f505dc6cffab06af281ce6369f825847b50b76234d8b3",
   },
+  "local/embeddinggemma-2": {
+    huggingFace: [
+      "ggml-org/embeddinggemma-2-GGUF",
+      "bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+    ],
+    modelScope: [
+      "ggml-org/embeddinggemma-2-GGUF",
+      "5ad9578640eeb5229d2b761af891a977c92e88ae",
+    ],
+    artifacts: ["embeddinggemma-2-Q8_0.gguf"],
+    artifactBytes: 309855456,
+    artifactManifestSha256:
+      "b415241b5a6a01a1cc873b5b680bcb5a73eafcf904b941dd838239bafde6b01b",
+  },
   "local/qwen3-embedding-0.6b": {
     huggingFace: [
       "Qwen/Qwen3-Embedding-0.6B-GGUF",
@@ -197,7 +211,7 @@ test("local embedding models declare pinned source and artifact metadata", () =>
     (entry) => entry.provider === "local",
   );
 
-  assert.equal(localEntries.length, 11);
+  assert.equal(localEntries.length, 12);
   assert.deepEqual(
     localEntries.map((entry) => entry.reference).sort(),
     Object.keys(EXPECTED_LOCAL_METADATA).sort(),
@@ -250,7 +264,7 @@ test("GGUF URIs pin Hugging Face revisions without changing cache names", () => 
     (entry) => entry.backend === "llama-cpp",
   );
 
-  assert.equal(ggufEntries.length, 2);
+  assert.equal(ggufEntries.length, 3);
   for (const entry of ggufEntries) {
     assert.ok(
       entry.uri.endsWith(`#${entry.sources.huggingFace.revision}`),
@@ -258,6 +272,18 @@ test("GGUF URIs pin Hugging Face revisions without changing cache names", () => 
     );
     assert.match(entry.cacheFile, /^hf_.+\.gguf$/);
   }
+});
+
+test("EmbeddingGemma 2 uses the text/code Q8 model profile", () => {
+  const model = listEmbeddingModels().find(
+    (entry) => entry.reference === "local/embeddinggemma-2",
+  );
+
+  assert.equal(model.backend, "llama-cpp");
+  assert.equal(model.format, "embeddinggemma2");
+  assert.equal(model.dimension, 768);
+  assert.equal(model.contextSize, 8192);
+  assert.equal(model.artifacts[0].path, "embeddinggemma-2-Q8_0.gguf");
 });
 
 test("GTE uses the ModelScope IIC namespace", () => {
