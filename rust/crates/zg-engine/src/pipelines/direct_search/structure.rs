@@ -171,7 +171,9 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
             entity_index: entity.index,
             range: entity.source_range,
         });
-        let crate::domain::Content::Text(content) = &entity.content else {
+        let (crate::domain::Content::Text(content) | crate::domain::Content::Code(content)) =
+            &entity.content
+        else {
             continue;
         };
         let line_offsets = line_byte_offsets(content);

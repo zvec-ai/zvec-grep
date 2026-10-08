@@ -218,6 +218,7 @@ mod tests {
         );
         assert!(index.model_for(ContentKind::Table).is_err());
         assert!(index.model_for(ContentKind::Image).is_err());
+        assert!(index.model_for(ContentKind::Code).is_err());
     }
 
     #[test]
@@ -233,7 +234,7 @@ mod tests {
         invalid = valid.clone();
         invalid.embeddings.push(model("second", false));
         assert!(invalid.validate().is_err());
-        for kind in [ContentKind::Table, ContentKind::Image] {
+        for kind in [ContentKind::Table, ContentKind::Image, ContentKind::Code] {
             invalid = valid.clone();
             invalid.routes.insert(kind, "test/text".into());
             assert!(invalid.validate().is_err());

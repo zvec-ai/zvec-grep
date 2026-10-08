@@ -2,11 +2,42 @@ use crate::{EngineError, EngineResult};
 
 use super::{Content, EntityMetadata, FileId, Range};
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct EntityId(String);
+/// A logical search unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Entity {
+    pub id: EntityId,
+    pub file_id: FileId,
+    /// Range within the original source.
+    pub source_range: Range,
+    pub content: Content,
+    pub metadata: Option<EntityMetadata>,
+    pub fragments: Vec<EntityFragment>,
+}
+
+impl Entity {
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        if !content_has_value(&self.content) || self.fragments.is_empty() {
+            return Err(EngineError::invalid_argument(
+                "entity requires content and at least one fragment",
+            ));
+        }
+        for fragment in &self.fragments {
+            validate_fragment_range(&self.content, fragment.range)?;
+        }
+        Ok(())
+    }
+}
+
+/// A unit used by the underlying search engine during retrieval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EntityFragment {
+    pub id: FragmentId,
+    /// Range within the owning entity's content.
+    pub range: Range,
+}
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct FragmentId(String);
+pub(crate) struct EntityId(String);
 
 impl EntityId {
     pub(crate) fn new(
@@ -30,6 +61,9 @@ impl EntityId {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct FragmentId(String);
+
 impl FragmentId {
     pub(crate) fn new(entity_id: &EntityId, ordinal: u32) -> Self {
         Self(format!("{}{:08x}", entity_id.as_str(), ordinal))
@@ -44,44 +78,10 @@ impl FragmentId {
     }
 }
 
-/// A logical search unit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Entity {
-    pub id: EntityId,
-    pub file_id: FileId,
-    /// Range within the original source.
-    pub source_range: Range,
-    pub content: Content,
-    pub metadata: Option<EntityMetadata>,
-    pub fragments: Vec<EntityFragment>,
-}
-
-/// A unit used by the underlying search engine during retrieval.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EntityFragment {
-    pub id: FragmentId,
-    /// Range within the owning entity's content.
-    pub range: Range,
-}
-
-impl Entity {
-    pub(crate) fn validate(&self) -> EngineResult<()> {
-        if !content_has_value(&self.content) || self.fragments.is_empty() {
-            return Err(EngineError::invalid_argument(
-                "entity requires content and at least one fragment",
-            ));
-        }
-        for fragment in &self.fragments {
-            validate_fragment_range(&self.content, fragment.range)?;
-        }
-        Ok(())
-    }
-}
-
 fn validate_fragment_range(content: &Content, range: Range) -> EngineResult<()> {
     match (range, content) {
         (Range::Full, _) => Ok(()),
-        (Range::Byte(range), Content::Text(text)) => {
+        (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 EngineError::invalid_argument("fragment start offset exceeds platform limits")
             })?;
@@ -96,14 +96,14 @@ fn validate_fragment_range(content: &Content, range: Range) -> EngineResult<()> 
             Ok(())
         }
         _ => Err(EngineError::invalid_argument(
-            "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+            "fragments use Full or entity-relative byte ranges for text and code; images and tables require Full",
         )),
     }
 }
 
 fn content_has_value(content: &Content) -> bool {
     match content {
-        Content::Text(text) => !text.trim().is_empty(),
+        Content::Text(text) | Content::Code(text) => !text.trim().is_empty(),
         Content::Image(image) => !image.data().is_empty(),
         Content::Table(table) => table
             .cells

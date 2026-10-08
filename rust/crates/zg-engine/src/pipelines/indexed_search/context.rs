@@ -491,7 +491,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     };
     let (content, excerpt_range) = match (fragment.range, &hit.entity.content) {
         (Range::Full, content) => (content_to_text(content), None),
-        (Range::Byte(range), Content::Text(text)) => {
+        (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
                     "fragment start offset exceeds platform limits",
@@ -521,7 +521,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
         }
         _ => {
             return Err(invalid_fragment(EngineError::invalid_argument(
-                "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+                "fragments use Full or entity-relative byte ranges for text and code; images and tables require Full",
             )));
         }
     };
@@ -579,7 +579,7 @@ fn contents_to_text(contents: &[Content]) -> String {
 
 fn content_to_text(content: &Content) -> String {
     match content {
-        Content::Text(text) => text.clone(),
+        Content::Text(text) | Content::Code(text) => text.clone(),
         Content::Image(image) => format!(
             "[image:{} bytes={}]",
             image.format().as_str(),
@@ -663,10 +663,21 @@ mod tests {
 
     #[test]
     fn best_fragment_preserves_original_content_and_source_range() {
+        assert_fragment_content_and_source_range(crate::domain::Content::Text);
+    }
+
+    #[test]
+    fn code_fragment_preserves_original_content_and_source_range() {
+        assert_fragment_content_and_source_range(crate::domain::Content::Code);
+    }
+
+    fn assert_fragment_content_and_source_range(
+        content_from_text: fn(String) -> crate::domain::Content,
+    ) {
         use crate::{
             domain::{
-                ByteRange, Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus,
-                FileRecord, FileSnapshot, FragmentId, Range, TextRange,
+                ByteRange, Entity, EntityFragment, EntityId, FileId, FileIndexStatus, FileRecord,
+                FileSnapshot, FragmentId, Range, TextRange,
             },
             pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit, SearchPlanResult},
         };
@@ -679,7 +690,7 @@ mod tests {
         let fragment_source_range = Range::Text(
             TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
         );
-        let content = Content::Text(source.into());
+        let content = content_from_text(source.into());
         let entity_id = EntityId::new(file_id, &content, source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&entity_id, 0),
@@ -726,7 +737,7 @@ mod tests {
         assert_eq!(target.content, "中😀\r\nβ");
         assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
         assert_eq!(target.content_range, fragment_source_range.into());
-        assert_eq!(hit.entity.content, Content::Text(source.into()));
+        assert_eq!(hit.entity.content, content_from_text(source.into()));
         let search = SearchPlanResult {
             routes: Vec::new(),
             hits: vec![hit.clone()],

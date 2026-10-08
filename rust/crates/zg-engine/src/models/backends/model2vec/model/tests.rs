@@ -59,7 +59,7 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
             &[
                 vec![Content::Text("both tokens".to_owned())],
                 vec![Content::Text("unknown-only".to_owned())],
-                vec![Content::Text("third token".to_owned())],
+                vec![Content::Code("third token".to_owned())],
             ],
             EmbeddingOptions {
                 purpose: EmbeddingPurpose::Query,

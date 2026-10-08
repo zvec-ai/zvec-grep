@@ -195,6 +195,42 @@ fn fragment_selectors_preserve_utf8_slices_without_repeating_content_or_ownershi
 }
 
 #[test]
+fn code_records_preserve_kind_without_metadata_and_validate_text_ranges() {
+    let mut entity = entity();
+    entity.content = Content::Code("a中文b".into());
+    entity.source_range = Range::Full;
+    entity.id = EntityId::new(entity.file_id, &entity.content, entity.source_range)
+        .expect("code entity id");
+    entity.fragments = vec![EntityFragment {
+        id: FragmentId::new(&entity.id, 0),
+        range: Range::Byte(ByteRange::new(1, 7).expect("UTF-8 slice")),
+    }];
+    entity.validate().expect("code entity");
+    round_trip(&entity);
+    let record: Value =
+        serde_json::from_str(&encode_entity(&entity).expect("encode code")).expect("JSON");
+    assert_eq!(record["content"], json!({"kind":"code", "value":"a中文b"}));
+    assert!(record.get("metadata").is_none());
+    assert_eq!(entity.content.kind(), crate::domain::ContentKind::Code);
+    assert_ne!(
+        entity.id,
+        EntityId::new(entity.file_id, &Content::Text("a中文b".into()), Range::Full)
+            .expect("text entity id"),
+    );
+    for (start, end) in [(2, 7), (1, 9), (1, 1)] {
+        let mut invalid = record.clone();
+        invalid["fragments"][0]["range"] = json!({
+            "kind":"byte", "start_offset":start, "end_offset":end,
+        });
+        assert_corrupt_entity(&invalid);
+    }
+    let mut invalid = record;
+    invalid["content"]["value"] = json!(" \n\t");
+    invalid["fragments"][0]["range"] = json!({"kind":"full"});
+    assert_corrupt_entity(&invalid);
+}
+
+#[test]
 fn rejects_invalid_table_geometry_without_allocating_a_dense_grid() {
     let original: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");

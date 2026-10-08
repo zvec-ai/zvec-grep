@@ -196,7 +196,7 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
+            matches!(content, Content::Text(_) | Content::Code(_))
         })?;
         let loaded = self
             .ensure_loaded(options.on_progress, options.signal.as_ref())

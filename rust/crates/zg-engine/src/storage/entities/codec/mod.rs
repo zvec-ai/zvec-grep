@@ -99,6 +99,7 @@ impl EntityRecord<'_> {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum ContentRecord<'a> {
     Text(Cow<'a, str>),
+    Code(Cow<'a, str>),
     Image {
         format: FileFormat,
         #[serde(with = "image_bytes")]
@@ -174,6 +175,7 @@ fn decode_contents(contents: Vec<ContentRecord<'_>>) -> EngineResult<Vec<Content
 fn encode_content(content: &Content) -> ContentRecord<'_> {
     match content {
         Content::Text(text) => ContentRecord::Text(text.as_str().into()),
+        Content::Code(text) => ContentRecord::Code(text.as_str().into()),
         Content::Image(image) => ContentRecord::Image {
             format: image.format(),
             data: image.data().into(),
@@ -203,6 +205,7 @@ fn encode_content(content: &Content) -> ContentRecord<'_> {
 fn decode_content(content: ContentRecord<'_>) -> EngineResult<Content> {
     Ok(match content {
         ContentRecord::Text(text) => Content::Text(text.into_owned()),
+        ContentRecord::Code(text) => Content::Code(text.into_owned()),
         ContentRecord::Image { format, data } => {
             Content::Image(ImageContent::new(data.into_owned(), format)?)
         }

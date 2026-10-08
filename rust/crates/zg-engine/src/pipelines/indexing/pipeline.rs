@@ -1035,17 +1035,21 @@ fn prepare_fragments(
             entity.fragments.iter().map(move |fragment| {
                 let content = match (fragment.range, &entity.content) {
                     (Range::Full, content) => Cow::Borrowed(content),
-                    (Range::Byte(range), Content::Text(text)) => {
+                    (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
                         let start = usize::try_from(range.start_offset()).map_err(|_| {
                             EngineError::invalid_argument("fragment start offset exceeds platform limits")
                         })?;
                         let end = usize::try_from(range.end_offset()).map_err(|_| {
                             EngineError::invalid_argument("fragment end offset exceeds platform limits")
                         })?;
-                        Cow::Owned(Content::Text(crate::utils::slice_text(text, start, end)?.to_owned()))
+                        let text = crate::utils::slice_text(text, start, end)?.to_owned();
+                        Cow::Owned(match &entity.content {
+                            Content::Code(_) => Content::Code(text),
+                            _ => Content::Text(text),
+                        })
                     }
                     _ => return Err(EngineError::invalid_argument(
-                        "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+                        "fragments use Full or entity-relative byte ranges for text and code; images and tables require Full",
                     )),
                 };
                 Ok(PreparedFragment {
@@ -1097,7 +1101,7 @@ fn lexical_text(content: &Content, metadata: Option<&EntityMetadata>) -> String 
 fn append_contents(output: &mut String, contents: &[Content]) {
     for content in contents {
         match content {
-            Content::Text(text) => output.push_str(text),
+            Content::Text(text) | Content::Code(text) => output.push_str(text),
             Content::Image(image) => {
                 output.push_str("[image:");
                 output.push_str(image.format().as_str());
@@ -2358,6 +2362,54 @@ mod tests {
         finalized: AtomicUsize,
         failed_markers: AtomicUsize,
         fail_replacements_once: Mutex<HashSet<FileId>>,
+    }
+
+    #[test]
+    fn prepared_code_preserves_kind_after_slicing_and_metadata_enrichment() {
+        use crate::domain::{ByteRange, CodeMetadata};
+
+        let file_id = FileId::new(42);
+        let content = Content::Code("a中文b".into());
+        let id = EntityId::new(file_id, &content, Range::Full).expect("code id");
+        let entity = Entity {
+            id: id.clone(),
+            file_id,
+            source_range: Range::Full,
+            content: content.clone(),
+            metadata: Some(EntityMetadata::Code(CodeMetadata {
+                symbol_type: None,
+                symbol_name: Some("example".into()),
+                scope: None,
+                signature: None,
+                documentation: None,
+            })),
+            fragments: vec![
+                EntityFragment {
+                    id: FragmentId::new(&id, 0),
+                    range: Range::Full,
+                },
+                EntityFragment {
+                    id: FragmentId::new(&id, 1),
+                    range: Range::Byte(ByteRange::new(1, 7).expect("UTF-8 slice")),
+                },
+            ],
+        };
+        entity.validate().expect("valid code entity");
+        let fragments =
+            prepare_fragments(std::slice::from_ref(&entity), None).expect("prepare code fragments");
+        assert_eq!(fragments.len(), 2);
+        for (fragment, body) in fragments.iter().zip(["a中文b", "中文"]) {
+            assert_eq!(fragment.entity_id, id);
+            assert_eq!(fragment.fts_text, format!("example\n{body}\n"));
+            assert_eq!(
+                fragment.embedding_content,
+                vec![Content::Code(format!("symbol: example\n{body}"))],
+            );
+        }
+        assert_eq!(
+            entity.content, content,
+            "preparation preserves source content"
+        );
     }
 
     #[test]

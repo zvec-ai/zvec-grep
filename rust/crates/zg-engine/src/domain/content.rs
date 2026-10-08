@@ -8,6 +8,7 @@ use super::{FileCategory, FileFormat};
 #[serde(rename_all = "snake_case")]
 pub enum ContentKind {
     Text,
+    Code,
     Image,
     Table,
 }
@@ -17,6 +18,7 @@ impl ContentKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
+            Self::Code => "code",
             Self::Image => "image",
             Self::Table => "table",
         }
@@ -27,6 +29,7 @@ impl ContentKind {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Content {
     Text(String),
+    Code(String),
     Image(ImageContent),
     Table(TableContent),
 }
@@ -35,6 +38,7 @@ impl Content {
     pub(crate) fn kind(&self) -> ContentKind {
         match self {
             Self::Text(_) => ContentKind::Text,
+            Self::Code(_) => ContentKind::Code,
             Self::Image(_) => ContentKind::Image,
             Self::Table(_) => ContentKind::Table,
         }

@@ -14,11 +14,11 @@ pub(crate) fn input_text(input: &[Content]) -> Result<Cow<'_, str>, ModelError> 
         [] => Err(ModelError::invalid_argument(
             "Embedding input requires at least one content item",
         )),
-        [Content::Text(text)] => Ok(Cow::Borrowed(text)),
+        [Content::Text(text) | Content::Code(text)] => Ok(Cow::Borrowed(text)),
         contents => {
             let mut combined = String::new();
             for (index, content) in contents.iter().enumerate() {
-                let Content::Text(text) = content else {
+                let (Content::Text(text) | Content::Code(text)) = content else {
                     return Err(ModelError::unsupported(
                         "Text embedding requires text content",
                     ));
@@ -190,7 +190,7 @@ fn validate_input(
         }
 
         match content {
-            Content::Text(text) if text.trim().is_empty() => {
+            Content::Text(text) | Content::Code(text) if text.trim().is_empty() => {
                 return Err(ModelError::new(
                     crate::EngineError::INVALID_ARGUMENT,
                     "Embedding text content must not be empty",
@@ -216,7 +216,7 @@ fn validate_input(
                     )),
                 ));
             }
-            Content::Text(_) | Content::Image(_) | Content::Table(_) => {}
+            Content::Text(_) | Content::Code(_) | Content::Image(_) | Content::Table(_) => {}
         }
     }
     Ok(())
@@ -291,7 +291,10 @@ mod tests {
         inputs: &[Vec<Content>],
     ) -> Result<(), ModelError> {
         super::validate_inputs(info, inputs, |content| {
-            matches!(content, Content::Text(_) | Content::Image(_))
+            matches!(
+                content,
+                Content::Text(_) | Content::Code(_) | Content::Image(_)
+            )
         })
     }
 
@@ -331,6 +334,10 @@ mod tests {
         );
         assert_error_code(
             validate_inputs(&info, &[vec![Content::Text("  ".to_owned())]]),
+            crate::EngineError::INVALID_ARGUMENT,
+        );
+        assert_error_code(
+            validate_inputs(&info, &[vec![Content::Code("  ".to_owned())]]),
             crate::EngineError::INVALID_ARGUMENT,
         );
         assert_error_code(
@@ -395,6 +402,25 @@ mod tests {
         let mixed = vec![Content::Text("first".to_owned()), Content::Image(image)];
         assert_eq!(
             input_text(&mixed).expect_err("non-text part").code(),
+            crate::EngineError::UNSUPPORTED,
+        );
+    }
+
+    #[test]
+    fn code_uses_text_input_without_losing_part_boundaries() {
+        let input = [Content::Code("fn example() {}".into())];
+        validate_inputs(&fixture_info(), &[input.to_vec()]).expect("code input");
+        assert!(matches!(
+            input_text(&input).expect("code text"),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            input_text(&[Content::Text("description".into()), input[0].clone()])
+                .expect("mixed text and code"),
+            "description\nfn example() {}",
+        );
+        assert_error_code(
+            super::validate_inputs(&fixture_info(), &[input.to_vec()], |_| false),
             crate::EngineError::UNSUPPORTED,
         );
     }

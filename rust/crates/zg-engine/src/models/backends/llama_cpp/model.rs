@@ -267,7 +267,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
+            matches!(content, Content::Text(_) | Content::Code(_))
         })?;
         let on_progress = options.on_progress.clone();
         let model = self

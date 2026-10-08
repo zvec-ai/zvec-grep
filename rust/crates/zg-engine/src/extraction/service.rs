@@ -39,7 +39,8 @@ pub(super) fn extract<'source>(
                     range.start_byte_offset(),
                     range.end_byte_offset(),
                 )?;
-                if !matches!(&entity.content, Content::Text(content) if content == original) {
+                if !matches!(&entity.content, Content::Text(content) | Content::Code(content) if content == original)
+                {
                     return Err(EngineError::internal(
                         "entity content differs from its source range",
                     ));
@@ -116,7 +117,7 @@ pub(super) fn vector_content_for_fragment(
     }
     let metadata = vector_metadata_text(metadata, metadata_budget(max_chars));
     if !metadata.is_empty() {
-        if let Some(Content::Text(text)) = contents.first_mut() {
+        if let Some(Content::Text(text) | Content::Code(text)) = contents.first_mut() {
             *text = format!("{metadata}\n{text}");
         } else {
             contents.insert(0, Content::Text(metadata));

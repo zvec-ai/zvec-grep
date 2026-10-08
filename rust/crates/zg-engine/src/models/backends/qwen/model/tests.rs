@@ -112,6 +112,57 @@ async fn text_request_and_index_order_match_main() {
 }
 
 #[tokio::test]
+async fn code_is_sent_as_text_and_cancelled_before_http_dispatch() {
+    for kind in ["text", "multimodal"] {
+        let body = if kind == "text" {
+            json!({"data": [{"index": 0, "embedding": [1.0, 0.0]}]})
+        } else {
+            json!({"output": {"embeddings": [{"text_index": 0, "embedding": [1.0, 0.0]}]}})
+        };
+        let http = Arc::new(MockHttp {
+            response: Mutex::new(Some(QwenHttpResponse {
+                status: 200,
+                retry_after: None,
+                body: serde_json::to_vec(&body).expect("fixture response"),
+            })),
+            requests: Mutex::new(Vec::new()),
+        });
+        let model =
+            QwenEmbeddingModel::with_http(config(kind, "code-test", 2), options(), http.clone())
+                .expect("model");
+        let input = [vec![Content::Code("fn example() {}".into())]];
+        let signal = CancellationToken::new();
+        signal.cancel();
+        let error = model
+            .embed(
+                &input,
+                EmbeddingOptions {
+                    signal: Some(signal),
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect_err("cancelled code request");
+        assert_eq!(error.code(), crate::EngineError::CANCELLED);
+        assert!(http.requests.lock().expect("requests lock").is_empty());
+
+        let result = model
+            .embed(&input, EmbeddingOptions::default())
+            .await
+            .expect("code embedding");
+        assert_eq!(result.vectors, [[1.0, 0.0]]);
+        let requests = http.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        let expected_input = if kind == "text" {
+            json!(["fn example() {}"])
+        } else {
+            json!({"contents": [{"text": "fn example() {}"}]})
+        };
+        assert_eq!(requests[0].0["input"], expected_input);
+    }
+}
+
+#[tokio::test]
 async fn text_backend_rejects_images_before_http_dispatch() {
     let http = Arc::new(MockHttp {
         response: Mutex::new(None),

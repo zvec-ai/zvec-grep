@@ -142,7 +142,7 @@ impl QwenEmbeddingModel {
         let request_contents = inputs
             .iter()
             .map(|input| match input.as_slice() {
-                [Content::Text(text)] => Ok(json!({ "text": text })),
+                [Content::Text(text) | Content::Code(text)] => Ok(json!({ "text": text })),
                 [Content::Image(image)] => Ok(json!({ "image": bytes_to_base64(image.data()) })),
                 _ => Err(ModelError::unsupported(
                     "Qwen multimodal embedding requires one text or image content per input",
@@ -251,7 +251,7 @@ impl EmbeddingModel for QwenEmbeddingModel {
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs, |content| match content {
-            Content::Text(_) => true,
+            Content::Text(_) | Content::Code(_) => true,
             Content::Image(_) => self.entry.kind == "multimodal",
             Content::Table(_) => false,
         })?;
