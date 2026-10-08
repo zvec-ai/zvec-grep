@@ -1,28 +1,16 @@
 use tree_sitter::Node;
 
-use crate::domain::{FileFormat, SymbolType};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdapterKind {
-    C,
-    Cpp,
-    Go,
-    Java,
-    JavaScript,
-    Python,
-    Rust,
-    TypeScript,
-}
+use crate::domain::{FileFormat, Language, SymbolType};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LanguageAdapter {
-    kind: AdapterKind,
+    kind: Language,
     entity_types: &'static [&'static str],
     scope_types: &'static [&'static str],
 }
 
 const C: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::C,
+    kind: Language::C,
     entity_types: &[
         "declaration",
         "field_declaration",
@@ -36,7 +24,7 @@ const C: LanguageAdapter = LanguageAdapter {
     scope_types: &["struct_specifier", "union_specifier"],
 };
 const CPP: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Cpp,
+    kind: Language::Cpp,
     entity_types: &[
         "alias_declaration",
         "declaration",
@@ -56,7 +44,7 @@ const CPP: LanguageAdapter = LanguageAdapter {
     ],
 };
 const GO: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Go,
+    kind: Language::Go,
     entity_types: &[
         "function_declaration",
         "method_elem",
@@ -68,7 +56,7 @@ const GO: LanguageAdapter = LanguageAdapter {
     scope_types: &["type_spec"],
 };
 const JAVA: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Java,
+    kind: Language::Java,
     entity_types: &[
         "annotation_type_declaration",
         "class_declaration",
@@ -89,7 +77,7 @@ const JAVA: LanguageAdapter = LanguageAdapter {
     ],
 };
 const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::JavaScript,
+    kind: Language::JavaScript,
     entity_types: &[
         "class_declaration",
         "field_definition",
@@ -102,7 +90,7 @@ const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
     scope_types: &["class_declaration"],
 };
 const PYTHON: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Python,
+    kind: Language::Python,
     entity_types: &[
         "class_definition",
         "decorated_definition",
@@ -111,7 +99,7 @@ const PYTHON: LanguageAdapter = LanguageAdapter {
     scope_types: &["class_definition", "decorated_definition"],
 };
 const RUST: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Rust,
+    kind: Language::Rust,
     entity_types: &[
         "enum_item",
         "const_item",
@@ -128,7 +116,7 @@ const RUST: LanguageAdapter = LanguageAdapter {
     scope_types: &["impl_item", "mod_item", "trait_item"],
 };
 const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::TypeScript,
+    kind: Language::TypeScript,
     entity_types: &[
         "abstract_class_declaration",
         "abstract_method_signature",
@@ -186,7 +174,7 @@ impl LanguageAdapter {
         node: Node<'tree>,
         source: &[u8],
     ) -> Vec<Node<'tree>> {
-        if matches!(self.kind, AdapterKind::JavaScript | AdapterKind::TypeScript)
+        if matches!(self.kind, Language::JavaScript | Language::TypeScript)
             && node.kind() == "variable_declarator"
         {
             let entities = exported_object_function_entities(node, source);
@@ -199,8 +187,8 @@ impl LanguageAdapter {
 
     pub(super) fn enter_scope_node(self, node: Node<'_>) -> Node<'_> {
         match self.kind {
-            AdapterKind::Go => node.child_by_field_name("type").unwrap_or(node),
-            AdapterKind::Python if node.kind() == "decorated_definition" => {
+            Language::Go => node.child_by_field_name("type").unwrap_or(node),
+            Language::Python if node.kind() == "decorated_definition" => {
                 inner_python_definition(node)
                     .filter(|inner| inner.kind() == "class_definition")
                     .unwrap_or(node)
@@ -211,19 +199,19 @@ impl LanguageAdapter {
 
     pub(super) fn extract_name(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp => extract_c_family_name(node, source),
-            AdapterKind::Go => field_text(node, "name", source),
-            AdapterKind::Java
+            Language::C | Language::Cpp => extract_c_family_name(node, source),
+            Language::Go => field_text(node, "name", source),
+            Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
             {
                 node.child_by_field_name("declarator")
                     .and_then(|declarator| field_text(declarator, "name", source))
             }
-            AdapterKind::Java => name_field(node, source),
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::Java => name_field(node, source),
+            Language::JavaScript | Language::TypeScript => {
                 extract_javascript_typescript_name(node, source)
             }
-            AdapterKind::Python => {
+            Language::Python => {
                 if node.kind() == "decorated_definition" {
                     inner_python_definition(node)
                         .and_then(|inner| field_text(inner, "name", source))
@@ -231,7 +219,7 @@ impl LanguageAdapter {
                     field_text(node, "name", source)
                 }
             }
-            AdapterKind::Rust => {
+            Language::Rust => {
                 if node.kind() == "impl_item" {
                     field_text(node, "type", source)
                 } else {
@@ -248,7 +236,7 @@ impl LanguageAdapter {
         breadcrumb: &[String],
     ) -> Vec<String> {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp if is_c_function_type(node.kind()) => {
+            Language::C | Language::Cpp if is_c_function_type(node.kind()) => {
                 let Some(name) = extract_raw_c_function_name(node, source) else {
                     return breadcrumb.to_vec();
                 };
@@ -266,7 +254,7 @@ impl LanguageAdapter {
                 }
                 breadcrumb.iter().cloned().chain(qualifier).collect()
             }
-            AdapterKind::Go if node.kind() == "method_declaration" => {
+            Language::Go if node.kind() == "method_declaration" => {
                 let Some(receiver) = node.child_by_field_name("receiver") else {
                     return breadcrumb.to_vec();
                 };
@@ -282,7 +270,7 @@ impl LanguageAdapter {
                     .chain([receiver_type.to_owned()])
                     .collect()
             }
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::JavaScript | Language::TypeScript => {
                 let Some(object_name) = exported_object_variable_name(node, source) else {
                     return breadcrumb.to_vec();
                 };
@@ -294,22 +282,20 @@ impl LanguageAdapter {
 
     pub(super) fn classify(self, node: Node<'_>) -> Option<SymbolType> {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp => classify_c_family(node),
-            AdapterKind::Go => classify_go(node),
-            AdapterKind::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
-                classify_javascript_typescript(node)
-            }
+            Language::C | Language::Cpp => classify_c_family(node),
+            Language::Go => classify_go(node),
+            Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
+            Language::JavaScript | Language::TypeScript => classify_javascript_typescript(node),
             _ => classify_code_node(node),
         }
     }
 
     pub(super) fn extract_signature(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         match self.kind {
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::JavaScript | Language::TypeScript => {
                 extract_javascript_signature(node, source)
             }
-            AdapterKind::Python => {
+            Language::Python => {
                 let definition = inner_python_definition(node).unwrap_or(node);
                 let signature = extract_generic_signature(definition, source)?;
                 let mut lines = named_children(node)
@@ -320,7 +306,7 @@ impl LanguageAdapter {
                 lines.push(signature);
                 Some(lines.join("\n"))
             }
-            AdapterKind::Rust => {
+            Language::Rust => {
                 let signature = extract_generic_signature(node, source)?;
                 let mut attributes = Vec::new();
                 let mut sibling = node.prev_named_sibling();
@@ -346,7 +332,7 @@ impl LanguageAdapter {
 
     fn should_index_entity(self, node: Node<'_>) -> bool {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp => {
+            Language::C | Language::Cpp => {
                 if matches!(node.kind(), "declaration" | "field_declaration") {
                     find_descendant_by_kind(node, "function_declarator").is_some()
                 } else if node.kind() == "macro_type_specifier" {
@@ -357,10 +343,10 @@ impl LanguageAdapter {
                     true
                 }
             }
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
             }
-            AdapterKind::Java
+            Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
             {
                 named_children(node)
@@ -376,10 +362,10 @@ impl LanguageAdapter {
 
     fn should_enter_scope(self, node: Node<'_>) -> bool {
         match self.kind {
-            AdapterKind::Go if node.kind() == "type_spec" => node
+            Language::Go if node.kind() == "type_spec" => node
                 .child_by_field_name("type")
                 .is_some_and(|kind| matches!(kind.kind(), "interface_type" | "struct_type")),
-            AdapterKind::Python if node.kind() == "decorated_definition" => {
+            Language::Python if node.kind() == "decorated_definition" => {
                 inner_python_definition(node)
                     .is_some_and(|inner| inner.kind() == "class_definition")
             }
