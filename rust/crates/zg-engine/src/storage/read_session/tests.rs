@@ -8,7 +8,7 @@ use crate::{
     domain::{
         Content, Entity, EntityFragment, EntityId, FileIndexStatus, FileRecord, FileSnapshot,
         FragmentId, IndexDescriptor, IndexState, Range, SourcePath, Workspace,
-        model::{EmbeddingModelInfo, Metric, ModelInfo},
+        model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     },
     models::ModelRuntimeManager,
     pipelines::{indexed_search::service::context, indexing::service::WorkspaceIndexService},
@@ -94,13 +94,17 @@ impl Fixture {
 
 fn schema() -> EmbeddingModelInfo {
     EmbeddingModelInfo {
-        model: ModelInfo {
-            provider: "fixture".into(),
-            name: "read-cache".into(),
-            endpoint: None,
-        },
+        model: ModelInfo::new(
+            "fixture",
+            "read-cache",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+        )
+        .expect("fixture model identity"),
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         max_batch_size: 32,
         max_input_tokens: None,
         max_image_bytes: None,
@@ -182,7 +186,7 @@ fn sequential_and_concurrent_queries_reuse_the_session() {
                 assert_eq!(
                     lease
                         .storage()
-                        .search_fts("orchard", 10, None)
+                        .search_fts("fixture/read-cache", "orchard", 10, None)
                         .expect("search")
                         .len(),
                     1
@@ -305,7 +309,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     assert_eq!(
         first
             .storage()
-            .search_fts("orchard", 10, None)
+            .search_fts("fixture/read-cache", "orchard", 10, None)
             .expect("old reader")
             .len(),
         1
@@ -313,7 +317,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     assert_eq!(
         second
             .storage()
-            .search_fts("vineyard", 10, None)
+            .search_fts("fixture/read-cache", "vineyard", 10, None)
             .expect("new reader")
             .len(),
         1
@@ -348,14 +352,14 @@ fn writes_invalidate_every_local_cache_and_next_query_sees_changes() {
         assert!(
             lease
                 .storage()
-                .search_fts("orchard", 10, None)
+                .search_fts("fixture/read-cache", "orchard", 10, None)
                 .expect("old text removed")
                 .is_empty()
         );
         assert_eq!(
             lease
                 .storage()
-                .search_fts("vineyard", 10, None)
+                .search_fts("fixture/read-cache", "vineyard", 10, None)
                 .expect("new text visible")
                 .len(),
             1
@@ -383,7 +387,7 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
     assert_eq!(
         lease
             .storage()
-            .search_fts("vineyard", 10, None)
+            .search_fts("fixture/read-cache", "vineyard", 10, None)
             .expect("query")
             .len(),
         1
@@ -504,7 +508,7 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
                 .send(
                     lease
                         .storage()
-                        .search_fts("orchard", 10, None)
+                        .search_fts("fixture/read-cache", "orchard", 10, None)
                         .expect("warm search")
                         .len(),
                 )

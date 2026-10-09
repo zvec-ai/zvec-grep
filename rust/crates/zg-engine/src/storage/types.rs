@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::domain::{
-    Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, SourcePath, SymbolType,
-    model::EmbeddingModelInfo,
+    ContentKind, Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, SourcePath,
+    SymbolType, model::EmbeddingModelInfo,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +71,7 @@ pub(crate) struct IndexedFragment {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StorageSearchFilter {
+    pub content_kinds: Option<Vec<ContentKind>>,
     pub path: Option<StoragePathFilter>,
     pub file_ids: Option<Vec<FileId>>,
     pub entity_ids: Option<Vec<EntityId>>,

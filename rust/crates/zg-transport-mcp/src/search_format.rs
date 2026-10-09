@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use zg_engine::api::context::{
     ContextResult,
     result::{
-        ContentRange, ContextItem, ContextItemKind, ContextItemStatus, ContextQueryGroupRole,
-        ContextSelectionReason, EmptyReason, EntityMetadata,
+        ContentPreview, ContentRange, ContextItem, ContextItemKind, ContextItemStatus,
+        ContextQueryGroupRole, ContextSelectionReason, EmptyReason, EntityMetadata,
     },
 };
 
@@ -55,6 +55,9 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
         );
         return lines.join("\n");
     }
+    if reply.items.iter().any(|item| item.content_ref.is_some()) {
+        lines.push("Use zvec_grep_read_content with the workspace root and a result's reference to retrieve its full indexed content.".into());
+    }
 
     if let Some(index) = &reply.diagnostics.index
         && index.query_groups.len() > 1
@@ -97,6 +100,24 @@ fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPrevi
         Some(ContextSelectionReason::GlobalFill) => " [global_fill]".to_owned(),
         None => String::new(),
     };
+    if let ContentPreview::Image { format, size_bytes } = &item.preview {
+        lines.push(format!(
+            "#{}{selection} matchedBy={} {}",
+            item.rank,
+            matched_by_label(item.matched_by),
+            item.relative_path.display()
+        ));
+        lines.push(format!(
+            "type: image; format: {}; size: {} bytes",
+            format.as_str(),
+            size_bytes
+        ));
+        append_content_reference(lines, item);
+        if item.status == ContextItemStatus::PossiblyStale {
+            lines.push("status: possibly_stale".into());
+        }
+        return;
+    }
     let header_range = item.container.as_ref().map_or(&item.range, |c| &c.range);
     lines.push(format!(
         "#{}{selection} matchedBy={} {}:{}",
@@ -105,6 +126,7 @@ fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPrevi
         item.relative_path.display(),
         range_label(header_range)
     ));
+    append_content_reference(lines, item);
     if !item.query_groups.is_empty() {
         lines.push(format!(
             "groups: {}",
@@ -141,6 +163,16 @@ fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPrevi
             lines.push("source:".to_owned());
         }
         lines.extend(source);
+    }
+}
+
+fn append_content_reference(lines: &mut Vec<String>, item: &ContextItem) {
+    if let Some(reference) = &item.content_ref {
+        let value = serde_json::json!({
+            "generation": reference.generation,
+            "entityId": reference.entity_id,
+        });
+        lines.push(format!("reference: {value}"));
     }
 }
 
@@ -196,10 +228,11 @@ fn outline_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
 }
 
 fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
-    if item.content.is_empty() {
+    let text = item.preview.text().unwrap_or_default();
+    if text.is_empty() {
         return Vec::new();
     }
-    let content: Vec<_> = split_lines(&item.content).collect();
+    let content: Vec<_> = split_lines(text).collect();
     let first = item.content_range.start_line();
     let (start, end) = if preview == SearchPreview::Short && content.len() > 10 {
         let anchor = item
@@ -289,4 +322,4 @@ const fn group_role(role: ContextQueryGroupRole) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

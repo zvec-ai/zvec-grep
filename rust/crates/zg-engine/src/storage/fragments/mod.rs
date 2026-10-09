@@ -25,9 +25,9 @@ use super::{
 use crate::{
     EngineError, EngineResult,
     domain::{
-        CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
-        FileId, FileRecord, FragmentId, IndexField, SourcePath,
-        model::{EmbeddingModelInfo, Metric},
+        CodeMetadata, ContentKind, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata,
+        FTS_CONFIG, FileId, FileRecord, FragmentId, IndexField, SourcePath,
+        model::{EmbeddingMetric, EmbeddingModelInfo},
     },
     utils::sha256_hex_parts,
 };
@@ -55,9 +55,9 @@ impl Fragments {
                     )
                 })?;
             let metric = match embedding.metric {
-                Metric::Cosine => MetricType::Cosine,
-                Metric::DotProduct => MetricType::Ip,
-                Metric::Euclidean => MetricType::L2,
+                EmbeddingMetric::Cosine => MetricType::Cosine,
+                EmbeddingMetric::DotProduct => MetricType::Ip,
+                EmbeddingMetric::Euclidean => MetricType::L2,
             };
             let name = fragment_collection_name(embedding);
             let collection = open_collection(
@@ -65,6 +65,11 @@ impl Fragments {
                 &fragments_schema(dimension, metric)?,
                 read_only,
             )?;
+            if !native(collection.schema(), "read fragment schema")?.has_field("content_kind") {
+                return Err(EngineError::invalid_argument(
+                    "fragment schema is missing content kind; rebuild the index",
+                ));
+            }
             if indexes
                 .insert(embedding.model.reference(), collection)
                 .is_some()
@@ -112,8 +117,13 @@ impl Fragments {
                 EngineError::invalid_argument("search projection references a missing fragment")
             })?;
             let mut doc = fragment_doc(owner, fragment, file, directories, fields)?;
+            let text = if owner.content.kind() == ContentKind::Image {
+                ""
+            } else {
+                &entry.fts_text
+            };
             native(
-                doc.add_string("text", &index_text(&entry.fts_text)),
+                doc.add_string("text", &index_text(text)),
                 "encode searchable text",
             )?;
             native(
@@ -167,10 +177,12 @@ impl Fragments {
 
     pub(super) fn search_fts(
         &self,
+        model: &str,
         query: &str,
         limit: usize,
         filter: Option<&str>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
+        let index = self.index(model)?;
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -188,28 +200,15 @@ impl Fragments {
             filter,
             &["document_id", "entity_id", "file_id"],
         )?;
-        let mut hits = Vec::new();
-        for index in self.indexes.values() {
-            for (rank, doc) in native(index.query(&request), "search full-text index")?
-                .into_iter()
-                .enumerate()
-            {
-                let mut hit = decode_search_hit(&doc, StorageSearchPath::Fts)?;
-                // BM25 is computed against each table's corpus; merge independent rankings.
-                if self.indexes.len() > 1 {
-                    let rank = u32::try_from(rank + 1)
-                        .map_err(|_| corrupt("FTS rank exceeds query limit"))?;
-                    hit.score = 1.0 / (60.0 + f64::from(rank));
-                }
-                hits.push(hit);
-            }
-        }
+        let mut hits = native(index.query(&request), "search full-text index")?
+            .into_iter()
+            .map(|doc| decode_search_hit(&doc, StorageSearchPath::Fts))
+            .collect::<EngineResult<Vec<_>>>()?;
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.document_id.cmp(&b.document_id))
         });
-        hits.truncate(limit);
         Ok(hits)
     }
 
@@ -262,8 +261,8 @@ pub(super) fn fragment_collection_name(embedding: &EmbeddingModelInfo) -> String
             "space",
             &format!(
                 "{}\0{}\0{}\0{:?}",
-                embedding.model.provider,
-                embedding.model.name,
+                embedding.model.provider(),
+                embedding.model.name(),
                 embedding.dimension,
                 embedding.metric
             )
@@ -281,6 +280,7 @@ fn identity_schema(name: &str) -> EngineResult<CollectionSchema> {
 
 fn retrieval_schema(name: &str) -> EngineResult<CollectionSchema> {
     let mut schema = identity_schema(name)?;
+    scalar(&mut schema, "content_kind", DataType::String, false, true)?;
     file_membership_schema(&mut schema)?;
     for field in EntityMetadata::index_schema() {
         match field {
@@ -348,6 +348,10 @@ fn fragment_doc(
     fields: &[(IndexField, String)],
 ) -> EngineResult<Doc> {
     let mut doc = identity_doc(entity, fragment)?;
+    native(
+        doc.add_string("content_kind", entity.content.kind().as_str()),
+        "encode content kind",
+    )?;
     file_membership_doc(&mut doc, file, directories)?;
     for (field, value) in fields {
         native(
@@ -405,6 +409,12 @@ pub(super) fn build_filter(
         return Ok(Some(constant_filter(false)));
     }
     let mut clauses = Vec::new();
+    if let Some(kinds) = &filter.content_kinds {
+        clauses.push(in_filter(
+            "content_kind",
+            kinds.iter().map(|kind| kind.as_str()),
+        ));
+    }
     if let Some(path) = &filter.path
         && !matches!(path, StoragePathFilter::All)
     {
@@ -571,7 +581,8 @@ fn like_literal(value: &str) -> String {
 
 pub(super) fn empty_filter(filter: Option<&StorageSearchFilter>) -> bool {
     filter.is_some_and(|filter| {
-        filter.file_ids.as_ref().is_some_and(Vec::is_empty)
+        filter.content_kinds.as_ref().is_some_and(Vec::is_empty)
+            || filter.file_ids.as_ref().is_some_and(Vec::is_empty)
             || filter.entity_ids.as_ref().is_some_and(Vec::is_empty)
             || filter.symbol_names.as_ref().is_some_and(Vec::is_empty)
             || filter.symbol_types.as_ref().is_some_and(Vec::is_empty)

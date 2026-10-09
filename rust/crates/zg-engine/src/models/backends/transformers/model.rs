@@ -27,14 +27,13 @@ use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::model::{
-    Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
-    ModelProgress,
+    Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelProgress,
 };
 use crate::models::{
     artifacts::{
         ArtifactSource, ModelDownloadProgressReporter, ResolveArtifacts, resolve_model_artifacts,
     },
-    catalog::TransformersConfig,
+    catalog::{EmbeddingCatalogEntry, TransformersConfig},
     runtime::ModelComputeRuntime,
     spi::{
         EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
@@ -122,19 +121,21 @@ impl TransformersEmbeddingModel {
         entry: TransformersConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
-    ) -> Self {
+    ) -> Result<Self, ModelError> {
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
             .unwrap_or_else(default_model_cache_dir);
-        Self {
+        Ok(Self {
             entry,
             info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: None,
-                },
+                model: EmbeddingCatalogEntry::Transformers(entry)
+                    .model_info()
+                    .map_err(|error| {
+                        ModelError::internal("invalid catalog model info")
+                            .with_cause(error)
+                            .shared()
+                    })?,
                 dimension: entry.dimension,
                 metric: entry.metric,
                 max_batch_size: entry.max_batch_size,
@@ -146,7 +147,7 @@ impl TransformersEmbeddingModel {
             compute_runtime,
             client: reqwest::Client::new(),
             state: Mutex::new(None),
-        }
+        })
     }
 
     async fn ensure_loaded(
@@ -279,9 +280,7 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_) | Content::Code(_))
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let loaded = self
             .ensure_loaded(options.on_progress.clone(), options.signal.as_ref())
             .await
@@ -809,7 +808,7 @@ fn embed_batch(
             );
             if let Some(on_progress) = on_progress {
                 on_progress(ModelProgress::Warning {
-                    model: entry.reference.to_owned(),
+                    model_ref: entry.reference.to_owned(),
                     message: warning,
                 });
             } else {

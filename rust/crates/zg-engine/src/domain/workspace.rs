@@ -17,7 +17,6 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    /// Validate names without normalizing their case or whitespace.
     pub(crate) fn validate_name(name: &str) -> EngineResult<()> {
         if name.is_empty()
             || name.trim() != name
@@ -57,79 +56,36 @@ impl Workspace {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FtsConfig {
-    pub tokenizer: &'static str,
-    pub filters: &'static [&'static str],
+/// Persistent rules for discovering and admitting workspace files to the index.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ScanRules {
+    /// Ordered path rules relative to the workspace root.
+    pub globs: Vec<GlobRule>,
+    pub hidden: bool,
+    pub follow_symlinks: bool,
+    pub max_depth: Option<usize>,
+    pub max_file_size_bytes: Option<u64>,
+
+    pub no_ignore: bool,
+    pub ignore_files: Vec<PathBuf>,
+    /// Traverse child Git repositories, including submodules and worktrees.
+    pub nested_git: bool,
 }
 
-/// Fixed FTS configuration for the current physical index format.
-pub(crate) const FTS_CONFIG: FtsConfig = FtsConfig {
-    tokenizer: "jieba",
-    filters: &["lowercase"],
-};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IndexDescriptor {
-    pub embeddings: Vec<EmbeddingModelInfo>,
-    /// The text route references the workspace's single embedding model.
-    pub routes: BTreeMap<ContentKind, String>,
-    pub fts: FtsConfig,
-}
-
-impl IndexDescriptor {
-    /// Configure the single text embedding model supported by this version.
-    pub(crate) fn single(embedding: EmbeddingModelInfo) -> Self {
-        let reference = embedding.model.reference();
+impl Default for ScanRules {
+    fn default() -> Self {
         Self {
-            embeddings: vec![embedding],
-            routes: BTreeMap::from([(ContentKind::Text, reference)]),
-            fts: FTS_CONFIG,
+            globs: Vec::new(),
+            hidden: false,
+            follow_symlinks: false,
+            max_depth: None,
+            max_file_size_bytes: None,
+            no_ignore: false,
+            ignore_files: Vec::new(),
+            nested_git: true,
         }
-    }
-
-    pub(crate) fn validate(&self) -> EngineResult<()> {
-        let [embedding] = self.embeddings.as_slice() else {
-            return Err(EngineError::invalid_argument(
-                "enabled index requires exactly one text embedding model",
-            ));
-        };
-        embedding.validate()?;
-        if self.routes.len() != 1
-            || self.routes.get(&ContentKind::Text) != Some(&embedding.model.reference())
-        {
-            return Err(EngineError::invalid_argument(
-                "enabled index requires exactly one text content route referencing its embedding model",
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn model_for(&self, kind: ContentKind) -> EngineResult<&EmbeddingModelInfo> {
-        let reference = self.routes.get(&kind).ok_or_else(|| {
-            EngineError::invalid_argument(format!(
-                "no embedding model configured for {kind:?} content"
-            ))
-        })?;
-        self.embeddings
-            .iter()
-            .find(|embedding| embedding.model.reference() == *reference)
-            .ok_or_else(|| {
-                EngineError::internal(format!(
-                    "content route refers to missing model: {reference}"
-                ))
-            })
-    }
-
-    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        self.validate()?;
-        other.validate()?;
-        if self.routes != other.routes || self.fts != other.fts {
-            return Err(EngineError::invalid_argument(
-                "existing index uses a different embedding model or FTS configuration; rebuild the index",
-            ));
-        }
-        self.embeddings[0].ensure_index_compatible(&other.embeddings[0])
     }
 }
 
@@ -149,126 +105,116 @@ impl IndexState {
     }
 }
 
-/// Persistent rules for discovering and admitting workspace files to the index.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct ScanRules {
-    /// Ripgrep type names used by scanning and watcher admission.
-    pub file_types: Vec<String>,
-    pub excluded_file_types: Vec<String>,
-    /// Ordered path rules relative to the workspace root.
-    pub globs: Vec<GlobRule>,
-    pub hidden: bool,
-    pub follow_symlinks: bool,
-    pub max_depth: Option<usize>,
-    pub max_file_size_bytes: Option<u64>,
-
-    pub no_ignore: bool,
-    pub ignore_files: Vec<PathBuf>,
-    /// Traverse child Git repositories, including submodules and worktrees.
-    pub nested_git: bool,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IndexDescriptor {
+    pub embeddings: Vec<EmbeddingModelInfo>,
+    /// Model used when a content kind has no explicit route.
+    pub default_model_ref: String,
+    /// Explicit content-kind overrides; each reference must support its kind.
+    pub routes: BTreeMap<ContentKind, String>,
+    pub fts: FtsConfig,
 }
 
-impl Default for ScanRules {
-    fn default() -> Self {
+impl IndexDescriptor {
+    /// Use one default model for every content kind it supports.
+    #[cfg(test)]
+    pub(crate) fn single(embedding: EmbeddingModelInfo) -> Self {
         Self {
-            globs: Vec::new(),
-            file_types: Vec::new(),
-            excluded_file_types: Vec::new(),
-            hidden: false,
-            follow_symlinks: false,
-            max_depth: None,
-            max_file_size_bytes: None,
-            no_ignore: false,
-            ignore_files: Vec::new(),
-            nested_git: true,
+            default_model_ref: embedding.model.reference(),
+            embeddings: vec![embedding],
+            routes: BTreeMap::new(),
+            fts: FTS_CONFIG,
         }
+    }
+
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        if self.embeddings.is_empty() {
+            return Err(EngineError::invalid_argument(
+                "enabled index requires at least one embedding model",
+            ));
+        }
+        let mut references = Vec::with_capacity(self.embeddings.len());
+        for embedding in &self.embeddings {
+            embedding.validate()?;
+            let reference = embedding.model.reference();
+            if references.contains(&reference) {
+                return Err(EngineError::invalid_argument(format!(
+                    "duplicate workspace embedding model: {reference}",
+                )));
+            }
+            references.push(reference);
+        }
+        self.default_model()?;
+        for kind in self.routes.keys() {
+            self.model_for(*kind)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn default_model(&self) -> EngineResult<&EmbeddingModelInfo> {
+        self.embedding_by_ref(&self.default_model_ref)
+    }
+
+    /// An unsupported default yields no model; an invalid explicit route is an error.
+    pub(crate) fn model_for(&self, kind: ContentKind) -> EngineResult<Option<&EmbeddingModelInfo>> {
+        if let Some(reference) = self.routes.get(&kind) {
+            let embedding = self.embedding_by_ref(reference)?;
+            if !embedding.model.supports_content(kind) {
+                return Err(EngineError::invalid_argument(format!(
+                    "embedding route for {} refers to model {reference}, which does not support this content kind",
+                    kind.as_str(),
+                )));
+            }
+            return Ok(Some(embedding));
+        }
+        let embedding = self.default_model()?;
+        Ok(embedding.model.supports_content(kind).then_some(embedding))
+    }
+
+    fn embedding_by_ref(&self, reference: &str) -> EngineResult<&EmbeddingModelInfo> {
+        self.embeddings
+            .iter()
+            .find(|embedding| embedding.model.reference() == reference)
+            .ok_or_else(|| {
+                EngineError::invalid_argument(format!(
+                    "workspace embedding model is missing: {reference}",
+                ))
+            })
+    }
+
+    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
+        self.validate()?;
+        other.validate()?;
+        if self.default_model_ref != other.default_model_ref
+            || self.routes != other.routes
+            || self.fts != other.fts
+            || self.embeddings.len() != other.embeddings.len()
+        {
+            return Err(EngineError::invalid_argument(
+                "existing index uses different embedding models, routing or FTS configuration; rebuild the index",
+            ));
+        }
+        for embedding in &self.embeddings {
+            let reference = embedding.model.reference();
+            let other_embedding = other.embeddings.iter()
+                .find(|candidate| candidate.model.reference() == reference)
+                .ok_or_else(|| EngineError::invalid_argument(format!(
+                    "existing index uses a different embedding model {reference}; rebuild the index",
+                )))?;
+            embedding.ensure_index_compatible(other_embedding)?;
+        }
+        Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::model::{Metric, ModelInfo};
-
-    fn model(name: &str, image: bool) -> EmbeddingModelInfo {
-        EmbeddingModelInfo {
-            model: ModelInfo {
-                provider: "test".into(),
-                name: name.into(),
-                endpoint: None,
-            },
-            dimension: 16,
-            metric: Metric::Cosine,
-            max_batch_size: 8,
-            max_input_tokens: Some(512),
-            max_image_bytes: image.then_some(1024),
-        }
-    }
-
-    #[test]
-    fn single_model_embeds_only_text_even_when_the_model_accepts_images() {
-        let index = IndexDescriptor::single(model("vl", true));
-        index.validate().expect("single text model");
-        assert_eq!(index.embeddings.len(), 1);
-        assert_eq!(
-            index.routes,
-            BTreeMap::from([(ContentKind::Text, "test/vl".into())])
-        );
-        assert!(index.model_for(ContentKind::Table).is_err());
-        assert!(index.model_for(ContentKind::Image).is_err());
-        assert!(index.model_for(ContentKind::Code).is_err());
-    }
-
-    #[test]
-    fn index_descriptor_requires_one_model_and_its_text_route() {
-        let valid = IndexDescriptor::single(model("text", false));
-        assert_eq!(
-            valid.model_for(ContentKind::Text).expect("text model"),
-            &valid.embeddings[0]
-        );
-        let mut invalid = valid.clone();
-        invalid.embeddings.clear();
-        assert!(invalid.validate().is_err());
-        invalid = valid.clone();
-        invalid.embeddings.push(model("second", false));
-        assert!(invalid.validate().is_err());
-        for kind in [ContentKind::Table, ContentKind::Image, ContentKind::Code] {
-            invalid = valid.clone();
-            invalid.routes.insert(kind, "test/text".into());
-            assert!(invalid.validate().is_err());
-            invalid.routes.remove(&ContentKind::Text);
-            assert!(invalid.validate().is_err());
-        }
-        invalid = valid.clone();
-        invalid.routes.clear();
-        assert!(invalid.validate().is_err());
-        invalid
-            .routes
-            .insert(ContentKind::Text, "test/missing".into());
-        assert!(invalid.validate().is_err());
-        invalid = valid;
-        invalid.embeddings[0].dimension = 0;
-        assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn routing_and_chunk_limits_require_rebuild_but_runtime_changes_do_not() {
-        let index = IndexDescriptor::single(model("vl", true));
-        let mut changed = index.clone();
-        changed.embeddings[0].model.endpoint = Some("https://other.example.test".into());
-        changed.embeddings[0].max_batch_size = 64;
-        index
-            .ensure_index_compatible(&changed)
-            .expect("runtime configuration");
-        changed.routes.insert(ContentKind::Table, "test/vl".into());
-        assert!(index.ensure_index_compatible(&changed).is_err());
-        changed = index.clone();
-        changed.embeddings[0].max_input_tokens = Some(256);
-        assert!(index.ensure_index_compatible(&changed).is_err());
-        changed = index.clone();
-        changed.embeddings.push(model("new", false));
-        assert!(index.ensure_index_compatible(&changed).is_err());
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FtsConfig {
+    pub tokenizer: &'static str,
+    pub filters: &'static [&'static str],
 }
+
+/// Fixed FTS configuration for the current physical index format.
+pub(crate) const FTS_CONFIG: FtsConfig = FtsConfig {
+    tokenizer: "jieba",
+    filters: &["lowercase"],
+};

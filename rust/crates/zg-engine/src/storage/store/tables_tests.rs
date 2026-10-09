@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 use crate::domain::{
     ByteRange, CodeMetadata, Content, EntityFragment, EntityId, EntityMetadata, FileSnapshot,
     FragmentId, Range, SourcePath, SymbolType, TextRange,
@@ -13,13 +13,17 @@ use zvec_rust::{Doc, SearchQuery};
 
 fn model() -> EmbeddingModelInfo {
     EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
+        model: crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+        )
+        .expect("fixture model identity"),
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         max_batch_size: 32,
         max_input_tokens: None,
         max_image_bytes: None,
@@ -217,7 +221,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
         ..StorageSearchFilter::default()
     };
     let hits = store
-        .search_fts("orchard", 10, Some(&filter))
+        .search_fts("fixture/fixture", "orchard", 10, Some(&filter))
         .expect("filtered FTS");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document_id, entities[0].fragments[1].id.as_str());
@@ -253,7 +257,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     ] {
         assert!(
             store
-                .search_fts("orchard", 10, Some(&rejected))
+                .search_fts("fixture/fixture", "orchard", 10, Some(&rejected))
                 .expect("filtered FTS")
                 .is_empty()
         );
@@ -284,7 +288,7 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
 
     for hits in [
         store
-            .search_fts("orchard", 10, None)
+            .search_fts("fixture/fixture", "orchard", 10, None)
             .expect("lightweight FTS"),
         store
             .search_vector("fixture/fixture", &entries[1].vector, 10, None)
@@ -324,7 +328,7 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
     };
     for hits in [
         store
-            .search_fts("orchard", 10, Some(&filter))
+            .search_fts("fixture/fixture", "orchard", 10, Some(&filter))
             .expect("ID-filtered FTS"),
         store
             .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
@@ -367,19 +371,28 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
 fn entity_content_is_canonical_and_fragments_have_one_model() {
     let home = tempfile::tempdir().expect("storage");
     let text = EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
+        model: crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+        )
+        .expect("fixture model identity"),
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         max_batch_size: 32,
         max_input_tokens: None,
         max_image_bytes: None,
     };
     let mut other = text.clone();
-    other.model.name = "other".into();
+    other.model = crate::domain::model::ModelInfo::new(
+        other.model.provider(),
+        "other",
+        other.model.content_kinds().iter().copied(),
+    )
+    .expect("fixture model identity");
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
         embeddings: vec![text, other],
@@ -396,7 +409,9 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("one model owns entire entity");
-    let hits = store.search_fts("orchard", 10, None).expect("window match");
+    let hits = store
+        .search_fts("fixture/fixture", "orchard", 10, None)
+        .expect("window match");
     assert_eq!(hits.len(), 1);
     let loaded = store.load_search_hits(&hits).expect("canonical bundle");
     assert_eq!(
@@ -440,19 +455,28 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
 fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     let home = tempfile::tempdir().expect("storage");
     let first = EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
+        model: crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+        )
+        .expect("fixture model identity"),
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         max_batch_size: 32,
         max_input_tokens: None,
         max_image_bytes: None,
     };
     let mut second = first.clone();
-    second.model.name = "other".into();
+    second.model = crate::domain::model::ModelInfo::new(
+        second.model.provider(),
+        "other",
+        second.model.content_kinds().iter().copied(),
+    )
+    .expect("fixture model identity");
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
         embeddings: vec![first, second],
@@ -486,7 +510,7 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     assert_eq!(store.list_files().expect("original file").len(), 1);
     assert_eq!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts("fixture/fixture", "orchard", 10, None)
             .expect("original fragments")
             .len(),
         1
@@ -508,7 +532,9 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
-    let old_hits = store.search_fts("orchard", 10, None).expect("old hits");
+    let old_hits = store
+        .search_fts("fixture/fixture", "orchard", 10, None)
+        .expect("old hits");
 
     // Simulate interruption after the retry marker but before replacing old rows.
     let mut unfinished = source.clone();
@@ -547,7 +573,7 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
     assert_eq!(store.list_files().expect("completed file"), [source]);
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts("fixture/fixture", "orchard", 10, None)
             .expect("stale text removed")
             .is_empty()
     );
@@ -558,7 +584,9 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
             .entities
             .is_empty()
     );
-    let new_hits = store.search_fts("Harvest", 10, None).expect("new results");
+    let new_hits = store
+        .search_fts("fixture/fixture", "Harvest", 10, None)
+        .expect("new results");
     assert_eq!(new_hits.len(), 1);
     assert_eq!(new_hits[0].entity_id, replacement[0].id);
 }
@@ -588,7 +616,9 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
         store.list_files().expect("deletion still pending"),
         [deleting]
     );
-    let hits = store.search_fts("orchard", 10, None).expect("stale hit");
+    let hits = store
+        .search_fts("fixture/fixture", "orchard", 10, None)
+        .expect("stale hit");
     assert_eq!(hits.len(), 1);
     assert!(
         store
@@ -602,7 +632,7 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
     assert!(store.list_files().expect("no files").is_empty());
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts("fixture/fixture", "orchard", 10, None)
             .expect("no stale hits")
             .is_empty()
     );
@@ -616,7 +646,9 @@ fn result_loading_skips_missing_files_and_canonical_fragments() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
-    let hits = store.search_fts("orchard", 10, None).expect("window hit");
+    let hits = store
+        .search_fts("fixture/fixture", "orchard", 10, None)
+        .expect("window hit");
     entities[0].fragments.pop();
     store
         .write(|state| state.entities.write(&Entities::prepare(&entities)?))
@@ -694,7 +726,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     };
     assert_eq!(
         reader
-            .search_fts("orchard", 10, Some(&filter))
+            .search_fts("fixture/fixture", "orchard", 10, Some(&filter))
             .expect("FTS membership")
             .len(),
         1

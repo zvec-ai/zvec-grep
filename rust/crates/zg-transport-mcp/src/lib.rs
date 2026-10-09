@@ -11,12 +11,14 @@ mod search_format;
 pub use search_format::SearchPreview;
 
 use std::{
+    collections::BTreeMap,
     fmt,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
@@ -34,11 +36,12 @@ use zg_cli::parse_managed_rg_args;
 use zg_engine::{
     EngineError, ErrorReport, ErrorSite, ZvecGrep,
     api::{
+        content::{Content, ContentRef, ContentResult, ReadContentOptions},
         context::{
             ContextOptions, ContextResult,
             options::{
-                ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter,
-                RefreshPolicy, SymbolType,
+                ContentKind, ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter,
+                QueryImage, RefreshPolicy, SymbolType,
             },
             result::{ContentRange, MatchedBy},
         },
@@ -57,10 +60,11 @@ use zg_engine::{
 };
 
 pub const AGENT_TOOL_NAME: &str = "zvec_grep_search";
-pub const FULL_TOOL_NAMES: [&str; 6] = [
+pub const FULL_TOOL_NAMES: [&str; 7] = [
     "zvec_grep_index",
     "zvec_grep_index_drop",
     "zvec_grep_index_status",
+    "zvec_grep_read_content",
     "zvec_grep_rg",
     "zvec_grep_search",
     "zvec_grep_server_status",
@@ -324,7 +328,7 @@ impl ZvecGrepMcpServer {
         }
         if toolset == McpToolset::Agent {
             for name in FULL_TOOL_NAMES {
-                if name != AGENT_TOOL_NAME {
+                if name != AGENT_TOOL_NAME && name != "zvec_grep_read_content" {
                     router.disable_route(name);
                 }
             }
@@ -381,6 +385,44 @@ impl ZvecGrepMcpServer {
             Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
                 search_format::format_search_result(&reply, preview),
             )]),
+            Err(error) => error_result(&error),
+        })
+    }
+
+    #[tool(
+        name = "zvec_grep_read_content",
+        description = "Read indexed content referenced by a search result. Supply its workspace root and content reference. Returns text, code, or an image from the active index. Search again if the referenced entity was removed or replaced, or the index was rebuilt.",
+        annotations(
+            title = "Read indexed content",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn zvec_grep_read_content(
+        &self,
+        Parameters(input): Parameters<ReadContentInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let root = absolute_root(&input.root)
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
+        let options = ReadContentOptions {
+            root: Some(root),
+            ..ReadContentOptions::new(ContentRef {
+                generation: input.reference.generation,
+                entity_id: input.reference.entity_id,
+            })
+        };
+        let result = request::run(&context, |_, signal| {
+            self.engine.read_content(ReadContentOptions {
+                signal: Some(signal),
+                ..options
+            })
+        })
+        .await;
+        Ok(match result {
+            Ok(reply) => content_result_to_tool_result(&reply),
             Err(error) => error_result(&error),
         })
     }
@@ -688,6 +730,87 @@ pub enum GlobListInput {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QueryImageInput {
+    Path {
+        path: String,
+    },
+    Bytes {
+        format: ImageFormatInput,
+        data: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormatInput {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl QueryImageInput {
+    fn into_query(self) -> Result<QueryImage, String> {
+        match self {
+            Self::Path { path } => Ok(QueryImage::Path {
+                path: absolute_root(&path)?,
+            }),
+            Self::Bytes { format, data } => {
+                if data.len() > 14 * 1024 * 1024 {
+                    return Err("queryImage base64 exceeds the 10 MiB image limit".into());
+                }
+                let data = STANDARD
+                    .decode(data)
+                    .map_err(|error| format!("invalid queryImage base64: {error}"))?;
+                if data.is_empty() || data.len() > 10 * 1024 * 1024 {
+                    return Err("queryImage must contain 1 byte to 10 MiB of image data".into());
+                }
+                Ok(QueryImage::Bytes {
+                    format: match format {
+                        ImageFormatInput::Png => FileFormat::Png,
+                        ImageFormatInput::Jpeg => FileFormat::Jpeg,
+                        ImageFormatInput::Webp => FileFormat::Webp,
+                    },
+                    data,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentKindInput {
+    Text,
+    Code,
+    Image,
+}
+
+impl From<ContentKindInput> for ContentKind {
+    fn from(value: ContentKindInput) -> Self {
+        match value {
+            ContentKindInput::Text => Self::Text,
+            ContentKindInput::Code => Self::Code,
+            ContentKindInput::Image => Self::Image,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadContentInput {
+    pub root: String,
+    pub reference: ContentReferenceInput,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContentReferenceInput {
+    pub generation: String,
+    pub entity_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchInput {
     /// Absolute workspace root visible to the daemon.
@@ -696,6 +819,8 @@ pub struct SearchInput {
     /// One primary hybrid-search group.
     #[schemars(length(max = 4000))]
     pub query: Option<String>,
+    /// Image-to-image query, exclusive with query/queries/fts/vector. PNG, JPEG or static WebP only.
+    pub query_image: Option<QueryImageInput>,
     /// One or more primary hybrid-search groups.
     pub queries: Option<QueryListInput>,
     /// Supplemental lexical-route groups.
@@ -769,9 +894,15 @@ pub struct IndexInput {
     pub endpoint: Option<String>,
     /// Permanently remove the workspace index.
     pub drop: Option<bool>,
-    /// Single embedding model for this workspace; this version indexes text only.
+    /// Default embedding model; content-kind routes override it.
     #[schemars(length(min = 1, max = 256))]
     pub embedding: Option<String>,
+    /// Explicit content-kind model references; omitted kinds retain saved routes.
+    #[serde(default)]
+    pub embedding_routes: BTreeMap<String, String>,
+    /// Remove saved overrides so these kinds use the default model.
+    #[serde(default)]
+    pub clear_embedding_routes: Vec<ContentKindInput>,
     /// Explicitly rebuild the existing index.
     pub rebuild: Option<bool>,
     /// Replace the index root-path configuration.
@@ -780,9 +911,6 @@ pub struct IndexInput {
     pub globs: Option<GlobListInput>,
     /// Ordered case-insensitive rg glob rules, applied after globs.
     pub insensitive_globs: Option<PathListInput>,
-    /// Ripgrep type names, such as ts, py, h or cpp.
-    pub file_types: Option<PathListInput>,
-    pub excluded_file_types: Option<PathListInput>,
     pub hidden: Option<bool>,
     pub no_ignore: Option<bool>,
     /// Whether indexing scans nested Git repositories and submodules.
@@ -1067,7 +1195,9 @@ struct WorkspaceIndexOutput {
     path: String,
     root_paths: Vec<RootSpecOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    embedding: Option<IndexedEmbeddingOutput>,
+    default_model_ref: Option<String>,
+    embeddings: Vec<IndexedEmbeddingOutput>,
+    embedding_routes: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fts: Option<IndexedFtsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1084,8 +1214,6 @@ struct RootSpecOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     globs: Vec<String>,
     insensitive_globs: Vec<String>,
-    file_types: Vec<String>,
-    excluded_file_types: Vec<String>,
     glob_rules: Vec<GlobInput>,
     #[serde(skip_serializing_if = "is_false")]
     hidden: bool,
@@ -1104,6 +1232,7 @@ struct RootSpecOutput {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct IndexedEmbeddingOutput {
+    content_kinds: Vec<String>,
     provider: String,
     model: String,
     dimension: usize,
@@ -1474,8 +1603,18 @@ impl SearchInput {
         queries.extend(normalize_query_list(self.queries, "queries")?);
         let fts = normalize_query_list(self.fts, "fts")?;
         let vector = normalize_query_list(self.vector, "vector")?;
-        if queries.is_empty() && fts.is_empty() && vector.is_empty() {
-            return Err("zvec_grep_search requires query, queries, fts, or vector".to_owned());
+        let query_image = self
+            .query_image
+            .map(QueryImageInput::into_query)
+            .transpose()?;
+        let has_text = !queries.is_empty() || !fts.is_empty() || !vector.is_empty();
+        if query_image.is_some() && has_text {
+            return Err("queryImage cannot be combined with text query routes".into());
+        }
+        if query_image.is_none() && !has_text {
+            return Err(
+                "zvec_grep_search requires queryImage, query, queries, fts, or vector".to_owned(),
+            );
         }
 
         let routes = fts
@@ -1494,6 +1633,7 @@ impl SearchInput {
 
         let request = ContextOptions {
             query: None,
+            query_image,
             root: Some(root.clone()),
             queries,
             routes,
@@ -1560,6 +1700,47 @@ impl From<DeviceInput> for Device {
     }
 }
 
+fn normalize_embedding_routes(
+    routes: BTreeMap<String, String>,
+) -> Result<BTreeMap<ContentKind, EmbeddingModelSpec>, String> {
+    routes
+        .into_iter()
+        .map(|(kind, reference)| {
+            let kind = match kind.as_str() {
+                "text" => ContentKind::Text,
+                "code" => ContentKind::Code,
+                "image" => ContentKind::Image,
+                _ => return Err(format!("unknown embedding route content kind {kind:?}")),
+            };
+            let reference = reference.trim().to_owned();
+            validate_text("embeddingRoutes", &reference, 1, 256)?;
+            Ok((
+                kind,
+                EmbeddingModelSpec {
+                    reference,
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Auto,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn validate_embedding_endpoint(endpoint: Option<&str>) -> Result<(), String> {
+    if let Some(endpoint) = endpoint {
+        validate_text("endpoint", endpoint, 1, 2_048)?;
+        let valid = endpoint.parse::<http::Uri>().is_ok_and(|uri| {
+            matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
+        });
+        if !valid {
+            return Err("endpoint must be an absolute HTTP(S) URL".to_owned());
+        }
+    }
+    Ok(())
+}
+
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
         let root = absolute_root(&self.root)?;
@@ -1584,26 +1765,10 @@ impl IndexInput {
         if self.max_file_size_bytes == Some(Some(0)) {
             return Err("maxFileSizeBytes must be greater than zero".to_owned());
         }
-        if let Some(endpoint) = &self.endpoint {
-            validate_text("endpoint", endpoint, 1, 2_048)?;
-            let valid = endpoint.parse::<http::Uri>().is_ok_and(|uri| {
-                matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
-            });
-            if !valid {
-                return Err("endpoint must be an absolute HTTP(S) URL".to_owned());
-            }
-        }
+        validate_embedding_endpoint(self.endpoint.as_deref())?;
 
         let glob_update = normalize_index_globs(self.globs, self.insensitive_globs)?;
         let scan = ScanRulesUpdate {
-            file_types: self
-                .file_types
-                .map(|values| normalize_types(Some(values), "fileTypes"))
-                .transpose()?,
-            excluded_file_types: self
-                .excluded_file_types
-                .map(|values| normalize_types(Some(values), "excludedFileTypes"))
-                .transpose()?,
             hidden: self.hidden,
             no_ignore: self.no_ignore,
             nested_git: self.nested_git,
@@ -1635,6 +1800,18 @@ impl IndexInput {
         } else {
             None
         };
+        let embedding_routes = normalize_embedding_routes(self.embedding_routes)?;
+        let clear_embedding_routes = self
+            .clear_embedding_routes
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        if clear_embedding_routes
+            .iter()
+            .any(|kind| embedding_routes.contains_key(kind))
+        {
+            return Err("a content kind cannot be both routed and cleared".into());
+        }
         Ok(IndexToolRequest::Index {
             options: Box::new(IndexOptions {
                 root: Some(root),
@@ -1643,6 +1820,8 @@ impl IndexInput {
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
+                embedding_routes,
+                clear_embedding_routes,
                 endpoint: self.endpoint,
                 device: self.device.map(Into::into),
                 api_key: self.api_key,
@@ -1660,12 +1839,12 @@ impl IndexInput {
             || self.device.is_some()
             || self.endpoint.is_some()
             || self.embedding.is_some()
+            || !self.embedding_routes.is_empty()
+            || !self.clear_embedding_routes.is_empty()
             || self.rebuild.is_some()
             || self.reset_paths.is_some()
             || self.globs.is_some()
             || self.insensitive_globs.is_some()
-            || self.file_types.is_some()
-            || self.excluded_file_types.is_some()
             || self.hidden.is_some()
             || self.no_ignore.is_some()
             || self.nested_git.is_some()
@@ -1985,6 +2164,33 @@ fn structured_result(value: impl Serialize) -> CallToolResult {
     }
 }
 
+fn content_result_to_tool_result(reply: &ContentResult) -> CallToolResult {
+    let content = match &reply.content {
+        Content::Text(text) | Content::Code(text) => ContentBlock::text(text),
+        Content::Image(image) => {
+            let mime = match image.format() {
+                FileFormat::Png => "image/png",
+                FileFormat::Jpeg => "image/jpeg",
+                FileFormat::Webp => "image/webp",
+                _ => {
+                    return error_result(&EngineError::unsupported(
+                        "indexed image format is not supported by MCP",
+                    ));
+                }
+            };
+            ContentBlock::image(STANDARD.encode(image.data()), mime)
+        }
+    };
+    CallToolResult::success(vec![
+        ContentBlock::text(format!(
+            "{} ({})",
+            reply.path.display(),
+            reply.content.kind().as_str(),
+        )),
+        content,
+    ])
+}
+
 fn request_root(root: Option<&Path>) -> PathBuf {
     root.map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
@@ -2063,12 +2269,27 @@ impl From<InfoResult> for IndexStatusOutput {
             name: info.name,
             path: info.path.display().to_string(),
             root_paths: vec![RootSpecOutput::new(&info.root, info.scan)],
-            embedding: info.embedding.map(|embedding| IndexedEmbeddingOutput {
-                provider: embedding.provider,
-                model: embedding.model,
-                dimension: embedding.dimension,
-                metric: embedding.metric,
-            }),
+            default_model_ref: info.default_model_ref,
+            embedding_routes: info
+                .embedding_routes
+                .into_iter()
+                .map(|(kind, model)| (kind.as_str().into(), model))
+                .collect(),
+            embeddings: info
+                .embeddings
+                .into_iter()
+                .map(|embedding| IndexedEmbeddingOutput {
+                    content_kinds: embedding
+                        .content_kinds
+                        .into_iter()
+                        .map(|kind| kind.as_str().into())
+                        .collect(),
+                    provider: embedding.provider,
+                    model: embedding.model,
+                    dimension: embedding.dimension,
+                    metric: embedding.metric,
+                })
+                .collect(),
             fts: info.fts.map(|fts| IndexedFtsOutput {
                 tokenizer: fts.tokenizer,
                 filters: fts.filters,
@@ -2230,8 +2451,6 @@ impl RootSpecOutput {
                 .map(|rule| rule.pattern.clone())
                 .collect(),
             glob_rules: scan.globs.into_iter().map(Into::into).collect(),
-            file_types: scan.file_types,
-            excluded_file_types: scan.excluded_file_types,
             hidden: scan.hidden,
             no_ignore: scan.no_ignore,
             nested_git: scan.nested_git,
@@ -2341,6 +2560,7 @@ mod tests {
         SearchInput {
             root: test_root().display().to_string(),
             query: Some("call chain".to_owned()),
+            query_image: None,
             queries: None,
             fts: Some(QueryListInput::One("run".to_owned())),
             vector: None,
@@ -2385,7 +2605,7 @@ mod tests {
             assert!(request.filter.formats.is_empty());
         }
         let index: IndexInput = serde_json::from_value(
-            serde_json::json!({"root":test_root(), "globs":"*.h", "fileTypes":"h", "follow":true}),
+            serde_json::json!({"root":test_root(), "globs":"*.h", "follow":true}),
         )
         .expect("index");
         let IndexToolRequest::Index { options, wait, .. } = index.into_request().expect("mapping")
@@ -2394,7 +2614,6 @@ mod tests {
         };
         assert!(!wait);
         assert_eq!(options.scan.follow_symlinks, Some(true));
-        assert_eq!(options.scan.file_types, Some(vec!["h".into()]));
         for arguments in [
             serde_json::json!({"fileTypes":"not-a-real-type"}),
             serde_json::json!({"queries":[" ".repeat(4001)]}),
@@ -2500,7 +2719,9 @@ mod tests {
                 root,
                 scan: super::ScanRules::default(),
                 policy: super::WorkspaceIndexPolicy::Enabled,
-                embedding: None,
+                default_model_ref: None,
+                embeddings: Vec::new(),
+                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
@@ -2532,8 +2753,8 @@ mod tests {
             serde_json::json!(["lowercase"])
         );
         assert_eq!(workspace["id"], "search-engine");
-        assert!(workspace.get("embeddings").is_none());
-        assert!(workspace.get("embedding_routes").is_none());
+        assert_eq!(workspace["embeddings"], serde_json::json!([]));
+        assert_eq!(workspace["embedding_routes"], serde_json::json!({}));
         assert_eq!(files["entities"], count);
         assert_eq!(files["indexed_size_bytes"], count + 3);
         assert!(files.get("truncated_fragments").is_none());
@@ -2701,16 +2922,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_server_exposes_only_search() {
+    fn agent_server_exposes_search_and_content_reads() {
         let server = ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new()));
         let tools = server.listed_tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, AGENT_TOOL_NAME);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "zvec_grep_read_content");
+        assert_eq!(tools[1].name, AGENT_TOOL_NAME);
         assert!(server.get_info().instructions.is_some());
     }
 
     #[test]
-    fn full_server_exposes_all_six_tools() {
+    fn full_server_exposes_all_seven_tools() {
         let server =
             ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
         let names = server
@@ -2728,7 +2950,7 @@ mod tests {
     }
 
     #[test]
-    fn index_input_accepts_one_model_and_rejects_model_routes() {
+    fn index_input_accepts_default_and_content_routes() {
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
             "root": test_root(),
             "embedding": "local/potion-code-16m-v2",
@@ -2748,16 +2970,24 @@ mod tests {
             serde_json::json!({"embeddingRoutes": {"text":"one"}}),
             serde_json::json!({"embeddingRoutes": {}}),
             serde_json::json!({"embedding":"one", "embeddingRoutes":{"text":"two"}}),
-            serde_json::json!({"embedding":["one", "two"]}),
         ] {
             let mut value = patch;
             value["root"] = serde_json::json!(test_root());
-            assert!(serde_json::from_value::<IndexInput>(value).is_err());
+            serde_json::from_value::<IndexInput>(value)
+                .expect("routes")
+                .into_request()
+                .expect("route mapping");
         }
+        assert!(
+            serde_json::from_value::<IndexInput>(
+                serde_json::json!({"root":test_root(), "embedding":["one","two"]})
+            )
+            .is_err()
+        );
         let schema =
             serde_json::to_value(schemars::schema_for!(IndexInput)).expect("index input schema");
         assert!(schema["properties"].get("embedding").is_some());
-        assert!(schema["properties"].get("embeddingRoutes").is_none());
+        assert!(schema["properties"].get("embeddingRoutes").is_some());
         assert_eq!(schema["additionalProperties"], false);
     }
 
@@ -3144,6 +3374,125 @@ mod tests {
         }
     }
 
+    #[test]
+    fn image_query_inputs_are_explicit_and_exclusive() {
+        use zg_engine::api::context::options::{FileFormat, QueryImage};
+        for image in [
+            serde_json::json!({"source":"path", "path":test_root().join("query.png")}),
+            serde_json::json!({"source":"bytes", "format":"png", "data":"AQID"}),
+        ] {
+            let mut input =
+                serde_json::json!({"root":test_root(), "queryImage":image, "autoUpdate":false});
+            let request = serde_json::from_value::<SearchInput>(input.clone())
+                .expect("input")
+                .into_request()
+                .expect("image request");
+            assert!(request.query_image.is_some());
+            assert!(request.routes.is_empty());
+            if let Some(QueryImage::Bytes { format, data }) = request.query_image {
+                assert_eq!(format, FileFormat::Png);
+                assert_eq!(data, [1, 2, 3]);
+            }
+            input["query"] = "text".into();
+            assert!(
+                serde_json::from_value::<SearchInput>(input)
+                    .expect("mixed input")
+                    .into_request()
+                    .is_err()
+            );
+        }
+        let invalid = serde_json::json!({"root":test_root(), "queryImage":{"source":"bytes", "format":"png", "data":"%%%"}});
+        assert!(
+            serde_json::from_value::<SearchInput>(invalid)
+                .expect("invalid base64 input")
+                .into_request()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn image_content_reads_return_an_mcp_image_block() {
+        let reply = zg_engine::api::content::ContentResult {
+            path: test_root().join("image.png"),
+            content: zg_engine::api::content::Content::Image(
+                zg_engine::api::content::ImageContent::new(
+                    vec![1, 2, 3],
+                    zg_engine::api::content::FileFormat::Png,
+                )
+                .expect("image content"),
+            ),
+        };
+        let result =
+            serde_json::to_value(super::content_result_to_tool_result(&reply)).expect("MCP image");
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["mimeType"], "image/png");
+        assert_eq!(result["content"][1]["data"], "AQID");
+    }
+
+    #[test]
+    fn content_reads_accept_a_structured_reference_and_render_text_and_code() {
+        use zg_engine::api::content::{Content, ContentResult};
+
+        let input = serde_json::json!({
+            "root": test_root(),
+            "reference": {"generation":"generation", "entityId":"entity"},
+        });
+        let parsed = serde_json::from_value::<super::ReadContentInput>(input)
+            .expect("structured content reference");
+        assert_eq!(parsed.reference.generation, "generation");
+        assert_eq!(parsed.reference.entity_id, "entity");
+        assert!(
+            serde_json::from_value::<super::ReadContentInput>(serde_json::json!({
+                "root": test_root(), "generation":"generation", "entityId":"entity",
+            }))
+            .is_err()
+        );
+
+        for content in [
+            Content::Text("prose".into()),
+            Content::Code("fn main() {}".into()),
+        ] {
+            let expected = match &content {
+                Content::Text(text) | Content::Code(text) => text.clone(),
+                Content::Image(_) => unreachable!(),
+            };
+            let result =
+                serde_json::to_value(super::content_result_to_tool_result(&ContentResult {
+                    path: test_root().join("source"),
+                    content,
+                }))
+                .expect("text response");
+            assert_eq!(result["content"][1]["type"], "text");
+            assert_eq!(result["content"][1]["text"], expected);
+        }
+    }
+
+    #[test]
+    fn index_content_routes_map_and_cannot_be_set_and_cleared_together() {
+        use zg_engine::api::context::options::ContentKind;
+        let mut input = serde_json::json!({"root":test_root(), "embedding":"local/embeddinggemma2", "embeddingRoutes":{"image":"qwen/qwen3-vl-embedding"}, "clearEmbeddingRoutes":["code"]});
+        let IndexToolRequest::Index { options, .. } =
+            serde_json::from_value::<IndexInput>(input.clone())
+                .expect("input")
+                .into_request()
+                .expect("routes")
+        else {
+            panic!("index")
+        };
+        assert_eq!(
+            options.embedding_routes[&ContentKind::Image].reference,
+            "qwen/qwen3-vl-embedding"
+        );
+        assert_eq!(options.clear_embedding_routes, [ContentKind::Code]);
+        input["clearEmbeddingRoutes"] = serde_json::json!(["image"]);
+        assert!(
+            serde_json::from_value::<IndexInput>(input)
+                .expect("conflicting input")
+                .into_request()
+                .is_err()
+        );
+    }
+
     fn index_input() -> IndexInput {
         IndexInput {
             root: test_root().display().to_string(),
@@ -3153,6 +3502,8 @@ mod tests {
             endpoint: None,
             drop: None,
             embedding: Some("potion-base-8M".to_owned()),
+            embedding_routes: std::collections::BTreeMap::new(),
+            clear_embedding_routes: Vec::new(),
             rebuild: Some(false),
             reset_paths: None,
             globs: Some(super::GlobListInput::Rules(vec![super::GlobInput {
@@ -3160,8 +3511,6 @@ mod tests {
                 case_insensitive: false,
             }])),
             insensitive_globs: None,
-            file_types: None,
-            excluded_file_types: None,
             hidden: None,
             no_ignore: None,
             nested_git: None,

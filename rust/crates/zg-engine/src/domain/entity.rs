@@ -45,10 +45,11 @@ impl EntityId {
         content: &Content,
         source_range: Range,
     ) -> EngineResult<Self> {
-        let bytes = serde_json::to_vec(&(content, source_range)).map_err(|error| {
-            EngineError::internal(format!("serialize entity identity: {error}"))
+        let fingerprint = content.fingerprint();
+        let range = serde_json::to_vec(&source_range).map_err(|error| {
+            EngineError::internal(format!("serialize entity source range: {error}"))
         })?;
-        let hash = crate::utils::sha256_hex(&bytes);
+        let hash = crate::utils::sha256_hex_parts([fingerprint.as_slice(), range.as_slice()]);
         Ok(Self(format!("{:08x}{}", file_id.get(), &hash[..24])))
     }
 
@@ -96,7 +97,7 @@ fn validate_fragment_range(content: &Content, range: Range) -> EngineResult<()> 
             Ok(())
         }
         _ => Err(EngineError::invalid_argument(
-            "fragments use Full or entity-relative byte ranges for text and code; images and tables require Full",
+            "fragments use Full or entity-relative byte ranges for text and code; images require Full",
         )),
     }
 }
@@ -105,9 +106,5 @@ fn content_has_value(content: &Content) -> bool {
     match content {
         Content::Text(text) | Content::Code(text) => !text.trim().is_empty(),
         Content::Image(image) => !image.data().is_empty(),
-        Content::Table(table) => table
-            .cells
-            .iter()
-            .any(|cell| cell.contents.iter().any(content_has_value)),
     }
 }

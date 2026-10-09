@@ -12,13 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord},
+    domain::{Entity, EntityId, FileId, FileIndexStatus, FileRecord},
     utils::{atomic_write as write_record, sync_directory},
 };
 
 use super::{
     directories::Directories,
-    entities::{self, Entities},
+    entities::Entities,
     files::Files,
     fragments::{self, Fragments},
     types::{
@@ -271,8 +271,30 @@ impl IndexStore {
         self.read(|state| load_search_hits(state, hits))
     }
 
+    /// Read canonical indexed content, never the current source file.
+    /// Callers bind the entity ID to the active workspace storage generation.
+    pub(crate) fn read_entity(&self, id: &EntityId) -> EngineResult<Option<StoredEntity>> {
+        self.read(|state| {
+            let Some(entity) = state.entities.fetch(std::slice::from_ref(id))?.remove(id) else {
+                return Ok(None);
+            };
+            let Some(file) = state
+                .files
+                .fetch(&[entity.file_id])?
+                .remove(&entity.file_id)
+            else {
+                return Ok(None);
+            };
+            if !matches!(file.index_status, FileIndexStatus::Indexed { .. }) {
+                return Ok(None);
+            }
+            Ok(Some(StoredEntity { entity, file }))
+        })
+    }
+
     pub(crate) fn search_fts(
         &self,
+        model: &str,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
@@ -282,7 +304,9 @@ impl IndexStore {
                 return Ok(Vec::new());
             }
             let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
-            state.fragments.search_fts(query, limit, filter.as_deref())
+            state
+                .fragments
+                .search_fts(model, query, limit, filter.as_deref())
         })
     }
 
@@ -483,7 +507,6 @@ fn validate_batch(
             return Err(EngineError::invalid_argument("duplicate entity id"));
         }
         entity.validate()?;
-        entities::validate_content(&entity.content)?;
         for fragment in &entity.fragments {
             if !fragment_ids.insert(&fragment.id) {
                 return Err(EngineError::invalid_argument("duplicate fragment id"));

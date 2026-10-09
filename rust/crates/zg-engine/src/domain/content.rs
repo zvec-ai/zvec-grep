@@ -10,7 +10,6 @@ pub enum ContentKind {
     Text,
     Code,
     Image,
-    Table,
 }
 
 impl ContentKind {
@@ -20,27 +19,39 @@ impl ContentKind {
             Self::Text => "text",
             Self::Code => "code",
             Self::Image => "image",
-            Self::Table => "table",
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Content {
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum Content {
     Text(String),
     Code(String),
     Image(ImageContent),
-    Table(TableContent),
 }
 
 impl Content {
-    pub(crate) fn kind(&self) -> ContentKind {
+    #[must_use]
+    pub fn kind(&self) -> ContentKind {
         match self {
             Self::Text(_) => ContentKind::Text,
             Self::Code(_) => ContentKind::Code,
             Self::Image(_) => ContentKind::Image,
-            Self::Table(_) => ContentKind::Table,
+        }
+    }
+
+    /// Returns a platform-independent SHA-256 fingerprint of the content kind and value.
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        match self {
+            Self::Text(text) => crate::utils::sha256_parts([b"text", text.as_bytes()]),
+            Self::Code(text) => crate::utils::sha256_parts([b"code", text.as_bytes()]),
+            Self::Image(image) => image.fingerprint(),
         }
     }
 }
@@ -49,14 +60,17 @@ impl Content {
 
 /// Stores a complete encoded image resource and its format.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct ImageContent {
+pub struct ImageContent {
+    #[serde(with = "crate::utils::base64_bytes")]
     data: Vec<u8>,
     format: FileFormat,
 }
 
 impl ImageContent {
+    /// # Errors
+    /// Returns an error if data is empty or the format is not an image.
     #[track_caller]
-    pub(crate) fn new(data: Vec<u8>, format: FileFormat) -> EngineResult<Self> {
+    pub fn new(data: Vec<u8>, format: FileFormat) -> EngineResult<Self> {
         if !format.categories().contains(&FileCategory::Image) {
             return Err(EngineError::invalid_argument(format!(
                 "image content requires an image format, got {}",
@@ -71,44 +85,32 @@ impl ImageContent {
         Ok(Self { data, format })
     }
 
-    pub(crate) fn format(&self) -> FileFormat {
+    #[must_use]
+    pub fn format(&self) -> FileFormat {
         self.format
     }
 
-    pub(crate) fn data(&self) -> &[u8] {
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    fn fingerprint(&self) -> [u8; 32] {
+        crate::utils::sha256_parts([b"image", self.data.as_slice()])
     }
 }
 
-// --- Table ---
+impl<'de> serde::Deserialize<'de> for ImageContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ImageData {
+            #[serde(with = "crate::utils::base64_bytes")]
+            data: Vec<u8>,
+            format: FileFormat,
+        }
 
-/// A logical table, independent of its source format.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct TableContent {
-    pub row_count: usize,
-    pub column_count: usize,
-    /// Cells in row-major order. Merged cells are stored once at the top-left.
-    /// Positions not covered by a cell have no recorded content.
-    pub cells: Vec<TableCell>,
-}
-
-/// Table-local, zero-based coordinates with positive spans.
-/// Cells must stay within the table bounds and must not overlap.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct TableCell {
-    pub row: usize,
-    pub column: usize,
-    pub row_span: usize,
-    pub column_span: usize,
-    /// Contents in reading order.
-    pub contents: Vec<Content>,
-    pub kind: TableCellRole,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TableCellRole {
-    Unknown,
-    Data,
-    Header,
+        let image = ImageData::deserialize(deserializer)?;
+        Self::new(image.data, image.format).map_err(serde::de::Error::custom)
+    }
 }

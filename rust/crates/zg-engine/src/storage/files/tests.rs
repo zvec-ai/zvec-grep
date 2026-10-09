@@ -248,6 +248,22 @@ fn deleting_preserves_file_projections_until_record_removal() {
 }
 
 #[test]
+fn allocation_metadata_is_required_for_writers_but_not_readers() {
+    initialize().expect("initialize zvec");
+    let root = tempfile::tempdir().expect("storage");
+    let files = Files::open(root.path(), false).expect("new files");
+    files.flush().expect("flush files");
+    drop(files);
+    let sequence = root.path().join("file-ids.json");
+    std::fs::remove_file(&sequence).expect("remove allocation metadata");
+    let reader = Files::open(root.path(), true).expect("reader needs only source records");
+    assert!(reader.list().expect("read empty collection").is_empty());
+    drop(reader);
+    assert!(Files::open(root.path(), false).is_err());
+    assert!(!sequence.exists());
+}
+
+#[test]
 fn reader_opens_without_loading_the_file_identity_map() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");

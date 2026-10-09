@@ -288,8 +288,6 @@ mod tests {
     #[test]
     fn index_summary_displays_saved_scan_rules() {
         let scan = ScanRules {
-            file_types: vec!["rust".into(), "python".into()],
-            excluded_file_types: vec!["js".into()],
             globs: vec![
                 "*.rs".into(),
                 zg_engine::api::index::options::GlobRule {
@@ -316,7 +314,7 @@ mod tests {
         )
         .expect("summary");
         let output = String::from_utf8(bytes).expect("UTF-8");
-        assert!(output.contains("\nroots\t/workspace (glob=*.rs iglob=!vendor/** type=rust|python type-not=js hidden no-ignore ignore-file=custom.ignore max-depth=2 max-filesize=4096 follow nested-git=false)\n"));
+        assert!(output.contains("\nroots\t/workspace (glob=*.rs iglob=!vendor/** hidden no-ignore ignore-file=custom.ignore max-depth=2 max-filesize=4096 follow nested-git=false)\n"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub(crate) trait SearchStorage: Send + Sync {
     fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData>;
     fn search_fts(
         &self,
+        model: &str,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
@@ -50,11 +51,12 @@ impl SearchStorage for IndexStore {
 
     fn search_fts(
         &self,
+        model: &str,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.search_fts(query, limit, filter)
+        self.search_fts(model, query, limit, filter)
     }
 
     fn search_vector(

@@ -9,12 +9,9 @@ mod source;
 mod workspace;
 
 // Content.
-pub(crate) use content::Content;
+pub use content::Content;
 pub use content::ContentKind;
-pub(crate) use content::ImageContent;
-pub(crate) use content::TableCell;
-pub(crate) use content::TableCellRole;
-pub(crate) use content::TableContent;
+pub use content::ImageContent;
 
 // Entities.
 pub(crate) use entity::Entity;
@@ -33,8 +30,8 @@ pub use metadata::MarkdownMetadata;
 pub use metadata::SymbolType;
 
 // Models.
+pub(crate) use model::EmbeddingMetric;
 pub(crate) use model::EmbeddingModelInfo;
-pub(crate) use model::Metric;
 
 // Sources.
 pub(crate) use source::ByteRange;

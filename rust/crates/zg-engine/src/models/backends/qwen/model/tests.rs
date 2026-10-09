@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::domain::{ImageContent, TableContent, model::Metric};
+use crate::domain::{ContentKind, ImageContent, model::EmbeddingMetric};
 
 struct MockHttp {
     response: Mutex<Option<QwenHttpResponse>>,
@@ -32,9 +32,9 @@ fn config(kind: &'static str, model: &'static str, dimension: usize) -> QwenConf
         provider: "qwen",
         model,
         dimension,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         default_endpoint: "https://default.test/embed",
-        max_batch_size: 20,
+        max_batch_size: if kind == "multimodal" { 1 } else { 20 },
         max_input_tokens: 512,
         max_image_bytes: Some(1024),
     }
@@ -117,7 +117,7 @@ async fn code_is_sent_as_text_and_cancelled_before_http_dispatch() {
         let body = if kind == "text" {
             json!({"data": [{"index": 0, "embedding": [1.0, 0.0]}]})
         } else {
-            json!({"output": {"embeddings": [{"text_index": 0, "embedding": [1.0, 0.0]}]}})
+            json!({"output": {"embeddings": [{"index": 0, "type": "fusion", "embedding": [1.0, 0.0]}]}})
         };
         let http = Arc::new(MockHttp {
             response: Mutex::new(Some(QwenHttpResponse {
@@ -183,19 +183,12 @@ async fn text_backend_rejects_images_before_http_dispatch() {
     assert!(http.requests.lock().expect("requests lock").is_empty());
 }
 
-#[tokio::test]
-async fn multimodal_request_preserves_content_and_rejects_unsupported_inputs() {
+fn multimodal_model(response: Option<Value>) -> (QwenEmbeddingModel, Arc<MockHttp>) {
     let http = Arc::new(MockHttp {
-        response: Mutex::new(Some(QwenHttpResponse {
+        response: Mutex::new(response.map(|body| QwenHttpResponse {
             status: 200,
             retry_after: None,
-            body: serde_json::to_vec(&json!({
-                "output": { "embeddings": [
-                    { "text_index": 0, "embedding": [1.0, 0.0] },
-                    { "index": 1, "embedding": [0.0, 1.0] }
-                ] }
-            }))
-            .expect("fixture JSON"),
+            body: serde_json::to_vec(&body).expect("fixture JSON"),
         })),
         requests: Mutex::new(Vec::new()),
     });
@@ -205,59 +198,164 @@ async fn multimodal_request_preserves_content_and_rejects_unsupported_inputs() {
         http.clone(),
     )
     .expect("model");
-    let result = model
+    (model, http)
+}
+
+fn fused_response() -> Value {
+    json!({"output": {"embeddings": [
+        {"index": 0, "type": "fusion", "embedding": [1.0, 0.0]}
+    ]}})
+}
+
+#[tokio::test]
+async fn multimodal_fusion_preserves_part_order_and_returns_one_vector() {
+    let (model, http) = multimodal_model(Some(fused_response()));
+    assert!(model.info().model.supports_content(ContentKind::Text));
+    assert!(model.info().model.supports_content(ContentKind::Code));
+    assert!(model.info().model.supports_content(ContentKind::Image));
+    let trace_headers = EmbeddingTraceHeaders {
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+        tracestate: None,
+        baggage: None,
+    };
+    let inputs = [vec![
+        Content::Text("query".into()),
+        Content::Image(ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image")),
+        Content::Code("fn example() {}".into()),
+        Content::Image(ImageContent::new(vec![4, 5], FileFormat::Jpeg).expect("image")),
+        Content::Image(ImageContent::new(vec![6], FileFormat::Webp).expect("image")),
+    ]];
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let error = model
         .embed(
-            &[
-                vec![Content::Text("query".to_owned())],
-                vec![Content::Image(
-                    ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image"),
-                )],
-            ],
-            EmbeddingOptions::default(),
+            &inputs,
+            EmbeddingOptions {
+                signal: Some(signal),
+                ..EmbeddingOptions::default()
+            },
         )
         .await
-        .expect("embedding");
-    assert_eq!(result.vectors, [[1.0, 0.0], [0.0, 1.0]]);
-    assert_eq!(
-        http.requests.lock().expect("requests lock")[0].0["input"]["contents"][1]["image"],
-        "AQID"
-    );
+        .expect_err("cancelled fusion request");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    assert!(http.requests.lock().expect("requests lock").is_empty());
 
+    let result = model
+        .embed(
+            &inputs,
+            EmbeddingOptions {
+                trace_headers: Some(trace_headers.clone()),
+                ..EmbeddingOptions::default()
+            },
+        )
+        .await
+        .expect("fusion embedding");
+    assert_eq!(result.vectors, [[1.0, 0.0]]);
+    let requests = http.requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].1, Some(trace_headers));
+    assert_eq!(
+        requests[0].0,
+        json!({
+            "model": "qwen3-vl-embedding",
+            "input": {"contents": [
+                {"text": "query"},
+                {"image": "data:image/png;base64,AQID"},
+                {"text": "fn example() {}"},
+                {"image": "data:image/jpeg;base64,BAU="},
+                {"image": "data:image/webp;base64,Bg=="}
+            ]},
+            "parameters": {"dimension": 2, "enable_fusion": true}
+        })
+    );
+}
+
+#[tokio::test]
+async fn multimodal_fusion_rejects_unsupported_parts_before_dispatch() {
+    let (model, http) = multimodal_model(None);
     for content in [
         Content::Image(ImageContent::new(vec![1], FileFormat::Gif).expect("image")),
         Content::Image(ImageContent::new(vec![1], FileFormat::Svg).expect("image")),
-        Content::Table(TableContent {
-            row_count: 0,
-            column_count: 0,
-            cells: Vec::new(),
-        }),
     ] {
         let error = model
             .embed(
-                &[vec![Content::Text("query".to_owned())], vec![content]],
+                &[vec![Content::Text("query".into()), content]],
                 EmbeddingOptions::default(),
             )
             .await
             .expect_err("unsupported content must be rejected before dispatch");
         assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+        assert!(
+            error
+                .context()
+                .is_some_and(|context| context.contains("partIndex=1"))
+        );
     }
-    for parts in [
-        vec![
-            Content::Text("first".to_owned()),
-            Content::Text("second".to_owned()),
-        ],
-        vec![
-            Content::Text("query".to_owned()),
-            Content::Image(ImageContent::new(vec![1], FileFormat::Png).expect("image")),
-        ],
+    assert!(http.requests.lock().expect("requests lock").is_empty());
+}
+
+#[tokio::test]
+async fn multimodal_fusion_enforces_limits_without_combining_batch_items() {
+    let (model, http) = multimodal_model(Some(fused_response()));
+    let text = Content::Text("query".into());
+    let image = Content::Image(ImageContent::new(vec![1], FileFormat::Png).expect("image"));
+    for inputs in [
+        vec![vec![text.clone()], vec![image.clone()]],
+        vec![vec![text.clone(); 21]],
+        vec![vec![image.clone(); 6]],
+        vec![vec![Content::Image(
+            ImageContent::new(vec![1; 1025], FileFormat::Png).expect("image"),
+        )]],
     ] {
         let error = model
-            .embed(&[parts], EmbeddingOptions::default())
+            .embed(&inputs, EmbeddingOptions::default())
             .await
-            .expect_err("composed multimodal inputs are unsupported");
-        assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+            .expect_err("input exceeds model limits");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
     }
+    assert!(http.requests.lock().expect("requests lock").is_empty());
+    let mut input = vec![text; 15];
+    input.extend(vec![image; 5]);
+    let result = model
+        .embed(&[input], EmbeddingOptions::default())
+        .await
+        .expect("input exactly at part and image limits");
+    assert_eq!(result.vectors, [[1.0, 0.0]]);
     assert_eq!(http.requests.lock().expect("requests lock").len(), 1);
+}
+
+#[tokio::test]
+async fn multimodal_fusion_rejects_unfused_or_malformed_responses() {
+    for response in [
+        json!({}),
+        json!({"output": {"embeddings": []}}),
+        json!({"output": {"embeddings": [
+            {"index": 0, "type": "fusion", "embedding": [1.0, 0.0]},
+            {"index": 1, "type": "fusion", "embedding": [0.0, 1.0]}
+        ]}}),
+        json!({"output": {"embeddings": [
+            {"index": 0, "type": "vl", "embedding": [1.0, 0.0]}
+        ]}}),
+        json!({"output": {"embeddings": [
+            {"index": 0, "embedding": [1.0, 0.0]}
+        ]}}),
+        json!({"output": {"embeddings": [null]}}),
+        json!({"output": {"embeddings": [{"type": "fusion"}]}}),
+        json!({"output": {"embeddings": [{"type": "fusion", "embedding": [1.0]}]}}),
+        json!({"output": {"embeddings": [{"type": "fusion", "embedding": [1.0, null]}]}}),
+    ] {
+        let (model, http) = multimodal_model(Some(response));
+        let inputs = [vec![
+            Content::Text("query".into()),
+            Content::Image(ImageContent::new(vec![1], FileFormat::Png).expect("image")),
+        ]];
+        let error = model
+            .embed(&inputs, EmbeddingOptions::default())
+            .await
+            .expect_err("invalid fusion response");
+        assert_eq!(error.code(), crate::EngineError::INTERNAL);
+        assert_eq!(http.requests.lock().expect("requests lock").len(), 1);
+    }
 }
 
 #[tokio::test]

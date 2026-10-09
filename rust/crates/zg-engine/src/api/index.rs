@@ -5,7 +5,7 @@ pub use result::IndexResult;
 
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use serde::{Deserialize, Serialize};
     use tokio_util::sync::CancellationToken;
@@ -30,8 +30,14 @@ pub mod options {
         pub changes: Vec<WorkspaceChange>,
         #[serde(default)]
         pub scan: ScanRulesUpdate,
-        /// The single model used to embed text content in this workspace.
+        /// Default model for content kinds without an explicit route.
         pub embedding: Option<EmbeddingModelSpec>,
+        /// Supplied routes replace only the corresponding saved content-kind overrides.
+        #[serde(default)]
+        pub embedding_routes: BTreeMap<ContentKind, EmbeddingModelSpec>,
+        /// Remove saved overrides so these kinds use the default model when supported.
+        #[serde(default)]
+        pub clear_embedding_routes: Vec<ContentKind>,
         /// Maximum embedding batch tasks for this index operation.
         /// The model default is used when omitted.
         pub embedding_concurrency: Option<usize>,
@@ -76,10 +82,6 @@ pub mod options {
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(default, deny_unknown_fields)]
     pub struct ScanRulesUpdate {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub file_types: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub excluded_file_types: Option<Vec<String>>,
         /// Replaces the complete ordered list, including both case categories.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub globs: Option<Vec<GlobRule>>,
@@ -115,12 +117,6 @@ pub mod options {
     impl ScanRulesUpdate {
         /// Applies only the fields supplied by this request.
         pub fn apply(&self, target: &mut ScanRules) {
-            if let Some(value) = &self.file_types {
-                target.file_types.clone_from(value);
-            }
-            if let Some(value) = &self.excluded_file_types {
-                target.excluded_file_types.clone_from(value);
-            }
             if let Some(rules) = &self.globs {
                 target.globs.clone_from(rules);
             }
@@ -535,18 +531,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_removed_content_routing_in_index_requests() {
-        for routes in [
-            serde_json::json!({}),
-            serde_json::json!({"text": "local/model"}),
-        ] {
-            let mut request = serde_json::to_value(IndexOptions::default()).expect("index request");
-            assert!(request.get("embedding_routes").is_none());
-            request["embedding_routes"] = routes;
-            let error =
-                serde_json::from_value::<IndexOptions>(request).expect_err("removed routing");
-            assert!(error.to_string().contains("embedding_routes"));
-        }
+    fn content_routes_round_trip_and_reject_unknown_kinds() {
+        let mut request = serde_json::to_value(IndexOptions::default()).expect("index request");
+        request["embedding_routes"] = serde_json::json!({"image": {
+            "reference": "local/embeddinggemma-2", "revision": null, "cache_dir": null,
+            "endpoint": null, "device": "auto"
+        }});
+        let options: IndexOptions = serde_json::from_value(request.clone()).expect("image route");
+        assert_eq!(
+            options.embedding_routes[&crate::domain::ContentKind::Image].reference,
+            "local/embeddinggemma-2"
+        );
+        request["embedding_routes"]["unknown"] = request["embedding_routes"]["image"].clone();
+        assert!(serde_json::from_value::<IndexOptions>(request).is_err());
     }
 
     #[test]

@@ -71,7 +71,7 @@ impl Fixture {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
-            stdout.contains(&format!("  Embedding   {reference}")),
+            stdout.contains(&format!("  Default     {reference}")),
             "{stdout}"
         );
     }
@@ -553,7 +553,7 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         let stdout = String::from_utf8_lossy(&status.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
-            stdout.contains(&format!("  Embedding   {expected}")),
+            stdout.contains(&format!("  Default     {expected}")),
             "{stdout}"
         );
         assert!(!fixture.root.path().join(".zvec-grep").exists());

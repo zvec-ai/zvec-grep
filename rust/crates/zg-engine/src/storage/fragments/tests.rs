@@ -20,13 +20,17 @@ fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
 
 fn model() -> EmbeddingModelInfo {
     EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
+        model: crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+        )
+        .expect("fixture model identity"),
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         max_batch_size: 32,
         max_input_tokens: None,
         max_image_bytes: None,
@@ -255,7 +259,10 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         };
         let filter = build_filter(Some(&filter), &DIRECTORY_LOOKUP).expect("symbol filter");
         for (hits, count) in [
-            (store.search_fts("orchard", 10, filter.as_deref()), 1),
+            (
+                store.search_fts("fixture/fixture", "orchard", 10, filter.as_deref()),
+                1,
+            ),
             (
                 store.search_vector("fixture/fixture", &entries[1].vector, 10, filter.as_deref()),
                 2,
@@ -290,8 +297,8 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
     let classified = build_filter(Some(&classified), &DIRECTORY_LOOKUP).expect("classified filter");
     for (all, filtered) in [
         (
-            store.search_fts("orchard", 10, None),
-            store.search_fts("orchard", 10, classified.as_deref()),
+            store.search_fts("fixture/fixture", "orchard", 10, None),
+            store.search_fts("fixture/fixture", "orchard", 10, classified.as_deref()),
         ),
         (
             store.search_vector("fixture/fixture", &entries[1].vector, 10, None),
@@ -400,7 +407,7 @@ fn filename_like_negation_propagates_native_query_errors() {
         for (operation, result) in [
             (
                 "search full-text index",
-                store.search_fts("orchard", 10, filter.as_deref()),
+                store.search_fts("fixture/fixture", "orchard", 10, filter.as_deref()),
             ),
             (
                 "search vector index",
@@ -444,7 +451,7 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
     for (label, result, fragments_per_file) in [
         (
             "FTS",
-            store.search_fts("orchard", 100, filter.as_deref()),
+            store.search_fts("fixture/fixture", "orchard", 100, filter.as_deref()),
             1,
         ),
         (
@@ -603,7 +610,12 @@ fn fragment_ownership_is_checked_across_model_collections() {
     super::super::zvec::initialize().expect("initialize zvec");
     let home = tempfile::tempdir().expect("storage");
     let mut other = model();
-    other.model.name = "other".into();
+    other.model = crate::domain::model::ModelInfo::new(
+        other.model.provider(),
+        "other",
+        other.model.content_kinds().iter().copied(),
+    )
+    .expect("fixture model identity");
     let store = Fragments::open(home.path(), &[model(), other], false).expect("two models");
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
@@ -615,7 +627,9 @@ fn fragment_ownership_is_checked_across_model_collections() {
         entry.model = "fixture/other".into();
     }
     assert!(store.validate_ownership(&foreign, FileId::new(0)).is_err());
-    let hits = store.search_fts("orchard", 10, None).expect("search");
+    let hits = store
+        .search_fts("fixture/fixture", "orchard", 10, None)
+        .expect("search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].file_id, source.id);
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
@@ -624,7 +638,7 @@ fn fragment_ownership_is_checked_across_model_collections() {
     store.delete_file(source.id).expect("idempotent delete");
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts("fixture/fixture", "orchard", 10, None)
             .expect("search deleted")
             .is_empty()
     );
@@ -633,6 +647,10 @@ fn fragment_ownership_is_checked_across_model_collections() {
 #[test]
 fn empty_selection_lists_compile_to_false_without_native_in_syntax() {
     for filter in [
+        StorageSearchFilter {
+            content_kinds: Some(Vec::new()),
+            ..Default::default()
+        },
         StorageSearchFilter {
             file_ids: Some(Vec::new()),
             ..Default::default()

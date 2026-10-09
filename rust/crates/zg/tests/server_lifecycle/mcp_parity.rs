@@ -81,7 +81,7 @@ fn modern_http_discovery_tools_errors_and_remote_continuation() -> Result<(), Bo
                         .as_array()
                         .expect("valid test fixture")
                         .len(),
-                    if toolset == "agent" { 1 } else { 6 }
+                    if toolset == "agent" { 2 } else { 7 }
                 );
             }
         }

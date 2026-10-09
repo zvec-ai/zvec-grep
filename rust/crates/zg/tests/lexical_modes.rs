@@ -179,7 +179,7 @@ async fn managed_rg_matching_options_preserve_source_coordinates() -> Result<(),
         assert_eq!(start_lines(&reply), *expected, "{args:?}");
     }
     let reply = search_args(root.path(), &["-U", "first\\nsecond", "sample.txt"]).await?;
-    assert_eq!(reply.items[0].content, "first\nsecond");
+    assert_eq!(reply.items[0].preview.text(), Some("first\nsecond"));
     assert!(matches!(
         reply.items[0].range,
         zg_engine::api::context::result::ContentRange::Text {
@@ -273,7 +273,7 @@ async fn managed_rg_handles_crlf_nul_and_multiple_multiline_hits() -> Result<(),
     fs::write(root.path().join("crlf.txt"), "needle\r\nother\r\n")?;
     let reply = search_args(root.path(), &["--crlf", "-x", "needle", "crlf.txt"]).await?;
     assert_eq!(start_lines(&reply), [1]);
-    assert_eq!(reply.items[0].content, "needle");
+    assert_eq!(reply.items[0].preview.text(), Some("needle"));
     fs::write(root.path().join("nul.txt"), "before\0needle\nafter\n")?;
     let reply = search_args(root.path(), &["-a", "needle", "nul.txt"]).await?;
     assert_eq!(start_lines(&reply), [1]);
@@ -288,7 +288,7 @@ async fn managed_rg_handles_crlf_nul_and_multiple_multiline_hits() -> Result<(),
     fs::write(root.path().join("overlap.txt"), "a a\na a\n")?;
     let reply = search_args(root.path(), &["-Um1", "a|\\n", "overlap.txt"]).await?;
     assert_eq!(start_lines(&reply), [1]);
-    assert_eq!(reply.items[0].content, "a a");
+    assert_eq!(reply.items[0].preview.text(), Some("a a"));
     assert_eq!(
         reply.coverage,
         zg_engine::api::context::result::ContextCoverage::RgTruncated

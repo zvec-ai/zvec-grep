@@ -106,17 +106,12 @@ pub(crate) async fn run_server(
         runtimes: runtimes.clone(),
         engine: Arc::clone(&engine),
     });
-    let index_operations: Arc<dyn IndexOperationProvider> = Arc::new(runtimes.clone());
-    let mcp_server = match config.mcp_toolset.unwrap_or_default() {
-        McpToolset::Agent => {
-            ZvecGrepMcpServer::agent_with_index_operations(Arc::clone(&engine), index_operations)
-        }
-        McpToolset::Full => ZvecGrepMcpServer::full_with_index_operations(
-            Arc::clone(&engine),
-            status,
-            index_operations,
-        ),
-    };
+    let mcp_server = create_mcp_server(
+        config.mcp_toolset.unwrap_or_default(),
+        &engine,
+        &runtimes,
+        status,
+    );
     let mcp_config = StreamableHttpServerConfig::default()
         .with_cancellation_token(shutdown.child_token())
         .with_allowed_hosts([
@@ -125,7 +120,7 @@ pub(crate) async fn run_server(
             "::1".to_owned(),
             config.listen.socket_addr().to_string(),
         ])
-        .with_max_request_body_bytes(1024 * 1024);
+        .with_max_request_body_bytes(16 * 1024 * 1024);
     let mcp_service = StreamableHttpService::new(
         move || Ok(mcp_server.clone()),
         Arc::new(crate::mcp_sessions::BoundedSessionManager::default()),
@@ -137,6 +132,7 @@ pub(crate) async fn run_server(
         .route("/admin/execute", post(execute_command))
         .route("/admin/index", post(stream_index))
         .nest_service("/mcp", mcp_service)
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             token,
             crate::authentication::authenticate,
@@ -175,6 +171,25 @@ pub(crate) async fn run_server(
     let release_result = instance.release().await;
     serve_result?;
     release_result
+}
+
+fn create_mcp_server(
+    toolset: McpToolset,
+    engine: &Arc<ZvecGrep>,
+    runtimes: &WorkspaceRuntimeManager,
+    status: Arc<dyn ServerStatusProvider>,
+) -> ZvecGrepMcpServer {
+    let index_operations: Arc<dyn IndexOperationProvider> = Arc::new(runtimes.clone());
+    match toolset {
+        McpToolset::Agent => {
+            ZvecGrepMcpServer::agent_with_index_operations(Arc::clone(engine), index_operations)
+        }
+        McpToolset::Full => ZvecGrepMcpServer::full_with_index_operations(
+            Arc::clone(engine),
+            status,
+            index_operations,
+        ),
+    }
 }
 
 async fn health() -> Json<Value> {
@@ -293,6 +308,18 @@ async fn execute_command(
                     .search(&state.engine, request)
                     .await
                     .map(|reply| DaemonReply::Context(Box::new(reply))),
+            )
+        }
+        DaemonCommand::ReadContent(mut request) => {
+            let signal = state.shutdown.child_token();
+            let _guard = signal.clone().drop_guard();
+            request.signal = Some(signal);
+            engine_execution(
+                state
+                    .engine
+                    .read_content(request)
+                    .await
+                    .map(|reply| DaemonReply::Content(Box::new(reply))),
             )
         }
         DaemonCommand::Index(request) => match state.runtimes.submit_index(request, true).await {

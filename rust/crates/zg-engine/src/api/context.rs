@@ -5,11 +5,25 @@ pub use result::ContextResult;
 
 /// Options accepted by [`crate::ZvecGrep::context`].
 pub mod options {
-    pub use crate::domain::{FileCategory, FileFormat, GlobRule, SymbolType};
+    pub use crate::domain::{ContentKind, FileCategory, FileFormat, GlobRule, SymbolType};
 
     use std::path::PathBuf;
 
     use serde::{Deserialize, Serialize};
+
+    /// An image supplied independently of the files stored in the workspace.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum QueryImage {
+        /// A path on the engine host, resolved relative to its working directory.
+        Path { path: PathBuf },
+        /// Encoded PNG, JPEG or static WebP bytes; `data` is base64 in JSON.
+        Bytes {
+            format: FileFormat,
+            #[serde(with = "crate::utils::base64_bytes")]
+            data: Vec<u8>,
+        },
+    }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextRoute {
@@ -52,6 +66,8 @@ pub mod options {
     #[allow(clippy::struct_excessive_bools)]
     pub struct ContextOptions {
         pub query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub query_image: Option<QueryImage>,
         pub queries: Vec<String>,
         pub rg: bool,
         pub rg_options: RgOptions,
@@ -112,7 +128,29 @@ pub mod options {
     }
 
     impl ContextOptions {
+        /// Content type used to select the workspace embedding route.
+        #[must_use]
+        pub fn input_kind(&self) -> ContentKind {
+            if self.query_image.is_some() {
+                ContentKind::Image
+            } else {
+                ContentKind::Text
+            }
+        }
+
         pub(crate) fn validate_file_selection(&self) -> crate::EngineResult<()> {
+            if self.query_image.is_some()
+                && (self.query.is_some()
+                    || !self.queries.is_empty()
+                    || !self.routes.is_empty()
+                    || self.rg
+                    || self.fuse
+                    || self.prefer_symbol)
+            {
+                return Err(crate::EngineError::invalid_argument(
+                    "image queries cannot be combined with text queries, routes, rg, fusion or symbol preference",
+                ));
+            }
             if self.rg {
                 if self.filter != QueryFilter::default() {
                     return Err(crate::EngineError::invalid_argument(
@@ -144,6 +182,7 @@ pub mod options {
         fn default() -> Self {
             Self {
                 query: None,
+                query_image: None,
                 queries: Vec::new(),
                 rg: false,
                 rg_options: RgOptions::default(),
@@ -239,6 +278,40 @@ pub mod options {
     #[cfg(test)]
     mod selection_tests {
         use super::*;
+
+        #[test]
+        fn image_queries_have_unambiguous_input_and_compact_transport_bytes() {
+            let image = QueryImage::Bytes {
+                format: FileFormat::Png,
+                data: vec![1, 2, 3],
+            };
+            let json = serde_json::to_value(&image).expect("encode");
+            assert_eq!(json["source"], "bytes");
+            assert_eq!(json["data"], "AQID");
+            assert_eq!(
+                serde_json::from_value::<QueryImage>(json).expect("decode"),
+                image
+            );
+            let options = ContextOptions {
+                query_image: Some(image),
+                ..ContextOptions::default()
+            };
+            assert_eq!(options.input_kind(), ContentKind::Image);
+            assert!(options.validate_file_selection().is_ok());
+            let mut conflicting = options.clone();
+            conflicting.query = Some("words".into());
+            assert!(conflicting.validate_file_selection().is_err());
+            conflicting = options.clone();
+            conflicting.rg = true;
+            assert!(conflicting.validate_file_selection().is_err());
+            conflicting = options;
+            conflicting.routes.push(ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "words".into(),
+            });
+            assert!(conflicting.validate_file_selection().is_err());
+            assert_eq!(ContextOptions::default().input_kind(), ContentKind::Text);
+        }
 
         #[test]
         fn query_modes_reject_each_others_selection_contract() {
@@ -422,9 +495,11 @@ pub mod result {
         pub relative_path: PathBuf,
         pub range: ContentRange,
         pub excerpt_range: Option<ContentRange>,
-        /// Exact source coordinates of `content`, independent of the entity and matched ranges.
+        /// Exact source coordinates of the preview, independent of the entity and matched ranges.
         pub content_range: ContentRange,
-        pub content: String,
+        pub preview: ContentPreview,
+        /// Reference to the complete indexed content. Direct rg results have no reference.
+        pub content_ref: Option<crate::api::content::ContentRef>,
         /// Optional structural context supplied with the retrieved source.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub outline: Option<String>,
@@ -433,12 +508,44 @@ pub mod result {
         pub score: Option<f64>,
         pub matched_by: MatchedBy,
         pub metadata: Option<EntityMetadata>,
-        pub entity_id: Option<String>,
         pub container: Option<ContextContainer>,
         pub trace: Option<SearchHitTrace>,
         pub query_groups: Vec<ContextQueryGroupMatch>,
         pub selection_reason: Option<ContextSelectionReason>,
         pub coverage_group: Option<String>,
+    }
+
+    /// A lightweight preview; the complete indexed content is available through `content_ref`.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+    pub enum ContentPreview {
+        Text(String),
+        Code(String),
+        Image {
+            format: crate::domain::FileFormat,
+            size_bytes: u64,
+        },
+    }
+
+    impl ContentPreview {
+        #[must_use]
+        pub const fn kind(&self) -> crate::domain::ContentKind {
+            use crate::domain::ContentKind;
+            match self {
+                Self::Text(_) => ContentKind::Text,
+                Self::Code(_) => ContentKind::Code,
+                Self::Image { .. } => ContentKind::Image,
+            }
+        }
+
+        /// Returns source text for text and code content.
+        #[must_use]
+        pub fn text(&self) -> Option<&str> {
+            match self {
+                Self::Text(text) | Self::Code(text) => Some(text),
+                Self::Image { .. } => None,
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -503,6 +610,8 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexDiagnostics {
+        pub input_kind: crate::domain::ContentKind,
+        pub model_ref: String,
         pub hits_returned: usize,
         pub query_groups: Vec<IndexQueryGroupDiagnostics>,
         pub routes: Vec<IndexRouteDiagnostics>,
@@ -646,6 +755,47 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn preview_wire_format_preserves_kind_without_binary_payloads() {
+        use crate::domain::{ContentKind, FileFormat};
+        use result::ContentPreview;
+
+        for (preview, kind, wire, text) in [
+            (
+                ContentPreview::Text("prose".into()),
+                ContentKind::Text,
+                json!({"kind": "text", "value": "prose"}),
+                Some("prose"),
+            ),
+            (
+                ContentPreview::Code("fn main() {}".into()),
+                ContentKind::Code,
+                json!({"kind": "code", "value": "fn main() {}"}),
+                Some("fn main() {}"),
+            ),
+            (
+                ContentPreview::Image {
+                    format: FileFormat::Png,
+                    size_bytes: 42,
+                },
+                ContentKind::Image,
+                json!({"kind": "image", "value": {"format": "png", "size_bytes": 42}}),
+                None,
+            ),
+        ] {
+            assert_eq!(preview.kind(), kind);
+            assert_eq!(preview.text(), text);
+            assert_eq!(
+                serde_json::to_value(&preview).expect("serialize preview"),
+                wire
+            );
+            assert_eq!(
+                serde_json::from_value::<ContentPreview>(wire).expect("deserialize preview"),
+                preview
+            );
+        }
+    }
 
     #[test]
     fn source_line_bounds_respect_half_open_and_empty_ranges() {

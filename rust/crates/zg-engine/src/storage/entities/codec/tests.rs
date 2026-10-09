@@ -6,43 +6,9 @@ fn text_range() -> Range {
     Range::Text(TextRange::from_coordinates(7, 18, 2, 2, 0, 11).expect("text range"))
 }
 
-fn cell(
-    row: usize,
-    column: usize,
-    row_span: usize,
-    column_span: usize,
-    kind: TableCellRole,
-) -> TableCell {
-    TableCell {
-        row,
-        column,
-        row_span,
-        column_span,
-        contents: vec![Content::Text(format!("{row},{column}"))],
-        kind,
-    }
-}
-
 fn entity() -> Entity {
-    let image = Content::Image(ImageContent::new(vec![0, 1, 255], FileFormat::Png).expect("image"));
-    let mut nested = cell(1, 1, 1, 1, TableCellRole::Unknown);
-    nested.contents.push(Content::Table(TableContent {
-        row_count: 1,
-        column_count: 1,
-        cells: vec![cell(0, 0, 1, 1, TableCellRole::Header)],
-    }));
-    let mut mixed = cell(0, 1, 1, 2, TableCellRole::Data);
-    mixed.contents.push(image);
-    let content = Content::Table(TableContent {
-        row_count: 2,
-        column_count: 3,
-        cells: vec![
-            cell(0, 0, 2, 1, TableCellRole::Header),
-            mixed,
-            nested,
-            cell(1, 2, 1, 1, TableCellRole::Data),
-        ],
-    });
+    let content =
+        Content::Image(ImageContent::new(vec![0, 1, 255], FileFormat::Png).expect("image"));
     let id = EntityId::new(FileId::new(1), &content, text_range()).expect("entity id");
     Entity {
         id: id.clone(),
@@ -90,18 +56,12 @@ fn stored_file_identities_reject_values_outside_u32() {
 }
 
 #[test]
-fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
+fn entity_records_preserve_image_content_ranges_and_external_metadata() {
     round_trip(&entity());
     let record: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
-    assert_eq!(
-        record["content"]["value"]["cells"][1]["contents"][1]["value"]["data"],
-        "AAH/"
-    );
-    assert_eq!(
-        record["content"]["value"]["cells"][1]["contents"][1]["value"]["format"],
-        "png"
-    );
+    assert_eq!(record["content"]["value"]["data"], "AAH/");
+    assert_eq!(record["content"]["value"]["format"], "png");
     assert!(
         record.get("metadata").is_none(),
         "metadata is supplied by its dedicated storage column"
@@ -231,57 +191,6 @@ fn code_records_preserve_kind_without_metadata_and_validate_text_ranges() {
 }
 
 #[test]
-fn rejects_invalid_table_geometry_without_allocating_a_dense_grid() {
-    let original: Value =
-        serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
-    for (field, value) in [
-        ("row_span", 0),
-        ("row_span", 3),
-        ("column_span", 2),
-        ("column", usize::MAX),
-    ] {
-        let mut record = original.clone();
-        record["content"]["value"]["cells"][0][field] = json!(value);
-        assert_corrupt_entity(&record);
-    }
-    let mut table = TableContent {
-        row_count: usize::MAX,
-        column_count: usize::MAX,
-        cells: vec![
-            cell(0, 0, 1, 1, TableCellRole::Unknown),
-            cell(usize::MAX - 1, usize::MAX - 1, 1, 1, TableCellRole::Data),
-        ],
-    };
-    validate_table(&table).expect("sparse table");
-    table.cells.reverse();
-    assert!(validate_table(&table).is_err());
-    table.cells = vec![
-        cell(0, 0, 2, 2, TableCellRole::Data),
-        cell(1, 1, 1, 1, TableCellRole::Data),
-    ];
-    assert!(validate_table(&table).is_err());
-    let mut entity = entity();
-    let mut content = Content::Text("nested".into());
-    for depth in 1..=MAX_TABLE_DEPTH + 1 {
-        let mut nested = cell(0, 0, 1, 1, TableCellRole::Data);
-        nested.contents = vec![content];
-        content = Content::Table(TableContent {
-            row_count: 1,
-            column_count: 1,
-            cells: vec![nested],
-        });
-        entity.content = content.clone();
-        if depth <= MAX_TABLE_DEPTH {
-            round_trip(&entity);
-        } else {
-            assert!(validate_content(&entity.content).is_err());
-            let encoded = encode_entity(&entity).expect("encode invalid fixture");
-            assert!(decode_entity(&encoded, None).is_err());
-        }
-    }
-}
-
-#[test]
 fn rejects_corrupt_identities_images_and_ranges() {
     let original: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
@@ -296,7 +205,7 @@ fn rejects_corrupt_identities_images_and_ranges() {
         ("data", json!("invalid base64!")),
     ] {
         let mut record = original.clone();
-        record["content"]["value"]["cells"][1]["contents"][1]["value"][field] = value;
+        record["content"]["value"][field] = value;
         assert_corrupt_entity(&record);
     }
     for (field, value) in [("start_line", 0), ("end_byte_column", 12)] {

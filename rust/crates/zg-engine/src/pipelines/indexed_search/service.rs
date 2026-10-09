@@ -8,7 +8,7 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::IndexOptions,
     },
-    domain::{IndexState, model::ModelConfig},
+    domain::{ContentKind, EmbeddingModelInfo, IndexState, Workspace, model::ModelConfig},
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
     pipelines::indexing::service::{
         WorkspaceIndexService, assert_embedding_compatible, environment_api_key, is_indexed,
@@ -49,6 +49,12 @@ pub(crate) async fn context(
         ));
     };
     let initial_manifest = read_workspace_manifest(&location.home)?;
+    if let Some(manifest) = initial_manifest
+        .as_ref()
+        .filter(|manifest| is_indexed(manifest))
+    {
+        validate_query_schema(&manifest.workspace, options.input_kind(), &request)?;
+    }
     if !initial_manifest
         .as_ref()
         .map(|manifest| IndexStore::exists(&manifest.storage_home()))
@@ -142,9 +148,7 @@ async fn try_writer_context(
         return Ok(None);
     };
     let manifest = &writer.session.manifest;
-    let schema = manifest.embedding().ok_or_else(|| {
-        workspace_index_unavailable(&location.root, "writer model information is missing")
-    })?;
+    let schema = validate_query_schema(&manifest.workspace, options.input_kind(), request)?;
     let model_request = search_model_request(
         manifest,
         schema,
@@ -156,8 +160,8 @@ async fn try_writer_context(
     if !writer
         .session
         .models
-        .first()
-        .is_some_and(|model| model.matches_request(&model_request))
+        .iter()
+        .any(|model| model.matches_request(&model_request))
     {
         return Ok(None);
     }
@@ -198,6 +202,7 @@ fn query_models(
     root: &Path,
     request: &super::context::NormalizedContextRequest,
 ) -> Result<Vec<ModelRuntimeLease>, EngineError> {
+    validate_query_schema(&manifest.workspace, options.input_kind(), request)?;
     if !uses_vectors(request) {
         return Ok(Vec::new());
     }
@@ -235,6 +240,9 @@ async fn query_storage(
         root,
         &manifest.workspace,
         &manifest.path,
+        manifest.storage_generation.as_deref().ok_or_else(|| {
+            EngineError::storage_failure("indexed workspace has no storage generation")
+        })?,
         storage,
         &embedding_models,
         options,
@@ -255,14 +263,44 @@ pub(in crate::pipelines) fn refresh_options(
         signal: options.signal.clone(),
         allow_remote: options.allow_remote,
         authorized_remote: options.authorized_remote.clone(),
-        api_key: options.api_key.clone(),
-        endpoint: options.endpoint.clone(),
+        // Refresh uses each model's persisted runtime configuration. Query-only
+        // endpoint, credentials and device overrides must not reconfigure other routes.
         embedding_concurrency: options.embedding_concurrency,
         lock_timeout_ms: options.lock_timeout_ms,
-        runtime_device: options.device,
-        model_cache: options.model_cache.clone(),
         ..IndexOptions::default()
     }
+}
+
+fn validate_query_schema<'a>(
+    workspace: &'a Workspace,
+    kind: ContentKind,
+    request: &super::context::NormalizedContextRequest,
+) -> Result<&'a EmbeddingModelInfo, EngineError> {
+    let schema = query_schema(workspace, kind)?;
+    if let Some(image) = &request.image
+        && schema
+            .max_image_bytes
+            .is_some_and(|limit| image.data().len() > limit)
+    {
+        return Err(EngineError::invalid_argument(format!(
+            "query image exceeds the {} input size limit",
+            schema.model.reference(),
+        )));
+    }
+    Ok(schema)
+}
+
+pub(crate) fn query_schema(
+    workspace: &Workspace,
+    kind: ContentKind,
+) -> Result<&EmbeddingModelInfo, EngineError> {
+    workspace.index.descriptor()
+        .ok_or_else(|| EngineError::unsupported("workspace indexing is disabled"))?
+        .model_for(kind)?
+        .ok_or_else(|| EngineError::unsupported(format!(
+            "workspace has no embedding model for {} queries; configure an embedding route and rebuild the index",
+            kind.as_str(),
+        )))
 }
 
 pub(in crate::pipelines) fn acquire_search_model(
@@ -272,9 +310,7 @@ pub(in crate::pipelines) fn acquire_search_model(
     options: &ContextOptions,
     root: &Path,
 ) -> Result<ModelRuntimeLease, EngineError> {
-    let schema = manifest.embedding().ok_or_else(|| {
-        workspace_index_unavailable(&manifest.path, "embedding model information is missing")
-    })?;
+    let schema = query_schema(&manifest.workspace, options.input_kind())?;
     acquire_search_model_for(
         models,
         manifest,
@@ -329,7 +365,7 @@ fn search_model_request(
         .cloned()
         .unwrap_or_default();
     let config = crate::config::read()?;
-    let local = schema.model.provider == "local";
+    let local = schema.model.provider() == "local";
     if !local && options.device.is_some() {
         return Err(EngineError::invalid_argument(
             "--device is only supported for local embedding models",
@@ -365,7 +401,7 @@ fn search_model_request(
                         .or_else(|| {
                             crate::config::string(
                                 &config,
-                                &["providers", &schema.model.provider, "apiKey"],
+                                &["providers", schema.model.provider(), "apiKey"],
                             )
                         })
                         .or_else(environment_api_key)
@@ -390,4 +426,74 @@ fn search_model_request(
 #[track_caller]
 fn workspace_index_unavailable(root: &Path, reason: &str) -> EngineError {
     EngineError::not_found(format!("workspace index at {}: {reason}", root.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        IndexDescriptor, ScanRules,
+        model::{EmbeddingMetric, ModelInfo},
+    };
+
+    fn model(name: &str, kinds: &[ContentKind]) -> EmbeddingModelInfo {
+        EmbeddingModelInfo {
+            model: ModelInfo::new("test", name, kinds.iter().copied()).expect("model"),
+            dimension: 4,
+            metric: EmbeddingMetric::Cosine,
+            max_batch_size: 1,
+            max_input_tokens: None,
+            max_image_bytes: Some(1024),
+        }
+    }
+
+    #[test]
+    fn input_kind_selects_exact_route_without_searching_other_capable_models() {
+        let text = model("text", &[ContentKind::Text, ContentKind::Code]);
+        let image = model("image", &[ContentKind::Text, ContentKind::Image]);
+        let mut index = IndexDescriptor::single(text);
+        index.embeddings.insert(0, image);
+        let mut workspace = Workspace {
+            name: "fixture".into(),
+            root: PathBuf::from("/workspace"),
+            scan: ScanRules::default(),
+            index: IndexState::Enabled(index.clone()),
+            created_epoch_ms: 0,
+            updated_epoch_ms: 0,
+        };
+        assert_eq!(
+            query_schema(&workspace, ContentKind::Text)
+                .expect("text route")
+                .model
+                .reference(),
+            "test/text"
+        );
+        let error = query_schema(&workspace, ContentKind::Image).expect_err("unrouted image");
+        assert_eq!(error.code(), EngineError::UNSUPPORTED);
+        assert!(error.message().contains("image"));
+        index.routes.insert(ContentKind::Image, "test/image".into());
+        workspace.index = IndexState::Enabled(index.clone());
+        assert_eq!(
+            query_schema(&workspace, ContentKind::Image)
+                .expect("image route")
+                .model
+                .reference(),
+            "test/image"
+        );
+        assert_eq!(
+            query_schema(&workspace, ContentKind::Text)
+                .expect("text route")
+                .model
+                .reference(),
+            "test/text"
+        );
+        index.routes.insert(ContentKind::Image, "test/text".into());
+        workspace.index = IndexState::Enabled(index);
+        assert_eq!(
+            query_schema(&workspace, ContentKind::Image)
+                .expect_err("invalid explicit route")
+                .code(),
+            EngineError::INVALID_ARGUMENT
+        );
+    }
 }

@@ -38,10 +38,10 @@ async fn zvec_grep_executes_typed_requests_directly() {
 
     assert_eq!(first_reply.root, first_root);
     assert_eq!(first_reply.items.len(), 1);
-    assert_eq!(first_reply.items[0].content, "first needle");
+    assert_eq!(first_reply.items[0].preview.text(), Some("first needle"));
     assert_eq!(second_reply.root, second_root);
     assert_eq!(second_reply.items.len(), 1);
-    assert_eq!(second_reply.items[0].content, "second needle");
+    assert_eq!(second_reply.items[0].preview.text(), Some("second needle"));
 
     service.close();
     let error = service

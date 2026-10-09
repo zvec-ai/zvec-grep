@@ -1,14 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{Content, FileFormat};
 
-use crate::domain::model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig, ModelInfo};
+use crate::domain::model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig};
 use crate::models::{
-    catalog::QwenConfig,
+    catalog::{EmbeddingCatalogEntry, QwenConfig},
     spi::{
         EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingTraceHeaders,
         ModelError, input_text, validate_inputs, validate_result,
@@ -16,7 +17,8 @@ use crate::models::{
 };
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_MULTIMODAL_IMAGES: usize = 10;
+const MAX_MULTIMODAL_PARTS: usize = 20;
+const MAX_MULTIMODAL_IMAGES: usize = 5;
 
 pub(crate) struct QwenEmbeddingModel {
     entry: QwenConfig,
@@ -64,11 +66,13 @@ impl QwenEmbeddingModel {
         Ok(Self {
             entry,
             info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: Some(endpoint.clone()),
-                },
+                model: EmbeddingCatalogEntry::Qwen(entry)
+                    .model_info()
+                    .map_err(|error| {
+                        ModelError::internal("invalid catalog model info")
+                            .with_cause(error)
+                            .shared()
+                    })?,
                 dimension: entry.dimension,
                 metric: entry.metric,
                 max_batch_size: entry.max_batch_size,
@@ -138,21 +142,35 @@ impl QwenEmbeddingModel {
         signal: Option<CancellationToken>,
         trace_headers: Option<EmbeddingTraceHeaders>,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_multimodal_inputs(self.entry, inputs)?;
-        let request_contents = inputs
-            .iter()
-            .map(|input| match input.as_slice() {
-                [Content::Text(text) | Content::Code(text)] => Ok(json!({ "text": text })),
-                [Content::Image(image)] => Ok(json!({ "image": bytes_to_base64(image.data()) })),
-                _ => Err(ModelError::unsupported(
-                    "Qwen multimodal embedding requires one text or image content per input",
+        let [input] = inputs else {
+            return Err(ModelError::new(
+                crate::EngineError::INVALID_ARGUMENT,
+                "Qwen3 VL fusion requires exactly one input per request",
+                Some(format!(
+                    "model={} inputCount={}",
+                    self.entry.reference,
+                    inputs.len()
                 )),
+            ));
+        };
+        validate_multimodal_input(self.entry, input)?;
+        let request_contents = input
+            .iter()
+            .map(|content| match content {
+                Content::Text(text) | Content::Code(text) => json!({ "text": text }),
+                Content::Image(image) => json!({
+                    "image": format!(
+                        "data:image/{};base64,{}",
+                        image.format().as_str(),
+                        STANDARD.encode(image.data()),
+                    )
+                }),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
         let request = json!({
             "model": self.entry.model,
             "input": { "contents": request_contents },
-            "parameters": { "dimension": self.info.dimension },
+            "parameters": { "dimension": self.info.dimension, "enable_fusion": true },
         });
         let response = self.send(request, signal, trace_headers).await?;
         let body = parse_response_body(&response, self.entry)?;
@@ -170,36 +188,26 @@ impl QwenEmbeddingModel {
                     Some(format!("model={}", self.entry.reference)),
                 )
             })?;
-        let mut vectors = vec![None; inputs.len()];
-        for (fallback_index, item) in items.iter().enumerate() {
-            let object = item.as_object().ok_or_else(|| {
-                ModelError::new(
-                    crate::EngineError::INTERNAL,
-                    "Qwen3 VL embedding response included an invalid embedding item",
-                    Some(format!(
-                        "model={} index={fallback_index}",
-                        self.entry.reference
-                    )),
-                )
-            })?;
-            let raw_index = object
-                .get("index")
-                .and_then(json_integer)
-                .or_else(|| object.get("text_index").and_then(json_integer))
-                .unwrap_or_else(|| i64::try_from(fallback_index).unwrap_or(i64::MAX));
-            let index = usize::try_from(raw_index)
-                .map_err(|_| multimodal_index_out_of_range(self.entry, raw_index, inputs.len()))?;
-            if index >= inputs.len() {
-                return Err(multimodal_index_out_of_range(
-                    self.entry,
-                    index,
-                    inputs.len(),
-                ));
-            }
-            vectors[index] = Some(parse_vector(object.get("embedding"), self.entry, index)?);
+        let [item] = items.as_slice() else {
+            return Err(ModelError::new(
+                crate::EngineError::INTERNAL,
+                "Qwen3 VL fusion response must contain exactly one embedding",
+                Some(format!(
+                    "model={} vectorCount={}",
+                    self.entry.reference,
+                    items.len()
+                )),
+            ));
+        };
+        if item.get("type").and_then(Value::as_str) != Some("fusion") {
+            return Err(ModelError::new(
+                crate::EngineError::INTERNAL,
+                "Qwen3 VL embedding response did not include a fused embedding",
+                Some(format!("model={}", self.entry.reference)),
+            ));
         }
         Ok(EmbeddingResult {
-            vectors: collect_vectors(vectors, self.entry)?,
+            vectors: vec![parse_vector(item.get("embedding"), self.entry, 0)?],
             truncated: Vec::new(),
         })
     }
@@ -250,11 +258,7 @@ impl EmbeddingModel for QwenEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| match content {
-            Content::Text(_) | Content::Code(_) => true,
-            Content::Image(_) => self.entry.kind == "multimodal",
-            Content::Table(_) => false,
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let EmbeddingOptions {
             signal,
             trace_headers,
@@ -729,34 +733,20 @@ fn index_out_of_range(
     )
 }
 
-fn multimodal_index_out_of_range(
-    entry: QwenConfig,
-    index: impl std::fmt::Display,
-    count: usize,
-) -> ModelError {
-    ModelError::new(
-        crate::EngineError::INTERNAL,
-        "Qwen3 VL embedding response index was out of range",
-        Some(format!(
-            "model={} index={index} inputCount={count}",
-            entry.reference
-        )),
-    )
-}
-
-fn validate_multimodal_inputs(
-    entry: QwenConfig,
-    inputs: &[Vec<Content>],
-) -> Result<(), ModelError> {
+fn validate_multimodal_input(entry: QwenConfig, input: &[Content]) -> Result<(), ModelError> {
+    if input.len() > MAX_MULTIMODAL_PARTS {
+        return Err(ModelError::new(
+            crate::EngineError::INVALID_ARGUMENT,
+            "Qwen3 VL embedding content count exceeds model limit",
+            Some(format!(
+                "model={} partCount={} maxPartCount={MAX_MULTIMODAL_PARTS}",
+                entry.reference,
+                input.len(),
+            )),
+        ));
+    }
     let mut image_count = 0;
-    for (index, input) in inputs.iter().enumerate() {
-        let [content] = input.as_slice() else {
-            return Err(ModelError::new(
-                crate::EngineError::UNSUPPORTED,
-                "Qwen multimodal embedding requires one text or image content per input",
-                Some(format!("model={} inputIndex={index}", entry.model)),
-            ));
-        };
+    for (part_index, content) in input.iter().enumerate() {
         let Content::Image(image) = content else {
             continue;
         };
@@ -769,7 +759,7 @@ fn validate_multimodal_inputs(
                 crate::EngineError::UNSUPPORTED,
                 "Qwen3 VL embedding model does not support image format",
                 Some(format!(
-                    "model={} index={index} format={}",
+                    "model={} partIndex={part_index} format={}",
                     entry.model,
                     image.format().as_str()
                 )),
@@ -787,25 +777,6 @@ fn validate_multimodal_inputs(
         ));
     }
     Ok(())
-}
-
-fn bytes_to_base64(bytes: &[u8]) -> String {
-    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied();
-        let third = chunk.get(2).copied();
-        output.push(char::from(CHARS[usize::from(first >> 2)]));
-        output.push(char::from(
-            CHARS[usize::from(((first & 3) << 4) | second.unwrap_or(0) >> 4)],
-        ));
-        output.push(second.map_or('=', |second| {
-            char::from(CHARS[usize::from(((second & 15) << 2) | third.unwrap_or(0) >> 6)])
-        }));
-        output.push(third.map_or('=', |third| char::from(CHARS[usize::from(third & 63)])));
-    }
-    output
 }
 
 fn model_name(entry: QwenConfig) -> &'static str {

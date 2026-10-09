@@ -953,20 +953,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             reply.background_refresh = Some("off".to_owned());
             return Ok(reply);
         }
-        let options = IndexOptions {
-            root: request.root.clone(),
-            on_progress: request.on_progress.clone(),
-            signal: request.signal.clone(),
-            allow_remote: request.allow_remote,
-            authorized_remote: request.authorized_remote.clone(),
-            api_key: request.api_key.clone(),
-            endpoint: request.endpoint.clone(),
-            embedding_concurrency: request.embedding_concurrency,
-            lock_timeout_ms: request.lock_timeout_ms,
-            runtime_device: request.device,
-            model_cache: request.model_cache.clone(),
-            ..IndexOptions::default()
-        };
+        let options = refresh_options(&request);
         if policy == RefreshPolicy::Background {
             // Query first so our own refresh cannot lock out the current-index read.
             // A successful query also proves that this operation is not creating an index.
@@ -1228,6 +1215,19 @@ fn canonical_root(root: Option<&Path>) -> Result<PathBuf, WorkspaceRuntimeError>
     })
 }
 
+fn refresh_options(request: &ContextOptions) -> IndexOptions {
+    IndexOptions {
+        root: request.root.clone(),
+        on_progress: request.on_progress.clone(),
+        signal: request.signal.clone(),
+        allow_remote: request.allow_remote,
+        authorized_remote: request.authorized_remote.clone(),
+        embedding_concurrency: request.embedding_concurrency,
+        lock_timeout_ms: request.lock_timeout_ms,
+        ..IndexOptions::default()
+    }
+}
+
 fn index_template(options: &IndexOptions) -> IndexOptions {
     let mut template = options.clone();
     // Saved workspace settings are authoritative for subsequent watch jobs.
@@ -1244,6 +1244,8 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
     template.embedding = None;
+    template.embedding_routes.clear();
+    template.clear_embedding_routes.clear();
     template
 }
 
@@ -2362,4 +2364,41 @@ mod tests {
 
     mod freshness;
     mod lifecycle;
+    #[test]
+    fn watcher_templates_resolve_saved_routes_instead_of_replaying_configuration_patches() {
+        use zg_engine::api::context::options::ContentKind;
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+        let options = IndexOptions {
+            embedding_routes: std::collections::BTreeMap::from([(
+                ContentKind::Image,
+                EmbeddingModelSpec {
+                    reference: "qwen/vision".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Auto,
+                },
+            )]),
+            clear_embedding_routes: vec![ContentKind::Code],
+            ..Default::default()
+        };
+        let template = super::index_template(&options);
+        assert!(template.embedding_routes.is_empty());
+        assert!(template.clear_embedding_routes.is_empty());
+    }
+    #[test]
+    fn resident_refresh_does_not_apply_query_model_overrides_to_saved_routes() {
+        let request = zg_engine::api::context::ContextOptions {
+            api_key: Some("query-only-key".into()),
+            endpoint: Some("https://query-only.example".into()),
+            device: Some(zg_engine::api::index::options::Device::Cpu),
+            model_cache: Some("query-cache".into()),
+            ..Default::default()
+        };
+        let options = super::refresh_options(&request);
+        assert!(options.api_key.is_none());
+        assert!(options.endpoint.is_none());
+        assert!(options.runtime_device.is_none());
+        assert!(options.model_cache.is_none());
+    }
 }

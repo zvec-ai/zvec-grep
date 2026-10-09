@@ -181,6 +181,8 @@ impl WorkspaceIndexService {
         // Check the on-disk version before any registry, recovery or storage mutation.
         let mut existing =
             inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
+        // Resolve all routes before any registry or storage mutation.
+        let _ = embedding_plan(existing.as_ref(), &options)?;
         let abandoned = match read_build_registration(&location.home) {
             Ok(registration) => registration,
             Err(_) if options.rebuild => None,
@@ -507,12 +509,17 @@ fn index_manifest(
         created_epoch_ms: active.map_or(now, |value| value.workspace.created_epoch_ms),
         updated_epoch_ms: now,
     };
+    let plan = embedding_plan(active, options)?;
     let runtime = models
         .iter()
         .map(|model| {
             Ok((
                 model.info().model.reference(),
-                embedding_runtime(active, options, model)?,
+                embedding_runtime(
+                    active,
+                    &plan.requests[&model.info().model.reference()],
+                    model,
+                )?,
             ))
         })
         .collect::<Result<BTreeMap<_, _>, EngineError>>()?;
@@ -542,16 +549,115 @@ impl fmt::Debug for WorkspaceIndexService {
 }
 
 fn normalize_model_paths(options: &mut IndexOptions) -> Result<(), EngineError> {
-    if let Some(cache_dir) = options
+    for spec in options
         .embedding
-        .as_mut()
-        .and_then(|spec| spec.cache_dir.as_mut())
+        .iter_mut()
+        .chain(options.embedding_routes.values_mut())
     {
-        *cache_dir = std::path::absolute(&*cache_dir).map_err(|error| {
-            EngineError::from_io("failed to resolve model cache directory", &error)
-        })?;
+        if let Some(cache_dir) = spec.cache_dir.as_mut() {
+            *cache_dir = std::path::absolute(&*cache_dir).map_err(|error| {
+                EngineError::from_io("failed to resolve model cache directory", &error)
+            })?;
+        }
     }
     Ok(())
+}
+
+/// Concrete per-model requests shared by execution and destination preflight.
+pub(crate) struct EmbeddingPlan {
+    pub default_ref: String,
+    pub routes: BTreeMap<crate::domain::ContentKind, String>,
+    pub requests: BTreeMap<String, IndexOptions>,
+}
+
+pub(crate) fn embedding_plan(
+    existing: Option<&WorkspaceManifest>,
+    options: &IndexOptions,
+) -> Result<EmbeddingPlan, EngineError> {
+    let default_ref = embedding_reference(existing, options.embedding.as_ref())?;
+    let mut routes = existing
+        .and_then(|manifest| manifest.workspace.index.descriptor())
+        .map_or_else(BTreeMap::new, |index| index.routes.clone());
+    for kind in &options.clear_embedding_routes {
+        if options.embedding_routes.contains_key(kind) {
+            return Err(EngineError::invalid_argument(format!(
+                "cannot set and clear the {} embedding route in one request",
+                kind.as_str(),
+            )));
+        }
+        routes.remove(kind);
+    }
+    let mut specifications = BTreeMap::new();
+    if let Some(spec) = &options.embedding {
+        specifications.insert(spec.reference.clone(), spec.clone());
+    }
+    for (kind, spec) in &options.embedding_routes {
+        if specifications
+            .get(&spec.reference)
+            .is_some_and(|previous| previous != spec)
+        {
+            return Err(EngineError::invalid_argument(format!(
+                "conflicting configurations for embedding model {}",
+                spec.reference,
+            )));
+        }
+        specifications.insert(spec.reference.clone(), spec.clone());
+        routes.insert(*kind, spec.reference.clone());
+    }
+    for (kind, reference) in &routes {
+        let entry =
+            crate::models::get_embedding_model_catalog_entry(reference).ok_or_else(|| {
+                EngineError::invalid_argument(format!("unknown embedding model: {reference}"))
+            })?;
+        if !entry.model_info()?.supports_content(*kind) {
+            return Err(EngineError::invalid_argument(format!(
+                "embedding model {reference} does not support {} content",
+                kind.as_str(),
+            )));
+        }
+    }
+    let mut requests = BTreeMap::new();
+    for reference in std::iter::once(&default_ref).chain(routes.values()) {
+        if requests.contains_key(reference) {
+            continue;
+        }
+        if crate::models::get_embedding_model_catalog_entry(reference).is_none() {
+            return Err(EngineError::invalid_argument(format!(
+                "unknown embedding model: {reference}"
+            )));
+        }
+        let spec = specifications
+            .get(reference)
+            .cloned()
+            .unwrap_or_else(|| EmbeddingModelSpec {
+                reference: reference.clone(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: Device::Auto,
+            });
+        if spec.revision.is_some() {
+            return Err(EngineError::unsupported(
+                "embedding revision overrides are not supported by the catalog-backed runtime",
+            ));
+        }
+        let mut request = options.clone();
+        request.embedding = Some(spec);
+        request.embedding_routes.clear();
+        request.clear_embedding_routes.clear();
+        if reference != &default_ref {
+            request.api_key = None;
+            request.endpoint = None;
+            request.device = None;
+            request.model_cache = None;
+        }
+        requests.insert(reference.clone(), request);
+    }
+    Ok(EmbeddingPlan {
+        default_ref,
+        routes,
+        requests,
+    })
 }
 
 struct IndexModels {
@@ -564,11 +670,21 @@ fn acquire_index_models(
     existing: Option<&WorkspaceManifest>,
     options: &IndexOptions,
 ) -> Result<IndexModels, EngineError> {
-    let model = acquire_model(models, existing, options)?;
-    let descriptor = IndexDescriptor::single(model.info().clone());
+    let plan = embedding_plan(existing, options)?;
+    let runtimes = plan
+        .requests
+        .values()
+        .map(|request| acquire_model(models, existing, request))
+        .collect::<Result<Vec<_>, _>>()?;
+    let descriptor = IndexDescriptor {
+        embeddings: runtimes.iter().map(|model| model.info().clone()).collect(),
+        default_model_ref: plan.default_ref,
+        routes: plan.routes,
+        fts: crate::domain::FTS_CONFIG,
+    };
     descriptor.validate()?;
     Ok(IndexModels {
-        runtimes: vec![model],
+        runtimes,
         descriptor,
     })
 }
@@ -683,7 +799,7 @@ pub(crate) fn embedding_reference(
     resolve_embedding_reference(ResolveEmbeddingReferenceOptions {
         explicit: requested.map(|embedding| embedding.reference.clone()),
         existing: existing
-            .and_then(|manifest| manifest.embedding())
+            .and_then(|manifest| manifest.default_embedding())
             .map(|embedding| embedding.model.reference()),
         global_default: crate::config::string(&config, &["defaults", "embedding"]),
         fallback: Some(DEFAULT_LOCAL_EMBEDDING.to_owned()),
@@ -752,12 +868,8 @@ fn embedding_runtime(
         })
         .unwrap_or_default();
     let config = crate::config::read()?;
-    if model.info().model.provider == "local" {
-        let reference = format!(
-            "{}/{}",
-            model.info().model.provider,
-            model.info().model.name
-        );
+    if model.info().model.provider() == "local" {
+        let reference = model.info().model.reference();
         Ok(ModelConfig {
             cache_dir: crate::config::model_cache(
                 &config,
@@ -784,7 +896,10 @@ fn embedding_runtime(
     } else {
         Ok(ModelConfig {
             api_key: current.api_key,
-            endpoint: model.info().model.endpoint.clone().or(current.endpoint),
+            endpoint: model
+                .configured_endpoint()
+                .map(str::to_owned)
+                .or(current.endpoint),
             device: None,
             cache_dir: None,
         })
@@ -949,7 +1064,14 @@ mod tests {
             super::CURRENT_INDEX_VERSION,
         ))
         .expect("current index");
-        for version in [None, Some(0), Some(1), Some(3), Some(5), Some(u32::MAX)] {
+        for version in [
+            None,
+            Some(0),
+            Some(1),
+            Some(super::CURRENT_INDEX_VERSION - 1),
+            Some(super::CURRENT_INDEX_VERSION + 1),
+            Some(u32::MAX),
+        ] {
             let error = crate::workspace::manifest::require_current_index_version(version)
                 .expect_err("incompatible index format");
             assert!(error.message().contains("rebuild the index"));
@@ -1019,6 +1141,80 @@ mod tests {
             .expect_err("workspace requires a directory");
         assert!(error.message().contains("existing directory"));
         assert_eq!(models.snapshot().cached_runtimes, 0);
+    }
+
+    #[tokio::test]
+    async fn remote_endpoint_is_saved_as_runtime_config_and_reused_on_reopen() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        let service = WorkspaceIndexService::with_test_registry();
+        let mut models = ModelRuntimeManager::new();
+        let reference = "qwen/text-embedding-v4";
+        let mut options = IndexOptions {
+            root: Some(directory.path().to_path_buf()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: reference.into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: Some(" https://first.example.test/v1 ".into()),
+                device: Device::Auto,
+            }),
+            api_key: Some("fixture".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        };
+        service
+            .index(&models, options.clone())
+            .await
+            .expect("empty workspace requires no remote embedding requests");
+        let initial = super::read_workspace_manifest(&home)
+            .expect("read")
+            .expect("manifest");
+        assert_eq!(
+            initial.embedding_runtimes[reference].endpoint.as_deref(),
+            Some("https://first.example.test/v1/embeddings")
+        );
+        assert_eq!(
+            serde_json::to_value(&initial.default_embedding().expect("model info").model)
+                .expect("serialize identity"),
+            serde_json::json!({"provider": "qwen", "name": "text-embedding-v4", "contentKinds": ["text", "code"]})
+        );
+
+        options.endpoint = Some("https://second.example.test/v1".into());
+        for reopen in [false, true] {
+            if reopen {
+                options.embedding = None;
+                options.endpoint = None;
+                models.close();
+                models = ModelRuntimeManager::new();
+            }
+            service
+                .index(&models, options.clone())
+                .await
+                .expect("endpoint changes and reopening do not require rebuilding");
+            let current = super::read_workspace_manifest(&home)
+                .expect("read")
+                .expect("manifest");
+            assert_eq!(current.workspace.index, initial.workspace.index);
+            assert_eq!(current.storage_generation, initial.storage_generation);
+            assert_eq!(
+                current.embedding_runtimes[reference].endpoint.as_deref(),
+                Some("https://second.example.test/v1/embeddings")
+            );
+        }
+
+        let saved = std::fs::read(home.join("manifest.json")).expect("saved manifest");
+        options.endpoint = Some("not a URL".into());
+        let error = service
+            .index(&models, options)
+            .await
+            .expect_err("invalid endpoint must not overwrite saved configuration");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert_eq!(
+            std::fs::read(home.join("manifest.json")).expect("unchanged manifest"),
+            saved
+        );
+        models.close();
     }
 
     #[tokio::test]
@@ -1943,7 +2139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_releases_name_reserved_before_initial_model_failure() {
+    async fn invalid_model_configuration_does_not_reserve_a_workspace_name() {
         let directory = tempdir().expect("workspace");
         let service = WorkspaceIndexService::with_test_registry();
         let models = ModelRuntimeManager::new();
@@ -1965,18 +2161,13 @@ mod tests {
             registry
                 .name_for_root(directory.path())
                 .expect("reservation"),
-            Some(name.clone())
+            None
         );
         let info = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: false,
         };
-        assert!(
-            service
-                .drop_index(&info)
-                .await
-                .expect("drop reservation without manifest")
-        );
+        assert!(!service.drop_index(&info).await.expect("nothing to drop"));
         assert_eq!(registry.root_for_name(&name).expect("released name"), None);
         assert!(!service.drop_index(&info).await.expect("idempotent drop"));
         models.close();

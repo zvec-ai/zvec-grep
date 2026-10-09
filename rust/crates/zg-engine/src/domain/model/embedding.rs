@@ -1,4 +1,4 @@
-use super::{Metric, ModelInfo};
+use super::ModelInfo;
 use crate::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct EmbeddingModelInfo {
     pub model: ModelInfo,
     pub dimension: usize,
-    pub metric: Metric,
+    pub metric: EmbeddingMetric,
     /// Maximum number of inputs accepted by one embedding request.
     pub max_batch_size: usize,
     /// Positive token limit when applicable and known.
@@ -18,16 +18,6 @@ pub(crate) struct EmbeddingModelInfo {
 
 impl EmbeddingModelInfo {
     pub(crate) fn validate(&self) -> EngineResult<()> {
-        for (field, value) in [
-            ("provider", self.model.provider.as_str()),
-            ("name", self.model.name.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(EngineError::invalid_argument(format!(
-                    "embedding model {field} must be non-empty",
-                )));
-            }
-        }
         for (field, value) in [
             ("dimension", Some(self.dimension)),
             ("max_batch_size", Some(self.max_batch_size)),
@@ -45,8 +35,7 @@ impl EmbeddingModelInfo {
 
     /// Check the fields that determine whether an existing index can be reused.
     pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        if self.model.provider != other.model.provider
-            || self.model.name != other.model.name
+        if self.model != other.model
             || self.dimension != other.dimension
             || self.metric != other.metric
             || self.max_input_tokens != other.max_input_tokens
@@ -58,6 +47,15 @@ impl EmbeddingModelInfo {
         }
         Ok(())
     }
+}
+
+/// Distance or similarity measure for embedding vectors.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EmbeddingMetric {
+    Cosine,
+    DotProduct,
+    Euclidean,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

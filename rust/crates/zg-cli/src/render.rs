@@ -7,7 +7,7 @@ use thiserror::Error;
 use zg_engine::api::context::{
     ContextResult,
     result::{
-        CodeMetadata, ContentRange, ContextItem, ContextItemStatus, EntityMetadata,
+        CodeMetadata, ContentPreview, ContentRange, ContextItem, ContextItemStatus, EntityMetadata,
         MarkdownMetadata,
     },
 };
@@ -31,10 +31,20 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             writeln!(writer, "{}", item.relative_path.display())?;
             previous_path = Some(item.relative_path.as_path());
         }
-        if let Some(first) = item.content_range.start_line() {
-            writeln!(writer, "  {first}: {}", item.content.trim_end())?;
+        if let ContentPreview::Image { format, size_bytes } = &item.preview {
+            writeln!(writer, "  image/{} ({} bytes)", format.as_str(), size_bytes)?;
+        } else if let Some(first) = item.content_range.start_line() {
+            writeln!(
+                writer,
+                "  {first}: {}",
+                item.preview.text().unwrap_or_default().trim_end()
+            )?;
         } else {
-            writeln!(writer, "  {}", item.content.trim_end())?;
+            writeln!(
+                writer,
+                "  {}",
+                item.preview.text().unwrap_or_default().trim_end()
+            )?;
         }
     }
     Ok(())
@@ -65,6 +75,16 @@ pub fn write_context_with_options(
         writeln!(writer, "Query: {}", result.query)?;
         writeln!(writer, "Hits: {}", result.items.len())?;
     }
+    if options.trace
+        && let Some(index) = &result.diagnostics.index
+    {
+        writeln!(
+            writer,
+            "route: input={} model={}",
+            index.input_kind.as_str(),
+            index.model_ref
+        )?;
+    }
     if result.source == ContextSource::Rg {
         if color {
             let mut buffer = Vec::new();
@@ -91,13 +111,17 @@ pub fn write_context_with_options(
         if index > 0 {
             writeln!(writer)?;
         }
-        let range = range_label(&item.range);
+        let range = if matches!(item.preview, ContentPreview::Image { .. }) {
+            String::new()
+        } else {
+            format!(":{}", range_label(&item.range))
+        };
         let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
         let label = if options.human {
-            format!("{}. {}:{}", item.rank, item.relative_path.display(), range)
+            format!("{}. {}{}", item.rank, item.relative_path.display(), range)
         } else {
             format!(
-                "#{} matchedBy={} {}:{}",
+                "#{} matchedBy={} {}{}",
                 item.rank,
                 matched_by.as_str().unwrap_or_default(),
                 item.relative_path.display(),
@@ -130,6 +154,19 @@ fn write_item_preview(
     use crate::PreviewMode;
     if item.status == ContextItemStatus::PossiblyStale {
         writeln!(writer, "status: possibly_stale")?;
+    }
+    if let Some(reference) = &item.content_ref {
+        writeln!(writer, "entity: {}", reference.entity_id)?;
+        writeln!(writer, "generation: {}", reference.generation)?;
+    }
+    if let ContentPreview::Image { format, size_bytes } = &item.preview {
+        writeln!(
+            writer,
+            "type: image/{}; size: {} bytes",
+            format.as_str(),
+            size_bytes
+        )?;
+        return Ok(());
     }
     if let Some(metadata) = &item.metadata {
         match metadata {
@@ -174,7 +211,7 @@ fn write_item_preview(
         PreviewMode::Full => usize::MAX,
     };
     let first = item.content_range.start_line();
-    let lines: Vec<_> = item.content.lines().collect();
+    let lines: Vec<_> = item.preview.text().unwrap_or_default().lines().collect();
     let anchor = item
         .excerpt_range
         .as_ref()
@@ -238,6 +275,7 @@ pub fn help_text(topic: Option<&str>) -> Result<String, HelpTopicError> {
         None => return Ok(main_help()),
         Some("search") => SEARCH_HELP,
         Some("index") => INDEX_HELP,
+        Some("read-content") => READ_CONTENT_HELP,
         Some("status") => STATUS_HELP,
         Some("config") => CONFIG_HELP,
         Some("auth") => AUTH_HELP,
@@ -278,10 +316,12 @@ const MAIN_HELP_BODY: &str = r#"Usage:
 Search:
   <query>        Search indexed context (no command prefix)
   --rg           Run managed ripgrep
+  --query-image  Search images using an image input
 
 Management:
   --index        Build, rebuild, or drop the workspace index
   --status       Show workspace and index status
+  --read-content Retrieve indexed content by entity ID
   --config       Configure provider credentials and embedding model defaults
   --auth         Manage Workspace Remote Embedding authorization
   --server       Start, stop, inspect, or run the shared MCP server
@@ -324,6 +364,7 @@ const SEARCH_HELP: &str = r#"Usage:
 
 Search routes:
   positional query                  Hybrid FTS and vector search
+  --query-image <path>              Search images using PNG, JPEG or static WebP input
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
@@ -392,9 +433,11 @@ Index options:
   --mode <direct|server|auto>       Select indexing transport
 
 Embedding options:
-  --embedding <model>               Single text embedding model for this workspace
+  --embedding <model>               Default model for supported content kinds
+  --embedding-route <kind=model>    Override text/code/image routing; repeatable
+  --clear-embedding-route <kind>    Remove an override and use the default; repeatable
   --api-key <key>                   Embedding provider API key
-  --endpoint <url>                  Embedding provider endpoint
+  --endpoint <url>                  Endpoint override for the default model
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --embedding-concurrency <n>       Embedding task concurrency
@@ -419,11 +462,16 @@ A new workspace name defaults to root directory name; use --name if it is taken.
 Names are case-sensitive and unique within the per-user registry. Naming an
 existing workspace renames it while preserving file IDs and active storage.
 
-This version indexes text only with one embedding model per workspace.
+Indexes text, code, PNG, JPEG and static WebP images. Each content kind selects
+one model. Unsupported default kinds are skipped; explicit unsupported routes fail.
+Image queries only return images from the configured image model's index.
 Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured
 default when creating a new index.
 Search automatically creates a missing index with a configured local model or
 local/potion-code-16m-v2, never a remote model.
+Model and routing changes require --rebuild. Omitted route flags preserve saved
+routes; --clear-embedding-route removes a kind's override. Configure each remote
+model's own endpoint with zg --config model set <model> --endpoint <url>.
 Model changes require --rebuild. Failed files are recorded; successful files
 remain searchable after a rebuild. Compatible indexes reuse their stored model.
 Rebuilding an incompatible index uses --embedding or the configured default;
@@ -438,6 +486,17 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 See zg --help environment for precedence and Server-mode scope.";
+
+const READ_CONTENT_HELP: &str = r"Usage:
+  zg --read-content <entity-id> [root] --generation <generation> --output <file>
+
+Reads content stored in the active index. Entity ID and generation are printed
+with indexed query results. Text and code are written as UTF-8, images retain
+their original encoded bytes.
+The output file is created exclusively; existing files are never overwritten.
+References remain valid only while their entity and storage generation exist.
+Search again if the content has been removed, replaced, or the index rebuilt.
+Supports --mode direct|server|auto and --home.";
 
 const STATUS_HELP: &str = r"Usage:
   zg --status [root] [--mode <direct|server|auto>] [--check-ready]
@@ -462,8 +521,8 @@ Model options:
 
 Remote models support --endpoint; local models support --device. At least one
 model option is required. --default may be used alone or with a runtime option.
-Each workspace uses one model for text content. Existing indexes continue to
-use their stored model.
+Workspaces may route content kinds to different models. Existing indexes retain
+their default and routes until an explicit reconfiguration and rebuild.
 
 Global configuration is stored in ~/.zvec-grep/config.json.";
 
@@ -583,12 +642,13 @@ const VERSION_HELP: &str = r"Usage:
 const MODELS_HELP: &str = r"Usage:
   zg --help models
 
-Supported text embedding models (one per workspace):
+Supported embedding models (content kinds route to one model each):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers
   local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
+  local/embeddinggemma-2              local    text,image   768    8192  onnx
   local/gte-modernbert-base           local    text         768    8192  transformers
   local/jina-embeddings-v2-base-code  local    text         768    8192  transformers
   local/multilingual-e5-small         local    text         384     512  transformers
@@ -597,13 +657,15 @@ Supported text embedding models (one per workspace):
   local/potion-multilingual-128m      local    text         256    1024  model2vec
   local/potion-retrieval-32m          local    text         512    1024  model2vec
   local/qwen3-embedding-0.6b          local    text        1024    8192  llama-cpp
-  qwen/qwen3-vl-embedding             remote   text        2560   32000  qwen
+  qwen/qwen3-vl-embedding             remote   text,image  2560   32000  qwen
   qwen/qwen3.7-text-embedding         remote   text        1024  128000  qwen
   qwen/text-embedding-v4              remote   text        1024    8192  qwen
 
 Local models are downloaded to the model cache on first use. Remote models
 require provider credentials plus --allow-remote or a Workspace authorization.
-This version uses text input only, including for models with image capabilities.
+Text models also support code content. PNG, JPEG and static WebP image content
+is supported by local/embeddinggemma-2 and qwen/qwen3-vl-embedding.
+EmbeddingGemma 2 runs on CPU in this release (--device auto or cpu).
 
 Existing indexes keep their stored model. See zg --help environment for
 new-index model selection and runtime precedence.";
@@ -662,7 +724,12 @@ Documents and data:
   yaml      .yaml, .yml
   Markdown preserves heading structure; other formats use text chunks.
 
-Images and other non-text content are not indexed in this version.
+Images (one entity per independent file):
+  png       .png
+  jpeg      .jpg, .jpeg
+  webp      .webp (static only)
+  Animated PNG/WebP, embedded images and PDF image extraction are not supported.
+  Image inputs must be at most 10 MiB and 40 megapixels, within model limits.
 
 Other text:
   Unknown non-binary extensions and extensionless files use text chunks.
@@ -781,16 +848,18 @@ mod output_tests {
             },
             excerpt_range: None,
             outline: None,
-            content: (1..=20)
-                .map(|n| format!("line{n}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
+            preview: ContentPreview::Text(
+                (1..=20)
+                    .map(|n| format!("line{n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(0.75),
             matched_by: MatchedBy::Fts,
             metadata: None,
-            entity_id: None,
+            content_ref: None,
             container: None,
             trace: None,
             query_groups: vec![],
@@ -834,11 +903,11 @@ mod output_tests {
                 } else {
                     excerpt
                 };
-                item.content = if whole_entity {
+                item.preview = ContentPreview::Text(if whole_entity {
                     source
                 } else {
                     source[17..].to_owned()
-                };
+                });
                 for preview in [PreviewMode::Short, PreviewMode::Full] {
                     let mut output = Vec::new();
                     write_item_preview(
@@ -859,6 +928,44 @@ mod output_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn image_result_displays_metadata_and_reference_without_line_numbers() {
+        let mut item = indexed_item();
+        item.preview = ContentPreview::Image {
+            format: zg_engine::api::context::options::FileFormat::Png,
+            size_bytes: 123,
+        };
+        item.relative_path = "picture.png".into();
+        item.range = ContentRange::File;
+        item.content_range = ContentRange::File;
+        item.excerpt_range = None;
+        item.content_ref = Some(zg_engine::api::content::ContentRef {
+            generation: "snapshot-generation".into(),
+            entity_id: "snapshot-entity".into(),
+        });
+        let result = ContextResult {
+            query: "image:input.png".into(),
+            freshness: None,
+            background_refresh: None,
+            root: std::env::temp_dir(),
+            source: ContextSource::Index,
+            coverage: ContextCoverage::RankedSample,
+            workspace_index: None,
+            items: vec![item],
+            group_results: vec![],
+            diagnostics: ContextDiagnostics::default(),
+        };
+        let mut output = Vec::new();
+        write_context_with_options(&mut output, &result, OutputOptions::default(), false)
+            .expect("render");
+        let text = String::from_utf8(output).expect("UTF-8");
+        assert!(text.contains("picture.png\n"));
+        assert!(text.contains("image/png; size: 123 bytes"));
+        assert!(text.contains("entity: snapshot-entity"));
+        assert!(text.contains("generation: snapshot-generation"));
+        assert!(!text.contains("picture.png:"));
     }
 
     #[test]
@@ -909,7 +1016,10 @@ mod output_tests {
             start_byte_column: 0,
             end_byte_column: 0,
         };
-        result.items[0].content.push('\n');
+        let ContentPreview::Text(text) = &mut result.items[0].preview else {
+            panic!("text preview")
+        };
+        text.push('\n');
         result.items[0].content_range = result.items[0].range.clone();
         let mut buffer = Vec::new();
         write_context_with_options(&mut buffer, &result, OutputOptions::default(), false)

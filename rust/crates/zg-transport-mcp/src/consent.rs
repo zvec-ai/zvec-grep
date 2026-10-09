@@ -12,7 +12,7 @@ use rmcp::{
 use zg_engine::{
     EngineError,
     api::{context::ContextOptions, index::IndexOptions},
-    authorization::{self, IndexAuthorization},
+    authorization::{self, IndexAuthorization, QueryAuthorization},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +32,19 @@ pub(crate) async fn index(
     }
     let mut decisions = Vec::new();
     for target in &targets {
-        decisions.push(ask(target, false, true, false, context).await?);
+        decisions.push(
+            ask(
+                &QueryAuthorization {
+                    target: target.clone(),
+                    query_text: false,
+                    query_image: false,
+                    workspace_content: true,
+                },
+                false,
+                context,
+            )
+            .await?,
+        );
     }
     if authorization::index_authorizations(options)? != targets {
         return Err(EngineError::permission_denied(
@@ -56,14 +68,7 @@ pub(crate) async fn search(
     }
     let mut decisions = Vec::new();
     for required in &targets {
-        let decision = ask(
-            &required.target,
-            required.query_text,
-            required.workspace_content,
-            true,
-            context,
-        )
-        .await?;
+        let decision = ask(required, options.query_image.is_none(), context).await?;
         if decision == Decision::FtsOnly {
             zg_cli::use_fts_only(options);
             return Ok(());
@@ -102,12 +107,14 @@ fn apply(
 }
 
 async fn ask(
-    target: &IndexAuthorization,
-    query_text: bool,
-    workspace_content: bool,
+    required: &QueryAuthorization,
     allow_fts: bool,
     context: &RequestContext<RoleServer>,
 ) -> Result<Decision, EngineError> {
+    let target = &required.target;
+    let query_text = required.query_text;
+    let query_image = required.query_image;
+    let workspace_content = required.workspace_content;
     if context.ct.is_cancelled() {
         return Err(EngineError::cancelled("MCP authorization was cancelled"));
     }
@@ -115,6 +122,7 @@ async fn ask(
         if approval.targets.iter().any(|required| {
             &required.target == target
                 && required.query_text == query_text
+                && required.query_image == query_image
                 && required.workspace_content == workspace_content
         }) {
             return Ok(approval.decision);
@@ -143,7 +151,7 @@ async fn ask(
         }}, "required": ["choice"]
     })).map_err(|error| EngineError::internal(format!("Invalid consent schema: {error}")))?;
     let message = format!(
-        "Allow remote embedding? Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}. Only explicit acceptance permits transmission. Do not enter credentials in this form.",
+        "Allow remote embedding? Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Query image sent: {query_image}. Workspace content sent for indexing/refresh: {workspace_content}. Only explicit acceptance permits transmission. Do not enter credentials in this form.",
         target.endpoint,
         target.endpoint_host,
         target.model,
@@ -237,7 +245,18 @@ mod tests {
                 endpoint: "https://embedding.example.test/v1".into(),
                 endpoint_host: "embedding.example.test".into(),
             };
-            Ok(match ask(&target, true, true, true, &context).await {
+            Ok(match ask(
+                &QueryAuthorization {
+                    target,
+                    query_text: true,
+                    query_image: false,
+                    workspace_content: true,
+                },
+                true,
+                &context,
+            )
+            .await
+            {
                 Ok(choice) => {
                     CallToolResult::success(vec![ContentBlock::text(format!("{choice:?}"))])
                 }

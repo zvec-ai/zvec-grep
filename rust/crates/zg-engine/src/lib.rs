@@ -20,6 +20,7 @@ mod utils;
 mod workspace;
 
 use api::{
+    content::{ContentResult, ReadContentOptions},
     context::{ContextOptions, ContextResult},
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
@@ -67,6 +68,14 @@ impl ZvecGrep {
     ) -> EngineResult<ContextResult> {
         self.service
             .context_after_refresh(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Reads complete indexed content using a context result's content reference.
+    pub async fn read_content(&self, options: ReadContentOptions) -> EngineResult<ContentResult> {
+        self.service
+            .read_content(options)
             .await
             .map_err(|error| error.report_here())
     }

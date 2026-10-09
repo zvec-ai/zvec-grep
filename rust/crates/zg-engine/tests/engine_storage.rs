@@ -22,11 +22,72 @@ use zg_engine::{
             options::{ContextRoute, ContextRouteMode, QueryFilter, SymbolType},
             result::{ContextItemStatus, EntityMetadata},
         },
-        index::{IndexOptions, options::WorkspaceChange},
+        index::{
+            IndexOptions,
+            options::{Device, EmbeddingModelSpec, WorkspaceChange},
+        },
     },
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[tokio::test]
+async fn fusion_model_keeps_indexed_entities_and_search_queries_in_separate_requests() -> TestResult
+{
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    fs::write(root.join("orchard.txt"), "Orchard apples and pears.")?;
+    fs::write(root.join("galaxy.txt"), "Galaxy stars and planets.")?;
+    let engine = ZvecGrep::new();
+    let indexed = engine
+        .index(IndexOptions {
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/qwen3-vl-embedding".into(),
+                endpoint: Some(format!("http://{}/embeddings", server.address)),
+                revision: None,
+                cache_dir: None,
+                device: Device::Auto,
+            }),
+            api_key: Some("local-test-key".into()),
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
+    assert_eq!(server.requests.load(Ordering::Acquire), 2);
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 2);
+
+    let result = engine
+        .context(ContextOptions {
+            root: Some(root.to_path_buf()),
+            routes: ["orchard", "galaxy"]
+                .into_iter()
+                .map(|query| ContextRoute {
+                    mode: ContextRouteMode::Vector,
+                    query: query.into(),
+                })
+                .collect(),
+            auto_update: false,
+            allow_remote: true,
+            api_key: Some("local-test-key".into()),
+            ..ContextOptions::default()
+        })
+        .await?;
+    let paths = result
+        .items
+        .iter()
+        .map(|item| item.relative_path.as_path())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        paths,
+        BTreeSet::from([Path::new("orchard.txt"), Path::new("galaxy.txt")])
+    );
+    assert_eq!(server.requests.load(Ordering::Acquire), 4);
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 4);
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
 
 #[tokio::test]
 async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -> TestResult {
@@ -84,10 +145,8 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     assert!(manifest.get("manifestVersion").is_none());
     assert_eq!(manifest["indexVersion"], 2);
     assert_eq!(manifest["embeddings"].as_array().expect("models").len(), 1);
-    assert_eq!(
-        manifest["embeddingRoutes"],
-        json!({"text":"qwen/text-embedding-v4"})
-    );
+    assert_eq!(manifest["defaultModelRef"], "qwen/text-embedding-v4");
+    assert_eq!(manifest["embeddingRoutes"], json!({}));
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
         [PathBuf::from("note.txt")]
@@ -113,6 +172,183 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     assert_eq!((unchanged.files_unchanged, unchanged.files_failed), (1, 0));
     assert_eq!(server.inputs.load(Ordering::Acquire), 2);
     assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 0);
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+fn fixture_image(format: image::ImageFormat, color: [u8; 3]) -> Vec<u8> {
+    let mut output = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(16, 16, image::Rgb(color)))
+        .write_to(&mut output, format)
+        .expect("image fixture");
+    output.into_inner()
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "exercises one persistent image lifecycle across indexing, reopen, content reads and deletion"
+)]
+async fn image_routes_partition_search_and_preserve_content_across_reopen() -> TestResult {
+    use zg_engine::api::{
+        content::{Content, ContentKind, ReadContentOptions},
+        context::{options::QueryImage, result::ContentPreview},
+    };
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    // A route's persisted provider credentials are independent of the default model.
+    let manifest_path = root.join(".zvec-grep/manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    manifest["embeddingRuntimes"]["qwen/qwen3-vl-embedding"] = json!({
+        "apiKey": "local-test-key", "endpoint": format!("http://{}/embeddings", server.address)
+    });
+    fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    fs::write(root.join("note.txt"), "Orchard textual documentation.")?;
+    fs::write(
+        root.join("code.rs"),
+        "fn orchard() { println!(\"orchard\"); }",
+    )?;
+    let png = fixture_image(image::ImageFormat::Png, [255, 0, 0]);
+    fs::write(root.join("red.png"), &png)?;
+    fs::write(
+        root.join("green.jpg"),
+        fixture_image(image::ImageFormat::Jpeg, [0, 255, 0]),
+    )?;
+    fs::write(
+        root.join("blue.webp"),
+        fixture_image(image::ImageFormat::WebP, [0, 0, 255]),
+    )?;
+    let mut engine = ZvecGrep::new();
+    let indexed = engine
+        .index(IndexOptions {
+            rebuild: true,
+            embedding_routes: std::collections::BTreeMap::from([(
+                ContentKind::Image,
+                EmbeddingModelSpec {
+                    reference: "qwen/qwen3-vl-embedding".into(),
+                    revision: None,
+                    endpoint: None,
+                    cache_dir: None,
+                    device: Device::Auto,
+                },
+            )]),
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (5, 0));
+    assert_eq!(server.inputs.load(Ordering::Acquire), 5);
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 3);
+    let info = engine.info(info_options(root)).await?;
+    assert_eq!(
+        info.workspace_index
+            .as_ref()
+            .expect("image fixture result")
+            .embeddings
+            .len(),
+        2
+    );
+    assert_eq!(model_collections(&info.index_path)?.len(), 2);
+    let mut reference = None;
+    for reopened in [false, true] {
+        if reopened {
+            engine.close();
+            engine = ZvecGrep::new();
+        }
+        let result = engine
+            .context(ContextOptions {
+                root: Some(root.into()),
+                query_image: Some(QueryImage::Path {
+                    path: root.join("red.png"),
+                }),
+                auto_update: false,
+                allow_remote: true,
+                limit: Some(10),
+                ..ContextOptions::default()
+            })
+            .await?;
+        assert_eq!(result.items.len(), 3);
+        assert!(
+            result
+                .items
+                .iter()
+                .all(|item| item.preview.kind() == ContentKind::Image
+                    && item.preview.text().is_none())
+        );
+        let item = result
+            .items
+            .iter()
+            .find(|item| item.relative_path == Path::new("red.png"))
+            .expect("image fixture result");
+        let ContentPreview::Image { size_bytes, .. } = &item.preview else {
+            panic!("image preview");
+        };
+        assert_eq!(*size_bytes, png.len() as u64);
+        reference = item.content_ref.clone();
+        assert!(reference.is_some());
+        let text = engine
+            .context(ContextOptions {
+                root: Some(root.into()),
+                query: Some("orchard".into()),
+                auto_update: false,
+                allow_remote: true,
+                ..ContextOptions::default()
+            })
+            .await?;
+        assert_eq!(text.items.len(), 2);
+        assert!(
+            text.items
+                .iter()
+                .all(|item| item.preview.kind() != ContentKind::Image)
+        );
+        assert!(
+            text.items
+                .iter()
+                .any(|item| item.preview.kind() == ContentKind::Code)
+        );
+        for item in &text.items {
+            let content = engine
+                .read_content(ReadContentOptions {
+                    root: Some(root.into()),
+                    ..ReadContentOptions::new(item.content_ref.clone().expect("indexed reference"))
+                })
+                .await?;
+            assert_eq!(content.content.kind(), item.preview.kind());
+            let text = match &content.content {
+                Content::Text(text) | Content::Code(text) => text,
+                other @ Content::Image(_) => panic!("unexpected complete content: {other:?}"),
+            };
+            assert_eq!(Some(text.as_str()), item.preview.text());
+            assert_eq!(content.path, item.absolute_path);
+        }
+    }
+    let reference = reference.expect("image fixture result");
+    fs::remove_file(root.join("red.png"))?;
+    let content = engine
+        .read_content(ReadContentOptions {
+            root: Some(root.into()),
+            ..ReadContentOptions::new(reference.clone())
+        })
+        .await?;
+    let Content::Image(image) = content.content else {
+        panic!("complete image content");
+    };
+    assert_eq!(image.data(), png);
+    assert_eq!(content.path, fs::canonicalize(root)?.join("red.png"));
+    let changed = engine.index(index_options(root)).await?;
+    assert_eq!(changed.files_deleted, 1);
+    assert_eq!(changed.files_unchanged, 4);
+    assert!(
+        engine
+            .read_content(ReadContentOptions {
+                root: Some(root.into()),
+                ..ReadContentOptions::new(reference)
+            })
+            .await
+            .is_err()
+    );
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())
@@ -283,7 +519,7 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
         entities[0].get_string("entity_id")?.as_deref(),
         Some(entity_id)
     );
-    assert_eq!(entity["content"], json!({"kind": "text", "value": source}));
+    assert_eq!(entity["content"], json!({"kind": "code", "value": source}));
     assert_eq!(entity["source_range"]["kind"], "text");
     assert!(entity.get("range").is_none());
     let metadata: Value = serde_json::from_str(
@@ -374,7 +610,7 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
         assert_eq!(Some(&item.content_range), item.excerpt_range.as_ref());
         assert_eq!(
             source.get(*start_byte_offset..*end_byte_offset),
-            Some(item.content.as_str())
+            item.preview.text()
         );
         for (offset, line, column) in [
             (*start_byte_offset, *start_line, *start_byte_column),
@@ -1051,8 +1287,8 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     engine.index(index_options(&original_root)).await?;
     let before = engine.context(query(&original_root, "orchard")).await?;
     assert_eq!(before.items.len(), 1);
-    let entity_id = before.items[0].entity_id.clone();
-    assert!(entity_id.is_some());
+    let content_ref = before.items[0].content_ref.clone();
+    assert!(content_ref.is_some());
     engine.close();
     drop(engine);
 
@@ -1064,7 +1300,7 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
         .context(query(&relocated_root.join("src"), "orchard"))
         .await?;
     assert_eq!(after.items.len(), 1);
-    assert_eq!(after.items[0].entity_id, entity_id);
+    assert_eq!(after.items[0].content_ref, content_ref);
     assert_eq!(after.items[0].relative_path, Path::new("src/note.txt"));
     assert_eq!(
         after.items[0].absolute_path,
@@ -1091,7 +1327,7 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     assert_eq!(updated.files_modified, 1);
     let result = engine.context(query(&relocated_root, "vineyard")).await?;
     assert_eq!(result.items.len(), 1);
-    assert_ne!(result.items[0].entity_id, entity_id);
+    assert_ne!(result.items[0].content_ref, content_ref);
     assert!(
         engine
             .context(query(&relocated_root, "orchard"))

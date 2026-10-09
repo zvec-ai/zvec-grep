@@ -66,16 +66,29 @@ pub enum QueryAuthorizationDecision {
 /// # Errors
 /// Returns terminal I/O errors. Empty, invalid, and EOF input cancel.
 pub fn prompt_query_authorization(
-    target: &IndexAuthorization,
-    query_text: bool,
-    workspace_content: bool,
+    authorization: &zg_engine::authorization::QueryAuthorization,
+    fts_fallback: bool,
     mut input: impl BufRead,
     mut output: impl Write,
 ) -> io::Result<QueryAuthorizationDecision> {
-    let data = match (query_text, workspace_content) {
-        (true, true) => "query text and selected workspace files",
-        (false, true) => "selected workspace files",
+    let target = &authorization.target;
+    let query_text = authorization.query_text;
+    let query_image = authorization.query_image;
+    let data = match (
+        query_text || query_image,
+        authorization.workspace_content,
+        query_image,
+    ) {
+        (true, true, true) => "query image and selected workspace files",
+        (true, false, true) => "query image",
+        (true, true, false) => "query text and selected workspace files",
+        (false, true, _) => "selected workspace files",
         _ => "query text",
+    };
+    let choices = if fts_fallback {
+        "1. Allow once\n2. Allow for this workspace\n3. Use FTS only\n4. Cancel"
+    } else {
+        "1. Allow once\n2. Allow for this workspace\n3. Cancel"
     };
     let root = label(
         &target
@@ -87,18 +100,18 @@ pub fn prompt_query_authorization(
     );
     writeln!(
         output,
-        "Remote Embedding authorization\n\nSend {data}?\n\n  From  {root}\n  To    {}\n        {}\n\nAPI charges may apply.\n\n1. Allow once\n2. Allow for this workspace\n3. Use FTS only\n4. Cancel",
+        "Remote Embedding authorization\n\nSend {data}?\n\n  From  {root}\n  To    {}\n        {}\n\nAPI charges may apply.\n\n{choices}",
         label(&target.model, 72),
         label(&target.endpoint_host, 72)
     )?;
-    write!(output, "Choose [1-4]: ")?;
+    write!(output, "Choose [1-{}]: ", if fts_fallback { 4 } else { 3 })?;
     output.flush()?;
     let mut answer = String::new();
     input.read_line(&mut answer)?;
     Ok(match answer.trim() {
         "1" => QueryAuthorizationDecision::Once,
         "2" => QueryAuthorizationDecision::Workspace,
-        "3" => QueryAuthorizationDecision::FtsOnly,
+        "3" if fts_fallback => QueryAuthorizationDecision::FtsOnly,
         _ => QueryAuthorizationDecision::Cancel,
     })
 }
@@ -185,6 +198,31 @@ mod tests {
     }
 
     #[test]
+    fn image_prompt_discloses_image_and_cannot_fall_back_to_fts() {
+        let target = IndexAuthorization {
+            root: std::env::temp_dir(),
+            workspace_roots: vec![],
+            model: "qwen/vision".into(),
+            endpoint: "https://example.test/embed".into(),
+            endpoint_host: "example.test".into(),
+        };
+        let authorization = zg_engine::authorization::QueryAuthorization {
+            target,
+            query_text: false,
+            query_image: true,
+            workspace_content: false,
+        };
+        let mut output = Vec::new();
+        let decision =
+            prompt_query_authorization(&authorization, false, "3\n".as_bytes(), &mut output)
+                .expect("prompt");
+        assert_eq!(decision, QueryAuthorizationDecision::Cancel);
+        let rendered = String::from_utf8(output).expect("text");
+        assert!(rendered.contains("query image"));
+        assert!(!rendered.contains("FTS"));
+    }
+
+    #[test]
     fn query_prompt_offers_fts_without_granting_remote_consent() {
         let target = IndexAuthorization {
             root: std::env::temp_dir().join("docs"),
@@ -192,6 +230,12 @@ mod tests {
             model: "qwen/text-embedding-v4".into(),
             endpoint: "https://dashscope.aliyuncs.com/embeddings".into(),
             endpoint_host: "dashscope.aliyuncs.com".into(),
+        };
+        let authorization = zg_engine::authorization::QueryAuthorization {
+            target,
+            query_text: true,
+            query_image: false,
+            workspace_content: false,
         };
         for (answer, expected) in [
             ("1\n", QueryAuthorizationDecision::Once),
@@ -204,14 +248,14 @@ mod tests {
         ] {
             let mut output = Vec::new();
             assert_eq!(
-                prompt_query_authorization(&target, true, false, answer.as_bytes(), &mut output)
+                prompt_query_authorization(&authorization, true, answer.as_bytes(), &mut output)
                     .expect("prompt"),
                 expected
             );
         }
         let mut output = Vec::new();
         let decision =
-            prompt_query_authorization(&target, true, false, "3\n".as_bytes(), &mut output)
+            prompt_query_authorization(&authorization, true, "3\n".as_bytes(), &mut output)
                 .expect("prompt");
         assert_eq!(decision, QueryAuthorizationDecision::FtsOnly);
         let text = String::from_utf8(output).expect("UTF-8");

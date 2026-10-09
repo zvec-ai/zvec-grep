@@ -18,7 +18,7 @@ use crate::{
         },
     },
     domain::{
-        Content, Entity, EntityFragment, EntityId, FileId, FileRecord,
+        Content, ContentKind, Entity, EntityFragment, EntityId, FileId, FileRecord, ImageContent,
         model::{EmbeddingModelInfo, EmbeddingPurpose},
     },
     file_selection::GlobMatcher,
@@ -41,6 +41,9 @@ const RECALL_MIN_TARGET_CANDIDATES: usize = 50;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SearchPlan {
+    pub model_ref: String,
+    pub content_kinds: Vec<ContentKind>,
+    pub image: Option<ImageContent>,
     pub routes: Vec<SearchRoute>,
     pub limit: Option<usize>,
     pub trace: bool,
@@ -82,7 +85,7 @@ pub(crate) struct SearchPlanResult {
 pub(crate) trait SearchEmbeddingRuntime: Send + Sync {
     fn info(&self) -> &EmbeddingModelInfo;
 
-    async fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, ModelError>;
+    async fn embed_queries(&self, queries: &[Content]) -> Result<Vec<Vec<f32>>, ModelError>;
 }
 
 #[async_trait]
@@ -91,12 +94,12 @@ impl SearchEmbeddingRuntime for ModelRuntimeLease {
         self.info()
     }
 
-    async fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, ModelError> {
+    async fn embed_queries(&self, queries: &[Content]) -> Result<Vec<Vec<f32>>, ModelError> {
         self.embed(
             &queries
                 .iter()
                 .cloned()
-                .map(|text| vec![Content::Text(text)])
+                .map(|content| vec![content])
                 .collect::<Vec<_>>(),
             EmbeddingOptions {
                 purpose: EmbeddingPurpose::Query,
@@ -120,13 +123,13 @@ impl SearchEmbeddingRuntime for RequestEmbeddingRuntime<'_> {
         self.model.info()
     }
 
-    async fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, ModelError> {
+    async fn embed_queries(&self, queries: &[Content]) -> Result<Vec<Vec<f32>>, ModelError> {
         self.model
             .embed(
                 &queries
                     .iter()
                     .cloned()
-                    .map(|text| vec![Content::Text(text)])
+                    .map(|content| vec![content])
                     .collect::<Vec<_>>(),
                 EmbeddingOptions {
                     purpose: EmbeddingPurpose::Query,
@@ -172,7 +175,7 @@ pub(crate) async fn search_workspace_index(
 ) -> Result<SearchPlanResult, EngineError> {
     if embedding_models.len() > 1 {
         return Err(EngineError::unsupported(
-            "this version supports only one embedding model per workspace",
+            "each query must select exactly one embedding model",
         ));
     }
     let total_started = Instant::now();
@@ -183,7 +186,10 @@ pub(crate) async fn search_workspace_index(
     let plan_duration = plan_started.elapsed();
 
     let filter_started = Instant::now();
-    let filter = search_plan_to_storage_filter(workspace_root, &plan, storage)?;
+    let mut filter =
+        search_plan_to_storage_filter(workspace_root, &plan, storage)?.unwrap_or_default();
+    filter.content_kinds = Some(plan.content_kinds.clone());
+    let filter = Some(filter);
     let filter_duration = filter_started.elapsed();
     let has_searchable_files = !filter_matches_no_files(filter.as_ref());
 
@@ -196,7 +202,12 @@ pub(crate) async fn search_workspace_index(
         let model = embedding_models.first().ok_or_else(|| {
             EngineError::unsupported("vector search requires a configured embedding model")
         })?;
-        embed_vector_routes(&routes, *model).await?
+        if model.info().model.reference() != plan.model_ref {
+            return Err(EngineError::invalid_argument(
+                "query runtime does not match the selected model route",
+            ));
+        }
+        embed_vector_routes(&routes, plan.image.as_ref(), *model).await?
     } else {
         HashMap::new()
     };
@@ -206,6 +217,7 @@ pub(crate) async fn search_workspace_index(
     let mut candidates = HashMap::new();
     if has_searchable_files && limit > 0 {
         collect_adaptive_recall(
+            &plan.model_ref,
             &routes,
             filter.as_ref(),
             plan.prefer_symbol,
@@ -298,6 +310,7 @@ struct ModelQueryVector {
 
 async fn embed_vector_routes(
     routes: &[ResolvedSearchRoute],
+    image: Option<&ImageContent>,
     model: &dyn SearchEmbeddingRuntime,
 ) -> Result<HashMap<String, ModelQueryVector>, EngineError> {
     model.info().validate()?;
@@ -310,7 +323,12 @@ async fn embed_vector_routes(
     for batch in vector_routes.chunks(maximum) {
         let queries = batch
             .iter()
-            .map(|route| route.query.clone())
+            .map(|route| {
+                image.map_or_else(
+                    || Content::Text(route.query.clone()),
+                    |image| Content::Image(image.clone()),
+                )
+            })
             .collect::<Vec<_>>();
         let embedded = model
             .embed_queries(&queries)
@@ -336,6 +354,7 @@ async fn embed_vector_routes(
 
 #[allow(clippy::too_many_arguments)]
 fn collect_adaptive_recall(
+    model_ref: &str,
     routes: &[ResolvedSearchRoute],
     filter: Option<&StorageSearchFilter>,
     prefer_symbol: bool,
@@ -352,9 +371,12 @@ fn collect_adaptive_recall(
         let mut saturated = false;
         for route in &recall_routes {
             let hits = match route.route.mode {
-                SearchRouteMode::Fts => {
-                    storage.search_fts(&route.route.query, depth, route.filter.as_ref())?
-                }
+                SearchRouteMode::Fts => storage.search_fts(
+                    model_ref,
+                    &route.route.query,
+                    depth,
+                    route.filter.as_ref(),
+                )?,
                 SearchRouteMode::Vector => vectors
                     .get(route.vector_route_id.as_deref().unwrap_or(&route.route.id))
                     .map_or_else(
@@ -397,8 +419,7 @@ fn build_recall_routes(
     if prefer_symbol {
         let mut symbol_routes = HashSet::new();
         for route in routes {
-            // Model expansion creates independent vector searches, while symbol
-            // recall still searches all FTS partitions for the original route.
+            // Symbol recall uses the same selected model index as the query.
             let logical_id = route
                 .id
                 .split_once('@')
@@ -845,7 +866,7 @@ mod tests {
         domain::{
             ByteRange, Content, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
             FileIndexStatus, FileRecord, FileSnapshot, FragmentId, GlobRule, Range, TextRange,
-            model::{EmbeddingModelInfo, Metric},
+            model::{EmbeddingMetric, EmbeddingModelInfo},
         },
         models::ModelError,
         storage::types::{
@@ -862,24 +883,30 @@ mod tests {
     struct FixtureModel {
         info: EmbeddingModelInfo,
         calls: Arc<Mutex<Vec<Vec<String>>>>,
+        failure: Option<&'static str>,
     }
 
     impl FixtureModel {
         fn new() -> Self {
             Self {
                 info: EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "local".to_owned(),
-                        name: "fixture".to_owned(),
-                        endpoint: None,
-                    },
+                    model: crate::domain::model::ModelInfo::new(
+                        "local",
+                        "fixture",
+                        [
+                            crate::domain::ContentKind::Text,
+                            crate::domain::ContentKind::Code,
+                        ],
+                    )
+                    .expect("fixture model identity"),
                     dimension: 2,
-                    metric: Metric::Cosine,
+                    metric: EmbeddingMetric::Cosine,
                     max_batch_size: 8,
                     max_input_tokens: None,
                     max_image_bytes: None,
                 },
                 calls: Arc::new(Mutex::new(Vec::new())),
+                failure: None,
             }
         }
     }
@@ -890,11 +917,19 @@ mod tests {
             &self.info
         }
 
-        async fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, ModelError> {
-            self.calls
-                .lock()
-                .expect("query call mutex")
-                .push(queries.to_vec());
+        async fn embed_queries(&self, queries: &[Content]) -> Result<Vec<Vec<f32>>, ModelError> {
+            if let Some(code) = self.failure {
+                return Err(ModelError::new(code, "fixture query failure", None));
+            }
+            self.calls.lock().expect("query call mutex").push(
+                queries
+                    .iter()
+                    .map(|content| match content {
+                        Content::Text(text) | Content::Code(text) => text.clone(),
+                        Content::Image(_) => "<image>".to_owned(),
+                    })
+                    .collect(),
+            );
             Ok(queries.iter().map(|_| vec![0.25, 0.75]).collect())
         }
     }
@@ -931,6 +966,15 @@ mod tests {
                     filter
                         .and_then(|filter| filter.file_ids.as_ref())
                         .is_none_or(|ids| ids.contains(&hit.hit.file_id))
+                })
+                .filter(|hit| {
+                    filter
+                        .and_then(|filter| filter.content_kinds.as_ref())
+                        .is_none_or(|kinds| {
+                            self.entities
+                                .get(hit.hit.entity_id.as_str())
+                                .is_some_and(|entity| kinds.contains(&entity.entity.content.kind()))
+                        })
                 })
                 .filter(|hit| {
                     filter
@@ -1022,6 +1066,7 @@ mod tests {
 
         fn search_fts(
             &self,
+            _model: &str,
             query: &str,
             limit: usize,
             filter: Option<&StorageSearchFilter>,
@@ -1042,6 +1087,94 @@ mod tests {
         ) -> EngineResult<Vec<StorageSearchHit>> {
             Ok(self.hits_with_filter(&self.vector, limit, filter))
         }
+    }
+
+    #[tokio::test]
+    async fn image_query_embeds_image_and_filters_before_top_k() {
+        use crate::domain::{ContentKind, ImageContent};
+        let image = ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image");
+        let source = file(1, "sample.png", 100);
+        let text = entity(&source, "higher-scoring text");
+        let mut picture = entity(&source, "image");
+        picture.entity.content = Content::Image(image.clone());
+        picture.entity.source_range = Range::Full;
+        let storage = FixtureStorage {
+            paths_only: false,
+            forbid_enumeration: true,
+            files: vec![source],
+            entities: HashMap::from([
+                (text.entity.id.as_str().to_owned(), text.clone()),
+                (picture.entity.id.as_str().to_owned(), picture.clone()),
+            ]),
+            fts: HashMap::new(),
+            vector: vec![
+                hit(&text, 0, StorageSearchPath::Vector, 0.99),
+                hit(&picture, 0, StorageSearchPath::Vector, 0.8),
+            ],
+            filters: Arc::new(Mutex::new(Vec::new())),
+            load_batches: Mutex::default(),
+        };
+        let mut model = FixtureModel::new();
+        model.info.model = crate::domain::model::ModelInfo::new(
+            "local",
+            "fixture",
+            [ContentKind::Text, ContentKind::Image],
+        )
+        .expect("model");
+        let mut image_plan = plan(vec![SearchRoute {
+            mode: SearchRouteMode::Vector,
+            query: "image:sample.png".into(),
+        }]);
+        image_plan.image = Some(image);
+        image_plan.content_kinds = vec![ContentKind::Image];
+        image_plan.limit = Some(1);
+        let result = search_workspace_index(
+            Path::new("/workspace"),
+            image_plan.clone(),
+            &storage,
+            &[&model],
+        )
+        .await
+        .expect("image query");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entity.id, picture.entity.id);
+        assert_eq!(
+            *model.calls.lock().expect("calls"),
+            vec![vec!["<image>".to_owned()]]
+        );
+        assert!(
+            storage
+                .filters
+                .lock()
+                .expect("filters")
+                .iter()
+                .all(|filter| filter
+                    .as_ref()
+                    .and_then(|filter| filter.content_kinds.as_deref())
+                    == Some(&[ContentKind::Image]))
+        );
+
+        for code in [crate::EngineError::CANCELLED, crate::EngineError::INTERNAL] {
+            model.failure = Some(code);
+            let error = search_workspace_index(
+                Path::new("/workspace"),
+                image_plan.clone(),
+                &storage,
+                &[&model],
+            )
+            .await
+            .expect_err("failed embedding");
+            assert_eq!(error.code(), code);
+        }
+        model.failure = None;
+        image_plan.model_ref = "local/other".into();
+        assert_eq!(
+            search_workspace_index(Path::new("/workspace"), image_plan, &storage, &[&model])
+                .await
+                .expect_err("mismatched route")
+                .code(),
+            crate::EngineError::INVALID_ARGUMENT
+        );
     }
 
     #[tokio::test]
@@ -1275,7 +1408,12 @@ mod tests {
         };
         let first = FixtureModel::new();
         let mut second = FixtureModel::new();
-        second.info.model.name = "second".into();
+        second.info.model = crate::domain::model::ModelInfo::new(
+            second.info.model.provider(),
+            "second",
+            second.info.model.content_kinds().iter().copied(),
+        )
+        .expect("fixture model identity");
         let mut query = plan(vec![SearchRoute {
             mode: SearchRouteMode::Vector,
             query: "Service".to_owned(),
@@ -1285,7 +1423,7 @@ mod tests {
             search_workspace_index(Path::new("/workspace"), query, &storage, &[&first, &second])
                 .await
                 .expect_err("multiple models are unsupported");
-        assert!(error.message().contains("only one embedding model"));
+        assert!(error.message().contains("exactly one embedding model"));
         assert!(first.calls.lock().expect("first model calls").is_empty());
         assert!(second.calls.lock().expect("second model calls").is_empty());
     }
@@ -2071,6 +2209,12 @@ mod tests {
 
     fn plan(routes: Vec<SearchRoute>) -> SearchPlan {
         SearchPlan {
+            model_ref: "local/fixture".to_owned(),
+            content_kinds: vec![
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+            image: None,
             routes,
             limit: Some(10),
             trace: true,

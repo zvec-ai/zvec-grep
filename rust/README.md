@@ -247,7 +247,7 @@ content, independently of the entity `range` and matched `excerpt_range`. CLI an
 MCP use these coordinates for source numbering; preview never infers a range from
 the number of content lines. The engine also interprets half-open line bounds.
 The required field changes the internal daemon reply contract. Version 13 also
-adds native ripgrep type filters to query and persisted scan rules. Version 14
+added native ripgrep type filters; these are now query-only. Version 14
 separates case-sensitive and case-insensitive glob updates on the daemon wire.
 Version 15 distinguishes complete ordered glob replacement from category updates.
 Restart older resident daemons when updating the CLI; replies without
@@ -263,9 +263,10 @@ index provenance without verified freshness is conservatively shown as
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string
 parameters update only the supplied case category. Typed glob lists and CLI glob
-arguments replace the complete ordered list. `fileTypes` and
+arguments replace the complete ordered list. Search-only `fileTypes` and
 `excludedFileTypes` use the embedded ripgrep catalog, including `h`, `cpp`, `ts`
-and `py`, independently of extractor `formats`. Index also accepts `follow`.
+and `py`, independently of extractor `formats`. Index uses globs for file
+selection and also accepts `follow`.
 Search never changes persisted scan policy: `hidden`, `noIgnore`, `ignoreFiles`,
 `maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
 indexed-search path ignores these options; Rust rejects them explicitly.

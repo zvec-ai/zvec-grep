@@ -26,6 +26,40 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/mcp/search-presentation.json"),
     )
     .expect("captured Node.js MCP fixtures")
+    .into_iter()
+    .map(|mut fixture| {
+        adapt_context_fixture(&mut fixture.result);
+        fixture
+    })
+    .collect()
+}
+
+pub(crate) fn adapt_context_fixture(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.contains_key("hits_returned") && object.contains_key("routes") {
+                object.insert("input_kind".into(), "text".into());
+                object.insert("model_ref".into(), "fixture/text".into());
+            }
+            if object.contains_key("rank") && object.contains_key("content") {
+                let text = object.remove("content").expect("content exists");
+                object.insert(
+                    "preview".into(),
+                    serde_json::json!({"kind":"text", "value":text}),
+                );
+                object.remove("entity_id");
+            }
+            for value in object.values_mut() {
+                adapt_context_fixture(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                adapt_context_fixture(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn source_range_cases() -> Vec<McpSearchPresentationCase> {
@@ -55,7 +89,7 @@ fn source_range_cases() -> Vec<McpSearchPresentationCase> {
             item["range"] = entity.clone();
             item["excerpt_range"] = excerpt.clone();
             item["content_range"] = if whole_entity { entity } else { excerpt };
-            item["content"] = if whole_entity {
+            item["preview"]["value"] = if whole_entity {
                 source.clone()
             } else {
                 source[17..].to_owned()
@@ -243,4 +277,43 @@ async fn public_tool_preview_matches_node_without_changing_retrieval() {
             task.await.expect("server task").expect("server stop");
         }
     }).await.expect("tool tests terminate");
+}
+
+#[test]
+fn image_search_results_expose_content_references_without_text_ranges_or_bytes() {
+    use zg_engine::api::content::ContentRef;
+    use zg_engine::api::context::{
+        options::FileFormat,
+        result::{ContentPreview, ContentRange},
+    };
+    let mut result: ContextResult =
+        serde_json::from_value(fixtures().remove(0).result).expect("context");
+    result.items.truncate(1);
+    result.group_results.clear();
+    let item = &mut result.items[0];
+    item.relative_path = "image.png".into();
+    item.preview = ContentPreview::Image {
+        format: FileFormat::Png,
+        size_bytes: 1024,
+    };
+    item.content_ref = Some(ContentRef {
+        generation: "generation".into(),
+        entity_id: "image-entity".into(),
+    });
+    item.range = ContentRange::File;
+    item.content_range = ContentRange::File;
+    let text = format_search_result(&result, SearchPreview::Full);
+    assert!(text.contains("image.png"));
+    assert!(!text.contains("image.png:"));
+    assert!(text.contains("type: image; format: png; size: 1024 bytes"));
+    let reference = text
+        .lines()
+        .find_map(|line| line.strip_prefix("reference: "))
+        .expect("content reference");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(reference).expect("structured reference"),
+        serde_json::json!({"generation":"generation", "entityId":"image-entity"})
+    );
+    assert!(text.contains("zvec_grep_read_content"));
+    assert!(!text.contains("source:"));
 }

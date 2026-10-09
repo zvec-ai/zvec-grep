@@ -572,7 +572,7 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn Error>> {
+fn server_on_exposes_agent_tools_and_off_stops_it() -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
@@ -617,6 +617,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     assert!(response.contains("zvec_grep_search"));
+    assert!(response.contains("zvec_grep_read_content"));
     assert!(!response.contains("zvec_grep_index"));
     assert!(!response.contains("zvec_grep_rg"));
     assert!(response.contains("\"maximum\":50"));
@@ -737,6 +738,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     let response = post_json(port, Some(&session), &list.to_string())?;
     for name in [
         "zvec_grep_search",
+        "zvec_grep_read_content",
         "zvec_grep_index",
         "zvec_grep_index_drop",
         "zvec_grep_rg",
@@ -1041,7 +1043,7 @@ fn default_connections_reuse_either_toolset_and_explicit_conflicts_fail()
                 .as_array()
                 .ok_or("tool list")?
                 .len(),
-            if profile == "agent" { 1 } else { 6 }
+            if profile == "agent" { 2 } else { 7 }
         );
         bridge.close()?;
         let current: serde_json::Value =
@@ -1276,7 +1278,7 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
     let tools = list["result"]["tools"]
         .as_array()
         .ok_or("tools/list did not return an array")?;
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
 
     for bridge in bridges {
         bridge.close()?;
@@ -1607,7 +1609,7 @@ impl EmbeddingServer {
             assert!(
                 Instant::now() < deadline,
                 "watcher did not submit the edited file: {stage}\n{}",
-                log_tail(&home.join("daemon/server.log"), 0)
+                log_tail(&home.join("daemon/logs/server.log"), 0)
             );
             std::thread::sleep(Duration::from_millis(10));
         }

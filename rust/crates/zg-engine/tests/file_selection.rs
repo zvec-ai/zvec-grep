@@ -595,7 +595,8 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     let dimension = info
         .workspace_index
         .expect("workspace")
-        .embedding
+        .embeddings
+        .first()
         .expect("model")
         .dimension;
     let collections = fs::read_dir(&info.index_path)?
@@ -634,7 +635,9 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         ),
     ] {
         // Excluding Rust negates both its suffix and the dot-only filename exception.
-        native_query.set_filter("(file_name NOT LIKE '%.rs' OR file_name = '.rs')")?;
+        native_query.set_filter(
+            "content_kind IN ('text', 'code') AND (file_name NOT LIKE '%.rs' OR file_name = '.rs')",
+        )?;
         native_query.set_output_fields(&["document_id", "entity_id", "file_id"])?;
         native_query.set_include_vector(false)?;
         let native_error = collection
