@@ -163,6 +163,39 @@ async fn cached_embeddinggemma_runs_real_llama_cpp_inference() {
     assert!(result.truncated.is_empty());
 }
 
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with the embeddinggemma GGUF"]
+async fn cached_embeddinggemma_uses_cuda() {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(Device::Cuda),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    let result = model
+        .embed(
+            &[vec![Content::Text("find relevant code".to_owned())]],
+            EmbeddingOptions::default(),
+        )
+        .await
+        .expect("CUDA llama.cpp inference");
+
+    assert_eq!(result.vectors[0].len(), 768);
+    assert!(result.vectors[0].iter().all(|value| value.is_finite()));
+    let loaded = model.state.lock().await;
+    assert!(
+        loaded.as_ref().is_some_and(|loaded| loaded.gpu),
+        "CUDA request unexpectedly fell back to CPU"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with the embeddinggemma GGUF"]
