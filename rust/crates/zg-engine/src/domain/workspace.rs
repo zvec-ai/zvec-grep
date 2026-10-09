@@ -41,6 +41,7 @@ impl Workspace {
                 self.root,
             )));
         }
+        self.scan.validate()?;
         if let IndexState::Enabled(index) = &self.index {
             index.validate()?;
         }
@@ -72,6 +73,17 @@ pub struct ScanRules {
     pub ignore_files: Vec<PathBuf>,
     /// Traverse child Git repositories, including submodules and worktrees.
     pub nested_git: bool,
+}
+
+impl ScanRules {
+    pub(crate) fn validate(&self) -> EngineResult<()> {
+        if self.max_file_size_bytes == Some(0) {
+            return Err(EngineError::invalid_argument(
+                "max_file_size_bytes must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ScanRules {

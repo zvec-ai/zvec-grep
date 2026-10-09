@@ -181,6 +181,9 @@ impl WorkspaceIndexService {
         // Check the on-disk version before any registry, recovery or storage mutation.
         let mut existing =
             inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
+        let scan = resolve_scan(existing.as_ref(), &options);
+        scan.validate()?;
+        crate::file_selection::GlobMatcher::new(&location.root, &scan.globs)?;
         // Resolve all routes before any registry or storage mutation.
         let _ = embedding_plan(existing.as_ref(), &options)?;
         let abandoned = match read_build_registration(&location.home) {
@@ -209,9 +212,6 @@ impl WorkspaceIndexService {
             || existing
                 .as_ref()
                 .is_none_or(|manifest| !is_indexed(manifest));
-        // Validate before model acquisition; invalid globs must not trigger downloads or inference.
-        let scan = resolve_scan(existing.as_ref(), &options);
-        crate::file_selection::GlobMatcher::new(&location.root, &scan.globs)?;
         if options.reset_paths
             || options.scan != crate::api::index::options::ScanRulesUpdate::default()
         {
