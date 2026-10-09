@@ -19,6 +19,11 @@ import {
 } from "../engine/errors.js";
 import { listEmbeddingModels } from "../engine/models/index.js";
 import { DaemonClient } from "../client/daemon-client.js";
+import type {
+  PortabilityInput,
+  PortabilityOperation,
+  PortabilityResults,
+} from "../mcp/portability-operation.js";
 import {
   resolveDirectSearchPolicy,
   resolveServerSearchPolicy,
@@ -90,6 +95,28 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
     case "status":
       await runStatus(parsed);
       return;
+    case "cleanup-transfer": {
+      if (parsed.positionals.length !== 1)
+        throw new Error(
+          "zg --cleanup-transfer requires one owned temporary directory path.",
+        );
+      const { recoverTransferScratch } =
+        await import("../engine/storage/transfer-scratch.js");
+      recoverTransferScratch(parsed.positionals[0]!);
+      console.log(
+        "Removed the abandoned transfer scratch directory. Destination locks were not changed.",
+      );
+      return;
+    }
+    case "migrate":
+      await runMigrate(parsed);
+      return;
+    case "export":
+      await runExport(parsed);
+      return;
+    case "import":
+      await runImport(parsed);
+      return;
     case "install":
       await runInstall(parsed);
       return;
@@ -109,6 +136,131 @@ export async function runParsedCommand(parsed: ParsedArgs): Promise<void> {
     case "version":
       throw new Error(`${parsed.command} must be handled before dispatch`);
   }
+}
+
+async function runCliTransfer<T extends PortabilityOperation>(
+  operation: T,
+  input: Omit<PortabilityInput, "confirm">,
+): Promise<PortabilityResults[T]> {
+  const { runPortabilityOperation } =
+    await import("../mcp/portability-operation.js");
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.on("SIGINT", cancel);
+  process.on("SIGTERM", cancel);
+  try {
+    return await runPortabilityOperation(
+      operation,
+      { ...input, confirm: true, verifySampleLimit: 256 },
+      {
+        signal: controller.signal,
+        onScratch: (path) => console.error(`Temporary transfer data: ${path}`),
+        onProgress: async (stage, detail) => {
+          console.error(`${stage}: ${detail}`);
+        },
+      },
+    );
+  } finally {
+    process.off("SIGINT", cancel);
+    process.off("SIGTERM", cancel);
+  }
+}
+
+function formatVectorVerification(verification: {
+  vectorsExact: boolean;
+  vectorsPreserved: boolean;
+  vectorsCompared: number;
+  vectorsSampled: boolean;
+}): string {
+  const state = !verification.vectorsPreserved
+    ? "FAILED"
+    : verification.vectorsExact
+      ? "exact"
+      : "preserved (cosine tolerance: at most two float32 steps)";
+  return `vectors ${state} (${verification.vectorsCompared} compared, ${verification.vectorsSampled ? "sampled" : "all"})`;
+}
+
+async function runMigrate(parsed: ParsedArgs): Promise<void> {
+  if (parsed.positionals.length !== 2) {
+    throw new Error(
+      "zg --migrate-index requires a legacy index home and an explicit destination workspace root: zg --migrate-index <legacy-home> <destination-root>",
+    );
+  }
+  const sourceHome = resolve(parsed.positionals[0]!);
+  const destinationRoot = resolve(parsed.positionals[1]!);
+  const result = await runCliTransfer("migrate", {
+    sourceHome,
+    destinationRoot,
+  });
+  console.log(`Migrated index: ${result.destinationHome}`);
+  console.log(
+    `Files: ${result.filesConverted}, fragments: ${result.entitiesConverted}`,
+  );
+  if (result.missingFiles.length > 0) {
+    console.log(
+      `Missing at destination: ${result.missingFiles.length} file(s) (handled by the next incremental update)`,
+    );
+  }
+  if (result.droppedPersistedCredential) {
+    console.log(
+      "Dropped a credential persisted by the legacy format; configure it per session (environment, global config, or explicit option).",
+    );
+  }
+  if (result.droppedPersistedDevice) {
+    console.log(
+      "Dropped a device setting persisted by the legacy format; device selection is host-local now.",
+    );
+  }
+  console.log(
+    `Verification: counts ${result.verification.countsMatch ? "ok" : "FAILED"}, identities ${result.verification.identitiesUnique ? "ok" : "FAILED"}, ownership ${result.verification.ownershipValid ? "ok" : "FAILED"}, inventories ${result.verification.inventoriesExact ? "ok" : "FAILED"}, groups ${result.verification.groupIntegrity ? "ok" : "FAILED"}, ${formatVectorVerification(result.verification)}`,
+  );
+  console.log(
+    "The migrated index is unverified; the first indexing run reconciles content by hash.",
+  );
+}
+
+async function runExport(parsed: ParsedArgs): Promise<void> {
+  if (parsed.positionals.length !== 2) {
+    throw new Error(
+      "zg --export-index requires an index home and an artifact directory: zg --export-index <index-home> <artifact-dir>",
+    );
+  }
+  const result = await runCliTransfer("export", {
+    sourceHome: resolve(parsed.positionals[0]!),
+    artifactPath: resolve(parsed.positionals[1]!),
+  });
+  console.log(`Exported index: ${result.artifactPath}`);
+  console.log(
+    `Files: ${result.filesExported}, fragments: ${result.entitiesExported}`,
+  );
+  console.log("The artifact contains no credentials or host bindings.");
+}
+
+async function runImport(parsed: ParsedArgs): Promise<void> {
+  if (parsed.positionals.length !== 2) {
+    throw new Error(
+      "zg --import-index requires an artifact directory and an explicit destination workspace root: zg --import-index <artifact-dir> <destination-root>",
+    );
+  }
+  const result = await runCliTransfer("import", {
+    artifactPath: resolve(parsed.positionals[0]!),
+    destinationRoot: resolve(parsed.positionals[1]!),
+  });
+  console.log(`Imported index: ${result.destinationHome}`);
+  console.log(
+    `Files: ${result.filesImported}, fragments: ${result.entitiesImported}`,
+  );
+  if (result.missingFiles.length > 0) {
+    console.log(
+      `Missing at destination: ${result.missingFiles.length} file(s) (handled by the next incremental update)`,
+    );
+  }
+  console.log(
+    `Verification: counts ${result.verification.countsMatch ? "ok" : "FAILED"}, identities ${result.verification.identitiesUnique ? "ok" : "FAILED"}, ownership ${result.verification.ownershipValid ? "ok" : "FAILED"}, inventories ${result.verification.inventoriesExact ? "ok" : "FAILED"}, groups ${result.verification.groupIntegrity ? "ok" : "FAILED"}, ${formatVectorVerification(result.verification)}`,
+  );
+  console.log(
+    "The imported index is unverified; the first indexing run reconciles content by hash.",
+  );
 }
 
 async function runConfig(parsed: ParsedArgs): Promise<void> {
@@ -432,6 +584,7 @@ async function runDirectIndex(
           root: rootPath.absolutePath,
           rootPaths: explicitRoot ? [rootPath] : undefined,
           rebuild: parsed.options.rebuild,
+          reconcile: parsed.options.reconcile,
           resetPaths: parsed.options.resetPaths,
           globs: parsed.options.globs,
           insensitiveGlobs: parsed.options.insensitiveGlobs,

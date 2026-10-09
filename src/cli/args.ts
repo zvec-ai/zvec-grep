@@ -96,6 +96,10 @@ const MANAGED_RG_OUTPUT_OPTIONS = new Set([
 const ACTION_FLAGS = new Map<string, CliCommand>([
   ["--index", "index"],
   ["--status", "status"],
+  ["--migrate-index", "migrate"],
+  ["--cleanup-transfer", "cleanup-transfer"],
+  ["--export-index", "export"],
+  ["--import-index", "import"],
   ["--install", "install"],
   ["--uninstall", "uninstall"],
   ["--config", "config"],
@@ -107,6 +111,9 @@ const COMMAND_SHAPED_QUERY_WORDS = new Set(["query", "search"]);
 const COMMAND_SHAPED_ACTION_WORDS = new Map<string, string>([
   ["index", "--index"],
   ["status", "--status"],
+  ["migrate", "--migrate-index"],
+  ["export", "--export-index"],
+  ["import", "--import-index"],
   ["install", "--install"],
   ["uninstall", "--uninstall"],
   ["config", "--config"],
@@ -314,6 +321,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.color = "never";
     } else if (arg === "--rebuild") {
       options.rebuild = true;
+    } else if (arg === "--reconcile") {
+      options.reconcile = true;
     } else if (arg === "--drop") {
       options.drop = true;
     } else if (arg === "--force") {
@@ -950,6 +959,7 @@ function validateCliShape(
       [options.apiKey, "--api-key"],
       [options.endpoint, "--endpoint"],
       [options.rebuild, "--rebuild"],
+      [options.reconcile, "--reconcile"],
       [options.drop, "--drop"],
       [options.resetPaths, "--reset-paths"],
       [options.globs?.length, "--glob"],

@@ -1,13 +1,208 @@
 import { realpathSync, statSync, type BigIntStats } from "node:fs";
-import { dirname, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { EngineError } from "../../errors.js";
+import type { WorkspaceManifestRootPath } from "../../manifest.js";
 import type { RootPath } from "../../types.js";
+import {
+  canonicalFromRelative,
+  tryRealpathSync,
+  workspaceRootCrp,
+  type CanonicalPathResolver,
+} from "../../utils/canonical-path.js";
 import { pathPatternMatches } from "../../utils/glob.js";
 import {
   isPathInside,
   normalizePath,
   toDisplayPath,
 } from "../../utils/path.js";
+
+/**
+ * Convert runtime roots to their persisted manifest form: canonical
+ * workspace-relative paths with selection options, no absolute locations.
+ * Ignore-file references are canonicalized too and must stay inside the
+ * workspace; anything else is an explicit error.
+ */
+export function manifestRootPathsFromRuntime(
+  paths: readonly RootPath[],
+  resolver: CanonicalPathResolver,
+): WorkspaceManifestRootPath[] {
+  return canonicalizeRootPaths(paths, resolver).map((root) => {
+    const { absolutePath: _absolutePath, canonicalPath, ...options } = root;
+    return {
+      ...options,
+      path: canonicalPath as string,
+      ...(root.ignoreFiles !== undefined
+        ? { ignoreFiles: portableIgnoreFiles(root, resolver) }
+        : {}),
+    };
+  });
+}
+
+function portableIgnoreFiles(
+  root: RootPath,
+  resolver: CanonicalPathResolver,
+): string[] {
+  return (root.ignoreFiles ?? []).map((entry) => {
+    const absolutePath = normalizePath(
+      isAbsolute(entry) ? entry : join(root.absolutePath, entry),
+    );
+    const canonicalPath =
+      resolver.toCanonical(absolutePath) ??
+      canonicalFilePathWithAlias(absolutePath, resolver);
+    if (canonicalPath === null) {
+      throw new EngineError("Configured ignore file is outside the workspace", {
+        code: "ZVEC_GREP.ENGINE.SCANNER.IGNORE_FILE_OUTSIDE_WORKSPACE",
+        context: `ignoreFile=${entry} root=${root.absolutePath} workspaceRoot=${resolver.workspaceRoot}`,
+      });
+    }
+    return canonicalPath;
+  });
+}
+
+/**
+ * CRP of a workspace file addressed through an equivalent alias spelling
+ * of the workspace. Unlike a root, a file is never the workspace root
+ * itself, so an empty alias suffix is outside the file namespace.
+ */
+function canonicalFilePathWithAlias(
+  absolutePath: string,
+  resolver: CanonicalPathResolver,
+): string | null {
+  const aliasSuffix = workspaceAliasSuffix(absolutePath, resolver);
+  if (aliasSuffix === null || aliasSuffix.length === 0) {
+    return null;
+  }
+  return canonicalFromRelative(aliasSuffix.join("/"));
+}
+
+/**
+ * A changed path's spelling inside the workspace: unchanged when it
+ * already matches the resolver's workspace root, remapped through the
+ * workspace alias boundary when it addresses the same physical tree
+ * through an equivalent spelling (macOS /var, Windows short names), and
+ * left as given when it is genuinely outside — downstream handling
+ * decides that case. Watcher events and caller-supplied changed paths
+ * may carry either spelling. An empty logical suffix is the workspace
+ * root itself — a notification to rescan the workspace directory — and
+ * maps to the resolver's workspace root; nonempty suffixes keep their
+ * logical identity even when an internal link resolves to the root.
+ * Deleted targets map through their canonical identity without
+ * requiring the leaf or subtree to exist: absence is the notification's
+ * point, and stored-entry comparison and removal need the workspace
+ * spelling. Escaping symlinks surface as forbidden and are left to
+ * containment; ambiguous canonical names and filesystem errors still
+ * throw.
+ */
+export function resolveWorkspaceFilePath(
+  absolutePath: string,
+  resolver: CanonicalPathResolver,
+): string {
+  if (resolver.toCanonical(absolutePath) !== null) {
+    return absolutePath;
+  }
+  const aliasSuffix = workspaceAliasSuffix(absolutePath, resolver);
+  if (aliasSuffix === null) {
+    return absolutePath;
+  }
+  if (aliasSuffix.length === 0) {
+    return resolver.workspaceRoot;
+  }
+  const canonicalPath = canonicalFromRelative(aliasSuffix.join("/"));
+  const resolution = resolver.resolveDetailedSync(canonicalPath);
+  if (resolution.status === "ok") {
+    return resolution.path;
+  }
+  if (resolution.status === "missing") {
+    return join(resolver.workspaceRoot, canonicalPath);
+  }
+  return absolutePath;
+}
+/**
+ * Assign each root its canonical workspace-relative path, the identity
+ * reference point for scanned files. Roots must stay inside the workspace,
+ * including through symlinks; anything else is an explicit error in portable
+ * mode.
+ */
+export function canonicalizeRootPaths(
+  paths: readonly RootPath[],
+  resolver: CanonicalPathResolver,
+): RootPath[] {
+  return paths.map((root) => {
+    const realRoot = tryRealpathSync(root.absolutePath);
+    const canonicalPath =
+      root.canonicalPath ?? canonicalRootPath(root, resolver);
+    const escapes =
+      realRoot !== undefined &&
+      !isPathInside(resolver.workspaceRealRoot, realRoot);
+    if (canonicalPath === null || escapes) {
+      throw new EngineError(
+        "Workspace index root path is outside the workspace",
+        {
+          code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_OUTSIDE_WORKSPACE",
+          context: `rootPath=${root.absolutePath} workspaceRoot=${resolver.workspaceRoot}`,
+        },
+      );
+    }
+    return { ...root, canonicalPath };
+  });
+}
+
+/**
+ * The CRP of a runtime root. Textual spelling decides first; when it does
+ * not match, an equivalent spelling of the workspace decides: a workspace
+ * may be addressed through a symlinked alias (macOS /var vs /private/var),
+ * but only the alias prefix is normalized — the segments below the
+ * workspace root keep their logical spelling so an internal symlink does
+ * not rename the selection. Selections with no prefix physically equal to
+ * the workspace root yield null; resolved-root containment stays with the
+ * caller's escape check.
+ */
+function canonicalRootPath(
+  root: RootPath,
+  resolver: CanonicalPathResolver,
+): string | null {
+  if (normalizePath(root.absolutePath) === resolver.workspaceRoot) {
+    return workspaceRootCrp();
+  }
+  const textual = resolver.toCanonical(root.absolutePath);
+  if (textual !== null) {
+    return textual;
+  }
+  const aliasSuffix = workspaceAliasSuffix(root.absolutePath, resolver);
+  if (aliasSuffix === null) {
+    return null;
+  }
+  return aliasSuffix.length === 0
+    ? workspaceRootCrp()
+    : canonicalFromRelative(aliasSuffix.join("/"));
+}
+
+/**
+ * The workspace-relative suffix of a path addressed through an equivalent
+ * spelling of the workspace: the outermost prefix that physically resolves
+ * to the workspace root marks the alias boundary. Nearer matches are
+ * internal links back to the workspace root and belong to the logical
+ * suffix, not to the boundary.
+ */
+function workspaceAliasSuffix(
+  absolutePath: string,
+  resolver: CanonicalPathResolver,
+): string[] | null {
+  const suffix: string[] = [];
+  let current = normalizePath(absolutePath);
+  let outermost: string[] | null = null;
+  while (true) {
+    if (tryRealpathSync(current) === resolver.workspaceRealRoot) {
+      outermost = [...suffix].reverse();
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return outermost;
+    }
+    suffix.push(basename(current));
+    current = parent;
+  }
+}
 
 export function validateRootPaths(
   paths: readonly (string | RootPath)[],
@@ -140,7 +335,7 @@ function rootPathToScanDomain(root: RootPath): RootScanDomain {
   let realPath: string;
 
   try {
-    realPath = normalizePath(realpathSync(root.absolutePath));
+    realPath = normalizePath(realpathSync.native(root.absolutePath));
   } catch (cause) {
     throw new EngineError("Workspace index root path could not be resolved", {
       code: "ZVEC_GREP.ENGINE.SCANNER.ROOT_PATH_REALPATH_FAILED",

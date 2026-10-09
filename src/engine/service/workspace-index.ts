@@ -11,6 +11,8 @@ import {
   indexWorkspacePaths,
 } from "../pipeline/indexing/index.js";
 import { searchWorkspaceIndex } from "../pipeline/search/index.js";
+import { WorkspaceBindingStore } from "../bindings.js";
+import { dirname } from "node:path";
 import {
   createWorkspaceIndexStorage,
   type WorkspaceIndexStorage,
@@ -35,6 +37,8 @@ export class WorkspaceIndex {
   private readonly storage: WorkspaceIndexStorage;
   private readonly embedding: WorkspaceIndexEmbeddingSchema;
   private readonly embeddingModel?: EmbeddingModel;
+  private readonly workspaceRoot: string;
+  private readonly bindings: WorkspaceBindingStore;
   private closed = false;
 
   constructor(
@@ -48,15 +52,22 @@ export class WorkspaceIndex {
       this.validateEmbeddingSchema(this.embeddingModel);
     }
 
+    // The index home lives at <workspace>/.zvec-grep; the workspace root is
+    // derived from the current location, never from persisted absolute paths.
+    this.workspaceRoot = dirname(info.path);
+    this.bindings = new WorkspaceBindingStore();
+
     if (options.mode === "write") {
       this.storage = createWorkspaceIndexStorage({
         storagePath: info.path,
+        workspaceRoot: this.workspaceRoot,
         readOnly: false,
         embedding: this.embedding,
       });
     } else {
       this.storage = createWorkspaceIndexStorage({
         storagePath: info.path,
+        workspaceRoot: this.workspaceRoot,
         readOnly: true,
       });
     }
@@ -76,21 +87,52 @@ export class WorkspaceIndex {
 
     const embeddingModel = this.requireEmbeddingModel("index");
 
+    // An index is unverified until the host-local binding store proves the
+    // current workspace binding was content-verified. Unverified indexes
+    // reconcile: every matched file is hashed, unchanged content keeps its
+    // vectors, and the binding is recorded only after success. --reconcile
+    // forces the pass regardless of stored trust (the documented recovery
+    // path for unsupported in-place restores); a forced run first drops the
+    // prior verification so cancellation or failure leaves the index
+    // unverified rather than trusted.
+    if (options.reconcile === true) {
+      this.bindings.invalidate(this.info.id, this.workspaceRoot);
+    }
+    const reconcile =
+      options.reconcile === true ||
+      !this.bindings.matches(this.info.id, this.workspaceRoot);
     const context = {
       workspaceIndex: this.info,
       embeddingModel,
       storage: this.storage,
+      workspaceRoot: this.workspaceRoot,
+      reconcile,
       embeddingConcurrency: options.embeddingConcurrency,
       onProgress: options.onProgress,
       signal: options.signal,
     };
-    return options.changedPaths && options.changedPaths.length > 0
-      ? indexWorkspacePaths(context, options.changedPaths)
-      : indexWorkspace(context);
+    const run = reconcile
+      ? // Reconciliation is always a complete pass: partial verification
+        // cannot establish the binding.
+        indexWorkspace(context)
+      : options.changedPaths?.length
+        ? indexWorkspacePaths(context, options.changedPaths)
+        : indexWorkspace(context);
+    return run.then((result) => {
+      if (reconcile) {
+        this.bindings.record(this.info.id, this.workspaceRoot);
+      }
+      return result;
+    });
   }
 
   status(): Promise<WorkspaceIndexStatus> {
-    return getWorkspaceIndexStatus(this.info, this.storage.listFiles());
+    return getWorkspaceIndexStatus(
+      this.info,
+      this.storage.listFiles(),
+      this.workspaceRoot,
+      { unverified: !this.bindings.matches(this.info.id, this.workspaceRoot) },
+    );
   }
 
   searchPlan(plan: SearchPlan): Promise<SearchPlanResult> {

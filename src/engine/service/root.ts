@@ -1,6 +1,12 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { deleteWorkspaceManifest, workspaceManifestPath } from "../manifest.js";
+import { EngineError } from "../errors.js";
+import { INCOMPLETE_RECOVERY_HINT } from "../utils/recovery-guidance.js";
+import {
+  deleteWorkspaceManifest,
+  incompleteMarkerEntry,
+  workspaceManifestPath,
+} from "../manifest.js";
 import {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,
@@ -64,6 +70,22 @@ function findNearestWorkspaceLocation(
 
   while (true) {
     const location = workspaceIndexLocation(current);
+    // An incomplete reserved destination blocks readers and writers and
+    // stops ancestor fallback until verified completion or the documented
+    // operator recovery. The marker check does not follow symlinks and
+    // fails closed on inspection errors.
+    const markerStatus = incompleteMarkerEntry(location.home);
+    if (markerStatus !== "absent") {
+      throw new EngineError(
+        markerStatus === "present"
+          ? "Workspace index destination is incomplete from an interrupted reservation"
+          : "Workspace index incomplete-marker state cannot be inspected; treating the destination as blocked",
+        {
+          code: "ZVEC_GREP.ENGINE.SERVICE.INDEX_INCOMPLETE",
+          context: `home=${location.home} hint=${INCOMPLETE_RECOVERY_HINT}`,
+        },
+      );
+    }
     if (predicate(location)) {
       return location;
     }

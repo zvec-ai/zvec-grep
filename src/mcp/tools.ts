@@ -1,3 +1,4 @@
+import { registerPortabilityTools } from "./portability-tools.js";
 import { randomBytes } from "node:crypto";
 import {
   acceptedContent,
@@ -110,6 +111,7 @@ export type ZvecGrepIndexStatusResult = {
   persistent: {
     home: string;
     index_path: string;
+    unverified?: boolean;
     workspace_index?: {
       id: string;
       name: string;
@@ -282,6 +284,7 @@ export const ZVEC_GREP_FULL_MCP_INSTRUCTIONS = formatPromptRules(
     "zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.",
     "Use zvec_grep_index with drop: true, or zvec_grep_index_drop, only when index deletion is explicitly requested.",
     "Call zvec_grep_server_status only for daemon diagnostics, not before ordinary searches.",
+    "Call zvec_grep_index_migrate, zvec_grep_index_export, or zvec_grep_index_import only after an explicit user request for that persistent operation. Paths must be visible to the server. Copying artifacts between hosts is separate.",
   ],
 );
 
@@ -338,6 +341,7 @@ export function registerZvecGrepTools(
 ): void {
   const toolset = options.toolset ?? DEFAULT_MCP_TOOLSET;
   const full = toolset === "full";
+  if (full) registerPortabilityTools(server);
 
   if (full) {
     server.registerTool(

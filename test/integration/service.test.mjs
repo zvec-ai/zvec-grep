@@ -10,6 +10,9 @@ import { CURRENT_INDEX_VERSION } from "../../dist/engine/types.js";
 import { createZvecGrep } from "../../dist/index.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
+import { useIsolatedZvecGrepHome } from "../helpers/isolated-home.mjs";
+
+useIsolatedZvecGrepHome();
 
 class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
   constructor({

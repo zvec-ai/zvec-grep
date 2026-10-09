@@ -45,6 +45,11 @@ export type FileIndexStatus = {
 
 export type RootPath = {
   absolutePath: string;
+  /**
+   * Canonical workspace-relative path (CRP) of this root when operating in
+   * portable mode; the runtime identity reference point for scanned files.
+   */
+  canonicalPath?: string;
   recursive: boolean;
   include?: readonly string[];
   exclude?: readonly string[];
@@ -63,6 +68,8 @@ export type RootPath = {
 export type FileInfo = {
   id: string;
   absolutePath: string;
+  /** Canonical workspace-relative path; the portable persistent identity. */
+  canonicalPath?: string;
   relativePath: string;
   rootPath: string;
   sizeBytes: number;
@@ -74,7 +81,7 @@ export type FileInfo = {
 };
 
 export type SkippedFileReason =
-  "empty" | "too_large" | "unsupported" | "binary";
+  "empty" | "too_large" | "unsupported" | "binary" | "escapes_workspace";
 
 export type SkippedFile = {
   absolutePath: string;
@@ -98,6 +105,13 @@ export type FileRange = {
   kind: "file";
 };
 
+/**
+ * Text range. The offset convention is currently producer-dependent:
+ * extraction producers write absolute document offsets, while lexical
+ * context expansion writes line-relative columns. Only same-line offset
+ * ordering is enforced on deserialize; cross-line offset rules wait on the
+ * recorded convention reconciliation.
+ */
 export type TextRange = {
   kind: "text";
   startLine: number;
@@ -194,7 +208,7 @@ export type EntityFragment = {
 // Workspace index types
 // -----------------------------------------------------------------------------
 
-export const CURRENT_INDEX_VERSION = 1;
+export const CURRENT_INDEX_VERSION = 2;
 
 export type WorkspaceIndexEmbeddingSchema = {
   provider: string;
@@ -246,6 +260,8 @@ export type IndexProgress = {
 export type IndexOptions = {
   name?: string;
   rebuild?: boolean;
+  /** Force a full content-hash reconciliation, ignoring stored trust. */
+  reconcile?: boolean;
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
   changedPaths?: readonly string[];
@@ -284,6 +300,8 @@ export type WorkspaceIndexStatus = {
   filesModified: number;
   filesDeleted: number;
   filesUnchanged: number;
+  /** True when the current workspace binding is not content-verified. */
+  unverified?: boolean;
   pendingFiles: FileInfo[];
   failedFiles: FileInfo[];
   addedFiles: FileInfo[];

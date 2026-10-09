@@ -37,10 +37,12 @@ type StorageSearchHit = {
 export type WorkspaceIndexStorageOptions =
   | {
       storagePath: string;
+      workspaceRoot: string;
       readOnly: true;
     }
   | {
       storagePath: string;
+      workspaceRoot: string;
       readOnly: false;
       embedding: WorkspaceIndexEmbeddingSchema;
     };
@@ -71,6 +73,11 @@ export interface WorkspaceIndexStorage {
     entries: readonly IndexedFragment[],
     diagnostics?: FileIndexDiagnostics,
   ): void;
+  /**
+   * Persist refreshed stat metadata for a file whose content is unchanged.
+   * Entities and index status are preserved; no embedding work occurs.
+   */
+  refreshFileMetadata(file: FileInfo): void;
   markFileFailed(file: FileInfo, error: string): void;
   deleteFile(fileId: string): void;
   finalizeWrites(): Promise<void>;
@@ -78,6 +85,13 @@ export interface WorkspaceIndexStorage {
 }
 
 export { createWorkspaceIndexStorage } from "./zvec.js";
+export {
+  createFilesSchema,
+  createSchema as createEntitiesSchema,
+  parseContent,
+  parseMetadata,
+  parseRange,
+} from "./zvec.js";
 export {
   deleteWorkspaceIndexStorage,
   hasWorkspaceIndexStorage,

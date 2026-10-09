@@ -521,8 +521,23 @@ test("server-mode index reports Workspace progress", async (t) => {
     [...groupedQueryArgs, "--mode", "server"],
     { cwd: root, env },
   );
-  assert.equal(serverGrouped.stdout, directGrouped.stdout);
-  assert.equal(serverGrouped.stderr, directGrouped.stderr);
+  assert.equal(
+    serverGrouped.stdout,
+    directGrouped.stdout,
+    `server grouped output differs from direct; server stderr: ${serverGrouped.stderr}`,
+  );
+  // The possibly-stale status block is timing-dependent reconciliation
+  // state: the daemon's watcher may already have caught up (fresh, block
+  // absent) while the one-shot direct snapshot still reports drift. The
+  // parity guarantee covers the grouped results and every other stderr
+  // line, not the freshness snapshot.
+  const freshnessStatusBlock =
+    /^(status: possibly_stale\nresults: [^\n]*\n)?(background_refresh: [^\n]*\n)?/m;
+  assert.equal(
+    serverGrouped.stderr.replace(freshnessStatusBlock, ""),
+    directGrouped.stderr.replace(freshnessStatusBlock, ""),
+    `server grouped stderr differs from direct beyond the timing-dependent freshness status block; server stdout: ${serverGrouped.stdout}`,
+  );
   assert.match(serverGrouped.stdout, /^query groups \(2\):/);
   assert.match(serverGrouped.stdout, /Q1 \[supplemental\]: missing-symbol/);
   assert.match(
@@ -618,6 +633,8 @@ test("CLI completes index, search, explicit refresh, status, and rg workflows", 
     USERPROFILE: home,
     NO_COLOR: "1",
     ZVEC_GREP_EMBEDDING: "qwen/qwen3.7-text-embedding",
+    // Credentials resolve per session; the manifest never persists them.
+    ZVEC_GREP_API_KEY: "test-key",
   };
   await mkdir(join(home, ".zvec-grep"), { recursive: true });
   await writeFile(

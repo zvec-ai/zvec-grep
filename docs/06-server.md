@@ -277,3 +277,21 @@ Successful `GET /healthz` completion events have level `debug` and are omitted
 at the default `info` level. Set `level` to `debug` to include them for diagnostics.
 Unsuccessful health checks and other requests continue to be logged at `info`.
 Each record includes a `level` field alongside the existing event fields.
+
+## Index locks
+
+Writers hold a file lock at `<workspace>/.zvec-grep/locks/`. A write lock is
+**never** reclaimed automatically — not for age, and not even when its local
+owner has verifiably exited: no reclamation-by-deletion can be made safe
+against racing a successor's fresh acquisition, so a crashed or abandoned
+write operation blocks the workspace instead of risking concurrent writers.
+Uniquely-named reader entries are reclaimed only for a verified-dead local
+owner, with physical ownership checks. `LOCK.BUSY` reports the observed owner
+state: alive, dead or unknown. For an active operation, wait or cancel through
+its owner. For an unknown owner, verify activity on the recorded host. Do not
+remove active or unconfirmed locks. A dead owner alone does not prove that an
+incomplete destination is valid. Stop all users, preserve the source and backups,
+and quarantine the entire incomplete destination index home before retrying
+into an empty destination. Do not remove only its lock or `INCOMPLETE` marker.
+See [index recovery](09-portable-indexes.md). No automatic write-lock deletion
+or age-based eviction is enabled.

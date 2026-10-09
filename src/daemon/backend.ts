@@ -27,6 +27,7 @@ import type {
 import {
   indexCompletionForJob,
   indexCompletionFromStatus,
+  indexStatusNeedsRefresh,
 } from "../engine/index-status.js";
 import {
   contextOptionsFromRgInput,
@@ -1383,16 +1384,7 @@ function readWorkspaceEmbeddingRuntime(
 }
 
 function indexStatusIsFresh(info: ZvecGrepInfoResult): boolean {
-  const status = info.status;
-  return (
-    status !== null &&
-    status !== undefined &&
-    status.filesAdded === 0 &&
-    status.filesModified === 0 &&
-    status.filesDeleted === 0 &&
-    status.filesPending === 0 &&
-    status.filesFailed === 0
-  );
+  return info.status != null && !indexStatusNeedsRefresh(info.status);
 }
 
 function assertDropOnlyInput(input: ZvecGrepIndexInput): void {
@@ -1464,6 +1456,7 @@ function persistentStatus(
   return {
     home: info.home,
     index_path: info.indexPath,
+    unverified: info.status ? info.status.unverified === true : undefined,
     workspace_index: info.workspaceIndex
       ? {
           id: info.workspaceIndex.id,

@@ -56,6 +56,10 @@ Node.js implementation. The Rust implementation is developed separately in
 
 ## 💫 Why zg?
 
+- **Move and reuse an index** — relocate a complete indexed workspace or
+  export and import it on another host without re-embedding unchanged documents.
+  See [Move and reuse an index](./docs/09-portable-indexes.md) for requirements
+  and limits.
 - **Ready for humans and agents** — install once, index once, then use the same
   workspace from the CLI or your agent on macOS, Linux, and Windows.
 - **Search beyond keywords** — discover by meaning, rank by relevance, then

@@ -10,7 +10,8 @@ export function indexStatusNeedsRefresh(
 ): boolean {
   return Boolean(
     status &&
-    (status.filesAdded > 0 ||
+    (status.unverified === true ||
+      status.filesAdded > 0 ||
       status.filesModified > 0 ||
       status.filesDeleted > 0 ||
       status.filesPending > 0 ||

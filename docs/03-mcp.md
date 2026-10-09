@@ -18,6 +18,11 @@ the default and compatibility toolsets. See
 [Server and execution modes](./06-server.md) for lifecycle, mode selection,
 refresh, authentication, and logs.
 
+To relocate a workspace or transfer an existing index, see
+[Move and reuse an index](./09-portable-indexes.md). The current MCP tools
+can search and update a portable index. The full toolset also exposes migration, export and import. Paths always refer to files visible to the server; copying an
+artifact between hosts is a separate operation.
+
 ## Default agent toolset
 
 The default `agent` toolset intentionally exposes only search:
@@ -164,7 +169,7 @@ zg --server off
 zg --server on --mcp-toolset full
 ```
 
-The `full` toolset exposes six tools:
+The `full` toolset exposes nine tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -172,6 +177,9 @@ The `full` toolset exposes six tools:
 | `zvec_grep_rg` | No-index exhaustive search |
 | `zvec_grep_index` | Create, update, rebuild, or explicitly drop an index |
 | `zvec_grep_index_drop` | Explicitly delete an index |
+| `zvec_grep_index_migrate` | Migrate a legacy index into a portable workspace index |
+| `zvec_grep_index_export` | Write a logical index artifact with stored vectors |
+| `zvec_grep_index_import` | Create native storage from a received artifact |
 | `zvec_grep_index_status` | Inspect persisted and active index state |
 | `zvec_grep_server_status` | Inspect daemon, queue, runtime, and model-pool state |
 
@@ -218,3 +226,70 @@ HTTP discovery and tool lists advertise a one-hour private cache. Older HTTP
 sessions have a 256-session limit and 30-minute idle expiry; active requests remain
 protected. Closing stdio leaves the shared daemon running. Both transports are
 covered by the normal Rust workspace tests and the three-platform Rust CI matrix.
+
+## Portable index operations (full toolset)
+
+The default `agent` toolset remains search-only. Start the server with
+`--mcp-toolset full` to expose these operations on its existing MCP endpoint.
+Use them only after an explicit user request. Each call requires `confirm: true`.
+This field records the caller's confirmation; it does not prove user identity
+or replace server authentication.
+
+| Tool                      | Required paths, all absolute and visible to the server                                             |
+| ------------------------- | -------------------------------------------------------------------------------------------------- |
+| `zvec_grep_index_migrate` | `sourceHome`: legacy index directory; `destinationRoot`: workspace receiving the v2 index          |
+| `zvec_grep_index_export`  | `sourceHome`: index directory; `artifactPath`: new artifact directory                              |
+| `zvec_grep_index_import`  | `artifactPath`: received artifact directory; `destinationRoot`: workspace receiving native storage |
+
+Example export call:
+
+```json
+{
+  "name": "zvec_grep_index_export",
+  "arguments": {
+    "sourceHome": "/work/project/.zvec-grep",
+    "artifactPath": "/transfer/project-index",
+    "confirm": true
+  }
+}
+```
+
+Copy the complete artifact and documents to the other host as a separate
+operation. Import with that host's paths:
+
+```json
+{
+  "name": "zvec_grep_index_import",
+  "arguments": {
+    "artifactPath": "/received/project-index",
+    "destinationRoot": "/work/project",
+    "confirm": true
+  }
+}
+```
+
+Results include `operation`, `state` and `result`. Migration and import return
+index identity, counts, missing files and verification results. The default
+missing-file sample has at most 20 paths and 4096 path characters.
+`missingFilesCount` gives the total. `missingFilesTruncated` identifies a sample.
+Set `includeAllMissingFiles: true` to request the full list. MCP compares
+all vectors. `vectorsExact` and `vectorsPreserved` are separate results.
+Cosine storage permits at most two float32 steps per component. Other metrics
+require exact equality. Export returns identity and counts. Failures set `isError: true`
+and return `state: "failed"` with an error code, message and available context.
+Input validation failures use the standard MCP validation error.
+
+Clients can request MCP progress notifications. Native storage operations run
+in a separate process so that the server can receive cancellation. A fatal
+native failure stops that process and returns a tool error. Before publication,
+cancellation uses the engine's reservation cleanup. Publication is the commit
+boundary: a late cancellation does not remove a completed index or artifact.
+A forced process kill is different from a cancellation request; incomplete
+markers and locks can require recovery after all writers have stopped. Do not
+remove them while another process owns them.
+
+These operations use existing engine locks. A busy source or occupied
+destination can fail; they do not stop another user's indexing job or replace
+an existing index. Retain the source, artifact and results until verification
+is complete. No transfer operation computes document embeddings. See the
+[move guide](./09-portable-indexes.md) for reconciliation and model requirements.
