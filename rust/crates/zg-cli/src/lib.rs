@@ -17,6 +17,7 @@ pub use progress::IndexProgressDisplay;
 pub use status::{write_info_result, write_info_with_options};
 
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     io::{self, IsTerminal},
     path::{Path, PathBuf},
@@ -30,8 +31,8 @@ use zg_engine::api::{
     context::{
         ContextOptions,
         options::{
-            ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter, RgGlob,
-            SymbolType,
+            ContentKind, ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter,
+            QueryImage, RgGlob, SymbolType,
         },
     },
     index::{
@@ -72,6 +73,8 @@ pub struct Cli {
 pub enum CommandLine {
     /// Search indexed context or run managed ripgrep.
     Query(QueryArgs),
+    /// Retrieve indexed content by generation and entity ID.
+    ReadContent(ReadContentArgs),
     /// Build, rebuild, or drop the workspace index.
     Index(IndexArgs),
     /// Show workspace and index status.
@@ -470,6 +473,9 @@ pub struct QueryArgs {
     pub trace: bool,
     #[arg(long)]
     pub compact: bool,
+    /// Emit the complete structured result as JSON.
+    #[arg(long)]
+    pub json: bool,
     #[arg(long, value_enum)]
     pub preview: Option<PreviewMode>,
     #[arg(long, value_enum)]
@@ -480,6 +486,12 @@ pub struct QueryArgs {
     pub limit: Option<usize>,
     #[arg(long = "hybrid", value_name = "QUERY")]
     pub hybrid_queries: Vec<String>,
+    /// Read query content from a file; currently PNG, JPEG or static WebP.
+    #[arg(long, value_name = "PATH")]
+    pub input: Option<PathBuf>,
+    /// Restrict indexed search to one content kind.
+    #[arg(long = "kind", value_parser = content_kind)]
+    pub target_kind: Option<ContentKind>,
     #[arg(long, value_name = "QUERY")]
     pub fts: Vec<String>,
     #[arg(long, value_name = "QUERY")]
@@ -515,6 +527,21 @@ pub struct QueryArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ReadContentArgs {
+    pub entity_id: String,
+    pub root: Option<PathBuf>,
+    #[arg(long)]
+    pub generation: String,
+    /// Create a new file containing the indexed bytes; existing files are never overwritten.
+    #[arg(long)]
+    pub output: PathBuf,
+    #[arg(long)]
+    pub mode: Option<ClientMode>,
+    #[arg(long, env = "ZVEC_GREP_HOME")]
+    pub home: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
     pub root: Option<PathBuf>,
@@ -539,9 +566,9 @@ pub struct IndexArgs {
     pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
-    /// Single embedding model for this workspace; this version indexes text only.
-    #[arg(long)]
-    pub embedding: Option<String>,
+    /// Set the default model, KIND=MODEL, or KIND=default to restore inheritance.
+    #[arg(long, value_name = "[KIND=]MODEL")]
+    pub embedding: Vec<String>,
     #[arg(long = "model-cache")]
     pub model_cache: Option<PathBuf>,
     #[arg(long, value_enum, ignore_case = true)]
@@ -568,6 +595,8 @@ pub struct StatusArgs {
     pub check_ready: bool,
     #[arg(long)]
     pub debug: bool,
+    #[arg(long)]
+    pub json: bool,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
     #[arg(long = "no-color", conflicts_with = "color")]
@@ -605,25 +634,25 @@ pub enum ServerAction {
 pub struct ServerStartArgs {
     #[arg(long)]
     pub listen: Option<String>,
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long, env = "ZVEC_GREP_MCP_TOOLSET", value_enum)]
     pub mcp_toolset: Option<McpToolset>,
-    #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
+    #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStopArgs {
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
-    #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
+    #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStatusArgs {
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long = "check-ready")]
     pub check_ready: bool,
@@ -631,6 +660,12 @@ pub struct ServerStatusArgs {
 
 #[derive(Debug)]
 pub enum CliPlan {
+    ReadContent {
+        mode: ClientMode,
+        home: Option<PathBuf>,
+        request: zg_engine::api::content::ReadContentOptions,
+        output: PathBuf,
+    },
     Query {
         mode: ClientMode,
         home: Option<PathBuf>,
@@ -660,7 +695,9 @@ pub enum CliPlan {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OutputOptions {
+    pub json: bool,
     pub debug: bool,
     pub trace: bool,
     pub human: bool,
@@ -686,9 +723,17 @@ pub enum ServerPlan {
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(
-        "zg requires text or --hybrid/--fts/--vector routes; use zg --help search for examples"
+        "zg requires text, --input, or --hybrid/--fts/--vector routes; use zg --help search for examples"
     )]
     MissingQuery,
+    #[error(
+        "--input cannot be combined with text queries, --rg, --hybrid, --fts, --vector, --fuse or --prefer-symbol"
+    )]
+    InputWithQuery,
+    #[error("invalid --embedding value: {0}")]
+    InvalidEmbedding(String),
+    #[error("unknown content kind {0:?}; expected text, code or image")]
+    InvalidContentKind(String),
     #[error("--rg cannot be combined with --hybrid, --fts, --vector, or --fuse")]
     RgWithIndexedRoutes,
     #[error("--rg cannot be combined with indexed preview, trace, refresh, or symbol options")]
@@ -705,8 +750,6 @@ pub enum CliError {
     InvalidFileCategory(String),
     #[error("--force-direct requires --mode direct")]
     ForceDirectMode,
-    #[error("--json is not supported; redirect output or use --compact for compact markdown")]
-    RemovedJson,
     #[error("--human has been removed; terminal output is human-readable by default")]
     RemovedHuman,
     #[error("unknown option: {0}")]
@@ -815,6 +858,20 @@ impl Cli {
         match command {
             CommandLine::Query(args) => query_plan(args, current_dir, terminal),
             CommandLine::Index(args) => index_plan(args, &current_dir),
+            CommandLine::ReadContent(args) => Ok(CliPlan::ReadContent {
+                mode: resolve_client_mode(args.mode)?,
+                home: args.home,
+                request: zg_engine::api::content::ReadContentOptions {
+                    root: Some(resolve_from(&current_dir, args.root.as_deref())),
+                    ..zg_engine::api::content::ReadContentOptions::new(
+                        zg_engine::api::content::ContentRef {
+                            generation: args.generation,
+                            entity_id: args.entity_id,
+                        },
+                    )
+                },
+                output: resolve_from(&current_dir, Some(&args.output)),
+            }),
             CommandLine::Status(args) => Ok(CliPlan::Status {
                 mode: resolve_client_mode(args.mode)?,
                 home: args.home,
@@ -824,6 +881,7 @@ impl Cli {
                 },
                 check_ready: args.check_ready,
                 output: OutputOptions {
+                    json: args.json,
                     debug: args.debug,
                     color: if args.no_color {
                         ColorMode::Never
@@ -856,6 +914,7 @@ impl Cli {
 fn action_for_flag(value: &OsStr) -> Option<&'static str> {
     match value.to_str()? {
         "--index" => Some("index"),
+        "--read-content" => Some("read-content"),
         "--status" => Some("status"),
         "--install" => Some("install"),
         "--uninstall" => Some("uninstall"),
@@ -891,6 +950,27 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
         ));
     }
     None
+}
+
+fn management_option_with_value(value: &str) -> bool {
+    matches!(
+        value,
+        "--name"
+            | "--embedding"
+            | "--generation"
+            | "--output"
+            | "--endpoint"
+            | "--embedding-concurrency"
+            | "--listen"
+            | "--token-file"
+            | "--mcp-toolset"
+            | "--target"
+            | "--mcp-transport"
+            | "--mcp-tool-timeout"
+            | "--mcp-token-env"
+            | "--capability"
+            | "--scope"
+    )
 }
 
 fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap::Error> {
@@ -951,22 +1031,8 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
         let text = argument.to_string_lossy();
         index += if query_option_with_value(&text)
             || managed_rg::takes_separate_value(&text)
-            || matches!(
-                text.as_ref(),
-                "--name"
-                    | "--embedding"
-                    | "--endpoint"
-                    | "--embedding-concurrency"
-                    | "--listen"
-                    | "--token-file"
-                    | "--mcp-toolset"
-                    | "--target"
-                    | "--mcp-transport"
-                    | "--mcp-tool-timeout"
-                    | "--mcp-token-env"
-                    | "--capability"
-                    | "--scope"
-            ) {
+            || management_option_with_value(&text)
+        {
             2
         } else {
             1
@@ -1062,6 +1128,7 @@ fn query_option_without_value(value: &str) -> bool {
             | "--debug"
             | "--trace"
             | "--compact"
+            | "--json"
             | "--no-color"
             | "--fuse"
             | "--prefer-symbol"
@@ -1082,6 +1149,8 @@ fn query_option_with_value(value: &str) -> bool {
             | "--color"
             | "--limit"
             | "--hybrid"
+            | "--input"
+            | "--kind"
             | "--fts"
             | "--vector"
             | "--refresh"
@@ -1113,6 +1182,8 @@ fn query_attached_option(value: &str) -> bool {
         || value.starts_with("--color=")
         || value.starts_with("--limit=")
         || value.starts_with("--hybrid=")
+        || value.starts_with("--input=")
+        || value.starts_with("--kind=")
         || value.starts_with("--fts=")
         || value.starts_with("--vector=")
         || value.starts_with("--refresh=")
@@ -1196,6 +1267,17 @@ fn context_refresh_policy(
 }
 
 fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
+    if args.input.is_some()
+        && (args.rg
+            || !args.values.is_empty()
+            || !args.hybrid_queries.is_empty()
+            || !args.fts.is_empty()
+            || !args.vector.is_empty()
+            || args.fuse
+            || args.prefer_symbol)
+    {
+        return Err(CliError::InputWithQuery);
+    }
     if args.force_direct && mode != ClientMode::Direct {
         return Err(CliError::ForceDirectMode);
     }
@@ -1208,7 +1290,8 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
         return Err(CliError::RgWithIndexedRoutes);
     }
     if args.rg
-        && (args.preview.is_some()
+        && (args.target_kind.is_some()
+            || args.preview.is_some()
             || args.trace
             || args.refresh.is_some()
             || args.prefer_symbol
@@ -1228,30 +1311,20 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
             1
         };
     }
-    if !args.rg {
-        if values.iter().any(|value| value == "--json") {
-            return Err(CliError::RemovedJson);
-        }
-        if let Some(option) = values
+    if !args.rg
+        && let Some(option) = values
             .iter()
             .find(|value| value.starts_with('-') && *value != "-")
-        {
-            return Err(CliError::UnknownQueryOption(option.clone()));
-        }
+    {
+        return Err(CliError::UnknownQueryOption(option.clone()));
     }
     Ok(())
 }
 
-fn query_plan(
-    mut args: QueryArgs,
-    current_dir: PathBuf,
-    terminal: bool,
-) -> Result<CliPlan, CliError> {
-    let mode = resolve_query_mode(&args)?;
-    validate_query(&args, mode)?;
-    let home = args.home.clone();
-    let human = terminal && !args.compact;
-    let output = OutputOptions {
+fn query_output(args: &QueryArgs, terminal: bool) -> OutputOptions {
+    let human = terminal && !args.compact && !args.json;
+    OutputOptions {
+        json: args.json,
         debug: args.debug,
         trace: args.trace,
         human,
@@ -1265,7 +1338,17 @@ fn query_plan(
         } else {
             args.color.unwrap_or_default()
         },
-    };
+    }
+}
+
+fn query_plan(
+    mut args: QueryArgs,
+    current_dir: PathBuf,
+    terminal: bool,
+) -> Result<CliPlan, CliError> {
+    let mode = resolve_query_mode(&args)?;
+    validate_query(&args, mode)?;
+    let output = query_output(&args, terminal);
     let mut request = if args.rg {
         if args.literal_value_count > 0 {
             args.values
@@ -1292,10 +1375,14 @@ fn query_plan(
                 query,
             }))
             .collect::<Vec<_>>();
-        if queries.is_empty() && routes.is_empty() {
+        if queries.is_empty() && routes.is_empty() && args.input.is_none() {
             return Err(CliError::MissingQuery);
         }
         ContextOptions {
+            target_kind: args.target_kind,
+            query_image: args.input.map(|path| QueryImage::Path {
+                path: resolve_from(&current_dir, Some(&path)),
+            }),
             queries,
             routes,
             fuse: args.fuse,
@@ -1341,9 +1428,75 @@ fn query_plan(
         .collect();
     Ok(CliPlan::Query {
         mode,
-        home,
+        home: args.home,
         request: Box::new(request),
         output,
+    })
+}
+
+fn content_kind(value: &str) -> Result<ContentKind, CliError> {
+    match value {
+        "text" => Ok(ContentKind::Text),
+        "code" => Ok(ContentKind::Code),
+        "image" => Ok(ContentKind::Image),
+        _ => Err(CliError::InvalidContentKind(value.to_owned())),
+    }
+}
+
+struct EmbeddingUpdates {
+    default_model: Option<EmbeddingModelSpec>,
+    routes: BTreeMap<ContentKind, EmbeddingModelSpec>,
+    inherited_kinds: Vec<ContentKind>,
+}
+
+fn parse_embeddings(args: &IndexArgs) -> Result<EmbeddingUpdates, CliError> {
+    let model = |reference: &str| EmbeddingModelSpec {
+        reference: reference.to_owned(),
+        revision: None,
+        cache_dir: args.model_cache.clone(),
+        endpoint: None,
+        device: args.device.unwrap_or(DeviceArg::Auto).into(),
+    };
+    let mut default = None;
+    let mut routes = BTreeMap::new();
+    let mut cleared = Vec::new();
+    for value in &args.embedding {
+        let (kind, reference) = value
+            .split_once('=')
+            .map_or((None, value.as_str()), |(kind, reference)| {
+                (Some(kind), reference)
+            });
+        if reference.trim().is_empty() {
+            return Err(CliError::InvalidEmbedding(format!(
+                "{value:?}; expected MODEL, KIND=MODEL or KIND=default"
+            )));
+        }
+        if let Some(kind) = kind {
+            let kind = content_kind(kind)?;
+            if routes.contains_key(&kind) || cleared.contains(&kind) {
+                return Err(CliError::InvalidEmbedding(format!(
+                    "duplicate configuration for {}",
+                    kind.as_str()
+                )));
+            }
+            if reference == "default" {
+                cleared.push(kind);
+            } else {
+                routes.insert(kind, model(reference));
+            }
+        } else {
+            if default.is_some() {
+                return Err(CliError::InvalidEmbedding(
+                    "default model specified more than once".to_owned(),
+                ));
+            }
+            default = Some(model(reference));
+        }
+    }
+    Ok(EmbeddingUpdates {
+        default_model: default,
+        routes,
+        inherited_kinds: cleared,
     })
 }
 
@@ -1367,7 +1520,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         if args.name.is_some()
             || args.rebuild
             || args.reset_paths
-            || args.embedding.is_some()
+            || !args.embedding.is_empty()
             || args.model_cache.is_some()
             || args.device.is_some()
             || args.api_key.is_some()
@@ -1399,13 +1552,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             .map(|path| resolve_from(current_dir, Some(&path)))
             .collect()
     });
-    let embedding = args.embedding.map(|reference| EmbeddingModelSpec {
-        reference,
-        revision: None,
-        cache_dir: args.model_cache.clone(),
-        endpoint: args.endpoint.clone(),
-        device: args.device.unwrap_or(DeviceArg::Auto).into(),
-    });
+    let embeddings = parse_embeddings(&args)?;
     Ok(CliPlan::Index {
         mode,
         home,
@@ -1415,7 +1562,9 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             rebuild: args.rebuild,
             reset_paths: args.reset_paths,
             scan,
-            embedding,
+            embedding: embeddings.default_model,
+            embedding_routes: embeddings.routes,
+            clear_embedding_routes: embeddings.inherited_kinds,
             allow_remote: args.allow_remote,
             api_key: args.api_key,
             endpoint: args.endpoint.clone(),
@@ -2178,14 +2327,17 @@ mod tests {
     }
 
     #[test]
-    fn index_accepts_one_model_and_rejects_model_routes() {
-        for args in [
-            vec!["zg", "--index", "--embedding", "one", "--embedding", "two"],
-            vec!["zg", "--index", "--embedding-route", "text=one"],
-            vec!["zg", "--config", "model", "set", "one", "--content", "text"],
-        ] {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
+    fn index_accepts_one_default_and_rejects_repeated_default() {
+        assert!(
+            Cli::try_parse_from(["zg", "--index", "--embedding", "one", "--embedding", "two"])
+                .expect("parse repeatable embedding")
+                .into_plan(PathBuf::from("/workspace"))
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["zg", "--config", "model", "set", "one", "--content", "text"])
+                .is_err()
+        );
         let CliPlan::Index {
             operation: IndexOperation::Build(request),
             ..
@@ -2206,6 +2358,172 @@ mod tests {
         let model = request.embedding.expect("selected model");
         assert_eq!(model.reference, "local/potion-code-16m-v2");
         assert_eq!(model.device, super::Device::Cpu);
+    }
+
+    #[test]
+    fn file_input_is_explicit_and_independent_of_result_kind() {
+        let CliPlan::Query {
+            request, output, ..
+        } = plan(
+            &[
+                "zg",
+                "--input",
+                "sample.png",
+                "--limit",
+                "3",
+                "--kind=image",
+                "--json",
+            ],
+            false,
+        )
+        else {
+            panic!("query")
+        };
+        assert_eq!(
+            request.query_image,
+            Some(super::QueryImage::Path {
+                path: std::env::temp_dir().join("sample.png")
+            })
+        );
+        assert_eq!(request.limit, Some(3));
+        assert_eq!(request.target_kind, Some(super::ContentKind::Image));
+        assert!(output.json);
+        assert!(request.queries.is_empty() && request.routes.is_empty());
+        let CliPlan::Query { request, .. } = plan(&["zg", "--input=sample.png"], false) else {
+            panic!("query")
+        };
+        assert!(request.query_image.is_some());
+        assert!(request.target_kind.is_none());
+        let existing_file = std::env::current_exe().expect("existing file");
+        let path = existing_file.to_str().expect("test executable path");
+        let CliPlan::Query { request, .. } = plan(&["zg", path], false) else {
+            panic!("query")
+        };
+        assert_eq!(request.queries, [path]);
+        assert!(request.query_image.is_none());
+        for args in [
+            vec!["zg", "words", "--input", "sample.png"],
+            vec!["zg", "--input", "sample.png", "--fts", "words"],
+            vec!["zg", "--input", "sample.png", "--vector", "words"],
+            vec!["zg", "--input", "sample.png", "--hybrid", "words"],
+            vec!["zg", "--input", "sample.png", "--fuse"],
+            vec!["zg", "--input", "sample.png", "--rg"],
+            vec!["zg", "--rg", "words", "--kind", "code"],
+            vec!["zg", "--input", "sample.png", "--prefer-symbol"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args)
+                    .expect("parse")
+                    .into_plan(PathBuf::from("/workspace"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn content_routes_reject_conflicting_or_invalid_cli_settings() {
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = plan(
+            &[
+                "zg",
+                "--index",
+                "--embedding",
+                "local/text",
+                "--embedding",
+                "image=qwen/vision",
+                "--embedding",
+                "code=local/code",
+                "--embedding",
+                "text=default",
+                "--endpoint",
+                "https://example.test/default-model",
+            ],
+            false,
+        )
+        else {
+            panic!("index")
+        };
+        let default = request.embedding.expect("default");
+        assert_eq!(default.reference, "local/text");
+        assert_eq!(
+            request.endpoint.as_deref(),
+            Some("https://example.test/default-model")
+        );
+        assert!(default.endpoint.is_none());
+        assert_eq!(
+            request.embedding_routes[&super::ContentKind::Image].reference,
+            "qwen/vision"
+        );
+        assert_eq!(request.embedding_routes.len(), 2);
+        assert!(
+            request
+                .embedding_routes
+                .values()
+                .all(|model| model.endpoint.is_none())
+        );
+        assert_eq!(
+            request.clear_embedding_routes,
+            vec![super::ContentKind::Text]
+        );
+        for route_args in [
+            vec!["--embedding", "image=one", "--embedding", "image=two"],
+            vec!["--embedding", "image=one", "--embedding", "image=default"],
+            vec!["--embedding", "image="],
+            vec!["--embedding", "image= "],
+            vec!["--embedding", " "],
+            vec!["--embedding", "=one"],
+            vec!["--embedding", "unknown=one"],
+            vec![
+                "--embedding",
+                "image=default",
+                "--embedding",
+                "image=default",
+            ],
+        ] {
+            let args = [vec!["zg", "--index"], route_args].concat();
+            assert!(
+                Cli::try_parse_from(args)
+                    .expect("parse")
+                    .into_plan(PathBuf::from("/workspace"))
+                    .is_err()
+            );
+        }
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = plan(&["zg", "--embedding=image=default", "--index"], false)
+        else {
+            panic!("index")
+        };
+        assert!(request.embedding.is_none());
+        assert!(request.embedding_routes.is_empty());
+        assert_eq!(request.clear_embedding_routes, [super::ContentKind::Image]);
+    }
+
+    #[test]
+    fn content_reads_require_entity_generation_and_output() {
+        let CliPlan::ReadContent {
+            request, output, ..
+        } = plan(
+            &[
+                "zg",
+                "--read-content",
+                "entity-id",
+                "--generation",
+                "generation-id",
+                "--output",
+                "snapshot.png",
+            ],
+            false,
+        )
+        else {
+            panic!("read")
+        };
+        assert_eq!(request.reference.entity_id, "entity-id");
+        assert_eq!(request.reference.generation, "generation-id");
+        assert_eq!(output, std::env::temp_dir().join("snapshot.png"));
     }
 
     #[test]
@@ -2373,10 +2691,14 @@ mod tests {
         assert_eq!(request.limit, Some(3));
         assert_eq!(request.routes.len(), 1);
 
-        let removed = Cli::try_parse_from(["zg", "--json", "query"])
-            .expect("shape validation follows syntax parsing")
-            .into_plan(PathBuf::from("/workspace"));
-        assert!(removed.is_err());
+        let CliPlan::Query { output, .. } = Cli::try_parse_from(["zg", "--json", "query"])
+            .expect("JSON syntax")
+            .into_plan(PathBuf::from("/workspace"))
+            .expect("JSON plan")
+        else {
+            panic!("query")
+        };
+        assert!(output.json);
     }
 
     #[test]

@@ -196,7 +196,8 @@ Remote Embedding authorization. Configuration examples are in
 Rust uses the same search routing, preview and freshness rules in `agent` and
 `full`. Search credentials and device selection come from the configured runtime;
 public search does not accept `apiKey` or `device`. Index accepts runtime overrides,
-`follow`, ordered globs and native ripgrep type filters, and defaults to `wait: false`.
+`follow` and ordered globs, and defaults to `wait: false`. Rust index uses globs
+for file selection; `fileTypes` and `excludedFileTypes` are search-only parameters.
 Completed debug indexing returns `scan_diagnostics` alongside extended diagnostics.
 
 The Rust indexed-search API rejects scanning options (`hidden`, `noIgnore`,

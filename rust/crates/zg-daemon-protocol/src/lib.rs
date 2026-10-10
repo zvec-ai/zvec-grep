@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zg_engine::ErrorReport;
 use zg_engine::api::{
+    content::{ContentResult, ReadContentOptions},
     context::{ContextOptions, ContextResult},
     index::{IndexOptions, IndexResult, progress::IndexProgress},
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 15;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 17;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -76,6 +77,7 @@ pub struct ExecuteRequest {
 #[serde(rename_all = "snake_case", tag = "kind", content = "request")]
 pub enum DaemonCommand {
     Context(ContextOptions),
+    ReadContent(ReadContentOptions),
     Index(IndexOptions),
     IndexAuthorization(IndexOptions),
     QueryAuthorization(ContextOptions),
@@ -187,6 +189,7 @@ pub enum IndexStreamEvent {
 #[serde(rename_all = "snake_case", tag = "kind", content = "reply")]
 pub enum DaemonReply {
     Context(Box<ContextResult>),
+    Content(Box<ContentResult>),
     Index(Box<IndexResult>),
     IndexAuthorization(Vec<zg_engine::authorization::IndexAuthorization>),
     QueryAuthorization(Vec<zg_engine::authorization::QueryAuthorization>),
@@ -300,7 +303,9 @@ mod tests {
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
-                embedding: None,
+                default_model_ref: None,
+                tables: Vec::new(),
+                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
@@ -391,5 +396,41 @@ mod tests {
         let decoded: ExecutionResult =
             serde_json::from_value(value).expect("error reply should deserialize");
         assert_eq!(decoded, result);
+    }
+    #[test]
+    fn image_query_and_content_reference_roundtrip_without_losing_bytes() {
+        use zg_engine::api::{
+            content::{ContentRef, ReadContentOptions},
+            context::options::{FileFormat, QueryImage},
+        };
+        let image = DaemonCommand::Context(ContextOptions {
+            target_kind: Some(zg_engine::api::context::options::ContentKind::Image),
+            query_image: Some(QueryImage::Bytes {
+                format: FileFormat::Png,
+                data: vec![1, 2, 3],
+            }),
+            ..Default::default()
+        });
+        let value = serde_json::to_value(&image).expect("image command");
+        assert_eq!(value["request"]["query_image"]["data"], "AQID");
+        assert_eq!(value["request"]["target_kind"], "image");
+        assert_eq!(
+            serde_json::from_value::<DaemonCommand>(value).expect("image decode"),
+            image
+        );
+        let read = DaemonCommand::ReadContent(ReadContentOptions {
+            root: Some("/workspace".into()),
+            ..ReadContentOptions::new(ContentRef {
+                generation: "generation".into(),
+                entity_id: "entity".into(),
+            })
+        });
+        assert_eq!(
+            serde_json::from_value::<DaemonCommand>(
+                serde_json::to_value(&read).expect("reference")
+            )
+            .expect("reference decode"),
+            read
+        );
     }
 }

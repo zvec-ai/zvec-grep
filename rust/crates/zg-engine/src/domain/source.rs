@@ -1,16 +1,20 @@
-//! Source files, directories, formats, content, and relative ranges.
+//! Source files, directories, formats, and relative ranges.
 
-mod content;
 mod directory;
 mod file;
 mod format;
 mod path;
 mod range;
 
-pub use content::ContentKind;
-pub(crate) use content::{Content, ImageContent, TableCell, TableCellRole, TableContent};
-pub(crate) use directory::{DirectoryId, DirectoryRecord};
-pub(crate) use file::{FileId, FileIndexStatus, FileRecord, FileSnapshot};
-pub use format::{FileCategory, FileFormat};
+pub(crate) use directory::DirectoryId;
+pub(crate) use directory::DirectoryRecord;
+pub(crate) use file::FileId;
+pub(crate) use file::FileIndexStatus;
+pub(crate) use file::FileRecord;
+pub(crate) use file::FileSnapshot;
+pub use format::FileCategory;
+pub use format::FileFormat;
 pub(crate) use path::SourcePath;
-pub(crate) use range::{ByteRange, Range, TextRange};
+pub(crate) use range::ByteRange;
+pub(crate) use range::Range;
+pub(crate) use range::TextRange;

@@ -40,7 +40,7 @@ removal_condition = "Node.js 为这些 indexed-search 参数提供实际语义�
 [[difference]]
 id = "mcp-typed-filter-and-index-extensions"
 owner = "MCP/engine"
-reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力；均为可选扩展，不代替 Node 的 fileTypes、follow、scan_diagnostics 和 status 字段。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
+reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力。Rust 的持久扫描配置统一使用 glob；fileTypes/excludedFileTypes 只用于查询，不用于索引请求或扫描状态。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
 removal_condition = "Node.js 提供同等能力或这些扩展不再有客户端时，按字段评估统一；不能删除引擎能力来简化协议。"
 
 [[difference]]

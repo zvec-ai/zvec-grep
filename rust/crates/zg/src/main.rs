@@ -23,6 +23,8 @@ use zg_daemon::{DaemonStatus, ListenAddress, McpToolset as DaemonMcpToolset, Ser
 use zg_daemon_protocol::{DaemonCommand, DaemonReply};
 use zg_engine::{EngineError, ZvecGrep, api::context::ContextOptions};
 
+mod process_limits;
+
 static DAEMON_LOGGING: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
@@ -73,6 +75,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     install_darwin_metal_residency_mitigation()?;
     // Emit after a possible re-exec so macOS prints each warning only once.
     warn();
+    process_limits::configure_file_limit();
     let debug = match &plan {
         CliPlan::Query { output, .. }
         | CliPlan::Index { output, .. }
@@ -122,6 +125,12 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
             request,
             output,
         } => Box::pin(execute_request(mode, home.as_deref(), *request, output)).await,
+        CliPlan::ReadContent {
+            mode,
+            home,
+            request,
+            output,
+        } => execute_read_content(mode, home.as_deref(), request, &output).await,
         CliPlan::Index {
             mode,
             home,
@@ -201,6 +210,47 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
         CliPlan::Uninstall(args) => zg_cli::execute_uninstall(&args).map_err(Into::into),
         CliPlan::Help(_) | CliPlan::Version => Ok(()),
     }
+}
+
+async fn execute_read_content(
+    mode: ClientMode,
+    home: Option<&Path>,
+    request: zg_engine::api::content::ReadContentOptions,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    use std::io::Write;
+    use zg_engine::api::content::Content;
+    let result = if use_server(mode, home).await? {
+        let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
+        let DaemonReply::Content(content) =
+            zg_daemon::execute_command(&home, DaemonCommand::ReadContent(request)).await?
+        else {
+            return Err(protocol_mismatch("read content"));
+        };
+        *content
+    } else {
+        let engine = ZvecGrep::new();
+        let content = engine.read_content(request).await;
+        engine.close();
+        content?
+    };
+    let bytes = match &result.content {
+        Content::Text(text) | Content::Code(text) => text.as_bytes(),
+        Content::Image(image) => image.data(),
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    println!(
+        "Saved {} content ({} bytes): {}",
+        result.content.kind().as_str(),
+        bytes.len(),
+        output.display()
+    );
+    Ok(())
 }
 
 async fn execute_install_plan(args: &zg_cli::InstallArgs) -> Result<(), Box<dyn Error>> {
@@ -371,6 +421,9 @@ async fn ensure_query_index(
         return Ok(false);
     }
 
+    if request.query_image.is_some() {
+        return Err(EngineError::unsupported("image queries require an existing image index; configure --embedding image=<model> with zg --index first").into());
+    }
     let embedding = zg_engine::config::implicit_embedding_reference()?;
     eprintln!("No index found; creating one with {embedding}.");
     // Implicit builds must not inherit remote credentials or authorization.
@@ -447,9 +500,8 @@ async fn authorize_query_with_io(
     let mut decisions = Vec::new();
     for authorization in &targets {
         let decision = zg_cli::prompt_query_authorization(
-            &authorization.target,
-            authorization.query_text,
-            authorization.workspace_content,
+            authorization,
+            request.query_image.is_none(),
             &mut input,
             &mut output,
         )?;
@@ -484,11 +536,6 @@ async fn authorize_query_with_io(
                 unreachable!()
             }
         }
-    }
-    // A single remote query destination can retain the legacy binding. Multiple
-    // models keep their individual saved endpoints instead of a global override.
-    if targets.len() == 1 {
-        request.authorization_model = Some(targets[0].target.model.clone());
     }
     Ok(())
 }
@@ -924,10 +971,6 @@ mod query_authorization_tests {
         );
         assert_eq!(once.authorized_remote.len(), 1);
         assert_eq!(once.authorized_remote[0].model, "qwen/text-embedding-v4");
-        assert_eq!(
-            once.authorization_model.as_deref(),
-            Some("qwen/text-embedding-v4")
-        );
         assert!(!root.join(".zvec-grep/authorization.json").exists());
         assert!(
             String::from_utf8(prompt)

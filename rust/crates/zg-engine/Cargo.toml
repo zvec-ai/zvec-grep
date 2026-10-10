@@ -25,6 +25,7 @@ grep.workspace = true
 half = "2.7.1"
 hex = "0.4.3"
 ignore.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 hmac-sha256 = "1.1.14"
 httpdate = "1.0.3"
 llama-cpp-2 = { version = "0.1.154", default-features = false }

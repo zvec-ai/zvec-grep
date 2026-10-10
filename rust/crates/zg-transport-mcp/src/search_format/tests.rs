@@ -26,6 +26,74 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/mcp/search-presentation.json"),
     )
     .expect("captured Node.js MCP fixtures")
+    .into_iter()
+    .map(|mut fixture| {
+        adapt_context_fixture(&mut fixture.result);
+        // Current engine replies already carry presentation order; old captured
+        // Node replies delegated their final rank sorting to this formatter.
+        if let Some(items) = fixture.result["items"].as_array_mut() {
+            items.sort_by_key(|item| item["rank"].as_u64().unwrap_or_default());
+        }
+        fixture
+    })
+    .collect()
+}
+
+pub(crate) fn adapt_context_fixture(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.contains_key("hits_returned") && object.contains_key("routes") {
+                object.insert("input_kind".into(), "text".into());
+                object.insert("targets".into(), serde_json::json!([]));
+                object.insert("result_groups".into(), serde_json::json!([]));
+                object.insert("incomplete".into(), false.into());
+                object.entry("limit").or_insert_with(|| 30.into());
+            }
+            if object.contains_key("rank") && object.contains_key("content") {
+                let text = object.remove("content").expect("content exists");
+                object.insert(
+                    "preview".into(),
+                    serde_json::json!({"kind":"text", "value":text}),
+                );
+                object.remove("entity_id");
+            }
+            for value in object.values_mut() {
+                adapt_context_fixture(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                adapt_context_fixture(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn kind_groups_preserve_engine_order_instead_of_globally_sorting_ranks() {
+    let mut value = fixtures().remove(0).result;
+    let mut first = value["items"][0].clone();
+    first["rank"] = 2.into();
+    first["relative_path"] = "text-result.txt".into();
+    let mut second = first.clone();
+    second["rank"] = 1.into();
+    second["relative_path"] = "code-result.rs".into();
+    value["items"] = serde_json::json!([first, second]);
+    value["diagnostics"]["index"] = serde_json::json!({
+        "input_kind":"text", "targets":[], "incomplete":false, "limit":30,
+        "hits_returned":2, "query_groups":[], "routes":[], "result_groups":[
+        {"id":"text", "kinds":["text"], "model_refs":["fixture/text"], "scoring":"hybrid", "item_start":0, "item_count":1},
+        {"id":"code", "kinds":["code"], "model_refs":["fixture/code"], "scoring":"hybrid", "item_start":1, "item_count":1},
+    ]});
+    let result: ContextResult = serde_json::from_value(value).expect("grouped result");
+    let rendered = format_search_result(&result, SearchPreview::Short);
+    assert!(
+        rendered.find("text-result.txt").expect("text path")
+            < rendered.find("code-result.rs").expect("code path")
+    );
+    assert!(rendered.contains("result group: text kinds=text"));
+    assert!(rendered.contains("result group: code kinds=code"));
 }
 
 fn source_range_cases() -> Vec<McpSearchPresentationCase> {
@@ -55,7 +123,7 @@ fn source_range_cases() -> Vec<McpSearchPresentationCase> {
             item["range"] = entity.clone();
             item["excerpt_range"] = excerpt.clone();
             item["content_range"] = if whole_entity { entity } else { excerpt };
-            item["content"] = if whole_entity {
+            item["preview"]["value"] = if whole_entity {
                 source.clone()
             } else {
                 source[17..].to_owned()
@@ -243,4 +311,43 @@ async fn public_tool_preview_matches_node_without_changing_retrieval() {
             task.await.expect("server task").expect("server stop");
         }
     }).await.expect("tool tests terminate");
+}
+
+#[test]
+fn image_search_results_expose_content_references_without_text_ranges_or_bytes() {
+    use zg_engine::api::content::ContentRef;
+    use zg_engine::api::context::{
+        options::FileFormat,
+        result::{ContentPreview, ContentRange},
+    };
+    let mut result: ContextResult =
+        serde_json::from_value(fixtures().remove(0).result).expect("context");
+    result.items.truncate(1);
+    result.group_results.clear();
+    let item = &mut result.items[0];
+    item.relative_path = "image.png".into();
+    item.preview = ContentPreview::Image {
+        format: FileFormat::Png,
+        size_bytes: 1024,
+    };
+    item.content_ref = Some(ContentRef {
+        generation: "generation".into(),
+        entity_id: "image-entity".into(),
+    });
+    item.range = ContentRange::File;
+    item.content_range = ContentRange::File;
+    let text = format_search_result(&result, SearchPreview::Full);
+    assert!(text.contains("image.png"));
+    assert!(!text.contains("image.png:"));
+    assert!(text.contains("type: image; format: png; size: 1024 bytes"));
+    let reference = text
+        .lines()
+        .find_map(|line| line.strip_prefix("reference: "))
+        .expect("content reference");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(reference).expect("structured reference"),
+        serde_json::json!({"generation":"generation", "entityId":"image-entity"})
+    );
+    assert!(text.contains("zvec_grep_read_content"));
+    assert!(!text.contains("source:"));
 }

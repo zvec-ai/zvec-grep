@@ -17,11 +17,11 @@ pub mod options {
 }
 
 pub mod result {
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, path::PathBuf};
 
     use serde::{Deserialize, Serialize};
 
-    use crate::domain::ScanRules;
+    use crate::domain::{ContentKind, ScanRules};
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct InfoResult {
@@ -163,12 +163,19 @@ pub mod result {
         pub root: PathBuf,
         pub scan: ScanRules,
         pub policy: WorkspaceIndexPolicy,
-        /// The workspace's text embedding model.
-        pub embedding: Option<WorkspaceIndexEmbedding>,
+        pub default_model_ref: Option<String>,
+        pub tables: Vec<WorkspaceIndexTable>,
+        pub embedding_routes: BTreeMap<ContentKind, String>,
         pub fts: Option<WorkspaceIndexFts>,
         pub index_version: Option<u32>,
         pub created_epoch_ms: u64,
         pub updated_epoch_ms: u64,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct WorkspaceIndexTable {
+        pub kind: ContentKind,
+        pub embedding: WorkspaceIndexEmbedding,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -177,6 +184,7 @@ pub mod result {
         pub model: String,
         pub dimension: usize,
         pub metric: String,
+        pub content_kinds: Vec<ContentKind>,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -198,6 +206,7 @@ pub mod result {
         pub files_stored: usize,
         pub files_indexed: usize,
         pub entities_indexed: u64,
+        pub entities_by_kind: BTreeMap<ContentKind, u64>,
         /// Total source snapshot bytes for successfully indexed files, excluding index storage.
         pub indexed_size_bytes: u64,
         pub files_pending: usize,
@@ -233,10 +242,31 @@ impl result::WorkspaceIndexInfo {
             root: workspace.root.clone(),
             scan: workspace.scan.clone(),
             policy: (&workspace.index).into(),
-            embedding: workspace
+            default_model_ref: workspace
                 .index
                 .descriptor()
-                .and_then(|index| index.embeddings.first().map(Into::into)),
+                .map(|index| index.default_model.model.reference()),
+            tables: workspace.index.descriptor().map_or_else(Vec::new, |index| {
+                index
+                    .tables()
+                    .expect("validated index descriptor")
+                    .iter()
+                    .map(|table| result::WorkspaceIndexTable {
+                        kind: table.kind,
+                        embedding: (&table.embedding).into(),
+                    })
+                    .collect()
+            }),
+            embedding_routes: workspace
+                .index
+                .descriptor()
+                .map_or_else(Default::default, |index| {
+                    index
+                        .routes
+                        .iter()
+                        .map(|(kind, model)| (*kind, model.model.reference()))
+                        .collect()
+                }),
             fts: workspace
                 .index
                 .descriptor()
@@ -264,13 +294,14 @@ impl From<&crate::domain::FtsConfig> for result::WorkspaceIndexFts {
 impl From<&crate::domain::EmbeddingModelInfo> for result::WorkspaceIndexEmbedding {
     fn from(value: &crate::domain::EmbeddingModelInfo) -> Self {
         Self {
-            provider: value.model.provider.clone(),
-            model: value.model.name.clone(),
+            provider: value.model.provider().to_owned(),
+            model: value.model.name().to_owned(),
             dimension: value.dimension,
+            content_kinds: value.model.content_kinds().to_vec(),
             metric: match value.metric {
-                crate::domain::Metric::Cosine => "cosine",
-                crate::domain::Metric::DotProduct => "dot",
-                crate::domain::Metric::Euclidean => "euclidean",
+                crate::domain::EmbeddingMetric::Cosine => "cosine",
+                crate::domain::EmbeddingMetric::DotProduct => "dot",
+                crate::domain::EmbeddingMetric::Euclidean => "euclidean",
             }
             .to_owned(),
         }

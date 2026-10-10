@@ -298,9 +298,9 @@ async fn rebuilding_node_index_preserves_old_data_until_successful_publication()
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (1, 0));
     assert_eq!(server.inputs.load(Ordering::Acquire), 1);
     let current = assert_current_index(&engine, root).await?;
-    assert_eq!(current["embeddings"][0]["model"]["provider"], "qwen");
+    assert_eq!(current["defaultModel"]["model"]["provider"], "qwen");
     assert_eq!(
-        current["embeddings"][0]["model"]["name"],
+        current["defaultModel"]["model"]["name"],
         "text-embedding-v4"
     );
     assert!(current.get("rootPaths").is_none());

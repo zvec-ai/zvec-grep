@@ -2,6 +2,8 @@
 
 pub(crate) mod context;
 mod format_filter;
+#[cfg(test)]
+mod multimodal_tests;
 mod path_filter;
 mod pipeline;
 pub(crate) mod service;

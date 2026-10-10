@@ -1,19 +1,16 @@
-use serde::{Deserialize, Serialize};
+//! Model info exposes limits that pipelines can use to adjust their work,
+//! such as batch size.
+//! Limits that only determine whether an input is accepted are checked
+//! by the backend and are not exposed in model info.
+
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct ModelInfo {
-    pub provider: String,
-    pub name: String,
-    pub endpoint: Option<String>,
-}
+use serde::{Deserialize, Serialize};
 
-impl ModelInfo {
-    pub(crate) fn reference(&self) -> String {
-        format!("{}/{}", self.provider, self.name)
-    }
-}
+mod info;
+pub(crate) use info::ModelInfo;
 
+/// Connection and execution settings for a model runtime.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelConfig {
@@ -41,33 +38,29 @@ pub enum Device {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelProgress {
     Preparing {
-        model: String,
+        model_ref: String,
     },
     Downloading {
-        model: String,
+        model_ref: String,
         downloaded_bytes: Option<u64>,
         total_bytes: Option<u64>,
     },
     Warning {
-        model: String,
+        model_ref: String,
         message: String,
     },
     Ready {
-        model: String,
+        model_ref: String,
     },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Metric {
-    Cosine,
-    DotProduct,
-    Euclidean,
-}
-
 mod embedding;
-mod reranking;
+pub(crate) use embedding::EmbeddingMetric;
+pub(crate) use embedding::EmbeddingModelInfo;
+pub(crate) use embedding::EmbeddingPurpose;
+pub(crate) use embedding::EmbeddingResult;
+pub(crate) use embedding::{EmbeddingRetrieval, EmbeddingSpace};
 
-pub(crate) use embedding::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult};
+mod reranking;
 #[allow(unused_imports)] // Reserved for the first reranking backend.
 pub(crate) use reranking::RerankScore;

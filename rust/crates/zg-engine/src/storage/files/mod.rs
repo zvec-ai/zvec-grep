@@ -37,12 +37,22 @@ impl Files {
     }
 
     pub(super) fn open(root: &Path, read_only: bool) -> EngineResult<Self> {
+        let ids = if read_only {
+            None
+        } else {
+            Some(FileIds::open(root)?)
+        };
         let mut files = Self {
             collection: open_collection(&root.join("files"), &files_schema()?, read_only)?,
-            ids: None,
+            ids,
         };
         if !read_only {
-            files.ids = Some(FileIds::from_paths(files.list_paths()?)?);
+            let paths = files.list_paths()?;
+            files
+                .ids
+                .as_mut()
+                .expect("writable file identities")
+                .restore(paths)?;
         }
         Ok(files)
     }

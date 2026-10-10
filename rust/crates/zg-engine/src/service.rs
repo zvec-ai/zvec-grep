@@ -6,6 +6,7 @@ use std::sync::{
 use crate::{
     EngineError,
     api::{
+        content::{ContentResult, ReadContentOptions},
         context::{ContextOptions, ContextResult},
         index::{IndexOptions, IndexResult},
         info::{InfoOptions, InfoResult},
@@ -83,6 +84,19 @@ impl EngineService {
             )
             .await
         }
+    }
+
+    pub(crate) async fn read_content(
+        &self,
+        options: ReadContentOptions,
+    ) -> Result<ContentResult, EngineError> {
+        self.ensure_open()?;
+        let cache = self
+            .read_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        crate::pipelines::content::read_content(&self.indexing, &options, cache.as_ref()).await
     }
 
     /// Creates or refreshes the workspace index.

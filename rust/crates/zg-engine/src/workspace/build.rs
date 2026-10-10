@@ -339,7 +339,7 @@ mod tests {
 
     use crate::domain::{
         IndexDescriptor, IndexState, Workspace,
-        model::{EmbeddingModelInfo, Metric, ModelConfig},
+        model::{EmbeddingMetric, EmbeddingModelInfo, ModelConfig},
     };
     use crate::workspace::manifest::read_workspace_manifest;
 
@@ -355,18 +355,24 @@ mod tests {
                 name: "workspace".to_owned(),
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "local".into(),
-                        name: "example".into(),
-                        endpoint: None,
-                    },
+                index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
+                    model: crate::domain::model::ModelInfo::new(
+                        "local",
+                        "example",
+                        [
+                            crate::domain::ContentKind::Text,
+                            crate::domain::ContentKind::Code,
+                        ],
+                    )
+                    .expect("fixture model identity"),
                     dimension: 8,
-                    metric: Metric::Cosine,
+                    metric: EmbeddingMetric::Cosine,
                     max_batch_size: 32,
                     max_input_tokens: None,
                     max_image_bytes: None,
-                })),
+                }))),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
             },

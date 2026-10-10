@@ -16,42 +16,44 @@ pub(super) fn for_index(reporter: IndexProgressReporter) -> ModelProgressReporte
 }
 
 fn index_progress(progress: ModelProgress, concurrency: usize) -> IndexProgress {
-    let (stage, model, downloaded_bytes, total_bytes, message) = match progress {
-        ModelProgress::Preparing { model } => {
-            (IndexEmbeddingStage::Preparing, model, None, None, None)
+    let (stage, model_ref, downloaded_bytes, total_bytes, message) = match progress {
+        ModelProgress::Preparing { model_ref } => {
+            (IndexEmbeddingStage::Preparing, model_ref, None, None, None)
         }
         ModelProgress::Downloading {
-            model,
+            model_ref,
             downloaded_bytes,
             total_bytes,
         } => (
             IndexEmbeddingStage::Downloading,
-            model,
+            model_ref,
             downloaded_bytes,
             total_bytes,
             None,
         ),
-        ModelProgress::Warning { model, message } => (
+        ModelProgress::Warning { model_ref, message } => (
             IndexEmbeddingStage::Warning,
-            model,
+            model_ref,
             None,
             None,
             Some(message),
         ),
-        ModelProgress::Ready { model } => (IndexEmbeddingStage::Ready, model, None, None, None),
+        ModelProgress::Ready { model_ref } => {
+            (IndexEmbeddingStage::Ready, model_ref, None, None, None)
+        }
     };
     IndexProgress {
         phase: IndexProgressPhase::Indexing,
         files_total: None,
         files_indexed: None,
         files_failed: None,
-        detail: Some(format!("downloading {model}")),
+        detail: Some(format!("downloading {model_ref}")),
         embedding: Some(IndexEmbeddingProgress {
             concurrency: Some(concurrency),
             max_concurrency: Some(concurrency),
             retryable_failures: None,
             stage: Some(stage),
-            model: Some(model),
+            model: Some(model_ref),
             downloaded_bytes,
             total_bytes,
             message,
@@ -65,22 +67,22 @@ mod tests {
 
     #[test]
     fn preserves_model_lifecycle_details_and_effective_concurrency() {
-        let model = "local/fixture";
+        let model_ref = "local/fixture";
         let events = [
             ModelProgress::Preparing {
-                model: model.into(),
+                model_ref: model_ref.into(),
             },
             ModelProgress::Downloading {
-                model: model.into(),
+                model_ref: model_ref.into(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Warning {
-                model: model.into(),
+                model_ref: model_ref.into(),
                 message: "fixture warning".into(),
             },
             ModelProgress::Ready {
-                model: model.into(),
+                model_ref: model_ref.into(),
             },
         ]
         .map(|event| index_progress(event, 3));
@@ -99,7 +101,7 @@ mod tests {
             );
             let embedding = event.embedding.as_ref().expect("model event");
             assert_eq!(embedding.stage, Some(stage));
-            assert_eq!(embedding.model.as_deref(), Some(model));
+            assert_eq!(embedding.model.as_deref(), Some(model_ref));
             assert_eq!(embedding.concurrency, Some(3));
             assert_eq!(embedding.max_concurrency, Some(3));
             assert_eq!(embedding.retryable_failures, None);

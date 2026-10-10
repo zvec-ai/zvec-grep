@@ -1,6 +1,6 @@
 use crate::domain::model::ModelConfig;
 #[cfg(test)]
-use crate::domain::model::{Device, Metric};
+use crate::domain::model::{Device, EmbeddingMetric};
 use crate::{
     EngineError,
     domain::{
@@ -49,9 +49,9 @@ struct ManifestData {
     scan: ScanRules,
     index_policy: IndexPolicy,
     #[serde(default)]
-    embeddings: Vec<EmbeddingModelInfo>,
+    default_model: Option<EmbeddingModelInfo>,
     #[serde(default)]
-    embedding_routes: BTreeMap<ContentKind, String>,
+    embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
     index_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_generation: Option<String>,
@@ -67,11 +67,13 @@ impl TryFrom<ManifestData> for WorkspaceManifest {
         let index = match input.index_policy {
             IndexPolicy::Disabled => IndexState::Disabled,
             IndexPolicy::Uninitialized => IndexState::Uninitialized,
-            IndexPolicy::Enabled => IndexState::Enabled(IndexDescriptor {
-                embeddings: input.embeddings,
+            IndexPolicy::Enabled => IndexState::Enabled(Box::new(IndexDescriptor {
+                default_model: input
+                    .default_model
+                    .ok_or_else(|| "enabled workspace requires defaultModel".to_owned())?,
                 routes: input.embedding_routes,
                 fts: crate::domain::FTS_CONFIG,
-            }),
+            })),
         };
         let manifest = Self {
             recorded_root: input.root.clone(),
@@ -108,10 +110,10 @@ impl From<WorkspaceManifest> for ManifestData {
                 IndexState::Disabled => IndexPolicy::Disabled,
                 IndexState::Enabled(_) => IndexPolicy::Enabled,
             },
-            embeddings: workspace
+            default_model: workspace
                 .index
                 .descriptor()
-                .map_or_else(Vec::new, |index| index.embeddings.clone()),
+                .map(|index| index.default_model.clone()),
             embedding_routes: workspace
                 .index
                 .descriptor()
@@ -151,18 +153,18 @@ impl WorkspaceManifest {
         )
     }
 
-    pub(crate) fn embedding(&self) -> Option<&EmbeddingModelInfo> {
+    pub(crate) fn default_embedding(&self) -> Option<&EmbeddingModelInfo> {
         self.workspace
             .index
             .descriptor()
-            .and_then(|index| index.embeddings.first())
+            .map(|index| &index.default_model)
     }
 
-    pub(crate) fn embeddings(&self) -> &[EmbeddingModelInfo] {
+    pub(crate) fn embeddings(&self) -> Vec<&EmbeddingModelInfo> {
         self.workspace
             .index
             .descriptor()
-            .map_or(&[], |index| index.embeddings.as_slice())
+            .map_or_else(Vec::new, IndexDescriptor::embeddings)
     }
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
@@ -377,6 +379,7 @@ fn manifest_io(operation: &str, path: &Path, error: &std::io::Error) -> EngineEr
 
 #[cfg(test)]
 mod tests {
+    use crate::workspace::CURRENT_INDEX_VERSION;
     use tempfile::tempdir;
 
     use super::*;
@@ -390,18 +393,24 @@ mod tests {
                     globs: vec!["*.rs".into()],
                     ..crate::domain::ScanRules::default()
                 },
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "local".into(),
-                        name: "minilm".into(),
-                        endpoint: Some("https://models.example.test/embeddings".into()),
-                    },
+                index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::Text,
+                    model: crate::domain::model::ModelInfo::new(
+                        "local",
+                        "minilm",
+                        [
+                            crate::domain::ContentKind::Text,
+                            crate::domain::ContentKind::Code,
+                        ],
+                    )
+                    .expect("fixture model identity"),
                     dimension: 384,
-                    metric: Metric::Cosine,
+                    metric: EmbeddingMetric::Cosine,
                     max_batch_size: 32,
                     max_input_tokens: Some(8192),
                     max_image_bytes: Some(1_048_576),
-                })),
+                }))),
                 created_epoch_ms: 10,
                 updated_epoch_ms: 20,
             },
@@ -467,7 +476,12 @@ mod tests {
                 "rootPaths",
                 serde_json::json!([{"absolutePath": directory.path(), "recursive": true}]),
             ),
-            ("embedding", value["embeddings"][0].clone()),
+            ("embedding", value["defaultModel"].clone()),
+            (
+                "embeddings",
+                serde_json::json!([value["defaultModel"].clone()]),
+            ),
+            ("defaultModelRef", serde_json::json!("local/minilm")),
             (
                 "embeddingRuntime",
                 value["embeddingRuntimes"]["local/minilm"].clone(),
@@ -490,23 +504,88 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_multiple_models_and_nontext_routes() {
+    fn manifest_preserves_default_and_content_routes() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        let mut manifest = fixture_manifest(&home);
+        let IndexState::Enabled(index) = &mut manifest.workspace.index else {
+            panic!("enabled fixture");
+        };
+        let mut vision = index.default_model.clone();
+        vision.model = crate::domain::model::ModelInfo::new(
+            "test",
+            "vision",
+            [ContentKind::Text, ContentKind::Image],
+        )
+        .expect("vision model");
+        vision.retrieval = crate::domain::model::EmbeddingRetrieval::TextImage;
+        index.routes.insert(ContentKind::Image, vision);
+        let value = serde_json::to_value(&manifest).expect("manifest JSON");
+        assert_eq!(value["defaultModel"]["model"]["name"], "minilm");
+        assert_eq!(
+            value["embeddingRoutes"]["image"]["model"]["name"],
+            serde_json::json!("vision")
+        );
+        write_workspace_manifest(&home, &manifest).expect("write routed workspace");
+        let loaded = read_workspace_manifest(&home)
+            .expect("read routed workspace")
+            .expect("manifest");
+        assert_eq!(loaded, manifest);
+        assert_eq!(
+            loaded
+                .default_embedding()
+                .expect("default model")
+                .model
+                .reference(),
+            "local/minilm"
+        );
+        let index = loaded.workspace.index.descriptor().expect("descriptor");
+        assert_eq!(
+            index
+                .model_for(ContentKind::Image)
+                .expect("route")
+                .expect("model")
+                .model
+                .reference(),
+            "test/vision"
+        );
+        assert_eq!(
+            index
+                .model_for(ContentKind::Text)
+                .expect("fallback")
+                .expect("model")
+                .model
+                .reference(),
+            "local/minilm"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_missing_default_and_invalid_routes() {
         let directory = tempdir().expect("workspace");
         let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         let value = serde_json::to_value(&manifest).expect("manifest");
-        let mut multiple = value.clone();
-        let mut second = multiple["embeddings"][0].clone();
-        second["model"]["name"] = serde_json::json!("second-model");
-        multiple["embeddings"]
-            .as_array_mut()
-            .expect("embeddings")
-            .push(second);
-        assert!(serde_json::from_value::<WorkspaceManifest>(multiple).is_err());
-        for kind in ["image", "table"] {
-            let mut nontext = value.clone();
-            nontext["embeddingRoutes"][kind] = serde_json::json!("local/minilm");
-            assert!(serde_json::from_value::<WorkspaceManifest>(nontext).is_err());
-        }
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("defaultModel");
+        assert!(
+            serde_json::from_value::<WorkspaceManifest>(missing)
+                .expect_err("required default reference")
+                .to_string()
+                .contains("defaultModel")
+        );
+        let mut invalid = value.clone();
+        invalid["defaultModel"]["model"]["name"] = serde_json::json!("");
+        assert!(serde_json::from_value::<WorkspaceManifest>(invalid).is_err());
+        let mut invalid = value.clone();
+        invalid["embeddingRoutes"]["image"] = value["defaultModel"].clone();
+        assert!(serde_json::from_value::<WorkspaceManifest>(invalid).is_err());
+        let mut conflicting = value.clone();
+        conflicting["embeddingRoutes"]["text"] = value["defaultModel"].clone();
+        conflicting["embeddingRoutes"]["text"]["dimension"] = serde_json::json!(768);
+        assert!(serde_json::from_value::<WorkspaceManifest>(conflicting).is_err());
     }
 
     #[test]
@@ -514,7 +593,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         let mut json = serde_json::to_value(&manifest).expect("serialize");
-        json["embeddings"] = serde_json::json!([]);
+        json["defaultModel"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
         for index in [
             IndexState::Uninitialized,
@@ -657,13 +736,23 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let home = directory.path().join(".zvec-grep");
         fs::create_dir_all(&home).expect("workspace home");
-        fs::write(workspace_manifest_path(&home), r#"{"indexVersion":2}"#)
-            .expect("invalid manifest");
+        fs::write(
+            workspace_manifest_path(&home),
+            serde_json::to_vec(&serde_json::json!({"indexVersion": CURRENT_INDEX_VERSION}))
+                .expect("version header"),
+        )
+        .expect("invalid manifest");
         assert!(read_workspace_manifest(&home).is_err());
         let current = fixture_manifest(&home);
         write_workspace_manifest(&home, &current).expect("current manifest");
         let bytes = fs::read(workspace_manifest_path(&home)).expect("persisted manifest");
-        for version in [0, 1, 3, 4, 5, u32::MAX] {
+        for version in [
+            0,
+            1,
+            CURRENT_INDEX_VERSION - 1,
+            CURRENT_INDEX_VERSION + 1,
+            u32::MAX,
+        ] {
             let mut unsupported = current.clone();
             unsupported.index_version = Some(version);
             assert!(write_workspace_manifest(&home, &unsupported).is_err());
@@ -689,7 +778,11 @@ mod tests {
                     .message()
                     .contains(&format!("unsupported index version {version}"))
             );
-            assert!(error.message().contains("expected 2"));
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("expected {CURRENT_INDEX_VERSION}"))
+            );
             assert!(error.message().contains("zg --index --rebuild"));
             fs::write(workspace_manifest_path(&home), &bytes).expect("restore current manifest");
         }
@@ -739,12 +832,42 @@ mod tests {
     }
 
     #[test]
+    fn previous_model_keyed_development_schema_requires_explicit_rebuild() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        let manifest = fixture_manifest(&home);
+        write_workspace_manifest(&home, &manifest).expect("current manifest");
+        let mut previous = serde_json::to_value(&manifest).expect("manifest JSON");
+        let model = previous
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("defaultModel")
+            .expect("default model");
+        previous["embeddings"] = serde_json::json!([model]);
+        previous["defaultModelRef"] = serde_json::json!("local/minilm");
+        fs::write(
+            workspace_manifest_path(&home),
+            serde_json::to_vec(&previous).expect("old JSON"),
+        )
+        .expect("old development manifest");
+        let error = read_workspace_manifest(&home).expect_err("old schema cannot be opened");
+        assert!(error.message().contains("rebuild the index"));
+        assert!(
+            inspect_workspace_manifest(&home)
+                .expect("inspect old schema")
+                .into_manifest(true)
+                .expect("explicit rebuild")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn rejects_invalid_embedding_limits_read_from_manifest() {
         let directory = tempdir().expect("workspace");
         let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
             let mut json = serde_json::to_value(&manifest).expect("manifest JSON");
-            json["embeddings"][0][field] = serde_json::json!(0);
+            json["defaultModel"][field] = serde_json::json!(0);
             assert!(
                 serde_json::from_value::<WorkspaceManifest>(json).is_err(),
                 "{field}"

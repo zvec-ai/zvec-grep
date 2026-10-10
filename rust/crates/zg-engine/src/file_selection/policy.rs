@@ -28,7 +28,6 @@ pub(crate) struct ScanPolicy {
     root: PathBuf,
     options: ScanRules,
     matcher: GlobMatcher,
-    types: ignore::types::Types,
     defaults: Gitignore,
     control_paths: Mutex<Vec<PathBuf>>,
     cache: Mutex<IgnoreCache>,
@@ -62,12 +61,10 @@ impl ScanPolicy {
                 .map_err(|error| ignore_error(&error))?;
         }
         let control_paths = control_paths(root, &options);
-        let types = super::file_types(&options.file_types, &options.excluded_file_types)?;
         Ok(Self {
             root: root.to_path_buf(),
             options,
             matcher,
-            types,
             defaults: defaults.build().map_err(|error| ignore_error(&error))?,
             control_paths: Mutex::new(control_paths),
             cache: Mutex::new(IgnoreCache::default()),
@@ -121,9 +118,6 @@ impl ScanPolicy {
 
     fn matches_rules(&self, absolute: &Path, directory: bool) -> Result<bool, HostError> {
         let relative = absolute.strip_prefix(&self.root).unwrap_or(absolute);
-        if !directory && self.types.matched(relative, false).is_ignore() {
-            return Ok(false);
-        }
         match self.matcher.path_match(relative, directory) {
             Match::Ignore(()) => return Ok(false),
             Match::Whitelist(()) => return Ok(true),
@@ -480,7 +474,7 @@ const DEFAULT_IGNORED_DIRECTORY_NAMES: [&str; 36] = [
     "translations",
 ];
 
-const DEFAULT_IGNORED_FILE_PATTERNS: [&str; 23] = [
+const DEFAULT_IGNORED_FILE_PATTERNS: [&str; 19] = [
     "*.lock",
     "*.lockb",
     "*-lock.json",
@@ -500,8 +494,4 @@ const DEFAULT_IGNORED_FILE_PATTERNS: [&str; 23] = [
     "*_pb2.*",
     "*.g.*",
     "*.gif",
-    "*.jpeg",
-    "*.jpg",
-    "*.png",
-    "*.webp",
 ];

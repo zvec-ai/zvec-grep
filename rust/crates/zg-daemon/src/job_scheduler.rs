@@ -606,14 +606,6 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
         &mut current.scan.insensitive_globs,
         incoming.scan.insensitive_globs.take(),
     );
-    merge_update(
-        &mut current.scan.file_types,
-        incoming.scan.file_types.take(),
-    );
-    merge_update(
-        &mut current.scan.excluded_file_types,
-        incoming.scan.excluded_file_types.take(),
-    );
     merge_update(&mut current.scan.hidden, incoming.scan.hidden.take());
     merge_update(&mut current.scan.no_ignore, incoming.scan.no_ignore.take());
     merge_update(
@@ -680,6 +672,9 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
             .endpoint
             .as_ref()
             .is_some_and(|endpoint| current.endpoint.as_ref() != Some(endpoint));
+    let destination_changed = destination_changed
+        || !incoming.embedding_routes.is_empty()
+        || !incoming.clear_embedding_routes.is_empty();
     if destination_changed {
         current.allow_remote = incoming.allow_remote;
         current.authorized_remote.clear();
@@ -690,6 +685,18 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     // must not erase the model or credentials of an already queued manual job.
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
+    for kind in incoming.clear_embedding_routes.drain(..) {
+        current.embedding_routes.remove(&kind);
+        if !current.clear_embedding_routes.contains(&kind) {
+            current.clear_embedding_routes.push(kind);
+        }
+    }
+    for (kind, model) in std::mem::take(&mut incoming.embedding_routes) {
+        current
+            .clear_embedding_routes
+            .retain(|existing| *existing != kind);
+        current.embedding_routes.insert(kind, model);
+    }
     merge_update(&mut current.api_key, incoming.api_key.take());
     merge_update(&mut current.endpoint, incoming.endpoint.take());
     merge_update(&mut current.device, incoming.device.take());
@@ -2604,5 +2611,55 @@ mod tests {
                 .submit(root, IndexOptions::default(), JobReason::Manual)
                 .is_err()
         );
+    }
+    #[test]
+    fn coalesced_content_routes_preserve_other_kinds_and_last_explicit_update() {
+        use zg_engine::api::context::options::ContentKind;
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+        let model = |reference: &str| EmbeddingModelSpec {
+            reference: reference.into(),
+            revision: None,
+            cache_dir: None,
+            endpoint: None,
+            device: Device::Auto,
+        };
+        let mut pending = Some(IndexOptions {
+            embedding_routes: std::collections::BTreeMap::from([
+                (ContentKind::Image, model("qwen/old")),
+                (ContentKind::Code, model("local/code")),
+            ]),
+            allow_remote: true,
+            ..Default::default()
+        });
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                clear_embedding_routes: vec![ContentKind::Image],
+                ..Default::default()
+            },
+        );
+        let current = pending.as_ref().expect("pending");
+        assert!(!current.embedding_routes.contains_key(&ContentKind::Image));
+        assert_eq!(current.clear_embedding_routes, [ContentKind::Image]);
+        assert!(current.embedding_routes.contains_key(&ContentKind::Code));
+        assert!(!current.allow_remote);
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                embedding_routes: std::collections::BTreeMap::from([(
+                    ContentKind::Image,
+                    model("qwen/new"),
+                )]),
+                ..Default::default()
+            },
+        );
+        super::merge_options(&mut pending, IndexOptions::default());
+        let current = pending.expect("pending");
+        assert_eq!(
+            current.embedding_routes[&ContentKind::Image].reference,
+            "qwen/new"
+        );
+        assert!(current.clear_embedding_routes.is_empty());
+        assert!(current.embedding_routes.contains_key(&ContentKind::Code));
     }
 }

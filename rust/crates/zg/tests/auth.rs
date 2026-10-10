@@ -23,6 +23,11 @@ impl Fixture {
                 self.state.path().join("key"),
             )
             .env("ZVEC_GREP_HOME", self.state.path())
+            .env("ZVEC_GREP_CONFIG", self.state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                self.state.path().join("workspaces.json"),
+            )
             .env_remove("ZVEC_GREP_EMBEDDING")
             .env_remove("ZVEC_GREP_ENDPOINT")
             .env_remove("ZVEC_GREP_API_KEY")
@@ -296,7 +301,16 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
     fixture.grant();
     // An empty workspace initializes the remote runtime without sending content.
     fixture.success(&args);
-    let search = ["--mode", "server", "--vector", "needle", "--refresh", "off"];
+    let search = [
+        "--mode",
+        "server",
+        "--vector",
+        "needle",
+        "--refresh",
+        "off",
+        "--json",
+    ];
+    // Empty tables still report missing credentials without sending a query.
     assert!(String::from_utf8_lossy(&fixture.run(&search).stderr).contains("requires an API key"));
     fixture.success(&["--auth", "revoke"]);
     assert!(

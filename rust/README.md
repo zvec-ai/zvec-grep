@@ -45,13 +45,13 @@ Uninstall preserves that shared server until both integrations are removed.
 
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
-typed `context`, `index`, `info`, and `drop_index` methods. It
+typed `context`, `index`, `info`, `read_content`, and `drop_index` methods. It
 calls its private services directly; there is no public command dispatcher,
 operation envelope, adapter registry or Core layer between a method and its
 implementation.
 
 Request and reply types are grouped under the matching method name in
-`zg_engine::api` (`context`, `index`, and `info`). Each group exposes its primary
+`zg_engine::api` (`context`, `index`, `info`, and `content`). Each group exposes its primary
 `Options` and `Result` types directly and keeps secondary types under `options`,
 `result`, or `progress`.
 
@@ -107,7 +107,19 @@ can activate a new runtime without deleting the persisted index. Model runtimes
 remain shared at engine scope and follow their own lease lifetime.
 
 The native engine supports indexing, indexed FTS and vector search, `zg --rg`,
-workspace discovery, `info`, and idempotent `drop_index`.
+workspace discovery, `info`, indexed `read_content`, and idempotent `drop_index`.
+
+For isolated runs, set `ZVEC_GREP_CONFIG` to a dedicated configuration file,
+`ZVEC_GREP_WORKSPACE_REGISTRY` to a dedicated registry file, `ZVEC_GREP_HOME` to a
+runtime directory, and `ZVEC_GREP_MODEL_CACHE` (or `--model-cache`) to a model cache.
+Workspace indexes remain under each source root's `.zvec-grep` directory. Existing
+model caches may be reused without changing the user's regular configuration.
+
+On Unix, the CLI raises its own open-file soft limit toward 4096, capped by the
+existing hard limit, before starting the runtime. Native index tables can exceed
+macOS's common 256-descriptor default. This leaves the parent shell and system
+settings unchanged; a restrictive hard limit is reported on stderr. Applications
+embedding `zg-engine` manage their own process limits.
 
 Search directly with `zg "where authentication is validated"`, `zg --fts
 "AuthService"`, or `zg --rg -F "AuthService" src`. Management uses flags:
@@ -127,20 +139,40 @@ piped output is compact. `--compact` forces compact output, and
 `--preview=full` explicitly requests full previews even in compact output.
 The former `--human` option is no longer accepted.
 
-This version indexes text with one embedding model per workspace. Choose it with
-`zg --index --embedding <model>` or set a default with
-`zg --config model set <model> --default`. Code, documents and structured text use
-that same model. Images and other unsupported sources are reported as skipped;
-multimodal content and per-content model routing are not supported. Changing the
-model requires `zg --index --rebuild --embedding <model>`.
+Each workspace generation has a separate retrieval table for each enabled
+content kind: text, code and image. `zg --index --embedding <model>` selects the
+default model; repeat `--embedding image=local/embeddinggemma-2` to override one
+kind. `--embedding image=default` removes that override and inherits the workspace
+default, including future changes. Omitted settings preserve saved values, and
+a bare model changes only the default. Repeating the default or the same kind in
+one command is an error. Unsupported default kinds are skipped; invalid explicit
+model choices are errors. `--endpoint` applies to the default model; configure
+other models with `zg --config model set <model> --endpoint <url>`.
+Different kinds remain separate tables even when they share one model runtime.
+Changing an effective table's model or encoding configuration requires `--rebuild`.
+PNG, JPEG and static WebP are supported as standalone image sources.
 
-Each entity stores one complete source content object, its location in the source
-file, metadata, and its fragments. Each text fragment has a unique ID and selects
-either full content or UTF-8 byte offsets relative to the entity's content. Source
-locations, including line and column numbers, are calculated when needed;
-fragments do not duplicate content or source coordinates.
-Model collections store the text and vectors needed for retrieval, with entity
-metadata included in search projections. Index format 5 uses this layout.
+Each entity stores its complete content snapshot, source location, metadata and
+fragments. Text/code fragments select full content or relative UTF-8 byte ranges;
+images use the complete encoded image. Source files stay unchanged. Kind tables
+contain retrieval projections, with full-text and vector indexes for text/code
+and only vector indexes for images. Index version remains 2; old development
+schemas require an explicit rebuild and are not migrated.
+
+Query input and target kind are independent. Use `zg --vector 'a red bicycle'
+--kind image` for text-to-image retrieval, or `zg --input photo.png
+--kind image` for image-to-image retrieval. `--input` reads one PNG, JPEG or static
+WebP file and cannot be combined with text queries. Positional queries remain
+literal text even if they name an existing file. The target table's model must
+support the task. Without `--kind`, all compatible enabled targets are
+searched. A pure vector query can combine comparable embedding spaces; other
+results are grouped by kind, each with its own ranking. Full-text/hybrid scores
+are never compared across tables. `--limit` is a total cap from 1 to 2000 (default 30), allocated
+round-robin across groups in text/code/image order. `--trace` explains targets,
+models and grouping; `--json` preserves complete structured results and content
+references. `--status --json` shows effective tables and per-kind entity counts.
+To retrieve an indexed snapshot, pass a result's generation and entity ID to
+`zg --read-content <entity-id> --generation <generation> --output <path>`.
 
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
@@ -247,7 +279,7 @@ content, independently of the entity `range` and matched `excerpt_range`. CLI an
 MCP use these coordinates for source numbering; preview never infers a range from
 the number of content lines. The engine also interprets half-open line bounds.
 The required field changes the internal daemon reply contract. Version 13 also
-adds native ripgrep type filters to query and persisted scan rules. Version 14
+added native ripgrep type filters; these are now query-only. Version 14
 separates case-sensitive and case-insensitive glob updates on the daemon wire.
 Version 15 distinguishes complete ordered glob replacement from category updates.
 Restart older resident daemons when updating the CLI; replies without
@@ -263,9 +295,10 @@ index provenance without verified freshness is conservatively shown as
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string
 parameters update only the supplied case category. Typed glob lists and CLI glob
-arguments replace the complete ordered list. `fileTypes` and
+arguments replace the complete ordered list. Search-only `fileTypes` and
 `excludedFileTypes` use the embedded ripgrep catalog, including `h`, `cpp`, `ts`
-and `py`, independently of extractor `formats`. Index also accepts `follow`.
+and `py`, independently of extractor `formats`. Index uses globs for file
+selection and also accepts `follow`.
 Search never changes persisted scan policy: `hidden`, `noIgnore`, `ignoreFiles`,
 `maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
 indexed-search path ignores these options; Rust rejects them explicitly.

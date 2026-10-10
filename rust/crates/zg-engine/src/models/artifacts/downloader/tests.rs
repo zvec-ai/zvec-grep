@@ -131,6 +131,69 @@ fn respond(mut stream: TcpStream, status: u16, body: &[u8]) {
     stream.write_all(body).expect("write response body");
 }
 
+#[tokio::test]
+async fn single_source_downloads_verifies_and_reuses_snapshot() {
+    let root = tempfile::tempdir().expect("single-source cache");
+    let server = TestServer::spawn(1, |_, _, stream| respond(stream, 200, BYTES));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let progress = reporter(&events);
+    let source =
+        ArtifactSource::hugging_face(HF, root.path().join("model")).with_base_url(&server.base_url);
+    for _ in 0..2 {
+        let result = resolve_model_artifacts(
+            &reqwest::Client::new(),
+            ResolveArtifacts {
+                model: "local/single-source",
+                sources: [source.clone()],
+                artifacts: ARTIFACTS,
+                reporter: &progress,
+                signal: None,
+            },
+        )
+        .await
+        .expect("verified source");
+        assert_eq!(
+            async_fs::read(&result.paths[ARTIFACTS[0].path])
+                .await
+                .expect("artifact bytes"),
+            BYTES
+        );
+    }
+    assert_eq!(server.finish(), 1);
+    assert!(partial_files(root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn single_source_failure_does_not_invent_a_fallback() {
+    let root = tempfile::tempdir().expect("single-source cache");
+    let server = TestServer::spawn(1, |_, _, stream| respond(stream, 404, b"missing"));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let progress = reporter(&events);
+    let error = resolve_model_artifacts(
+        &reqwest::Client::new(),
+        ResolveArtifacts {
+            model: "local/single-source",
+            sources: [ArtifactSource::hugging_face(HF, root.path().join("model"))
+                .with_base_url(&server.base_url)],
+            artifacts: ARTIFACTS,
+            reporter: &progress,
+            signal: None,
+        },
+    )
+    .await
+    .expect_err("missing artifact");
+    assert!(!error.to_string().contains("ModelScope"));
+    assert!(
+        !events
+            .lock()
+            .expect("events")
+            .iter()
+            .any(|event| matches!(event, ModelProgress::Warning { .. }))
+    );
+    assert_eq!(server.finish(), 1);
+    assert!(partial_files(root.path()).is_empty());
+}
+
 fn partial_files(path: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(path) else {
         return Vec::new();

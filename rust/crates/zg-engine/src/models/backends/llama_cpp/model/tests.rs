@@ -94,7 +94,8 @@ async fn cached_embeddinggemma_runs_real_llama_cpp_inference() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let result = model
         .embed(
             &[
@@ -178,7 +179,8 @@ async fn cached_embeddinggemma_uses_metal_and_supports_concurrency() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let result = model
         .embed(
             &[vec![Content::Text("find relevant code".to_owned())]],
@@ -234,7 +236,8 @@ async fn cached_qwen3_runs_real_llama_cpp_inference() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let result = model
         .embed(
             &[vec![Content::Text(

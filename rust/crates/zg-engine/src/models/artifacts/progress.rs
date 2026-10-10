@@ -17,20 +17,20 @@ pub(crate) struct ModelDownloadProgressReporter {
 }
 
 struct Inner {
-    model: String,
+    model_ref: String,
     on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
     artifacts: Mutex<HashMap<String, ArtifactDownloadProgress>>,
 }
 
 impl ModelDownloadProgressReporter {
     pub(crate) fn new(
-        model: impl Into<String>,
+        model_ref: impl Into<String>,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         expected_artifacts: impl IntoIterator<Item = String>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                model: model.into(),
+                model_ref: model_ref.into(),
                 on_progress,
                 artifacts: Mutex::new(
                     expected_artifacts
@@ -52,7 +52,7 @@ impl ModelDownloadProgressReporter {
 
     pub(crate) fn start(&self) {
         self.emit(ModelProgress::Preparing {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model_ref.clone(),
         });
     }
 
@@ -87,7 +87,7 @@ impl ModelDownloadProgressReporter {
             (downloaded_bytes, total_bytes)
         };
         self.emit(ModelProgress::Downloading {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model_ref.clone(),
             downloaded_bytes: Some(downloaded_bytes),
             total_bytes,
         });
@@ -98,7 +98,7 @@ impl ModelDownloadProgressReporter {
             return false;
         }
         self.emit(ModelProgress::Warning {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model_ref.clone(),
             message: message.into(),
         });
         true
@@ -106,7 +106,7 @@ impl ModelDownloadProgressReporter {
 
     pub(crate) fn finish(&self) {
         self.emit(ModelProgress::Ready {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model_ref.clone(),
         });
     }
 
@@ -163,20 +163,20 @@ mod tests {
             *events.lock().expect("event lock"),
             [
                 ModelProgress::Preparing {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                 },
                 ModelProgress::Downloading {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                     downloaded_bytes: Some(4),
                     total_bytes: Some(16),
                 },
                 ModelProgress::Downloading {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                     downloaded_bytes: Some(8),
                     total_bytes: Some(16),
                 },
                 ModelProgress::Ready {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                 },
             ]
         );

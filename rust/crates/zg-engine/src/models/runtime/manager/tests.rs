@@ -6,7 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use tokio::sync::{Barrier, Semaphore as TokioSemaphore};
 
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 
 use super::*;
 use crate::domain::model::EmbeddingPurpose;
@@ -22,13 +22,19 @@ impl ConcurrentFixtureModel {
     fn new() -> Self {
         Self {
             info: EmbeddingModelInfo {
-                model: crate::domain::model::ModelInfo {
-                    provider: "local".to_owned(),
-                    name: "fixture".to_owned(),
-                    endpoint: None,
-                },
+                space: crate::domain::model::EmbeddingSpace::fixture(),
+                retrieval: crate::domain::model::EmbeddingRetrieval::Text,
+                model: crate::domain::model::ModelInfo::new(
+                    "local",
+                    "fixture",
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                    ],
+                )
+                .expect("fixture model identity"),
                 dimension: 1,
-                metric: Metric::Cosine,
+                metric: EmbeddingMetric::Cosine,
                 max_batch_size: 8,
                 max_input_tokens: Some(32),
                 max_image_bytes: None,
@@ -138,19 +144,19 @@ impl EmbeddingModel for ProgressFixtureModel {
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
         if let Some(on_progress) = options.on_progress {
             on_progress(crate::domain::model::ModelProgress::Preparing {
-                model: self.info.model.reference(),
+                model_ref: self.info.model.reference(),
             });
             on_progress(crate::domain::model::ModelProgress::Downloading {
-                model: self.info.model.reference(),
+                model_ref: self.info.model.reference(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             });
             on_progress(crate::domain::model::ModelProgress::Warning {
-                model: self.info.model.reference(),
+                model_ref: self.info.model.reference(),
                 message: "fixture warning".to_owned(),
             });
             on_progress(crate::domain::model::ModelProgress::Ready {
-                model: self.info.model.reference(),
+                model_ref: self.info.model.reference(),
             });
         }
         Ok(())
@@ -477,8 +483,6 @@ fn concurrent_final_releases_cannot_mark_new_leases_idle() {
 #[test]
 fn invalid_model_info_is_rejected_before_caching_or_leasing() {
     for field in [
-        "provider",
-        "name",
         "dimension",
         "max_batch_size",
         "max_input_tokens",
@@ -490,8 +494,6 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
             let mut model = ConcurrentFixtureModel::new();
             if observed_creations.fetch_add(1, Ordering::AcqRel) == 0 {
                 match field {
-                    "provider" => model.info.model.provider = " ".to_owned(),
-                    "name" => model.info.model.name.clear(),
                     "dimension" => model.info.dimension = 0,
                     "max_batch_size" => model.info.max_batch_size = 0,
                     "max_input_tokens" => model.info.max_input_tokens = Some(0),
@@ -664,19 +666,19 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
         *model_events,
         [
             ModelProgress::Preparing {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Warning {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
                 message: "fixture warning".to_owned(),
             },
             ModelProgress::Ready {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
             },
         ]
     );
@@ -857,6 +859,38 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
 
     assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
     assert_eq!(creations.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn endpoints_separate_runtimes_and_persisted_encoding_identity() {
+    let manager = ModelRuntimeManager::new();
+    let acquire = |endpoint: &str| {
+        manager
+            .acquire(ModelRuntimeRequest::new(
+                "qwen/text-embedding-v4",
+                ModelConfig {
+                    api_key: Some("fixture".into()),
+                    endpoint: Some(endpoint.into()),
+                    ..ModelConfig::default()
+                },
+                None,
+            ))
+            .expect("remote runtime without an embedding request")
+    };
+    let first = acquire("https://first.example.test/embeddings");
+    let second = acquire("https://second.example.test/embeddings");
+
+    assert_ne!(first.info().space, second.info().space);
+    assert!(!Arc::ptr_eq(&first.entry, &second.entry));
+    assert_eq!(
+        first.configured_endpoint(),
+        Some("https://first.example.test/embeddings")
+    );
+    assert_eq!(
+        second.configured_endpoint(),
+        Some("https://second.example.test/embeddings")
+    );
+    manager.close();
 }
 
 #[test]

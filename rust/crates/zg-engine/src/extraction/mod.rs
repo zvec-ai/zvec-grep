@@ -8,6 +8,8 @@ mod service;
 mod spi;
 mod text;
 
+pub(crate) use image::{prepare_image, read_image};
+
 // Extraction sources.
 pub(crate) use spi::{ImageSource, Source, SourceKind, TextSource};
 
@@ -30,6 +32,15 @@ use service::{test_content, test_metadata, test_source};
 
 pub(crate) fn source_kind(formats: &[FileFormat]) -> Option<SourceKind> {
     service::source_kind(formats)
+}
+
+pub(crate) fn source_content_kind(formats: &[FileFormat]) -> Option<crate::domain::ContentKind> {
+    use crate::domain::ContentKind;
+    match source_kind(formats)? {
+        SourceKind::Image(_) => Some(ContentKind::Image),
+        SourceKind::Text if service::is_code_source(formats) => Some(ContentKind::Code),
+        SourceKind::Text => Some(ContentKind::Text),
+    }
 }
 
 pub(crate) fn extract<'source>(

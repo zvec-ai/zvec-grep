@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use super::{
-    llama_cpp::LlamaCppEmbeddingModel, model2vec::Model2VecEmbeddingModel,
-    qwen::QwenEmbeddingModel, transformers::TransformersEmbeddingModel,
+    embedding_gemma2::EmbeddingGemma2Model, llama_cpp::LlamaCppEmbeddingModel,
+    model2vec::Model2VecEmbeddingModel, qwen::QwenEmbeddingModel,
+    transformers::TransformersEmbeddingModel,
 };
 use crate::domain::model::ModelConfig;
 use crate::models::{
@@ -33,22 +34,27 @@ pub fn create_embedding_model(
     })?;
     let options = options.unwrap_or_default();
     match entry {
+        EmbeddingCatalogEntry::EmbeddingGemma2(config) => Ok(Arc::new(EmbeddingGemma2Model::new(
+            config,
+            options,
+            compute_runtime,
+        )?)),
         EmbeddingCatalogEntry::Model2Vec(config) => Ok(Arc::new(Model2VecEmbeddingModel::new(
             config,
             options,
             compute_runtime,
-        ))),
+        )?)),
         EmbeddingCatalogEntry::Qwen(config) => {
             Ok(Arc::new(QwenEmbeddingModel::new(config, options)?))
         }
         EmbeddingCatalogEntry::Transformers(config) => Ok(Arc::new(
-            TransformersEmbeddingModel::new(config, options, compute_runtime),
+            TransformersEmbeddingModel::new(config, options, compute_runtime)?,
         )),
         EmbeddingCatalogEntry::LlamaCpp(config) => Ok(Arc::new(LlamaCppEmbeddingModel::new(
             config,
             options,
             compute_runtime,
-        ))),
+        )?)),
     }
 }
 
@@ -66,9 +72,6 @@ mod tests {
                     ..super::ModelConfig::default()
                 }
             });
-            let expected_endpoint = options
-                .as_ref()
-                .and_then(|options| options.endpoint.clone());
             let model = create_embedding_model(
                 entry.reference(),
                 options,
@@ -77,8 +80,11 @@ mod tests {
             .expect("catalog backend should construct without loading model assets");
             model.info().validate().expect("valid catalog model info");
             assert_eq!(model.info().model.reference(), entry.reference());
+            assert_eq!(
+                model.info().model,
+                entry.model_info().expect("catalog model info")
+            );
             assert_eq!(model.info().dimension, entry.dimension());
-            assert_eq!(model.info().model.endpoint, expected_endpoint);
         }
 
         let unknown = create_embedding_model(

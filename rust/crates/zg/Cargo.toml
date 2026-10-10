@@ -19,6 +19,9 @@ zg-daemon-protocol = { path = "../zg-daemon-protocol" }
 zg-engine = { path = "../zg-engine" }
 zvec-rust.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [build-dependencies]
 zvec-rust-build.workspace = true
 

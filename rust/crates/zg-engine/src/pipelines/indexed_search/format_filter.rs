@@ -51,6 +51,19 @@ pub(super) fn compile_format_filter(filter: &QueryFilter) -> Option<StoragePathF
     Some(all(predicates))
 }
 
+/// The pinned zvec parser does not support NOT LIKE. Such rules use file-ID
+/// filtering instead, before either full-text or vector top-k is evaluated.
+pub(super) fn supports_native_filter(predicate: &StoragePathFilter, negated: bool) -> bool {
+    match predicate {
+        StoragePathFilter::FileNamePrefix(_) | StoragePathFilter::FileNameSuffix(_) => !negated,
+        StoragePathFilter::And(predicates) | StoragePathFilter::Or(predicates) => predicates
+            .iter()
+            .all(|predicate| supports_native_filter(predicate, negated)),
+        StoragePathFilter::Not(predicate) => supports_native_filter(predicate, !negated),
+        _ => true,
+    }
+}
+
 struct CatalogRules {
     extensions: BTreeMap<&'static str, Vec<FileFormat>>,
     names: BTreeMap<&'static str, Vec<FileFormat>>,

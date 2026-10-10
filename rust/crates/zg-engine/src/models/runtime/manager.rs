@@ -413,6 +413,11 @@ impl ModelRuntimeLease {
         self.entry.runtime.model.info()
     }
 
+    /// Endpoint supplied when acquiring this runtime, after caller-side resolution.
+    pub(crate) fn configured_endpoint(&self) -> Option<&str> {
+        self.key.endpoint.as_deref()
+    }
+
     pub(crate) async fn prepare(
         &self,
         mut options: EmbeddingPrepareOptions,

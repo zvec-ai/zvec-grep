@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::domain::{
-    Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, SourcePath, SymbolType,
-    model::EmbeddingModelInfo,
+    ContentKind, Entity, EntityFragment, EntityId, FileId, FileRecord, FragmentId, IndexTable,
+    SourcePath, SymbolType,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,7 +17,7 @@ pub(crate) enum WorkspaceIndexStorageOptions {
     },
     ReadWrite {
         storage_path: PathBuf,
-        embeddings: Vec<EmbeddingModelInfo>,
+        tables: Vec<IndexTable>,
     },
 }
 
@@ -63,14 +63,15 @@ impl From<&FileRecord> for StoredFileAttributes {
 pub(crate) struct IndexedFragment {
     pub entity_id: EntityId,
     pub fragment_id: FragmentId,
-    /// Unique configured embedding model reference (provider/name).
-    pub model: String,
+    /// The content kind whose table owns this projection.
+    pub kind: ContentKind,
     pub vector: Vec<f32>,
     pub fts_text: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StorageSearchFilter {
+    pub content_kinds: Option<Vec<ContentKind>>,
     pub path: Option<StoragePathFilter>,
     pub file_ids: Option<Vec<FileId>>,
     pub entity_ids: Option<Vec<EntityId>>,
@@ -78,7 +79,7 @@ pub(crate) struct StorageSearchFilter {
     pub symbol_types: Option<Vec<SymbolType>>,
 }
 
-/// Boolean predicates over metadata projected into each model collection.
+/// Boolean predicates over metadata projected into each kind collection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StoragePathFilter {
     All,

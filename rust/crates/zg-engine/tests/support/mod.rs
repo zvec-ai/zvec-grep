@@ -70,6 +70,13 @@ pub fn set_native_file_status(
 pub fn index_options(root: &Path) -> IndexOptions {
     IndexOptions {
         root: Some(root.to_path_buf()),
+        embedding: Some(zg_engine::api::index::options::EmbeddingModelSpec {
+            reference: "qwen/text-embedding-v4".into(),
+            revision: None,
+            endpoint: None,
+            cache_dir: None,
+            device: zg_engine::api::index::options::Device::Auto,
+        }),
         allow_remote: true,
         ..IndexOptions::default()
     }
@@ -88,14 +95,11 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     // Seed credentials without changing process-wide environment. Each fixture
     // keeps one globally unique name, including when its root is later moved.
     let name = format!("fixture-{}", uuid::Uuid::new_v4());
-    let generation = uuid::Uuid::new_v4().to_string();
-    fs::create_dir_all(home.join("generations").join(&generation))?;
     let manifest = json!({
         "name": name, "path": home,
         "root": root, "scan": {},
-        "indexPolicy": "enabled", "embeddings": [{ "model": { "provider": "qwen", "name": "text-embedding-v4", "endpoint": format!("http://{address}/embeddings") }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null }],
-        "embeddingRoutes": { "text": "qwen/text-embedding-v4" },
-        "indexVersion": 2, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
+        "indexPolicy": "uninitialized", "defaultModel": null, "embeddingRoutes": {},
+        "indexVersion": null, "createdTime": 1, "updatedTime": 1,
         "embeddingRuntimes": { "qwen/text-embedding-v4": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") } }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)
@@ -207,9 +211,25 @@ fn respond(
     } else {
         body["input"].as_array().expect("text inputs")
     };
-    inputs.fetch_add(items.len(), Ordering::Release);
+    let texts = items
+        .iter()
+        .map(|item| {
+            if multimodal {
+                item["text"].as_str().unwrap_or("image")
+            } else {
+                item.as_str().expect("text")
+            }
+        })
+        .collect::<Vec<_>>();
+    let texts = if multimodal {
+        assert_eq!(body["parameters"]["enable_fusion"], true);
+        vec![texts.join("\n")]
+    } else {
+        texts.into_iter().map(str::to_owned).collect()
+    };
+    inputs.fetch_add(texts.len(), Ordering::Release);
     if multimodal {
-        multimodal_inputs.fetch_add(items.len(), Ordering::Release);
+        multimodal_inputs.fetch_add(texts.len(), Ordering::Release);
     }
     let dimension_value = if multimodal {
         &body["parameters"]["dimension"]
@@ -218,28 +238,7 @@ fn respond(
     };
     let dimension =
         usize::try_from(dimension_value.as_u64().expect("dimensions")).expect("usize dimensions");
-    let data = items
-        .iter()
-        .enumerate()
-        .map(|(index, text)| {
-            let mut vector = vec![0.0_f32; dimension];
-            let text = if multimodal {
-                text["text"].as_str().unwrap_or("image")
-            } else {
-                text.as_str().expect("text")
-            };
-            for word in text
-                .split(|character: char| !character.is_alphanumeric())
-                .filter(|word| !word.is_empty())
-            {
-                let hash = word.to_lowercase().bytes().fold(0usize, |hash, byte| {
-                    hash.wrapping_mul(31).wrapping_add(usize::from(byte))
-                });
-                vector[hash % dimension] += 1.0;
-            }
-            json!({ "index": index, "embedding": vector })
-        })
-        .collect::<Vec<_>>();
+    let data = mock_vectors(&texts, dimension, multimodal);
     let response = serde_json::to_vec(&if multimodal {
         json!({ "output": { "embeddings": data } })
     } else {
@@ -251,4 +250,28 @@ fn respond(
         response.len()
     )?;
     stream.write_all(&response)
+}
+
+fn mock_vectors(texts: &[String], dimension: usize, fused: bool) -> Vec<Value> {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let mut vector = vec![0.0_f32; dimension];
+            for word in text
+                .split(|character: char| !character.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+            {
+                let hash = word.to_lowercase().bytes().fold(0usize, |hash, byte| {
+                    hash.wrapping_mul(31).wrapping_add(usize::from(byte))
+                });
+                vector[hash % dimension] += 1.0;
+            }
+            if fused {
+                json!({ "index": index, "type": "fusion", "embedding": vector })
+            } else {
+                json!({ "index": index, "embedding": vector })
+            }
+        })
+        .collect()
 }

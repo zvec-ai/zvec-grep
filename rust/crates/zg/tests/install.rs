@@ -88,6 +88,7 @@ fn codex_http_install_rejects_invalid_global_config_before_writing() {
         ])
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env_remove("ZVEC_GREP_CONFIG")
         .env("CODEX_HOME", &codex_home)
         .env_remove("ZVEC_GREP_SERVER_URL")
         .output()
@@ -229,6 +230,7 @@ fn qoder_trims_ide_environment_paths() {
             .env("PATH", &empty_path)
             .env("HOME", temporary.path())
             .env("USERPROFILE", temporary.path())
+            .env_remove("ZVEC_GREP_CONFIG")
             .env("QODER_CONFIG_DIR", &home)
             .env(
                 "QODER_IDE_EXECUTABLE",
@@ -424,6 +426,7 @@ fn install_starts_the_configured_server_with_the_selected_toolset() {
         .env_remove("ZVEC_GREP_INSTALL_SKIP_SERVER")
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env_remove("ZVEC_GREP_CONFIG")
         .env("CODEX_HOME", &codex)
         .env("ZVEC_GREP_HOME", &runtime_home),
     );
@@ -442,6 +445,7 @@ fn install_starts_the_configured_server_with_the_selected_toolset() {
             .env_remove("ZVEC_GREP_INSTALL_SKIP_SERVER")
             .env("HOME", &home)
             .env("USERPROFILE", &home)
+            .env_remove("ZVEC_GREP_CONFIG")
             .env("CODEX_HOME", &second_codex)
             .env("ZVEC_GREP_HOME", &runtime_home),
     );
@@ -516,7 +520,8 @@ fn opencode_command(action: &str, root: &Path) -> Command {
         .env_remove("OPENCODE_CONFIG")
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("HOME", root)
-        .env("USERPROFILE", root);
+        .env("USERPROFILE", root)
+        .env_remove("ZVEC_GREP_CONFIG");
     command
 }
 
@@ -662,7 +667,8 @@ fn copilot_command(action: &str, root: &Path) -> Command {
         .args([action, "--target", "copilot", "--yes"])
         .env("COPILOT_HOME", root.join("copilot"))
         .env("HOME", root)
-        .env("USERPROFILE", root);
+        .env("USERPROFILE", root)
+        .env_remove("ZVEC_GREP_CONFIG");
     command
 }
 
@@ -673,7 +679,8 @@ fn vscode_command(action: &str, root: &Path) -> Command {
         .env("VSCODE_USER_DIR", root.join("profile"))
         .env("COPILOT_HOME", root.join("copilot"))
         .env("HOME", root)
-        .env("USERPROFILE", root);
+        .env("USERPROFILE", root)
+        .env_remove("ZVEC_GREP_CONFIG");
     command
 }
 
@@ -837,7 +844,8 @@ fn vscode_configures_all_existing_profiles_and_preflights_guidance() {
         .env("VSCODE_APPDATA", &appdata)
         .env("COPILOT_HOME", &copilot)
         .env("HOME", root)
-        .env("USERPROFILE", root);
+        .env("USERPROFILE", root)
+        .env_remove("ZVEC_GREP_CONFIG");
     let output = install.output().expect("run");
     assert!(!output.status.success());
     assert!(!stable.join("mcp.json").exists());
@@ -861,7 +869,8 @@ fn vscode_configures_all_existing_profiles_and_preflights_guidance() {
         .env("VSCODE_APPDATA", &appdata)
         .env("COPILOT_HOME", &copilot)
         .env("HOME", root)
-        .env("USERPROFILE", root);
+        .env("USERPROFILE", root)
+        .env_remove("ZVEC_GREP_CONFIG");
     run_ok(&mut uninstall);
     for profile in [&stable, &insiders] {
         assert!(
@@ -894,7 +903,8 @@ fn vscode_portable_http_uses_supported_schema_and_env_token() {
         .env("VSCODE_PORTABLE", root)
         .env("COPILOT_HOME", root.join("copilot"))
         .env("HOME", root)
-        .env("USERPROFILE", root);
+        .env("USERPROFILE", root)
+        .env_remove("ZVEC_GREP_CONFIG");
     run_ok(&mut install);
     let profile = json(&root.join("user-data/User/mcp.json"));
     assert_eq!(

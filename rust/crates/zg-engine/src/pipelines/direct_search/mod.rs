@@ -9,9 +9,9 @@ use crate::{
     api::context::{
         ContextOptions, ContextResult,
         result::{
-            ContextContainer, ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItem,
-            ContextItemKind, ContextItemStatus, ContextSource, EmptyReason, MatchedBy,
-            RgDiagnostics, TimingEntry,
+            ContentPreview, ContextContainer, ContextContentRole, ContextCoverage,
+            ContextDiagnostics, ContextItem, ContextItemKind, ContextItemStatus, ContextSource,
+            EmptyReason, MatchedBy, RgDiagnostics, TimingEntry,
         },
     },
     lexical::{
@@ -198,7 +198,7 @@ fn context_from_lexical(
                     range: item.range.into(),
                     excerpt_range: item.excerpt_range.map(Into::into),
                     content_range: item.content_range.into(),
-                    content: item.content,
+                    preview: ContentPreview::Text(item.content),
                     outline: None,
                     content_role: Some(ContextContentRole::Source),
                     status: ContextItemStatus::Fresh,
@@ -208,7 +208,7 @@ fn context_from_lexical(
                         .as_ref()
                         .and_then(|value| value.metadata.as_ref())
                         .cloned(),
-                    entity_id: None,
+                    content_ref: None,
                     container: container.map(|value| ContextContainer {
                         entity_id: None,
                         range: value.range.into(),
@@ -277,9 +277,16 @@ mod tests {
         else {
             panic!("source coordinates")
         };
-        assert_eq!(&source[start_byte_offset..end_byte_offset], item.content);
-        assert!(item.entity_id.is_none());
-        assert!(item.content.contains("needle"));
+        assert_eq!(
+            &source[start_byte_offset..end_byte_offset],
+            item.preview.text().expect("text preview")
+        );
+        assert!(item.content_ref.is_none());
+        assert!(
+            item.preview
+                .text()
+                .is_some_and(|text| text.contains("needle"))
+        );
         let container = item.container.as_ref().expect("function container");
         assert!(container.entity_id.is_none());
         assert!(matches!(

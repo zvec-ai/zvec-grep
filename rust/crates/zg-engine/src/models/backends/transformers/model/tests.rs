@@ -81,7 +81,7 @@ fn coreml_batch_merge_repads_rows_and_preserves_indexes() {
     assert_eq!(merged.attention_mask, [1, 1, 0, 1, 1, 1, 1, 1, 0]);
     assert_eq!(merged.truncated, [0, 2]);
 }
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 
 fn entry(pooling: &'static str, normalize: bool) -> TransformersConfig {
     let download =
@@ -98,7 +98,7 @@ fn entry(pooling: &'static str, normalize: bool) -> TransformersConfig {
         download,
         dtype: "q8",
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling,
         normalize,
         query_prefix: Some("query: "),
@@ -145,7 +145,8 @@ fn prefixes_and_catalog_info_match_main() {
         entry("mean", true),
         ModelConfig::default(),
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     assert_eq!(model.info().max_input_tokens, Some(2));
     assert_eq!(onnx_artifact("q4").expect("q4"), "onnx/model_q4.onnx");
     assert_eq!(
@@ -164,7 +165,8 @@ async fn cancelled_initial_load_preserves_cancellation_code() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let signal = CancellationToken::new();
     signal.cancel();
     let error = model
@@ -199,7 +201,8 @@ async fn cached_minilm_runs_real_onnx_inference() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let loaded = model
         .ensure_loaded(None, None)
         .await
@@ -328,7 +331,8 @@ async fn cached_minilm_routes_metal_to_cpu_with_warning() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let result = model
         .embed(
             &[vec![Content::Text("find relevant code".to_owned())]],

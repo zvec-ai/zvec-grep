@@ -37,6 +37,11 @@ impl Fixture {
             .env("HOME", self.state.path())
             .env("USERPROFILE", self.state.path())
             .env("ZVEC_GREP_HOME", self.state.path().join("runtime"))
+            .env("ZVEC_GREP_CONFIG", self.state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                self.state.path().join("workspaces.json"),
+            )
             .env_remove("ZVEC_GREP_SERVER_TOKEN")
             .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE")
             .env_remove("ZVEC_GREP_EMBEDDING")

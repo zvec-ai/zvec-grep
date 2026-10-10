@@ -26,6 +26,10 @@ pub fn write_info_with_options(
     options: OutputOptions,
     terminal: bool,
 ) -> io::Result<()> {
+    if options.json {
+        serde_json::to_writer_pretty(&mut writer, result).map_err(io::Error::other)?;
+        return writeln!(writer);
+    }
     let theme = StatusTheme::new(options.color, terminal);
     writeln!(writer, "{}", heading(theme, result.index_status()))?;
     writeln!(writer, "  {}", theme.path(&display_path(&result.root)))?;
@@ -36,7 +40,7 @@ pub fn write_info_with_options(
     }
     if let Some(index) = &result.workspace_index {
         writeln!(writer)?;
-        write_embedding(&mut writer, theme, index)?;
+        write_embedding(&mut writer, theme, index, result)?;
     }
 
     writeln!(writer)?;
@@ -222,29 +226,48 @@ fn write_embedding(
     writer: &mut impl Write,
     theme: StatusTheme,
     index: &WorkspaceIndexInfo,
+    result: &InfoResult,
 ) -> io::Result<()> {
-    let values = index.embedding.as_ref().map_or_else(
-        || vec![theme.warning("Not configured")],
-        |embedding| {
-            vec![
-                format!("{}/{}", embedding.provider, embedding.model),
-                format!(
-                    "{} dimensions {} {}",
-                    format_count(embedding.dimension),
-                    theme.muted("·"),
-                    embedding.metric
-                ),
-            ]
-        },
-    );
-    write_status_field(writer, theme, "Embedding", &values)?;
+    use zg_engine::api::context::options::ContentKind;
+    for kind in [ContentKind::Text, ContentKind::Code, ContentKind::Image] {
+        let Some(table) = index.tables.iter().find(|table| table.kind == kind) else {
+            write_status_field(writer, theme, kind.as_str(), &["not enabled".to_owned()])?;
+            continue;
+        };
+        let model = &table.embedding;
+        let count = result.status.as_ref().map(|stats| {
+            stats
+                .entities_by_kind
+                .get(&kind)
+                .copied()
+                .unwrap_or_default()
+        });
+        let state = match count {
+            None => "unknown",
+            Some(0) if result.index_status() == IndexStatus::Ready => "empty",
+            Some(_) => result.index_status().as_str(),
+        };
+        write_status_field(
+            writer,
+            theme,
+            kind.as_str(),
+            &[format!(
+                "{}/{} ({} dimensions, {}) · {} entities · {state}",
+                model.provider,
+                model.model,
+                format_count(model.dimension),
+                model.metric,
+                count.map_or_else(|| "unknown".to_owned(), format_count),
+            )],
+        )?;
+    }
     if let Some(fts) = &index.fts {
         write_status_field(
             writer,
             theme,
             "FTS",
             &[format!(
-                "tokenizer={} filters={}",
+                "text/code: tokenizer={} filters={}",
                 fts.tokenizer,
                 fts.filters.join(", ")
             )],
@@ -325,12 +348,6 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
             )
         })
         .collect();
-    if !scan.file_types.is_empty() {
-        filters.push(format!("type={}", scan.file_types.join("|")));
-    }
-    if !scan.excluded_file_types.is_empty() {
-        filters.push(format!("type-not={}", scan.excluded_file_types.join("|")));
-    }
     if scan.hidden {
         filters.push("hidden".into());
     }
@@ -366,7 +383,7 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
 mod tests {
     use super::*;
     use zg_engine::api::info::result::{
-        FailedFile, InfoSource, WorkspaceIndexEmbedding, WorkspaceIndexFts,
+        FailedFile, InfoSource, WorkspaceIndexEmbedding, WorkspaceIndexFts, WorkspaceIndexTable,
     };
 
     fn ready() -> InfoResult {
@@ -384,12 +401,21 @@ mod tests {
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
-                embedding: Some(WorkspaceIndexEmbedding {
-                    provider: "qwen".into(),
-                    model: "text-embedding-v4".into(),
-                    dimension: 1024,
-                    metric: "cosine".into(),
-                }),
+                default_model_ref: Some("qwen/text-embedding-v4".into()),
+                embedding_routes: std::collections::BTreeMap::default(),
+                tables: vec![WorkspaceIndexTable {
+                    kind: zg_engine::api::context::options::ContentKind::Text,
+                    embedding: WorkspaceIndexEmbedding {
+                        content_kinds: vec![
+                            zg_engine::api::context::options::ContentKind::Text,
+                            zg_engine::api::context::options::ContentKind::Code,
+                        ],
+                        provider: "qwen".into(),
+                        model: "text-embedding-v4".into(),
+                        dimension: 1024,
+                        metric: "cosine".into(),
+                    },
+                }],
                 fts: Some(WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
@@ -404,6 +430,10 @@ mod tests {
                 files_indexed: 1132,
                 files_unchanged: 1132,
                 entities_indexed: 22037,
+                entities_by_kind: std::collections::BTreeMap::from([(
+                    zg_engine::api::context::options::ContentKind::Text,
+                    22037,
+                )]),
                 indexed_size_bytes: 4_177_103,
                 ..IndexStats::default()
             }),
@@ -427,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_status_matches_node_layout_with_rust_metadata() {
+    fn ready_status_shows_effective_kind_tables_and_counts() {
         let bar = crate::progress::gradient_bar(
             20,
             20,
@@ -437,7 +467,7 @@ mod tests {
         assert_eq!(
             render(&ready(), ColorMode::Never),
             format!(
-                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/storage\n  Version     2\n  Nested Git  included\n"
+                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  text        qwen/text-embedding-v4 (1,024 dimensions, cosine) · 22,037 entities · ready\n  code        not enabled\n  image       not enabled\n  FTS         text/code: tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/storage\n  Version     2\n  Nested Git  included\n"
             )
         );
     }
@@ -566,12 +596,13 @@ mod tests {
     fn scan_scope_and_missing_embedding_remain_visible() {
         let mut info = ready();
         let index = info.workspace_index.as_mut().expect("workspace");
-        index.embedding = None;
+        index.default_model_ref = None;
+        index.tables.clear();
         index.scan.globs = vec!["*.rs".into(), "!vendor/**".into()];
         index.scan.hidden = true;
         index.scan.max_depth = Some(0);
         let output = render(&info, ColorMode::Never);
-        assert!(output.contains("Embedding   Not configured"));
+        assert!(output.contains("text        not enabled"));
         assert!(
             output
                 .contains("Roots       /workspace (glob=*.rs glob=!vendor/** hidden max-depth=0)")

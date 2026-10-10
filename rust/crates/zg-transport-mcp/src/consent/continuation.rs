@@ -51,7 +51,7 @@ impl ContinuationState {
                         Ok(targets) => targets,
                         Err(error) => return Ok(Some(crate::error_result(&error).into())),
                     },
-                    true,
+                    options.query_image.is_none(),
                 )
             }
             "zvec_grep_index" => {
@@ -67,6 +67,7 @@ impl ContinuationState {
                         .map(|target| authorization::QueryAuthorization {
                             target,
                             query_text: false,
+                            query_image: false,
                             workspace_content: true,
                         })
                         .collect(),

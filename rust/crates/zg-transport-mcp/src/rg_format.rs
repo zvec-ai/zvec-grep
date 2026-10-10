@@ -103,7 +103,7 @@ fn source(items: &[&ContextItem]) -> Vec<(Option<usize>, bool, String)> {
     for item in items {
         let matched = item.excerpt_range.as_ref().unwrap_or(&item.range);
         // A trailing newline is not an extra source line in rg's line-oriented output.
-        for (offset, text) in item.content.lines().enumerate() {
+        for (offset, text) in item.preview.text().unwrap_or_default().lines().enumerate() {
             if let Some(first) = item.content_range.start_line() {
                 let line = first + offset;
                 let hit = matched.start_line().is_none_or(|first| line >= first)
@@ -157,8 +157,9 @@ mod tests {
             serde_json::from_str(include_str!("../../../compat/mcp/rg-presentation.json"))
                 .expect("fixtures");
         for case in fixtures["cases"].as_array().expect("cases") {
-            let result: ContextResult =
-                serde_json::from_value(case["result"].clone()).expect("context");
+            let mut value = case["result"].clone();
+            crate::search_format::tests::adapt_context_fixture(&mut value);
+            let result: ContextResult = serde_json::from_value(value).expect("context");
             assert_eq!(
                 format(&result),
                 case["expected"].as_str().expect("expected"),
@@ -172,19 +173,20 @@ mod tests {
     fn preserves_long_lines_all_context_and_explicit_truncation() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../compat/mcp/search-presentation.json");
-        let mut result: ContextResult = serde_json::from_value(
-            zg_testkit::load_mcp_search_cases(&path)
-                .expect("fixtures")
-                .remove(0)
-                .result,
-        )
-        .expect("result");
+        let mut value = zg_testkit::load_mcp_search_cases(&path)
+            .expect("fixtures")
+            .remove(0)
+            .result;
+        crate::search_format::tests::adapt_context_fixture(&mut value);
+        let mut result: ContextResult = serde_json::from_value(value).expect("result");
         result.items.truncate(1);
         result.items[0].container = None;
-        result.items[0].content = (1..=20)
-            .map(|line| format!("line-{line}-{}", "x".repeat(200)))
-            .collect::<Vec<_>>()
-            .join("\n");
+        result.items[0].preview = zg_engine::api::context::result::ContentPreview::Text(
+            (1..=20)
+                .map(|line| format!("line-{line}-{}", "x".repeat(200)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         result.coverage = ContextCoverage::RgTruncated;
         let text = format(&result);
         assert!(text.starts_with("src/sample.ts\n"));

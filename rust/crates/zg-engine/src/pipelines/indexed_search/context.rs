@@ -4,18 +4,20 @@ use std::{collections::HashSet, fs, path::Path};
 
 use crate::{
     EngineError,
+    api::content::ContentRef,
     api::context::{
         ContextOptions, ContextResult,
-        options::{ContextRoute, ContextRouteMode},
+        options::{ContextRoute, ContextRouteMode, QueryImage},
         result::{
-            ContentRange, ContextContentRole, ContextCoverage, ContextDiagnostics,
+            ContentPreview, ContentRange, ContextContentRole, ContextCoverage, ContextDiagnostics,
             ContextGroupResult, ContextItem, ContextItemKind, ContextItemStatus,
             ContextQueryGroupMatch, ContextQueryGroupRole, ContextSelectionReason, ContextSource,
             ContextWorkspaceIndex, EmptyReason, IndexDiagnostics, IndexQueryGroupDiagnostics,
-            IndexRouteDiagnostics, MatchedBy,
+            IndexResultGroup, IndexRouteDiagnostics, IndexScoring, IndexTargetDiagnostics,
+            IndexTargetStatus, MatchedBy,
         },
     },
-    domain::{Content, FileRecord, Range, Workspace},
+    domain::{Content, ContentKind, FileRecord, ImageContent, Range, Workspace},
     utils::sha256_hex,
 };
 
@@ -23,13 +25,13 @@ use super::pipeline::{
     SearchEmbeddingRuntime, SearchHit, SearchPlan, SearchPlanResult, search_workspace_index,
 };
 
-const DEFAULT_CONTEXT_LIMIT: usize = 10;
 const DEFAULT_CONTEXT_TOTAL_LIMIT: usize = 30;
 const DEFAULT_CONTEXT_PRIORITY_LIMIT: usize = 6;
 const CONTEXT_GROUP_RRF_K: f64 = 60.0;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NormalizedContextRequest {
+    pub image: Option<ImageContent>,
     pub display_query: String,
     pub routes: Vec<ContextRoute>,
     pub groups: Vec<NormalizedContextGroup>,
@@ -46,6 +48,10 @@ pub(crate) struct NormalizedContextGroup {
 pub(crate) fn normalize_context_request(
     options: &ContextOptions,
 ) -> Result<NormalizedContextRequest, EngineError> {
+    options.validate_file_selection()?;
+    if let Some(image) = &options.query_image {
+        return normalize_image_request(image);
+    }
     let primary_queries = options
         .query
         .iter()
@@ -123,66 +129,453 @@ pub(crate) fn normalize_context_request(
     };
 
     Ok(NormalizedContextRequest {
+        image: None,
         display_query,
         routes: all_routes,
         groups,
     })
 }
 
+fn normalize_image_request(image: &QueryImage) -> Result<NormalizedContextRequest, EngineError> {
+    let (image, display_query) = match image {
+        QueryImage::Path { path } => (
+            crate::extraction::read_image(path)?,
+            format!("image:{}", path.display()),
+        ),
+        QueryImage::Bytes { format, data } => (
+            crate::extraction::prepare_image(data.clone(), *format)?,
+            format!("image:{}", format.as_str()),
+        ),
+    };
+    let routes = vec![ContextRoute {
+        mode: ContextRouteMode::Vector,
+        query: display_query.clone(),
+    }];
+    Ok(NormalizedContextRequest {
+        image: Some(image),
+        display_query: display_query.clone(),
+        routes: routes.clone(),
+        groups: vec![NormalizedContextGroup {
+            id: "Q1".to_owned(),
+            query: display_query,
+            role: ContextQueryGroupRole::Primary,
+            routes,
+        }],
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn context_from_index(
     root: &Path,
     workspace: &Workspace,
     workspace_home: &Path,
+    generation: &str,
     storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
 ) -> Result<ContextResult, EngineError> {
-    let groups = if options.fuse {
+    let targets = super::service::query_targets(workspace, options, request)?;
+    let groups = query_groups(options, request);
+    let limit = options.limit.unwrap_or(DEFAULT_CONTEXT_TOTAL_LIMIT);
+    let counts = storage.entity_counts()?;
+    let cached = embedding_models
+        .iter()
+        .map(|model| super::pipeline::CachedSearchRuntime::new(*model))
+        .collect::<Vec<_>>();
+    let mut targets_diagnostics = Vec::new();
+    let mut bundles = Vec::new();
+    let mut result = build_context_result(
+        root,
+        workspace,
+        workspace_home,
+        generation,
+        request,
+        &groups,
+        Vec::new(),
+    )?;
+    let mut first_error = None;
+    for target in targets {
+        let model_ref = target.schema.model.reference();
+        let mut diagnostic = IndexTargetDiagnostics {
+            kind: target.kind,
+            model_ref: model_ref.clone(),
+            status: IndexTargetStatus::Searched,
+            reason: None,
+        };
+        if let Some(reason) = &target.skip_reason {
+            diagnostic.status = IndexTargetStatus::Skipped;
+            diagnostic.reason = Some(reason.clone());
+            targets_diagnostics.push(diagnostic);
+            continue;
+        }
+        let empty = counts.get(&target.kind) == Some(&0);
+        let recall = recall_table(
+            &workspace.root,
+            &target,
+            &groups,
+            storage,
+            &cached,
+            options,
+            request,
+            empty,
+        )
+        .await;
+        let recall = match recall {
+            Ok(recall) => recall,
+            Err(error) => {
+                if options.target_kind.is_some() || error.code() == EngineError::CANCELLED {
+                    return Err(error);
+                }
+                diagnostic.status = IndexTargetStatus::Failed;
+                diagnostic.reason = Some(error.message().to_owned());
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                targets_diagnostics.push(diagnostic);
+                continue;
+            }
+        };
+        if empty {
+            diagnostic.status = IndexTargetStatus::Empty;
+        }
+        let table_result = build_context_result(
+            root,
+            workspace,
+            workspace_home,
+            generation,
+            request,
+            &recall.groups,
+            recall.searches,
+        )?;
+        let compatible = groups.len() == 1 && groups[0].routes.len() == 1;
+        append_table_result(
+            &mut result,
+            &mut bundles,
+            &target,
+            options.input_kind(),
+            recall.scoring,
+            compatible,
+            table_result,
+        );
+        targets_diagnostics.push(diagnostic);
+    }
+    if bundles.is_empty()
+        && let Some(error) = first_error
+    {
+        return Err(error);
+    }
+    Ok(finish_context_result(
+        result,
+        bundles,
+        targets_diagnostics,
+        limit,
+    ))
+}
+
+fn query_groups(
+    options: &ContextOptions,
+    request: &NormalizedContextRequest,
+) -> Vec<NormalizedContextGroup> {
+    if options.fuse {
         vec![NormalizedContextGroup {
             id: "Q1".to_owned(),
             query: request.display_query.clone(),
-            role: if request
-                .groups
-                .iter()
-                .any(|group| group.role == ContextQueryGroupRole::Primary)
-            {
-                ContextQueryGroupRole::Primary
-            } else {
-                ContextQueryGroupRole::Supplemental
-            },
+            role: ContextQueryGroupRole::Primary,
             routes: request.routes.clone(),
         }]
     } else {
         request.groups.clone()
-    };
-    let limit = context_group_limit(options.limit, groups.len());
-    let mut searches = Vec::with_capacity(groups.len());
-    for group in &groups {
-        searches.push(
-            search_workspace_index(
-                &workspace.root,
-                SearchPlan {
-                    routes: group.routes.clone(),
-                    limit: Some(limit),
-                    trace: options.trace,
-                    prefer_symbol: options.prefer_symbol,
-                    filter: options.filter.clone(),
-                },
-                storage,
-                embedding_models,
-            )
-            .await?,
-        );
     }
+}
 
-    build_context_result(root, workspace, workspace_home, request, &groups, searches)
+struct TableRecall {
+    groups: Vec<NormalizedContextGroup>,
+    scoring: IndexScoring,
+    searches: Vec<SearchPlanResult>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recall_table(
+    root: &Path,
+    target: &super::service::QueryTarget<'_>,
+    groups: &[NormalizedContextGroup],
+    storage: &dyn SearchStorage,
+    cached: &[super::pipeline::CachedSearchRuntime<'_>],
+    options: &ContextOptions,
+    request: &NormalizedContextRequest,
+    empty: bool,
+) -> Result<TableRecall, EngineError> {
+    let groups = target_query_groups(groups, target.kind);
+    let prefer_symbol = options.prefer_symbol && target.kind == ContentKind::Code;
+    let scoring = table_scoring(&groups, prefer_symbol);
+    let model_ref = target.schema.model.reference();
+    let runtime = cached
+        .iter()
+        .find(|runtime| runtime.info().model.reference() == model_ref);
+    let searches = recall_target(
+        root,
+        SearchPlan {
+            model_ref,
+            kind: target.kind,
+            image: request.image.clone(),
+            routes: Vec::new(),
+            limit: Some(options.limit.unwrap_or(DEFAULT_CONTEXT_TOTAL_LIMIT)),
+            trace: options.trace,
+            prefer_symbol,
+            filter: options.filter.clone(),
+        },
+        &groups,
+        storage,
+        runtime,
+        empty,
+    )
+    .await?;
+    Ok(TableRecall {
+        groups,
+        scoring,
+        searches,
+    })
+}
+
+struct RankedResultGroup {
+    schema: crate::domain::EmbeddingModelInfo,
+    group: IndexResultGroup,
+    items: Vec<ContextItem>,
+}
+
+fn target_query_groups(
+    groups: &[NormalizedContextGroup],
+    kind: ContentKind,
+) -> Vec<NormalizedContextGroup> {
+    groups
+        .iter()
+        .filter_map(|group| {
+            let mut group = group.clone();
+            if kind == ContentKind::Image {
+                group
+                    .routes
+                    .retain(|route| route.mode == ContextRouteMode::Vector);
+            }
+            (!group.routes.is_empty()).then_some(group)
+        })
+        .collect()
+}
+
+fn table_scoring(groups: &[NormalizedContextGroup], prefer_symbol: bool) -> IndexScoring {
+    if groups.len() == 1 && groups[0].routes.len() == 1 && !prefer_symbol {
+        match groups[0].routes[0].mode {
+            ContextRouteMode::Vector => IndexScoring::Vector,
+            ContextRouteMode::Fts => IndexScoring::FullText,
+        }
+    } else if groups.len() == 1 {
+        IndexScoring::Hybrid
+    } else {
+        IndexScoring::MultiQuery
+    }
+}
+
+async fn recall_target(
+    root: &Path,
+    plan: SearchPlan,
+    groups: &[NormalizedContextGroup],
+    storage: &dyn SearchStorage,
+    runtime: Option<&super::pipeline::CachedSearchRuntime<'_>>,
+    empty: bool,
+) -> Result<Vec<SearchPlanResult>, EngineError> {
+    if let Some(runtime) = runtime {
+        runtime.ensure_available()?;
+    }
+    if empty {
+        return Ok(Vec::new());
+    }
+    let runtimes = runtime
+        .map(|runtime| vec![runtime as &dyn SearchEmbeddingRuntime])
+        .unwrap_or_default();
+    let mut searches = Vec::new();
+    for group in groups {
+        let mut plan = plan.clone();
+        plan.routes.clone_from(&group.routes);
+        searches.push(search_workspace_index(root, plan, storage, &runtimes).await?);
+    }
+    Ok(searches)
+}
+
+fn merge_table_items(
+    bundles: &mut Vec<RankedResultGroup>,
+    target: &super::service::QueryTarget<'_>,
+    input_kind: ContentKind,
+    scoring: IndexScoring,
+    compatible: bool,
+    mut items: Vec<ContextItem>,
+) {
+    let model_ref = target.schema.model.reference();
+    if let Some(existing) = bundles.iter_mut().find(|existing| {
+        compatible
+            && existing.group.scoring == IndexScoring::Vector
+            && target.schema.can_compare_vectors(&existing.schema)
+            && target.schema.query_encoding(input_kind, target.kind)
+                == existing
+                    .schema
+                    .query_encoding(input_kind, existing.group.kinds[0])
+    }) {
+        existing.group.kinds.push(target.kind);
+        if !existing.group.model_refs.contains(&model_ref) {
+            existing.group.model_refs.push(model_ref);
+        }
+        existing.items.append(&mut items);
+        existing.items.sort_by(|a, b| {
+            b.score
+                .unwrap_or(0.0)
+                .total_cmp(&a.score.unwrap_or(0.0))
+                .then_with(|| a.relative_path.cmp(&b.relative_path))
+                .then_with(|| {
+                    a.content_ref
+                        .as_ref()
+                        .map(|r| &r.entity_id)
+                        .cmp(&b.content_ref.as_ref().map(|r| &r.entity_id))
+                })
+        });
+    } else {
+        bundles.push(RankedResultGroup {
+            schema: target.schema.clone(),
+            group: IndexResultGroup {
+                id: target.kind.as_str().to_owned(),
+                kinds: vec![target.kind],
+                model_refs: vec![model_ref],
+                scoring,
+                item_start: 0,
+                item_count: 0,
+            },
+            items,
+        });
+    }
+}
+
+fn append_table_result(
+    result: &mut ContextResult,
+    bundles: &mut Vec<RankedResultGroup>,
+    target: &super::service::QueryTarget<'_>,
+    input_kind: ContentKind,
+    scoring: IndexScoring,
+    compatible: bool,
+    table_result: ContextResult,
+) {
+    result
+        .diagnostics
+        .timings
+        .extend(table_result.diagnostics.timings);
+    if let Some(index) = table_result.diagnostics.index {
+        result
+            .diagnostics
+            .index
+            .as_mut()
+            .expect("index diagnostics")
+            .routes
+            .extend(index.routes);
+    }
+    merge_table_items(
+        bundles,
+        target,
+        input_kind,
+        scoring,
+        compatible && scoring == IndexScoring::Vector,
+        table_result.items,
+    );
+}
+
+fn finish_context_result(
+    mut result: ContextResult,
+    bundles: Vec<RankedResultGroup>,
+    targets: Vec<IndexTargetDiagnostics>,
+    limit: usize,
+) -> ContextResult {
+    // Allocate a total cap fairly without inventing a global relevance rank.
+    let mut allocations = vec![0; bundles.len()];
+    let mut remaining = limit;
+    while remaining > 0 {
+        let mut advanced = false;
+        for (allocation, bundle) in allocations.iter_mut().zip(&bundles) {
+            if remaining > 0 && *allocation < bundle.items.len() {
+                *allocation += 1;
+                remaining -= 1;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    let mut items = Vec::new();
+    let mut result_groups = Vec::new();
+    for (mut bundle, allocation) in bundles.into_iter().zip(allocations) {
+        bundle.items.truncate(allocation);
+        for (i, item) in bundle.items.iter_mut().enumerate() {
+            item.rank = i + 1;
+            if let Some(trace) = &mut item.trace {
+                trace.final_selection.cutoff_rank = allocation;
+            }
+        }
+        bundle.group.item_start = items.len();
+        bundle.group.item_count = bundle.items.len();
+        items.extend(bundle.items);
+        result_groups.push(bundle.group);
+    }
+    result.diagnostics.empty_reason = if !items.is_empty() {
+        None
+    } else if targets
+        .iter()
+        .all(|t| t.status == IndexTargetStatus::Skipped)
+    {
+        Some(EmptyReason::NoSupportedTargets)
+    } else if targets
+        .iter()
+        .filter(|t| t.status != IndexTargetStatus::Skipped)
+        .all(|t| t.status == IndexTargetStatus::Empty)
+    {
+        Some(EmptyReason::NoSearchableFiles)
+    } else {
+        Some(EmptyReason::NoMatches)
+    };
+    let index = result
+        .diagnostics
+        .index
+        .as_mut()
+        .expect("index diagnostics");
+    index.incomplete = targets
+        .iter()
+        .any(|t| t.status == IndexTargetStatus::Failed);
+    index.targets = targets;
+    index.result_groups = result_groups;
+    index.limit = limit;
+    index.hits_returned = items.len();
+    result.group_results = index
+        .query_groups
+        .iter()
+        .map(|group| ContextGroupResult {
+            id: group.id.clone(),
+            query: group.query.clone(),
+            role: group.role,
+            items: items
+                .iter()
+                .filter(|item| {
+                    item.query_groups
+                        .iter()
+                        .any(|matched| matched.id == group.id)
+                })
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    result.items = items;
+    result
 }
 
 fn build_context_result(
     root: &Path,
     workspace: &Workspace,
     workspace_home: &Path,
+    generation: &str,
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
     searches: Vec<SearchPlanResult>,
@@ -190,7 +583,9 @@ fn build_context_result(
     let group_items = searches
         .iter()
         .zip(groups)
-        .map(|(search, group)| search_plan_to_context_items(search, &workspace.root, group))
+        .map(|(search, group)| {
+            search_plan_to_context_items(search, &workspace.root, generation, group)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let coverage_groups = groups
         .iter()
@@ -232,6 +627,15 @@ fn build_context_result(
         diagnostics: ContextDiagnostics {
             empty_reason: (hits_returned == 0).then_some(EmptyReason::NoMatches),
             index: Some(IndexDiagnostics {
+                input_kind: if request.image.is_some() {
+                    ContentKind::Image
+                } else {
+                    ContentKind::Text
+                },
+                targets: Vec::new(),
+                result_groups: Vec::new(),
+                incomplete: false,
+                limit: hits_returned,
                 hits_returned,
                 query_groups: groups
                     .iter()
@@ -258,20 +662,10 @@ fn build_context_result(
     })
 }
 
-fn context_group_limit(limit: Option<usize>, group_count: usize) -> usize {
-    limit.unwrap_or_else(|| {
-        let group_count = group_count.max(1);
-        if group_count <= 3 {
-            DEFAULT_CONTEXT_LIMIT
-        } else {
-            DEFAULT_CONTEXT_TOTAL_LIMIT.div_ceil(group_count).max(1)
-        }
-    })
-}
-
 fn search_plan_to_context_items(
     result: &SearchPlanResult,
     workspace_root: &Path,
+    generation: &str,
     group: &NormalizedContextGroup,
 ) -> Result<Vec<ContextItem>, EngineError> {
     result
@@ -287,14 +681,17 @@ fn search_plan_to_context_items(
                 range: hit.entity.source_range.into(),
                 excerpt_range: target.excerpt_range,
                 content_range: target.content_range,
-                content: target.content,
+                preview: target.preview,
+                content_ref: Some(ContentRef {
+                    generation: generation.to_owned(),
+                    entity_id: hit.entity.id.as_str().to_owned(),
+                }),
                 outline: None,
                 content_role: Some(target.content_role),
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),
                 matched_by: hit.matched_by,
                 metadata: hit.entity.metadata.clone(),
-                entity_id: Some(hit.entity.id.as_str().to_owned()),
                 container: None,
                 trace: hit.trace.clone(),
                 query_groups: vec![ContextQueryGroupMatch {
@@ -460,14 +857,14 @@ fn context_group_number(id: &str) -> usize {
 }
 
 fn context_item_dedupe_key(item: &ContextItem) -> String {
-    item.entity_id.as_ref().map_or_else(
+    item.content_ref.as_ref().map_or_else(
         || format!("range:{}:{:?}", item.absolute_path.display(), item.range),
-        |id| format!("entity:{id}"),
+        |reference| format!("entity:{}:{}", reference.generation, reference.entity_id),
     )
 }
 
 struct ContextItemTarget {
-    content: String,
+    preview: ContentPreview,
     content_range: ContentRange,
     content_role: ContextContentRole,
     excerpt_range: Option<ContentRange>,
@@ -476,7 +873,7 @@ struct ContextItemTarget {
 fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError> {
     let Some(evidence) = hit.evidence.first() else {
         return Ok(ContextItemTarget {
-            content: content_to_text(&hit.entity.content),
+            preview: content_preview(&hit.entity.content),
             content_range: hit.entity.source_range.into(),
             content_role: ContextContentRole::Source,
             excerpt_range: None,
@@ -489,9 +886,9 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             fragment.id.as_str()
         ))
     };
-    let (content, excerpt_range) = match (fragment.range, &hit.entity.content) {
-        (Range::Full, content) => (content_to_text(content), None),
-        (Range::Byte(range), Content::Text(text)) => {
+    let (preview, excerpt_range) = match (fragment.range, &hit.entity.content) {
+        (Range::Full, content) => (content_preview(content), None),
+        (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
                     "fragment start offset exceeds platform limits",
@@ -517,16 +914,21 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
                     )));
                 }
             };
-            (content.to_owned(), Some(Range::Text(source).into()))
+            let preview = if matches!(&hit.entity.content, Content::Code(_)) {
+                ContentPreview::Code(content.to_owned())
+            } else {
+                ContentPreview::Text(content.to_owned())
+            };
+            (preview, Some(Range::Text(source).into()))
         }
         _ => {
             return Err(invalid_fragment(EngineError::invalid_argument(
-                "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+                "fragments use Full or entity-relative byte ranges for text and code; images require Full",
             )));
         }
     };
     Ok(ContextItemTarget {
-        content,
+        preview,
         content_range: excerpt_range
             .clone()
             .unwrap_or_else(|| hit.entity.source_range.into()),
@@ -569,36 +971,14 @@ fn rank_as_f64(rank: usize) -> f64 {
     f64::from(u32::try_from(rank).unwrap_or(u32::MAX))
 }
 
-fn contents_to_text(contents: &[Content]) -> String {
-    contents
-        .iter()
-        .map(content_to_text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn content_to_text(content: &Content) -> String {
+fn content_preview(content: &Content) -> ContentPreview {
     match content {
-        Content::Text(text) => text.clone(),
-        Content::Image(image) => format!(
-            "[image:{} bytes={}]",
-            image.format().as_str(),
-            image.data().len()
-        ),
-        Content::Table(table) => {
-            let mut cells = table.cells.iter().collect::<Vec<_>>();
-            cells.sort_unstable_by_key(|cell| (cell.row, cell.column));
-            let mut output = String::new();
-            let mut previous_row = None;
-            for cell in cells {
-                if let Some(row) = previous_row {
-                    output.push(if row == cell.row { '\t' } else { '\n' });
-                }
-                output.push_str(&contents_to_text(&cell.contents));
-                previous_row = Some(cell.row);
-            }
-            output
-        }
+        Content::Text(text) => ContentPreview::Text(text.clone()),
+        Content::Code(code) => ContentPreview::Code(code.clone()),
+        Content::Image(image) => ContentPreview::Image {
+            format: image.format(),
+            size_bytes: u64::try_from(image.data().len()).unwrap_or(u64::MAX),
+        },
     }
 }
 
@@ -610,65 +990,155 @@ mod tests {
         ContextOptions,
         options::{ContextRoute, ContextRouteMode},
         result::{
-            ContentRange, ContextContentRole, ContextItem, ContextItemKind, ContextItemStatus,
-            ContextQueryGroupMatch, ContextQueryGroupRole, ContextSelectionReason, MatchedBy,
+            ContentPreview, ContentRange, ContextContentRole, ContextItem, ContextItemKind,
+            ContextItemStatus, ContextQueryGroupMatch, ContextQueryGroupRole,
+            ContextSelectionReason, MatchedBy,
         },
     };
 
     use super::{normalize_context_request, select_and_rank_context_items};
 
     #[test]
-    fn renders_ordered_content_and_nested_table_cells() {
-        use crate::domain::{
-            Content, FileFormat, ImageContent, TableCell, TableCellRole, TableContent,
+    fn image_inputs_normalize_to_one_vector_route_and_reject_invalid_bytes() {
+        use crate::api::context::options::QueryImage;
+        use crate::domain::FileFormat;
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .expect("encode PNG");
+        let data = output.into_inner();
+        let options = ContextOptions {
+            query_image: Some(QueryImage::Bytes {
+                format: FileFormat::Png,
+                data: data.clone(),
+            }),
+            ..Default::default()
         };
+        let request = normalize_context_request(&options).expect("image input");
+        assert_eq!(request.routes.len(), 1);
+        assert_eq!(request.routes[0].mode, ContextRouteMode::Vector);
+        assert_eq!(request.image.expect("image").data(), data);
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("arbitrary.extension");
+        std::fs::write(&path, &data).expect("write image");
+        let from_path = normalize_context_request(&ContextOptions {
+            query_image: Some(QueryImage::Path { path }),
+            ..Default::default()
+        })
+        .expect("detect image by bytes");
+        assert_eq!(from_path.image.expect("image").data(), data);
+        for (format, data) in [(FileFormat::Jpeg, data), (FileFormat::Png, vec![1, 2, 3])] {
+            assert!(
+                normalize_context_request(&ContextOptions {
+                    query_image: Some(QueryImage::Bytes { format, data }),
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+    }
 
-        let image = ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image");
-        let cell = |row, column, column_span, contents| TableCell {
-            row,
-            column,
-            row_span: 1,
-            column_span,
-            contents,
-            kind: TableCellRole::Unknown,
+    #[test]
+    fn image_results_return_metadata_and_stable_reference_without_image_payload() {
+        use crate::domain::{
+            Content, ContentKind, Entity, EntityId, FileFormat, FileId, FileIndexStatus,
+            FileRecord, FileSnapshot, ImageContent, Range, SourcePath,
         };
-        let table = Content::Table(TableContent {
-            row_count: 2,
-            column_count: 2,
-            cells: vec![
-                cell(0, 0, 2, vec![Content::Text("Product".to_owned())]),
-                cell(
-                    1,
-                    0,
-                    1,
-                    vec![Content::Text("Keyboard".to_owned()), Content::Image(image)],
-                ),
-                cell(
-                    1,
-                    1,
-                    1,
-                    vec![Content::Table(TableContent {
-                        row_count: 1,
-                        column_count: 1,
-                        cells: vec![cell(0, 0, 1, vec![Content::Text("299".to_owned())])],
-                    })],
-                ),
-            ],
-        });
+        use crate::pipelines::indexed_search::pipeline::{SearchHit, SearchPlanResult};
+        let content =
+            Content::Image(ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image"));
+        let file_id = FileId::new(1);
+        let id = EntityId::new(file_id, &content, Range::Full).expect("id");
+        let search = SearchPlanResult {
+            routes: vec![],
+            timings: vec![],
+            hits: vec![SearchHit {
+                entity: Entity {
+                    id: id.clone(),
+                    file_id,
+                    content,
+                    source_range: Range::Full,
+                    metadata: None,
+                    fragments: vec![],
+                },
+                file: FileRecord {
+                    id: file_id,
+                    relative_path: SourcePath::new("image.png").expect("path"),
+                    snapshot: FileSnapshot {
+                        size_bytes: 3,
+                        modified_epoch_ms: None,
+                        content_hash: None,
+                    },
+                    index_status: FileIndexStatus::NotIndexed,
+                },
+                evidence: vec![],
+                rank: 1,
+                score: 0.9,
+                matched_by: MatchedBy::Vector,
+                trace: None,
+            }],
+        };
+        let group = super::NormalizedContextGroup {
+            id: "Q1".into(),
+            query: "image:input.png".into(),
+            role: ContextQueryGroupRole::Primary,
+            routes: vec![],
+        };
+        let items = super::search_plan_to_context_items(
+            &search,
+            std::path::Path::new("/workspace"),
+            "generation-1",
+            &group,
+        )
+        .expect("result");
+        let item = &items[0];
+        assert_eq!(item.preview.text(), None);
+        assert_eq!(item.range, ContentRange::File);
+        assert_eq!(item.preview.kind(), ContentKind::Image);
         assert_eq!(
-            super::contents_to_text(&[Content::Text("Catalog".to_owned()), table]),
-            "Catalog\nProduct\nKeyboard\n[image:png bytes=3]\t299"
+            item.preview,
+            ContentPreview::Image {
+                format: FileFormat::Png,
+                size_bytes: 3
+            }
         );
+        let reference = item.content_ref.as_ref().expect("content reference");
+        assert_eq!(reference.entity_id, id.as_str());
+        assert_eq!(reference.generation, "generation-1");
+        assert_eq!(item.absolute_path, PathBuf::from("/workspace/image.png"));
+        let json = serde_json::to_value(item).expect("JSON");
+        assert_eq!(
+            json["preview"],
+            serde_json::json!({"kind": "image", "value": {"format": "png", "size_bytes": 3}})
+        );
+        assert_eq!(
+            json["content_ref"],
+            serde_json::json!({"entity_id": id.as_str(), "generation": "generation-1"})
+        );
+        for removed in ["image", "entity_id", "content_kind", "content"] {
+            assert!(json.get(removed).is_none(), "obsolete field {removed}");
+        }
     }
 
     #[test]
     fn best_fragment_preserves_original_content_and_source_range() {
+        assert_fragment_content_and_source_range(crate::domain::Content::Text);
+    }
+
+    #[test]
+    fn code_fragment_preserves_original_content_and_source_range() {
+        assert_fragment_content_and_source_range(crate::domain::Content::Code);
+    }
+
+    fn assert_fragment_content_and_source_range(
+        content_from_text: fn(String) -> crate::domain::Content,
+    ) {
         use crate::{
             domain::{
-                ByteRange, Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus,
-                FileRecord, FileSnapshot, FragmentId, Range, TextRange,
+                ByteRange, Entity, EntityFragment, EntityId, FileId, FileIndexStatus, FileRecord,
+                FileSnapshot, FragmentId, Range, TextRange,
             },
-            pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit, SearchPlanResult},
+            pipelines::indexed_search::pipeline::{SearchEvidence, SearchHit},
         };
         let file_id = FileId::new(1);
         let source = "A中😀\r\nβeta\n尾";
@@ -679,7 +1149,7 @@ mod tests {
         let fragment_source_range = Range::Text(
             TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
         );
-        let content = Content::Text(source.into());
+        let content = content_from_text(source.into());
         let entity_id = EntityId::new(file_id, &content, source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&entity_id, 0),
@@ -723,33 +1193,28 @@ mod tests {
         };
         let target = super::context_item_target(&hit).expect("fragment content");
         assert_eq!(target.content_role, ContextContentRole::Source);
-        assert_eq!(target.content, "中😀\r\nβ");
+        assert_eq!(target.preview.kind(), hit.entity.content.kind());
+        assert_eq!(target.preview.text().expect("text preview"), "中😀\r\nβ");
         assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
         assert_eq!(target.content_range, fragment_source_range.into());
-        assert_eq!(hit.entity.content, Content::Text(source.into()));
-        let search = SearchPlanResult {
-            routes: Vec::new(),
-            hits: vec![hit.clone()],
-            timings: Vec::new(),
-        };
-        let request = normalize_context_request(&ContextOptions {
-            query: Some("source".into()),
-            ..ContextOptions::default()
-        })
-        .expect("request");
-        let items = super::search_plan_to_context_items(
-            &search,
-            std::path::Path::new("."),
-            &request.groups[0],
-        )
-        .expect("context items");
-        assert_eq!(items[0].range, source_range.into());
-        assert_eq!(items[0].excerpt_range, Some(fragment_source_range.into()));
-        assert_eq!(items[0].content_range, fragment_source_range.into());
-        assert_eq!(items[0].content, "中😀\r\nβ");
+        assert_eq!(hit.entity.content, content_from_text(source.into()));
+        let item = context_item_for_hit(&hit);
+        assert_eq!(item.range, source_range.into());
+        assert_eq!(item.preview.kind(), hit.entity.content.kind());
+        assert_eq!(
+            item.content_ref,
+            Some(crate::api::content::ContentRef {
+                generation: "test-generation".into(),
+                entity_id: hit.entity.id.as_str().into(),
+            })
+        );
+        assert_eq!(item.excerpt_range, Some(fragment_source_range.into()));
+        assert_eq!(item.content_range, fragment_source_range.into());
+        assert_eq!(item.preview.text().expect("text preview"), "中😀\r\nβ");
         hit.evidence.reverse();
         let target = super::context_item_target(&hit).expect("full content");
-        assert_eq!(target.content, source);
+        assert_eq!(target.preview.text().expect("text preview"), source);
+        assert_eq!(target.preview.kind(), hit.entity.content.kind());
         assert_eq!(target.content_range, source_range.into());
         assert_eq!(
             target.excerpt_range, None,
@@ -761,6 +1226,27 @@ mod tests {
             .err()
             .expect("invalid fragment must fail");
         assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
+    }
+
+    fn context_item_for_hit(hit: &super::SearchHit) -> ContextItem {
+        let search = super::SearchPlanResult {
+            routes: Vec::new(),
+            hits: vec![hit.clone()],
+            timings: Vec::new(),
+        };
+        let request = normalize_context_request(&ContextOptions {
+            query: Some("source".into()),
+            ..ContextOptions::default()
+        })
+        .expect("request");
+        super::search_plan_to_context_items(
+            &search,
+            std::path::Path::new("."),
+            "test-generation",
+            &request.groups[0],
+        )
+        .expect("context items")
+        .remove(0)
     }
 
     #[test]
@@ -822,11 +1308,17 @@ mod tests {
             let start = usize::try_from(bytes.start_offset()).expect("start");
             let end = usize::try_from(bytes.end_offset()).expect("end");
             assert!(start > "# Heading\nprefix ".len());
-            assert_eq!(target.content, source[start..end]);
+            assert_eq!(
+                target.preview.text().expect("text preview"),
+                &source[start..end]
+            );
             assert_eq!(target.content_range.start_line(), Some(2));
             assert_eq!(target.content_range.last_line(), Some(2));
             assert_eq!(target.excerpt_range, Some(target.content_range));
-            assert_eq!(target.content.ends_with('\n'), !newline.is_empty());
+            assert_eq!(
+                target.preview.text().expect("text preview").ends_with('\n'),
+                !newline.is_empty()
+            );
             assert!(matches!(hit.entity.content, Content::Text(_)));
         }
     }
@@ -841,7 +1333,7 @@ mod tests {
             domain::{
                 Content, Entity, EntityId, FileId, FileIndexStatus, FileRecord, FileSnapshot,
                 IndexDescriptor, IndexState, Range, TextRange, Workspace,
-                model::{EmbeddingModelInfo, Metric},
+                model::{EmbeddingMetric, EmbeddingModelInfo},
             },
             pipelines::indexed_search::pipeline::{SearchHit, SearchPlanResult},
             utils::sha256_hex,
@@ -903,18 +1395,24 @@ mod tests {
             name: "workspace".to_owned(),
             root: original_root.clone(),
             scan: crate::domain::ScanRules::default(),
-            index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                model: crate::domain::model::ModelInfo {
-                    provider: "local".to_owned(),
-                    name: "fixture".to_owned(),
-                    endpoint: None,
-                },
+            index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                space: crate::domain::model::EmbeddingSpace::fixture(),
+                retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
+                model: crate::domain::model::ModelInfo::new(
+                    "local",
+                    "fixture",
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                    ],
+                )
+                .expect("fixture model identity"),
                 dimension: 2,
-                metric: Metric::Cosine,
+                metric: EmbeddingMetric::Cosine,
                 max_batch_size: 32,
                 max_input_tokens: None,
                 max_image_bytes: None,
-            })),
+            }))),
             created_epoch_ms: 0,
             updated_epoch_ms: 0,
         };
@@ -931,6 +1429,7 @@ mod tests {
                 &requested_root,
                 &workspace,
                 &workspace_home,
+                "test-generation",
                 &request,
                 &request.groups,
                 vec![search.clone()],
@@ -998,7 +1497,13 @@ mod tests {
         let selected = select_and_rank_context_items(items, &["Q1".to_owned(), "Q2".to_owned()]);
 
         assert_eq!(selected.len(), 3);
-        assert_eq!(selected[0].entity_id.as_deref(), Some("shared"));
+        assert_eq!(
+            selected[0]
+                .content_ref
+                .as_ref()
+                .map(|reference| reference.entity_id.as_str()),
+            Some("shared")
+        );
         assert_eq!(selected[0].query_groups.len(), 2);
         assert_eq!(selected[0].matched_by, MatchedBy::FtsAndVector);
         assert_eq!(
@@ -1006,7 +1511,13 @@ mod tests {
             Some(ContextSelectionReason::Coverage)
         );
         assert_eq!(selected[0].coverage_group.as_deref(), Some("Q1"));
-        assert_eq!(selected[1].entity_id.as_deref(), Some("q2-only"));
+        assert_eq!(
+            selected[1]
+                .content_ref
+                .as_ref()
+                .map(|reference| reference.entity_id.as_str()),
+            Some("q2-only")
+        );
         assert_eq!(selected[1].coverage_group.as_deref(), Some("Q2"));
         assert_eq!(
             selected.iter().map(|item| item.rank).collect::<Vec<_>>(),
@@ -1047,14 +1558,17 @@ mod tests {
                 end_byte_column: 1,
             },
             excerpt_range: None,
-            content: id.to_owned(),
+            preview: ContentPreview::Text(id.to_owned()),
             outline: None,
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(1.0),
             matched_by: query_group.matched_by,
             metadata: None,
-            entity_id: Some(id.to_owned()),
+            content_ref: Some(crate::api::content::ContentRef {
+                generation: "generation-1".into(),
+                entity_id: id.to_owned(),
+            }),
             container: None,
             trace: None,
             query_groups: vec![query_group],

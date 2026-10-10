@@ -1,16 +1,17 @@
 //! Storage operations used by indexing, with a small seam for pipeline tests.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{
     EngineResult,
-    domain::{Entity, FileId, FileRecord},
+    domain::{ContentKind, Entity, FileId, FileRecord},
     storage::{IndexStore, types::IndexedFragment},
 };
 
 pub(crate) trait IndexStorage: Send + Sync {
     fn is_read_only(&self) -> bool;
     fn list_files(&self) -> EngineResult<Vec<FileRecord>>;
+    fn entity_counts(&self) -> EngineResult<BTreeMap<ContentKind, u64>>;
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>>;
     fn replace_file(
         &self,
@@ -30,6 +31,10 @@ impl IndexStorage for IndexStore {
 
     fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.list_files()
+    }
+
+    fn entity_counts(&self) -> EngineResult<BTreeMap<ContentKind, u64>> {
+        self.entity_counts()
     }
 
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>> {

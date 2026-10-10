@@ -74,9 +74,11 @@ fn authorizations_for_manifest(
     root: &Path,
     existing: Option<&WorkspaceManifest>,
 ) -> Result<Vec<IndexAuthorization>, EngineError> {
-    Ok(authorization_for_manifest(options, root, existing)?
-        .into_iter()
-        .collect())
+    crate::pipelines::indexing::service::embedding_plan(existing, options)?
+        .requests
+        .values()
+        .filter_map(|request| authorization_for_manifest(request, root, existing).transpose())
+        .collect()
 }
 
 fn authorization_for_manifest(
@@ -141,6 +143,7 @@ fn format_endpoint_host(url: &reqwest::Url) -> String {
 pub struct QueryAuthorization {
     pub target: IndexAuthorization,
     pub query_text: bool,
+    pub query_image: bool,
     pub workspace_content: bool,
 }
 
@@ -164,7 +167,7 @@ pub fn query_authorizations(
         return Ok(Vec::new());
     }
     let request = crate::pipelines::indexed_search::context::normalize_context_request(options)?;
-    let query_text = request
+    let vector = request
         .routes
         .iter()
         .any(|route| route.mode == ContextRouteMode::Vector);
@@ -178,30 +181,71 @@ pub fn query_authorizations(
     let Some(manifest) = read_workspace_manifest(&location.home)? else {
         return Ok(Vec::new());
     };
-    if manifest.workspace.index.descriptor().is_none() {
+    let Some(_) = manifest.workspace.index.descriptor() else {
+        return Ok(Vec::new());
+    };
+    if options.allow_remote || (!vector && !workspace_content) {
         return Ok(Vec::new());
     }
-    if options.allow_remote || (!query_text && !workspace_content) {
-        return Ok(Vec::new());
+    let base = crate::api::index::IndexOptions {
+        root: Some(location.root.clone()),
+        authorized_remote: options.authorized_remote.clone(),
+        ..crate::api::index::IndexOptions::default()
+    };
+    let mut plans: Vec<QueryAuthorization> = if workspace_content {
+        authorizations_for_manifest(&base, &location.root, Some(&manifest))?
+            .into_iter()
+            .map(|target| QueryAuthorization {
+                target,
+                query_text: false,
+                query_image: false,
+                workspace_content: true,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if vector {
+        for target in crate::pipelines::indexed_search::service::query_targets(
+            &manifest.workspace,
+            options,
+            &request,
+        )? {
+            if target.skip_reason.is_some() {
+                continue;
+            }
+            let kind = options.input_kind();
+            let schema = target.schema;
+            let query = crate::api::index::IndexOptions {
+                endpoint: options.endpoint.clone(),
+                embedding: Some(crate::api::index::options::EmbeddingModelSpec {
+                    reference: schema.model.reference(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: crate::domain::model::Device::Auto,
+                }),
+                ..base.clone()
+            };
+            if let Some(target) =
+                authorization_for_manifest(&query, &location.root, Some(&manifest))?
+            {
+                let image = kind == crate::domain::ContentKind::Image;
+                if let Some(plan) = plans.iter_mut().find(|plan| plan.target == target) {
+                    plan.query_text = !image;
+                    plan.query_image = image;
+                } else {
+                    plans.push(QueryAuthorization {
+                        target,
+                        query_text: !image,
+                        query_image: image,
+                        workspace_content: false,
+                    });
+                }
+            }
+        }
     }
-    let targets = authorizations_for_manifest(
-        &crate::api::index::IndexOptions {
-            root: Some(location.root.clone()),
-            endpoint: options.endpoint.clone(),
-            authorized_remote: options.authorized_remote.clone(),
-            ..crate::api::index::IndexOptions::default()
-        },
-        &location.root,
-        Some(&manifest),
-    )?;
-    Ok(targets
-        .into_iter()
-        .map(|target| QueryAuthorization {
-            target,
-            query_text,
-            workspace_content,
-        })
-        .collect())
+    Ok(plans)
 }
 
 /// Persists a destination explicitly approved by the terminal user.
@@ -405,7 +449,7 @@ pub fn grant(
         .or_else(|| {
             manifest
                 .as_ref()
-                .and_then(|m| m.embedding())
+                .and_then(|m| m.default_embedding())
                 .map(|e| e.model.reference())
         })
         .or_else(|| {
@@ -696,7 +740,16 @@ mod tests {
             .env(FIXTURE_ENV, workspace.path())
             .env("HOME", state.path())
             .env("USERPROFILE", state.path())
+            .env("ZVEC_GREP_HOME", state.path().join("runtime"))
+            .env("ZVEC_GREP_CONFIG", state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                state.path().join("workspaces.json"),
+            )
             .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
+            .env("ZVEC_GREP_API_KEY", "authorization-test-key")
+            .env_remove("DASHSCOPE_API_KEY")
+            .env_remove("QWEN_API_KEY")
             .env_remove("ZVEC_GREP_EMBEDDING")
             .env_remove("ZVEC_GREP_ENDPOINT")
             .output()
@@ -1070,7 +1123,7 @@ mod tests {
             api::context::{ContextOptions, options::RefreshPolicy},
             domain::{
                 IndexDescriptor, IndexState, Workspace,
-                model::{EmbeddingModelInfo, Metric, ModelConfig},
+                model::{EmbeddingMetric, EmbeddingModelInfo, ModelConfig},
             },
             workspace::{build::prepare_build, manifest::write_workspace_manifest},
         };
@@ -1081,18 +1134,24 @@ mod tests {
                 name: "workspace".to_owned(),
                 root: directory.path().to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "qwen".into(),
-                        name: "text-embedding-v4".into(),
-                        endpoint: None,
-                    },
+                index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
+                    model: crate::domain::model::ModelInfo::new(
+                        "qwen",
+                        "text-embedding-v4",
+                        [
+                            crate::domain::ContentKind::Text,
+                            crate::domain::ContentKind::Code,
+                        ],
+                    )
+                    .expect("fixture model identity"),
                     dimension: 1024,
-                    metric: Metric::Cosine,
+                    metric: EmbeddingMetric::Cosine,
                     max_batch_size: 32,
                     max_input_tokens: None,
                     max_image_bytes: None,
-                })),
+                }))),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 1,
             },
@@ -1185,6 +1244,155 @@ mod tests {
         options.allow_remote = false;
         options.embedding.as_mut().expect("model").reference = "local/potion-code-16m-v2".into();
         assert!(index_authorization(&options).expect("local").is_none());
+    }
+
+    #[test]
+    fn indexing_discloses_each_routed_destination_and_validates_capabilities() {
+        use crate::domain::ContentKind;
+        let directory = tempfile::tempdir().expect("workspace");
+        let spec = |reference: &str, endpoint: &str| EmbeddingModelSpec {
+            reference: reference.into(),
+            endpoint: Some(endpoint.into()),
+            revision: None,
+            cache_dir: None,
+            device: Device::Auto,
+        };
+        let mut options = IndexOptions {
+            root: Some(directory.path().into()),
+            embedding: Some(spec(
+                "qwen/text-embedding-v4",
+                "https://text.test/embeddings",
+            )),
+            embedding_routes: std::collections::BTreeMap::from([(
+                ContentKind::Image,
+                spec("qwen/qwen3-vl-embedding", "https://image.test/embeddings"),
+            )]),
+            ..IndexOptions::default()
+        };
+        let targets = index_authorizations(&options).expect("destinations");
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.endpoint_host == "text.test")
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.endpoint_host == "image.test")
+        );
+        assert!(!directory.path().join(".zvec-grep").exists());
+        options.authorized_remote = targets;
+        assert!(
+            index_authorizations(&options)
+                .expect("approved destinations")
+                .is_empty()
+        );
+        options.embedding_routes.insert(
+            ContentKind::Image,
+            spec("qwen/text-embedding-v4", "https://text.test/embeddings"),
+        );
+        assert!(index_authorizations(&options).is_err());
+    }
+
+    async fn routed_query_authorization_fixture() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("workspace");
+        let engine = crate::ZvecGrep::new();
+        engine
+            .index(IndexOptions {
+                root: Some(directory.path().into()),
+                allow_remote: true,
+                api_key: Some("test-key".into()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "qwen/qwen3-vl-embedding".into(),
+                    endpoint: Some("https://images.test/embeddings".into()),
+                    revision: None,
+                    cache_dir: None,
+                    device: Device::Auto,
+                }),
+                embedding_routes: std::collections::BTreeMap::from([(
+                    crate::domain::ContentKind::Text,
+                    EmbeddingModelSpec {
+                        reference: "qwen/text-embedding-v4".into(),
+                        endpoint: Some("https://text.test/embeddings".into()),
+                        revision: None,
+                        cache_dir: None,
+                        device: Device::Auto,
+                    },
+                )]),
+                ..IndexOptions::default()
+            })
+            .await
+            .expect("empty multimodal index");
+        engine.close();
+        directory
+    }
+
+    #[tokio::test]
+    async fn query_and_refresh_disclose_only_their_actual_destinations_and_content() {
+        use crate::api::context::{
+            ContextOptions,
+            options::{QueryImage, RefreshPolicy},
+        };
+        let Some(_root) = isolated_authorization_root(
+            "authorization::tests::query_and_refresh_disclose_only_their_actual_destinations_and_content",
+        ) else {
+            return;
+        };
+        let directory = routed_query_authorization_fixture().await;
+        let mut options = ContextOptions {
+            root: Some(directory.path().into()),
+            query: Some("text query".into()),
+            refresh: Some(RefreshPolicy::Off),
+            target_kind: Some(crate::domain::ContentKind::Text),
+            ..ContextOptions::default()
+        };
+        let targets = query_authorizations(&options).expect("text query");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target.endpoint_host, "text.test");
+        assert!(targets[0].query_text && !targets[0].query_image && !targets[0].workspace_content);
+        options.target_kind = None;
+        let targets = query_authorizations(&options).expect("all supported text targets");
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.query_text && !target.workspace_content)
+        );
+        options.refresh = Some(RefreshPolicy::Wait);
+        options.endpoint = Some("https://query-override.test/embeddings".into());
+        let targets = query_authorizations(&options).expect("query plus refresh");
+        assert_eq!(targets.len(), 4);
+        assert!(
+            targets
+                .iter()
+                .filter(|target| target.workspace_content)
+                .all(|target| !target.query_text && !target.query_image)
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .find(|target| target.query_text)
+                .expect("authorization fixture")
+                .target
+                .endpoint_host,
+            "query-override.test"
+        );
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("authorization fixture");
+        options.query = None;
+        options.query_image = Some(QueryImage::Bytes {
+            format: crate::domain::FileFormat::Png,
+            data: png.into_inner(),
+        });
+        options.endpoint = None;
+        options.refresh = Some(RefreshPolicy::Off);
+        let targets = query_authorizations(&options).expect("image query");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target.endpoint_host, "images.test");
+        assert!(!targets[0].query_text && targets[0].query_image && !targets[0].workspace_content);
     }
 
     #[test]
