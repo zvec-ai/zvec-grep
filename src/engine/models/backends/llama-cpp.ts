@@ -773,6 +773,11 @@ function formatTextForEmbedding(
       ? `Instruct: Retrieve relevant documents for the given query\nQuery: ${text}`
       : text;
   }
+  if (entry.format === "embeddinggemma2") {
+    return purpose === "query"
+      ? `task: code retrieval | query: ${text}`
+      : `title: none | text: ${text}`;
+  }
 
   return purpose === "query"
     ? `task: search result | query: ${text}`
