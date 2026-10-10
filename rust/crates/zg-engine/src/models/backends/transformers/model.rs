@@ -401,7 +401,7 @@ impl SessionPool {
         max_sessions: usize,
         inference: impl Fn(&mut Session) -> Result<T, ModelError>,
     ) -> Result<T, ModelError> {
-        let max_sessions = max_sessions.max(1);
+        let max_sessions = max_sessions.clamp(1, crate::models::runtime::LOCAL_CONCURRENCY_CAP);
         loop {
             let mut state = lock_std_mutex(&self.state);
             if let Some(slot) = state.sessions.iter().find_map(|slot| {

@@ -27,6 +27,29 @@ let reply = zg.context(ContextOptions {
 zg.close();
 ```
 
+Index embedding concurrency is configured with
+`zg --index --index-embedding-concurrency <n>`; the old
+`--embedding-concurrency` spelling is rejected. For automatic indexing and
+refreshes as well, set `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=<n>`. Values must be
+positive integers. Explicit CLI/API index settings take precedence over this
+environment variable, followed by the legacy
+`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
+Invalid environment values warn and select the automatic default. These overrides
+do not configure query-vector inference and are not persisted in workspace settings.
+Direct and Server indexing use the same engine boundary; restart the Server after
+changing its inherited environment, while explicit CLI overrides need no restart.
+
+For llama.cpp, the limit controls contexts within a serialized batch and is capped
+at eight, defaulting to one. Transformers/ORT limits in-flight batches to at most
+eight, defaulting to one. ORT may create sessions within this budget;
+CoreML retains one physical session. Potion/model2vec defaults to two batch tasks
+and retains an independent CPU worker capacity; remote models retain adaptive
+request scheduling. Model2vec and remote overrides are not capped at eight.
+
+Matching local concurrency configurations share runtime admission. Different
+configurations use separate cached native resources; active leases keep their
+models alive, while unused variants are released when switching configurations.
+
 `zg --install --target opencode` respects a nonempty `OPENCODE_CONFIG` override.
 Otherwise it selects an existing `opencode.jsonc` before `opencode.json` under
 `${XDG_CONFIG_HOME:-~/.config}/opencode`, creating `opencode.json` when neither

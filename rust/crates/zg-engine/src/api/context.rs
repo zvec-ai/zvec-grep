@@ -81,6 +81,7 @@ pub mod options {
         pub max_depth: Option<usize>,
         pub max_file_size_bytes: Option<u64>,
         pub follow: bool,
+        /// Index-only override for refreshes; query-vector inference uses its own defaults.
         pub embedding_concurrency: Option<usize>,
         /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).
         #[serde(default, skip_serializing_if = "Option::is_none")]

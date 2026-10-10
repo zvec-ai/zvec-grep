@@ -724,7 +724,8 @@ pub struct SearchInput {
     pub categories: Option<PathListInput>,
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
-    /// Embedding requests processed concurrently during updates.
+    /// Index-only refresh budget; query-vector inference keeps its own defaults.
+    /// Controls llama.cpp contexts or concurrent batches/requests for other backends.
     #[schemars(range(min = 1))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
@@ -795,7 +796,8 @@ pub struct IndexInput {
     pub max_file_size_bytes: Option<Option<u64>>,
     #[serde(rename = "follow", alias = "followSymlinks")]
     pub follow_symlinks: Option<bool>,
-    /// Embedding batch tasks processed concurrently during this update.
+    /// Index-only execution budget: llama.cpp contexts, local batches, or remote requests.
+    /// llama.cpp and Transformers limits are capped at eight.
     #[schemars(range(min = 1))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.

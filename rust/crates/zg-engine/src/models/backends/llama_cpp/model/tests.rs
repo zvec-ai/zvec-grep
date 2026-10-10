@@ -52,11 +52,13 @@ fn user_concurrency_controls_cpu_threads_per_context() {
 }
 
 #[test]
-fn metal_context_pool_caps_physical_workers_without_ignoring_user_limit() {
+fn context_pool_honors_user_limit_and_caps_at_eight() {
     assert_eq!(physical_context_worker_limit(true, 1), 1);
     assert_eq!(physical_context_worker_limit(true, 2), 2);
-    assert_eq!(physical_context_worker_limit(true, 4), 2);
+    assert_eq!(physical_context_worker_limit(true, 4), 4);
     assert_eq!(physical_context_worker_limit(false, 4), 4);
+    assert_eq!(physical_context_worker_limit(true, 24), 8);
+    assert_eq!(physical_context_worker_limit(false, 24), 8);
 }
 
 #[test]

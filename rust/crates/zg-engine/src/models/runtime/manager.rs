@@ -16,6 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::compute::ModelComputeRuntime;
+use super::concurrency::{batch_concurrency, local_runtime_limit};
 use crate::domain::{
     Content,
     model::{Device, EmbeddingModelInfo, EmbeddingResult, ModelConfig},
@@ -81,6 +82,8 @@ struct ModelRuntimeEntry {
 struct ModelRuntime {
     model: Arc<dyn EmbeddingModel>,
     active_embeddings: AtomicUsize,
+    // Native callers with the same budget share admission across all leases.
+    batch_permits: Option<Arc<Semaphore>>,
 }
 
 /// Configuration that determines whether two callers may share one model.
@@ -111,6 +114,7 @@ struct ModelRuntimeKey {
     endpoint: Option<String>,
     model_cache_dir: Option<PathBuf>,
     device: Option<Device>,
+    local_limit: Option<usize>,
 }
 
 /// A counted handle to a shared model runtime.
@@ -177,7 +181,7 @@ impl ModelRuntimeManager {
             embedding_concurrency,
         } = request;
         validate_embedding_concurrency(embedding_concurrency)?;
-        let key = ModelRuntimeKey::new(&reference, &options);
+        let key = ModelRuntimeKey::for_request(&reference, &options, embedding_concurrency);
         // Declare retired handles before the guard so even an error releases the
         // manager lock before running native model destructors.
         let mut retired = Vec::new();
@@ -204,6 +208,11 @@ impl ModelRuntimeManager {
                 runtime: Arc::new(ModelRuntime {
                     model,
                     active_embeddings: AtomicUsize::new(0),
+                    batch_permits: key.local_limit.is_some().then(|| {
+                        Arc::new(Semaphore::new(
+                            batch_concurrency(&reference, key.local_limit).unwrap_or(1),
+                        ))
+                    }),
                 }),
                 leases: AtomicUsize::new(0),
             });
@@ -217,19 +226,23 @@ impl ModelRuntimeManager {
             entry
         };
         let concurrency = resolve_embedding_concurrency(
-            embedding_concurrency,
+            key.local_limit.or(embedding_concurrency),
             entry.runtime.model.concurrency_defaults(),
         );
         entry.leases.fetch_add(1, Ordering::AcqRel);
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
         state.wake_maintenance();
+        let permits = entry.runtime.batch_permits.clone().unwrap_or_else(|| {
+            // Preserve the requested budget without overflowing Tokio's permit counter.
+            Arc::new(Semaphore::new(concurrency.min(Semaphore::MAX_PERMITS)))
+        });
         let lease = ModelRuntimeLease {
             key,
             entry,
             manager: Arc::downgrade(&self.inner),
             operation: Arc::new(OperationConcurrency {
                 limit: concurrency,
-                permits: Arc::new(Semaphore::new(concurrency)),
+                permits,
             }),
         };
         drop(state);
@@ -401,8 +414,11 @@ impl fmt::Debug for ModelRuntimeManager {
 }
 
 impl ModelRuntimeLease {
-    pub(crate) fn matches_request(&self, request: &ModelRuntimeRequest) -> bool {
-        self.key == ModelRuntimeKey::new(&request.reference, &request.options)
+    pub(crate) fn matches_query_request(&self, request: &ModelRuntimeRequest) -> bool {
+        // Queries may borrow writer storage while using a separate native budget.
+        let mut key = ModelRuntimeKey::new(&request.reference, &request.options);
+        key.local_limit = self.key.local_limit;
+        self.key == key
     }
 
     pub(crate) fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
@@ -539,7 +555,14 @@ impl ModelRuntimeKey {
             endpoint: options.endpoint.clone(),
             model_cache_dir: options.cache_dir.clone(),
             device: options.device,
+            local_limit: local_runtime_limit(reference, None),
         }
+    }
+
+    fn for_request(reference: &str, options: &ModelConfig, concurrency: Option<usize>) -> Self {
+        let mut key = Self::new(reference, options);
+        key.local_limit = local_runtime_limit(reference, concurrency);
+        key
     }
 }
 

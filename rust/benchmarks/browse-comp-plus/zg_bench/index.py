@@ -114,7 +114,7 @@ def build_index(
         "direct",
         "--embedding",
         config.zvec_grep.embedding,
-        "--embedding-concurrency",
+        "--index-embedding-concurrency",
         str(config.zvec_grep.embedding_concurrency),
         "--max-filesize",
         config.zvec_grep.max_filesize,

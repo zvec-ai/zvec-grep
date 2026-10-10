@@ -497,12 +497,8 @@ fn embed_texts(
     )
 }
 
-fn physical_context_worker_limit(gpu: bool, requested: usize) -> usize {
-    if gpu {
-        requested.clamp(1, 2)
-    } else {
-        requested.max(1)
-    }
+fn physical_context_worker_limit(_gpu: bool, requested: usize) -> usize {
+    requested.clamp(1, crate::models::runtime::LOCAL_CONCURRENCY_CAP)
 }
 
 impl LlamaContextPool {

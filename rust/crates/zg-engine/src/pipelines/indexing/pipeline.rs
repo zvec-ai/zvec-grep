@@ -638,10 +638,8 @@ async fn index_candidates(
     progress_base: Option<ProgressBase>,
     model_prepared: &mut bool,
 ) -> Result<IndexWriteStats, EngineError> {
-    let policy = resolve_embedding_policy(
-        context.embedding_concurrency,
-        context.embedding_models[0].concurrency_defaults(),
-    )?;
+    let policy =
+        resolve_index_batch_policy(context.embedding_concurrency, context.embedding_models[0])?;
     let scheduler = Arc::new(EmbeddingScheduler::new(policy));
     let max_batch_size = context.embedding_models[0].info().max_batch_size;
     let mut stats = IndexWriteStats::default();
@@ -1557,6 +1555,19 @@ struct EmbeddingConcurrencyPolicy {
     adaptive: bool,
 }
 
+fn resolve_index_batch_policy(
+    requested: Option<usize>,
+    model: &dyn IndexEmbeddingRuntime,
+) -> Result<EmbeddingConcurrencyPolicy, EngineError> {
+    if requested == Some(0) {
+        return resolve_embedding_policy(requested, model.concurrency_defaults());
+    }
+    resolve_embedding_policy(
+        crate::models::batch_concurrency(&model.info().model.reference(), requested),
+        model.concurrency_defaults(),
+    )
+}
+
 fn resolve_embedding_policy(
     requested: Option<usize>,
     defaults: EmbeddingConcurrencyDefaults,
@@ -1825,8 +1836,7 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
                 EngineError::invalid_argument("runtime model is not in workspace index")
             })?;
         schema.ensure_index_compatible(model.info())?;
-        let _ =
-            resolve_embedding_policy(context.embedding_concurrency, model.concurrency_defaults())?;
+        let _ = resolve_index_batch_policy(context.embedding_concurrency, *model)?;
     }
     Ok(())
 }

@@ -397,8 +397,24 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>       Embedding task concurrency
+  --index-embedding-concurrency <n>  Positive index embedding concurrency
   --allow-remote                    Allow Remote Embedding for this command only
+
+Index embedding concurrency:
+  Applies only to index construction and updates, including automatic indexing
+  and refresh; query-vector inference keeps its own defaults. The CLI option
+  is accepted only with --index and is never saved in workspace settings.
+  llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
+  Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
+    sessions honor that budget; CoreML uses one physical session.
+  Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
+    CPU worker-pool capacity. No cap of 8 is applied.
+  Remote: concurrent requests; adaptive scheduling may reduce the limit after
+    failures or rate limits. No cap of 8 is applied.
+  Precedence: CLI/API override, ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY, legacy
+    ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM for llama.cpp indexing, then defaults.
+  Explicit CLI overrides work without restarting the Server. Environment
+    changes require restarting the Server so it inherits the new value.
 
 Scan rules:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
@@ -436,6 +452,13 @@ Environment:
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
+
+Index-only embedding concurrency:
+  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  Applies to automatic indexing and refresh, never query-vector inference.
+  Explicit CLI/API index settings take precedence. Invalid values warn and use
+  automatic selection. Server mode reads the Server process environment;
+  restart the Server after changing it. Overrides are not persisted.
 
 See zg --help environment for precedence and Server-mode scope.";
 
@@ -711,6 +734,14 @@ Embedding:
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
+Index-only embedding concurrency:
+  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  Applies to automatic indexing and refresh, never query-vector inference.
+  Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
+  index setting, then backend defaults. Invalid values warn and use defaults.
+  Server mode reads the Server process environment; restart it after changes.
+  These overrides are not persisted in workspace settings.
+
 Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY
   QWEN_API_KEY       Qwen credential fallback after DASHSCOPE_API_KEY
@@ -721,7 +752,7 @@ State and authorization:
 
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
-  ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Positive llama.cpp context parallelism override (advanced)
+  ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
   NO_COLOR                             Disable terminal colors
 
 Agent integration paths:

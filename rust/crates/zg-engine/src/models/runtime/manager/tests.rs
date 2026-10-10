@@ -694,6 +694,110 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
 }
 
 #[tokio::test]
+async fn native_batches_share_admission_across_independent_leases() {
+    for (reference, requested, allowed) in [
+        ("local/all-minilm-l6-v2", 2, 2),
+        ("local/embeddinggemma-300m", 8, 1),
+    ] {
+        let fixture = Arc::new(GatedFixtureModel::new());
+        let manager = ModelRuntimeManager::with_factory({
+            let fixture = Arc::clone(&fixture);
+            move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        });
+        let request =
+            || ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(requested));
+        let first = manager.acquire(request()).expect("first operation");
+        let second = manager.acquire(request()).expect("second operation");
+        assert!(Arc::ptr_eq(&first.entry, &second.entry));
+        let inputs = [vec![Content::Text("fixture".into())]];
+        let embeddings = async {
+            tokio::join!(
+                first.embed(&inputs, EmbeddingOptions::default(), None),
+                first.embed(&inputs, EmbeddingOptions::default(), None),
+                second.embed(&inputs, EmbeddingOptions::default(), None),
+                second.embed(&inputs, EmbeddingOptions::default(), None),
+            )
+        };
+        let observe = async {
+            while fixture.started.load(Ordering::Acquire) < allowed {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(fixture.started.load(Ordering::Acquire), allowed);
+            assert_eq!(first.operation.permits.available_permits(), 0);
+            assert!(Arc::ptr_eq(
+                &first.operation.permits,
+                &second.operation.permits
+            ));
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            assert_eq!(
+                second
+                    .embed(
+                        &inputs,
+                        EmbeddingOptions {
+                            signal: Some(cancelled),
+                            ..EmbeddingOptions::default()
+                        },
+                        None
+                    )
+                    .await
+                    .expect_err("cancelled waiting batch")
+                    .code(),
+                crate::EngineError::CANCELLED
+            );
+            fixture.release.add_permits(4);
+        };
+        let ((a, b, c, d), ()) = tokio::join!(embeddings, observe);
+        for result in [a, b, c, d] {
+            result.expect("embedding batch");
+        }
+        assert_eq!(fixture.maximum_active.load(Ordering::Acquire), allowed);
+    }
+}
+
+#[test]
+fn local_variants_reuse_equivalent_limits_and_release_idle_resources() {
+    let (manager, creations) = fixture_cache(CachePolicy::default());
+    let request =
+        |limit| ModelRuntimeRequest::new("local/all-minilm-l6-v2", ModelConfig::default(), limit);
+    let first = manager.acquire(request(Some(24))).expect("capped override");
+    let same = manager
+        .acquire(request(Some(99)))
+        .expect("equivalent override");
+    assert!(Arc::ptr_eq(&first.entry, &same.entry));
+    assert_eq!(first.operation.limit, 8);
+    let previous = Arc::downgrade(&first.entry.runtime.model);
+    let query = manager.acquire(request(None)).expect("query default");
+    assert!(!Arc::ptr_eq(&first.entry, &query.entry));
+    assert_eq!(query.operation.limit, 1);
+    assert!(
+        previous.upgrade().is_some(),
+        "active index resources are retained"
+    );
+    drop(first);
+    drop(same);
+    assert!(
+        previous.upgrade().is_none(),
+        "idle index variant is retired before replacement use"
+    );
+    let explicit_one = manager
+        .acquire(request(Some(1)))
+        .expect("equivalent query limit");
+    assert!(Arc::ptr_eq(&query.entry, &explicit_one.entry));
+    assert_eq!(creations.load(Ordering::Acquire), 2);
+    drop(explicit_one);
+    drop(query);
+    let replacement = manager
+        .acquire(request(Some(4)))
+        .expect("sequential index limit");
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
+    assert_eq!(creations.load(Ordering::Acquire), 3);
+    drop(replacement);
+    manager.close();
+    assert_eq!(manager.snapshot().cached_runtimes, 0);
+}
+
+#[tokio::test]
 async fn user_concurrency_limits_tasks_without_splitting_the_shared_runtime() {
     let fixture = Arc::new(GatedFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
@@ -832,8 +936,16 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         let explicit = manager
             .acquire(ModelRuntimeRequest::new(reference, config, Some(24)))
             .expect("explicit concurrency");
-        assert_eq!(explicit.operation.limit, 24, "{reference}");
-        assert!(Arc::ptr_eq(&lease.entry, &explicit.entry));
+        let local_native = matches!(
+            reference,
+            "local/embeddinggemma-300m" | "local/all-minilm-l6-v2"
+        );
+        assert_eq!(
+            explicit.operation.limit,
+            if local_native { 8 } else { 24 },
+            "{reference}"
+        );
+        assert_eq!(Arc::ptr_eq(&lease.entry, &explicit.entry), !local_native);
     }
 }
 
@@ -857,6 +969,32 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
 
     assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
     assert_eq!(creations.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn large_remote_overrides_do_not_overflow_runtime_admission() {
+    let manager = ModelRuntimeManager::with_factory(|_reference, _options, _compute| {
+        Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
+    });
+    let lease = manager
+        .acquire(ModelRuntimeRequest::new(
+            "qwen/text-embedding-v4",
+            ModelConfig::default(),
+            Some(usize::MAX),
+        ))
+        .expect("positive remote limit");
+    lease
+        .embed(
+            &[vec![Content::Text("fixture".into())]],
+            EmbeddingOptions::default(),
+            None,
+        )
+        .await
+        .expect("admitted request");
+    assert_eq!(lease.operation.limit, usize::MAX);
+    assert_eq!(manager.snapshot().active_embeddings, 0);
+    drop(lease);
+    manager.close();
 }
 
 #[test]

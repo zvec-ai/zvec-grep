@@ -32,8 +32,10 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// Maximum embedding batch tasks for this index operation.
-        /// The model default is used when omitted.
+        /// Index-only embedding concurrency: llama.cpp contexts, local inference
+        /// batches, or remote requests. Local native limits are capped at eight.
+        /// Omitted values use `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY`, the legacy
+        /// llama.cpp index override, then the backend default; never persisted.
         pub embedding_concurrency: Option<usize>,
         /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).
         #[serde(default, skip_serializing_if = "Option::is_none")]

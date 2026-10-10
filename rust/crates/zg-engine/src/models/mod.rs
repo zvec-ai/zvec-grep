@@ -17,6 +17,7 @@ pub(crate) use catalog::{ResolveEmbeddingReferenceOptions, resolve_embedding_ref
 // Runtime lifecycle.
 pub(crate) use error::ModelError;
 pub(crate) use runtime::{ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest};
+pub(crate) use runtime::{batch_concurrency, resolve_index_concurrency};
 pub(crate) use spi::{
     EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelProgressReporter,
 };

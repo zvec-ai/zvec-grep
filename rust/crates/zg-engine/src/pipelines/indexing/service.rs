@@ -24,7 +24,7 @@ use crate::{
     },
     models::{
         ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
-        ResolveEmbeddingReferenceOptions, resolve_embedding_reference,
+        ResolveEmbeddingReferenceOptions, resolve_embedding_reference, resolve_index_concurrency,
     },
     storage::{IndexStore, types::WorkspaceIndexStorageOptions},
     workspace::{
@@ -215,6 +215,12 @@ impl WorkspaceIndexService {
             // A changed selection can admit files outside a watcher's narrow change scope.
             options.changes.clear();
         }
+        // Resolve only at the shared index boundary; query runtimes never read these overrides.
+        options.embedding_concurrency = resolve_index_concurrency(
+            &embedding_reference(existing.as_ref(), options.embedding.as_ref())?,
+            options.embedding_concurrency,
+        )
+        .map_err(ModelError::into_engine_error)?;
         let IndexModels {
             runtimes: acquired,
             descriptor,
@@ -2116,6 +2122,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_concurrency_is_ephemeral_and_queries_ignore_refresh_overrides() {
+        let directory = tempdir().expect("workspace");
+        let service = WorkspaceIndexService::with_test_registry();
+        let models = ModelRuntimeManager::new();
+        let mut options = empty_index_options(directory.path());
+        options.embedding.as_mut().expect("model").reference = "local/all-minilm-l6-v2".into();
+        options.embedding.as_mut().expect("model").cache_dir =
+            Some(directory.path().join("model-cache"));
+        options.embedding_concurrency = Some(8);
+        service
+            .index(&models, options)
+            .await
+            .expect("empty index with override");
+        let home = directory.path().join(".zvec-grep");
+        let manifest = super::read_workspace_manifest(&home)
+            .expect("manifest")
+            .expect("index");
+        let serialized = serde_json::to_string(&manifest).expect("manifest serialization");
+        assert!(!serialized.contains("embedding_concurrency"));
+        assert!(!serialized.contains("embeddingConcurrency"));
+        let default = crate::api::context::ContextOptions::default();
+        let first = crate::pipelines::indexed_search::service::acquire_search_model(
+            &models,
+            &manifest,
+            &default,
+            directory.path(),
+        )
+        .expect("query default");
+        let second = crate::pipelines::indexed_search::service::acquire_search_model(
+            &models,
+            &manifest,
+            &crate::api::context::ContextOptions {
+                embedding_concurrency: Some(24),
+                ..default
+            },
+            directory.path(),
+        )
+        .expect("query with refresh override");
+        assert_eq!(
+            models.snapshot().cached_runtimes,
+            1,
+            "queries share their default budget"
+        );
+        assert_eq!(models.snapshot().active_leases, 2);
+        assert!(
+            !directory.path().join("model-cache").exists(),
+            "empty work does not load a model"
+        );
+        drop(first);
+        drop(second);
+        models.close();
+    }
+
+    #[tokio::test]
     async fn composes_workspace_lifecycle_around_the_indexing_pipeline() {
         let directory = tempdir().expect("temporary directory");
         let sources = directory.path().join("sources");
@@ -2158,7 +2218,6 @@ mod tests {
         let lease = crate::pipelines::indexed_search::service::acquire_search_model(
             &models,
             &manifest,
-            None,
             &crate::api::context::ContextOptions::default(),
             directory.path(),
         )
