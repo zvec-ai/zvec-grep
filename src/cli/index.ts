@@ -4,9 +4,12 @@ import { compatibilityWarningForArgs, parseArgs } from "./args.js";
 import { runParsedCommand } from "./commands.js";
 import { colorModeFromArgs, printError } from "./errors.js";
 import { printHelp } from "./help.js";
+import { installStdoutErrorHandler } from "./stdio.js";
 import { readPackageVersion } from "./version.js";
 
 const PACKAGE_VERSION = readPackageVersion();
+
+installStdoutErrorHandler();
 
 void main();
 
