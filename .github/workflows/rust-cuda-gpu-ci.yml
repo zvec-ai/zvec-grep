@@ -1,0 +1,71 @@
+name: Rust CUDA GPU CI
+run-name: Rust CUDA GPU CI / ${{ inputs.ref }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, SHA, or pull request merge ref (for example refs/pull/235/merge)
+        required: true
+        default: main
+        type: string
+      confirm_reviewed:
+        description: I reviewed and trust the selected ref to run on the self-hosted GPU runner
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: rust-cuda-gpu
+  cancel-in-progress: false
+
+jobs:
+  cuda-runtime:
+    name: cuda runtime (T4)
+    if: ${{ inputs.confirm_reviewed }}
+    runs-on: [self-hosted, Linux, X64, gpu, cuda, t4]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Verify the GPU runner
+        run: |
+          nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
+          docker version
+      - name: Build the pinned CUDA toolchain image
+        run: >-
+          docker build --network host --platform linux/amd64
+          --file rust/docker/cuda-builder.Dockerfile
+          --tag zvec-grep-cuda-builder .
+      - name: Build, audit, and run real CUDA inference
+        run: |
+          docker run --rm --gpus all --network host --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume zvec-grep-cargo-cache:/root/.cargo \
+            --volume zvec-grep-cuda-target:/work-target \
+            --volume zvec-grep-model-cache:/model-cache \
+            --env CARGO_TARGET_DIR=/work-target \
+            --env CMAKE_BUILD_PARALLEL_LEVEL=4 \
+            --env CMAKE_CUDA_ARCHITECTURES=75 \
+            --env ORT_CUDA_VERSION=13 \
+            --env ZVEC_GREP_MODEL_CACHE=/model-cache \
+            --env ZVEC_GREP_TEST_MODEL_CACHE=/model-cache \
+            zvec-grep-cuda-builder \
+            bash -euo pipefail -c '
+              nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
+              bash scripts/build-cuda.sh
+              export ZVEC_GREP_NATIVE_LIB_DIR="${CARGO_TARGET_DIR}/release/zg-cuda"
+              export LD_LIBRARY_PATH="${ZVEC_GREP_NATIVE_LIB_DIR}:${CARGO_TARGET_DIR}/release${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+              cargo test --locked --release --package zg-engine --features cuda --lib \
+                models::backends::llama_cpp::model::tests::cached_embeddinggemma_uses_cuda \
+                -- --ignored --exact --nocapture
+              cargo test --locked --release --package zg-engine --features cuda --lib \
+                models::backends::transformers::model::tests::cached_minilm_uses_cuda \
+                -- --ignored --exact --nocapture
+            '
