@@ -687,6 +687,11 @@ pub enum GlobListInput {
     Rules(Vec<GlobInput>),
 }
 
+// Advertise optional numeric/boolean inputs as scalar types, with optionality
+// expressed by the object's required list. Qwen-compatible tool parsers can
+// return strings for schemars' nullable type arrays. These schema-only overrides
+// preserve strict serde types and acceptance of null as absence. Do not apply
+// them to fields where null clears a saved setting (Option<Option<T>>).
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchInput {
@@ -703,7 +708,7 @@ pub struct SearchInput {
     /// Supplemental semantic/vector-route groups.
     pub vector: Option<QueryListInput>,
     /// Maximum returned items per query group or fused plan.
-    #[schemars(range(min = 1, max = 50))]
+    #[schemars(range(min = 1, max = 50), extend("type" = "integer"))]
     pub limit: Option<usize>,
     /// Source display only: short bounds snippets; full preserves all available retrieved content and outline without changing retrieval or ranking.
     #[serde(default)]
@@ -725,11 +730,13 @@ pub struct SearchInput {
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
     /// Embedding requests processed concurrently during updates.
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
+    #[schemars(extend("type" = "boolean"))]
     pub fuse: Option<bool>,
     /// Prefer exact indexed symbols.
+    #[schemars(extend("type" = "boolean"))]
     pub prefer_symbol: Option<bool>,
     /// Restrict indexed results to symbol types.
     #[serde(default)]
@@ -740,6 +747,7 @@ pub struct SearchInput {
     /// Only query files modified before this time.
     pub modified_before: Option<TimeInput>,
     /// Include per-hit search trace.
+    #[schemars(extend("type" = "boolean"))]
     pub trace: Option<bool>,
     /// Search now or wait for delivered workspace changes to be indexed.
     /// Resident servers cover watcher notifications received before the refresh
@@ -768,13 +776,16 @@ pub struct IndexInput {
     #[schemars(length(max = 2048))]
     pub endpoint: Option<String>,
     /// Permanently remove the workspace index.
+    #[schemars(extend("type" = "boolean"))]
     pub drop: Option<bool>,
     /// Single embedding model for this workspace; this version indexes text only.
     #[schemars(length(min = 1, max = 256))]
     pub embedding: Option<String>,
     /// Explicitly rebuild the existing index.
+    #[schemars(extend("type" = "boolean"))]
     pub rebuild: Option<bool>,
     /// Replace the index root-path configuration.
+    #[schemars(extend("type" = "boolean"))]
     pub reset_paths: Option<bool>,
     #[schemars(length(max = 128))]
     pub globs: Option<GlobListInput>,
@@ -783,9 +794,12 @@ pub struct IndexInput {
     /// Ripgrep type names, such as ts, py, h or cpp.
     pub file_types: Option<PathListInput>,
     pub excluded_file_types: Option<PathListInput>,
+    #[schemars(extend("type" = "boolean"))]
     pub hidden: Option<bool>,
+    #[schemars(extend("type" = "boolean"))]
     pub no_ignore: Option<bool>,
     /// Whether indexing scans nested Git repositories and submodules.
+    #[schemars(extend("type" = "boolean"))]
     pub nested_git: Option<bool>,
     pub ignore_files: Option<PathListInput>,
     #[serde(default, deserialize_with = "deserialize_optional_update")]
@@ -794,13 +808,16 @@ pub struct IndexInput {
     #[serde(default, deserialize_with = "deserialize_optional_update")]
     pub max_file_size_bytes: Option<Option<u64>>,
     #[serde(rename = "follow", alias = "followSymlinks")]
+    #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
     /// Embedding batch tasks processed concurrently during this update.
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
+    #[schemars(extend("type" = "boolean"))]
     pub debug: Option<bool>,
     /// Wait for the submitted index job to finish.
+    #[schemars(extend("type" = "boolean"))]
     pub wait: Option<bool>,
 }
 
@@ -2725,6 +2742,142 @@ mod tests {
                 .instructions
                 .is_some_and(|instructions| instructions.contains("zvec_grep_index"))
         );
+    }
+
+    #[test]
+    fn listed_optional_scalars_use_provider_compatible_types() {
+        for server in [
+            ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new())),
+            ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus)),
+        ] {
+            for tool in server.listed_tools() {
+                let fields: &[(&str, &str)] = match tool.name.as_ref() {
+                    AGENT_TOOL_NAME => &[
+                        ("limit", "integer"),
+                        ("embeddingConcurrency", "integer"),
+                        ("fuse", "boolean"),
+                        ("preferSymbol", "boolean"),
+                        ("trace", "boolean"),
+                    ],
+                    "zvec_grep_index" => &[
+                        ("drop", "boolean"),
+                        ("rebuild", "boolean"),
+                        ("resetPaths", "boolean"),
+                        ("hidden", "boolean"),
+                        ("noIgnore", "boolean"),
+                        ("nestedGit", "boolean"),
+                        ("follow", "boolean"),
+                        ("embeddingConcurrency", "integer"),
+                        ("debug", "boolean"),
+                        ("wait", "boolean"),
+                    ],
+                    _ => continue,
+                };
+                let schema = serde_json::to_value(&tool.input_schema).expect("input schema");
+                let required = schema["required"].as_array().expect("required root");
+                assert!(required.contains(&serde_json::json!("root")));
+                assert_eq!(schema["additionalProperties"], false);
+                for (field, scalar) in fields {
+                    let property = &schema["properties"][field];
+                    assert_eq!(property["type"], *scalar, "{}.{field}", tool.name);
+                    assert!(!required.contains(&serde_json::json!(field)));
+                    assert!(property.get("anyOf").is_none());
+                    assert!(property.get("oneOf").is_none());
+                }
+                assert_eq!(schema["properties"]["embeddingConcurrency"]["minimum"], 1);
+                if tool.name == AGENT_TOOL_NAME {
+                    assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+                    assert_eq!(schema["properties"]["limit"]["maximum"], 50);
+                } else {
+                    // Explicit null clears these settings, unlike ordinary Option<T>.
+                    for field in ["maxDepth", "maxFileSizeBytes"] {
+                        let types = schema["properties"][field]["type"]
+                            .as_array()
+                            .expect("nullable reset input");
+                        assert!(types.contains(&serde_json::json!("integer")));
+                        assert!(types.contains(&serde_json::json!("null")));
+                        assert!(!required.contains(&serde_json::json!(field)));
+                    }
+                    assert_eq!(schema["properties"]["maxFileSizeBytes"]["minimum"], 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_optional_scalars_keep_strict_runtime_types() {
+        let base = serde_json::json!({"root": test_root(), "query": "needle"});
+        let omitted: SearchInput = serde_json::from_value(base.clone()).expect("optional scalars");
+        assert!(omitted.limit.is_none());
+        assert!(omitted.fuse.is_none());
+        for (field, typed) in [
+            ("limit", serde_json::json!(15)),
+            ("embeddingConcurrency", serde_json::json!(2)),
+            ("fuse", serde_json::json!(true)),
+            ("preferSymbol", serde_json::json!(false)),
+            ("trace", serde_json::json!(true)),
+        ] {
+            for value in [typed.clone(), serde_json::Value::Null] {
+                let mut arguments = base.clone();
+                arguments[field] = value;
+                serde_json::from_value::<SearchInput>(arguments)
+                    .expect("typed or legacy null input")
+                    .into_request()
+                    .expect("valid search request");
+            }
+            let mut arguments = base.clone();
+            arguments[field] = serde_json::json!(typed.to_string());
+            assert!(
+                serde_json::from_value::<SearchInput>(arguments).is_err(),
+                "{field}"
+            );
+        }
+        let mut arguments = base;
+        arguments["limit"] = serde_json::json!(15);
+        arguments["fuse"] = serde_json::json!(true);
+        let typed: SearchInput = serde_json::from_value(arguments).expect("typed arguments");
+        assert_eq!(typed.limit, Some(15));
+        assert_eq!(typed.fuse, Some(true));
+    }
+
+    #[test]
+    fn index_optional_scalars_keep_strict_runtime_types() {
+        let base = serde_json::json!({"root": test_root()});
+        let omitted: IndexInput = serde_json::from_value(base.clone()).expect("optional scalars");
+        assert!(omitted.embedding_concurrency.is_none());
+        assert!(omitted.wait.is_none());
+        for field in [
+            "drop",
+            "rebuild",
+            "resetPaths",
+            "hidden",
+            "noIgnore",
+            "nestedGit",
+            "follow",
+            "embeddingConcurrency",
+            "debug",
+            "wait",
+        ] {
+            let typed = if field == "embeddingConcurrency" {
+                serde_json::json!(2)
+            } else {
+                serde_json::json!(false)
+            };
+            for value in [typed.clone(), serde_json::Value::Null] {
+                let mut arguments = base.clone();
+                arguments[field] = value;
+                serde_json::from_value::<IndexInput>(arguments)
+                    .expect("typed or legacy null input")
+                    .into_request()
+                    .expect("valid index request");
+            }
+            let mut arguments = base.clone();
+            arguments[field] = serde_json::json!(typed.to_string());
+            assert!(
+                serde_json::from_value::<IndexInput>(arguments).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
