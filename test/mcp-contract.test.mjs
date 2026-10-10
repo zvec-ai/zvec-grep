@@ -26,6 +26,25 @@ const root = resolve("test/fixtures/repository");
 const longIndexedContent = "x".repeat(8_000);
 const longRgContent = "r".repeat(8_000);
 
+test("agent and full MCP instructions stay within Claude Code's 2048-character limit", () => {
+  assert.ok(
+    ZVEC_GREP_AGENT_MCP_INSTRUCTIONS.length <= 2_048,
+    `agent instructions are ${ZVEC_GREP_AGENT_MCP_INSTRUCTIONS.length} characters`,
+  );
+  assert.ok(
+    ZVEC_GREP_FULL_MCP_INSTRUCTIONS.length <= 2_048,
+    `full instructions are ${ZVEC_GREP_FULL_MCP_INSTRUCTIONS.length} characters`,
+  );
+  assert.doesNotMatch(
+    ZVEC_GREP_AGENT_MCP_INSTRUCTIONS,
+    /For a fused mixed search/,
+  );
+  assert.doesNotMatch(
+    ZVEC_GREP_FULL_MCP_INSTRUCTIONS,
+    /For a fused mixed search/,
+  );
+});
+
 function createBackend() {
   return {
     index: async (input) => ({
@@ -226,47 +245,54 @@ test("default agent contract exposes only indexed search", async (t) => {
   assert.match(instructions, /question concerns how the current project works/);
   assert.match(instructions, /workspace is not mentioned explicitly/);
   assert.match(instructions, /unrelated open-world questions/);
-  assert.match(instructions, /solely to locate workspace material/);
-  assert.match(instructions, /user-provided or verified exact symbols/);
+  assert.match(search.description, /solely to locate workspace material/);
+  assert.match(search.description, /user-provided or verified exact symbols/);
   assert.match(
-    instructions,
+    search.description,
     /start discovery with focused zvec_grep_search before broad file discovery/,
   );
-  assert.match(instructions, /user request and established context/);
-  assert.match(instructions, /supplemental hypotheses/);
+  assert.match(search.description, /user request and established context/);
+  assert.match(search.description, /supplemental hypotheses/);
   assert.match(
-    instructions,
+    search.description,
     /available evidence is sufficient for the requested task/,
   );
-  assert.match(instructions, /resolve a material gap or ambiguity/);
-  assert.match(instructions, /do not repeat similar searches/);
-  assert.match(instructions, /reconfirm what is already established/);
-  assert.match(instructions, /use Read, Grep, or rg for focused verification/);
-  assert.match(instructions, /fall back to native Grep or rg/);
+  assert.match(search.description, /resolve a material gap or ambiguity/);
+  assert.match(search.description, /do not repeat similar searches/);
+  assert.match(search.description, /reconfirm what is already established/);
+  assert.match(
+    search.description,
+    /use Read, Grep, or rg for focused verification/,
+  );
+  assert.match(search.description, /fall back to native Grep or rg/);
   assert.doesNotMatch(instructions, /solely to locate code/);
   assert.ok(
-    instructions.indexOf(
+    search.description.indexOf(
       "Use native Grep or rg first only when exact lookup alone is sufficient",
     ) <
-      instructions.indexOf(
+      search.description.indexOf(
         "Use zvec_grep_search first when wording or location is unknown",
       ),
   );
   assert.ok(
-    instructions.indexOf(
+    search.description.indexOf(
       "Use zvec_grep_search first when wording or location is unknown",
     ) <
-      instructions.indexOf(
+      search.description.indexOf(
         "start discovery with focused zvec_grep_search before broad file discovery",
       ),
   );
-  assert.match(
-    search.description,
-    /semantic, relational, cross-file, or multi-hop evidence/,
-  );
+  assert.match(search.description, /Search an existing workspace index/);
+  assert.match(search.description, /retrieval routes, not hard constraints/);
+  assert.match(search.description, /For a fused mixed search/);
   assert.match(search.description, /bounded source snippets/);
   assert.match(search.description, /already-read evidence/);
-  assert.match(search.description, /native Grep or rg instead/);
+  assert.match(search.description, /native Grep or rg first only/);
+  assert.match(
+    search.description,
+    /at most one focused zvec_grep_search probe/,
+  );
+  assert.doesNotMatch(instructions, /For a fused mixed search/);
   assert.doesNotMatch(search.description, /index first/);
   assert.doesNotMatch(
     search.description,
@@ -313,6 +339,8 @@ test("full server contract exposes all tools with stable annotations", async (t)
   const instructions = client.getInstructions();
   assert.equal(instructions, ZVEC_GREP_FULL_MCP_INSTRUCTIONS);
   assert.notEqual(instructions, ZVEC_GREP_AGENT_MCP_INSTRUCTIONS);
+  const search = tools.find((tool) => tool.name === "zvec_grep_search");
+  assert.ok(search);
   const toolContracts = JSON.stringify(
     tools.map((tool) => ({
       title: tool.title,
@@ -329,37 +357,37 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.match(instructions, /question concerns how the current project works/);
   assert.match(instructions, /workspace is not mentioned explicitly/);
   assert.match(
-    instructions,
+    search.description,
     /zvec_grep_rg first only when exact lookup alone is sufficient/,
   );
   assert.match(
-    instructions,
+    search.description,
     /Use zvec_grep_search first when wording or location is unknown/,
   );
-  assert.match(instructions, /treat the task as mixed/);
+  assert.match(search.description, /treat the task as mixed/);
   assert.match(
-    instructions,
+    search.description,
     /start discovery with focused zvec_grep_search before broad file discovery/,
   );
-  assert.match(instructions, /user request and established context/);
-  assert.match(instructions, /supplemental hypotheses/);
-  assert.match(instructions, /`query` creates one primary hybrid/);
-  assert.match(instructions, /retrieval routes, not hard constraints/);
-  assert.match(instructions, /"root":"\/absolute\/workspace"/);
-  assert.match(instructions, /bounded source snippets/);
+  assert.match(search.description, /user request and established context/);
+  assert.match(search.description, /supplemental hypotheses/);
+  assert.match(search.description, /`query` creates one primary hybrid/);
+  assert.match(search.description, /retrieval routes, not hard constraints/);
+  assert.match(search.description, /"root":"\/absolute\/workspace"/);
+  assert.match(search.description, /bounded source snippets/);
   assert.match(
-    instructions,
+    search.description,
     /available evidence is sufficient for the requested task/,
   );
-  assert.match(instructions, /resolve a material gap or ambiguity/);
-  assert.match(instructions, /do not repeat similar searches/);
-  assert.match(instructions, /reconfirm what is already established/);
+  assert.match(search.description, /resolve a material gap or ambiguity/);
+  assert.match(search.description, /do not repeat similar searches/);
+  assert.match(search.description, /reconfirm what is already established/);
   assert.match(
-    instructions,
+    search.description,
     /use Read or zvec_grep_rg for focused verification/,
   );
-  assert.match(instructions, /fall back to zvec_grep_rg/);
-  assert.match(instructions, /solely to locate workspace material/);
+  assert.match(search.description, /fall back to zvec_grep_rg/);
+  assert.match(search.description, /solely to locate workspace material/);
   assert.match(instructions, /workspace search, status, indexing, deletion/);
   assert.match(instructions, /unrelated open-world questions/);
   assert.doesNotMatch(instructions, /solely to locate code/);
@@ -387,10 +415,13 @@ test("full server contract exposes all tools with stable annotations", async (t)
   assert.match(index.title, /Ensure or drop/);
   assert.match(index.description, /Do not call this tool/);
   assert.match(index.description, /index deletion/);
-  const search = tools.find((tool) => tool.name === "zvec_grep_search");
-  assert.match(search.description, /semantic, relational, cross-file/);
-  assert.match(search.description, /zvec_grep_rg instead/);
+  assert.match(search.description, /zvec_grep_search first/);
+  assert.match(search.description, /zvec_grep_rg first only/);
   assert.match(search.description, /bounded source snippets/);
+  assert.match(
+    search.description,
+    /at most one focused zvec_grep_search probe/,
+  );
   assert.doesNotMatch(search.description, /index first/);
   for (const tool of [index, search]) {
     assert.match(

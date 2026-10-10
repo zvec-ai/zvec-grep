@@ -313,11 +313,19 @@ async function installClaudeIntegration(
     path: guidancePath,
     startMarker: ZVEC_GREP_AGENTS_START,
     endMarker: ZVEC_GREP_AGENTS_END,
-    block: agentGuidanceBlock(),
+    block: claudeGuidanceBlock(),
     force: true,
   });
 
   return { files: [mcpConfigPath, settingsPath, guidancePath] };
+}
+
+function claudeGuidanceBlock(): string {
+  return `${ZVEC_GREP_AGENTS_START}
+## zvec-grep
+
+Follow the connected zvec-grep MCP server instructions and the zvec_grep_search tool description for workspace retrieval, search routing, and index lifecycle.
+${ZVEC_GREP_AGENTS_END}`;
 }
 
 async function uninstallClaudeIntegration(): Promise<InstallAgentResult> {

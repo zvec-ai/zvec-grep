@@ -239,28 +239,28 @@ function searchRoutingRules(exactTool: string, focusedTools: string): string[] {
     'Search results include bounded source snippets by default. Set preview: "full" for all available content of each retrieved item; this does not retrieve the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.',
     `If semantic retrieval remains irrelevant, fall back to ${exactTool}.`,
     "Stop searching once the available evidence is sufficient for the requested task. Continue only to resolve a material gap or ambiguity; do not repeat similar searches or broaden the investigation merely to reconfirm what is already established.",
+    "When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused zvec_grep_search probe using the question and distinctive names, dates, or terms. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer. This does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests.",
     "Do not launch a sub-agent solely to locate workspace material.",
   ];
 }
 
-const ZVEC_GREP_AGENT_SEARCH_MCP_INSTRUCTIONS = searchRoutingRules(
+const ZVEC_GREP_AGENT_SEARCH_TOOL_RULES = searchRoutingRules(
   "native Grep or rg",
   "Read, Grep, or rg",
 );
 
-const ZVEC_GREP_FULL_SEARCH_MCP_INSTRUCTIONS = searchRoutingRules(
+const ZVEC_GREP_FULL_SEARCH_TOOL_RULES = searchRoutingRules(
   "zvec_grep_rg",
   "Read or zvec_grep_rg",
 );
 
 const ZVEC_GREP_SEARCH_TOOL_DESCRIPTION =
-  'Search an existing workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: "full" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence.';
+  "Search an existing workspace index for local evidence.";
 
 export const ZVEC_GREP_AGENT_MCP_INSTRUCTIONS = formatPromptRules(
   "Use zvec-grep with these workspace retrieval rules:",
   [
     ...ZVEC_GREP_WORKSPACE_EVIDENCE_RULES,
-    ...ZVEC_GREP_AGENT_SEARCH_MCP_INSTRUCTIONS,
     "Every workspace operation requires an absolute root path visible to the daemon.",
     "Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.",
     "When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.",
@@ -272,7 +272,6 @@ export const ZVEC_GREP_FULL_MCP_INSTRUCTIONS = formatPromptRules(
   "Use zvec-grep with these workspace retrieval and lifecycle rules:",
   [
     ...ZVEC_GREP_WORKSPACE_EVIDENCE_RULES,
-    ...ZVEC_GREP_FULL_SEARCH_MCP_INSTRUCTIONS,
     "Every workspace operation requires an absolute root path visible to the daemon.",
     "Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.",
     "Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
@@ -435,9 +434,12 @@ export function registerZvecGrepTools(
     "zvec_grep_search",
     {
       title: "Search with zvec-grep",
-      description: full
-        ? `${ZVEC_GREP_SEARCH_TOOL_DESCRIPTION} Use zvec_grep_rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response; when results are served_from_current_index, use them if sufficient.`
-        : `${ZVEC_GREP_SEARCH_TOOL_DESCRIPTION} Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient.`,
+      description: [
+        ZVEC_GREP_SEARCH_TOOL_DESCRIPTION,
+        ...(full
+          ? ZVEC_GREP_FULL_SEARCH_TOOL_RULES
+          : ZVEC_GREP_AGENT_SEARCH_TOOL_RULES),
+      ].join(" "),
       inputSchema: options.includeSearchStructuredContent
         ? zvecGrepCliSearchInputSchema
         : zvecGrepSearchInputSchema,
