@@ -22,6 +22,8 @@ impl ConcurrentFixtureModel {
     fn new() -> Self {
         Self {
             info: EmbeddingModelInfo {
+                space: crate::domain::model::EmbeddingSpace::fixture(),
+                retrieval: crate::domain::model::EmbeddingRetrieval::Text,
                 model: crate::domain::model::ModelInfo::new(
                     "local",
                     "fixture",
@@ -860,7 +862,7 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
 }
 
 #[test]
-fn endpoints_separate_runtimes_without_changing_model_info() {
+fn endpoints_separate_runtimes_and_persisted_encoding_identity() {
     let manager = ModelRuntimeManager::new();
     let acquire = |endpoint: &str| {
         manager
@@ -878,7 +880,7 @@ fn endpoints_separate_runtimes_without_changing_model_info() {
     let first = acquire("https://first.example.test/embeddings");
     let second = acquire("https://second.example.test/embeddings");
 
-    assert_eq!(first.info(), second.info());
+    assert_ne!(first.info().space, second.info().space);
     assert!(!Arc::ptr_eq(&first.entry, &second.entry));
     assert_eq!(
         first.configured_endpoint(),

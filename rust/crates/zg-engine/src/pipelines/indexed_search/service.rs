@@ -53,7 +53,7 @@ pub(crate) async fn context(
         .as_ref()
         .filter(|manifest| is_indexed(manifest))
     {
-        validate_query_schema(&manifest.workspace, options.input_kind(), &request)?;
+        query_targets(&manifest.workspace, options, &request)?;
     }
     if !initial_manifest
         .as_ref()
@@ -148,34 +148,30 @@ async fn try_writer_context(
         return Ok(None);
     };
     let manifest = &writer.session.manifest;
-    let schema = validate_query_schema(&manifest.workspace, options.input_kind(), request)?;
-    let model_request = search_model_request(
-        manifest,
-        schema,
-        options.embedding_concurrency,
-        options,
-        &location.root,
-        uses_vectors(request),
-    )?;
-    if !writer
-        .session
-        .models
-        .iter()
-        .any(|model| model.matches_request(&model_request))
-    {
-        return Ok(None);
+    for target in query_targets(&manifest.workspace, options, request)? {
+        if target.skip_reason.is_some() {
+            continue;
+        }
+        let model_request = search_model_request(
+            manifest,
+            target.schema,
+            options.embedding_concurrency,
+            options,
+            &location.root,
+            uses_vectors(request),
+        );
+        if let Ok(model_request) = model_request
+            && uses_vectors(request)
+            && !writer
+                .session
+                .models
+                .iter()
+                .any(|model| model.matches_request(&model_request))
+        {
+            return Ok(None);
+        }
     }
-    // Use the exact configuration that passed the writer-key check, including
-    // authorization, rather than resolving mutable configuration a second time.
-    let acquired = if uses_vectors(request) {
-        let model = models
-            .acquire(model_request)
-            .map_err(ModelError::into_engine_error)?;
-        assert_embedding_compatible(Some(manifest), &model)?;
-        vec![model]
-    } else {
-        Vec::new()
-    };
+    let acquired = query_models(models, manifest, options, &location.root, request)?;
     query_storage(
         &acquired,
         &location.root,
@@ -195,40 +191,69 @@ fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {
         .any(|route| route.mode == crate::api::context::options::ContextRouteMode::Vector)
 }
 
+struct QueryModel {
+    info: EmbeddingModelInfo,
+    model: Result<ModelRuntimeLease, EngineError>,
+}
+
 fn query_models(
     models: &ModelRuntimeManager,
     manifest: &WorkspaceManifest,
     options: &ContextOptions,
     root: &Path,
     request: &super::context::NormalizedContextRequest,
-) -> Result<Vec<ModelRuntimeLease>, EngineError> {
-    validate_query_schema(&manifest.workspace, options.input_kind(), request)?;
+) -> Result<Vec<QueryModel>, EngineError> {
+    let targets = query_targets(&manifest.workspace, options, request)?;
     if !uses_vectors(request) {
         return Ok(Vec::new());
     }
-    let model = acquire_search_model(
-        models,
-        manifest,
-        options.embedding_concurrency,
-        options,
-        root,
-    )?;
-    assert_embedding_compatible(Some(manifest), &model)?;
-    Ok(vec![model])
+    let mut acquired: Vec<QueryModel> = Vec::new();
+    for target in targets {
+        if target.skip_reason.is_some()
+            || acquired
+                .iter()
+                .any(|model| model.info.model.reference() == target.schema.model.reference())
+        {
+            continue;
+        }
+        let model = acquire_search_model_for(
+            models,
+            manifest,
+            target.schema,
+            options.embedding_concurrency,
+            options,
+            root,
+        );
+        if let Ok(model) = &model {
+            assert_embedding_compatible(Some(manifest), model)?;
+        }
+        acquired.push(QueryModel {
+            info: target.schema.clone(),
+            model,
+        });
+    }
+    Ok(acquired)
 }
 
 async fn query_storage(
-    acquired: &[ModelRuntimeLease],
+    acquired: &[QueryModel],
     root: &Path,
     manifest: &WorkspaceManifest,
     storage: &IndexStore,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
 ) -> Result<ContextResult, EngineError> {
+    let descriptor = manifest
+        .workspace
+        .index
+        .descriptor()
+        .ok_or_else(|| EngineError::unsupported("workspace indexing is disabled"))?;
+    storage.ensure_compatible(&descriptor.tables()?)?;
     let runtimes = acquired
         .iter()
         .map(|model| RequestEmbeddingRuntime {
-            model,
+            model: model.model.as_ref(),
+            info: &model.info,
             signal: options.signal.clone(),
         })
         .collect::<Vec<_>>();
@@ -271,54 +296,69 @@ pub(in crate::pipelines) fn refresh_options(
     }
 }
 
-fn validate_query_schema<'a>(
+pub(crate) struct QueryTarget<'a> {
+    pub kind: ContentKind,
+    pub schema: &'a EmbeddingModelInfo,
+    pub skip_reason: Option<String>,
+}
+
+pub(crate) fn query_targets<'a>(
     workspace: &'a Workspace,
-    kind: ContentKind,
-    request: &super::context::NormalizedContextRequest,
-) -> Result<&'a EmbeddingModelInfo, EngineError> {
-    let schema = query_schema(workspace, kind)?;
-    if let Some(image) = &request.image
-        && schema
-            .max_image_bytes
-            .is_some_and(|limit| image.data().len() > limit)
-    {
-        return Err(EngineError::invalid_argument(format!(
-            "query image exceeds the {} input size limit",
-            schema.model.reference(),
-        )));
-    }
-    Ok(schema)
-}
-
-pub(crate) fn query_schema(
-    workspace: &Workspace,
-    kind: ContentKind,
-) -> Result<&EmbeddingModelInfo, EngineError> {
-    workspace.index.descriptor()
-        .ok_or_else(|| EngineError::unsupported("workspace indexing is disabled"))?
-        .model_for(kind)?
-        .ok_or_else(|| EngineError::unsupported(format!(
-            "workspace has no embedding model for {} queries; configure an embedding route and rebuild the index",
-            kind.as_str(),
-        )))
-}
-
-pub(in crate::pipelines) fn acquire_search_model(
-    models: &ModelRuntimeManager,
-    manifest: &WorkspaceManifest,
-    embedding_concurrency: Option<usize>,
     options: &ContextOptions,
-    root: &Path,
-) -> Result<ModelRuntimeLease, EngineError> {
-    let schema = query_schema(&manifest.workspace, options.input_kind())?;
-    acquire_search_model_for(
-        models,
-        manifest,
-        schema,
-        embedding_concurrency,
-        options,
-        root,
-    )
+    request: &super::context::NormalizedContextRequest,
+) -> Result<Vec<QueryTarget<'a>>, EngineError> {
+    let descriptor = workspace
+        .index
+        .descriptor()
+        .ok_or_else(|| EngineError::unsupported("workspace indexing is disabled"))?;
+    let kinds = options.target_kind.map_or_else(
+        || vec![ContentKind::Text, ContentKind::Code, ContentKind::Image],
+        |kind| vec![kind],
+    );
+    let mut targets = Vec::new();
+    for kind in kinds {
+        let Some(schema) = descriptor.model_for(kind)? else {
+            if options.target_kind.is_some() {
+                return Err(EngineError::unsupported(format!(
+                    "target {} is not enabled; configure its model route and rebuild",
+                    kind.as_str()
+                )));
+            }
+            continue;
+        };
+        let skip_reason = if kind == ContentKind::Image && !uses_vectors(request) {
+            Some("image tables do not support full-text search".to_owned())
+        } else if uses_vectors(request) && !schema.supports_retrieval(options.input_kind(), kind) {
+            Some(format!(
+                "{} does not support {} to {} retrieval",
+                schema.model.reference(),
+                options.input_kind().as_str(),
+                kind.as_str()
+            ))
+        } else if request.image.as_ref().is_some_and(|image| {
+            schema
+                .max_image_bytes
+                .is_some_and(|limit| image.data().len() > limit)
+        }) {
+            Some(format!(
+                "query image exceeds the {} input size limit",
+                schema.model.reference()
+            ))
+        } else {
+            None
+        };
+        if options.target_kind.is_some()
+            && let Some(reason) = &skip_reason
+        {
+            return Err(EngineError::unsupported(reason.clone()));
+        }
+        targets.push(QueryTarget {
+            kind,
+            schema,
+            skip_reason,
+        });
+    }
+    Ok(targets)
 }
 
 fn acquire_search_model_for(
@@ -350,15 +390,6 @@ fn search_model_request(
     authorize: bool,
 ) -> Result<ModelRuntimeRequest, EngineError> {
     let reference = schema.model.reference();
-    if options
-        .authorization_model
-        .as_ref()
-        .is_some_and(|expected| expected != &reference)
-    {
-        return Err(EngineError::permission_denied(
-            "Workspace embedding model changed after authorization; retry the query",
-        ));
-    }
     let runtime = manifest
         .embedding_runtimes
         .get(&reference)
@@ -438,6 +469,8 @@ mod tests {
 
     fn model(name: &str, kinds: &[ContentKind]) -> EmbeddingModelInfo {
         EmbeddingModelInfo {
+            space: crate::domain::model::EmbeddingSpace::fixture(),
+            retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
             model: ModelInfo::new("test", name, kinds.iter().copied()).expect("model"),
             dimension: 4,
             metric: EmbeddingMetric::Cosine,
@@ -448,52 +481,61 @@ mod tests {
     }
 
     #[test]
-    fn input_kind_selects_exact_route_without_searching_other_capable_models() {
+    fn targets_follow_explicit_selection_or_all_supported_tables() {
         let text = model("text", &[ContentKind::Text, ContentKind::Code]);
         let image = model("image", &[ContentKind::Text, ContentKind::Image]);
         let mut index = IndexDescriptor::single(text);
-        index.embeddings.insert(0, image);
         let mut workspace = Workspace {
             name: "fixture".into(),
             root: PathBuf::from("/workspace"),
             scan: ScanRules::default(),
-            index: IndexState::Enabled(index.clone()),
+            index: IndexState::Enabled(Box::new(index.clone())),
             created_epoch_ms: 0,
             updated_epoch_ms: 0,
         };
-        assert_eq!(
-            query_schema(&workspace, ContentKind::Text)
-                .expect("text route")
-                .model
-                .reference(),
-            "test/text"
-        );
-        let error = query_schema(&workspace, ContentKind::Image).expect_err("unrouted image");
+        let mut options = ContextOptions {
+            query: Some("orchard".into()),
+            target_kind: Some(ContentKind::Image),
+            ..ContextOptions::default()
+        };
+        let request = normalize_context_request(&options).expect("text query");
+        let Err(error) = query_targets(&workspace, &options, &request) else {
+            panic!("image target should not be enabled");
+        };
         assert_eq!(error.code(), EngineError::UNSUPPORTED);
         assert!(error.message().contains("image"));
-        index.routes.insert(ContentKind::Image, "test/image".into());
-        workspace.index = IndexState::Enabled(index.clone());
+
+        index.routes.insert(ContentKind::Image, image);
+        workspace.index = IndexState::Enabled(Box::new(index.clone()));
+        let targets = query_targets(&workspace, &options, &request).expect("explicit image target");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, ContentKind::Image);
+        assert_eq!(targets[0].schema.model.reference(), "test/image");
+        assert!(targets[0].skip_reason.is_none());
+        assert_eq!(options.input_kind(), ContentKind::Text);
+
+        options.target_kind = None;
+        let targets = query_targets(&workspace, &options, &request).expect("default targets");
         assert_eq!(
-            query_schema(&workspace, ContentKind::Image)
-                .expect("image route")
-                .model
-                .reference(),
-            "test/image"
+            targets
+                .iter()
+                .map(|target| (target.kind, target.schema.model.reference()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ContentKind::Text, "test/text".into()),
+                (ContentKind::Code, "test/text".into()),
+                (ContentKind::Image, "test/image".into()),
+            ],
         );
-        assert_eq!(
-            query_schema(&workspace, ContentKind::Text)
-                .expect("text route")
-                .model
-                .reference(),
-            "test/text"
-        );
-        index.routes.insert(ContentKind::Image, "test/text".into());
-        workspace.index = IndexState::Enabled(index);
-        assert_eq!(
-            query_schema(&workspace, ContentKind::Image)
-                .expect_err("invalid explicit route")
-                .code(),
-            EngineError::INVALID_ARGUMENT
-        );
+        assert!(targets.iter().all(|target| target.skip_reason.is_none()));
+
+        index
+            .routes
+            .insert(ContentKind::Image, index.default_model.clone());
+        workspace.index = IndexState::Enabled(Box::new(index));
+        let Err(error) = query_targets(&workspace, &options, &request) else {
+            panic!("explicit image route must support images");
+        };
+        assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
     }
 }

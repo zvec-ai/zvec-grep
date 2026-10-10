@@ -164,12 +164,18 @@ pub mod result {
         pub scan: ScanRules,
         pub policy: WorkspaceIndexPolicy,
         pub default_model_ref: Option<String>,
-        pub embeddings: Vec<WorkspaceIndexEmbedding>,
+        pub tables: Vec<WorkspaceIndexTable>,
         pub embedding_routes: BTreeMap<ContentKind, String>,
         pub fts: Option<WorkspaceIndexFts>,
         pub index_version: Option<u32>,
         pub created_epoch_ms: u64,
         pub updated_epoch_ms: u64,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct WorkspaceIndexTable {
+        pub kind: ContentKind,
+        pub embedding: WorkspaceIndexEmbedding,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -200,6 +206,7 @@ pub mod result {
         pub files_stored: usize,
         pub files_indexed: usize,
         pub entities_indexed: u64,
+        pub entities_by_kind: BTreeMap<ContentKind, u64>,
         /// Total source snapshot bytes for successfully indexed files, excluding index storage.
         pub indexed_size_bytes: u64,
         pub files_pending: usize,
@@ -238,14 +245,28 @@ impl result::WorkspaceIndexInfo {
             default_model_ref: workspace
                 .index
                 .descriptor()
-                .map(|index| index.default_model_ref.clone()),
-            embeddings: workspace.index.descriptor().map_or_else(Vec::new, |index| {
-                index.embeddings.iter().map(Into::into).collect()
+                .map(|index| index.default_model.model.reference()),
+            tables: workspace.index.descriptor().map_or_else(Vec::new, |index| {
+                index
+                    .tables()
+                    .expect("validated index descriptor")
+                    .iter()
+                    .map(|table| result::WorkspaceIndexTable {
+                        kind: table.kind,
+                        embedding: (&table.embedding).into(),
+                    })
+                    .collect()
             }),
             embedding_routes: workspace
                 .index
                 .descriptor()
-                .map_or_else(Default::default, |index| index.routes.clone()),
+                .map_or_else(Default::default, |index| {
+                    index
+                        .routes
+                        .iter()
+                        .map(|(kind, model)| (*kind, model.model.reference()))
+                        .collect()
+                }),
             fts: workspace
                 .index
                 .descriptor()

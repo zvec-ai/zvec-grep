@@ -184,7 +184,7 @@ pub fn query_authorizations(
     let Some(manifest) = read_workspace_manifest(&location.home)? else {
         return Ok(Vec::new());
     };
-    let Some(descriptor) = manifest.workspace.index.descriptor() else {
+    let Some(_) = manifest.workspace.index.descriptor() else {
         return Ok(Vec::new());
     };
     if options.allow_remote || (!vector && !workspace_content) {
@@ -209,36 +209,42 @@ pub fn query_authorizations(
         Vec::new()
     };
     if vector {
-        let kind = options.input_kind();
-        let schema = descriptor.model_for(kind)?.ok_or_else(|| {
-            EngineError::unsupported(format!(
-                "workspace has no embedding model supporting {} queries",
-                kind.as_str(),
-            ))
-        })?;
-        let query = crate::api::index::IndexOptions {
-            endpoint: options.endpoint.clone(),
-            embedding: Some(crate::api::index::options::EmbeddingModelSpec {
-                reference: schema.model.reference(),
-                revision: None,
-                cache_dir: None,
-                endpoint: None,
-                device: crate::domain::model::Device::Auto,
-            }),
-            ..base
-        };
-        if let Some(target) = authorization_for_manifest(&query, &location.root, Some(&manifest))? {
-            let image = kind == crate::domain::ContentKind::Image;
-            if let Some(plan) = plans.iter_mut().find(|plan| plan.target == target) {
-                plan.query_text = !image;
-                plan.query_image = image;
-            } else {
-                plans.push(QueryAuthorization {
-                    target,
-                    query_text: !image,
-                    query_image: image,
-                    workspace_content: false,
-                });
+        for target in crate::pipelines::indexed_search::service::query_targets(
+            &manifest.workspace,
+            options,
+            &request,
+        )? {
+            if target.skip_reason.is_some() {
+                continue;
+            }
+            let kind = options.input_kind();
+            let schema = target.schema;
+            let query = crate::api::index::IndexOptions {
+                endpoint: options.endpoint.clone(),
+                embedding: Some(crate::api::index::options::EmbeddingModelSpec {
+                    reference: schema.model.reference(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: crate::domain::model::Device::Auto,
+                }),
+                ..base.clone()
+            };
+            if let Some(target) =
+                authorization_for_manifest(&query, &location.root, Some(&manifest))?
+            {
+                let image = kind == crate::domain::ContentKind::Image;
+                if let Some(plan) = plans.iter_mut().find(|plan| plan.target == target) {
+                    plan.query_text = !image;
+                    plan.query_image = image;
+                } else {
+                    plans.push(QueryAuthorization {
+                        target,
+                        query_text: !image,
+                        query_image: image,
+                        workspace_content: false,
+                    });
+                }
             }
         }
     }
@@ -737,7 +743,16 @@ mod tests {
             .env(FIXTURE_ENV, workspace.path())
             .env("HOME", state.path())
             .env("USERPROFILE", state.path())
+            .env("ZVEC_GREP_HOME", state.path().join("runtime"))
+            .env("ZVEC_GREP_CONFIG", state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                state.path().join("workspaces.json"),
+            )
             .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
+            .env("ZVEC_GREP_API_KEY", "authorization-test-key")
+            .env_remove("DASHSCOPE_API_KEY")
+            .env_remove("QWEN_API_KEY")
             .env_remove("ZVEC_GREP_EMBEDDING")
             .env_remove("ZVEC_GREP_ENDPOINT")
             .output()
@@ -1122,7 +1137,9 @@ mod tests {
                 name: "workspace".to_owned(),
                 root: directory.path().to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+                index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
                     model: crate::domain::model::ModelInfo::new(
                         "qwen",
                         "text-embedding-v4",
@@ -1137,7 +1154,7 @@ mod tests {
                     max_batch_size: 32,
                     max_input_tokens: None,
                     max_image_bytes: None,
-                })),
+                }))),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 1,
             },
@@ -1296,28 +1313,21 @@ mod tests {
                     cache_dir: None,
                     device: Device::Auto,
                 }),
+                embedding_routes: std::collections::BTreeMap::from([(
+                    crate::domain::ContentKind::Text,
+                    EmbeddingModelSpec {
+                        reference: "qwen/text-embedding-v4".into(),
+                        endpoint: Some("https://text.test/embeddings".into()),
+                        revision: None,
+                        cache_dir: None,
+                        device: Device::Auto,
+                    },
+                )]),
                 ..IndexOptions::default()
             })
             .await
             .expect("empty multimodal index");
         engine.close();
-        let path = directory.path().join(".zvec-grep/manifest.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("authorization fixture"))
-                .expect("authorization fixture");
-        manifest["embeddings"].as_array_mut().expect("authorization fixture").push(serde_json::json!({
-            "model": {"provider":"qwen", "name":"text-embedding-v4", "contentKinds":["text","code"]},
-            "dimension":1024, "metric":"cosine", "maxBatchSize":10, "maxInputTokens":8192,
-            "maxImageBytes":null
-        }));
-        manifest["embeddingRoutes"] = serde_json::json!({"text":"qwen/text-embedding-v4"});
-        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"] =
-            serde_json::json!({"endpoint":"https://text.test/embeddings"});
-        fs::write(
-            &path,
-            serde_json::to_vec(&manifest).expect("authorization fixture"),
-        )
-        .expect("authorization fixture");
         directory
     }
 
@@ -1327,21 +1337,35 @@ mod tests {
             ContextOptions,
             options::{QueryImage, RefreshPolicy},
         };
+        let Some(_root) = isolated_authorization_root(
+            "authorization::tests::query_and_refresh_disclose_only_their_actual_destinations_and_content",
+        ) else {
+            return;
+        };
         let directory = routed_query_authorization_fixture().await;
         let mut options = ContextOptions {
             root: Some(directory.path().into()),
             query: Some("text query".into()),
             refresh: Some(RefreshPolicy::Off),
+            target_kind: Some(crate::domain::ContentKind::Text),
             ..ContextOptions::default()
         };
         let targets = query_authorizations(&options).expect("text query");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].target.endpoint_host, "text.test");
         assert!(targets[0].query_text && !targets[0].query_image && !targets[0].workspace_content);
+        options.target_kind = None;
+        let targets = query_authorizations(&options).expect("all supported text targets");
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.query_text && !target.workspace_content)
+        );
         options.refresh = Some(RefreshPolicy::Wait);
         options.endpoint = Some("https://query-override.test/embeddings".into());
         let targets = query_authorizations(&options).expect("query plus refresh");
-        assert_eq!(targets.len(), 3);
+        assert_eq!(targets.len(), 4);
         assert!(
             targets
                 .iter()

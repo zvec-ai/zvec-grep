@@ -190,16 +190,7 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
     assert_eq!(remaining, ids[..ids.len() - 1]);
 }
 
-// TODO: re-enable on macOS once the zvec native binary registers the
-// `array_take` Arrow compute kernel. See bug report: `fetch_with_options`
-// silently returns a field-stripped Doc on macOS, so `mark_deleting`
-// (fetch → mutate → upsert) persists a corrupted record and the follow-up
-// `fetch` panics with "Field not found in document".
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "zvec macOS native missing array_take kernel; corrupts fetch→upsert path"
-)]
 fn deleting_preserves_file_projections_until_record_removal() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
@@ -218,7 +209,13 @@ fn deleting_preserves_file_projections_until_record_removal() {
     files
         .put(&source, &[DirectoryId::new(3), DirectoryId::new(8)])
         .expect("source");
+    files.flush().expect("persist source");
+    drop(files);
+    let files = Files::open(root.path(), false).expect("reopen source");
     files.mark_deleting(id).expect("mark deleting");
+    files.flush().expect("persist deletion marker");
+    drop(files);
+    let mut files = Files::open(root.path(), false).expect("resume deletion");
     let mut deleting = source.clone();
     deleting.index_status = FileIndexStatus::Deleting;
     assert_eq!(files.fetch(&[id]).expect("file").get(&id), Some(&deleting));
@@ -243,6 +240,9 @@ fn deleting_preserves_file_projections_until_record_removal() {
         [id]
     );
     files.delete(id).expect("remove source");
+    files.flush().expect("persist deletion");
+    drop(files);
+    let mut files = Files::open(root.path(), false).expect("reopen deleted source");
     assert!(files.fetch(&[id]).expect("missing source").is_empty());
     assert_ne!(files.resolve_ids(&[path]).expect("new identity"), [id]);
 }

@@ -13,7 +13,8 @@ use crate::{
             ContextGroupResult, ContextItem, ContextItemKind, ContextItemStatus,
             ContextQueryGroupMatch, ContextQueryGroupRole, ContextSelectionReason, ContextSource,
             ContextWorkspaceIndex, EmptyReason, IndexDiagnostics, IndexQueryGroupDiagnostics,
-            IndexRouteDiagnostics, MatchedBy,
+            IndexResultGroup, IndexRouteDiagnostics, IndexScoring, IndexTargetDiagnostics,
+            IndexTargetStatus, MatchedBy,
         },
     },
     domain::{Content, ContentKind, FileRecord, ImageContent, Range, Workspace},
@@ -24,7 +25,6 @@ use super::pipeline::{
     SearchEmbeddingRuntime, SearchHit, SearchPlan, SearchPlanResult, search_workspace_index,
 };
 
-const DEFAULT_CONTEXT_LIMIT: usize = 10;
 const DEFAULT_CONTEXT_TOTAL_LIMIT: usize = 30;
 const DEFAULT_CONTEXT_PRIORITY_LIMIT: usize = 6;
 const CONTEXT_GROUP_RRF_K: f64 = 60.0;
@@ -175,74 +175,400 @@ pub(crate) async fn context_from_index(
     options: &ContextOptions,
     request: &NormalizedContextRequest,
 ) -> Result<ContextResult, EngineError> {
-    let descriptor = workspace
-        .index
-        .descriptor()
-        .ok_or_else(|| EngineError::unsupported("workspace indexing is disabled"))?;
-    let selected = super::service::query_schema(workspace, options.input_kind())?;
-    let model_ref = selected.model.reference();
-    let content_kinds = if request.image.is_some() {
-        vec![ContentKind::Image]
-    } else {
-        [ContentKind::Text, ContentKind::Code]
-            .into_iter()
-            .filter_map(|kind| match descriptor.model_for(kind) {
-                Ok(Some(model)) if model.model.reference() == model_ref => Some(Ok(kind)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>, EngineError>>()?
-    };
-    let groups = if options.fuse {
-        vec![NormalizedContextGroup {
-            id: "Q1".to_owned(),
-            query: request.display_query.clone(),
-            role: if request
-                .groups
-                .iter()
-                .any(|group| group.role == ContextQueryGroupRole::Primary)
-            {
-                ContextQueryGroupRole::Primary
-            } else {
-                ContextQueryGroupRole::Supplemental
-            },
-            routes: request.routes.clone(),
-        }]
-    } else {
-        request.groups.clone()
-    };
-    let limit = context_group_limit(options.limit, groups.len());
-    let mut searches = Vec::with_capacity(groups.len());
-    for group in &groups {
-        searches.push(
-            search_workspace_index(
-                &workspace.root,
-                SearchPlan {
-                    model_ref: model_ref.clone(),
-                    image: request.image.clone(),
-                    content_kinds: content_kinds.clone(),
-                    routes: group.routes.clone(),
-                    limit: Some(limit),
-                    trace: options.trace,
-                    prefer_symbol: options.prefer_symbol,
-                    filter: options.filter.clone(),
-                },
-                storage,
-                embedding_models,
-            )
-            .await?,
-        );
-    }
-
-    build_context_result(
+    let targets = super::service::query_targets(workspace, options, request)?;
+    let groups = query_groups(options, request);
+    let limit = options.limit.unwrap_or(DEFAULT_CONTEXT_TOTAL_LIMIT);
+    let counts = storage.entity_counts()?;
+    let cached = embedding_models
+        .iter()
+        .map(|model| super::pipeline::CachedSearchRuntime::new(*model))
+        .collect::<Vec<_>>();
+    let mut targets_diagnostics = Vec::new();
+    let mut bundles = Vec::new();
+    let mut result = build_context_result(
         root,
         workspace,
         workspace_home,
         generation,
         request,
         &groups,
-        searches,
+        Vec::new(),
+    )?;
+    let mut first_error = None;
+    for target in targets {
+        let model_ref = target.schema.model.reference();
+        let mut diagnostic = IndexTargetDiagnostics {
+            kind: target.kind,
+            model_ref: model_ref.clone(),
+            status: IndexTargetStatus::Searched,
+            reason: None,
+        };
+        if let Some(reason) = &target.skip_reason {
+            diagnostic.status = IndexTargetStatus::Skipped;
+            diagnostic.reason = Some(reason.clone());
+            targets_diagnostics.push(diagnostic);
+            continue;
+        }
+        let empty = counts.get(&target.kind) == Some(&0);
+        let recall = recall_table(
+            &workspace.root,
+            &target,
+            &groups,
+            storage,
+            &cached,
+            options,
+            request,
+            empty,
+        )
+        .await;
+        let recall = match recall {
+            Ok(recall) => recall,
+            Err(error) => {
+                if options.target_kind.is_some() || error.code() == EngineError::CANCELLED {
+                    return Err(error);
+                }
+                diagnostic.status = IndexTargetStatus::Failed;
+                diagnostic.reason = Some(error.message().to_owned());
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                targets_diagnostics.push(diagnostic);
+                continue;
+            }
+        };
+        if empty {
+            diagnostic.status = IndexTargetStatus::Empty;
+        }
+        let table_result = build_context_result(
+            root,
+            workspace,
+            workspace_home,
+            generation,
+            request,
+            &recall.groups,
+            recall.searches,
+        )?;
+        let compatible = groups.len() == 1 && groups[0].routes.len() == 1;
+        append_table_result(
+            &mut result,
+            &mut bundles,
+            &target,
+            options.input_kind(),
+            recall.scoring,
+            compatible,
+            table_result,
+        );
+        targets_diagnostics.push(diagnostic);
+    }
+    if bundles.is_empty()
+        && let Some(error) = first_error
+    {
+        return Err(error);
+    }
+    Ok(finish_context_result(
+        result,
+        bundles,
+        targets_diagnostics,
+        limit,
+    ))
+}
+
+fn query_groups(
+    options: &ContextOptions,
+    request: &NormalizedContextRequest,
+) -> Vec<NormalizedContextGroup> {
+    if options.fuse {
+        vec![NormalizedContextGroup {
+            id: "Q1".to_owned(),
+            query: request.display_query.clone(),
+            role: ContextQueryGroupRole::Primary,
+            routes: request.routes.clone(),
+        }]
+    } else {
+        request.groups.clone()
+    }
+}
+
+struct TableRecall {
+    groups: Vec<NormalizedContextGroup>,
+    scoring: IndexScoring,
+    searches: Vec<SearchPlanResult>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recall_table(
+    root: &Path,
+    target: &super::service::QueryTarget<'_>,
+    groups: &[NormalizedContextGroup],
+    storage: &dyn SearchStorage,
+    cached: &[super::pipeline::CachedSearchRuntime<'_>],
+    options: &ContextOptions,
+    request: &NormalizedContextRequest,
+    empty: bool,
+) -> Result<TableRecall, EngineError> {
+    let groups = target_query_groups(groups, target.kind);
+    let prefer_symbol = options.prefer_symbol && target.kind == ContentKind::Code;
+    let scoring = table_scoring(&groups, prefer_symbol);
+    let model_ref = target.schema.model.reference();
+    let runtime = cached
+        .iter()
+        .find(|runtime| runtime.info().model.reference() == model_ref);
+    let searches = recall_target(
+        root,
+        SearchPlan {
+            model_ref,
+            kind: target.kind,
+            image: request.image.clone(),
+            routes: Vec::new(),
+            limit: Some(options.limit.unwrap_or(DEFAULT_CONTEXT_TOTAL_LIMIT)),
+            trace: options.trace,
+            prefer_symbol,
+            filter: options.filter.clone(),
+        },
+        &groups,
+        storage,
+        runtime,
+        empty,
     )
+    .await?;
+    Ok(TableRecall {
+        groups,
+        scoring,
+        searches,
+    })
+}
+
+struct RankedResultGroup {
+    schema: crate::domain::EmbeddingModelInfo,
+    group: IndexResultGroup,
+    items: Vec<ContextItem>,
+}
+
+fn target_query_groups(
+    groups: &[NormalizedContextGroup],
+    kind: ContentKind,
+) -> Vec<NormalizedContextGroup> {
+    groups
+        .iter()
+        .filter_map(|group| {
+            let mut group = group.clone();
+            if kind == ContentKind::Image {
+                group
+                    .routes
+                    .retain(|route| route.mode == ContextRouteMode::Vector);
+            }
+            (!group.routes.is_empty()).then_some(group)
+        })
+        .collect()
+}
+
+fn table_scoring(groups: &[NormalizedContextGroup], prefer_symbol: bool) -> IndexScoring {
+    if groups.len() == 1 && groups[0].routes.len() == 1 && !prefer_symbol {
+        match groups[0].routes[0].mode {
+            ContextRouteMode::Vector => IndexScoring::Vector,
+            ContextRouteMode::Fts => IndexScoring::FullText,
+        }
+    } else if groups.len() == 1 {
+        IndexScoring::Hybrid
+    } else {
+        IndexScoring::MultiQuery
+    }
+}
+
+async fn recall_target(
+    root: &Path,
+    plan: SearchPlan,
+    groups: &[NormalizedContextGroup],
+    storage: &dyn SearchStorage,
+    runtime: Option<&super::pipeline::CachedSearchRuntime<'_>>,
+    empty: bool,
+) -> Result<Vec<SearchPlanResult>, EngineError> {
+    if let Some(runtime) = runtime {
+        runtime.ensure_available()?;
+    }
+    if empty {
+        return Ok(Vec::new());
+    }
+    let runtimes = runtime
+        .map(|runtime| vec![runtime as &dyn SearchEmbeddingRuntime])
+        .unwrap_or_default();
+    let mut searches = Vec::new();
+    for group in groups {
+        let mut plan = plan.clone();
+        plan.routes.clone_from(&group.routes);
+        searches.push(search_workspace_index(root, plan, storage, &runtimes).await?);
+    }
+    Ok(searches)
+}
+
+fn merge_table_items(
+    bundles: &mut Vec<RankedResultGroup>,
+    target: &super::service::QueryTarget<'_>,
+    input_kind: ContentKind,
+    scoring: IndexScoring,
+    compatible: bool,
+    mut items: Vec<ContextItem>,
+) {
+    let model_ref = target.schema.model.reference();
+    if let Some(existing) = bundles.iter_mut().find(|existing| {
+        compatible
+            && existing.group.scoring == IndexScoring::Vector
+            && target.schema.can_compare_vectors(&existing.schema)
+            && target.schema.query_encoding(input_kind, target.kind)
+                == existing
+                    .schema
+                    .query_encoding(input_kind, existing.group.kinds[0])
+    }) {
+        existing.group.kinds.push(target.kind);
+        if !existing.group.model_refs.contains(&model_ref) {
+            existing.group.model_refs.push(model_ref);
+        }
+        existing.items.append(&mut items);
+        existing.items.sort_by(|a, b| {
+            b.score
+                .unwrap_or(0.0)
+                .total_cmp(&a.score.unwrap_or(0.0))
+                .then_with(|| a.relative_path.cmp(&b.relative_path))
+                .then_with(|| {
+                    a.content_ref
+                        .as_ref()
+                        .map(|r| &r.entity_id)
+                        .cmp(&b.content_ref.as_ref().map(|r| &r.entity_id))
+                })
+        });
+    } else {
+        bundles.push(RankedResultGroup {
+            schema: target.schema.clone(),
+            group: IndexResultGroup {
+                id: target.kind.as_str().to_owned(),
+                kinds: vec![target.kind],
+                model_refs: vec![model_ref],
+                scoring,
+                item_start: 0,
+                item_count: 0,
+            },
+            items,
+        });
+    }
+}
+
+fn append_table_result(
+    result: &mut ContextResult,
+    bundles: &mut Vec<RankedResultGroup>,
+    target: &super::service::QueryTarget<'_>,
+    input_kind: ContentKind,
+    scoring: IndexScoring,
+    compatible: bool,
+    table_result: ContextResult,
+) {
+    result
+        .diagnostics
+        .timings
+        .extend(table_result.diagnostics.timings);
+    if let Some(index) = table_result.diagnostics.index {
+        result
+            .diagnostics
+            .index
+            .as_mut()
+            .expect("index diagnostics")
+            .routes
+            .extend(index.routes);
+    }
+    merge_table_items(
+        bundles,
+        target,
+        input_kind,
+        scoring,
+        compatible && scoring == IndexScoring::Vector,
+        table_result.items,
+    );
+}
+
+fn finish_context_result(
+    mut result: ContextResult,
+    bundles: Vec<RankedResultGroup>,
+    targets: Vec<IndexTargetDiagnostics>,
+    limit: usize,
+) -> ContextResult {
+    // Allocate a total cap fairly without inventing a global relevance rank.
+    let mut allocations = vec![0; bundles.len()];
+    let mut remaining = limit;
+    while remaining > 0 {
+        let mut advanced = false;
+        for (allocation, bundle) in allocations.iter_mut().zip(&bundles) {
+            if remaining > 0 && *allocation < bundle.items.len() {
+                *allocation += 1;
+                remaining -= 1;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    let mut items = Vec::new();
+    let mut result_groups = Vec::new();
+    for (mut bundle, allocation) in bundles.into_iter().zip(allocations) {
+        bundle.items.truncate(allocation);
+        for (i, item) in bundle.items.iter_mut().enumerate() {
+            item.rank = i + 1;
+            if let Some(trace) = &mut item.trace {
+                trace.final_selection.cutoff_rank = allocation;
+            }
+        }
+        bundle.group.item_start = items.len();
+        bundle.group.item_count = bundle.items.len();
+        items.extend(bundle.items);
+        result_groups.push(bundle.group);
+    }
+    result.diagnostics.empty_reason = if !items.is_empty() {
+        None
+    } else if targets
+        .iter()
+        .all(|t| t.status == IndexTargetStatus::Skipped)
+    {
+        Some(EmptyReason::NoSupportedTargets)
+    } else if targets
+        .iter()
+        .filter(|t| t.status != IndexTargetStatus::Skipped)
+        .all(|t| t.status == IndexTargetStatus::Empty)
+    {
+        Some(EmptyReason::NoSearchableFiles)
+    } else {
+        Some(EmptyReason::NoMatches)
+    };
+    let index = result
+        .diagnostics
+        .index
+        .as_mut()
+        .expect("index diagnostics");
+    index.incomplete = targets
+        .iter()
+        .any(|t| t.status == IndexTargetStatus::Failed);
+    index.targets = targets;
+    index.result_groups = result_groups;
+    index.limit = limit;
+    index.hits_returned = items.len();
+    result.group_results = index
+        .query_groups
+        .iter()
+        .map(|group| ContextGroupResult {
+            id: group.id.clone(),
+            query: group.query.clone(),
+            role: group.role,
+            items: items
+                .iter()
+                .filter(|item| {
+                    item.query_groups
+                        .iter()
+                        .any(|matched| matched.id == group.id)
+                })
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    result.items = items;
+    result
 }
 
 fn build_context_result(
@@ -306,16 +632,10 @@ fn build_context_result(
                 } else {
                     ContentKind::Text
                 },
-                model_ref: super::service::query_schema(
-                    workspace,
-                    if request.image.is_some() {
-                        ContentKind::Image
-                    } else {
-                        ContentKind::Text
-                    },
-                )?
-                .model
-                .reference(),
+                targets: Vec::new(),
+                result_groups: Vec::new(),
+                incomplete: false,
+                limit: hits_returned,
                 hits_returned,
                 query_groups: groups
                     .iter()
@@ -339,17 +659,6 @@ fn build_context_result(
             structure: None,
             timings,
         },
-    })
-}
-
-fn context_group_limit(limit: Option<usize>, group_count: usize) -> usize {
-    limit.unwrap_or_else(|| {
-        let group_count = group_count.max(1);
-        if group_count <= 3 {
-            DEFAULT_CONTEXT_LIMIT
-        } else {
-            DEFAULT_CONTEXT_TOTAL_LIMIT.div_ceil(group_count).max(1)
-        }
     })
 }
 
@@ -1086,7 +1395,9 @@ mod tests {
             name: "workspace".to_owned(),
             root: original_root.clone(),
             scan: crate::domain::ScanRules::default(),
-            index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+            index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                space: crate::domain::model::EmbeddingSpace::fixture(),
+                retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
                 model: crate::domain::model::ModelInfo::new(
                     "local",
                     "fixture",
@@ -1101,7 +1412,7 @@ mod tests {
                 max_batch_size: 32,
                 max_input_tokens: None,
                 max_image_bytes: None,
-            })),
+            }))),
             created_epoch_ms: 0,
             updated_epoch_ms: 0,
         };

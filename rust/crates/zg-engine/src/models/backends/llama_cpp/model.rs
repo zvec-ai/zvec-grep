@@ -130,6 +130,8 @@ impl LlamaCppEmbeddingModel {
         Ok(Self {
             entry,
             info: EmbeddingModelInfo {
+                space: EmbeddingCatalogEntry::LlamaCpp(entry).embedding_space(None),
+                retrieval: EmbeddingCatalogEntry::LlamaCpp(entry).retrieval(),
                 model: EmbeddingCatalogEntry::LlamaCpp(entry)
                     .model_info()
                     .map_err(|error| {
@@ -806,14 +808,16 @@ fn format_text(text: &str, purpose: EmbeddingPurpose, format: &str) -> String {
     if format == "qwen3" {
         return match purpose {
             EmbeddingPurpose::Query => {
-                format!("Instruct: Retrieve relevant documents for the given query\nQuery: {text}")
+                format!("{}{text}", crate::models::catalog::QWEN3_QUERY_PREFIX)
             }
             EmbeddingPurpose::Document => text.to_owned(),
         };
     }
     match purpose {
-        EmbeddingPurpose::Query => format!("task: search result | query: {text}"),
-        EmbeddingPurpose::Document => format!("title: none | text: {text}"),
+        EmbeddingPurpose::Query => format!("{}{text}", crate::models::catalog::GEMMA_QUERY_PREFIX),
+        EmbeddingPurpose::Document => {
+            format!("{}{text}", crate::models::catalog::GEMMA_DOCUMENT_PREFIX)
+        }
     }
 }
 

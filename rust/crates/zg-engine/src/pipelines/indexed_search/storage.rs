@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::{
     EngineResult,
-    domain::FileId,
+    domain::{ContentKind, FileId},
     storage::{
         IndexStore,
         types::{StorageSearchFilter, StorageSearchHit, StoredFileAttributes, StoredSearchData},
@@ -12,20 +12,23 @@ use crate::{
 };
 
 pub(crate) trait SearchStorage: Send + Sync {
+    fn entity_counts(&self) -> EngineResult<std::collections::BTreeMap<ContentKind, u64>> {
+        Ok(std::collections::BTreeMap::new())
+    }
     fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>>;
     fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>>;
     fn has_non_unicode_file_names(&self) -> EngineResult<bool>;
     fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData>;
     fn search_fts(
         &self,
-        model: &str,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>>;
     fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
@@ -33,6 +36,9 @@ pub(crate) trait SearchStorage: Send + Sync {
 }
 
 impl SearchStorage for IndexStore {
+    fn entity_counts(&self) -> EngineResult<std::collections::BTreeMap<ContentKind, u64>> {
+        self.entity_counts()
+    }
     fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
         self.list_file_paths()
     }
@@ -51,21 +57,21 @@ impl SearchStorage for IndexStore {
 
     fn search_fts(
         &self,
-        model: &str,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.search_fts(model, query, limit, filter)
+        self.search_fts(kind, query, limit, filter)
     }
 
     fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.search_vector(model, vector, limit, filter)
+        self.search_vector(kind, vector, limit, filter)
     }
 }

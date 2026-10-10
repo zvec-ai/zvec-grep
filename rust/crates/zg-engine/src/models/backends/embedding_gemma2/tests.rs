@@ -265,4 +265,29 @@ async fn real_embeddinggemma2_text_image_fusion_and_recovery() {
         .await
         .expect("healthy sessions survive bad input");
     assert_eq!(vectors[1], recovered.vectors[0]);
+    let query = [vec![Content::Text(
+        "find a function that adds two numbers".into(),
+    )]];
+    let mut query_vectors = Vec::new();
+    for target in [ContentKind::Text, ContentKind::Code] {
+        query_vectors.push(
+            model
+                .embed(
+                    &query,
+                    EmbeddingOptions {
+                        purpose: EmbeddingPurpose::Query,
+                        query_target: Some(target),
+                        ..EmbeddingOptions::default()
+                    },
+                )
+                .await
+                .expect("target-specific text query")
+                .vectors
+                .remove(0),
+        );
+    }
+    assert_ne!(
+        query_vectors[0], query_vectors[1],
+        "the code task must change encoding without changing input kind"
+    );
 }

@@ -70,6 +70,13 @@ pub fn set_native_file_status(
 pub fn index_options(root: &Path) -> IndexOptions {
     IndexOptions {
         root: Some(root.to_path_buf()),
+        embedding: Some(zg_engine::api::index::options::EmbeddingModelSpec {
+            reference: "qwen/text-embedding-v4".into(),
+            revision: None,
+            endpoint: None,
+            cache_dir: None,
+            device: zg_engine::api::index::options::Device::Auto,
+        }),
         allow_remote: true,
         ..IndexOptions::default()
     }
@@ -88,14 +95,11 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     // Seed credentials without changing process-wide environment. Each fixture
     // keeps one globally unique name, including when its root is later moved.
     let name = format!("fixture-{}", uuid::Uuid::new_v4());
-    let generation = uuid::Uuid::new_v4().to_string();
-    fs::create_dir_all(home.join("generations").join(&generation))?;
     let manifest = json!({
         "name": name, "path": home,
         "root": root, "scan": {},
-        "indexPolicy": "enabled", "embeddings": [{ "model": { "provider": "qwen", "name": "text-embedding-v4", "contentKinds": ["text", "code"] }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null }],
-        "defaultModelRef": "qwen/text-embedding-v4", "embeddingRoutes": {},
-        "indexVersion": 2, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
+        "indexPolicy": "uninitialized", "defaultModel": null, "embeddingRoutes": {},
+        "indexVersion": null, "createdTime": 1, "updatedTime": 1,
         "embeddingRuntimes": { "qwen/text-embedding-v4": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") } }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)

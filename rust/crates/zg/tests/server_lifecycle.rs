@@ -536,7 +536,8 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |command| {
         command
             .env("HOME", config_home.path())
-            .env("USERPROFILE", config_home.path());
+            .env("USERPROFILE", config_home.path())
+            .env_remove("ZVEC_GREP_CONFIG");
     })?;
     let log_dir = home.path().join("daemon").join("logs");
     let active_path = log_dir.join("server.log");
@@ -548,6 +549,7 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
     let duplicate = Command::new(&binary)
         .env("HOME", config_home.path())
         .env("USERPROFILE", config_home.path())
+        .env_remove("ZVEC_GREP_CONFIG")
         .args(["--server", "run", "--home"])
         .arg(home.path())
         .args(["--listen", &guard.listen])
@@ -620,7 +622,17 @@ fn server_on_exposes_agent_tools_and_off_stops_it() -> Result<(), Box<dyn Error>
     assert!(response.contains("zvec_grep_read_content"));
     assert!(!response.contains("zvec_grep_index"));
     assert!(!response.contains("zvec_grep_rg"));
-    assert!(response.contains("\"maximum\":50"));
+    let list = mcp_parity::rpc(&response);
+    let search = list["result"]["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .find(|tool| tool["name"] == "zvec_grep_search")
+        .expect("search tool");
+    assert_eq!(
+        search["inputSchema"]["properties"]["limit"]["maximum"],
+        2000
+    );
 
     let call = json!({
         "jsonrpc": "2.0",
@@ -1687,18 +1699,29 @@ fn respond_embedding(mut stream: TcpStream, fail: bool) -> std::io::Result<()> {
         );
     }
     let request: serde_json::Value = serde_json::from_slice(&body)?;
-    let dimension = usize::try_from(request["dimensions"].as_u64().expect("dimension"))
-        .expect("usize dimension");
+    let visual = request["input"]["contents"].is_array();
+    let dimension = if visual {
+        &request["parameters"]["dimension"]
+    } else {
+        &request["dimensions"]
+    };
+    let dimension =
+        usize::try_from(dimension.as_u64().expect("dimension")).expect("usize dimension");
     let mut vector = vec![0.0_f32; dimension];
     vector[0] = 1.0;
-    let data = request["input"]
-        .as_array()
-        .expect("text inputs")
-        .iter()
-        .enumerate()
-        .map(|(index, _)| json!({ "index": index, "embedding": vector }))
-        .collect::<Vec<_>>();
-    let response = serde_json::to_vec(&json!({ "data": data }))?;
+    let response = if visual {
+        json!({"output": {"embeddings": [{"type": "fusion", "embedding": vector}]}})
+    } else {
+        let data = request["input"]
+            .as_array()
+            .expect("text inputs")
+            .iter()
+            .enumerate()
+            .map(|(index, _)| json!({ "index": index, "embedding": vector }))
+            .collect::<Vec<_>>();
+        json!({"data": data})
+    };
+    let response = serde_json::to_vec(&response)?;
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

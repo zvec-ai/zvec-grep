@@ -89,6 +89,12 @@ fn read_stored_content(
     options: &ReadContentOptions,
 ) -> EngineResult<ContentResult> {
     validate_generation(manifest, options)?;
+    let descriptor = manifest
+        .workspace
+        .index
+        .descriptor()
+        .ok_or_else(|| EngineError::not_found("workspace index is unavailable"))?;
+    storage.ensure_compatible(&descriptor.tables()?)?;
     let id = EntityId::from_string(options.reference.entity_id.clone());
     let stored = storage.read_entity(&id)?.ok_or_else(|| {
         EngineError::not_found("indexed content no longer exists; query the current index again")

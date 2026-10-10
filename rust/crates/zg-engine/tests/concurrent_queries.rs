@@ -281,6 +281,14 @@ async fn mismatched_models_and_rebuilds_wait_instead_of_borrowing() -> TestResul
         query.endpoint = endpoint;
         query.model_cache = model_cache;
         query.lock_timeout_ms = Some(20);
+        let lexical = fixture.engine.context(query.clone()).await?;
+        assert_eq!(lexical.items[0].relative_path, PathBuf::from("anchor.txt"));
+        assert!(
+            !update.is_finished(),
+            "FTS borrows storage without a model runtime"
+        );
+
+        query.routes[0].mode = ContextRouteMode::Vector;
         let error = fixture
             .engine
             .context(query)

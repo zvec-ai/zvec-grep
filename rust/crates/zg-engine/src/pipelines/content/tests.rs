@@ -34,6 +34,8 @@ impl Fixture {
         let home = root.join(".zvec-grep");
         let generation = uuid::Uuid::new_v4().to_string();
         let schema = EmbeddingModelInfo {
+            space: crate::domain::model::EmbeddingSpace::fixture(),
+            retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
             model: ModelInfo::new(
                 "fixture",
                 "vision",
@@ -51,7 +53,7 @@ impl Fixture {
                 name: "content-fixture".into(),
                 root: root.clone(),
                 scan: ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(schema.clone())),
+                index: IndexState::Enabled(Box::new(IndexDescriptor::single(schema.clone()))),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 1,
             },
@@ -64,7 +66,13 @@ impl Fixture {
         fs::create_dir_all(manifest.storage_home()).expect("generation directory");
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: manifest.storage_home(),
-            embeddings: vec![schema],
+            tables: manifest
+                .workspace
+                .index
+                .descriptor()
+                .expect("index")
+                .tables()
+                .expect("tables"),
         })
         .expect("storage");
         let relative_path = SourcePath::new("image.png").expect("relative path");
@@ -100,7 +108,7 @@ impl Fixture {
                 &[IndexedFragment {
                     entity_id: id,
                     fragment_id: entity.fragments[0].id.clone(),
-                    model: "fixture/vision".into(),
+                    kind: entity.content.kind(),
                     vector: vec![1.0, 0.0],
                     fts_text: String::new(),
                 }],
@@ -139,7 +147,14 @@ impl Fixture {
     fn writer(&self) -> IndexStore {
         IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: self.manifest.storage_home(),
-            embeddings: self.manifest.embeddings().to_vec(),
+            tables: self
+                .manifest
+                .workspace
+                .index
+                .descriptor()
+                .expect("index")
+                .tables()
+                .expect("tables"),
         })
         .expect("writer")
     }
@@ -317,7 +332,7 @@ async fn deleted_reference_cannot_read_another_file_with_identical_content_after
             &[IndexedFragment {
                 entity_id: entity.id.clone(),
                 fragment_id: entity.fragments[0].id.clone(),
-                model: "fixture/vision".into(),
+                kind: entity.content.kind(),
                 vector: vec![1.0, 0.0],
                 fts_text: String::new(),
             }],

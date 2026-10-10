@@ -78,6 +78,8 @@ impl EmbeddingGemma2Model {
         Ok(Self {
             entry,
             info: EmbeddingModelInfo {
+                space: EmbeddingCatalogEntry::EmbeddingGemma2(entry).embedding_space(None),
+                retrieval: EmbeddingCatalogEntry::EmbeddingGemma2(entry).retrieval(),
                 model: EmbeddingCatalogEntry::EmbeddingGemma2(entry)
                     .model_info()
                     .map_err(|error| {
@@ -223,7 +225,7 @@ impl EmbeddingModel for EmbeddingGemma2Model {
                     check_cancelled(options.signal.as_ref())?;
                     let prepared = prepare_input(
                         input,
-                        options.purpose,
+                        (options.purpose, options.query_target),
                         &loaded.tokenizer,
                         &mut sessions.vision,
                         &run_options,
@@ -275,7 +277,7 @@ fn session(path: &Path) -> Result<Session, ModelError> {
 
 fn prepare_input(
     input: &[Content],
-    purpose: EmbeddingPurpose,
+    (purpose, query_target): (EmbeddingPurpose, Option<crate::domain::ContentKind>),
     tokenizer: &Tokenizer,
     vision: &mut Session,
     run_options: &RunOptions,
@@ -293,7 +295,10 @@ fn prepare_input(
             Content::Text(value) | Content::Code(value) => text.push_str(&format_text(
                 value,
                 purpose,
-                matches!(content, Content::Code(_)),
+                query_target.map_or_else(
+                    || matches!(content, Content::Code(_)),
+                    |kind| kind == crate::domain::ContentKind::Code,
+                ),
             )),
             Content::Image(image) => {
                 let patches = image_patches(image.data())?;
@@ -371,9 +376,13 @@ fn prepare_input(
 
 pub(super) fn format_text(text: &str, purpose: EmbeddingPurpose, code: bool) -> String {
     match purpose {
-        EmbeddingPurpose::Document => format!("title: none | text: {text}"),
-        EmbeddingPurpose::Query if code => format!("task: code retrieval | query: {text}"),
-        EmbeddingPurpose::Query => format!("task: search result | query: {text}"),
+        EmbeddingPurpose::Document => {
+            format!("{}{text}", crate::models::catalog::GEMMA_DOCUMENT_PREFIX)
+        }
+        EmbeddingPurpose::Query if code => {
+            format!("{}{text}", crate::models::catalog::GEMMA_CODE_QUERY_PREFIX)
+        }
+        EmbeddingPurpose::Query => format!("{}{text}", crate::models::catalog::GEMMA_QUERY_PREFIX),
     }
 }
 

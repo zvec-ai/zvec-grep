@@ -52,5 +52,6 @@ pub(crate) use workspace::FTS_CONFIG;
 pub(crate) use workspace::FtsConfig;
 pub(crate) use workspace::IndexDescriptor;
 pub(crate) use workspace::IndexState;
+pub(crate) use workspace::IndexTable;
 pub use workspace::ScanRules;
 pub(crate) use workspace::Workspace;

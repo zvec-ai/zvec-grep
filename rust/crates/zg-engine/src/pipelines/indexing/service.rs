@@ -269,7 +269,12 @@ impl WorkspaceIndexService {
     ) -> Result<IndexResult, EngineError> {
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             storage_path: manifest.storage_home(),
-            embeddings: models.iter().map(|model| model.info().clone()).collect(),
+            tables: manifest
+                .workspace
+                .index
+                .descriptor()
+                .expect("enabled index")
+                .tables()?,
         })?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
@@ -348,6 +353,14 @@ impl WorkspaceIndexService {
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
             storage_path: manifest.storage_home(),
         })?;
+        storage.ensure_compatible(
+            &manifest
+                .workspace
+                .index
+                .descriptor()
+                .expect("enabled index")
+                .tables()?,
+        )?;
         let status =
             get_workspace_index_status(&manifest.workspace, &storage, &self.scanner, None).await;
         let close = storage.close();
@@ -402,6 +415,14 @@ impl WorkspaceIndexService {
             let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
                 storage_path: manifest.storage_home(),
             })?;
+            storage.ensure_compatible(
+                &manifest
+                    .workspace
+                    .index
+                    .descriptor()
+                    .expect("enabled index")
+                    .tables()?,
+            )?;
             let status =
                 get_workspace_index_status(&manifest.workspace, &storage, &self.scanner, None)
                     .await;
@@ -505,7 +526,7 @@ fn index_manifest(
             .unwrap_or_else(|| workspace_name(&location.root)),
         root: location.root.clone(),
         scan: resolve_scan(active, options),
-        index: IndexState::Enabled(descriptor),
+        index: IndexState::Enabled(Box::new(descriptor)),
         created_epoch_ms: active.map_or(now, |value| value.workspace.created_epoch_ms),
         updated_epoch_ms: now,
     };
@@ -577,7 +598,13 @@ pub(crate) fn embedding_plan(
     let default_ref = embedding_reference(existing, options.embedding.as_ref())?;
     let mut routes = existing
         .and_then(|manifest| manifest.workspace.index.descriptor())
-        .map_or_else(BTreeMap::new, |index| index.routes.clone());
+        .map_or_else(BTreeMap::new, |index| {
+            index
+                .routes
+                .iter()
+                .map(|(kind, model)| (*kind, model.model.reference()))
+                .collect()
+        });
     for kind in &options.clear_embedding_routes {
         if options.embedding_routes.contains_key(kind) {
             return Err(EngineError::invalid_argument(format!(
@@ -676,10 +703,20 @@ fn acquire_index_models(
         .values()
         .map(|request| acquire_model(models, existing, request))
         .collect::<Result<Vec<_>, _>>()?;
+    let info_for = |reference: &str| {
+        runtimes
+            .iter()
+            .find(|runtime| runtime.info().model.reference() == reference)
+            .map(|runtime| runtime.info().clone())
+            .ok_or_else(|| EngineError::internal(format!("missing embedding runtime {reference}")))
+    };
     let descriptor = IndexDescriptor {
-        embeddings: runtimes.iter().map(|model| model.info().clone()).collect(),
-        default_model_ref: plan.default_ref,
-        routes: plan.routes,
+        default_model: info_for(&plan.default_ref)?,
+        routes: plan
+            .routes
+            .into_iter()
+            .map(|(kind, reference)| Ok((kind, info_for(&reference)?)))
+            .collect::<Result<_, EngineError>>()?,
         fts: crate::domain::FTS_CONFIG,
     };
     descriptor.validate()?;
@@ -829,7 +866,7 @@ pub(in crate::pipelines) fn assert_embedding_compatible(
     };
     let schema = existing
         .embeddings()
-        .iter()
+        .into_iter()
         .find(|schema| schema.model.reference() == model.info().model.reference())
         .ok_or_else(|| {
             EngineError::invalid_argument(
@@ -1144,7 +1181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_endpoint_is_saved_as_runtime_config_and_reused_on_reopen() {
+    async fn remote_endpoint_changes_require_rebuild_and_reopen_preserves_the_new_space() {
         let directory = tempdir().expect("workspace");
         let home = directory.path().join(".zvec-grep");
         let service = WorkspaceIndexService::with_test_registry();
@@ -1174,34 +1211,48 @@ mod tests {
             initial.embedding_runtimes[reference].endpoint.as_deref(),
             Some("https://first.example.test/v1/embeddings")
         );
+        let saved = std::fs::read(home.join("manifest.json")).expect("saved manifest");
+        options.endpoint = Some("https://second.example.test/v1".into());
+        let error = service
+            .index(&models, options.clone())
+            .await
+            .expect_err("another endpoint changes the embedding space");
+        assert!(error.message().contains("rebuild the index"));
         assert_eq!(
-            serde_json::to_value(&initial.default_embedding().expect("model info").model)
-                .expect("serialize identity"),
-            serde_json::json!({"provider": "qwen", "name": "text-embedding-v4", "contentKinds": ["text", "code"]})
+            std::fs::read(home.join("manifest.json")).expect("preserved manifest"),
+            saved
         );
 
-        options.endpoint = Some("https://second.example.test/v1".into());
-        for reopen in [false, true] {
-            if reopen {
-                options.embedding = None;
-                options.endpoint = None;
-                models.close();
-                models = ModelRuntimeManager::new();
-            }
-            service
-                .index(&models, options.clone())
-                .await
-                .expect("endpoint changes and reopening do not require rebuilding");
-            let current = super::read_workspace_manifest(&home)
-                .expect("read")
-                .expect("manifest");
-            assert_eq!(current.workspace.index, initial.workspace.index);
-            assert_eq!(current.storage_generation, initial.storage_generation);
-            assert_eq!(
-                current.embedding_runtimes[reference].endpoint.as_deref(),
-                Some("https://second.example.test/v1/embeddings")
-            );
-        }
+        options.rebuild = true;
+        service
+            .index(&models, options.clone())
+            .await
+            .expect("explicit rebuild selects the new endpoint");
+        let rebuilt = super::read_workspace_manifest(&home)
+            .expect("read")
+            .expect("rebuilt manifest");
+        assert_ne!(rebuilt.workspace.index, initial.workspace.index);
+        assert_ne!(rebuilt.storage_generation, initial.storage_generation);
+        assert_eq!(
+            rebuilt.embedding_runtimes[reference].endpoint.as_deref(),
+            Some("https://second.example.test/v1/embeddings")
+        );
+
+        options.embedding = None;
+        options.endpoint = None;
+        options.rebuild = false;
+        models.close();
+        models = ModelRuntimeManager::new();
+        service
+            .index(&models, options.clone())
+            .await
+            .expect("reopen uses the persisted endpoint and space");
+        let reopened = super::read_workspace_manifest(&home)
+            .expect("read")
+            .expect("reopened manifest");
+        assert_eq!(reopened.workspace.index, rebuilt.workspace.index);
+        assert_eq!(reopened.storage_generation, rebuilt.storage_generation);
+        assert_eq!(reopened.embedding_runtimes, rebuilt.embedding_runtimes);
 
         let saved = std::fs::read(home.join("manifest.json")).expect("saved manifest");
         options.endpoint = Some("not a URL".into());
@@ -2246,20 +2297,26 @@ mod tests {
                 .cache_dir,
             Some(directory.path().join("model-cache"))
         );
-        let lease = crate::pipelines::indexed_search::service::acquire_search_model(
+        crate::pipelines::indexed_search::service::context(
+            &service,
             &models,
-            &manifest,
+            &crate::api::context::ContextOptions {
+                root: Some(directory.path().to_path_buf()),
+                query: Some("fixture".into()),
+                target_kind: Some(crate::domain::ContentKind::Text),
+                auto_update: false,
+                ..crate::api::context::ContextOptions::default()
+            },
             None,
-            &crate::api::context::ContextOptions::default(),
-            directory.path(),
+            false,
         )
-        .expect("search model");
+        .await
+        .expect("empty indexed search");
         assert_eq!(
             models.snapshot().cached_runtimes,
             1,
             "search reuses the configured model cache"
         );
-        drop(lease);
 
         // An incompatible physical index requires an explicit rebuild.
         write_previous_index_version(&info.home, &manifest);

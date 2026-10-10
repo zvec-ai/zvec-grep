@@ -83,9 +83,6 @@ pub(crate) async fn search(
     for (required, decision) in targets.iter().zip(decisions) {
         apply(decision, &required.target, &mut options.authorized_remote)?;
     }
-    if targets.len() == 1 {
-        options.authorization_model = Some(targets[0].target.model.clone());
-    }
     Ok(())
 }
 

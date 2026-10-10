@@ -105,7 +105,7 @@ impl Default for ScanRules {
 pub(crate) enum IndexState {
     Uninitialized,
     Disabled,
-    Enabled(IndexDescriptor),
+    Enabled(Box<IndexDescriptor>),
 }
 
 impl IndexState {
@@ -117,103 +117,109 @@ impl IndexState {
     }
 }
 
+/// Resolved model configuration; effective retrieval tables are derived by content kind.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IndexDescriptor {
-    pub embeddings: Vec<EmbeddingModelInfo>,
-    /// Model used when a content kind has no explicit route.
-    pub default_model_ref: String,
-    /// Explicit content-kind overrides; each reference must support its kind.
-    pub routes: BTreeMap<ContentKind, String>,
+    pub default_model: EmbeddingModelInfo,
+    pub routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
     pub fts: FtsConfig,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct IndexTable {
+    pub kind: ContentKind,
+    pub embedding: EmbeddingModelInfo,
+}
+
 impl IndexDescriptor {
-    /// Use one default model for every content kind it supports.
     #[cfg(test)]
     pub(crate) fn single(embedding: EmbeddingModelInfo) -> Self {
         Self {
-            default_model_ref: embedding.model.reference(),
-            embeddings: vec![embedding],
+            default_model: embedding,
             routes: BTreeMap::new(),
             fts: FTS_CONFIG,
         }
     }
 
     pub(crate) fn validate(&self) -> EngineResult<()> {
-        if self.embeddings.is_empty() {
-            return Err(EngineError::invalid_argument(
-                "enabled index requires at least one embedding model",
-            ));
-        }
-        let mut references = Vec::with_capacity(self.embeddings.len());
-        for embedding in &self.embeddings {
+        self.default_model.validate()?;
+        for (kind, embedding) in &self.routes {
             embedding.validate()?;
-            let reference = embedding.model.reference();
-            if references.contains(&reference) {
-                return Err(EngineError::invalid_argument(format!(
-                    "duplicate workspace embedding model: {reference}",
-                )));
-            }
-            references.push(reference);
-        }
-        self.default_model()?;
-        for kind in self.routes.keys() {
             self.model_for(*kind)?;
+            for other in std::iter::once(&self.default_model).chain(self.routes.values()) {
+                if embedding.model.reference() == other.model.reference() && embedding != other {
+                    return Err(EngineError::invalid_argument(format!(
+                        "conflicting configurations for embedding model {}",
+                        embedding.model.reference(),
+                    )));
+                }
+            }
         }
         Ok(())
     }
 
-    pub(crate) fn default_model(&self) -> EngineResult<&EmbeddingModelInfo> {
-        self.embedding_by_ref(&self.default_model_ref)
-    }
-
-    /// An unsupported default yields no model; an invalid explicit route is an error.
+    /// An unsupported default yields no table; an invalid explicit route is an error.
     pub(crate) fn model_for(&self, kind: ContentKind) -> EngineResult<Option<&EmbeddingModelInfo>> {
-        if let Some(reference) = self.routes.get(&kind) {
-            let embedding = self.embedding_by_ref(reference)?;
+        if let Some(embedding) = self.routes.get(&kind) {
             if !embedding.model.supports_content(kind) {
                 return Err(EngineError::invalid_argument(format!(
-                    "embedding route for {} refers to model {reference}, which does not support this content kind",
+                    "embedding route for {} refers to model {}, which does not support this content kind",
                     kind.as_str(),
+                    embedding.model.reference(),
                 )));
             }
             return Ok(Some(embedding));
         }
-        let embedding = self.default_model()?;
-        Ok(embedding.model.supports_content(kind).then_some(embedding))
+        Ok(self
+            .default_model
+            .model
+            .supports_content(kind)
+            .then_some(&self.default_model))
     }
 
-    fn embedding_by_ref(&self, reference: &str) -> EngineResult<&EmbeddingModelInfo> {
-        self.embeddings
-            .iter()
-            .find(|embedding| embedding.model.reference() == reference)
-            .ok_or_else(|| {
-                EngineError::invalid_argument(format!(
-                    "workspace embedding model is missing: {reference}",
-                ))
-            })
+    pub(crate) fn tables(&self) -> EngineResult<Vec<IndexTable>> {
+        self.validate()?;
+        let mut tables = Vec::new();
+        for kind in [ContentKind::Text, ContentKind::Code, ContentKind::Image] {
+            if let Some(embedding) = self.model_for(kind)? {
+                tables.push(IndexTable {
+                    kind,
+                    embedding: embedding.clone(),
+                });
+            }
+        }
+        Ok(tables)
+    }
+
+    /// One runtime per distinct model, even when several kinds share it.
+    pub(crate) fn embeddings(&self) -> Vec<&EmbeddingModelInfo> {
+        let mut models = BTreeMap::new();
+        for embedding in std::iter::once(&self.default_model).chain(self.routes.values()) {
+            models
+                .entry(embedding.model.reference())
+                .or_insert(embedding);
+        }
+        models.into_values().collect()
     }
 
     pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        self.validate()?;
-        other.validate()?;
-        if self.default_model_ref != other.default_model_ref
-            || self.routes != other.routes
-            || self.fts != other.fts
-            || self.embeddings.len() != other.embeddings.len()
-        {
+        let tables = self.tables()?;
+        let other_tables = other.tables()?;
+        if self.fts != other.fts || tables.len() != other_tables.len() {
             return Err(EngineError::invalid_argument(
-                "existing index uses different embedding models, routing or FTS configuration; rebuild the index",
+                "existing index uses different content kinds or FTS configuration; rebuild the index",
             ));
         }
-        for embedding in &self.embeddings {
-            let reference = embedding.model.reference();
-            let other_embedding = other.embeddings.iter()
-                .find(|candidate| candidate.model.reference() == reference)
-                .ok_or_else(|| EngineError::invalid_argument(format!(
-                    "existing index uses a different embedding model {reference}; rebuild the index",
-                )))?;
-            embedding.ensure_index_compatible(other_embedding)?;
+        for (table, other_table) in tables.iter().zip(&other_tables) {
+            if table.kind != other_table.kind {
+                return Err(EngineError::invalid_argument(
+                    "existing index uses different content kinds; rebuild the index",
+                ));
+            }
+            table
+                .embedding
+                .ensure_index_compatible(&other_table.embedding)?;
         }
         Ok(())
     }

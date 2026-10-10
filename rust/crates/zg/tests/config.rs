@@ -25,6 +25,7 @@ impl Fixture {
             .env("USERPROFILE", self.user.path())
             .env("ZVEC_GREP_HOME", self.user.path().join("runtime"));
         for key in [
+            "ZVEC_GREP_CONFIG",
             "ZVEC_GREP_DEVICE",
             "ZVEC_GREP_EMBEDDING",
             "ZVEC_GREP_API_KEY",
@@ -166,12 +167,15 @@ fn force_direct_uses_resolved_environment_mode() {
         .env("ZVEC_GREP_MODE", "direct")
         .output()
         .expect("environment direct mode");
-    assert!(!direct.status.success());
     assert!(
-        String::from_utf8_lossy(&direct.stderr).contains("--json is not supported"),
-        "stderr:\n{}",
+        direct.status.success(),
+        "{}",
         String::from_utf8_lossy(&direct.stderr)
     );
+    let result: serde_json::Value =
+        serde_json::from_slice(&direct.stdout).expect("clean JSON output");
+    assert_eq!(result["source"], "index");
+    assert_eq!(result["items"], json!([]));
 
     let server = fixture
         .command(&["--force-direct", "--json", "needle"])
@@ -192,12 +196,15 @@ fn force_direct_uses_resolved_global_mode() {
     fixture.write_config(&json!({"version": 1, "client": {"mode": "direct"}}));
 
     let direct = fixture.run(&["--force-direct", "--json", "needle"]);
-    assert!(!direct.status.success());
     assert!(
-        String::from_utf8_lossy(&direct.stderr).contains("--json is not supported"),
-        "stderr:\n{}",
+        direct.status.success(),
+        "{}",
         String::from_utf8_lossy(&direct.stderr)
     );
+    let result: serde_json::Value =
+        serde_json::from_slice(&direct.stdout).expect("clean JSON output");
+    assert_eq!(result["source"], "index");
+    assert_eq!(result["items"], json!([]));
 
     fixture.write_config(&json!({"version": 1, "client": {"mode": "server"}}));
     let server = fixture.run(&["--force-direct", "--json", "needle"]);
@@ -331,7 +338,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddings"][0]["model"]["name"],
+        manifest["defaultModel"]["model"]["name"],
         "potion-code-16m-v2"
     );
     assert_eq!(
@@ -341,7 +348,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     let status = fixture.success(&["--status", "--mode", "direct"]);
     assert!(
         String::from_utf8_lossy(&status.stdout)
-            .contains("  FTS         tokenizer=jieba filters=lowercase")
+            .contains("  FTS         text/code: tokenizer=jieba filters=lowercase")
     );
 }
 
@@ -431,10 +438,32 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
         manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/embeddings"
     );
+    let previous_manifest = manifest;
+    let changed = fixture.run(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--api-key",
+        "test-key",
+        "--allow-remote",
+        "--endpoint",
+        "https://example.test/updated",
+    ]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("rebuild the index"));
+    let preserved: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+    )
+    .expect("JSON");
+    assert_eq!(
+        preserved, previous_manifest,
+        "incompatible updates preserve the active manifest"
+    );
     fixture.success(&[
         "--index",
         "--mode",
         "direct",
+        "--rebuild",
         "--api-key",
         "test-key",
         "--allow-remote",
@@ -448,5 +477,9 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     assert_eq!(
         manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/updated"
+    );
+    assert_ne!(
+        manifest["storageGeneration"],
+        previous_manifest["storageGeneration"]
     );
 }

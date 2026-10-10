@@ -2,8 +2,8 @@
 
 use std::{borrow::Cow, collections::HashSet, fmt, sync::Arc};
 
-use crate::domain::Content;
 use crate::domain::model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelProgress};
+use crate::domain::{Content, ContentKind};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
@@ -50,6 +50,8 @@ impl ModelProgressReporter {
 #[derive(Clone, Default)]
 pub struct EmbeddingOptions {
     pub purpose: EmbeddingPurpose,
+    /// Selects a query task without changing the query's input content kind.
+    pub query_target: Option<ContentKind>,
     pub signal: Option<CancellationToken>,
     pub on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
     /// Runtime-owned execution budget. Backends use this to size their
@@ -78,6 +80,7 @@ impl fmt::Debug for EmbeddingOptions {
         formatter
             .debug_struct("EmbeddingOptions")
             .field("purpose", &self.purpose)
+            .field("query_target", &self.query_target)
             .field("has_signal", &self.signal.is_some())
             .field("has_progress_callback", &self.on_progress.is_some())
             .field("execution_concurrency", &self.execution_concurrency)
@@ -491,6 +494,8 @@ mod tests {
 
     fn fixture_info() -> EmbeddingModelInfo {
         EmbeddingModelInfo {
+            space: crate::domain::model::EmbeddingSpace::fixture(),
+            retrieval: crate::domain::model::EmbeddingRetrieval::Text,
             model: crate::domain::model::ModelInfo::new(
                 "test",
                 "stub",

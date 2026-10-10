@@ -253,6 +253,7 @@ pub(crate) async fn get_workspace_index_status(
         files_scanned: diff.files_scanned,
         files_stored: stored_files.len(),
         files_indexed: indexed_files.len(),
+        entities_by_kind: storage.entity_counts()?,
         entities_indexed: indexed_files
             .iter()
             .map(|file| file.index_status.entity_count())
@@ -605,7 +606,7 @@ async fn resolve_status_modifications(
 
 #[derive(Clone)]
 struct PreparedFragment {
-    model: String,
+    kind: ContentKind,
     entity_id: EntityId,
     fragment_id: FragmentId,
     embedding_content: Vec<Content>,
@@ -653,7 +654,7 @@ async fn index_candidates(
                 .model_for(kind)?
                 .ok_or_else(|| EngineError::internal("unrouted content reached indexing"))?,
             // Detection errors are recorded by preparation without invoking the model.
-            None => descriptor.default_model()?,
+            None => &descriptor.default_model,
         };
         groups
             .entry(model.model.reference())
@@ -1008,7 +1009,7 @@ fn commit_file(
         .into_iter()
         .zip(vectors)
         .map(|(fragment, vector)| IndexedFragment {
-            model: fragment.model,
+            kind: fragment.kind,
             entity_id: fragment.entity_id,
             fragment_id: fragment.fragment_id,
             fts_text: fragment.fts_text,
@@ -1047,10 +1048,6 @@ async fn prepare_candidate(
         .as_ref()
         .ok_or_else(|| EngineError::internal("index candidate must have a detected format"))?;
     if let Some(SourceKind::Image(format)) = source_kind(formats) {
-        let model_ref = model_for_content(context, ContentKind::Image)?
-            .info()
-            .model
-            .reference();
         throw_if_cancelled(context.signal.as_ref())?;
         let prepared = tokio::task::spawn_blocking(move || {
             let image = crate::extraction::prepare_image(source.bytes, format)?;
@@ -1058,10 +1055,7 @@ async fn prepare_candidate(
             let extracted =
                 extract_for_indexing(&source, crate::extraction::ChunkOptions::default())?;
             let entities = bind_entities(file.id, extracted)?;
-            let mut fragments = prepare_fragments(&entities, None)?;
-            for fragment in &mut fragments {
-                fragment.model.clone_from(&model_ref);
-            }
+            let fragments = prepare_fragments(&entities, None)?;
             Ok::<_, EngineError>(PreparedCandidate::File(Box::new(PreparedFile {
                 file,
                 entities,
@@ -1092,22 +1086,7 @@ async fn prepare_candidate(
     };
     let extracted = extract_for_indexing(&text, chunk_options)?;
     let entities = bind_entities(file.id, extracted)?;
-    let owners = entities
-        .iter()
-        .map(|entity| {
-            Ok((
-                entity.id.clone(),
-                model_for_content(context, entity.content.kind())?
-                    .info()
-                    .model
-                    .reference(),
-            ))
-        })
-        .collect::<Result<HashMap<_, _>, EngineError>>()?;
-    let mut fragments = prepare_fragments(&entities, chunk_options.max_chunk_chars)?;
-    for fragment in &mut fragments {
-        fragment.model = owners[&fragment.entity_id].clone();
-    }
+    let fragments = prepare_fragments(&entities, chunk_options.max_chunk_chars)?;
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
         entities,
@@ -1171,7 +1150,7 @@ fn prepare_fragments(
                     )),
                 };
                 Ok(PreparedFragment {
-                    model: String::new(),
+                    kind: entity.content.kind(),
                     entity_id: entity.id.clone(),
                     fragment_id: fragment.id.clone(),
                     fts_text: lexical_text(&content, entity.metadata.as_ref()),
@@ -1917,7 +1896,7 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
         .index
         .descriptor()
         .expect("enabled workspace");
-    if context.embedding_models.len() != index.embeddings.len() {
+    if context.embedding_models.len() != index.embeddings().len() {
         return Err(EngineError::invalid_argument(
             "runtime models differ from workspace models",
         ));
@@ -1925,8 +1904,8 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
     for model in context.embedding_models {
         model.info().validate()?;
         let schema = index
-            .embeddings
-            .iter()
+            .embeddings()
+            .into_iter()
             .find(|schema| schema.model.reference() == model.info().model.reference())
             .ok_or_else(|| {
                 EngineError::invalid_argument("runtime model is not in workspace index")
@@ -2579,15 +2558,15 @@ mod tests {
         };
         let entities = vec![entity];
         entities[0].validate().expect("valid entity");
-        let mut fragments = prepare_fragments(&entities, None).expect("prepare both projections");
-        for (fragment, body) in fragments.iter_mut().zip(bodies) {
+        let fragments = prepare_fragments(&entities, None).expect("prepare both projections");
+        for (fragment, body) in fragments.iter().zip(bodies) {
             assert_eq!(fragment.fts_text, format!("Heading\nParent\n{body}\n"));
             let [Content::Text(embedding)] = fragment.embedding_content.as_slice() else {
                 panic!("text embedding");
             };
             assert!(embedding.starts_with("heading: Heading\n"));
             assert!(embedding.ends_with(body));
-            fragment.model = "fixture/model".into();
+            assert_eq!(fragment.kind, ContentKind::Text);
         }
         let storage = MemoryStorage::default();
         let prepared = PreparedFile {
@@ -2621,7 +2600,7 @@ mod tests {
         {
             assert_eq!(entry.entity_id, entity_id);
             assert_eq!(entry.fragment_id, FragmentId::new(&entity_id, ordinal));
-            assert_eq!(entry.model, "fixture/model");
+            assert_eq!(entry.kind, ContentKind::Text);
             assert_eq!(entry.vector, vector);
             assert_eq!(entry.fts_text, format!("Heading\nParent\n{body}\n"));
         }
@@ -2630,6 +2609,21 @@ mod tests {
     impl IndexStorage for MemoryStorage {
         fn is_read_only(&self) -> bool {
             false
+        }
+
+        fn entity_counts(&self) -> EngineResult<std::collections::BTreeMap<ContentKind, u64>> {
+            let entries = self.entries.lock().expect("entries");
+            let mut entities = std::collections::BTreeMap::<ContentKind, HashSet<EntityId>>::new();
+            for entry in entries.values().flatten() {
+                entities
+                    .entry(entry.kind)
+                    .or_default()
+                    .insert(entry.entity_id.clone());
+            }
+            Ok(entities
+                .into_iter()
+                .map(|(kind, entities)| (kind, entities.len() as u64))
+                .collect())
         }
 
         fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>> {
@@ -2832,6 +2826,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 info: EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::Text,
                     model: crate::domain::model::ModelInfo::new(
                         "local",
                         "test",
@@ -2864,6 +2860,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 info: EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::Text,
                     model: crate::domain::model::ModelInfo::new(
                         "local",
                         "test",
@@ -2994,7 +2992,14 @@ mod tests {
             sleep(Duration::from_millis(10)).await;
             self.active.fetch_sub(1, Ordering::AcqRel);
             Ok(EmbeddingResult {
-                vectors: contents.iter().map(|_| vec![1.0, 0.0]).collect(),
+                vectors: contents
+                    .iter()
+                    .map(|_| {
+                        let mut vector = vec![0.0; self.info.dimension];
+                        vector[0] = 1.0;
+                        vector
+                    })
+                    .collect(),
                 truncated: Vec::new(),
             })
         }
@@ -3057,7 +3062,7 @@ mod tests {
         let entity_id =
             EntityId::new(FileId::new(91), &content, Range::Full).expect("fixture entity ID");
         PreparedFragment {
-            model: "local/test".to_owned(),
+            kind: ContentKind::Text,
             fragment_id: FragmentId::new(&entity_id, ordinal),
             entity_id,
             embedding_content: vec![content],
@@ -3070,8 +3075,10 @@ mod tests {
             name: "fixture".to_owned(),
             root: root.to_path_buf(),
             scan: crate::domain::ScanRules::default(),
-            index: crate::domain::IndexState::Enabled(IndexDescriptor::single(
+            index: crate::domain::IndexState::Enabled(Box::new(IndexDescriptor::single(
                 EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::Text,
                     model: crate::domain::model::ModelInfo::new(
                         "local",
                         "test",
@@ -3087,7 +3094,7 @@ mod tests {
                     max_input_tokens: Some(64),
                     max_image_bytes: None,
                 },
-            )),
+            ))),
             created_epoch_ms: 1,
             updated_epoch_ms: 1,
         }
@@ -3500,53 +3507,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_routes_accept_one_or_multiple_models() {
+    async fn configured_routes_write_each_content_kind_with_its_model_dimension() {
         use std::collections::BTreeMap;
         let directory = tempdir().expect("workspace");
-        std::fs::write(directory.path().join("note.txt"), "text").expect("source");
-        let first = ConcurrentModel::new();
-        let mut second = ConcurrentModel::new();
-        second.info.model = crate::domain::model::ModelInfo::new(
-            second.info.model.provider(),
-            "image",
-            [
-                crate::domain::ContentKind::Text,
-                crate::domain::ContentKind::Image,
-            ],
+        std::fs::write(directory.path().join("note.txt"), "text").expect("text source");
+        std::fs::write(
+            directory.path().join("main.rs"),
+            "fn main() { println!(\"hello\"); }",
         )
-        .expect("fixture model identity");
-        second.info.max_image_bytes = Some(1024);
+        .expect("code source");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]))
+            .save(directory.path().join("image.png"))
+            .expect("image source");
         let scanner = NativeScanner::default();
-        for multiple in [true, false] {
+        for (multiple, image_enabled) in [(true, true), (false, true), (false, false)] {
+            let first = ConcurrentModel::new();
+            let mut second = ConcurrentModel::new();
+            second.info.model = crate::domain::model::ModelInfo::new(
+                "local",
+                "vision",
+                [ContentKind::Text, ContentKind::Code, ContentKind::Image],
+            )
+            .expect("vision model identity");
+            second.info.retrieval = crate::domain::model::EmbeddingRetrieval::TextImage;
+            second.info.dimension = 3;
+            second.info.max_image_bytes = Some(1024);
             let storage = MemoryStorage::default();
             let mut workspace = workspace(directory.path());
-            workspace.index = crate::domain::IndexState::Enabled(IndexDescriptor {
+            workspace.index = crate::domain::IndexState::Enabled(Box::new(IndexDescriptor {
                 fts: crate::domain::FTS_CONFIG,
-                default_model_ref: if multiple {
-                    first.info.model.reference()
+                default_model: if multiple || !image_enabled {
+                    first.info.clone()
                 } else {
-                    second.info.model.reference()
-                },
-                embeddings: if multiple {
-                    vec![first.info.clone(), second.info.clone()]
-                } else {
-                    vec![second.info.clone()]
+                    second.info.clone()
                 },
                 routes: if multiple {
-                    BTreeMap::from([
-                        (ContentKind::Text, first.info.model.reference()),
-                        (ContentKind::Image, second.info.model.reference()),
-                    ])
+                    BTreeMap::from([(ContentKind::Image, second.info.clone())])
                 } else {
-                    BTreeMap::from([(ContentKind::Image, second.info.model.reference())])
+                    BTreeMap::new()
                 },
-            });
+            }));
             let models: Vec<&dyn IndexEmbeddingRuntime> = if multiple {
                 vec![&first, &second]
-            } else {
+            } else if image_enabled {
                 vec![&second]
+            } else {
+                vec![&first]
             };
-            let context = IndexingContext {
+            let result = index_workspace(&IndexingContext {
                 workspace_index: &workspace,
                 storage: &storage,
                 scanner: &scanner,
@@ -3555,20 +3563,36 @@ mod tests {
                 on_progress: None,
                 signal: None,
                 changes: &[],
-            };
-            let result = index_workspace(&context)
-                .await
-                .expect("configured route indexes");
-            assert_eq!(result.files_added, 1);
+            })
+            .await
+            .expect("configured routes index");
+            let expected_files = if image_enabled { 3 } else { 2 };
+            assert_eq!(result.files_added, expected_files);
             assert_eq!(result.files_failed, 0);
-            assert_eq!(storage.entries.lock().expect("entries").len(), 1);
-            assert_eq!(storage.list_files().expect("files").len(), 1);
-            if multiple {
-                assert_eq!(first.calls.load(Ordering::Acquire), 1);
-                assert_eq!(second.calls.load(Ordering::Acquire), 0);
-            } else {
-                assert_eq!(second.calls.load(Ordering::Acquire), 1);
+            assert_eq!(storage.list_files().expect("files").len(), expected_files);
+            let entries = storage.entries.lock().expect("entries");
+            let mut kinds = std::collections::BTreeSet::new();
+            for entry in entries.values().flatten() {
+                kinds.insert(entry.kind);
+                let expected_dimension =
+                    if entry.kind == ContentKind::Image || (!multiple && image_enabled) {
+                        3
+                    } else {
+                        2
+                    };
+                assert_eq!(entry.vector.len(), expected_dimension);
             }
+            assert_eq!(kinds.contains(&ContentKind::Image), image_enabled);
+            assert!(kinds.contains(&ContentKind::Text));
+            assert!(kinds.contains(&ContentKind::Code));
+            assert_eq!(
+                first.prepare_calls.load(Ordering::Acquire),
+                usize::from(multiple || !image_enabled)
+            );
+            assert_eq!(
+                second.prepare_calls.load(Ordering::Acquire),
+                usize::from(image_enabled)
+            );
         }
     }
 

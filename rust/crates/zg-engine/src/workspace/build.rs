@@ -355,7 +355,9 @@ mod tests {
                 name: "workspace".to_owned(),
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
+                index: IndexState::Enabled(Box::new(IndexDescriptor::single(EmbeddingModelInfo {
+                    space: crate::domain::model::EmbeddingSpace::fixture(),
+                    retrieval: crate::domain::model::EmbeddingRetrieval::TextImage,
                     model: crate::domain::model::ModelInfo::new(
                         "local",
                         "example",
@@ -370,7 +372,7 @@ mod tests {
                     max_batch_size: 32,
                     max_input_tokens: None,
                     max_image_bytes: None,
-                })),
+                }))),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
             },

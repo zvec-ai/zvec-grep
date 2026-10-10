@@ -29,6 +29,11 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
     .into_iter()
     .map(|mut fixture| {
         adapt_context_fixture(&mut fixture.result);
+        // Current engine replies already carry presentation order; old captured
+        // Node replies delegated their final rank sorting to this formatter.
+        if let Some(items) = fixture.result["items"].as_array_mut() {
+            items.sort_by_key(|item| item["rank"].as_u64().unwrap_or_default());
+        }
         fixture
     })
     .collect()
@@ -39,7 +44,10 @@ pub(crate) fn adapt_context_fixture(value: &mut serde_json::Value) {
         serde_json::Value::Object(object) => {
             if object.contains_key("hits_returned") && object.contains_key("routes") {
                 object.insert("input_kind".into(), "text".into());
-                object.insert("model_ref".into(), "fixture/text".into());
+                object.insert("targets".into(), serde_json::json!([]));
+                object.insert("result_groups".into(), serde_json::json!([]));
+                object.insert("incomplete".into(), false.into());
+                object.entry("limit").or_insert_with(|| 30.into());
             }
             if object.contains_key("rank") && object.contains_key("content") {
                 let text = object.remove("content").expect("content exists");
@@ -60,6 +68,32 @@ pub(crate) fn adapt_context_fixture(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+#[test]
+fn kind_groups_preserve_engine_order_instead_of_globally_sorting_ranks() {
+    let mut value = fixtures().remove(0).result;
+    let mut first = value["items"][0].clone();
+    first["rank"] = 2.into();
+    first["relative_path"] = "text-result.txt".into();
+    let mut second = first.clone();
+    second["rank"] = 1.into();
+    second["relative_path"] = "code-result.rs".into();
+    value["items"] = serde_json::json!([first, second]);
+    value["diagnostics"]["index"] = serde_json::json!({
+        "input_kind":"text", "targets":[], "incomplete":false, "limit":30,
+        "hits_returned":2, "query_groups":[], "routes":[], "result_groups":[
+        {"id":"text", "kinds":["text"], "model_refs":["fixture/text"], "scoring":"hybrid", "item_start":0, "item_count":1},
+        {"id":"code", "kinds":["code"], "model_refs":["fixture/code"], "scoring":"hybrid", "item_start":1, "item_count":1},
+    ]});
+    let result: ContextResult = serde_json::from_value(value).expect("grouped result");
+    let rendered = format_search_result(&result, SearchPreview::Short);
+    assert!(
+        rendered.find("text-result.txt").expect("text path")
+            < rendered.find("code-result.rs").expect("code path")
+    );
+    assert!(rendered.contains("result group: text kinds=text"));
+    assert!(rendered.contains("result group: code kinds=code"));
 }
 
 fn source_range_cases() -> Vec<McpSearchPresentationCase> {

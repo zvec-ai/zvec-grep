@@ -134,8 +134,12 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
         Some(2)
     );
     let collections = model_collections(&info.index_path)?;
-    assert_eq!(collections.len(), 1);
-    assert_eq!(native_documents(&collections[0])?.len(), 1);
+    assert_eq!(collections.len(), 2);
+    assert_eq!(
+        native_documents(&info.index_path.join("fragments_text"))?.len(),
+        1
+    );
+    assert!(native_documents(&info.index_path.join("fragments_code"))?.is_empty());
     assert_eq!(
         native_documents(&info.index_path.join("entities"))?.len(),
         1
@@ -144,8 +148,10 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
     assert_eq!(manifest["indexVersion"], 2);
-    assert_eq!(manifest["embeddings"].as_array().expect("models").len(), 1);
-    assert_eq!(manifest["defaultModelRef"], "qwen/text-embedding-v4");
+    assert_eq!(
+        manifest["defaultModel"]["model"]["name"],
+        "text-embedding-v4"
+    );
     assert_eq!(manifest["embeddingRoutes"], json!({}));
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
@@ -246,11 +252,11 @@ async fn image_routes_partition_search_and_preserve_content_across_reopen() -> T
         info.workspace_index
             .as_ref()
             .expect("image fixture result")
-            .embeddings
+            .tables
             .len(),
-        2
+        3
     );
-    assert_eq!(model_collections(&info.index_path)?.len(), 2);
+    assert_eq!(model_collections(&info.index_path)?.len(), 3);
     let mut reference = None;
     for reopened in [false, true] {
         if reopened {
@@ -260,6 +266,7 @@ async fn image_routes_partition_search_and_preserve_content_across_reopen() -> T
         let result = engine
             .context(ContextOptions {
                 root: Some(root.into()),
+                target_kind: Some(ContentKind::Image),
                 query_image: Some(QueryImage::Path {
                     path: root.join("red.png"),
                 }),
@@ -288,40 +295,41 @@ async fn image_routes_partition_search_and_preserve_content_across_reopen() -> T
         assert_eq!(*size_bytes, png.len() as u64);
         reference = item.content_ref.clone();
         assert!(reference.is_some());
-        let text = engine
-            .context(ContextOptions {
-                root: Some(root.into()),
-                query: Some("orchard".into()),
-                auto_update: false,
-                allow_remote: true,
-                ..ContextOptions::default()
-            })
-            .await?;
-        assert_eq!(text.items.len(), 2);
-        assert!(
-            text.items
-                .iter()
-                .all(|item| item.preview.kind() != ContentKind::Image)
-        );
-        assert!(
-            text.items
-                .iter()
-                .any(|item| item.preview.kind() == ContentKind::Code)
-        );
-        for item in &text.items {
-            let content = engine
-                .read_content(ReadContentOptions {
+        for kind in [ContentKind::Text, ContentKind::Code] {
+            let text = engine
+                .context(ContextOptions {
                     root: Some(root.into()),
-                    ..ReadContentOptions::new(item.content_ref.clone().expect("indexed reference"))
+                    query: Some("orchard".into()),
+                    target_kind: Some(kind),
+                    auto_update: false,
+                    allow_remote: true,
+                    ..ContextOptions::default()
                 })
                 .await?;
-            assert_eq!(content.content.kind(), item.preview.kind());
-            let text = match &content.content {
-                Content::Text(text) | Content::Code(text) => text,
-                other @ Content::Image(_) => panic!("unexpected complete content: {other:?}"),
-            };
-            assert_eq!(Some(text.as_str()), item.preview.text());
-            assert_eq!(content.path, item.absolute_path);
+            assert_eq!(text.items.len(), 1);
+            assert!(
+                text.items
+                    .iter()
+                    .all(|item| item.preview.kind() != ContentKind::Image)
+            );
+            assert!(text.items.iter().all(|item| item.preview.kind() == kind));
+            for item in &text.items {
+                let content = engine
+                    .read_content(ReadContentOptions {
+                        root: Some(root.into()),
+                        ..ReadContentOptions::new(
+                            item.content_ref.clone().expect("indexed reference"),
+                        )
+                    })
+                    .await?;
+                assert_eq!(content.content.kind(), item.preview.kind());
+                let text = match &content.content {
+                    Content::Text(text) | Content::Code(text) => text,
+                    other @ Content::Image(_) => panic!("unexpected complete content: {other:?}"),
+                };
+                assert_eq!(Some(text.as_str()), item.preview.text());
+                assert_eq!(content.path, item.absolute_path);
+            }
         }
     }
     let reference = reference.expect("image fixture result");
@@ -554,8 +562,8 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
     assert!(coverage.into_iter().all(|covered| covered));
     assert_eq!(server.inputs.load(Ordering::Acquire), fragments.len());
     let collections = model_collections(&info.index_path)?;
-    assert_eq!(collections.len(), 1);
-    let projected = native_documents(&collections[0])?;
+    assert_eq!(collections.len(), 2);
+    let projected = native_documents(&info.index_path.join("fragments_code"))?;
     assert_eq!(projected.len(), fragments.len());
     let mut projected_ids = BTreeSet::new();
     for doc in projected {
@@ -1097,9 +1105,11 @@ async fn incremental_failure_removes_all_old_searchable_content_for_the_file() -
         [PathBuf::from("stable.txt")]
     );
     assert_eq!(native_documents(&index_path.join("entities"))?.len(), 1);
-    for collection in model_collections(&index_path)? {
-        assert_eq!(native_documents(&collection)?.len(), 1);
-    }
+    assert_eq!(
+        native_documents(&index_path.join("fragments_text"))?.len(),
+        1
+    );
+    assert!(native_documents(&index_path.join("fragments_code"))?.is_empty());
     let status = engine
         .info(info_options(root))
         .await?
@@ -1144,7 +1154,8 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         files[0].get_string("payload")?.expect("source payload")
     };
     // Simulate interruption after recording NotIndexed. Opening the store must
-    // preserve this state and any remaining search documents until indexing retries.
+    // preserve recovery records until indexing retries, while keeping incomplete
+    // projections hidden from readers.
     let original: Value = serde_json::from_str(&source)?;
     let id = u32::try_from(original["id"].as_u64().expect("file ID"))?;
     set_native_file_status(&index_path, id, "not_indexed")?;
@@ -1164,10 +1175,7 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         (1, 0, 0)
     );
     assert!(!index_path.join("pending.json").exists());
-    assert_eq!(
-        fts_paths(&engine, root, "orchard").await?,
-        [PathBuf::from("note.txt")]
-    );
+    assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
     assert_eq!(server.requests.load(Ordering::Acquire), requests);
     engine.close();
     drop(engine);
@@ -1204,8 +1212,11 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    assert_eq!(collections.len(), 2);
+    assert_eq!(collections.len(), 3);
     for collection in collections {
+        if collection.ends_with("fragments_code") {
+            continue;
+        }
         assert!(
             !native_documents(&collection)?.is_empty(),
             "opening storage preserves intermediate records in {}",

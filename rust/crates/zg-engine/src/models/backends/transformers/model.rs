@@ -129,6 +129,8 @@ impl TransformersEmbeddingModel {
         Ok(Self {
             entry,
             info: EmbeddingModelInfo {
+                space: EmbeddingCatalogEntry::Transformers(entry).embedding_space(None),
+                retrieval: EmbeddingCatalogEntry::Transformers(entry).retrieval(),
                 model: EmbeddingCatalogEntry::Transformers(entry)
                     .model_info()
                     .map_err(|error| {

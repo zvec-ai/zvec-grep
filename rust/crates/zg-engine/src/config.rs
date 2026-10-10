@@ -15,6 +15,9 @@ use std::{
 /// # Errors
 /// Returns an error when the user home cannot be resolved.
 pub fn global_config_path() -> Result<PathBuf, EngineError> {
+    if let Some(path) = std::env::var_os("ZVEC_GREP_CONFIG") {
+        return Ok(PathBuf::from(path));
+    }
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
     #[cfg(not(windows))]

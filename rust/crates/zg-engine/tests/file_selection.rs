@@ -525,10 +525,6 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Compare positive catalog filtering and native NOT LIKE errors through both public retrieval routes"
-)]
 async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResult {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
@@ -580,6 +576,13 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
             },
             vec!["tsconfig.json"],
         ),
+        (
+            QueryFilter {
+                excluded_formats: vec![FileFormat::Rust],
+                ..Default::default()
+            },
+            vec!["CMakeLists.txt", "header.h", "notes.txt", "tsconfig.json"],
+        ),
     ];
     for (filter, expected) in cases {
         for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
@@ -590,83 +593,6 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
             );
         }
     }
-
-    let info = engine.info(info_options(root)).await?;
-    let dimension = info
-        .workspace_index
-        .expect("workspace")
-        .embeddings
-        .first()
-        .expect("model")
-        .dimension;
-    let collections = fs::read_dir(&info.index_path)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .expect("collection name")
-                .to_string_lossy()
-                .starts_with("fragments_")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(collections.len(), 1, "one native model collection");
-    let collection_path = &collections[0];
-    #[cfg(windows)]
-    let collection_path = dunce::simplified(collection_path);
-    let mut collection_options = zvec_rust::CollectionOptions::new()?;
-    collection_options.set_read_only(true)?;
-    let collection = zvec_rust::Collection::open(
-        collection_path.to_str().expect("UTF-8 collection path"),
-        Some(&collection_options),
-    )?;
-    let mut fts = zvec_rust::Fts::new()?;
-    fts.set_match_string("orchard")?;
-    for (mode, operation, mut native_query) in [
-        (
-            ContextRouteMode::Fts,
-            "search full-text index",
-            zvec_rust::SearchQuery::fts("text", &fts, 64)?,
-        ),
-        (
-            ContextRouteMode::Vector,
-            "search vector index",
-            zvec_rust::SearchQuery::new("embedding", &vec![1.0; dimension], 64)?,
-        ),
-    ] {
-        // Excluding Rust negates both its suffix and the dot-only filename exception.
-        native_query.set_filter(
-            "content_kind IN ('text', 'code') AND (file_name NOT LIKE '%.rs' OR file_name = '.rs')",
-        )?;
-        native_query.set_output_fields(&["document_id", "entity_id", "file_id"])?;
-        native_query.set_include_vector(false)?;
-        let native_error = collection
-            .query(&native_query)
-            .err()
-            .expect("zvec 0.7.2 does not parse NOT LIKE");
-        assert!(native_error.to_string().contains("syntax error"));
-        let error = engine
-            .context(ContextOptions {
-                root: Some(root.to_path_buf()),
-                routes: vec![ContextRoute {
-                    mode,
-                    query: "orchard".into(),
-                }],
-                filter: QueryFilter {
-                    excluded_formats: vec![FileFormat::Rust],
-                    ..Default::default()
-                },
-                limit: Some(64),
-                auto_update: false,
-                allow_remote: true,
-                ..ContextOptions::default()
-            })
-            .await
-            .expect_err("native NOT LIKE error must not be replaced with a successful fallback");
-        assert_eq!(error.code(), zg_engine::EngineError::STORAGE_FAILURE);
-        assert_eq!(error.message(), format!("zvec {operation}: {native_error}"));
-    }
-    collection.close()?;
 
     engine.drop_index(info_options(root)).await?;
     engine.close();

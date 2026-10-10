@@ -71,7 +71,8 @@ impl Fixture {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
-            stdout.contains(&format!("  Default     {reference}")),
+            stdout.contains(&format!("  text        {reference}"))
+                && stdout.contains(&format!("  code        {reference}")),
             "{stdout}"
         );
     }
@@ -467,7 +468,10 @@ fn missing_index_uses_default_local_model_without_polluting_query_stdout() {
         "{stderr}"
     );
     assert!(stderr.contains("Index complete"), "{stderr}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Selected index tables are empty.\n"
+    );
     fixture.assert_model("direct", "local/potion-code-16m-v2");
 }
 
@@ -542,7 +546,10 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
             "{stderr}"
         );
         assert!(stderr.contains("Index complete"), "{stderr}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "Selected index tables are empty.\n"
+        );
         let status = success(
             fixture
                 .command(&["--status", "--mode", mode, "--no-color"])
@@ -553,7 +560,8 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         let stdout = String::from_utf8_lossy(&status.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
-            stdout.contains(&format!("  Default     {expected}")),
+            stdout.contains(&format!("  text        {expected}"))
+                && stdout.contains(&format!("  code        {expected}")),
             "{stdout}"
         );
         assert!(!fixture.root.path().join(".zvec-grep").exists());
@@ -660,7 +668,10 @@ fn existing_local_and_remote_indexes_are_reused_from_nested_directories() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!stderr.contains("No index found"), "{stderr}");
             assert!(!stderr.contains("Index complete"), "{stderr}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "Selected index tables are empty.\n"
+            );
             fixture.assert_model(mode, reference);
             assert!(!nested.join(".zvec-grep").exists());
         }

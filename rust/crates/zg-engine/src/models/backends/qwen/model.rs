@@ -63,9 +63,23 @@ impl QwenEmbeddingModel {
             )
             .shared());
         }
+        let valid_endpoint = reqwest::Url::parse(&endpoint).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+        if !valid_endpoint {
+            return Err(ModelError::invalid_argument(
+                "embedding endpoint must be an HTTP(S) URL without user information, query parameters or fragment; pass credentials through api_key",
+            ).shared());
+        }
         Ok(Self {
             entry,
             info: EmbeddingModelInfo {
+                space: EmbeddingCatalogEntry::Qwen(entry).embedding_space(Some(&endpoint)),
+                retrieval: EmbeddingCatalogEntry::Qwen(entry).retrieval(),
                 model: EmbeddingCatalogEntry::Qwen(entry)
                     .model_info()
                     .map_err(|error| {

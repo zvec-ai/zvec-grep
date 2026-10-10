@@ -48,6 +48,35 @@ fn options() -> ModelConfig {
     }
 }
 
+#[test]
+fn rejects_endpoint_options_that_cannot_form_a_credential_free_model_identity() {
+    for endpoint in [
+        "https://user:secret@example.test/embed",
+        "https://example.test/embed?api_key=secret",
+        "https://example.test/embed?model_revision=other",
+        "https://example.test/embed#secret",
+        "file:///tmp/embedding",
+    ] {
+        let http = Arc::new(MockHttp {
+            response: Mutex::new(None),
+            requests: Mutex::new(Vec::new()),
+        });
+        let error = QwenEmbeddingModel::with_http(
+            config("text", "text-embedding-v4", 3),
+            ModelConfig {
+                endpoint: Some(endpoint.into()),
+                ..options()
+            },
+            http.clone(),
+        )
+        .err()
+        .expect("invalid endpoint");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert!(!error.to_string().contains("secret"));
+        assert!(http.requests.lock().expect("requests").is_empty());
+    }
+}
+
 #[tokio::test]
 async fn text_request_and_index_order_match_main() {
     let http = Arc::new(MockHttp {

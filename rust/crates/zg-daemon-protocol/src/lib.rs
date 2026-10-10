@@ -304,7 +304,7 @@ mod tests {
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
                 default_model_ref: None,
-                embeddings: Vec::new(),
+                tables: Vec::new(),
                 embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
@@ -404,6 +404,7 @@ mod tests {
             context::options::{FileFormat, QueryImage},
         };
         let image = DaemonCommand::Context(ContextOptions {
+            target_kind: Some(zg_engine::api::context::options::ContentKind::Image),
             query_image: Some(QueryImage::Bytes {
                 format: FileFormat::Png,
                 data: vec![1, 2, 3],
@@ -412,6 +413,7 @@ mod tests {
         });
         let value = serde_json::to_value(&image).expect("image command");
         assert_eq!(value["request"]["query_image"]["data"], "AQID");
+        assert_eq!(value["request"]["target_kind"], "image");
         assert_eq!(
             serde_json::from_value::<DaemonCommand>(value).expect("image decode"),
             image

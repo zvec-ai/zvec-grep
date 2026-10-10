@@ -45,10 +45,17 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
     if let Some(refresh) = refresh {
         lines.push(format!("background_refresh: {refresh}"));
     }
+    append_target_diagnostics(&mut lines, reply);
     if reply.items.is_empty() {
         lines.push(
             match reply.diagnostics.empty_reason {
+                Some(EmptyReason::NoSearchableFiles) if reply.diagnostics.index.is_some() => {
+                    "Selected index tables are empty."
+                }
                 Some(EmptyReason::NoSearchableFiles) => "No searchable files.",
+                Some(EmptyReason::NoSupportedTargets) => {
+                    "No enabled index table supports this query."
+                }
                 _ => "No matches.",
             }
             .to_owned(),
@@ -75,20 +82,57 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
         lines.push(String::new());
     }
 
-    let mut items: Vec<_> = reply.items.iter().collect();
-    items.sort_by(|left, right| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| left.range.start_line().cmp(&right.range.start_line()))
-            .then_with(|| range_label(&left.range).cmp(&range_label(&right.range)))
-    });
-    for (position, item) in items.into_iter().enumerate() {
+    for (position, item) in reply.items.iter().enumerate() {
+        if let Some(group) = reply.diagnostics.index.as_ref().and_then(|index| {
+            index
+                .result_groups
+                .iter()
+                .find(|group| group.item_start == position)
+        }) {
+            lines.push(format!(
+                "result group: {} kinds={} scoring={:?} merge={}; ranked within this group",
+                group.id,
+                group
+                    .kinds
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                group.scoring,
+                if group.kinds.len() > 1 {
+                    "compatible_vector_scores"
+                } else {
+                    "independent_kind"
+                }
+            ));
+        }
         if position > 0 {
             lines.push(String::new());
         }
         append_item(&mut lines, item, preview);
     }
     lines.join("\n")
+}
+
+fn append_target_diagnostics(lines: &mut Vec<String>, reply: &ContextResult) {
+    if let Some(index) = &reply.diagnostics.index {
+        if index.incomplete {
+            lines.push("incomplete: one or more target searches failed".into());
+        }
+        for target in &index.targets {
+            lines.push(format!(
+                "route: input={} target={} model={} status={:?}{}",
+                index.input_kind.as_str(),
+                target.kind.as_str(),
+                target.model_ref,
+                target.status,
+                target
+                    .reason
+                    .as_ref()
+                    .map_or_else(String::new, |reason| format!(" ({reason})")),
+            ));
+        }
+    }
 }
 
 fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPreview) {
@@ -126,6 +170,9 @@ fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPrevi
         item.relative_path.display(),
         range_label(header_range)
     ));
+    if item.content_ref.is_some() {
+        lines.push(format!("type: {}", item.preview.kind().as_str()));
+    }
     append_content_reference(lines, item);
     if !item.query_groups.is_empty() {
         lines.push(format!(

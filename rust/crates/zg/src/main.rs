@@ -23,6 +23,8 @@ use zg_daemon::{DaemonStatus, ListenAddress, McpToolset as DaemonMcpToolset, Ser
 use zg_daemon_protocol::{DaemonCommand, DaemonReply};
 use zg_engine::{EngineError, ZvecGrep, api::context::ContextOptions};
 
+mod process_limits;
+
 static DAEMON_LOGGING: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
@@ -73,6 +75,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     install_darwin_metal_residency_mitigation()?;
     // Emit after a possible re-exec so macOS prints each warning only once.
     warn();
+    process_limits::configure_file_limit();
     let debug = match &plan {
         CliPlan::Query { output, .. }
         | CliPlan::Index { output, .. }
@@ -419,7 +422,7 @@ async fn ensure_query_index(
     }
 
     if request.query_image.is_some() {
-        return Err(EngineError::unsupported("image queries require an existing image index; configure --embedding-route image=<model> with zg --index first").into());
+        return Err(EngineError::unsupported("image queries require an existing image index; configure --embedding image=<model> with zg --index first").into());
     }
     let embedding = zg_engine::config::implicit_embedding_reference()?;
     eprintln!("No index found; creating one with {embedding}.");
@@ -533,14 +536,6 @@ async fn authorize_query_with_io(
                 unreachable!()
             }
         }
-    }
-    // A single remote query destination can retain the legacy binding. Multiple
-    // models keep their individual saved endpoints instead of a global override.
-    if let Some(authorization) = targets
-        .iter()
-        .find(|target| target.query_text || target.query_image)
-    {
-        request.authorization_model = Some(authorization.target.model.clone());
     }
     Ok(())
 }
@@ -976,10 +971,6 @@ mod query_authorization_tests {
         );
         assert_eq!(once.authorized_remote.len(), 1);
         assert_eq!(once.authorized_remote[0].model, "qwen/text-embedding-v4");
-        assert_eq!(
-            once.authorization_model.as_deref(),
-            Some("qwen/text-embedding-v4")
-        );
         assert!(!root.join(".zvec-grep/authorization.json").exists());
         assert!(
             String::from_utf8(prompt)

@@ -81,6 +81,8 @@ impl Model2VecEmbeddingModel {
         Ok(Self {
             entry,
             info: EmbeddingModelInfo {
+                space: EmbeddingCatalogEntry::Model2Vec(entry).embedding_space(None),
+                retrieval: EmbeddingCatalogEntry::Model2Vec(entry).retrieval(),
                 model: EmbeddingCatalogEntry::Model2Vec(entry)
                     .model_info()
                     .map_err(|error| {

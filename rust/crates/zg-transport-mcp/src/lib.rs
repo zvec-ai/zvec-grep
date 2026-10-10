@@ -123,7 +123,7 @@ const MAX_QUERY_GROUPS: usize = 32;
 const MAX_QUERY_CHARS: usize = 4_000;
 const MAX_PATH_FILTERS: usize = 128;
 const MAX_PATH_CHARS: usize = 1_024;
-const MAX_SEARCH_LIMIT: usize = 50;
+const MAX_SEARCH_LIMIT: usize = 2000;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -821,14 +821,16 @@ pub struct SearchInput {
     pub query: Option<String>,
     /// Image-to-image query, exclusive with query/queries/fts/vector. PNG, JPEG or static WebP only.
     pub query_image: Option<QueryImageInput>,
+    /// Restrict search to one content kind; omitted searches every supported configured table.
+    pub target_kind: Option<ContentKindInput>,
     /// One or more primary hybrid-search groups.
     pub queries: Option<QueryListInput>,
     /// Supplemental lexical-route groups.
     pub fts: Option<QueryListInput>,
     /// Supplemental semantic/vector-route groups.
     pub vector: Option<QueryListInput>,
-    /// Maximum returned items per query group or fused plan.
-    #[schemars(range(min = 1, max = 50))]
+    /// Total returned item cap (default 30), shared round-robin across independently ranked groups.
+    #[schemars(range(min = 1, max = 2000))]
     pub limit: Option<usize>,
     /// Source display only: short bounds snippets; full preserves all available retrieved content and outline without changing retrieval or ranking.
     #[serde(default)]
@@ -1196,7 +1198,7 @@ struct WorkspaceIndexOutput {
     root_paths: Vec<RootSpecOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_model_ref: Option<String>,
-    embeddings: Vec<IndexedEmbeddingOutput>,
+    tables: Vec<IndexedTableOutput>,
     embedding_routes: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fts: Option<IndexedFtsOutput>,
@@ -1228,6 +1230,14 @@ struct RootSpecOutput {
     max_file_size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "is_false")]
     follow: bool,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct IndexedTableOutput {
+    kind: String,
+    embedding: IndexedEmbeddingOutput,
+    entities: Option<u64>,
+    status: String,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
@@ -1273,6 +1283,7 @@ struct IndexFilesOutput {
     deleted: usize,
     unchanged: usize,
     entities: u64,
+    entities_by_kind: BTreeMap<String, u64>,
     /// Total source snapshot bytes for successfully indexed files, excluding index storage.
     indexed_size_bytes: u64,
 }
@@ -1634,6 +1645,7 @@ impl SearchInput {
         let request = ContextOptions {
             query: None,
             query_image,
+            target_kind: self.target_kind.map(Into::into),
             root: Some(root.clone()),
             queries,
             routes,
@@ -2264,6 +2276,7 @@ fn info_result_to_tool_result(
 impl From<InfoResult> for IndexStatusOutput {
     fn from(reply: InfoResult) -> Self {
         let status = reply.index_status().as_str().to_owned();
+        let counts = reply.status.as_ref().map(|stats| &stats.entities_by_kind);
         let workspace_index = reply.workspace_index.map(|info| WorkspaceIndexOutput {
             id: info.name.clone(),
             name: info.name,
@@ -2275,19 +2288,34 @@ impl From<InfoResult> for IndexStatusOutput {
                 .into_iter()
                 .map(|(kind, model)| (kind.as_str().into(), model))
                 .collect(),
-            embeddings: info
-                .embeddings
+            tables: info
+                .tables
                 .into_iter()
-                .map(|embedding| IndexedEmbeddingOutput {
-                    content_kinds: embedding
-                        .content_kinds
-                        .into_iter()
-                        .map(|kind| kind.as_str().into())
-                        .collect(),
-                    provider: embedding.provider,
-                    model: embedding.model,
-                    dimension: embedding.dimension,
-                    metric: embedding.metric,
+                .map(|table| {
+                    let entities =
+                        counts.map(|counts| counts.get(&table.kind).copied().unwrap_or_default());
+                    let state = match entities {
+                        None => "unknown".to_owned(),
+                        Some(0) if status == "ready" => "empty".to_owned(),
+                        Some(_) => status.clone(),
+                    };
+                    let embedding = table.embedding;
+                    IndexedTableOutput {
+                        kind: table.kind.as_str().into(),
+                        entities,
+                        status: state,
+                        embedding: IndexedEmbeddingOutput {
+                            content_kinds: embedding
+                                .content_kinds
+                                .into_iter()
+                                .map(|kind| kind.as_str().into())
+                                .collect(),
+                            provider: embedding.provider,
+                            model: embedding.model,
+                            dimension: embedding.dimension,
+                            metric: embedding.metric,
+                        },
+                    }
                 })
                 .collect(),
             fts: info.fts.map(|fts| IndexedFtsOutput {
@@ -2314,6 +2342,11 @@ impl From<InfoResult> for IndexStatusOutput {
             deleted: status.files_deleted,
             unchanged: status.files_unchanged,
             entities: status.entities_indexed,
+            entities_by_kind: status
+                .entities_by_kind
+                .into_iter()
+                .map(|(kind, count)| (kind.as_str().into(), count))
+                .collect(),
             indexed_size_bytes: status.indexed_size_bytes,
         });
         Self {
@@ -2561,6 +2594,7 @@ mod tests {
             root: test_root().display().to_string(),
             query: Some("call chain".to_owned()),
             query_image: None,
+            target_kind: None,
             queries: None,
             fts: Some(QueryListInput::One("run".to_owned())),
             vector: None,
@@ -2720,7 +2754,7 @@ mod tests {
                 scan: super::ScanRules::default(),
                 policy: super::WorkspaceIndexPolicy::Enabled,
                 default_model_ref: None,
-                embeddings: Vec::new(),
+                tables: Vec::new(),
                 embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
@@ -2753,7 +2787,7 @@ mod tests {
             serde_json::json!(["lowercase"])
         );
         assert_eq!(workspace["id"], "search-engine");
-        assert_eq!(workspace["embeddings"], serde_json::json!([]));
+        assert_eq!(workspace["tables"], serde_json::json!([]));
         assert_eq!(workspace["embedding_routes"], serde_json::json!({}));
         assert_eq!(files["entities"], count);
         assert_eq!(files["indexed_size_bytes"], count + 3);
@@ -3375,18 +3409,31 @@ mod tests {
     }
 
     #[test]
+    fn text_query_keeps_input_type_when_targeting_images() {
+        let request = serde_json::from_value::<SearchInput>(serde_json::json!({
+            "root":test_root(), "query":"a red bicycle", "targetKind":"image", "autoUpdate":false,
+        }))
+        .expect("MCP input")
+        .into_request()
+        .expect("request");
+        assert_eq!(request.target_kind, Some(super::ContentKind::Image));
+        assert_eq!(request.input_kind(), super::ContentKind::Text);
+        assert_eq!(request.queries, ["a red bicycle"]);
+    }
+
+    #[test]
     fn image_query_inputs_are_explicit_and_exclusive() {
         use zg_engine::api::context::options::{FileFormat, QueryImage};
         for image in [
             serde_json::json!({"source":"path", "path":test_root().join("query.png")}),
             serde_json::json!({"source":"bytes", "format":"png", "data":"AQID"}),
         ] {
-            let mut input =
-                serde_json::json!({"root":test_root(), "queryImage":image, "autoUpdate":false});
+            let mut input = serde_json::json!({"root":test_root(), "queryImage":image, "targetKind":"image", "autoUpdate":false});
             let request = serde_json::from_value::<SearchInput>(input.clone())
                 .expect("input")
                 .into_request()
                 .expect("image request");
+            assert_eq!(request.target_kind, Some(super::ContentKind::Image));
             assert!(request.query_image.is_some());
             assert!(request.routes.is_empty());
             if let Some(QueryImage::Bytes { format, data }) = request.query_image {

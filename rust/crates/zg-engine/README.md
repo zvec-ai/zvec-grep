@@ -18,7 +18,7 @@ The engine also uses per-user files: `~/.zvec-grep/workspaces.json` registers wo
 
 **Models.** Local models download missing assets on first use and process content locally. On macOS and Linux, the default model cache is `~/.zvec-grep/models`. Set `ZVEC_GREP_MODEL_CACHE` to choose a cache directory. Remote models send content or queries to the configured embedding endpoint and require authorization.
 
-**Storage and embedding.** This version supports one text embedding model per workspace. A generation contains `directories`, `files`, `entities`, and one `fragments_<fingerprint>` collection for that model. Each entity stores one complete source content object, its source location, metadata, and its fragments. A fragment has its own ID and one range relative to its entity's content. Its source location is calculated from that range and the entity's source location; it stores neither a second content payload nor duplicate source coordinates. Short entities use one full-content fragment, and long entities use source slices that preserve headers, delimiters, and whitespace. Metadata remains attached to the entity and is projected into FTS and embedding inputs; supported metadata filters have dedicated index fields.
+**Storage and embedding.** Each generation contains shared `directories`, `files` and `entities` collections, plus one retrieval table per enabled content kind (text, code, image). Each table binds one embedding model; kinds stay physically separate even when they share the same runtime. Each entity stores one complete source content object, its source location, metadata, and its fragments. A fragment has its own ID and one range relative to its entity's content. Its source location is calculated from that range and the entity's source location; it stores neither a second content payload nor duplicate source coordinates. Short entities use one full-content fragment, and long entities use source slices that preserve headers, delimiters, and whitespace. Metadata remains attached to the entity and is projected into FTS and embedding inputs; supported metadata filters have dedicated index fields.
 
 Entities and fragments use the same `Range` type. An entity's `source_range` is relative to its file; text source locations include decoded UTF-8 byte offsets, one-based line numbers, and zero-based byte columns. A text fragment's `range` selects full content or a half-open UTF-8 byte span relative to its entity's content. Fragment line and column numbers are computed when source locations are needed. Images can only use full-content fragments; raw byte source locations remain available independently.
 
@@ -28,7 +28,24 @@ Entity IDs are 32 lowercase hexadecimal characters: an eight-character file ID f
 
 Whitespace-only ranges remain in the complete entity content without creating search fragments. Every non-whitespace part of an extracted entity, including braces and punctuation, remains covered by its fragments.
 
-Select the model with `zg --index --embedding <model>`. Every text fragment uses that model, with both FTS and vector indexes. Images and other unsupported sources are skipped; multimodal content and content-route configuration are not supported. Changing the model requires `--rebuild`. Remote destinations require consent as usual.
+Select the default model with `zg --index --embedding <model>` and override a kind
+with another `--embedding image=local/embeddinggemma-2`. Use
+`--embedding image=default` to remove that override and inherit the workspace
+default; omitted settings keep their saved values. Defaults that cannot index a
+kind skip it; unsupported explicit model choices fail. Text/code tables have full-text
+and vector indexes; image tables have vectors only. Standalone PNG, JPEG and static
+WebP snapshots are supported. Effective model/encoding changes require `--rebuild`.
+Remote destinations require consent as usual.
+
+Queries retain their input kind and can select a target using `--kind`.
+The CLI accepts literal text or a single `--input <path>` file (PNG, JPEG or static
+WebP); positional text is never interpreted as a file input automatically.
+Without a target, all configured compatible tables participate. Identical model
+and query encoding configurations reuse the query vector. Only compatible pure
+vector scores may share a ranked group; other results retain independent kind
+rankings. The total result limit (1–2000, default 30) is shared round-robin across
+groups. Structured
+results expose target outcomes, grouping, incomplete searches and content references.
 
 **Index compatibility.** `indexVersion` is the single version for persisted workspace configuration, storage layout, and record encoding. The current Rust format is version 2; Node.js indexes use version 1. Search, incremental indexing, and watching require the current version. Status reports `rebuild_required` with the actual and expected versions when existing data is incompatible, including a missing version or invalid current-format metadata. Status inspection does not open incompatible storage. There are no separate manifest, storage-schema, or record-codec version counters. Storage generation UUIDs select published data and do not describe compatibility.
 

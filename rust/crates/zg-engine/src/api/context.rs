@@ -68,6 +68,9 @@ pub mod options {
         pub query: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub query_image: Option<QueryImage>,
+        /// Search only this content kind. Absent searches every supported target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub target_kind: Option<ContentKind>,
         pub queries: Vec<String>,
         pub rg: bool,
         pub rg_options: RgOptions,
@@ -112,9 +115,6 @@ pub mod options {
         pub api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
-        /// Model disclosed by an interactive caller; reject a changed index model.
-        #[serde(default)]
-        pub authorization_model: Option<String>,
         #[serde(default)]
         pub device: Option<crate::api::index::options::Device>,
         #[serde(default)]
@@ -128,7 +128,7 @@ pub mod options {
     }
 
     impl ContextOptions {
-        /// Content type used to select the workspace embedding route.
+        /// The original query content type, independent of its search targets.
         #[must_use]
         pub fn input_kind(&self) -> ContentKind {
             if self.query_image.is_some() {
@@ -139,6 +139,15 @@ pub mod options {
         }
 
         pub(crate) fn validate_file_selection(&self) -> crate::EngineResult<()> {
+            if self
+                .limit
+                .is_some_and(|limit| !(1..=2_000).contains(&limit))
+                && !self.rg
+            {
+                return Err(crate::EngineError::invalid_argument(
+                    "indexed search limit must be between 1 and 2000",
+                ));
+            }
             if self.query_image.is_some()
                 && (self.query.is_some()
                     || !self.queries.is_empty()
@@ -152,6 +161,11 @@ pub mod options {
                 ));
             }
             if self.rg {
+                if self.target_kind.is_some() {
+                    return Err(crate::EngineError::invalid_argument(
+                        "target_kind requires indexed search",
+                    ));
+                }
                 if self.filter != QueryFilter::default() {
                     return Err(crate::EngineError::invalid_argument(
                         "indexed file filters cannot be combined with rg; use rg glob and type options",
@@ -183,6 +197,7 @@ pub mod options {
             Self {
                 query: None,
                 query_image: None,
+                target_kind: None,
                 queries: Vec::new(),
                 rg: false,
                 rg_options: RgOptions::default(),
@@ -212,7 +227,6 @@ pub mod options {
                 authorized_remote: Vec::new(),
                 api_key: None,
                 endpoint: None,
-                authorization_model: None,
                 device: None,
                 model_cache: None,
                 on_progress: None,
@@ -611,10 +625,51 @@ pub mod result {
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexDiagnostics {
         pub input_kind: crate::domain::ContentKind,
-        pub model_ref: String,
+        pub targets: Vec<IndexTargetDiagnostics>,
+        /// Each group ranks independently. Item ranges refer to `ContextResult.items`.
+        pub result_groups: Vec<IndexResultGroup>,
+        pub incomplete: bool,
+        /// Total result cap, allocated round-robin across independently ranked groups.
+        pub limit: usize,
         pub hits_returned: usize,
         pub query_groups: Vec<IndexQueryGroupDiagnostics>,
         pub routes: Vec<IndexRouteDiagnostics>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct IndexTargetDiagnostics {
+        pub kind: crate::domain::ContentKind,
+        pub model_ref: String,
+        pub status: IndexTargetStatus,
+        pub reason: Option<String>,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum IndexTargetStatus {
+        Searched,
+        Empty,
+        Skipped,
+        Failed,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct IndexResultGroup {
+        pub id: String,
+        pub kinds: Vec<crate::domain::ContentKind>,
+        pub model_refs: Vec<String>,
+        pub scoring: IndexScoring,
+        pub item_start: usize,
+        pub item_count: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum IndexScoring {
+        Vector,
+        FullText,
+        Hybrid,
+        MultiQuery,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -636,6 +691,7 @@ pub mod result {
     pub enum EmptyReason {
         NoMatches,
         NoSearchableFiles,
+        NoSupportedTargets,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
