@@ -321,6 +321,52 @@ Run the complete local gate with:
 bash scripts/check.sh
 ```
 
+## Linux CUDA build
+
+Build the release bundle on a machine with the CUDA toolkit, NVIDIA driver,
+CMake, a C/C++ toolchain, libclang, and patchelf installed:
+
+```sh
+bash scripts/build-cuda.sh
+```
+
+For a reproducible toolchain, build and use the pinned CUDA 13.2/Ubuntu 24.04
+builder image:
+
+```sh
+docker build --platform linux/amd64 \
+  -f rust/docker/cuda-builder.Dockerfile -t zvec-grep-cuda-builder .
+docker run --rm --gpus all --platform linux/amd64 \
+  -v "$PWD:/work" \
+  zvec-grep-cuda-builder bash scripts/build-cuda.sh
+```
+
+Run these Docker commands from the repository root. The image includes
+`libclang-dev`, which bindgen needs while compiling `llama-cpp-sys-2`.
+
+The script detects the CUDA major version and the first visible GPU's compute
+capability. Set `ORT_CUDA_VERSION` or `CMAKE_CUDA_ARCHITECTURES` explicitly for
+cross-builds or multi-architecture packages (for example, `80;89;90`). It
+assembles `target/release/zg-cuda/` and runs `scripts/check-cuda-linkage.sh`
+against that bundle.
+
+The Linux CUDA linkage policy is:
+
+- `llama`, `ggml`, their CPU/CUDA backends, the ONNX Runtime CUDA providers,
+  and zvec's C API are packaged shared libraries beside `zg`;
+- the ONNX Runtime core remains statically linked into `zg`;
+- every packaged ELF uses an `$ORIGIN` runtime search path, so the directory is
+  relocatable without `LD_LIBRARY_PATH`; and
+- the NVIDIA driver/runtime libraries and normal system libraries remain host
+  dependencies.
+
+The CUDA backend libraries are plugins rather than process-startup dependencies.
+On a machine without CUDA, `zg` and CPU embedding still start normally. An
+`auto` or `cuda` request that cannot load a CUDA backend reports a warning and
+falls back to CPU, matching the existing device fallback policy. The bundle
+must be kept together; `ZVEC_GREP_NATIVE_LIB_DIR` can point llama.cpp at a
+different backend directory when needed for development or packaging.
+
 ## Local npm installation
 
 Build the release binary with the same script name used by the TypeScript

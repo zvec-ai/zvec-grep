@@ -13,6 +13,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(feature = "cuda")]
+use llama_cpp_2::llama_backend::{BACKENDS_DIR, load_backends_from_path};
 use llama_cpp_2::{
     LlamaBackendDevice, LlamaBackendDeviceType,
     context::{LlamaContext, params::LlamaContextParams},
@@ -827,18 +829,58 @@ fn embed_error(entry: LlamaCppConfig, cause: ModelError) -> ModelError {
 
 fn llama_backend() -> Result<&'static LlamaBackend, ModelError> {
     match LLAMA_BACKEND.get_or_init(|| {
+        #[cfg(feature = "cuda")]
+        load_packaged_llama_backends()?;
         LlamaBackend::init()
+            .map_err(|error| error.to_string())
             .map(|mut backend| {
                 backend.void_logs();
                 backend
             })
-            .map_err(|error| error.to_string())
     }) {
         Ok(backend) => Ok(backend),
         Err(error) => {
             Err(ModelError::internal("Unable to initialize llama.cpp backend").with_cause(error))
         }
     }
+}
+
+#[cfg(feature = "cuda")]
+fn load_packaged_llama_backends() -> Result<(), String> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env::var_os("ZVEC_GREP_NATIVE_LIB_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(executable) = env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        candidates.push(directory.to_path_buf());
+    }
+    if let Some(directory) = BACKENDS_DIR {
+        candidates.push(PathBuf::from(directory));
+    }
+
+    for directory in candidates {
+        if directory.to_str().is_none() || !contains_ggml_backend(&directory) {
+            continue;
+        }
+        load_backends_from_path(&directory);
+        return Ok(());
+    }
+
+    Err("Unable to locate packaged llama.cpp backend modules; keep the libggml backend shared libraries beside zg or set ZVEC_GREP_NATIVE_LIB_DIR".to_owned())
+}
+
+#[cfg(feature = "cuda")]
+fn contains_ggml_backend(directory: &Path) -> bool {
+    std::fs::read_dir(directory).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.starts_with("libggml-cpu") || name.starts_with("ggml-cpu"))
+                && (name.contains(".so") || name.ends_with(".dylib") || name.ends_with(".dll"))
+        })
+    })
 }
 
 fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError> {

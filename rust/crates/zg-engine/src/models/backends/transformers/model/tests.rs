@@ -308,6 +308,47 @@ async fn cached_minilm_runs_real_onnx_inference() {
     assert_eq!(lock_std_mutex(&loaded.sessions.state).sessions.len(), 2);
 }
 
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with a pinned ONNX model"]
+async fn cached_minilm_uses_cuda() {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
+    let entry = crate::models::catalog::get_embedding_model_catalog_entry("local/all-minilm-l6-v2")
+        .and_then(crate::models::catalog::EmbeddingCatalogEntry::transformers_config)
+        .expect("catalog entry");
+    let model = TransformersEmbeddingModel::new(
+        entry,
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(Device::Cuda),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    let result = model
+        .embed(
+            &[vec![Content::Text("find relevant code".to_owned())]],
+            EmbeddingOptions::default(),
+        )
+        .await
+        .expect("CUDA ONNX inference");
+
+    assert_eq!(result.vectors[0].len(), entry.dimension);
+    assert!(result.vectors[0].iter().all(|value| value.is_finite()));
+    let loaded = model.state.lock().await;
+    let provider = loaded
+        .as_ref()
+        .map(|loaded| loaded.sessions.provider())
+        .expect("loaded model");
+    assert_eq!(
+        provider,
+        TransformersExecutionProvider::Cuda,
+        "CUDA request unexpectedly fell back to CPU"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with a pinned ONNX model"]

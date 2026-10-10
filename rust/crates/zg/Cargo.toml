@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+cuda = ["zg-engine/cuda"]
+vulkan = ["zg-engine/vulkan"]
+
 [dependencies]
 serde_json.workspace = true
 clap.workspace = true
