@@ -556,6 +556,12 @@ pub struct IndexArgs {
     pub allow_remote: bool,
     #[command(flatten)]
     pub files: ScanArgs,
+    /// Include ripgrep file types when scanning the workspace.
+    #[arg(short = 't', long = "type", value_name = "TYPE")]
+    pub file_types: Vec<String>,
+    /// Exclude ripgrep file types when scanning the workspace.
+    #[arg(short = 'T', long = "type-not", value_name = "TYPE")]
+    pub excluded_file_types: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1376,6 +1382,8 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || args.allow_remote
             || args.debug
             || !args.files.is_empty()
+            || !args.file_types.is_empty()
+            || !args.excluded_file_types.is_empty()
         {
             return Err(CliError::DropWithIndexOptions);
         }
@@ -1393,6 +1401,9 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         });
     }
     let mut scan = args.files.update();
+    scan.file_types = (!args.file_types.is_empty()).then_some(args.file_types);
+    scan.excluded_file_types =
+        (!args.excluded_file_types.is_empty()).then_some(args.excluded_file_types);
     scan.ignore_files = scan.ignore_files.map(|paths| {
         paths
             .into_iter()
@@ -2009,19 +2020,61 @@ mod tests {
     }
 
     #[test]
-    fn index_rejects_query_format_and_category_options() {
-        for (option, value) in [
-            ("-t", "rust"),
-            ("--type", "rust"),
-            ("-T", "rust"),
-            ("--type-not", "rust"),
-            ("--category", "code"),
-            ("--category-not", "code"),
-        ] {
+    fn index_rejects_query_category_options() {
+        for (option, value) in [("--category", "code"), ("--category-not", "code")] {
             assert!(
                 Cli::try_parse_from(["zg", "--index", option, value]).is_err(),
                 "index must reject query option {option}"
             );
+        }
+    }
+
+    #[test]
+    fn index_type_filters_reach_scan_request_and_reject_drop() {
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = Cli::try_parse_from([
+            "zg",
+            "--index",
+            "-t",
+            "rust",
+            "--type=go",
+            "-T",
+            "json",
+            "--type-not=toml",
+        ])
+        .expect("index type arguments")
+        .into_plan(std::env::temp_dir())
+        .expect("index plan")
+        else {
+            panic!("index build");
+        };
+        assert_eq!(
+            request.scan.file_types,
+            Some(vec!["rust".into(), "go".into()])
+        );
+        assert_eq!(
+            request.scan.excluded_file_types,
+            Some(vec!["json".into(), "toml".into()])
+        );
+        let wire = serde_json::to_value(request).expect("serialize index request");
+        assert_eq!(
+            wire["scan"]["file_types"],
+            serde_json::json!(["rust", "go"])
+        );
+        assert_eq!(
+            wire["scan"]["excluded_file_types"],
+            serde_json::json!(["json", "toml"])
+        );
+
+        for option in ["-t", "--type", "-T", "--type-not"] {
+            let parsed = Cli::try_parse_from(["zg", "--index", "--drop", "--yes", option, "rust"])
+                .expect("index drop syntax");
+            assert!(matches!(
+                parsed.into_plan(std::env::temp_dir()),
+                Err(super::CliError::DropWithIndexOptions)
+            ));
         }
     }
 

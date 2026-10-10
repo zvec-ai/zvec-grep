@@ -403,6 +403,8 @@ Embedding options:
 Scan rules:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
+  -t, --type <type>                 Include a ripgrep file type; repeatable
+  -T, --type-not <type>             Exclude a ripgrep file type; repeatable
   --hidden[=true|false]              Include hidden paths except .git and .zvec-grep
   --no-ignore[=true|false]           Do not apply default or .gitignore rules
   --nested-git[=true|false]          Scan nested Git repositories and submodules
