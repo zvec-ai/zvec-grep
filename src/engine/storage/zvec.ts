@@ -12,7 +12,14 @@ import {
   type ZVecDocInput,
   type ZVecStatus,
 } from "@zvec/zvec";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { EngineError } from "../errors.js";
 import type {
@@ -825,7 +832,7 @@ function initializeZvec(): void {
   zvecInitialized = true;
 }
 
-function openZvecCollection(
+export function openZvecCollection(
   zvecPath: string,
   readOnly: boolean,
   action: "open" | "create",
@@ -836,7 +843,11 @@ function openZvecCollection(
 
   for (let attempt = 0; attempt < ZVEC_OPEN_RETRY_ATTEMPTS; attempt++) {
     try {
-      return open();
+      const collection = open();
+      if (!readOnly) {
+        reclaimInterruptedMergeTempDirs(zvecPath);
+      }
+      return collection;
     } catch (error) {
       lastError = error;
 
@@ -851,11 +862,45 @@ function openZvecCollection(
     }
   }
 
+  if (
+    !readOnly &&
+    !isRetryableZvecOpenError(lastError, lockWritable) &&
+    reclaimInterruptedMergeTempDirs(zvecPath)
+  ) {
+    try {
+      return open();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
   throw new EngineError("Failed to open zvec collection storage", {
     code: "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED",
     context: `path=${zvecPath} action=${action} readOnly=${readOnly} attempts=${ZVEC_OPEN_RETRY_ATTEMPTS}`,
     cause: lastError,
   });
+}
+
+function reclaimInterruptedMergeTempDirs(zvecPath: string): boolean {
+  if (!existsSync(zvecPath)) {
+    return false;
+  }
+
+  let reclaimed = false;
+  for (const entry of readdirSync(zvecPath)) {
+    if (!entry.endsWith(".tmp")) {
+      continue;
+    }
+
+    try {
+      rmSync(join(zvecPath, entry), { recursive: true, force: true });
+      reclaimed = true;
+    } catch {
+      continue;
+    }
+  }
+
+  return reclaimed;
 }
 
 function canTouchZvecLock(zvecPath: string): boolean {
