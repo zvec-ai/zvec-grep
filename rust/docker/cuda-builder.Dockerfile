@@ -18,7 +18,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
-        | sh -s -- --profile minimal --default-toolchain "${RUST_VERSION}" --no-modify-path
+        | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" --no-modify-path
 
 ENV PATH=/root/.cargo/bin:${PATH}
 WORKDIR /work/rust
