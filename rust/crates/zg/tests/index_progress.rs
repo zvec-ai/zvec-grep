@@ -37,6 +37,11 @@ impl Fixture {
             .env("HOME", self.state.path())
             .env("USERPROFILE", self.state.path())
             .env("ZVEC_GREP_HOME", self.state.path().join("runtime"))
+            .env("ZVEC_GREP_CONFIG", self.state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                self.state.path().join("workspaces.json"),
+            )
             .env_remove("ZVEC_GREP_SERVER_TOKEN")
             .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE")
             .env_remove("ZVEC_GREP_EMBEDDING")
@@ -111,8 +116,6 @@ fn index_summary_uses_saved_scope_in_direct_and_server_modes() {
         root: TempDir::new().expect("workspace"),
         state: TempDir::new().expect("state"),
     };
-    let nested = fixture.root.path().join("nested");
-    std::fs::create_dir(&nested).expect("nested directory");
     fixture.start_server();
     for mode in ["direct", "server"] {
         // Empty directories avoid model downloads while exercising saved scope.
@@ -141,13 +144,7 @@ fn index_summary_uses_saved_scope_in_direct_and_server_modes() {
         let initial_roots = roots_line(&initial);
         assert!(initial_roots.ends_with(" (glob=*.rs iglob=!vendor/** hidden no-ignore max-depth=2 max-filesize=4096 follow nested-git=false)"), "{mode}: {initial}");
 
-        let retained = fixture.success(&[
-            "--index",
-            nested.to_str().expect("nested path"),
-            "--mode",
-            mode,
-            "--no-color",
-        ]);
+        let retained = fixture.success(&["--index", "--mode", mode, "--no-color"]);
         assert_eq!(
             roots_line(&retained),
             initial_roots,
@@ -168,6 +165,70 @@ fn index_summary_uses_saved_scope_in_direct_and_server_modes() {
             roots_line(&reset),
             base_root,
             "{mode}: reset removes saved filters"
+        );
+    }
+}
+
+fn manifest_without_update_time(path: &std::path::Path) -> serde_json::Value {
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("parent manifest"))
+            .expect("manifest JSON");
+    // A resident parent watcher can refresh its timestamp after child filesystem events.
+    manifest
+        .as_object_mut()
+        .expect("manifest object")
+        .remove("updatedTime");
+    manifest
+}
+
+#[test]
+fn explicit_nested_index_owns_its_scope_in_direct_and_server_modes() {
+    for mode in ["direct", "server"] {
+        let fixture = Fixture {
+            root: TempDir::new().expect("workspace"),
+            state: TempDir::new().expect("state"),
+        };
+        let nested = fixture.root.path().join("nested");
+        std::fs::create_dir(&nested).expect("nested directory");
+        if mode == "server" {
+            fixture.start_server();
+        }
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--no-color",
+            "--embedding",
+            "local/potion-code-16m-v2",
+            "--device",
+            "cpu",
+            "--glob",
+            "*.rs",
+        ]);
+        let parent_manifest = fixture.root.path().join(".zvec-grep/manifest.json");
+        let parent_before = manifest_without_update_time(&parent_manifest);
+        let child = fixture.success(&[
+            "--index",
+            nested.to_str().expect("nested path"),
+            "--mode",
+            mode,
+            "--no-color",
+            "--embedding",
+            "local/potion-retrieval-32m",
+            "--device",
+            "cpu",
+        ]);
+        let child_root = std::fs::canonicalize(&nested).expect("child root");
+        assert_eq!(
+            roots_line(&child),
+            format!("roots\t{}", child_root.display()),
+            "{mode}: child uses its own root and scan scope"
+        );
+        assert!(nested.join(".zvec-grep/manifest.json").exists());
+        assert_eq!(
+            manifest_without_update_time(&parent_manifest),
+            parent_before,
+            "{mode}: child indexing preserves the parent manifest"
         );
     }
 }

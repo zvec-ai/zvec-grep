@@ -64,10 +64,7 @@ pub fn index_authorizations(
     options: &crate::api::index::IndexOptions,
 ) -> Result<Vec<IndexAuthorization>, EngineError> {
     let requested_root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
-    let location = match find_nearest_workspace(&requested_root)? {
-        Some(location) => location,
-        None => workspace_index_location(&requested_root)?,
-    };
+    let location = workspace_index_location(&requested_root)?;
     let existing = inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
     authorizations_for_manifest(options, &location.root, existing.as_ref())
 }
@@ -1434,5 +1431,73 @@ mod tests {
             assert_eq!(status.grants[0].endpoint_host, target.endpoint_host);
             assert_eq!(revoke_all(&root).expect("revoke"), Some(1));
         }
+    }
+
+    #[tokio::test]
+    async fn nested_index_authorization_ignores_parent_manifest_and_grants() {
+        let Some(root) = isolated_authorization_root(
+            "authorization::tests::nested_index_authorization_ignores_parent_manifest_and_grants",
+        ) else {
+            return;
+        };
+        let engine = crate::ZvecGrep::new();
+        let parent_options = IndexOptions {
+            root: Some(root.clone()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/text-embedding-v4".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: Some("https://parent.test/embeddings".into()),
+                device: Device::Auto,
+            }),
+            api_key: Some("parent-test-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        };
+        engine
+            .index(parent_options.clone())
+            .await
+            .expect("empty parent index");
+        engine.close();
+        let parent_manifest = root.join(".zvec-grep/manifest.json");
+        let before = fs::read(&parent_manifest).expect("parent manifest");
+        let mut unapproved = parent_options;
+        unapproved.allow_remote = false;
+        let parent_target = index_authorization(&unapproved)
+            .expect("parent plan")
+            .expect("parent consent");
+        grant_index(&parent_target).expect("parent grant");
+
+        let child = root.join("sub");
+        fs::create_dir(&child).expect("child directory");
+        let mut options = IndexOptions {
+            root: Some(child.clone()),
+            ..unapproved.clone()
+        };
+        let target = index_authorization(&options)
+            .expect("child plan")
+            .expect("parent grant does not authorize child");
+        assert_eq!(target.root, fs::canonicalize(&child).expect("child root"));
+        assert_eq!(target.workspace_roots, vec![target.root.clone()]);
+        options.embedding.as_mut().expect("child model").reference =
+            "qwen/qwen3.7-text-embedding".into();
+        options.endpoint = Some("https://child.test/embeddings".into());
+        for rebuild in [false, true] {
+            options.rebuild = rebuild;
+            let target = index_authorization(&options)
+                .expect("independent child plan")
+                .expect("child consent");
+            assert_eq!(target.root, fs::canonicalize(&child).expect("child root"));
+            assert_eq!(target.model, "qwen/qwen3.7-text-embedding");
+            assert_eq!(target.endpoint, "https://child.test/embeddings");
+        }
+        assert_eq!(
+            fs::read(parent_manifest).expect("parent manifest unchanged"),
+            before
+        );
+        assert!(
+            !child.join(".zvec-grep").exists(),
+            "preflight does not create child state"
+        );
     }
 }

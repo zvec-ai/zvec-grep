@@ -162,8 +162,7 @@ impl WorkspaceIndexService {
         normalize_model_paths(&mut options)?;
         let requested_root = resolve_root(options.root.as_deref())?;
         validate_workspace_root(&requested_root)?;
-        let location = find_nearest_workspace(&requested_root)?
-            .map_or_else(|| workspace_index_location(&requested_root), Ok)?;
+        let location = workspace_index_location(&requested_root)?;
         options.root = Some(location.root.clone());
         let home_lock = Arc::new(
             LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?
@@ -1667,6 +1666,116 @@ mod tests {
             }),
             ..IndexOptions::default()
         }
+    }
+
+    async fn assert_nested_index_keeps_parent(model: &str, rebuild: bool) {
+        let directory = tempdir().expect("nested workspaces");
+        let root = std::fs::canonicalize(directory.path()).expect("parent root");
+        let child = root.join("sub");
+        std::fs::create_dir(root.join("docs")).expect("parent sources");
+        std::fs::create_dir_all(child.join("src")).expect("child sources");
+        let service = WorkspaceIndexService::with_test_registry();
+        let models = ModelRuntimeManager::new();
+        let mut parent_options = empty_index_options(&root);
+        parent_options.embedding.as_mut().expect("model").reference =
+            "local/potion-retrieval-32m".into();
+        parent_options.scan.globs = Some(vec!["docs/**".into()]);
+        service
+            .index(&models, parent_options)
+            .await
+            .expect("parent index");
+        let parent_home = root.join(".zvec-grep");
+        let parent_bytes =
+            std::fs::read(parent_home.join("manifest.json")).expect("parent manifest");
+        let parent = super::read_workspace_manifest(&parent_home)
+            .expect("manifest read")
+            .expect("parent manifest");
+        assert_eq!(
+            service
+                .info(InfoOptions {
+                    root: Some(child.clone()),
+                    include_status: false
+                })
+                .await
+                .expect("ancestor info")
+                .root,
+            root
+        );
+
+        let mut options = empty_index_options(&child);
+        options.embedding.as_mut().expect("model").reference = model.into();
+        options.scan.globs = Some(vec!["src/**".into()]);
+        options.rebuild = rebuild;
+        service
+            .index(&models, options)
+            .await
+            .expect("independent child index");
+        let child_home = child.join(".zvec-grep");
+        let indexed = super::read_workspace_manifest(&child_home)
+            .expect("child manifest read")
+            .expect("child owns its manifest");
+        assert_eq!(indexed.workspace.root, child);
+        assert_eq!(
+            indexed
+                .workspace
+                .index
+                .descriptor()
+                .expect("child index")
+                .model_for(crate::domain::ContentKind::Text)
+                .expect("child text route")
+                .expect("child text model")
+                .model
+                .reference(),
+            model
+        );
+        assert_eq!(
+            indexed.workspace.scan.globs,
+            vec![crate::domain::GlobRule::from("src/**")]
+        );
+        assert_eq!(
+            std::fs::read(parent_home.join("manifest.json")).expect("parent manifest"),
+            parent_bytes
+        );
+        assert!(super::IndexStore::exists(&parent.storage_home()).expect("parent storage remains"));
+        assert_eq!(
+            service
+                .info(InfoOptions {
+                    root: Some(child.clone()),
+                    include_status: true
+                })
+                .await
+                .expect("child info")
+                .root,
+            child
+        );
+
+        let mut incompatible = empty_index_options(&child);
+        incompatible.embedding.as_mut().expect("model").reference =
+            if model == "local/potion-retrieval-32m" {
+                "local/potion-code-16m-v2".into()
+            } else {
+                "local/potion-retrieval-32m".into()
+            };
+        service
+            .index(&models, incompatible)
+            .await
+            .expect_err("existing child model still requires rebuild");
+        models.close();
+    }
+
+    #[tokio::test]
+    async fn nested_index_with_same_model_keeps_parent() {
+        assert_nested_index_keeps_parent("local/potion-retrieval-32m", false).await;
+    }
+
+    #[tokio::test]
+    async fn nested_index_with_different_model_does_not_require_rebuild() {
+        assert_nested_index_keeps_parent("local/potion-code-16m-v2", false).await;
+    }
+
+    #[tokio::test]
+    async fn nested_index_rebuild_keeps_parent() {
+        assert_nested_index_keeps_parent("local/potion-code-16m-v2", true).await;
     }
 
     #[tokio::test]

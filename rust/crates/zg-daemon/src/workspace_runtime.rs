@@ -2010,6 +2010,112 @@ mod tests {
         );
     }
 
+    async fn assert_nested_index_after_parent_query(rebuild: bool) {
+        use zg_engine::{
+            ZvecGrep,
+            api::{
+                context::{
+                    ContextOptions,
+                    options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+                },
+                index::options::{Device, EmbeddingModelSpec, ScanRulesUpdate},
+            },
+        };
+        use zg_transport_mcp::IndexOperationProvider;
+
+        let directory = tempdir().expect("nested workspaces");
+        let root = std::fs::canonicalize(directory.path()).expect("parent root");
+        let child = root.join("sub");
+        std::fs::create_dir(root.join("docs")).expect("parent sources");
+        std::fs::create_dir_all(child.join("src")).expect("child sources");
+        let engine = Arc::new(ZvecGrep::new());
+        let mut options = IndexOptions {
+            root: Some(root.clone()),
+            name: Some(format!("nested-parent-{}", uuid::Uuid::new_v4())),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "local/potion-retrieval-32m".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: Device::Cpu,
+            }),
+            scan: ScanRulesUpdate {
+                globs: Some(vec!["docs/**".into()]),
+                ..ScanRulesUpdate::default()
+            },
+            ..IndexOptions::default()
+        };
+        engine.index(options.clone()).await.expect("parent index");
+        let manager = WorkspaceRuntimeManager::native(Arc::clone(&engine));
+        let result = IndexOperationProvider::search(
+            &manager,
+            &engine,
+            ContextOptions {
+                root: Some(child.clone()),
+                routes: vec![ContextRoute {
+                    mode: ContextRouteMode::Fts,
+                    query: "needle".into(),
+                }],
+                refresh: Some(RefreshPolicy::Wait),
+                auto_update: false,
+                ..ContextOptions::default()
+            },
+        )
+        .await
+        .expect("query discovers and refreshes parent index");
+        assert_eq!(result.root, root);
+        assert_eq!(manager.snapshot().active_runtimes, 1);
+        let parent_manifest = root.join(".zvec-grep/manifest.json");
+        let before = std::fs::read(&parent_manifest).expect("parent manifest");
+
+        options.root = Some(child.clone());
+        options.name = Some(format!("nested-child-{}", uuid::Uuid::new_v4()));
+        options.embedding.as_mut().expect("child model").reference =
+            "local/potion-code-16m-v2".into();
+        options.scan.globs = Some(vec!["src/**".into()]);
+        options.rebuild = rebuild;
+        let indexed = manager
+            .submit_index(options, true)
+            .await
+            .expect("child submission");
+        assert_eq!(
+            indexed.job.state,
+            super::JobState::Succeeded,
+            "{:?}",
+            indexed.job.error
+        );
+        assert_eq!(indexed.job.canonical_root, child);
+        assert!(child.join(".zvec-grep/manifest.json").is_file());
+        assert_eq!(
+            std::fs::read(parent_manifest).expect("parent manifest unchanged"),
+            before
+        );
+        assert_eq!(
+            engine
+                .info(InfoOptions {
+                    root: Some(child.clone()),
+                    include_status: false
+                })
+                .await
+                .expect("child info")
+                .root,
+            child
+        );
+        assert_eq!(manager.snapshot().active_runtimes, 2);
+        manager.shutdown_all().await.expect("runtime shutdown");
+        engine.close();
+    }
+
+    #[tokio::test]
+    async fn nested_index_after_parent_query_uses_child_root() {
+        assert_nested_index_after_parent_query(false).await;
+    }
+
+    #[tokio::test]
+    async fn nested_index_rebuild_after_parent_query_keeps_parent() {
+        assert_nested_index_after_parent_query(true).await;
+    }
+
     #[tokio::test]
     async fn failed_index_keeps_the_runtime_visible_without_starting_a_watcher() {
         let workspace = tempdir().expect("workspace should be created");

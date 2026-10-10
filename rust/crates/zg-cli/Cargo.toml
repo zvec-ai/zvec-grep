@@ -16,5 +16,9 @@ thiserror.workspace = true
 uuid.workspace = true
 zg-engine = { path = "../zg-engine" }
 
+[dev-dependencies]
+tempfile.workspace = true
+toml.workspace = true
+
 [lints]
 workspace = true
