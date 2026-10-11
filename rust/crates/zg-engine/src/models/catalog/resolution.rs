@@ -94,14 +94,21 @@ mod tests {
         .expect("blank environment should fall through");
         assert_eq!(resolved.as_deref(), Some("local/potion-code-16m-v2"));
 
-        let invalid_environment =
-            HashMap::from([("ZVEC_GREP_EMBEDDING".to_owned(), "unknown/model".to_owned())]);
+        let invalid_environment = HashMap::from([(
+            "ZVEC_GREP_EMBEDDING".to_owned(),
+            "local/embeddinggemma-2".to_owned(),
+        )]);
         let error = resolve_embedding_reference(ResolveEmbeddingReferenceOptions {
             environment: Some(invalid_environment),
             ..ResolveEmbeddingReferenceOptions::default()
         })
         .expect_err("unsupported environment model must fail");
         assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported model local/embeddinggemma-2")
+        );
         assert!(error.to_string().contains("zg --help models"));
     }
 }

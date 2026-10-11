@@ -1,6 +1,7 @@
 use crate::domain::Content;
 use std::{
     env,
+    ffi::CString,
     num::{NonZeroU32, NonZeroUsize},
     path::{Path, PathBuf},
     sync::{
@@ -19,7 +20,7 @@ use llama_cpp_2::{
     list_llama_ggml_backend_devices,
     llama_backend::LlamaBackend,
     llama_batch::LlamaBatch,
-    model::{AddBos, LlamaModel, params::LlamaModelParams},
+    model::{LlamaModel, params::LlamaModelParams},
     token::LlamaToken,
 };
 use tokio::{fs, sync::Mutex};
@@ -62,6 +63,7 @@ struct LoadedLlamaModel {
 
 struct LlamaContextPool {
     model: Arc<LlamaModel>,
+    gpu: bool,
     state: StdMutex<LlamaContextPoolState>,
     changed: Condvar,
 }
@@ -379,7 +381,7 @@ fn load_cpu_model(path: &Path) -> Result<LoadedLlamaModel, ModelError> {
 fn loaded_llama_model(model: LlamaModel, path: &Path, gpu: bool) -> LoadedLlamaModel {
     let model = Arc::new(model);
     LoadedLlamaModel {
-        contexts: LlamaContextPool::new(Arc::clone(&model)),
+        contexts: LlamaContextPool::new(Arc::clone(&model), gpu),
         model,
         model_path: path.to_path_buf(),
         gpu,
@@ -466,19 +468,15 @@ fn embed_texts(
     let mut inputs = Vec::with_capacity(texts.len());
     for (index, text) in texts.iter().enumerate() {
         check_cancelled(signal)?;
-        let mut tokens = loaded
-            .model
-            .str_to_token(text, AddBos::Always)
-            .map_err(|error| {
-                ModelError::internal("Unable to tokenize llama.cpp embedding input")
-                    .with_cause(error)
-            })?;
+        let c_text = llama_tokenization_input(text)?;
+        let vocab = loaded.model.vocab();
+        let mut tokens = vocab.tokenize(c_text.as_bytes(), true, true);
         if tokens.len() > context_size {
             let final_token = tokens.last().copied();
             tokens.truncate(context_size.saturating_sub(4).max(1));
-            if let Some(final_token) = final_token.filter(|token| {
-                loaded.model.is_eog_token(*token) || *token == loaded.model.token_sep()
-            }) && tokens.last() != Some(&final_token)
+            if let Some(final_token) =
+                final_token.filter(|token| vocab.is_eog(*token) || *token == vocab.sep())
+                && tokens.last() != Some(&final_token)
             {
                 tokens.push(final_token);
             }
@@ -506,9 +504,10 @@ fn physical_context_worker_limit(gpu: bool, requested: usize) -> usize {
 }
 
 impl LlamaContextPool {
-    fn new(model: Arc<LlamaModel>) -> Self {
+    fn new(model: Arc<LlamaModel>, gpu: bool) -> Self {
         Self {
             model,
+            gpu,
             state: StdMutex::new(LlamaContextPoolState::default()),
             changed: Condvar::new(),
         }
@@ -667,10 +666,11 @@ impl LlamaContextPool {
         let worker_id = state.next_worker_id;
         state.next_worker_id = state.next_worker_id.saturating_add(1);
         let model = Arc::clone(&self.model);
+        let gpu = self.gpu;
         let (sender, receiver) = mpsc::channel();
         let join = thread::Builder::new()
             .name(format!("zg-llama-context-{worker_id}"))
-            .spawn(move || llama_context_worker(&model, &receiver))
+            .spawn(move || llama_context_worker(&model, &receiver, gpu))
             .map_err(|error| {
                 ModelError::internal("Unable to create llama.cpp context worker").with_cause(error)
             })?;
@@ -706,7 +706,11 @@ impl Drop for LlamaWorkerLease<'_> {
     }
 }
 
-fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorkerMessage>) {
+fn llama_context_worker(
+    model: &LlamaModel,
+    receiver: &mpsc::Receiver<LlamaWorkerMessage>,
+    gpu: bool,
+) {
     let mut context = None;
     let mut profile = None;
     while let Ok(message) = receiver.recv() {
@@ -726,7 +730,7 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
         if !reusable {
             context = None;
             profile = None;
-            match create_llama_context(model, desired) {
+            match create_llama_context(model, desired, gpu) {
                 Ok(created) => {
                     context = Some(created);
                     profile = Some(desired);
@@ -750,6 +754,7 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
 fn create_llama_context(
     model: &LlamaModel,
     profile: LlamaContextProfile,
+    gpu: bool,
 ) -> Result<LlamaContext<'_>, ModelError> {
     let params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(profile.context_size))
@@ -757,6 +762,8 @@ fn create_llama_context(
         .with_n_ubatch(profile.batch_capacity.clamp(1, 256))
         .with_n_threads(profile.threads)
         .with_n_threads_batch(profile.threads)
+        .with_op_offload(gpu)
+        .with_offload_kqv(gpu)
         .with_embeddings(true);
     model
         .new_context(llama_backend()?, params)
@@ -812,10 +819,22 @@ fn format_text(text: &str, purpose: EmbeddingPurpose, format: &str) -> String {
             EmbeddingPurpose::Document => text.to_owned(),
         };
     }
+    if format == "embeddinggemma2" {
+        return match purpose {
+            EmbeddingPurpose::Query => format!("task: code retrieval | query: {text}"),
+            EmbeddingPurpose::Document => format!("title: none | text: {text}"),
+        };
+    }
     match purpose {
         EmbeddingPurpose::Query => format!("task: search result | query: {text}"),
         EmbeddingPurpose::Document => format!("title: none | text: {text}"),
     }
+}
+
+fn llama_tokenization_input(text: &str) -> Result<CString, ModelError> {
+    CString::new(text).map_err(|error| {
+        ModelError::internal("Unable to tokenize llama.cpp embedding input").with_cause(error)
+    })
 }
 
 fn embed_error(entry: LlamaCppConfig, cause: ModelError) -> ModelError {

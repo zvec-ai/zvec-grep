@@ -18,12 +18,31 @@ fn formats_embeddinggemma_and_qwen_inputs_like_main() {
         "title: none | text: hello"
     );
     assert_eq!(
+        format_text("hello", EmbeddingPurpose::Query, "embeddinggemma2"),
+        "task: code retrieval | query: hello"
+    );
+    assert_eq!(
+        format_text("hello", EmbeddingPurpose::Document, "embeddinggemma2"),
+        "title: none | text: hello"
+    );
+    assert_eq!(
         format_text("hello", EmbeddingPurpose::Query, "qwen3"),
         "Instruct: Retrieve relevant documents for the given query\nQuery: hello"
     );
     assert_eq!(
         format_text("hello", EmbeddingPurpose::Document, "qwen3"),
         "hello"
+    );
+}
+
+#[test]
+fn rejects_embedded_nul_in_llama_tokenizer_input() {
+    let error = llama_tokenization_input("code\0query")
+        .expect_err("CString-based llama tokenization rejects embedded NUL bytes");
+    assert!(
+        error
+            .to_string()
+            .contains("Unable to tokenize llama.cpp embedding input")
     );
 }
 

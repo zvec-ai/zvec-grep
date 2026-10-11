@@ -845,12 +845,16 @@ mod tests {
         domain::{
             ByteRange, Content, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
             FileIndexStatus, FileRecord, FileSnapshot, FragmentId, GlobRule, Range, TextRange,
-            model::{EmbeddingModelInfo, Metric},
+            model::{EmbeddingModelInfo, EmbeddingPurpose, Metric},
         },
-        models::ModelError,
-        storage::types::{
-            StoragePathFilter, StorageSearchFilter, StorageSearchHit, StorageSearchPath,
-            StoredEntity, StoredFileAttributes, StoredSearchData,
+        models::{EmbeddingModel, EmbeddingOptions, ModelError},
+        storage::{
+            IndexStore,
+            types::{
+                IndexedFragment, StoragePathFilter, StorageSearchFilter, StorageSearchHit,
+                StorageSearchPath, StoredEntity, StoredFileAttributes, StoredSearchData,
+                WorkspaceIndexStorageOptions,
+            },
         },
     };
 
@@ -899,6 +903,53 @@ mod tests {
         }
     }
 
+    struct RealEmbeddingModel {
+        model: Box<dyn EmbeddingModel>,
+        queries: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl SearchEmbeddingRuntime for RealEmbeddingModel {
+        fn info(&self) -> &EmbeddingModelInfo {
+            self.model.info()
+        }
+
+        async fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, ModelError> {
+            self.queries
+                .lock()
+                .expect("real model query mutex")
+                .push(queries.to_vec());
+            self.model
+                .embed(
+                    &queries
+                        .iter()
+                        .cloned()
+                        .map(|text| vec![Content::Text(text)])
+                        .collect::<Vec<_>>(),
+                    EmbeddingOptions {
+                        purpose: EmbeddingPurpose::Query,
+                        ..EmbeddingOptions::default()
+                    },
+                )
+                .await
+                .map(|result| result.vectors)
+        }
+    }
+
+    fn embeddinggemma2_test_model_from_cache() -> Box<dyn EmbeddingModel> {
+        let cache = std::env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+            .map(PathBuf::from)
+            .expect(
+                "ZVEC_GREP_TEST_MODEL_CACHE must point at a cache with the pre-cached EG2 file",
+            );
+        assert!(
+            cache
+                .join("hf_ggml-org_embeddinggemma-2-Q8_0.gguf")
+                .is_file()
+        );
+        crate::models::embeddinggemma2_test_model(cache)
+    }
+
     struct FixtureStorage {
         paths_only: bool,
         forbid_enumeration: bool,
@@ -906,9 +957,12 @@ mod tests {
         entities: HashMap<String, StoredEntity>,
         fts: HashMap<String, Vec<FixtureHit>>,
         vector: Vec<FixtureHit>,
+        vector_searches: VectorSearchCalls,
         filters: Arc<Mutex<Vec<Option<StorageSearchFilter>>>>,
         load_batches: Mutex<Vec<Vec<StorageSearchHit>>>,
     }
+
+    type VectorSearchCalls = Arc<Mutex<Vec<(String, Vec<f32>)>>>;
 
     struct FixtureHit {
         hit: StorageSearchHit,
@@ -1035,11 +1089,15 @@ mod tests {
 
         fn search_vector(
             &self,
-            _model: &str,
-            _vector: &[f32],
+            model: &str,
+            vector: &[f32],
             limit: usize,
             filter: Option<&StorageSearchFilter>,
         ) -> EngineResult<Vec<StorageSearchHit>> {
+            self.vector_searches
+                .lock()
+                .expect("vector search mutex")
+                .push((model.to_owned(), vector.to_vec()));
             Ok(self.hits_with_filter(&self.vector, limit, filter))
         }
     }
@@ -1063,6 +1121,7 @@ mod tests {
             ]),
             fts: HashMap::from([("alpha".to_owned(), vec![a_fts, b_fts])]),
             vector: vec![b_vector, a_vector],
+            vector_searches: Arc::default(),
             filters: Arc::new(Mutex::new(Vec::new())),
             load_batches: Mutex::default(),
         };
@@ -1270,6 +1329,7 @@ mod tests {
                 vec![hit(&owner, 0, StorageSearchPath::Fts, 2.0)],
             )]),
             vector: Vec::new(),
+            vector_searches: Arc::default(),
             filters: Arc::new(Mutex::new(Vec::new())),
             load_batches: Mutex::default(),
         };
@@ -1288,6 +1348,105 @@ mod tests {
         assert!(error.message().contains("only one embedding model"));
         assert!(first.calls.lock().expect("first model calls").is_empty());
         assert!(second.calls.lock().expect("second model calls").is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a pre-cached EmbeddingGemma 2 GGUF and local b11501 llama.cpp override"]
+    async fn embeddinggemma2_query_flows_through_real_index_store_vector_search() {
+        let model = embeddinggemma2_test_model_from_cache();
+        let model_info = model.info().clone();
+        let documents = [
+            (
+                "src/auth.rs",
+                "Authentication middleware validates requests.",
+            ),
+            (
+                "docs/garden.md",
+                "The garden irrigation schedule waters tomatoes on Tuesday.",
+            ),
+        ];
+        let document_inputs = documents
+            .iter()
+            .map(|(_, text)| vec![Content::Text((*text).to_owned())])
+            .collect::<Vec<_>>();
+        let document_vectors = model
+            .embed(
+                &document_inputs,
+                EmbeddingOptions {
+                    purpose: EmbeddingPurpose::Document,
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect("EmbeddingGemma 2 document embeddings")
+            .vectors;
+        assert_eq!(document_vectors.len(), documents.len());
+        assert!(document_vectors.iter().all(|vector| {
+            vector.len() == model_info.dimension && vector.iter().all(|value| value.is_finite())
+        }));
+
+        let directory = tempfile::tempdir().expect("temporary real index");
+        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: directory.path().join("index"),
+            embeddings: vec![model_info],
+        })
+        .expect("open real zvec index");
+        let mut expected_entity = None;
+        for ((path, text), vector) in documents.iter().zip(document_vectors) {
+            let file_id = storage
+                .resolve_file_ids(&[PathBuf::from(*path)])
+                .expect("reserve index-local file ID")[0];
+            let mut source = file(1, path, 200);
+            source.id = file_id;
+            let mut stored = entity(&source, text);
+            let fragment_id = FragmentId::new(&stored.entity.id, 0);
+            stored.entity.fragments.push(EntityFragment {
+                id: fragment_id.clone(),
+                range: Range::Full,
+            });
+            if *path == "src/auth.rs" {
+                expected_entity = Some(stored.entity.id.clone());
+            }
+            storage
+                .replace_file(
+                    &stored.file,
+                    std::slice::from_ref(&stored.entity),
+                    &[IndexedFragment {
+                        entity_id: stored.entity.id.clone(),
+                        fragment_id,
+                        model: "local/embeddinggemma-2".to_owned(),
+                        vector,
+                        fts_text: (*text).to_owned(),
+                    }],
+                )
+                .expect("index document embedding in real zvec storage");
+        }
+        let expected_entity = expected_entity.expect("authentication fixture entity");
+        let queries = Arc::default();
+        let model = RealEmbeddingModel {
+            model,
+            queries: Arc::clone(&queries),
+        };
+        let query_text = "find authentication middleware";
+        let result = search_workspace_index(
+            Path::new("/workspace"),
+            plan(vec![SearchRoute {
+                mode: SearchRouteMode::Vector,
+                query: query_text.to_owned(),
+            }]),
+            &storage,
+            &[&model],
+        )
+        .await
+        .expect("EmbeddingGemma 2 vector search against real zvec storage");
+
+        assert_eq!(
+            queries.lock().expect("query calls").as_slice(),
+            &[vec![query_text.to_owned()]]
+        );
+        assert_eq!(result.hits.len(), documents.len());
+        assert_eq!(result.hits[0].entity.id, expected_entity);
+        storage.close().expect("close real zvec index");
     }
 
     #[tokio::test]
@@ -1319,6 +1478,7 @@ mod tests {
                 ],
             )]),
             vector: Vec::new(),
+            vector_searches: Arc::default(),
             filters: Arc::clone(&filters),
             load_batches: Mutex::default(),
         };
@@ -1400,6 +1560,7 @@ mod tests {
             entities: HashMap::new(),
             fts: HashMap::new(),
             vector: Vec::new(),
+            vector_searches: Arc::default(),
             filters: Arc::default(),
             load_batches: Mutex::default(),
         }
