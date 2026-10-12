@@ -85,6 +85,13 @@ test("maps supported native npm targets", () => {
     binary: "zg",
     target: "darwin-arm64",
   });
+  assert.deepEqual(selectPlatform(manifest, "darwin", "x64"), {
+    package: "@zvec/zvec-grep-darwin-x64",
+    os: "darwin",
+    cpu: "x64",
+    binary: "zg",
+    target: "darwin-x64",
+  });
   assert.deepEqual(
     selectPlatform(manifest, "linux", "x64", { glibcVersionRuntime: "2.39" }),
     {
@@ -106,10 +113,6 @@ test("maps supported native npm targets", () => {
 });
 
 test("rejects platforms without a local release target", () => {
-  assert.throws(
-    () => selectPlatform(manifest, "darwin", "x64"),
-    /unsupported npm platform: darwin-x64/,
-  );
   assert.throws(
     () => selectPlatform(manifest, "freebsd", "x64"),
     /unsupported npm platform/,

@@ -11,6 +11,13 @@
       "binary": "zg"
     },
     {
+      "target": "darwin-x64",
+      "package": "@zvec/zvec-grep-darwin-x64",
+      "os": "darwin",
+      "cpu": "x64",
+      "binary": "zg"
+    },
+    {
       "target": "linux-x64-gnu",
       "package": "@zvec/zvec-grep-linux-x64-gnu",
       "os": "linux",

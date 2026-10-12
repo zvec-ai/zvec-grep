@@ -1,0 +1,102 @@
+name: Build a native Rust package
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+
+jobs:
+  native:
+    name: Build ${{ inputs.target }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Restore Cargo build state
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/release/
+          key: rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
+      - name: Restore the Intel macOS ONNX Runtime
+        if: inputs.target == 'darwin-x64'
+        id: ort-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: rust/target/ort-runtime/
+          key: rust-ort-v2-1.28.0-${{ inputs.runner }}-${{ hashFiles('rust/scripts/build-onnxruntime-macos.sh') }}
+      - name: Build ONNX Runtime for Intel macOS
+        if: inputs.target == 'darwin-x64' && steps.ort-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-onnxruntime-macos.sh
+      - name: Save the compiled Intel macOS ONNX Runtime
+        if: inputs.target == 'darwin-x64' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: rust/target/ort-runtime/
+          key: ${{ steps.ort-cache.outputs.cache-primary-key }}
+      - name: Use the Intel macOS ONNX Runtime
+        if: inputs.target == 'darwin-x64'
+        run: |
+          echo "ORT_LIB_PATH=$GITHUB_WORKSPACE/rust/target/ort-runtime" >> "$GITHUB_ENV"
+          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=13.3" >> "$GITHUB_ENV"
+      - name: Build the native target
+        run: npm run build
+      - name: Apply local macOS signatures after building
+        if: runner.os == 'macOS'
+        run: |
+          for binary in target/release/*.dylib target/release/zg; do
+            if [[ -f "$binary" ]]; then
+              codesign --force --sign - "$binary"
+              codesign --verify "$binary"
+            fi
+          done
+      - name: Package the native target
+        run: npm run release:platform -- --no-build --target ${{ inputs.target }}
+      - name: Install the tarballs and run the packaged CLI
+        run: npm run release:smoke -- --no-build --target ${{ inputs.target }}
+      - name: Upload the platform package
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-native-${{ inputs.target }}
+          path: rust/dist/npm/release/tarballs/zvec-zvec-grep-${{ inputs.target }}-*.tgz
+          if-no-files-found: error
+          retention-days: 14

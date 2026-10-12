@@ -6,6 +6,7 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust-publish.yml"
+      - ".github/workflows/rust-package-build.yml"
   workflow_dispatch:
     inputs:
       publish:
@@ -71,11 +72,19 @@ jobs:
         working-directory: rust
         run: node --test scripts/npm-local.test.mjs scripts/npm-release-registry.test.mjs npm/meta/install.test.cjs
 
+  intel:
+    name: Verify Intel macOS first
+    needs: source
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust-package-build.yml
+    with:
+      target: darwin-x64
+      runner: macos-15-intel
+
   build:
     name: Build ${{ matrix.target }}
-    needs: source
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    needs: [source, intel]
     permissions:
       contents: read
     strategy:
@@ -90,65 +99,14 @@ jobs:
             runner: ubuntu-24.04-arm
           - target: win32-x64-msvc
             runner: windows-2022
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-      - name: Set up MSVC
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
-      - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Restore Cargo build state
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/release/
-          key: rust-release-v2-${{ matrix.target }}-${{ matrix.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            rust-release-v2-${{ matrix.target }}-${{ matrix.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
-      - name: Build the native target
-        run: npm run build
-      - name: Apply local macOS signatures after building
-        if: runner.os == 'macOS'
-        run: |
-          for binary in target/release/*.dylib target/release/zg; do
-            if [[ -f "$binary" ]]; then
-              codesign --force --sign - "$binary"
-              codesign --verify "$binary"
-            fi
-          done
-      - name: Package the native target
-        run: npm run release:platform -- --no-build --target ${{ matrix.target }}
-      - name: Install the tarballs and run the packaged CLI
-        run: npm run release:smoke -- --no-build --target ${{ matrix.target }}
-      - name: Upload the platform package
-        uses: actions/upload-artifact@v7
-        with:
-          name: rust-native-${{ matrix.target }}
-          path: rust/dist/npm/release/tarballs/zvec-zvec-grep-${{ matrix.target }}-*.tgz
-          if-no-files-found: error
-          retention-days: 14
+    uses: ./.github/workflows/rust-package-build.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
 
   collect:
     name: Collect downloadable release packages
-    needs: [source, build]
+    needs: [source, intel, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: read

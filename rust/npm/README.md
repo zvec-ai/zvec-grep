@@ -4,8 +4,8 @@ The release layout has one small meta package and one native package for each
 published target. `platforms.json` is the single source of truth for package
 names and npm `os`, `cpu`, and `libc` selectors.
 
-The current published targets are macOS ARM64, Linux x64/ARM64 with glibc, and
-Windows x64. Intel macOS is temporarily excluded from this release.
+The current published targets are macOS ARM64/x64, Linux x64/ARM64 with glibc,
+and Windows x64.
 
 The platform package owns the complete runtime payload:
 
@@ -42,6 +42,9 @@ Release order:
 `.github/workflows/rust-publish.yml` builds and installs every target on its
 native runner, checks CLI startup and direct/server search output, and collects
 the candidates into a downloadable artifact. Regular runs do not publish.
+Intel macOS installation and runtime checks must pass before the other four
+platform builds start. Its ONNX Runtime with CoreML is built from source and
+bundled with the native package.
 
 Explicit publication runs from a `rust-v<version>`-tagged commit on `main` and
 uses npm provenance with trusted publishing or `NPM_TOKEN`. Native packages are
