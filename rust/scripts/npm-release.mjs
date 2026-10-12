@@ -290,7 +290,7 @@ async function smokeCurrent(options) {
       prefix,
       "--no-audit",
       "--no-fund",
-      `--allow-scripts=${loadReleaseManifest().metaPackage}`,
+      `--allow-scripts=${meta.tarball}`,
       platform.tarball,
       meta.tarball,
     ],
@@ -339,12 +339,12 @@ async function smokeCurrent(options) {
       `installed zg version ${installedVersion} did not match ${platform.version}`,
     );
   }
-  const query = ["query", "--rg", "-F", "rust-release-smoke-marker", "fixture.txt"];
+  const query = ["--rg", "-F", "rust-release-smoke-marker", "fixture.txt"];
   const direct = execute(query, "direct");
   const server = execute(query, "server");
   if (!direct.includes("rust-release-smoke-marker") || direct !== server) {
     throw new Error(
-      "packaged zg search output did not match between direct and server modes",
+      `packaged zg search output did not match between direct and server modes: ${JSON.stringify({ direct, server })}`,
     );
   }
   console.log(

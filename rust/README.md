@@ -412,15 +412,22 @@ output in direct and server modes. macOS binaries receive ad hoc signatures;
 Developer ID, notarization, and Windows certificate signing are not required for
 candidate builds.
 
+Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
+Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
+runtime, so older Linux distributions are not covered by this release workflow.
+Intel macOS builds ONNX Runtime 1.28.0 with CoreML from source because `ort` no
+longer supplies prebuilt Intel macOS libraries. This shared runtime is included
+in the platform tarball.
+
 Download the `rust-release-<version>` artifact from the successful workflow run
 and unzip it. It contains all five platform tarballs, the meta tarball,
 `SHA256SUMS`, `release.json` with the source commit, and platform-specific install
 commands. For example, on an ARM64 Mac:
 
 ```sh
-npm install --global ./zvec-zvec-grep-darwin-arm64-0.0.1.tgz ./zvec-zvec-grep-0.0.1.tgz
+npm install --global --allow-scripts=./zvec-zvec-grep-0.0.1.tgz ./zvec-zvec-grep-darwin-arm64-0.0.1.tgz ./zvec-zvec-grep-0.0.1.tgz
 zg --version
-zg query --rg -F "zvec-grep" README.md
+zg --rg -F "zvec-grep" README.md
 ```
 
 Use the filenames from the downloaded artifact when the version changes. On

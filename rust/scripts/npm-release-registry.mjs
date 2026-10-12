@@ -101,13 +101,14 @@ export async function collectRelease({ manifest, version, tarballRoot }) {
     "```sh",
     ...manifest.platforms.map(
       (platform) =>
-        `# ${platform.target}\nnpm install --global ./${filename(platform.package, version)} ./${filename(manifest.metaPackage, version)}`,
+        `# ${platform.target}\nnpm install --global --allow-scripts=./${filename(manifest.metaPackage, version)} ./${filename(platform.package, version)} ./${filename(manifest.metaPackage, version)}`,
     ),
     "zg --version",
     "```",
     "",
     "Use only the command for your platform. On Windows, use zg.cmd if PowerShell blocks the generated zg.ps1 shim.",
     "The native packages contain the executable, shared runtime libraries, and Jieba dictionaries.",
+    "Linux candidates are built and verified on Ubuntu 24.04; older glibc and C++ runtimes are not covered.",
     "SHA256SUMS and release.json identify the exact files and source commit.",
     "These artifacts use the regular npm package layout; no registry publication is needed to install them.",
     "macOS packages use the toolchain's local code signatures; Windows packages do not require a signing certificate.",

@@ -87,9 +87,9 @@ jobs:
           - target: darwin-x64
             runner: macos-15-intel
           - target: linux-x64-gnu
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
           - target: linux-arm64-gnu
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
           - target: win32-x64-msvc
             runner: windows-2022
     defaults:
@@ -122,9 +122,35 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/target/release/
-          key: rust-release-v1-${{ matrix.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
+          key: rust-release-v2-${{ matrix.target }}-${{ matrix.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            rust-release-v1-${{ matrix.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
+            rust-release-v2-${{ matrix.target }}-${{ matrix.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
+      - name: Restore the Intel macOS ONNX Runtime
+        if: matrix.target == 'darwin-x64'
+        id: ort-cache
+        uses: actions/cache@v5
+        with:
+          path: rust/target/ort-runtime/
+          key: rust-ort-v1-1.28.0-${{ matrix.runner }}
+      - name: Build ONNX Runtime for Intel macOS
+        if: matrix.target == 'darwin-x64' && steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v1.28.0 --recursive https://github.com/microsoft/onnxruntime.git "$RUNNER_TEMP/onnxruntime"
+          python3 "$RUNNER_TEMP/onnxruntime/tools/ci_build/build.py" \
+            --build_dir "$RUNNER_TEMP/onnxruntime-build" \
+            --config Release --update --build --build_shared_lib \
+            --parallel 2 --skip_tests --compile_no_warning_as_error --use_coreml \
+            --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=x86_64 CMAKE_OSX_DEPLOYMENT_TARGET=13.3 onnxruntime_BUILD_UNIT_TESTS=OFF
+          mkdir -p target/ort-runtime
+          cp -L "$RUNNER_TEMP/onnxruntime-build/Release/"*.dylib target/ort-runtime/
+          for library in target/ort-runtime/*.dylib; do
+            install_name_tool -id "@rpath/$(basename "$library")" "$library"
+          done
+      - name: Use the Intel macOS ONNX Runtime
+        if: matrix.target == 'darwin-x64'
+        run: |
+          echo "ORT_LIB_PATH=$GITHUB_WORKSPACE/rust/target/ort-runtime" >> "$GITHUB_ENV"
+          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
       - name: Build the native target
         run: npm run build
       - name: Apply local macOS signatures after building
