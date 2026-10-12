@@ -28,7 +28,7 @@ and package tests without reducing the published package's compatibility.
 
 Release order:
 
-1. Build, sign, and package every native target.
+1. Build and package every native target; apply ad hoc signatures on macOS.
 2. Verify payload closure, checksums, licenses, and SBOMs.
 3. Publish all native packages to the canary dist-tag.
 4. Install and smoke-test every native package.
@@ -36,6 +36,13 @@ Release order:
 6. Promote the dist-tag only after meta-package install, update, and rollback
    smoke tests pass.
 
-`scripts/npm-release.mjs` only stages and packs packages. Publishing and moving
-dist-tags remain intentionally outside the script until the release CI owns
-credentials, provenance, signing, and approval policy.
+`.github/workflows/rust-publish.yml` builds and installs every target on its
+native runner, checks CLI startup and direct/server search output, and collects
+the candidates into a downloadable artifact. Regular runs do not publish.
+
+Explicit publication runs from a `rust-v<version>`-tagged commit on `main` and
+uses npm provenance with trusted publishing or `NPM_TOKEN`. Native packages are
+published first and the meta package last. The default `rust-canary` dist-tag
+keeps the TypeScript package as the default installation until `latest` is
+explicitly selected. Developer certificate signing and Apple notarization can
+be added to the native build steps independently of npm publishing.

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { copyFile, mkdir, readFile, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -12,9 +12,9 @@ export const npmManifestPath = join(workspaceDir, "npm", "platforms.json");
 export function loadReleaseManifest() {
   const manifest = JSON.parse(readFileSync(npmManifestPath, "utf8"));
   if (
-    manifest.schemaVersion !== 1
-    || typeof manifest.metaPackage !== "string"
-    || typeof manifest.nodeEngine !== "string"
+    manifest.schemaVersion !== 1 ||
+    typeof manifest.metaPackage !== "string" ||
+    typeof manifest.nodeEngine !== "string"
   ) {
     throw new Error("npm/platforms.json has an unsupported schema");
   }
@@ -43,13 +43,18 @@ export function loadReleaseManifest() {
 }
 
 export function selectPlatform(manifest, platform, arch, reportHeader = {}) {
-  const libc = platform === "linux"
-    ? (reportHeader.glibcVersionRuntime ? "glibc" : "musl")
-    : undefined;
-  const matches = manifest.platforms.filter((entry) =>
-    entry.os === platform
-    && entry.cpu === arch
-    && (entry.libc === undefined || entry.libc === libc));
+  const libc =
+    platform === "linux"
+      ? reportHeader.glibcVersionRuntime
+        ? "glibc"
+        : "musl"
+      : undefined;
+  const matches = manifest.platforms.filter(
+    (entry) =>
+      entry.os === platform &&
+      entry.cpu === arch &&
+      (entry.libc === undefined || entry.libc === libc),
+  );
   if (matches.length !== 1) {
     const suffix = libc ? `-${libc}` : "";
     throw new Error(`unsupported npm platform: ${platform}-${arch}${suffix}`);
@@ -58,7 +63,9 @@ export function selectPlatform(manifest, platform, arch, reportHeader = {}) {
 }
 
 export function platformByTarget(manifest, target) {
-  const entry = manifest.platforms.find((candidate) => candidate.target === target);
+  const entry = manifest.platforms.find(
+    (candidate) => candidate.target === target,
+  );
   if (!entry) {
     throw new Error(`unknown npm release target: ${target}`);
   }
@@ -66,12 +73,22 @@ export function platformByTarget(manifest, target) {
 }
 
 export function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd: options.cwd ?? workspaceDir,
-    encoding: "utf8",
-    stdio: options.capture ? "pipe" : "inherit",
-    env: options.env ?? process.env,
-  });
+  // Windows cannot execute npm.cmd with CreateProcess. Invoke npm's JavaScript
+  // entry point directly instead of introducing a shell for package arguments.
+  const npmCli =
+    process.env.npm_execpath ??
+    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  const useNpmCli = process.platform === "win32" && command === "npm";
+  const result = spawnSync(
+    useNpmCli ? process.execPath : command,
+    useNpmCli ? [npmCli, ...args] : args,
+    {
+      cwd: options.cwd ?? workspaceDir,
+      encoding: "utf8",
+      stdio: options.capture ? "pipe" : "inherit",
+      env: options.env ?? process.env,
+    },
+  );
   if (result.error) {
     throw result.error;
   }
@@ -117,11 +134,33 @@ export async function stageZvecRuntime(sourceDir, binDir, platform) {
     linux: "libzvec_c_api.so",
     win32: "zvec_c_api.dll",
   }[platform];
-  if (!library) throw new Error(`unsupported zvec runtime platform: ${platform}`);
-  const files = [library, "data/jieba_dict/jieba.dict.utf8", "data/jieba_dict/hmm_model.utf8"];
+  if (!library)
+    throw new Error(`unsupported zvec runtime platform: ${platform}`);
+  const files = [
+    library,
+    "data/jieba_dict/jieba.dict.utf8",
+    "data/jieba_dict/hmm_model.utf8",
+  ];
   for (const file of files) {
     const source = join(sourceDir, file);
-    if (!(await stat(source)).isFile()) throw new Error(`missing zvec runtime file: ${source}`);
+    if (!(await stat(source)).isFile())
+      throw new Error(`missing zvec runtime file: ${source}`);
+  }
+  // Cargo also stages model backend libraries beside the executable. Include
+  // these in the payload so installation does not depend on the build tree.
+  const runtimePattern = {
+    darwin: /\.dylib$/,
+    linux: /\.so(?:\.\d+)*$/,
+    win32: /\.dll$/i,
+  }[platform];
+  for (const name of (await readdir(sourceDir)).sort()) {
+    if (
+      name !== library &&
+      runtimePattern.test(name) &&
+      (await stat(join(sourceDir, name))).isFile()
+    ) {
+      files.push(name);
+    }
   }
   for (const file of files) {
     const destination = join(binDir, file);

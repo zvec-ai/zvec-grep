@@ -15,6 +15,8 @@
     "release:meta": "node scripts/npm-release.mjs pack-meta",
     "release:pack": "node scripts/npm-release.mjs pack-current",
     "release:smoke": "node scripts/npm-release.mjs smoke-current",
+    "release:collect": "node scripts/npm-release.mjs collect",
+    "release:publish": "node scripts/npm-release.mjs publish",
     "test": "npm run build && cargo test --workspace && node --test scripts/npm-local.test.mjs npm/meta/install.test.cjs",
     "test:package": "npm run build && node scripts/npm-local.mjs smoke --no-build"
   }

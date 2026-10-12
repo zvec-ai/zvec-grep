@@ -404,6 +404,40 @@ The runtime library directory must include zvec's shared library and its
 `data/jieba_dict` directory. Without `--lib-dir`, these assets are read from
 the binary's directory.
 
-All native platform packages must be published and smoke-tested before the meta
-package. The release script intentionally does not run `npm publish` or move a
-dist-tag.
+The `Publish Rust packages` workflow builds all five native targets on matching
+GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
+produce downloadable candidates without publishing to npm. Each runner installs
+its platform and meta tarballs, then runs `zg --version` and compares managed-rg
+output in direct and server modes. macOS binaries receive ad hoc signatures;
+Developer ID, notarization, and Windows certificate signing are not required for
+candidate builds.
+
+Download the `rust-release-<version>` artifact from the successful workflow run
+and unzip it. It contains all five platform tarballs, the meta tarball,
+`SHA256SUMS`, `release.json` with the source commit, and platform-specific install
+commands. For example, on an ARM64 Mac:
+
+```sh
+npm install --global ./zvec-zvec-grep-darwin-arm64-0.0.1.tgz ./zvec-zvec-grep-0.0.1.tgz
+zg --version
+zg query --rg -F "zvec-grep" README.md
+```
+
+Use the filenames from the downloaded artifact when the version changes. On
+Windows, use `zg.cmd` if PowerShell blocks the generated `zg.ps1` shim. Artifacts
+are retained for 14 days.
+
+To publish, update the Rust workspace version, tag the release commit on `main`
+as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
+publishing repository must have an npm trusted publisher configured, or provide
+the existing `NPM_TOKEN` secret. The default `rust-canary` dist-tag lets users
+opt into Rust with `npm install --global @zvec/zvec-grep@rust-canary`; selecting
+`latest` explicitly changes the default installation from the TypeScript
+package to the Rust package.
+
+`release:collect` requires all platform tarballs and packs the meta package last.
+`release:publish` validates the collected files before publishing native packages
+and then the meta package with npm provenance. An already published version is
+reused only when its tarball integrity matches, allowing a partial publication
+to be retried without replacing a version. Ordinary build and packaging commands
+do not publish or move dist-tags.

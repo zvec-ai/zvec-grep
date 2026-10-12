@@ -1,0 +1,209 @@
+name: Publish Rust packages
+
+on:
+  push:
+    branches: [main, "release/rust-*"]
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-publish.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish verified packages to npm instead of only uploading artifacts.
+        type: boolean
+        default: false
+      dist_tag:
+        description: npm dist-tag; rust-canary keeps the current default installation.
+        type: choice
+        options: [rust-canary, latest]
+        default: rust-canary
+
+permissions: {}
+
+concurrency:
+  group: rust-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+
+jobs:
+  source:
+    name: Validate release source
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Validate the manifest and release ref
+        id: version
+        working-directory: rust
+        env:
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          rustup show active-toolchain
+          npm run release:verify
+          version="$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s=""; process.stdin.on("data", d => s+=d).on("end", () => console.log(JSON.parse(s).packages.find(p => p.name === "zg").version))')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$PUBLISH" == "true" ]]; then
+            if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
+              echo "::error::npm publishing must run from main"
+              exit 1
+            fi
+            tag_commit="$(git rev-parse --verify "refs/tags/rust-v$version^{commit}")"
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "::error::rust-v$version must point to the commit being published"
+              exit 1
+            fi
+          fi
+      - name: Test package selection and installation
+        working-directory: rust
+        run: node --test scripts/npm-local.test.mjs scripts/npm-release-registry.test.mjs npm/meta/install.test.cjs
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-x64-gnu
+            runner: ubuntu-22.04
+          - target: linux-arm64-gnu
+            runner: ubuntu-22.04-arm
+          - target: win32-x64-msvc
+            runner: windows-2022
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Restore Cargo build state
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/release/
+          key: rust-release-v1-${{ matrix.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-release-v1-${{ matrix.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
+      - name: Build the native target
+        run: npm run build
+      - name: Apply local macOS signatures after building
+        if: runner.os == 'macOS'
+        run: |
+          for binary in target/release/*.dylib target/release/zg; do
+            if [[ -f "$binary" ]]; then
+              codesign --force --sign - "$binary"
+              codesign --verify "$binary"
+            fi
+          done
+      - name: Package the native target
+        run: npm run release:platform -- --no-build --target ${{ matrix.target }}
+      - name: Install the tarballs and run the packaged CLI
+        run: npm run release:smoke -- --no-build --target ${{ matrix.target }}
+      - name: Upload the platform package
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-native-${{ matrix.target }}
+          path: rust/dist/npm/release/tarballs/zvec-zvec-grep-${{ matrix.target }}-*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  collect:
+    name: Collect downloadable release packages
+    needs: [source, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rust-native-*
+          merge-multiple: true
+          path: rust/dist/npm/release/tarballs
+      - name: Pack the exact-version meta package and verify the complete release
+        run: |
+          rustup show active-toolchain
+          npm run release:collect
+      - name: Upload all packages and download instructions
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-release-${{ needs.source.outputs.version }}
+          path: rust/dist/npm/release/tarballs/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified npm packages
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [source, collect]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-release-${{ needs.source.outputs.version }}
+          path: rust/dist/npm/release/tarballs
+      - name: Publish native packages first and the meta package last
+        working-directory: rust
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIST_TAG: ${{ inputs.dist_tag }}
+        run: npm run release:publish
