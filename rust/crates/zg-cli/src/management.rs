@@ -233,6 +233,39 @@ mod tests {
     use zg_engine::authorization::AuthorizationGrantStatus;
 
     #[test]
+    fn index_result_distinguishes_failed_files_from_retried_work() {
+        use zg_engine::api::info::result::FailedFile;
+        let root = std::env::temp_dir().join("workspace");
+        for failed in [0, 1] {
+            let result = IndexResult {
+                files_scanned: 2,
+                // This counts retry candidates processed by the build, not remaining work.
+                files_pending: 1,
+                files_failed: failed,
+                failed_files: if failed > 0 {
+                    vec![FailedFile {
+                        path: "broken.txt".into(),
+                        reason: "prepare: invalid text encoding".into(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                ..IndexResult::default()
+            };
+            let mut output = Vec::new();
+            write_index_result(&mut output, &root, &result).expect("index output");
+            let output = String::from_utf8(output).expect("UTF-8");
+            assert!(output.starts_with("Workspace index\nfiles\t"));
+            assert!(!output.contains("Workspace index: ready"));
+            assert!(output.contains("1 retried"));
+            assert!(output.contains(&format!("{failed} failed")));
+            if failed > 0 {
+                assert!(output.contains("failed\tbroken.txt: prepare: invalid text encoding"));
+            }
+        }
+    }
+
+    #[test]
     fn index_summary_uses_node_fields_and_reports_retries_and_duration() {
         let result = IndexResult {
             files_scanned: 9,

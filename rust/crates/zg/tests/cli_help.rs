@@ -85,7 +85,8 @@ fn index_help_describes_the_optional_workspace_name() {
     assert!(help.contains("--name <NAME>"));
     assert!(help.contains("defaults to root directory name"));
     assert!(help.contains("Scan rules:"));
-    assert!(!help.contains("--type"));
+    assert!(help.contains("-t, --type <type>"));
+    assert!(help.contains("-T, --type-not <type>"));
     assert!(!help.contains("--category"));
 }
 
