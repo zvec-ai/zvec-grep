@@ -43,8 +43,9 @@ Release order:
 native runner, checks CLI startup and direct/server search output, and collects
 the candidates into a downloadable artifact. Regular runs do not publish.
 Intel macOS installation and runtime checks must pass before the other four
-platform builds start. Its ONNX Runtime with CoreML is built from source and
-bundled with the native package.
+platform builds start. Its ONNX Runtime with CoreML and zvec SDK are built from
+pinned sources, cached, and bundled with the native package. The Intel release
+targets macOS 14 and later.
 
 Explicit publication runs from a `rust-v<version>`-tagged commit on `main` and
 uses npm provenance with trusted publishing or `NPM_TOKEN`. Native packages are

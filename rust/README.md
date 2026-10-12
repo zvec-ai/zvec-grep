@@ -419,9 +419,10 @@ builds start. The final artifact is collected after all five targets pass.
 Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
 Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
 runtime, so older Linux distributions are not covered by this release workflow.
-Intel macOS uses ONNX Runtime 1.28.0 built from source with CoreML because `ort`
-no longer supplies prebuilt Intel macOS libraries. Its shared libraries are
-included in the npm payload, with macOS 13.3 as the deployment target.
+Intel macOS builds ONNX Runtime 1.28.0 with CoreML and the native zvec SDK from
+pinned source revisions because neither dependency supplies prebuilt Intel
+macOS libraries. Both SDKs are cached and their shared libraries are included
+in the npm payload. The Intel release targets macOS 14 and later.
 
 Download the `rust-release-<version>` artifact from the successful workflow run
 and unzip it. It contains all five platform tarballs, the meta tarball,

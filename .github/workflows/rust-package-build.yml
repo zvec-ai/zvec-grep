@@ -22,7 +22,7 @@ jobs:
   native:
     name: Build ${{ inputs.target }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ inputs.target == 'darwin-x64' && 180 || 90 }}
     defaults:
       run:
         working-directory: rust
@@ -72,12 +72,29 @@ jobs:
         with:
           path: rust/target/ort-runtime/
           key: ${{ steps.ort-cache.outputs.cache-primary-key }}
-      - name: Use the Intel macOS ONNX Runtime
+      - name: Restore the Intel macOS zvec SDK
+        if: inputs.target == 'darwin-x64'
+        id: zvec-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: rust/target/zvec-runtime/
+          key: rust-zvec-v1-0.7.2-${{ inputs.runner }}-${{ hashFiles('rust/scripts/build-zvec-macos.sh') }}
+      - name: Build the zvec SDK for Intel macOS
+        if: inputs.target == 'darwin-x64' && steps.zvec-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-zvec-macos.sh
+      - name: Save the compiled Intel macOS zvec SDK
+        if: inputs.target == 'darwin-x64' && steps.zvec-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: rust/target/zvec-runtime/
+          key: ${{ steps.zvec-cache.outputs.cache-primary-key }}
+      - name: Use the Intel macOS runtime libraries
         if: inputs.target == 'darwin-x64'
         run: |
           echo "ORT_LIB_PATH=$GITHUB_WORKSPACE/rust/target/ort-runtime" >> "$GITHUB_ENV"
           echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
-          echo "MACOSX_DEPLOYMENT_TARGET=13.3" >> "$GITHUB_ENV"
+          echo "ZVEC_LIB_DIR=$GITHUB_WORKSPACE/rust/target/zvec-runtime" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
       - name: Build the native target
         run: npm run build
       - name: Apply local macOS signatures after building
