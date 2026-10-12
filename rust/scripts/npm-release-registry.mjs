@@ -118,7 +118,7 @@ export async function collectRelease({ manifest, version, tarballRoot }) {
   if (process.env.GITHUB_STEP_SUMMARY) {
     await appendFile(
       process.env.GITHUB_STEP_SUMMARY,
-      `## Rust release ${version}\n\nSource: \`${release.commit}\`\n\nDownload **rust-release-${version}** for all five native packages, the meta package, checksums, and installation instructions.\n`,
+      `## Rust release ${version}\n\nSource: \`${release.commit}\`\n\nDownload **rust-release-${version}** for all ${manifest.platforms.length} native packages, the meta package, checksums, and installation instructions.\n`,
     );
   }
   console.log(`collected ${packages.length} verified packages for ${version}`);

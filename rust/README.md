@@ -404,7 +404,7 @@ The runtime library directory must include zvec's shared library and its
 `data/jieba_dict` directory. Without `--lib-dir`, these assets are read from
 the binary's directory.
 
-The `Publish Rust packages` workflow builds all five native targets on matching
+The `Publish Rust packages` workflow builds all four published native targets on matching
 GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
 produce downloadable candidates without publishing to npm. Each runner installs
 its platform and meta tarballs, then runs `zg --version` and compares managed-rg
@@ -415,12 +415,10 @@ candidate builds.
 Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
 Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
 runtime, so older Linux distributions are not covered by this release workflow.
-Intel macOS builds ONNX Runtime 1.28.0 with CoreML from source because `ort` no
-longer supplies prebuilt Intel macOS libraries. This shared runtime is included
-in the platform tarball.
+Intel macOS is temporarily excluded from the npm release manifest and workflow.
 
 Download the `rust-release-<version>` artifact from the successful workflow run
-and unzip it. It contains all five platform tarballs, the meta tarball,
+and unzip it. It contains all four platform tarballs, the meta tarball,
 `SHA256SUMS`, `release.json` with the source commit, and platform-specific install
 commands. For example, on an ARM64 Mac:
 

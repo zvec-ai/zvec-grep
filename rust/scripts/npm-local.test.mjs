@@ -107,6 +107,10 @@ test("maps supported native npm targets", () => {
 
 test("rejects platforms without a local release target", () => {
   assert.throws(
+    () => selectPlatform(manifest, "darwin", "x64"),
+    /unsupported npm platform: darwin-x64/,
+  );
+  assert.throws(
     () => selectPlatform(manifest, "freebsd", "x64"),
     /unsupported npm platform/,
   );

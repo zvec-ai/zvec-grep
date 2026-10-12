@@ -4,6 +4,9 @@ The release layout has one small meta package and one native package for each
 published target. `platforms.json` is the single source of truth for package
 names and npm `os`, `cpu`, and `libc` selectors.
 
+The current published targets are macOS ARM64, Linux x64/ARM64 with glibc, and
+Windows x64. Intel macOS is temporarily excluded from this release.
+
 The platform package owns the complete runtime payload:
 
 ```text
