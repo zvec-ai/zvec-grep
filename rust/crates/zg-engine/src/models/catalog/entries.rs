@@ -207,6 +207,46 @@ const NOMIC_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
+#[cfg(test)]
+const EMBEDDINGGEMMA2_TEST_ARTIFACTS: &[ArtifactConfig] = &[ArtifactConfig {
+    path: "embeddinggemma-2-Q8_0.gguf",
+    size: 309_855_456,
+    sha256: "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
+}];
+
+#[cfg(test)]
+const EMBEDDINGGEMMA2_TEST_DOWNLOAD: ArtifactDownloadConfig = ArtifactDownloadConfig {
+    hugging_face: ArtifactSourceConfig {
+        repo: "ggml-org/embeddinggemma-2-GGUF",
+        revision: "bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+    },
+    model_scope: ArtifactSourceConfig {
+        repo: "ggml-org/embeddinggemma-2-GGUF",
+        revision: "5ad9578640eeb5229d2b761af891a977c92e88ae",
+    },
+    artifacts: EMBEDDINGGEMMA2_TEST_ARTIFACTS,
+};
+
+/// `EmbeddingGemma` 2 metadata for manually running the local-runtime smoke test.
+/// This test-only configuration is intentionally absent from the production catalog
+/// until the published llama.cpp binding includes the required architecture.
+#[cfg(test)]
+pub(crate) const fn embeddinggemma2_test_config() -> LlamaCppConfig {
+    LlamaCppConfig {
+        reference: "local/embeddinggemma-2",
+        provider: "local",
+        model: "embeddinggemma-2",
+        uri: "hf:ggml-org/embeddinggemma-2-GGUF/embeddinggemma-2-Q8_0.gguf#bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+        cache_file: "hf_ggml-org_embeddinggemma-2-Q8_0.gguf",
+        download: &EMBEDDINGGEMMA2_TEST_DOWNLOAD,
+        dimension: 768,
+        metric: Metric::Cosine,
+        format: "embeddinggemma2",
+        context_size: 8_192,
+        max_batch_size: 16,
+    }
+}
+
 const CATALOG: [EmbeddingCatalogEntry; 14] = [
     EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
         reference: "local/embeddinggemma-300m",

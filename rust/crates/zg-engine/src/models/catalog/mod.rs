@@ -4,6 +4,8 @@ mod entries;
 mod resolution;
 mod types;
 
+#[cfg(test)]
+pub(crate) use entries::embeddinggemma2_test_config;
 pub(crate) use entries::get_embedding_model_catalog_entry;
 #[cfg(test)]
 pub(crate) use entries::list_embedding_models;

@@ -81,13 +81,16 @@ mod tests {
             assert_eq!(model.info().model.endpoint, expected_endpoint);
         }
 
-        let unknown = create_embedding_model(
-            "missing",
+        let unsupported_embeddinggemma2 = create_embedding_model(
+            "local/embeddinggemma-2",
             None,
             crate::models::runtime::ModelComputeRuntime::shared(),
         )
         .err()
-        .expect("unknown model should fail catalog lookup");
-        assert_eq!(unknown.code(), crate::EngineError::NOT_FOUND);
+        .expect("EmbeddingGemma 2 must stay unavailable until the Rust runtime supports it");
+        assert_eq!(
+            unsupported_embeddinggemma2.code(),
+            crate::EngineError::NOT_FOUND
+        );
     }
 }
