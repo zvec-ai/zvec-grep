@@ -88,6 +88,41 @@ test("text extractor validates options, sources, chunks, and overlap", async () 
   );
 });
 
+test("text overlap never produces a chunk contained in the previous one", async () => {
+  const extractor = new TextExtractor();
+  const lines = ["a".repeat(10), "b".repeat(40), "c".repeat(40)];
+
+  for (const next of ["d".repeat(80), "d".repeat(150)]) {
+    const chunks = await extractor.extract(
+      textSource([...lines, next].join("\n")),
+      { maxChunkChars: 100, chunkOverlapChars: 54 },
+    );
+
+    for (let index = 1; index < chunks.length; index++) {
+      assert.ok(
+        chunks[index].range.endOffset > chunks[index - 1].range.endOffset,
+        `chunk ${index} repeats ${JSON.stringify(chunks[index].range)}`,
+      );
+    }
+    assert.equal(
+      chunks.at(-1).range.endOffset,
+      [...lines, next].join("\n").length,
+    );
+  }
+
+  const overlapped = await extractor.extract(
+    textSource([...lines, "d".repeat(50)].join("\n")),
+    { maxChunkChars: 100, chunkOverlapChars: 54 },
+  );
+  assert.deepEqual(
+    overlapped.map((chunk) => [chunk.range.startLine, chunk.range.endLine]),
+    [
+      [1, 3],
+      [3, 4],
+    ],
+  );
+});
+
 test("global extraction keeps concurrent chunk options isolated", async () => {
   const source = textSource(
     Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"),
