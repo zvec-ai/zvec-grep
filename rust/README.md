@@ -407,13 +407,15 @@ the binary's directory.
 The `Publish Rust packages` workflow builds all five published native targets on matching
 GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
 produce downloadable candidates without publishing to npm. Each runner installs
-its platform and meta tarballs, then runs `zg --version` and compares managed-rg
-output in direct and server modes. macOS binaries receive ad hoc signatures;
+its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
+starts the packaged daemon, compares workspace status in direct and server
+modes, and stops the daemon. The server status request crosses the IPC boundary;
+managed-rg intentionally stays local. macOS binaries receive ad hoc signatures;
 Developer ID, notarization, and Windows certificate signing are not required for
 candidate builds.
 
 Intel macOS is built and verified first. Only after its tarball installation,
-CLI startup, and direct/server managed-rg checks pass do the other four native
+CLI startup, managed-rg, and daemon IPC checks pass do the other four native
 builds start. The final artifact is collected after all five targets pass.
 
 Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
@@ -441,15 +443,26 @@ are retained for 14 days.
 
 To publish, update the Rust workspace version, tag the release commit on `main`
 as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured, or provide
-the existing `NPM_TOKEN` secret. The default `rust-canary` dist-tag lets users
-opt into Rust with `npm install --global @zvec/zvec-grep@rust-canary`; selecting
-`latest` explicitly changes the default installation from the TypeScript
-package to the Rust package.
+publishing repository must have an npm trusted publisher configured for all six
+packages with both **Allow npm publish** and the independent **Allow npm
+dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
+Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
+
+Registry publication is currently blocked until reviewed license texts and
+SPDX SBOMs are supplied for every target in [`npm/compliance/`](npm/compliance/README.md).
+Candidate downloads remain available while these inputs are prepared.
+Every publication uses `rust-canary`, letting users opt into Rust with
+`npm install --global @zvec/zvec-grep@rust-canary`. Five native runners then
+install only the meta package from the registry, test actual daemon IPC, and
+exercise update and rollback with a distinct previously published version.
+Selecting `latest` requests a separate promotion job that changes the default
+installation only after all registry checks pass.
 
 `release:collect` requires all platform tarballs and packs the meta package last.
 `release:publish` validates the collected files before publishing native packages
-and then the meta package with npm provenance. An already published version is
+and then the meta package under `rust-canary` with npm provenance. An already published version is
 reused only when its tarball integrity matches, allowing a partial publication
-to be retried without replacing a version. Ordinary build and packaging commands
+to be retried without replacing a version. `release:promote` only moves tags for
+an already published identical release and runs after registry validation in the
+workflow. Ordinary build and packaging commands
 do not publish or move dist-tags.

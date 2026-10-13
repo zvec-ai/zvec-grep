@@ -14,7 +14,7 @@ on:
         type: boolean
         default: false
       dist_tag:
-        description: npm dist-tag; rust-canary keeps the current default installation.
+        description: Promote to latest only after registry install/update/rollback checks pass.
         type: choice
         options: [rust-canary, latest]
         default: rust-canary
@@ -67,10 +67,11 @@ jobs:
               echo "::error::rust-v$version must point to the commit being published"
               exit 1
             fi
+            node scripts/npm-release.mjs verify-publication
           fi
       - name: Test package selection and installation
         working-directory: rust
-        run: node --test scripts/npm-local.test.mjs scripts/npm-release-registry.test.mjs npm/meta/install.test.cjs
+        run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
 
   intel:
     name: Verify Intel macOS first
@@ -138,9 +139,85 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Publish verified npm packages
+    name: Publish verified candidates to rust-canary
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     needs: [source, collect]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      baseline: ${{ steps.baseline.outputs.baseline }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Install npm with OIDC dist-tag support
+        run: |
+          npm install --global npm@11.21.0
+          npm --version
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-release-${{ needs.source.outputs.version }}
+          path: rust/dist/npm/release/tarballs
+      - name: Record the registry version used for update and rollback
+        id: baseline
+        working-directory: rust
+        run: node scripts/npm-release.mjs rollback-version
+      - name: Publish native packages first and the meta package last
+        working-directory: rust
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm run release:publish
+
+  registry-smoke:
+    name: Verify registry install/update/rollback (${{ matrix.target }})
+    needs: [source, publish]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: darwin-arm64
+            runner: macos-14
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+          - target: win32-x64-msvc
+            runner: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install the release npm version
+        run: npm install --global npm@11.21.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-release-${{ needs.source.outputs.version }}
+          path: rust/dist/npm/release/tarballs
+      - name: Test registry packages without explicit native-package installation
+        working-directory: rust
+        env:
+          NPM_ROLLBACK_VERSION: ${{ needs.publish.outputs.baseline }}
+        run: npm run release:registry-smoke
+
+  promote:
+    name: Promote the verified registry release to latest
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.dist_tag == 'latest'
+    needs: [source, publish, registry-smoke]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -153,13 +230,16 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      - name: Install npm with OIDC dist-tag support
+        run: |
+          npm install --global npm@11.21.0
+          npm --version
       - uses: actions/download-artifact@v8
         with:
           name: rust-release-${{ needs.source.outputs.version }}
           path: rust/dist/npm/release/tarballs
-      - name: Publish native packages first and the meta package last
+      - name: Move native latest tags first and the meta latest tag last
         working-directory: rust
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_DIST_TAG: ${{ inputs.dist_tag }}
-        run: npm run release:publish
+        run: npm run release:promote

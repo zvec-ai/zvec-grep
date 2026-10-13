@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFile, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run, sha256File } from "./npm-package-core.mjs";
+import { verifyTarballCompliance } from "./npm-release-compliance.mjs";
 
 function filename(name, version) {
   return `${name.replace(/^@/, "").replaceAll("/", "-")}-${version}.tgz`;
@@ -144,10 +145,7 @@ export async function checkPublishedPackage(entry, registryFetch = fetch) {
   return true;
 }
 
-export async function publishRelease({ manifest, tarballRoot }) {
-  const tag = process.env.NPM_DIST_TAG;
-  if (!["rust-canary", "latest"].includes(tag))
-    throw new Error("NPM_DIST_TAG must be rust-canary or latest");
+async function preflightRelease({ manifest, tarballRoot, registryFetch }) {
   const release = JSON.parse(
     await readFile(join(tarballRoot, "release.json"), "utf8"),
   );
@@ -178,21 +176,68 @@ export async function publishRelease({ manifest, tarballRoot }) {
     if ((await sha256File(join(tarballRoot, entry.file))) !== entry.sha256) {
       throw new Error(`release tarball checksum mismatch: ${entry.file}`);
     }
-    published.push(await checkPublishedPackage(entry));
+    if (entry.target !== "meta")
+      verifyTarballCompliance(join(tarballRoot, entry.file));
+    published.push(await checkPublishedPackage(entry, registryFetch));
   }
+  return { release, published };
+}
+
+export async function publishRelease({
+  manifest,
+  tarballRoot,
+  registryFetch = fetch,
+  runNpm = run,
+}) {
+  const { release, published } = await preflightRelease({
+    manifest,
+    tarballRoot,
+    registryFetch,
+  });
   for (const [index, entry] of release.packages.entries()) {
     if (published[index]) {
-      run("npm", ["dist-tag", "add", `${entry.name}@${entry.version}`, tag]);
+      runNpm("npm", [
+        "dist-tag",
+        "add",
+        `${entry.name}@${entry.version}`,
+        "rust-canary",
+      ]);
     } else {
-      run("npm", [
+      runNpm("npm", [
         "publish",
         join(tarballRoot, entry.file),
         "--access",
         "public",
         "--provenance",
         "--tag",
-        tag,
+        "rust-canary",
       ]);
     }
+  }
+}
+
+export async function promoteRelease({
+  manifest,
+  tarballRoot,
+  registryFetch = fetch,
+  runNpm = run,
+}) {
+  const { release, published } = await preflightRelease({
+    manifest,
+    tarballRoot,
+    registryFetch,
+  });
+  if (published.some((exists) => !exists)) {
+    throw new Error("cannot promote an incomplete registry release");
+  }
+  // The workflow calls this only after every registry smoke job has passed.
+  // Native tags move first; the meta package becomes the default last.
+  for (const entry of release.packages) {
+    runNpm("npm", [
+      "dist-tag",
+      "add",
+      `${entry.name}@${entry.version}`,
+      "latest",
+    ]);
   }
 }

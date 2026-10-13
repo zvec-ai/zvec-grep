@@ -2,10 +2,12 @@
 
 import {
   chmod,
+  appendFile,
   copyFile,
   cp,
   mkdir,
   readdir,
+  readFile,
   rename,
   rm,
   stat,
@@ -24,7 +26,20 @@ import {
   stageZvecRuntime,
   workspaceDir,
 } from "./npm-package-core.mjs";
-import { collectRelease, publishRelease } from "./npm-release-registry.mjs";
+import {
+  collectRelease,
+  promoteRelease,
+  publishRelease,
+} from "./npm-release-registry.mjs";
+import {
+  stageCompliance,
+  verifyPublicationInputs,
+} from "./npm-release-compliance.mjs";
+import {
+  rollbackVersion,
+  smokeInstalledPackage,
+  smokeRegistryRelease,
+} from "./npm-release-smoke.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const releaseRoot = join(workspaceDir, "dist", "npm", "release");
@@ -175,6 +190,11 @@ async function packPlatform(options) {
     }
 
     const checksums = await checksumManifest(temporary, entry.target);
+    await stageCompliance(
+      join(workspaceDir, "npm", "compliance", entry.target),
+      temporary,
+    );
+
     const packageJson = {
       name: entry.package,
       version,
@@ -268,14 +288,6 @@ async function verifyManifest() {
   );
 }
 
-function installedPackageRoot(prefix, packageName) {
-  const modules =
-    process.platform === "win32"
-      ? join(prefix, "node_modules")
-      : join(prefix, "lib", "node_modules");
-  return join(modules, ...packageName.split("/"));
-}
-
 async function smokeCurrent(options) {
   const platform = await packPlatform(options);
   const meta = await packMeta();
@@ -297,59 +309,13 @@ async function smokeCurrent(options) {
     { env: npmEnvironment(cacheRoot) },
   );
 
-  const installedMeta = installedPackageRoot(
+  await smokeInstalledPackage({
+    manifest: loadReleaseManifest(),
+    entry: platform.entry,
+    version: platform.version,
     prefix,
-    loadReleaseManifest().metaPackage,
-  );
-  const installedPlatform = installedPackageRoot(
-    prefix,
-    platform.entry.package,
-  );
-  const materializedDigest = await sha256File(
-    join(installedMeta, "bin", "zg.exe"),
-  );
-  const platformDigest = await sha256File(
-    join(installedPlatform, "bin", platform.entry.binary),
-  );
-  if (materializedDigest !== platformDigest) {
-    throw new Error(
-      "materialized meta binary does not match the platform package",
-    );
-  }
-  const fixtureRoot = join(releaseRoot, "smoke-workspace");
-  await mkdir(fixtureRoot, { recursive: true });
-  await writeFile(
-    join(fixtureRoot, "fixture.txt"),
-    "rust-release-smoke-marker\n",
-  );
-  const binary = join(installedMeta, "bin", "zg.exe");
-  const execute = (args, mode) =>
-    run(binary, args, {
-      capture: true,
-      cwd: fixtureRoot,
-      env: {
-        ...process.env,
-        ZVEC_GREP_HOME: join(fixtureRoot, "home"),
-        ZVEC_GREP_MODE: mode,
-      },
-    });
-  const installedVersion = execute(["--version"], "direct").trim();
-  if (installedVersion !== platform.version) {
-    throw new Error(
-      `installed zg version ${installedVersion} did not match ${platform.version}`,
-    );
-  }
-  const query = ["--rg", "-F", "rust-release-smoke-marker", "fixture.txt"];
-  const direct = execute(query, "direct");
-  const server = execute(query, "server");
-  if (!direct.includes("rust-release-smoke-marker") || direct !== server) {
-    throw new Error(
-      `packaged zg search output did not match between direct and server modes: ${JSON.stringify({ direct, server })}`,
-    );
-  }
-  console.log(
-    `release smoke passed: zg ${installedVersion} (${platform.entry.target}), direct/server search`,
-  );
+    fixtureRoot: join(releaseRoot, "smoke-workspace"),
+  });
 }
 
 async function main() {
@@ -372,6 +338,13 @@ async function main() {
     await verifyManifest();
     return;
   }
+  if (command === "verify-publication") {
+    await verifyPublicationInputs(
+      loadReleaseManifest(),
+      join(workspaceDir, "npm", "compliance"),
+    );
+    return;
+  }
   if (command === "smoke-current") {
     await smokeCurrent(options);
     return;
@@ -389,8 +362,33 @@ async function main() {
     await publishRelease({ manifest: loadReleaseManifest(), tarballRoot });
     return;
   }
+  if (command === "promote") {
+    await promoteRelease({ manifest: loadReleaseManifest(), tarballRoot });
+    return;
+  }
+  if (command === "rollback-version") {
+    const baseline = await rollbackVersion(
+      loadReleaseManifest(),
+      cargoPackageVersion(),
+    );
+    if (process.env.GITHUB_OUTPUT)
+      await appendFile(process.env.GITHUB_OUTPUT, `baseline=${baseline}\n`);
+    console.log(baseline);
+    return;
+  }
+  if (command === "smoke-registry") {
+    await smokeRegistryRelease({
+      manifest: loadReleaseManifest(),
+      release: JSON.parse(
+        await readFile(join(tarballRoot, "release.json"), "utf8"),
+      ),
+      baseline: process.env.NPM_ROLLBACK_VERSION,
+      prefixRoot: join(releaseRoot, "registry-smoke"),
+    });
+    return;
+  }
   throw new Error(
-    "usage: npm-release.mjs <verify|pack-platform|pack-meta|pack-current|smoke-current|collect|publish> [--target TARGET] [--binary PATH] [--lib-dir PATH] [--no-build]",
+    "usage: npm-release.mjs <verify|verify-publication|pack-platform|pack-meta|pack-current|smoke-current|collect|publish|promote|rollback-version|smoke-registry> [--target TARGET] [--binary PATH] [--lib-dir PATH] [--no-build]",
   );
 }
 

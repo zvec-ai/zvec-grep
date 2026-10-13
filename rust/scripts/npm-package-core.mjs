@@ -85,6 +85,7 @@ export function run(command, args, options = {}) {
     {
       cwd: options.cwd ?? workspaceDir,
       encoding: "utf8",
+      timeout: options.timeout,
       stdio: options.capture ? "pipe" : "inherit",
       env: options.env ?? process.env,
     },

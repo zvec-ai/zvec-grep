@@ -17,6 +17,8 @@
     "release:smoke": "node scripts/npm-release.mjs smoke-current",
     "release:collect": "node scripts/npm-release.mjs collect",
     "release:publish": "node scripts/npm-release.mjs publish",
+    "release:promote": "node scripts/npm-release.mjs promote",
+    "release:registry-smoke": "node scripts/npm-release.mjs smoke-registry",
     "test": "npm run build && cargo test --workspace && node --test scripts/npm-local.test.mjs npm/meta/install.test.cjs",
     "test:package": "npm run build && node scripts/npm-local.mjs smoke --no-build"
   }
