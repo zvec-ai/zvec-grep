@@ -2044,7 +2044,20 @@ mod tests {
             ..IndexOptions::default()
         };
         engine.index(options.clone()).await.expect("parent index");
-        let manager = WorkspaceRuntimeManager::native(Arc::clone(&engine));
+        // Isolate root routing from native events that can legitimately refresh
+        // the parent manifest's timestamp while the child index is being built.
+        let (_sender, receiver) = mpsc::channel(4);
+        let manager = WorkspaceRuntimeManager::new(
+            Arc::new(super::ZvecGrepIndexExecutor {
+                engine: Arc::clone(&engine),
+            }),
+            Arc::new(ManualWatcherFactory {
+                receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+                watches: Mutex::new(Vec::new()),
+                closes: Arc::new(AtomicUsize::new(0)),
+            }),
+            SchedulerConfig::default(),
+        );
         let result = IndexOperationProvider::search(
             &manager,
             &engine,
