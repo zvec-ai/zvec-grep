@@ -50,6 +50,11 @@ platform builds start. Its ONNX Runtime with CoreML and zvec SDK are built from
 pinned sources, cached, and bundled with the native package. The Intel release
 targets macOS 14 and later.
 
+Windows prepares the prebuilt ONNX Runtime selected by locked `ort-sys` with
+bounded download retries, verifies its SHA-256, and caches the complete archive
+and extracted runtime before compiling. The original static-link configuration
+is preserved.
+
 Explicit publication runs from a `rust-v<version>`-tagged commit on `main` and
 uses npm provenance with trusted publishing or `NPM_TOKEN`. Native packages are
 published first and the meta package last, always under `rust-canary`. Selecting

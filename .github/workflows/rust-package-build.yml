@@ -45,6 +45,10 @@ jobs:
           sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
+      - uses: actions/setup-python@v6
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.12"
       - name: Restore Cargo build state
         uses: actions/cache@v5
         with:
@@ -56,6 +60,18 @@ jobs:
           key: rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
             rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
+      - name: Restore the Windows ONNX Runtime
+        if: runner.os == 'Windows'
+        uses: actions/cache@v5
+        with:
+          path: rust/target/ort-prebuilt/
+          key: rust-ort-windows-v1-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
+      - name: Prepare the verified Windows ONNX Runtime
+        if: runner.os == 'Windows'
+        run: |
+          python scripts/test-prepare-onnxruntime-windows.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/prepare-onnxruntime-windows.py
       - name: Restore the Intel macOS ONNX Runtime
         if: inputs.target == 'darwin-x64'
         id: ort-cache
