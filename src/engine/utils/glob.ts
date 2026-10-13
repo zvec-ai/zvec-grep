@@ -225,7 +225,16 @@ function readGlobCharacterClass(
   pattern: string,
   startIndex: number,
 ): { expression: string; endIndex: number } | undefined {
-  const endIndex = pattern.indexOf("]", startIndex + 1);
+  // Per POSIX glob semantics, a ']' immediately after '[' (or after '[!'
+  // / '[^') is a literal member of the character class, not the closing
+  // bracket.  Start searching for the real closing ']' past that position.
+  const afterOpen = pattern[startIndex + 1];
+  const classBodyStart =
+    afterOpen === "!" || afterOpen === "^"
+      ? startIndex + 2
+      : startIndex + 1;
+  const searchStart = Math.min(classBodyStart + 1, pattern.length);
+  const endIndex = pattern.indexOf("]", searchStart);
   if (endIndex < 0) {
     return undefined;
   }
@@ -239,7 +248,10 @@ function readGlobCharacterClass(
   if (negated) {
     content = content.slice(1);
   }
-  content = content.replaceAll("\\", "\\\\").replaceAll("/", "\\/");
+  content = content
+    .replaceAll("\\", "\\\\")
+    .replaceAll("]", "\\]")
+    .replaceAll("/", "\\/");
 
   return {
     expression: `[${negated ? "^" : ""}${content}]`,
