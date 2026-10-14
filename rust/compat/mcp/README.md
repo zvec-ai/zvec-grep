@@ -39,8 +39,9 @@ retain nullable schemas because null explicitly clears their saved settings.
 Regression tests cover the actual tool catalog, HTTP discovery and calls,
 numeric constraints, optionality, and the distinction between absence and reset.
 
-The legacy provider's unverified freshness is covered separately under
-`mcp-unverified-current-index-freshness` in `allowed-differences.toml`.
+Freshness requires observed file-change evidence and is independent of index
+provenance or background activity. The remaining Node.js difference is covered
+under `mcp-observed-file-change-freshness` in `allowed-differences.toml`.
 
 Fixtures explicitly declare the source range of each item's content; the capture
 script does not infer it from text length. Node.js still uses a line-count heuristic

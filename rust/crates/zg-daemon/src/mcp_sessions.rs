@@ -48,8 +48,12 @@ impl Default for BoundedSessionManager {
 
 impl BoundedSessionManager {
     fn new(capacity: usize, idle: Duration) -> Self {
+        let mut inner = LocalSessionManager::default();
+        // This manager owns request-aware expiry; rmcp's independent timer also
+        // expires sessions with an active request waiting for a response.
+        inner.session_config.keep_alive = None;
         Self {
-            inner: LocalSessionManager::default(),
+            inner,
             activities: Arc::default(),
             admission: tokio::sync::Mutex::new(()),
             capacity,
@@ -223,6 +227,7 @@ impl SessionManager for BoundedSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::transport::{Transport, streamable_http_server::session::local::SessionTransport};
 
     #[tokio::test(start_paused = true)]
     async fn bounds_sessions_and_expires_only_idle_work() {
@@ -250,11 +255,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn resumed_notification_stream_does_not_block_idle_expiry() {
-        use rmcp::transport::Transport;
-
-        let manager = BoundedSessionManager::new(1, Duration::from_secs(60));
+    async fn initialized_session(manager: &BoundedSessionManager) -> (SessionId, SessionTransport) {
         let (id, mut transport) = manager.create_session().await.expect("first session");
         let initialize = serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0",
@@ -288,6 +289,107 @@ mod tests {
                 .expect("worker sends initialization");
         });
         initialized.expect("session initialized");
+        (id, transport)
+    }
+
+    fn tools_list_request() -> ClientJsonRpcMessage {
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+        }))
+        .expect("tools/list request")
+    }
+
+    async fn complete_tools_list(
+        transport: &mut SessionTransport,
+        stream: impl Stream<Item = ServerSseMessage>,
+    ) {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "result": {"tools": []}
+        });
+        transport
+            .send(serde_json::from_value(response.clone()).expect("tools/list response"))
+            .await
+            .expect("session worker sends response");
+        let messages: Vec<_> = stream
+            .filter_map(|event| async move { event.message })
+            .collect()
+            .await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            serde_json::to_value(messages[0].as_ref()).expect("response JSON"),
+            response
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_session_serves_requests_after_rmcp_idle_timeout() {
+        let manager = BoundedSessionManager::default();
+        let (id, mut transport) = initialized_session(&manager).await;
+        let _subscription = manager
+            .create_standalone_stream(&id)
+            .await
+            .expect("notification subscription");
+
+        tokio::time::sleep(Duration::from_mins(29)).await;
+        assert!(manager.has_session(&id).await.expect("session still live"));
+        let stream = manager
+            .create_stream(&id, tools_list_request())
+            .await
+            .expect("same session accepts a request after five minutes");
+        assert_eq!(
+            serde_json::to_value(transport.receive().await.expect("worker receives request"))
+                .expect("received request JSON"),
+            serde_json::to_value(tools_list_request()).expect("expected request JSON")
+        );
+        complete_tools_list(&mut transport, stream).await;
+        manager.close_session(&id).await.expect("close session");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_idle_expiry_closes_inner_session_with_notification_subscription() {
+        let manager = BoundedSessionManager::default();
+        let (id, mut transport) = initialized_session(&manager).await;
+        let subscription = manager
+            .create_standalone_stream(&id)
+            .await
+            .expect("notification subscription");
+
+        tokio::time::sleep(Duration::from_mins(30)).await;
+        assert!(!manager.has_session(&id).await.expect("idle expiry"));
+        assert!(!manager.inner.has_session(&id).await.expect("inner removed"));
+        assert!(transport.receive().await.is_none());
+        assert_eq!(subscription.count().await, 0);
+        assert!(matches!(
+            manager.create_stream(&id, tools_list_request()).await,
+            Err(SessionError::Missing)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn active_request_survives_idle_timeout_and_gets_fresh_idle_period() {
+        let manager = BoundedSessionManager::default();
+        let (id, mut transport) = initialized_session(&manager).await;
+        let stream = manager
+            .create_stream(&id, tools_list_request())
+            .await
+            .expect("active request");
+        transport.receive().await.expect("worker receives request");
+
+        tokio::time::sleep(Duration::from_mins(31)).await;
+        assert!(manager.has_session(&id).await.expect("active survives"));
+        complete_tools_list(&mut transport, stream).await;
+
+        tokio::time::sleep(Duration::from_mins(29)).await;
+        assert!(manager.has_session(&id).await.expect("fresh idle period"));
+        tokio::time::sleep(Duration::from_mins(1)).await;
+        assert!(!manager.has_session(&id).await.expect("idle expires"));
+        assert!(transport.receive().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resumed_notification_stream_does_not_block_idle_expiry() {
+        let manager = BoundedSessionManager::new(1, Duration::from_secs(60));
+        let (id, _transport) = initialized_session(&manager).await;
 
         let _stream = manager
             .resume(&id, "0".to_owned())

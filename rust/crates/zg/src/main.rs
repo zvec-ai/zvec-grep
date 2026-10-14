@@ -324,6 +324,7 @@ async fn execute_context(
             output,
             io::stdout().is_terminal(),
         )?;
+        zg_cli::write_context_status(io::stderr().lock(), &result)?;
         if output.debug {
             eprintln!(
                 "Diagnostics: {}",
@@ -536,7 +537,21 @@ async fn execute_direct_context(
     // A short-lived direct process cannot retain a background refresh job.
     zg_cli::finalize_refresh(&mut request, false);
     let engine = ZvecGrep::new();
-    let result = engine.context(request).await?;
+    let inspect_status = !request.rg
+        && request.refresh == Some(zg_engine::api::context::options::RefreshPolicy::Off);
+    let mut result = engine.context(request).await?;
+    if inspect_status {
+        let info = engine
+            .info(zg_engine::api::info::InfoOptions {
+                root: Some(result.root.clone()),
+                include_status: true,
+            })
+            .await?;
+        result.indexing = info
+            .status
+            .as_ref()
+            .and_then(zg_engine::api::context::result::ContextIndexingStatus::from_stats);
+    }
     engine.close();
     zg_cli::write_context_with_options(
         io::stdout().lock(),
@@ -544,6 +559,7 @@ async fn execute_direct_context(
         output,
         io::stdout().is_terminal(),
     )?;
+    zg_cli::write_context_status(io::stderr().lock(), &result)?;
     if output.debug {
         eprintln!(
             "Diagnostics: {}",

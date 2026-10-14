@@ -175,6 +175,7 @@ fn context_from_lexical(
     ContextResult {
         freshness: None,
         background_refresh: None,
+        indexing: None,
         query,
         root: reply.root,
         source: ContextSource::Rg,

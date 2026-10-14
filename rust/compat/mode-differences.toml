@@ -16,6 +16,13 @@ server = "background"
 reason = "only a resident process can safely own a background refresh"
 
 [[difference]]
+id = "indexed-query-change-observation"
+operation = "query"
+direct = "compare returned sources with indexed snapshots"
+server = "also consider observed pending workspace changes and drift found by inspections"
+reason = "only the resident server owns watcher evidence; neither mode scans the entire workspace solely to label search freshness"
+
+[[difference]]
 id = "resident-resources"
 operation = "lifecycle"
 direct = "resources live for one command"

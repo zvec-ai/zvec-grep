@@ -869,12 +869,12 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "{response}"
     );
     assert!(response.contains("\"isError\":false"), "{response}");
-    assert!(response.contains("freshness: possibly_stale"), "{response}");
+    assert!(response.contains("freshness: fresh"), "{response}");
     assert!(
-        response.contains("results: served_from_current_index"),
+        !response.contains("results: served_from_current_index"),
         "{response}"
     );
-    assert!(response.contains("background_refresh: off"), "{response}");
+    assert!(!response.contains("background_refresh:"), "{response}");
 
     std::fs::write(
         workspace.path().join("fresh.txt"),
@@ -918,22 +918,31 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &background_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
-    assert!(response.contains("freshness: possibly_stale"), "{response}");
-    assert!(
-        response.contains("results: served_from_current_index"),
-        "{response}"
-    );
     assert!(
         !response.contains("freshness: served_from_current_index"),
         "{response}"
     );
     // A native watcher can deliver delayed or duplicate notifications after the
     // preceding fresh query. Controlled runtime tests cover the quiet idle case.
-    assert!(
-        response.contains("background_refresh: idle")
-            || response.contains("background_refresh: scheduled"),
-        "{response}"
-    );
+    let stale = response.contains("freshness: possibly_stale");
+    let scheduled = response.contains("background_refresh: scheduled");
+    assert!(stale || response.contains("freshness: fresh"), "{response}");
+    if stale || scheduled {
+        assert!(
+            response.contains("results: served_from_current_index"),
+            "{response}"
+        );
+        assert!(
+            response.contains("background_refresh: idle") || scheduled,
+            "{response}"
+        );
+    } else {
+        assert!(
+            !response.contains("results: served_from_current_index"),
+            "{response}"
+        );
+        assert!(!response.contains("background_refresh:"), "{response}");
+    }
     assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;

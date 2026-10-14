@@ -31,6 +31,9 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "1"
+  CARGO_PROFILE_TEST_DEBUG: "1"
   RUST_BACKTRACE: 1
 
 jobs:
@@ -56,17 +59,12 @@ jobs:
           persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
-      - name: Restore Cargo cache
-        uses: actions/cache@v5
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-
+          prefix-key: rust-ci-v2
+          workspaces: rust -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check packages independently
@@ -83,7 +81,7 @@ jobs:
   test:
     name: rust test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
     permissions:
       contents: read
     strategy:
@@ -96,18 +94,14 @@ jobs:
           persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
-      - name: Restore Cargo cache
-        uses: actions/cache@v5
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-cargo-v1-
+          prefix-key: rust-ci-v2
+          workspaces: rust -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Run workspace tests
         run: cargo test --locked --workspace --all-targets
       - name: Smoke test the CLI
-        run: cargo run --locked -p zg -- --rg "zvec-grep Rust rewrite" README.md
+        shell: bash
+        run: ./target/debug/zg${{ runner.os == 'Windows' && '.exe' || '' }} --rg "zvec-grep Rust rewrite" README.md

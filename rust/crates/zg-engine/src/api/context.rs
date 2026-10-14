@@ -405,6 +405,9 @@ pub mod result {
         pub freshness: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub background_refresh: Option<String>,
+        /// Observed indexing activity for CLI status, independent of file-change freshness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub indexing: Option<ContextIndexingStatus>,
         pub root: PathBuf,
         pub source: ContextSource,
         pub coverage: ContextCoverage,
@@ -412,6 +415,40 @@ pub mod result {
         pub items: Vec<ContextItem>,
         pub group_results: Vec<ContextGroupResult>,
         pub diagnostics: ContextDiagnostics,
+    }
+
+    impl ContextResult {
+        /// Returns whether any retrieved item is marked as possibly stale.
+        #[must_use]
+        pub fn has_stale_items(&self) -> bool {
+            self.items
+                .iter()
+                .any(|item| item.status == ContextItemStatus::PossiblyStale)
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct ContextIndexingStatus {
+        pub state: String,
+        pub completed: Option<usize>,
+        pub total: Option<usize>,
+    }
+
+    impl ContextIndexingStatus {
+        /// Returns a status only when an inspection found unfinished or changed files.
+        #[must_use]
+        pub fn from_stats(stats: &crate::api::info::result::IndexStats) -> Option<Self> {
+            (stats.files_added > 0
+                || stats.files_modified > 0
+                || stats.files_deleted > 0
+                || stats.files_pending > 0
+                || stats.files_failed > 0)
+                .then(|| Self {
+                    state: "idle".to_owned(),
+                    completed: Some(stats.files_unchanged),
+                    total: Some(stats.files_scanned),
+                })
+        }
     }
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

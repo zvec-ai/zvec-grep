@@ -52,7 +52,8 @@ pub use install::{
 };
 pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
 pub use render::{
-    HelpTopicError, help_text, print_help, write_context_result, write_context_with_options,
+    HelpTopicError, help_text, print_help, write_context_result, write_context_status,
+    write_context_with_options,
 };
 
 #[derive(Debug, Parser)]

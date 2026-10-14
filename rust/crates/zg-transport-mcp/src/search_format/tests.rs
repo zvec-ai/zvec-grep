@@ -139,11 +139,19 @@ fn captured_node_search_presentation() {
 fn freshness_never_uses_provenance_as_a_status() {
     let mut result: ContextResult =
         serde_json::from_value(fixtures().remove(0).result).expect("fixture");
-    for refresh in ["off", "scheduled", "failed"] {
+    for refresh in ["off", "idle", "scheduled", "failed"] {
         result.freshness = Some("served_from_current_index".to_owned());
         result.background_refresh = Some(refresh.to_owned());
         let text = format_search_result(&result, SearchPreview::Short);
-        assert!(text.starts_with(&format!("freshness: possibly_stale\nresults: served_from_current_index\nbackground_refresh: {refresh}\n")));
+        assert!(
+            text.starts_with("freshness: fresh\nresults: served_from_current_index\n"),
+            "{refresh}: {text}"
+        );
+        if matches!(refresh, "scheduled" | "failed") {
+            assert!(text.contains(&format!("background_refresh: {refresh}\n")));
+        } else {
+            assert!(!text.contains("background_refresh:"));
+        }
         assert!(!text.contains("freshness: served_from_current_index"));
     }
     result.freshness = Some("fresh".to_owned());
@@ -151,6 +159,11 @@ fn freshness_never_uses_provenance_as_a_status() {
     let text = format_search_result(&result, SearchPreview::Short);
     assert!(text.starts_with("freshness: fresh\n#1"));
     assert!(!text.contains("background_refresh:"));
+    result.freshness = Some("possibly_stale".to_owned());
+    assert!(
+        format_search_result(&result, SearchPreview::Short)
+            .starts_with("freshness: possibly_stale\n")
+    );
     result.freshness = None;
     result.background_refresh = None;
     result.items[0].status = zg_engine::api::context::result::ContextItemStatus::PossiblyStale;
