@@ -555,10 +555,10 @@ Environment:
 See zg --help environment for daemon startup scope.";
 
 const INSTALL_HELP: &str = r"Usage:
-  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|pi|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
 
 Options:
-  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, grok, auto, or all; repeatable
+  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, grok, pi, auto, or all; repeatable
   --mcp-transport <stdio|http>      MCP connection mode (default: stdio)
   --mcp-toolset <agent|full>        Daemon MCP toolset (default: agent)
   --mcp-tool-timeout <seconds>      MCP tool timeout where supported (default: 600)
@@ -571,12 +571,20 @@ The copilot target configures GitHub Copilot CLI and Agent Host. The vscode
 target configures detected VS Code profiles and shared Copilot instructions.
 The grok target configures Grok Build's user-level config.toml, global
 rules file, and tool pre-approval.
+The pi target configures built-in MCP in ~/.pi/agent/mcp.json and the active
+global context file. PI_CODING_AGENT_DIR overrides this directory; use native
+filesystem paths (file:// and Windows shell drive paths are unsupported).
+New servers use direct exposure and a timeout in seconds. Reinstall preserves
+user exposure/enabled settings and existing HTTP authentication when no token
+option is supplied. Use /reload or a new session; replacement MCP extensions
+must be disabled separately. Remote Embedding may require the user to run
+zg --auth grant in their terminal before retrying.
 
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
 Codex, Claude Code, Qwen Code, Qoder CLI, OpenCode, Copilot, VS Code, and
-Grok Build receive managed guidance. Qoder IDE has no supported global Rules
+Grok Build and Pi receive managed guidance. Qoder IDE has no supported global Rules
 file, so only its MCP configuration is managed.
 Codex and Claude Code receive local tool pre-approval. Grok Build receives
 pre-approval through its permission rules unless the configuration already
@@ -586,11 +594,12 @@ use. Restart the agent or open a new session after installation. This does not
 install the npm package.";
 
 const UNINSTALL_HELP: &str = r"Usage:
-  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|all|auto] [--yes]
+  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|pi|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
 guidance. The qoder target removes the managed Qoder CLI and IDE integration
-together.";
+together. The pi target removes its managed server and guidance blocks from
+the effective agent directory; unrelated configuration and context are kept.";
 
 const HELP_HELP: &str = r"Usage:
   zg --help [topic]
@@ -761,6 +770,7 @@ Agent integration paths:
   CODEX_HOME            Codex configuration directory used by zg --install
   CLAUDE_CONFIG_DIR     Claude configuration directory used by zg --install
   GROK_HOME             Grok Build configuration directory used by zg --install
+  PI_CODING_AGENT_DIR   Pi agent directory used by zg --install/--uninstall
   QWEN_HOME             Qwen Code configuration directory used by zg --install
   QODER_CONFIG_DIR      Qoder CLI configuration directory used by zg --install
   QODER_IDE_MCP_PATH    Full Qoder IDE SharedClientCache/mcp.json path used by zg --install

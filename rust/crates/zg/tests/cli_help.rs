@@ -62,6 +62,18 @@ fn every_documented_help_topic_is_available() {
 }
 
 #[test]
+fn integration_help_documents_pi_and_its_configuration_directory() {
+    for topic in ["install", "uninstall"] {
+        assert!(stdout(&["--help", topic]).contains("|pi|"));
+    }
+    let install = stdout(&["--help", "install"]);
+    assert!(install.contains("PI_CODING_AGENT_DIR"));
+    assert!(install.contains("timeout in seconds"));
+    assert!(install.contains("zg --auth grant"));
+    assert!(stdout(&["--help", "environment"]).contains("PI_CODING_AGENT_DIR"));
+}
+
+#[test]
 fn search_help_describes_terminal_and_compact_defaults() {
     let help = stdout(&["--help", "search"]);
     assert!(help.starts_with("Usage:\n  zg <query> [options]\n"));

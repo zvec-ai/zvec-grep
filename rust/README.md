@@ -66,6 +66,18 @@ every detected Stable and Insiders user profile, using `VSCODE_USER_DIR`,
 Copilot's home because the shared instructions are read by both clients.
 Uninstall preserves that shared server until both integrations are removed.
 
+`zg --install --target pi` configures Pi's built-in user-level MCP in
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}/mcp.json` and adds guidance to the active
+global context file, including `AGENTS.override.md` when present. Both stdio
+and HTTP use the shared daemon; new entries have direct exposure and a timeout
+in seconds. Reinstall preserves Pi UI choices and existing HTTP authentication
+unless an explicit token environment option replaces it. Uninstall uses a
+stable ownership marker, so changing the daemon URL does not leave stale
+managed entries. Use `/reload` or a new session. Native filesystem paths are
+required for the directory override; file URIs and Windows shell drive paths
+are rejected. Pi's built-in MCP currently needs user-managed `zg --auth grant`
+authorization for Remote Embedding; see the [integration guide](../docs/01-agents.md).
+
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
 typed `context`, `index`, `info`, and `drop_index` methods. It

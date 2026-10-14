@@ -31,6 +31,15 @@ const QODER_DESCRIPTION: &str = "Managed by zg install";
 const QODER_OWNERSHIP_PREFIX: &str = "Managed by zg install; managed permissions=";
 const VSCODE_INSTRUCTIONS_FILE: &str = "zvec-grep.instructions.md";
 const VSCODE_FRONTMATTER: &str = "---\napplyTo: '**'\n---\n";
+const PI_DESCRIPTION: &str =
+    "Workspace semantic search and exact text lookup. Managed by zg install.";
+const PI_CONTEXT_FILES: [&str; 5] = [
+    "AGENTS.override.md",
+    "AGENTS.md",
+    "AGENTS.MD",
+    "CLAUDE.md",
+    "CLAUDE.MD",
+];
 
 #[derive(Debug, Error)]
 pub enum InstallError {
@@ -62,10 +71,11 @@ enum Agent {
     Copilot,
     VsCode,
     Grok,
+    Pi,
 }
 
 impl Agent {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
@@ -75,6 +85,7 @@ impl Agent {
         Self::Copilot,
         Self::VsCode,
         Self::Grok,
+        Self::Pi,
     ];
 
     const fn label(self) -> &'static str {
@@ -88,6 +99,7 @@ impl Agent {
             Self::Copilot => "GitHub Copilot",
             Self::VsCode => "VS Code",
             Self::Grok => "Grok Build",
+            Self::Pi => "Pi",
         }
     }
 
@@ -102,6 +114,7 @@ impl Agent {
             Self::Copilot => "copilot",
             Self::VsCode => "vscode",
             Self::Grok => "grok",
+            Self::Pi => "pi",
         }
     }
 }
@@ -441,6 +454,9 @@ fn agents_from_tokens(
             "9" | "grok" | "grok-build" | "grok-cli" => {
                 selected.insert(Agent::Grok);
             }
+            "10" | "pi" => {
+                selected.insert(Agent::Pi);
+            }
             _ => {
                 return Err(InstallError::Message(format!(
                     "Unknown install target: {token}"
@@ -476,6 +492,9 @@ fn detect_agents() -> BTreeSet<Agent> {
                     || vscode_user_directories().iter().any(|path| path.exists())
             }
             Agent::Grok => executable_available("grok") || grok_home().exists(),
+            Agent::Pi => {
+                executable_available("pi") || resolve_pi_home().is_ok_and(|home| home.is_dir())
+            }
         })
         .collect()
 }
@@ -598,6 +617,7 @@ fn install_agent(agent: Agent, options: &AgentOptions) -> Result<AgentInstallRes
         }
         Agent::VsCode => return install_vscode(options),
         Agent::Grok => return install_grok(options),
+        Agent::Pi => return install_pi(options),
     }?;
     Ok(AgentInstallResult::default())
 }
@@ -613,7 +633,210 @@ fn uninstall_agent(agent: Agent) -> Result<(), InstallError> {
         Agent::Copilot => uninstall_copilot(),
         Agent::VsCode => uninstall_vscode(),
         Agent::Grok => uninstall_grok(),
+        Agent::Pi => uninstall_pi(),
     }
+}
+
+fn resolve_pi_home() -> Result<PathBuf, InstallError> {
+    let Some(value) = env::var_os("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()) else {
+        return Ok(home_dir().join(".pi").join("agent"));
+    };
+    let Some(value) = value.to_str() else {
+        return Ok(absolute_path(PathBuf::from(value)));
+    };
+    if value.to_ascii_lowercase().starts_with("file://") {
+        return Err(InstallError::Message(
+            "PI_CODING_AGENT_DIR must use a native filesystem path, not a file:// URI".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    if is_windows_shell_path(value) {
+        return Err(InstallError::Message(
+            "PI_CODING_AGENT_DIR must use a native Windows path, not a shell drive path".to_owned(),
+        ));
+    }
+    Ok(expand_home(value))
+}
+
+#[cfg(any(windows, test))]
+fn is_windows_shell_path(value: &str) -> bool {
+    let drive = value
+        .strip_prefix("/mnt/")
+        .or_else(|| value.strip_prefix("/cygdrive/"))
+        .or_else(|| value.strip_prefix('/'));
+    drive.is_some_and(|drive| {
+        let bytes = drive.as_bytes();
+        bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && (bytes.len() == 1 || bytes.get(1) == Some(&b'/'))
+    })
+}
+
+fn read_pi_file(path: &Path) -> Result<String, InstallError> {
+    read_if_exists(path)
+        .map_err(|error| InstallError::Message(format!("Cannot read {}: {error}", path.display())))
+}
+
+fn pi_context_files(home: &Path) -> Result<Vec<(PathBuf, String)>, InstallError> {
+    let mut files = Vec::new();
+    for name in PI_CONTEXT_FILES {
+        let path = home.join(name);
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                files.push((path.clone(), read_pi_file(&path)?));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(InstallError::Message(format!(
+                    "Cannot inspect {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn is_managed_pi_server(server: &Value) -> bool {
+    server.is_object() && server.get("description").and_then(Value::as_str) == Some(PI_DESCRIPTION)
+}
+
+fn pi_server(
+    existing: Option<&Value>,
+    options: &AgentOptions,
+    path: &Path,
+) -> Result<Value, InstallError> {
+    let mut server = existing
+        .filter(|server| is_managed_pi_server(server))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    match options.transport {
+        McpInstallTransport::Stdio => {
+            for key in ["url", "headers", "oauth", "auth"] {
+                server.remove(key);
+            }
+            server.insert("type".to_owned(), json!("stdio"));
+            server.insert("command".to_owned(), json!("zg"));
+            server.insert("args".to_owned(), json!(stdio_args(options.toolset)));
+        }
+        McpInstallTransport::Http => {
+            let url = resolve_server_url()?;
+            for key in ["command", "args", "env", "cwd"] {
+                server.remove(key);
+            }
+            server.insert("type".to_owned(), json!("http"));
+            server.insert("url".to_owned(), json!(url));
+            if let Some(token) = &options.token_env {
+                let headers = object_field_mut(&mut server, "headers", false, path)?;
+                headers.insert(
+                    "Authorization".to_owned(),
+                    json!(format!("Bearer ${{{token}}}")),
+                );
+                // Explicit bearer authentication takes precedence over saved login providers.
+                server.remove("oauth");
+                server.remove("auth");
+            }
+        }
+    }
+    server.insert("timeout".to_owned(), json!(options.timeout_seconds));
+    server
+        .entry("exposure".to_owned())
+        .or_insert_with(|| json!("direct"));
+    server.insert("description".to_owned(), json!(PI_DESCRIPTION));
+    Ok(Value::Object(server))
+}
+
+fn install_pi(options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
+    let home = resolve_pi_home()?;
+    let config = home.join("mcp.json");
+    let mut root = read_json_object(&config).map_err(|error| {
+        InstallError::Message(format!("Cannot read {}: {error}", config.display()))
+    })?;
+    let servers = object_field_mut(&mut root, "mcpServers", false, &config)?;
+    if servers.contains_key("zvec-grep") {
+        return Err(InstallError::Message(format!(
+            "Conflicting zvec-grep MCP server found in {}; remove or rename it before installing zvec_grep for Pi",
+            config.display()
+        )));
+    }
+    let existing = servers.get("zvec_grep");
+    if existing.is_some_and(|server| !is_managed_pi_server(server)) && !options.force {
+        return Err(InstallError::Message(format!(
+            "Existing unmanaged zvec_grep MCP server found in {}. Re-run with --force to replace it for Pi.",
+            config.display()
+        )));
+    }
+    let server = pi_server(existing, options, &config)?;
+    let contexts = pi_context_files(&home)?;
+    let guidance = contexts
+        .first()
+        .map_or_else(|| home.join("AGENTS.md"), |(path, _)| path.clone());
+    // Validate the default destination too when no readable context file exists.
+    read_pi_file(&guidance)?;
+    resolve_atomic_target(&config, &mut HashSet::new())?;
+    resolve_atomic_target(&guidance, &mut HashSet::new())?;
+    servers.insert("zvec_grep".to_owned(), server);
+    write_json_object(&config, &root)?;
+    write_marked_file(
+        &guidance,
+        GUIDANCE_START,
+        GUIDANCE_END,
+        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, false, pi_host_notes()),
+        true,
+        None,
+        None,
+    )?;
+    Ok(AgentInstallResult {
+        config_path: Some(config),
+        config_note: Some(format!(
+            "Guidance: {}. Use built-in MCP and /reload or a new session. Remote Embedding may require manual `zg --auth grant` authorization.",
+            guidance.display()
+        )),
+    })
+}
+
+fn uninstall_pi() -> Result<(), InstallError> {
+    let home = resolve_pi_home()?;
+    let config = home.join("mcp.json");
+    let source = read_pi_file(&config)?;
+    let mut root = if source.trim().is_empty() {
+        Map::new()
+    } else {
+        parse_json_object(&config, &source)?
+    };
+    if root
+        .get("mcpServers")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(InstallError::Message(format!(
+            "Expected mcpServers in {} to be a JSON object",
+            config.display()
+        )));
+    }
+    let contexts = pi_context_files(&home)?;
+    if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut)
+        && servers.get("zvec_grep").is_some_and(is_managed_pi_server)
+    {
+        servers.remove("zvec_grep");
+        if servers.is_empty() {
+            root.remove("mcpServers");
+        }
+        write_json_object(&config, &root)?;
+    }
+    for (path, source) in contexts {
+        if source
+            .lines()
+            .any(|line| matches!(line.trim(), GUIDANCE_START | GUIDANCE_END))
+        {
+            remove_marked_file(&path, GUIDANCE_START, GUIDANCE_END)?;
+        }
+    }
+    Ok(())
+}
+
+fn pi_host_notes() -> &'static str {
+    "\n### Pi host notes\n- MCP tools use their complete `mcp__zvec_grep__*` names. With direct exposure, call them directly; with codemode or deferred exposure, discover them using the host's available codemode or tool-search tools.\n- The default agent toolset offers search only. When the managed rg tool is unavailable, use the host's available shell tool for exact lookup.\n- Built-in MCP currently lacks form elicitation and the newer authorization continuation protocol. If remote embedding reports that form elicitation is unsupported, explain the workspace, provider/endpoint and transmitted data, and ask the user to run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace` in their terminal. Use the same root as the failed call; retry the original call once after the user confirms the grant. Do not grant silently, do not substitute `--allow-remote`, and do not request credentials to resolve a data-authorization error.\n- If the user explicitly chooses local FTS, retry search once with the original text in `fts`, omit `query`, `queries`, and `vector`, set `autoUpdate` to `false` and `freshness` to `eventual`, and preserve root, filters and limits. If the user cancels or a decision is unavailable, stop without granting access.\n"
 }
 
 fn install_codex(options: &AgentOptions) -> Result<(), InstallError> {
@@ -3063,6 +3286,38 @@ mod tests {
                 .expect("targets"),
             vec![Agent::Copilot, Agent::VsCode]
         );
+    }
+
+    #[test]
+    fn pi_targets_preserve_existing_numbers_and_participate_in_selection() {
+        let detected = BTreeSet::from([Agent::Pi]);
+        assert_eq!(
+            agents_from_tokens(&["PI,10,9,1".to_owned()], &detected).expect("targets"),
+            vec![Agent::Claude, Agent::Grok, Agent::Pi]
+        );
+        assert_eq!(
+            agents_from_tokens(&["auto".to_owned()], &detected).expect("auto"),
+            vec![Agent::Pi]
+        );
+        assert_eq!(
+            agents_from_tokens(&["all".to_owned()], &detected).expect("all"),
+            Agent::ALL
+        );
+    }
+
+    #[test]
+    fn windows_shell_paths_are_distinguished_from_native_paths() {
+        for value in ["/c", "/C/project", "/mnt/c/project", "/cygdrive/d/project"] {
+            assert!(is_windows_shell_path(value), "{value}");
+        }
+        for value in [
+            "C:\\project",
+            "agent directory",
+            "/config/agent",
+            "/mnt/cache",
+        ] {
+            assert!(!is_windows_shell_path(value), "{value}");
+        }
     }
 
     #[test]

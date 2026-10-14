@@ -23,11 +23,12 @@ managed-rg route.
 | GitHub Copilot | `copilot` | `~/.copilot/mcp-config.json` and `~/.copilot/copilot-instructions.md` |
 | VS Code | `vscode` | the `mcp.json` of every detected VS Code profile, `~/.copilot/mcp-config.json`, and `~/.copilot/instructions/zvec-grep.instructions.md` |
 | Grok Build | `grok` | `~/.grok/config.toml` and `~/.grok/rules/zvec-grep.md` |
+| Pi (Rust distribution) | `pi` | `~/.pi/agent/mcp.json` and the active global context file |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
 `QODER_IDE_MCP_PATH`, `QODER_IDE_EXECUTABLE`, `OPENCODE_CONFIG`,
-`CURSOR_CONFIG_DIR`, `COPILOT_HOME`, `VSCODE_PORTABLE`, and `VSCODE_APPDATA`.
+`CURSOR_CONFIG_DIR`, `COPILOT_HOME`, `PI_CODING_AGENT_DIR`, `VSCODE_PORTABLE`, and `VSCODE_APPDATA`.
 `VSCODE_USER_DIR` overrides the complete VS Code `User` profile directory, for
 a non-default profile, VS Code Insiders, or a VS Code derivative.
 
@@ -64,6 +65,7 @@ zg --install --target qoder --yes
 zg --install --target copilot --yes
 zg --install --target vscode --yes
 zg --install --target grok --yes
+zg --install --target pi --yes
 zg --install --target all --yes
 ```
 
@@ -228,6 +230,54 @@ an existing `claude` or `cursor` install may already expose the zg server
 there; the `grok` target replaces that compat-sourced entry with a native one
 and adds the guidance and pre-approval those sources cannot provide.
 
+For Pi, the Rust installer configures its built-in MCP support in
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}/mcp.json`. Pi introduced native MCP in
+0.99.0; replacement extensions such as `pi-mcp-adapter` can take over `/mcp`
+and prevent a session from loading this configuration. Enable built-in MCP
+and run `/reload` or start a new session after installation or removal. The
+TypeScript installer does not support the `pi` target.
+
+Pi accepts stdio and streamable HTTP. New entries use `exposure: "direct"`
+and `--mcp-tool-timeout` in seconds (default 600). The default `agent` toolset
+provides `mcp__zvec_grep__zvec_grep_search`; `full` also provides managed rg and
+management tools. Stdio and HTTP use the same shared daemon. Pi's `direct`
+exposure controls tool discovery and is separate from zg's CLI execution mode.
+
+Reinstall preserves existing `enabled`, `exposure`, `toolExposure`, and other
+non-connection settings. Stdio reinstall retains user `env` and `cwd`, while
+switching transports removes fields belonging to the previous transport.
+HTTP reinstall preserves headers; an explicit `--mcp-token-env` replaces the
+Authorization value and removes conflicting OAuth/provider login settings.
+Omitting this option retains existing HTTP authentication. Edit `mcp.json`
+to remove authentication when needed. Only entries with the installer's stable
+description are managed; an unmarked `zvec_grep` needs `--force` before it is
+replaced. A `zvec-grep` alias must be removed or renamed before installation
+because Pi treats that name as equivalent to `zvec_grep`.
+
+Global guidance uses the first existing readable context file in Pi's order:
+`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`.
+The installer creates `AGENTS.md` only when none exists, preserving user
+guidance and its priority. Uninstall scans these candidates and removes only
+the managed blocks. Directory overrides support native paths, relative paths,
+and `~`; nonempty values are not trimmed. `file://` URIs and Windows shell
+drive forms such as `/c/` are rejected; use a native filesystem path instead.
+Project `.pi/mcp.json` overrides remain under user control.
+
+Pi's built-in MCP currently does not support the Remote Embedding authorization
+form or zg's newer authorization continuation. If an unapproved remote search
+fails, the managed guidance asks the user to run the following command in their
+terminal, then retries the original call once after confirmation:
+
+```bash
+zg --auth grant "/absolute/workspace" --capability embedding --scope workspace
+```
+
+Alternatively, an explicit local-FTS choice retries with `fts`, omits
+`query/queries/vector`, and sets `autoUpdate: false` and `freshness: "eventual"`.
+Installation does not grant Remote Embedding authorization. Check connection
+with `pi mcp list` in an isolated configuration when appropriate; that command
+connects every enabled server, and does not prove a session uses built-in MCP.
+
 Restart the selected agent, or open a new session, after installation.
 
 ## How the agent searches
@@ -311,6 +361,7 @@ zg --uninstall --target qwen --yes
 zg --uninstall --target qoder --yes
 zg --uninstall --target copilot --yes
 zg --uninstall --target vscode --yes
+zg --uninstall --target pi --yes
 zg --uninstall --target all --yes
 ```
 
