@@ -81,8 +81,10 @@ struct WorkspaceRuntime {
 struct CachedIndexStatus {
     epoch: u64,
     snapshot: Option<IndexStatusSnapshot>,
-    /// Running jobs may use these counts after the public status is invalidated.
+    /// Full refreshes may use these counts until a mutation or completion makes them obsolete.
     completion_baseline: Option<IndexStatusSnapshot>,
+    /// Invalidating a snapshot does not repair the unfinished files it observed.
+    needs_repair: bool,
     job: Option<(uuid::Uuid, JobState)>,
 }
 
@@ -116,6 +118,11 @@ impl CachedIndexStatus {
             )
             .unwrap_or(u64::MAX),
         };
+        self.needs_repair = matches!(
+            snapshot.status,
+            zg_engine::api::info::result::IndexStatus::Stale
+                | zg_engine::api::info::result::IndexStatus::Failed
+        );
         self.completion_baseline = Some(snapshot.clone());
         self.snapshot = Some(snapshot);
         true
@@ -737,10 +744,13 @@ impl WorkspaceRuntimeManager {
             job.reason == JobReason::Manual
                 && matches!(job.state, JobState::Queued | JobState::Running)
         });
+        let needs_repair = lock(&self.inner.runtimes)
+            .get(&reply.root)
+            .is_some_and(|runtime| lock(&runtime.index_status).needs_repair);
         reply.indexing = search_indexing_status(
             reply,
             IndexOperationProvider::runtime_snapshot(self, &reply.root).as_ref(),
-            manual_update,
+            manual_update || needs_repair,
         );
     }
 
@@ -1121,7 +1131,7 @@ fn set_search_freshness(
 fn search_indexing_status(
     reply: &ContextResult,
     runtime: Option<&IndexRuntimeSnapshot>,
-    manual_update: bool,
+    index_not_ready: bool,
 ) -> Option<zg_engine::api::context::result::ContextIndexingStatus> {
     use zg_engine::api::context::result::ContextIndexingStatus;
 
@@ -1133,9 +1143,7 @@ fn search_indexing_status(
                 .or(runtime.completion_baseline.as_ref())
         })
         .and_then(|snapshot| snapshot.stats.as_ref());
-    let not_ready = stats.and_then(ContextIndexingStatus::from_stats);
-    if reply.freshness.as_deref() != Some("possibly_stale") && not_ready.is_none() && !manual_update
-    {
+    if reply.freshness.as_deref() != Some("possibly_stale") && !index_not_ready {
         return None;
     }
     let refresh_state = runtime.and_then(|runtime| runtime.job_state).map_or_else(
@@ -1258,7 +1266,11 @@ async fn watch_loop(
         let Some(activity) = RuntimeActivity::begin(&runtime, false) else {
             break;
         };
-        runtime.invalidate_status();
+        {
+            let mut cache = lock(&runtime.index_status);
+            cache.invalidate();
+            cache.completion_baseline = None;
+        }
         let revision = runtime.dirty_revision.fetch_add(1, Ordering::AcqRel) + 1;
         if batch.changes.iter().any(|change| {
             matches!(

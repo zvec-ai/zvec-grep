@@ -615,6 +615,220 @@ impl IndexExecutor for PartiallyFailingExecutor {
     }
 }
 
+struct ResultExecutor {
+    result: Mutex<IndexResult>,
+}
+
+#[async_trait]
+impl IndexExecutor for ResultExecutor {
+    async fn index(&self, _options: IndexOptions) -> Result<IndexResult, EngineError> {
+        Ok(self.result.lock().expect("index result").clone())
+    }
+}
+
+#[tokio::test]
+async fn failed_manual_index_changes_remain_stale_until_full_repair() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let executor = Arc::new(ResultExecutor {
+        result: Mutex::new(IndexResult {
+            files_added: 1,
+            files_failed: 1,
+            ..Default::default()
+        }),
+    });
+    let (manager, _sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    manager
+        .submit_index(options.clone(), true)
+        .await
+        .expect("manual index partially fails before watcher activation");
+    let failed = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("search after partial failure");
+    assert!(failed.items.is_empty());
+    assert_eq!(failed.freshness.as_deref(), Some("possibly_stale"));
+
+    *executor.result.lock().expect("index result") = IndexResult {
+        files_pending: 1,
+        files_failed: 1,
+        ..Default::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect_err("retry still fails without rediscovering additions");
+    let retried = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("search after retry");
+    assert_eq!(retried.freshness.as_deref(), Some("possibly_stale"));
+
+    *executor.result.lock().expect("index result") = IndexResult::default();
+    manager
+        .refresh_index(options, true)
+        .await
+        .expect("successful full repair");
+    let repaired = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("search after repair");
+    assert_eq!(repaired.freshness.as_deref(), Some("fresh"));
+    assert!(repaired.indexing.is_none());
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn failed_health_repairs_keep_cli_warnings_until_full_repair() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let executor = Arc::new(RecordingExecutor::default());
+    let (manager, sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial reconciliation");
+    let runtime = manager.runtime(root.clone(), &options).expect("runtime");
+    let mut info = inspected_info();
+    info.status = Some(IndexStats {
+        files_scanned: 10,
+        files_unchanged: 9,
+        files_pending: 1,
+        files_failed: 1,
+        ..Default::default()
+    });
+    let epoch = super::super::lock(&runtime.index_status).invalidate();
+    let job = manager.job_for_root(&root).map(|job| (job.id, job.state));
+    assert!(runtime.record_status(epoch, &info, job));
+    executor.fail.store(true, Ordering::Release);
+    for _ in 0..2 {
+        manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Background))
+            .await
+            .expect("background retry");
+        runtime.settle_jobs(&manager.inner.scheduler, None).await;
+        let failed = manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+            .await
+            .expect("search after failed retry");
+        assert_eq!(failed.freshness.as_deref(), Some("fresh"));
+        let indexing = failed.indexing.expect("unrepaired health still warns");
+        assert_eq!(indexing.state, "failed");
+    }
+    executor.fail.store(false, Ordering::Release);
+    deliver(
+        &manager,
+        &sender,
+        &root,
+        WorkspaceChange::Upsert("unrelated.rs".into()),
+    )
+    .await;
+    let unrelated = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("search after unrelated narrow update");
+    assert!(
+        unrelated.indexing.is_some(),
+        "narrow updates cannot repair known failures"
+    );
+    manager
+        .refresh_index(options, true)
+        .await
+        .expect("successful full repair");
+    let repaired = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("search after repair");
+    assert!(repaired.indexing.is_none());
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn watcher_updates_do_not_reuse_previous_ready_completion_counts() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(1),
+    });
+    let (manager, sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial reconciliation");
+    jobs.recv().await.expect("initial job");
+    let runtime = manager.runtime(root.clone(), &options).expect("runtime");
+    for path in ["added.rs", "modified.rs"] {
+        let mut info = inspected_info();
+        info.status = Some(IndexStats {
+            files_scanned: 10,
+            files_unchanged: 10,
+            ..Default::default()
+        });
+        let epoch = super::super::lock(&runtime.index_status).invalidate();
+        let job = manager.job_for_root(&root).map(|job| (job.id, job.state));
+        assert!(runtime.record_status(epoch, &info, job));
+        sender
+            .send(WorkspaceChangeBatch {
+                changes: vec![WorkspaceChange::Upsert(path.into())],
+            })
+            .await
+            .expect("notification");
+        manager.flush_watcher(&runtime).await.expect("flush");
+        let running = jobs.recv().await.expect("watcher job running");
+        let result = manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+            .await
+            .expect("search during update");
+        let indexing = result.indexing.expect("changed file warning");
+        assert_eq!(indexing.state, "running");
+        assert_eq!(
+            (indexing.completed, indexing.total),
+            (None, None),
+            "old 10/10 inspection is no longer a valid baseline"
+        );
+        running.on_progress.expect("progress reporter").report(
+            zg_engine::api::index::progress::IndexProgress {
+                phase: zg_engine::api::index::progress::IndexProgressPhase::Indexing,
+                files_total: Some(1),
+                files_indexed: Some(0),
+                files_failed: Some(0),
+                detail: None,
+                embedding: None,
+            },
+        );
+        let progress = manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+            .await
+            .expect("search with progress")
+            .indexing
+            .expect("progress warning");
+        assert_eq!((progress.completed, progress.total), (Some(0), Some(1)));
+        executor.release.add_permits(1);
+        runtime.settle_jobs(&manager.inner.scheduler, None).await;
+    }
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
 #[tokio::test]
 async fn partial_index_failure_is_not_cached_as_fresh_or_retried_forever() {
     let workspace = tempdir().expect("workspace");

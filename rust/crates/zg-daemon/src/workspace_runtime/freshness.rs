@@ -23,6 +23,7 @@ pub(super) struct Freshness {
 
 struct Proof {
     revision: u64,
+    status_epoch: u64,
     full_epoch: Option<u64>,
     full: bool,
     has_changes: bool,
@@ -155,6 +156,15 @@ impl WorkspaceRuntime {
             }
         };
         if !submitted.reused || submitted.job.state == JobState::Queued {
+            let status_epoch = {
+                let mut cache = lock(&self.index_status);
+                let epoch = cache.invalidate();
+                if reason == JobReason::Manual || !full {
+                    // These jobs did not inspect the current workspace for a completion baseline.
+                    cache.completion_baseline = None;
+                }
+                epoch
+            };
             let known_change =
                 reason == JobReason::Watch && state.unsubmitted_change == Some(revision);
             if known_change {
@@ -162,11 +172,13 @@ impl WorkspaceRuntime {
             }
             let proof = state.jobs.entry(submitted.job.id).or_insert(Proof {
                 revision,
+                status_epoch,
                 full_epoch,
                 full,
                 has_changes: known_change,
             });
             proof.revision = proof.revision.max(revision);
+            proof.status_epoch = proof.status_epoch.max(status_epoch);
             proof.full_epoch = proof.full_epoch.max(full_epoch);
             proof.full |= full;
             proof.has_changes |= known_change;
@@ -180,21 +192,19 @@ impl WorkspaceRuntime {
         let Some(mut proof) = state.jobs.remove(&job.id) else {
             return;
         };
-        if job.reason == JobReason::Watch
-            && completed.result.as_ref().is_some_and(|result| {
-                result.files_added > 0 || result.files_modified > 0 || result.files_deleted > 0
-            })
-        {
-            // Reconciliation may find drift without any exact watcher notification.
+        if completed.result.as_ref().is_some_and(|result| {
+            result.files_added > 0 || result.files_modified > 0 || result.files_deleted > 0
+        }) {
+            // Indexing may find drift without any exact watcher notification.
             state.change_version += 1;
             proof.has_changes = true;
         }
-        if job.state == JobState::Succeeded
+        let succeeded = job.state == JobState::Succeeded
             && completed
                 .result
                 .as_ref()
-                .is_some_and(|result| result.files_failed == 0)
-        {
+                .is_some_and(|result| result.files_failed == 0);
+        if succeeded {
             if proof.full {
                 state.unreconciled_change = state
                     .unreconciled_change
@@ -211,7 +221,19 @@ impl WorkspaceRuntime {
         } else {
             state.lose_proof(&proof);
         }
-        self.invalidate_status();
+        let mut cache = lock(&self.index_status);
+        if completed
+            .result
+            .as_ref()
+            .is_some_and(|result| result.files_failed > 0)
+        {
+            cache.needs_repair = true;
+        } else if succeeded && proof.full && cache.epoch == proof.status_epoch {
+            // A later inspection or mutation must not be cleared by an older job.
+            cache.needs_repair = false;
+        }
+        cache.invalidate();
+        cache.completion_baseline = None;
     }
 
     pub(super) fn forget_job_proof(&self, id: Uuid) {
