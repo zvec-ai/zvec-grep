@@ -11,7 +11,7 @@ use zg_engine::{
 };
 
 use crate::{
-    ColorMode, OutputOptions,
+    ColorMode, OutputOptions, output_path,
     status::scan_filters,
     theme::{StatusTheme, display_path, storage_path, write_status_field},
 };
@@ -78,9 +78,9 @@ pub fn write_index_with_options(
     )?;
     let filters = scan.map(scan_filters).unwrap_or_default();
     let roots = if filters.is_empty() {
-        root.display().to_string()
+        output_path(root).display().to_string()
     } else {
-        format!("{} ({filters})", root.display())
+        format!("{} ({filters})", output_path(root).display())
     };
     index_field(&mut writer, theme, "roots", &theme.path(&roots))?;
     for file in &result.failed_files {
@@ -90,7 +90,7 @@ pub fn write_index_with_options(
             "failed",
             &format!(
                 "{}: {}",
-                theme.path(&file.path.display().to_string()),
+                theme.path(&output_path(&file.path).display().to_string()),
                 theme.danger(&file.reason),
             ),
         )?;
@@ -136,6 +136,7 @@ fn format_duration(milliseconds: u64) -> String {
 pub fn write_index_drop_result(
     mut writer: impl Write,
     root: &Path,
+    index_dir: &Path,
     removed: bool,
 ) -> io::Result<()> {
     writeln!(
@@ -146,7 +147,12 @@ pub fn write_index_drop_result(
         } else {
             "No index found for"
         },
-        root.display(),
+        output_path(root).display(),
+    )?;
+    writeln!(
+        writer,
+        "  Index directory: {}",
+        output_path(index_dir).display()
     )
 }
 
@@ -285,6 +291,25 @@ mod tests {
             String::from_utf8(bytes).expect("render output"),
             "Workspace index\nfiles\t9 scanned, 2 added, 1 modified, 1 retried, 4 unchanged, 3 deleted, 1 failed\nentities\t24\nduration\t1m 2s (61500ms)\nroots\t/workspace\n",
         );
+        let root = Path::new(r"\\?\D:\workspace\repo");
+        let expected = if cfg!(windows) {
+            r"D:\workspace\repo"
+        } else {
+            r"\\?\D:\workspace\repo"
+        };
+        let mut bytes = Vec::new();
+        write_index_result(&mut bytes, root, &result).expect("Windows-style index output");
+        assert!(
+            String::from_utf8(bytes)
+                .expect("UTF-8")
+                .contains(&format!("roots\t{expected}\n"))
+        );
+        let mut bytes = Vec::new();
+        write_index_drop_result(&mut bytes, root, root, true).expect("drop output");
+        assert_eq!(
+            String::from_utf8(bytes).expect("UTF-8"),
+            format!("Dropped index for {expected}\n  Index directory: {expected}\n")
+        );
     }
 
     #[test]
@@ -320,24 +345,25 @@ mod tests {
 
     #[test]
     fn index_summary_displays_saved_scan_rules() {
-        let scan = ScanRules {
-            file_types: vec!["rust".into(), "python".into()],
-            excluded_file_types: vec!["js".into()],
-            globs: vec![
+        let scan = zg_engine::api::index::options::ScanRulesUpdate {
+            globs: Some(vec![
                 "*.rs".into(),
                 zg_engine::api::index::options::GlobRule {
                     pattern: "!vendor/**".into(),
                     case_insensitive: true,
                 },
-            ],
-            hidden: true,
-            no_ignore: true,
-            ignore_files: vec!["custom.ignore".into()],
-            max_depth: Some(2),
-            max_file_size_bytes: Some(4096),
-            follow_symlinks: true,
-            nested_git: false,
-        };
+            ]),
+            include_hidden: Some(true),
+            use_default_ignores: Some(false),
+            ignore_files: Some(vec!["custom.ignore".into()]),
+            max_depth: Some(Some(2)),
+            max_file_size_bytes: Some(Some(4096)),
+            follow_symlinks: Some(true),
+            nested_git: Some(false),
+            ..Default::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("saved scan rules");
         let mut bytes = Vec::new();
         write_index_with_options(
             &mut bytes,
@@ -349,7 +375,7 @@ mod tests {
         )
         .expect("summary");
         let output = String::from_utf8(bytes).expect("UTF-8");
-        assert!(output.contains("\nroots\t/workspace (glob=*.rs iglob=!vendor/** type=rust|python type-not=js hidden no-ignore ignore-file=custom.ignore max-depth=2 max-filesize=4096 follow nested-git=false)\n"));
+        assert!(output.contains("\nroots\t/workspace (glob=*.rs iglob=!vendor/** hidden no-ignore ignore-file=custom.ignore max-depth=2 max-filesize=4096 follow nested-git=false)\n"));
     }
 
     #[test]

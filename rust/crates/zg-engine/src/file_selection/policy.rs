@@ -26,9 +26,10 @@ const IGNORE_NAMES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
 #[derive(Debug)]
 pub(crate) struct ScanPolicy {
     root: PathBuf,
+    index_home: Option<PathBuf>,
     options: ScanRules,
+    ignore_files: Vec<PathBuf>,
     matcher: GlobMatcher,
-    types: ignore::types::Types,
     defaults: Gitignore,
     control_paths: Mutex<Vec<PathBuf>>,
     cache: Mutex<IgnoreCache>,
@@ -42,11 +43,14 @@ struct IgnoreCache {
 }
 
 impl ScanPolicy {
-    pub(crate) fn new(root: &Path, options: &ScanRules) -> EngineResult<Self> {
-        let matcher = GlobMatcher::new(root, &options.globs)?;
-        let mut options = options.clone();
-        options.ignore_files = options
-            .ignore_files
+    pub(crate) fn new(
+        root: &Path,
+        options: &ScanRules,
+        index_home: Option<&Path>,
+    ) -> EngineResult<Self> {
+        let matcher = GlobMatcher::new(root, options.globs())?;
+        let ignore_files: Vec<_> = options
+            .ignore_files()
             .iter()
             .map(|path| control_alias(&root.join(path)))
             .collect();
@@ -61,30 +65,45 @@ impl ScanPolicy {
                 .add_line(None, pattern)
                 .map_err(|error| ignore_error(&error))?;
         }
-        let control_paths = control_paths(root, &options);
-        let types = super::file_types(&options.file_types, &options.excluded_file_types)?;
-        Ok(Self {
+        let control_paths = control_paths(root, options.use_default_ignores(), &ignore_files);
+        let policy = Self {
             root: root.to_path_buf(),
-            options,
+            index_home: index_home.map(Path::to_path_buf),
+            options: options.clone(),
+            ignore_files,
             matcher,
-            types,
             defaults: defaults.build().map_err(|error| ignore_error(&error))?,
             control_paths: Mutex::new(control_paths),
             cache: Mutex::new(IgnoreCache::default()),
             repositories: Mutex::new(HashMap::new()),
-        })
+        };
+        policy
+            .load_explicit_rules()
+            .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
+        Ok(policy)
     }
 
-    pub(crate) fn root_spec(root: &Path, options: &ScanRules) -> EngineResult<RootSpec> {
-        let policy = Arc::new(Self::new(root, options)?);
+    pub(crate) fn root_spec(
+        root: &Path,
+        options: &ScanRules,
+        index_home: Option<&Path>,
+    ) -> EngineResult<RootSpec> {
+        let policy = Arc::new(Self::new(root, options, index_home)?);
         let mut spec = RootSpec::new(root.to_path_buf(), policy);
-        spec.follow = options.follow_symlinks;
-        spec.max_depth = options.max_depth;
-        spec.max_file_size_bytes = options.max_file_size_bytes;
+        spec.follow = options.follow_symlinks();
+        spec.max_depth = options.max_depth();
+        spec.max_file_size_bytes = options.max_file_size_bytes();
         Ok(spec)
     }
 
     fn selected(&self, path: &Path, directory: bool) -> Result<bool, HostError> {
+        if self
+            .index_home
+            .as_ref()
+            .is_some_and(|home| is_within_index(path, home))
+        {
+            return Ok(false);
+        }
         let Ok(relative) = path.strip_prefix(&self.root) else {
             return Ok(false);
         };
@@ -112,33 +131,35 @@ impl ScanPolicy {
     }
 
     fn selected_entry(&self, absolute: &Path, directory: bool) -> Result<bool, HostError> {
+        if directory
+            && absolute != self.root
+            && crate::workspace::layout::is_workspace_data_directory(absolute)
+        {
+            return Ok(false);
+        }
         if !self.matches_rules(absolute, directory)? {
             return Ok(false);
         }
         // Ordinary exclusions need no marker checks or extra control watches.
-        Ok(!directory || self.options.nested_git || !self.is_nested_repository(absolute)?)
+        Ok(!directory || self.options.nested_git() || !self.is_nested_repository(absolute)?)
     }
 
     fn matches_rules(&self, absolute: &Path, directory: bool) -> Result<bool, HostError> {
         let relative = absolute.strip_prefix(&self.root).unwrap_or(absolute);
-        if !directory && self.types.matched(relative, false).is_ignore() {
-            return Ok(false);
-        }
         match self.matcher.path_match(relative, directory) {
             Match::Ignore(()) => return Ok(false),
             Match::Whitelist(()) => return Ok(true),
             Match::None => {}
         }
-        // Explicit ignore files remain active with no_ignore, matching the saved contract.
-        for file in self.options.ignore_files.iter().rev() {
-            let rules = self.rules(&self.root.join(file), true)?;
+        for file in self.ignore_files.iter().rev() {
+            let rules = self.rules(file, true)?;
             match rules.matched(absolute, directory) {
                 Match::Ignore(_) => return Ok(false),
                 Match::Whitelist(_) => return Ok(true),
                 Match::None => {}
             }
         }
-        if !self.options.no_ignore {
+        if self.options.use_default_ignores() {
             for parent in absolute
                 .parent()
                 .into_iter()
@@ -160,7 +181,7 @@ impl ScanPolicy {
                 return Ok(false);
             }
         }
-        Ok(self.options.hidden
+        Ok(self.options.include_hidden()
             || !absolute
                 .file_name()
                 .is_some_and(|name| name.as_encoded_bytes().starts_with(b".")))
@@ -215,6 +236,13 @@ impl ScanPolicy {
         Ok(nested)
     }
 
+    fn load_explicit_rules(&self) -> Result<(), HostError> {
+        for file in &self.ignore_files {
+            self.rules(file, true)?;
+        }
+        Ok(())
+    }
+
     fn rules(&self, path: &Path, explicit: bool) -> Result<Arc<Gitignore>, HostError> {
         if let Some(value) = self
             .cache
@@ -266,7 +294,7 @@ impl ScanPolicy {
                         })?;
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => {}
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",
@@ -324,7 +352,7 @@ impl PathPolicy for ScanPolicy {
             return Ok(false);
         }
         // Discover ignore-file symlinks even when scanning does not follow links.
-        if !self.options.no_ignore {
+        if self.options.use_default_ignores() {
             for name in IGNORE_NAMES {
                 self.rules(&absolute_path.join(name), false)?;
             }
@@ -333,7 +361,7 @@ impl PathPolicy for ScanPolicy {
     }
 
     fn control_file_changed(&self, absolute_path: &Path) -> Result<Option<PathBuf>, HostError> {
-        if !self.options.nested_git
+        if !self.options.nested_git()
             && absolute_path.file_name().is_some_and(|name| name == ".git")
             && let Some(parent) = absolute_path.parent()
             && parent != self.root
@@ -350,7 +378,7 @@ impl PathPolicy for ScanPolicy {
                 .any(|file| file.file_name() == absolute_path.file_name())
                 && controls.contains(&control_alias(absolute_path)));
         let scoped = absolute_path.strip_prefix(&self.root).ok();
-        let local = !self.options.no_ignore
+        let local = self.options.use_default_ignores()
             && scoped.is_some()
             && absolute_path
                 .file_name()
@@ -394,9 +422,12 @@ impl PathPolicy for ScanPolicy {
         *self
             .control_paths
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            control_paths(&self.root, &self.options);
-        Ok(())
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = control_paths(
+            &self.root,
+            self.options.use_default_ignores(),
+            &self.ignore_files,
+        );
+        self.load_explicit_rules()
     }
 }
 
@@ -423,9 +454,9 @@ fn control_alias(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn control_paths(root: &Path, options: &ScanRules) -> Vec<PathBuf> {
-    let mut paths = options.ignore_files.clone();
-    if !options.no_ignore {
+fn control_paths(root: &Path, use_default_ignores: bool, ignore_files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = ignore_files.to_vec();
+    if use_default_ignores {
         paths.extend(IGNORE_NAMES.map(|name| root.join(name)));
     }
     let targets: Vec<_> = paths
@@ -480,7 +511,7 @@ const DEFAULT_IGNORED_DIRECTORY_NAMES: [&str; 36] = [
     "translations",
 ];
 
-const DEFAULT_IGNORED_FILE_PATTERNS: [&str; 23] = [
+const DEFAULT_IGNORED_FILE_PATTERNS: [&str; 19] = [
     "*.lock",
     "*.lockb",
     "*-lock.json",
@@ -500,8 +531,9 @@ const DEFAULT_IGNORED_FILE_PATTERNS: [&str; 23] = [
     "*_pb2.*",
     "*.g.*",
     "*.gif",
-    "*.jpeg",
-    "*.jpg",
-    "*.png",
-    "*.webp",
 ];
+
+/// Includes symlink aliases of a data directory.
+pub(crate) fn is_within_index(path: &Path, home: &Path) -> bool {
+    path.starts_with(home) || std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(home))
+}

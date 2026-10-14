@@ -83,7 +83,7 @@ jobs:
   test:
     name: rust test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
     permissions:
       contents: read
     strategy:

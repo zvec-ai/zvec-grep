@@ -76,6 +76,35 @@ function expandHome(path, home) {
   return path;
 }
 
+function groupedEmbedding(stdout) {
+  const legacy = /^ {2}Embedding +(\S+)$/m.exec(stdout);
+  if (legacy) return legacy[1];
+  const tables = [];
+  for (const kind of ["text", "code", "image"]) {
+    const value = required(
+      new RegExp(`^ {2}${kind} +(.+)$`, "m"),
+      stdout,
+      `${kind} embedding`,
+    )[1];
+    if (value === "not enabled") continue;
+    const match =
+      /^(\S+) \(([\d,]+) dimensions, ([^)]+)\) · ([\d,]+) entities · (ready|empty)$/.exec(
+        value,
+      );
+    assert.ok(match, `invalid ${kind} embedding`);
+    assert.ok(groupedCount(match[2], "embedding dimensions") > 0);
+    const count = groupedCount(match[4], "table entity count");
+    assert.equal(match[5], count === 0 ? "empty" : "ready");
+    tables.push([kind, match[1]]);
+  }
+  assert.ok(tables.length > 0, "native status omitted embedding");
+  // Preserve single-model identities when comparing the main and candidate CLI.
+  const models = new Set(tables.map(([, model]) => model));
+  return models.size === 1
+    ? tables[0][1]
+    : tables.map(([kind, model]) => `${kind}=${model}`).join(",");
+}
+
 function parseGroupedStatus(stdout, home) {
   const heading = required(
     /^(✓ Workspace index is ready|! Workspace index needs an update|✗ Workspace index failed|○ Workspace indexing is disabled|○ Workspace index is not created|\? Workspace index is not configured|\? Workspace index status is unknown|! Workspace index requires a rebuild)\n {2}(.+)$/m,
@@ -89,7 +118,7 @@ function parseGroupedStatus(stdout, home) {
   const root = expandHome(heading[2], home);
   assert.ok(isAbsolute(root), "native status root is not absolute");
   const storage = required(/^ {2}Storage +(.+)$/m, stdout, "index path")[1];
-  const embedding = required(/^ {2}Embedding +(\S+)$/m, stdout, "embedding")[1];
+  const embedding = groupedEmbedding(stdout);
   const coverage = required(
     /^ {2}Coverage +\S+ +(\d+)% +([\d,]+) \/ ([\d,]+) files$/m,
     stdout,

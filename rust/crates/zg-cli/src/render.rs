@@ -7,10 +7,12 @@ use thiserror::Error;
 use zg_engine::api::context::{
     ContextResult,
     result::{
-        CodeMetadata, ContentRange, ContextItem, ContextItemStatus, EntityMetadata,
+        CodeMetadata, ContentPreview, ContentRange, ContextItem, ContextItemStatus, EntityMetadata,
         MarkdownMetadata,
     },
 };
+
+use crate::output_path;
 
 /// Writes a context reply in the stable CLI text layout.
 ///
@@ -28,13 +30,23 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             if previous_path.is_some() {
                 writeln!(writer)?;
             }
-            writeln!(writer, "{}", item.relative_path.display())?;
+            writeln!(writer, "{}", output_path(&item.relative_path).display())?;
             previous_path = Some(item.relative_path.as_path());
         }
-        if let Some(first) = item.content_range.start_line() {
-            writeln!(writer, "  {first}: {}", item.content.trim_end())?;
+        if let ContentPreview::Image { format, size_bytes } = &item.preview {
+            writeln!(writer, "  image/{} ({} bytes)", format.as_str(), size_bytes)?;
+        } else if let Some(first) = item.content_range.start_line() {
+            writeln!(
+                writer,
+                "  {first}: {}",
+                item.preview.text().unwrap_or_default().trim_end()
+            )?;
         } else {
-            writeln!(writer, "  {}", item.content.trim_end())?;
+            writeln!(
+                writer,
+                "  {}",
+                item.preview.text().unwrap_or_default().trim_end()
+            )?;
         }
     }
     Ok(())
@@ -51,6 +63,37 @@ pub fn write_context_with_options(
 ) -> io::Result<()> {
     use crate::ColorMode;
     use zg_engine::api::context::result::ContextSource;
+    if options.json {
+        #[cfg(windows)]
+        let result = &{
+            let mut result = result.clone();
+            result.root = output_path(&result.root).to_path_buf();
+            if let Some(index) = &mut result.workspace_index {
+                index.path = output_path(&index.path).to_path_buf();
+            }
+            for item in result.items.iter_mut().chain(
+                result
+                    .group_results
+                    .iter_mut()
+                    .flat_map(|group| &mut group.items),
+            ) {
+                item.absolute_path = output_path(&item.absolute_path).to_path_buf();
+                item.relative_path = output_path(&item.relative_path).to_path_buf();
+            }
+            if let Some(rg) = &mut result.diagnostics.rg {
+                for path in std::iter::once(&mut rg.command)
+                    .chain(&mut rg.ignored_directories)
+                    .chain(&mut rg.missing_paths)
+                    .chain(&mut rg.searched_paths)
+                {
+                    *path = output_path(path).to_path_buf();
+                }
+            }
+            result
+        };
+        serde_json::to_writer_pretty(&mut writer, result).map_err(io::Error::other)?;
+        return writeln!(writer);
+    }
     let color = options.color == ColorMode::Always
         || (options.color == ColorMode::Auto && terminal && std::env::var_os("NO_COLOR").is_none());
     let heading = |value: String| {
@@ -60,11 +103,13 @@ pub fn write_context_with_options(
             value
         }
     };
-    if options.human {
+    if options.trace {
         writeln!(writer, "{}: {:?}", heading("Context".into()), result.source)?;
-        writeln!(writer, "Query: {}", result.query)?;
-        writeln!(writer, "Hits: {}", result.items.len())?;
     }
+    if options.human {
+        writeln!(writer, "Query: {}", result.query)?;
+    }
+    write_index_diagnostics(&mut writer, result, options.trace)?;
     if result.source == ContextSource::Rg {
         if color {
             let mut buffer = Vec::new();
@@ -84,27 +129,86 @@ pub fn write_context_with_options(
         }
         return write_context_result(writer, result);
     }
+    write_indexed_items(writer, result, options, heading)
+}
+
+fn write_indexed_items(
+    mut writer: impl Write,
+    result: &ContextResult,
+    options: crate::OutputOptions,
+    heading: impl Fn(String) -> String,
+) -> io::Result<()> {
     if result.items.is_empty() {
-        return writeln!(writer, "No matches.");
+        let message = empty_message(result);
+        return writeln!(writer, "{message}");
     }
+    let groups: Vec<_> = result
+        .diagnostics
+        .index
+        .iter()
+        .flat_map(|diagnostics| &diagnostics.result_groups)
+        .filter(|group| group.item_count > 0)
+        .collect();
     for (index, item) in result.items.iter().enumerate() {
         if index > 0 {
             writeln!(writer)?;
         }
-        let range = range_label(&item.range);
+        if groups.len() > 1
+            && let Some((group_index, group)) = groups
+                .iter()
+                .enumerate()
+                .find(|(_, group)| group.item_start == index)
+        {
+            let mut matched_kinds: Vec<_> = result
+                .items
+                .iter()
+                .skip(group.item_start)
+                .take(group.item_count)
+                .map(|item| item.preview.kind())
+                .collect();
+            matched_kinds.sort_unstable();
+            matched_kinds.dedup();
+            writeln!(
+                writer,
+                "{}",
+                heading(format!(
+                    "Group {} · matches: {}",
+                    group_index + 1,
+                    matched_kinds
+                        .iter()
+                        .map(|kind| kind.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + "),
+                ))
+            )?;
+        }
+        let range = if matches!(item.preview, ContentPreview::Image { .. }) {
+            String::new()
+        } else {
+            format!(":{}", range_label(&item.range))
+        };
         let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
         let label = if options.human {
-            format!("{}. {}:{}", item.rank, item.relative_path.display(), range)
+            format!(
+                "{}. {}{} [{}]",
+                item.rank,
+                output_path(&item.relative_path).display(),
+                range,
+                item.preview.kind().as_str()
+            )
         } else {
             format!(
-                "#{} matchedBy={} {}:{}",
+                "#{} matchedBy={} {}{}",
                 item.rank,
                 matched_by.as_str().unwrap_or_default(),
-                item.relative_path.display(),
+                output_path(&item.relative_path).display(),
                 range
             )
         };
         writeln!(writer, "{}", heading(label))?;
+        if !options.human && !matches!(item.preview, ContentPreview::Image { .. }) {
+            writeln!(writer, "type: {}", item.preview.kind().as_str())?;
+        }
         write_item_preview(&mut writer, item, options)?;
         if options.trace {
             if let Some(score) = item.score {
@@ -122,6 +226,74 @@ pub fn write_context_with_options(
     Ok(())
 }
 
+fn empty_message(result: &ContextResult) -> &'static str {
+    use zg_engine::api::context::result::EmptyReason;
+    if result.diagnostics.empty_reason == Some(EmptyReason::NoSupportedTargets) {
+        "No enabled index table supports this query."
+    } else {
+        "No matches."
+    }
+}
+
+fn write_index_diagnostics(
+    mut writer: impl Write,
+    result: &ContextResult,
+    trace: bool,
+) -> io::Result<()> {
+    if let Some(index) = &result.diagnostics.index {
+        if index.incomplete {
+            writeln!(
+                writer,
+                "Incomplete results: one or more target searches failed."
+            )?;
+        }
+        for target in &index.targets {
+            if trace || target.reason.is_some() {
+                writeln!(
+                    writer,
+                    "route: input={} target={} model={} status={:?}{}",
+                    index.input_kind.as_str(),
+                    target.kind.as_str(),
+                    target.model_ref,
+                    target.status,
+                    target
+                        .reason
+                        .as_ref()
+                        .map_or_else(String::new, |reason| format!(" ({reason})")),
+                )?;
+            }
+        }
+        if trace {
+            for group in &index.result_groups {
+                writeln!(
+                    writer,
+                    "group: {} kinds={} models={} scoring={} recall={:?} merge={}; ranked within group",
+                    group.id,
+                    group
+                        .kinds
+                        .iter()
+                        .map(|kind| kind.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    group.model_refs.join(","),
+                    if group.rule_ranking {
+                        "rule".to_owned()
+                    } else {
+                        format!("{:?}", group.scoring)
+                    },
+                    group.scoring,
+                    if group.kinds.len() > 1 {
+                        "shared_recall_then_rules"
+                    } else {
+                        "independent_kind"
+                    }
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_item_preview(
     mut writer: impl Write,
     item: &ContextItem,
@@ -130,6 +302,15 @@ fn write_item_preview(
     use crate::PreviewMode;
     if item.status == ContextItemStatus::PossiblyStale {
         writeln!(writer, "status: possibly_stale")?;
+    }
+    if let ContentPreview::Image { format, size_bytes } = &item.preview {
+        writeln!(
+            writer,
+            "type: image/{}; size: {} bytes",
+            format.as_str(),
+            size_bytes
+        )?;
+        return Ok(());
     }
     if let Some(metadata) = &item.metadata {
         match metadata {
@@ -174,7 +355,7 @@ fn write_item_preview(
         PreviewMode::Full => usize::MAX,
     };
     let first = item.content_range.start_line();
-    let lines: Vec<_> = item.content.lines().collect();
+    let lines: Vec<_> = item.preview.text().unwrap_or_default().lines().collect();
     let anchor = item
         .excerpt_range
         .as_ref()
@@ -273,11 +454,14 @@ fn main_help() -> String {
 
 const MAIN_HELP_BODY: &str = r#"Usage:
   zg <query> [options]
+  zg --input <path> [options]
   zg --<management-command> [options]
 
 Search:
   <query>        Search indexed context (no command prefix)
   --rg           Run managed ripgrep
+  --input        Search using a file's contents
+  --kind         Restrict indexed search to text, code or image
 
 Management:
   --index        Build, rebuild, or drop the workspace index
@@ -296,6 +480,7 @@ output. Use --compact to force compact output.
 
 Examples:
   zg "where authentication is validated"
+  zg --input photo.png --kind image
   zg --fts "AuthService"
   zg --rg -F "AuthService" src
   zg --index --embedding local/potion-code-16m-v2
@@ -306,42 +491,74 @@ Examples:
   zg --install
 
 Environment:
-  ZVEC_GREP_HOME        Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep
+  ZVEC_GREP_INDEX_DIR   Complete workspace data directory; --index-dir wins
+  ZVEC_GREP_HOME        Runtime and daemon state directory; separate from workspace indexes
   ZVEC_GREP_MODE        Default client mode: direct, server, or auto
   ZVEC_GREP_EMBEDDING   Default model for new indexes and auth grant
   ZVEC_GREP_API_KEY     Embedding provider credential fallback
   ZVEC_GREP_SERVER_URL  MCP server URL used by CLI clients
 
 Run zg --help models or zg --help file-types for supported indexing capabilities.
+--index-dir overrides ZVEC_GREP_INDEX_DIR. Paths are relative to the command
+working directory. Existing indexes resolve their saved source directory relative
+to the index directory; --rg ignores index selection.
 Run zg --help environment for all variables, scopes, aliases, and precedence.
 Run zg --help search or zg --help <topic> for specific help.
 Use zg -h/--help for this page and zg -v/--version for the version."#;
 
 const SEARCH_HELP: &str = r#"Usage:
   zg <query> [options]
+  zg --input <path> [options]
   zg --hybrid <query> --fts <query> --vector <query> [--fuse]
   zg --rg [rg-options] <pattern> [path...]
 
-Search routes:
-  positional query                  Hybrid FTS and vector search
+Query input:
+  positional query                  Literal text, even when it names an existing file
+  --input <path>                   Read one file as the query; PNG, JPEG or static WebP only
+
+--input cannot be combined with text queries. Its image contents use vector
+search; positional text uses hybrid search by default.
+
+Search modes:
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
-  --fuse                            Fuse all query groups into one ranked list
+  --fuse                            Fuse query groups within each compatible result group
   --rg                              Run exhaustive managed ripgrep
 
+Search scope:
+  --index-dir <path>               Exact index data directory; overrides ZVEC_GREP_INDEX_DIR
+  --kind <text|code|image>           Search only this content kind; default: all supported targets
+
+Without an explicit index directory, search finds the nearest .zvec-grep upwards
+from the current directory. An explicit directory must contain an existing index.
+Its saved source location is independent of the query's working directory.
+--rg ignores index selection and scans its current directory or supplied paths.
+
 Result options:
-  --limit <n>                       Maximum results per group (default: 7)
+  --limit <n>                       Total result cap, 1..2000 (default: 30); shared across groups
   --compact                         Force compact output (default for pipes)
+  --json                            Emit complete structured results and groups
   --preview <none|short|full>       Indexed preview size (default: full on TTY, none in compact mode)
   --debug                           Print diagnostics to stderr
-  --trace                           Include per-hit indexed search trace
+  --trace                           Show search source, targets, grouping and per-hit trace
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
                                     In direct mode, background warns and falls back to off
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
-Indexed results are shown by query group, preserving each group's own rank.
-A result that matches more than one group is shown in each matching group.
+--refresh off does not stop an already active watcher; it prevents this request
+from scheduling an update.
+
+Input type and target kind are independent. Text can search image tables whose
+model supports text-to-image retrieval. Without --kind, all supported
+configured tables are searched. Unsupported paths are reported and skipped.
+Text/code tables with compatible query encoding share vector recall; full-text
+recall with the same configuration can also be combined using approximate BM25
+scores from each table. Hybrid recall is fused before shared rule ranking.
+All text/code searches apply rule ranking; images keep vector ranking separately.
+Incompatible model/encoding groups stay separate. --limit is allocated one item
+per group in text/code/image order until exhausted; each group keeps its own
+ranking. Scores are retrieval or rule scores, not probabilities.
 
 Embedding runtime:
   --api-key <key>                   Embedding provider API key
@@ -370,6 +587,7 @@ Unicode BOM decoding is automatic. PCRE2, compressed search, explicit encoding,
 and options that replace rg's output format are not supported.
 
 Environment:
+  ZVEC_GREP_INDEX_DIR    Complete workspace data directory; --index-dir wins
   ZVEC_GREP_MODE         Default client mode: direct, server, or auto
   ZVEC_GREP_API_KEY      Embedding provider credential fallback
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
@@ -381,10 +599,12 @@ See zg --help environment for precedence and Server-mode scope."#;
 const INDEX_HELP: &str = r"Usage:
   zg --index [root] [options]
   zg --index [root] --rebuild [options]
+  zg --index [root] --index-dir <path> [options]
   zg --index [root] --drop [--yes]
 
 Index options:
-  --name <NAME>                     Set or rename the unique workspace name
+  --index-dir <path>               Complete workspace data directory; overrides ZVEC_GREP_INDEX_DIR
+  --name <NAME>                     Set or rename the workspace label
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
   --yes                             Confirm --drop without prompting
@@ -392,9 +612,9 @@ Index options:
   --mode <direct|server|auto>       Select indexing transport
 
 Embedding options:
-  --embedding <model>               Single text embedding model for this workspace
-  --api-key <key>                   Embedding provider API key
-  --endpoint <url>                  Embedding provider endpoint
+  --embedding <model|kind=model>    Set the default or a text/code/image model; repeatable
+  --api-key <key>                   Save the default remote model's key encrypted
+  --endpoint <url>                  Endpoint override for the default model
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --index-embedding-concurrency <n>  Positive index embedding concurrency
@@ -407,6 +627,7 @@ Index embedding concurrency:
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
   Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
     sessions honor that budget; CoreML uses one physical session.
+  EmbeddingGemma2: one batch at a time across its shared ONNX sessions.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
@@ -419,8 +640,6 @@ Index embedding concurrency:
 Scan rules:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
-  -t, --type <type>                 Include a ripgrep file type; repeatable
-  -T, --type-not <type>             Exclude a ripgrep file type; repeatable
   --hidden[=true|false]              Include hidden paths except .git and .zvec-grep
   --no-ignore[=true|false]           Do not apply default or .gitignore rules
   --nested-git[=true|false]          Scan nested Git repositories and submodules
@@ -430,20 +649,45 @@ Scan rules:
   -L, --follow[=true|false]          Follow symbolic links safely
   --reset-paths                     Clear inherited scanning settings
 
+The saved key is portable with the complete index data directory. Environment and
+global configuration keys are not saved. Omit --api-key to keep a saved key;
+repeat it to replace the key after successful indexing. Keep the index directory private.
+
 Interactive remote indexing asks to allow once, allow for this workspace, or
 cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
 
-A new workspace name defaults to root directory name; use --name if it is taken.
-Names are case-sensitive and unique within the per-user registry. Naming an
-existing workspace renames it while preserving file IDs and active storage.
+A new workspace name defaults to its root directory name. Names are labels;
+different roots may share a name. --name updates it after successful indexing
+while preserving file IDs and active storage. No global registration is required.
 
-This version indexes text only with one embedding model per workspace.
-Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured
-default when creating a new index.
-Search automatically creates a missing index with a configured local model or
-local/potion-code-16m-v2, never a remote model.
-Model changes require --rebuild. Failed files are recorded; successful files
-remain searchable after a rebuild. Compatible indexes reuse their stored model.
+An existing index uses its saved source directory when [root] is omitted.
+Supply [root] to create a new explicit --index-dir or to relocate its source.
+The source is saved relative to the index directory; cross-drive layouts that
+cannot be represented by a relative path are rejected. Move both directories
+together, keeping their relative layout, while no writers or watchers are active.
+Missing or unreadable source directories fail indexed operations; --rg still
+searches its current directory and requested paths without reading the index.
+
+Indexes text, code, PNG, JPEG and static WebP images. Each content kind selects
+one model. Unsupported default kinds are skipped; explicit unsupported models fail.
+Vector queries search enabled tables whose models support the query's input kind.
+Explicit zg --index requires a default model from --embedding <model>,
+ZVEC_GREP_EMBEDDING, or configuration when creating a new index.
+Text search automatically creates a missing index only when no --index-dir or
+ZVEC_GREP_INDEX_DIR is selected, using a configured local model or
+local/potion-code-16m-v2, never a remote model. --input requires an existing index.
+
+Repeat --embedding to configure different kinds, for example:
+  zg --index --embedding local/potion-code-16m-v2 --embedding image=local/embeddinggemma-2
+Use --embedding image=default to remove that override and inherit the workspace
+default, including future changes. If the default does not support images, their
+index is disabled. Omitted settings preserve saved values; a bare model changes
+only the default. Repeating the default or the same kind is an error.
+Changing enabled tables, models, vector dimensions or metrics requires --rebuild.
+Changing an endpoint does not. --endpoint applies only to the default model;
+configure other remote models with zg --config model set <model> --endpoint <url>.
+Failed files are recorded; successful files remain searchable after a rebuild.
+Compatible indexes reuse their stored model.
 Rebuilding an incompatible index uses --embedding or the configured default;
 provide desired scan rules again.
 
@@ -465,10 +709,12 @@ Index-only embedding concurrency:
 See zg --help environment for precedence and Server-mode scope.";
 
 const STATUS_HELP: &str = r"Usage:
-  zg --status [root] [--mode <direct|server|auto>] [--check-ready]
+  zg --status [root] [--index-dir <path>] [--mode <direct|server|auto>] [--check-ready] [--json]
 
-Shows the nearest workspace root, index policy, index state, embedding model,
-stored paths, refresh status, and suggested next action.
+Shows the workspace root and policy, effective model and entity count for each
+content-kind table, index state, refresh status, and suggested next action.
+--json emits the complete structured status. [root] is the default-index discovery
+starting point; --index-dir selects an exact index and its saved source location.
 
 --check-ready preserves the normal output and exits non-zero unless the
 Workspace index is ready.";
@@ -487,8 +733,8 @@ Model options:
 
 Remote models support --endpoint; local models support --device. At least one
 model option is required. --default may be used alone or with a runtime option.
-Each workspace uses one model for text content. Existing indexes continue to
-use their stored model.
+Workspaces may route content kinds to different models. Existing indexes retain
+their default and routes until an explicit reconfiguration and rebuild.
 
 Global configuration is stored in ~/.zvec-grep/config.json.";
 
@@ -498,7 +744,9 @@ const AUTH_HELP: &str = r"Usage:
   zg --auth revoke [root]
 
 Manage the signed Remote Embedding grant stored in the Workspace under
-.zvec-grep/authorization.json. Workspace grants are shared by zg CLI and zg MCP.
+authorization.json in the selected index directory. Workspace grants are shared
+by zg CLI and zg MCP. --index-dir selects that directory; moving source roots or
+changing machines requires fresh remote authorization.
 
 --embedding selects the Remote Embedding model to authorize; it does not run
 embedding. If omitted, auth grant uses the existing Workspace index model, then
@@ -546,7 +794,8 @@ continue to use the daemon's internal administration endpoint.
 --check-ready exits non-zero unless the server is ready.
 
 Environment:
-  ZVEC_GREP_HOME               Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep
+  ZVEC_GREP_INDEX_DIR   Complete workspace data directory; --index-dir wins
+  ZVEC_GREP_HOME               Runtime and daemon state directory; separate from workspace indexes
   ZVEC_GREP_SERVER_URL         MCP server URL used by CLI clients
   ZVEC_GREP_SERVER_TOKEN       Server/client Bearer token
   ZVEC_GREP_SERVER_TOKEN_FILE  File containing the Server/client Bearer token
@@ -612,12 +861,13 @@ const VERSION_HELP: &str = r"Usage:
 const MODELS_HELP: &str = r"Usage:
   zg --help models
 
-Supported text embedding models (one per workspace):
+Supported embedding models (content kinds route to one model each):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers
   local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
+  local/embeddinggemma-2              local    text,image   768    8192  onnx
   local/gte-modernbert-base           local    text         768    8192  transformers
   local/jina-embeddings-v2-base-code  local    text         768    8192  transformers
   local/multilingual-e5-small         local    text         384     512  transformers
@@ -626,13 +876,15 @@ Supported text embedding models (one per workspace):
   local/potion-multilingual-128m      local    text         256    1024  model2vec
   local/potion-retrieval-32m          local    text         512    1024  model2vec
   local/qwen3-embedding-0.6b          local    text        1024    8192  llama-cpp
-  qwen/qwen3-vl-embedding             remote   text        2560   32000  qwen
+  qwen/qwen3-vl-embedding             remote   text,image  2560   32000  qwen
   qwen/qwen3.7-text-embedding         remote   text        1024  128000  qwen
   qwen/text-embedding-v4              remote   text        1024    8192  qwen
 
 Local models are downloaded to the model cache on first use. Remote models
 require provider credentials plus --allow-remote or a Workspace authorization.
-This version uses text input only, including for models with image capabilities.
+Text models also support code content. PNG, JPEG and static WebP image content
+is supported by local/embeddinggemma-2 and qwen/qwen3-vl-embedding.
+EmbeddingGemma 2 runs on CPU in this release (--device auto or cpu).
 
 Existing indexes keep their stored model. See zg --help environment for
 new-index model selection and runtime precedence.";
@@ -691,7 +943,12 @@ Documents and data:
   yaml      .yaml, .yml
   Markdown preserves heading structure; other formats use text chunks.
 
-Images and other non-text content are not indexed in this version.
+Images (one entity per independent file):
+  png       .png
+  jpeg      .jpg, .jpeg
+  webp      .webp (static only)
+  Animated PNG/WebP, embedded images and PDF image extraction are not supported.
+  Image inputs must be at most 10 MiB and 40 megapixels, within model limits.
 
 Other text:
   Unknown non-binary extensions and extensionless files use text chunks.
@@ -749,7 +1006,10 @@ Qwen credential aliases:
   QWEN_API_KEY       Qwen credential fallback after DASHSCOPE_API_KEY
 
 State and authorization:
-  ZVEC_GREP_HOME                    Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep
+  ZVEC_GREP_CONFIG                  Global configuration file override; use for isolated configurations
+  ZVEC_GREP_INDEX_DIR               Complete workspace index directory; --index-dir wins
+  ZVEC_GREP_WORKSPACE_REGISTRY      Workspace-name registry file override
+  ZVEC_GREP_HOME                    Runtime and daemon state directory; separate from workspace indexes
   ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)
 
 Advanced:
@@ -773,7 +1033,8 @@ Agent integration paths:
   VSCODE_APPDATA        Base directory for VS Code release channels
 
 Precedence:
-  Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  Remote endpoint/credential      CLI > Workspace snapshot > Global config > Environment
+  Local device/model cache        CLI > Environment > Global config > Default
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY
@@ -819,16 +1080,17 @@ mod output_tests {
             },
             excerpt_range: None,
             outline: None,
-            content: (1..=20)
-                .map(|n| format!("line{n}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
+            preview: ContentPreview::Text(
+                (1..=20)
+                    .map(|n| format!("line{n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(0.75),
             matched_by: MatchedBy::Fts,
             metadata: None,
-            entity_id: None,
             container: None,
             trace: None,
             query_groups: vec![],
@@ -872,11 +1134,11 @@ mod output_tests {
                 } else {
                     excerpt
                 };
-                item.content = if whole_entity {
+                item.preview = ContentPreview::Text(if whole_entity {
                     source
                 } else {
                     source[17..].to_owned()
-                };
+                });
                 for preview in [PreviewMode::Short, PreviewMode::Full] {
                     let mut output = Vec::new();
                     write_item_preview(
@@ -900,6 +1162,165 @@ mod output_tests {
     }
 
     #[test]
+    fn image_result_displays_metadata_without_line_numbers() {
+        let mut item = indexed_item();
+        item.preview = ContentPreview::Image {
+            format: zg_engine::api::context::options::FileFormat::Png,
+            size_bytes: 123,
+        };
+        item.relative_path = "picture.png".into();
+        item.range = ContentRange::File;
+        item.content_range = ContentRange::File;
+        item.excerpt_range = None;
+        let mut result = ContextResult {
+            query: "image:input.png".into(),
+            freshness: None,
+            background_refresh: None,
+            root: std::env::temp_dir(),
+            source: ContextSource::Index,
+            coverage: ContextCoverage::RankedSample,
+            workspace_index: None,
+            items: vec![item],
+            group_results: vec![],
+            diagnostics: ContextDiagnostics::default(),
+        };
+        result.diagnostics.index = Some(serde_json::from_value(serde_json::json!({
+            "input_kind":"image", "targets":[], "incomplete":false, "limit":30,
+            "hits_returned":1, "query_groups":[], "routes":[], "result_groups":[
+                {"id":"text", "kinds":["text"], "model_refs":["fixture/model"], "scoring":"vector", "rule_ranking":true, "item_start":0, "item_count":0},
+                {"id":"image", "kinds":["image"], "model_refs":["fixture/model"], "scoring":"vector", "rule_ranking":false, "item_start":0, "item_count":1}
+            ]
+        })).expect("leading empty group"));
+        let mut output = Vec::new();
+        write_context_with_options(&mut output, &result, OutputOptions::default(), false)
+            .expect("render");
+        let text = String::from_utf8(output).expect("UTF-8");
+        assert!(text.contains("picture.png\n"));
+        assert!(text.contains("image/png; size: 123 bytes"));
+        assert!(!text.contains("entity:"));
+        assert!(!text.contains("generation:"));
+        assert!(!text.contains("picture.png:"));
+        assert!(!text.contains("Group "));
+        assert!(!text.contains("ranked"));
+
+        result.items.insert(0, indexed_item());
+        let groups = &mut result
+            .diagnostics
+            .index
+            .as_mut()
+            .expect("index diagnostics")
+            .result_groups;
+        groups[0]
+            .kinds
+            .push(zg_engine::api::context::options::ContentKind::Code);
+        groups[0].item_count = 1;
+        groups[1].item_start = 1;
+        for human in [false, true] {
+            let mut output = Vec::new();
+            write_context_with_options(
+                &mut output,
+                &result,
+                OutputOptions {
+                    human,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("render separate result groups");
+            let text = String::from_utf8(output).expect("UTF-8");
+            assert!(!text.contains("Results are ranked within each group."));
+            assert!(!text.contains("Hits:"));
+            assert!(text.contains("Group 1 · matches: text\n"));
+            assert!(text.contains("Group 2 · matches: image\n"));
+            assert!(!text.contains("text + code"));
+            assert!(!text.contains("rule-ranked"));
+            if human {
+                assert!(text.contains("1. sample.rs:1-20 [text]"));
+                assert!(text.contains("1. picture.png [image]"));
+                assert!(!text.contains("type: text"));
+            } else {
+                assert!(text.contains("#1 matchedBy=fts sample.rs:1-20"));
+                assert!(text.contains("#1 matchedBy=fts picture.png"));
+                assert!(text.contains("type: text"));
+            }
+        }
+    }
+
+    #[test]
+    fn json_formats_path_fields_without_changing_queries_or_content() {
+        use zg_engine::api::context::result::{
+            ContextGroupResult, ContextQueryGroupRole, ContextWorkspaceIndex, RgDiagnostics,
+        };
+        let root = r"\\?\D:\workspace\repo";
+        let file = r"\\?\D:\workspace\repo\sample.rs";
+        let mut item = indexed_item();
+        item.absolute_path = file.into();
+        item.preview = ContentPreview::Text(file.into());
+        let result = ContextResult {
+            query: root.into(),
+            freshness: None,
+            background_refresh: None,
+            root: root.into(),
+            source: ContextSource::Index,
+            coverage: ContextCoverage::RankedSample,
+            workspace_index: Some(ContextWorkspaceIndex {
+                name: root.into(),
+                path: r"\\?\D:\workspace\repo\.zvec-grep".into(),
+            }),
+            items: vec![item.clone()],
+            group_results: vec![ContextGroupResult {
+                id: "primary".into(),
+                query: root.into(),
+                role: ContextQueryGroupRole::Primary,
+                items: vec![item],
+            }],
+            diagnostics: ContextDiagnostics {
+                rg: Some(RgDiagnostics {
+                    backend: "embedded".into(),
+                    command: r"\\?\D:\tools\zg.exe".into(),
+                    args: vec![root.into()],
+                    ignored_directories: vec![r"\\?\D:\workspace\repo\ignored".into()],
+                    missing_paths: vec![r"\\?\D:\workspace\repo\missing".into()],
+                    searched_paths: vec![root.into()],
+                    limit: None,
+                    truncated: false,
+                }),
+                ..ContextDiagnostics::default()
+            },
+        };
+        let original = result.clone();
+        let mut expected = serde_json::to_value(&result).expect("context");
+        if cfg!(windows) {
+            expected["root"] = r"D:\workspace\repo".into();
+            expected["workspace_index"]["path"] = r"D:\workspace\repo\.zvec-grep".into();
+            expected["items"][0]["absolute_path"] = r"D:\workspace\repo\sample.rs".into();
+            expected["group_results"][0]["items"][0]["absolute_path"] =
+                r"D:\workspace\repo\sample.rs".into();
+            expected["diagnostics"]["rg"]["command"] = r"D:\tools\zg.exe".into();
+            expected["diagnostics"]["rg"]["ignored_directories"][0] =
+                r"D:\workspace\repo\ignored".into();
+            expected["diagnostics"]["rg"]["missing_paths"][0] = r"D:\workspace\repo\missing".into();
+            expected["diagnostics"]["rg"]["searched_paths"][0] = r"D:\workspace\repo".into();
+        }
+        let mut bytes = Vec::new();
+        write_context_with_options(
+            &mut bytes,
+            &result,
+            OutputOptions {
+                json: true,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("JSON query output");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("JSON"),
+            expected
+        );
+        assert_eq!(result, original);
+    }
+
+    #[test]
     fn preview_modes_and_trace_preserve_indexed_result_information() {
         let mut result = ContextResult {
             query: "needle".into(),
@@ -913,13 +1334,20 @@ mod output_tests {
             diagnostics: ContextDiagnostics::default(),
             items: vec![indexed_item()],
         };
-        let render = |preview, trace| {
+        result.diagnostics.index = Some(serde_json::from_value(serde_json::json!({
+            "input_kind":"text", "targets":[], "incomplete":false, "limit":30,
+            "hits_returned":1, "query_groups":[], "routes":[], "result_groups":[
+                {"id":"text", "kinds":["text","code"], "model_refs":["fixture/model"], "scoring":"full_text", "rule_ranking":true, "item_start":0, "item_count":1}
+            ]
+        })).expect("shared text/code group"));
+        let render = |preview, trace, human| {
             let mut buffer = Vec::new();
             write_context_with_options(
                 &mut buffer,
                 &result,
                 OutputOptions {
                     trace,
+                    human,
                     preview,
                     ..OutputOptions::default()
                 },
@@ -928,16 +1356,26 @@ mod output_tests {
             .expect("render");
             String::from_utf8(buffer).expect("UTF-8")
         };
-        let minimal = render(PreviewMode::None, false);
+        let minimal = render(PreviewMode::None, false, false);
         assert!(minimal.contains("#1 matchedBy=fts sample.rs:1-20"));
         assert!(minimal.contains("1: line1"));
         assert!(!minimal.contains("2: line2"));
-        let short = render(PreviewMode::Short, false);
+        let short = render(PreviewMode::Short, false, false);
         assert!(short.contains("10: line10"));
         assert!(!short.contains("11: line11"));
-        let full = render(PreviewMode::Full, true);
+        let full = render(PreviewMode::Full, true, true);
         assert!(full.contains("20: line20"));
         assert!(full.contains("score: 0.7500"));
+        assert!(full.contains("Context: Index"));
+        assert!(full.contains("group: text kinds=text,code models=fixture/model scoring=rule"));
+        assert!(!minimal.contains("Context:"));
+        assert!(!minimal.contains("Group "));
+        assert!(!minimal.contains("rule-ranked"));
+        let human = render(PreviewMode::Full, false, true);
+        assert!(!human.contains("Context:"));
+        assert!(human.contains("Query: needle\n1. sample.rs:1-20 [text]"));
+        assert!(!human.contains("type: text"));
+        assert!(!human.contains("Group "));
 
         result.items[0].range = ContentRange::Text {
             start_line: 1,
@@ -947,7 +1385,10 @@ mod output_tests {
             start_byte_column: 0,
             end_byte_column: 0,
         };
-        result.items[0].content.push('\n');
+        let ContentPreview::Text(text) = &mut result.items[0].preview else {
+            panic!("text preview")
+        };
+        text.push('\n');
         result.items[0].content_range = result.items[0].range.clone();
         let mut buffer = Vec::new();
         write_context_with_options(&mut buffer, &result, OutputOptions::default(), false)

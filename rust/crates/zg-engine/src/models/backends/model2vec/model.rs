@@ -17,15 +17,14 @@ use tokio_util::sync::CancellationToken;
 use crate::utils::atomic_write;
 use crate::{
     domain::model::{
-        EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
-        ModelProgress,
+        EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelProgress,
     },
     models::{
         artifacts::{
             ArtifactSource, ModelDownloadProgressReporter, ResolveArtifacts,
             resolve_model_artifacts,
         },
-        catalog::Model2VecConfig,
+        catalog::{EmbeddingCatalogEntry, Model2VecConfig},
         runtime::ModelComputeRuntime,
         spi::{
             EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions,
@@ -60,7 +59,7 @@ impl Model2VecEmbeddingModel {
         entry: Model2VecConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
-    ) -> Self {
+    ) -> Result<Self, ModelError> {
         Self::with_dependencies(
             entry,
             options,
@@ -74,30 +73,25 @@ impl Model2VecEmbeddingModel {
         options: ModelConfig,
         dependencies: Arc<dyn Model2VecDependencies>,
         compute_runtime: ModelComputeRuntime,
-    ) -> Self {
+    ) -> Result<Self, ModelError> {
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
             .unwrap_or_else(default_model_cache_dir);
-        Self {
+        Ok(Self {
             entry,
-            info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: None,
-                },
-                dimension: entry.dimension,
-                metric: entry.metric,
-                max_batch_size: entry.max_batch_size,
-                max_input_tokens: Some(entry.max_input_tokens),
-                max_image_bytes: None,
-            },
+            info: EmbeddingCatalogEntry::Model2Vec(entry)
+                .embedding_model_info()
+                .map_err(|error| {
+                    ModelError::internal("invalid catalog model info")
+                        .with_cause(error)
+                        .shared()
+                })?,
             model_cache_dir,
             compute_runtime,
             dependencies,
             state: Mutex::new(ModelState::default()),
-        }
+        })
     }
 
     async fn ensure_loaded(
@@ -172,6 +166,10 @@ impl Model2VecEmbeddingModel {
 
 #[async_trait]
 impl EmbeddingModel for Model2VecEmbeddingModel {
+    fn has_pinned_weights(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> &EmbeddingModelInfo {
         &self.info
     }
@@ -195,9 +193,7 @@ impl EmbeddingModel for Model2VecEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let loaded = self
             .ensure_loaded(options.on_progress, options.signal.as_ref())
             .await?;

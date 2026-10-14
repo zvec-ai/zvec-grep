@@ -48,11 +48,12 @@ fn stored_paths(index_path: &Path) -> TestResult<BTreeSet<PathBuf>> {
     Ok(native_file_records(index_path)?
         .iter()
         .map(|file| {
-            PathBuf::from(
-                file["relative_path"]["value"]
-                    .as_str()
-                    .expect("UTF-8 fixture path"),
-            )
+            file["relative_path"]["components"]
+                .as_array()
+                .expect("portable fixture path")
+                .iter()
+                .map(|component| component.as_str().expect("UTF-8 fixture component"))
+                .collect()
         })
         .collect())
 }
@@ -115,7 +116,7 @@ async fn assert_index_and_queries(
             .workspace_index
             .expect("workspace")
             .scan
-            .globs,
+            .globs(),
         filter.globs,
         "query filters do not alter workspace configuration"
     );
@@ -285,14 +286,14 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
             scan: ScanRulesUpdate {
                 globs: Some(boundary_filter.globs.clone()),
                 nested_git: Some(false),
-                no_ignore: Some(true),
+                use_default_ignores: Some(false),
                 ..ScanRulesUpdate::default()
             },
             ..index_options(root)
         })
         .await?;
     assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
-    // Neither explicit directory globs nor no_ignore may cross a disabled boundary.
+    // Neither explicit directory globs nor disabled default ignores may cross a disabled boundary.
     assert_index_and_queries(&engine, root, &boundary_filter, &outer).await?;
 
     let indexed = engine
@@ -300,7 +301,7 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
             scan: ScanRulesUpdate {
                 globs: Some(Vec::new()),
                 nested_git: Some(true),
-                no_ignore: Some(false),
+                use_default_ignores: Some(true),
                 ..ScanRulesUpdate::default()
             },
             ..index_options(root)
@@ -317,7 +318,7 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
             .workspace_index
             .expect("workspace after omitted update")
             .scan
-            .nested_git
+            .nested_git()
     );
     engine.close();
 
@@ -327,7 +328,7 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
         info.workspace_index
             .expect("reopened workspace")
             .scan
-            .nested_git
+            .nested_git()
     );
     let manifest: Value = serde_json::from_slice(&fs::read(info.home.join("manifest.json"))?)?;
     assert_eq!(manifest["scan"]["nested_git"], true);
@@ -361,7 +362,7 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
             .workspace_index
             .expect("reopened workspace")
             .scan
-            .nested_git
+            .nested_git()
     );
     let manifest: Value = serde_json::from_slice(&fs::read(info.home.join("manifest.json"))?)?;
     assert_eq!(manifest["scan"]["nested_git"], false);
@@ -461,7 +462,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     let files = native_file_records(&info.index_path)?;
     let script = files
         .iter()
-        .find(|file| file["relative_path"]["value"] == "script")
+        .find(|file| file["relative_path"]["components"] == json!(["script"]))
         .expect("stored script");
     assert!(script.get("formats").is_none());
 
@@ -482,7 +483,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     assert!(
         files
             .iter()
-            .all(|file| file["relative_path"]["value"] != "script")
+            .all(|file| file["relative_path"]["components"] != json!(["script"]))
     );
     assert_index_and_queries(
         &engine,
@@ -525,10 +526,6 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Compare positive catalog filtering and native NOT LIKE errors through both public retrieval routes"
-)]
 async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResult {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path();
@@ -580,6 +577,13 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
             },
             vec!["tsconfig.json"],
         ),
+        (
+            QueryFilter {
+                excluded_formats: vec![FileFormat::Rust],
+                ..Default::default()
+            },
+            vec!["CMakeLists.txt", "header.h", "notes.txt", "tsconfig.json"],
+        ),
     ];
     for (filter, expected) in cases {
         for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
@@ -590,80 +594,6 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
             );
         }
     }
-
-    let info = engine.info(info_options(root)).await?;
-    let dimension = info
-        .workspace_index
-        .expect("workspace")
-        .embedding
-        .expect("model")
-        .dimension;
-    let collections = fs::read_dir(&info.index_path)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .expect("collection name")
-                .to_string_lossy()
-                .starts_with("fragments_")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(collections.len(), 1, "one native model collection");
-    let collection_path = &collections[0];
-    #[cfg(windows)]
-    let collection_path = dunce::simplified(collection_path);
-    let mut collection_options = zvec_rust::CollectionOptions::new()?;
-    collection_options.set_read_only(true)?;
-    let collection = zvec_rust::Collection::open(
-        collection_path.to_str().expect("UTF-8 collection path"),
-        Some(&collection_options),
-    )?;
-    let mut fts = zvec_rust::Fts::new()?;
-    fts.set_match_string("orchard")?;
-    for (mode, operation, mut native_query) in [
-        (
-            ContextRouteMode::Fts,
-            "search full-text index",
-            zvec_rust::SearchQuery::fts("text", &fts, 64)?,
-        ),
-        (
-            ContextRouteMode::Vector,
-            "search vector index",
-            zvec_rust::SearchQuery::new("embedding", &vec![1.0; dimension], 64)?,
-        ),
-    ] {
-        // Excluding Rust negates both its suffix and the dot-only filename exception.
-        native_query.set_filter("(file_name NOT LIKE '%.rs' OR file_name = '.rs')")?;
-        native_query.set_output_fields(&["document_id", "entity_id", "file_id"])?;
-        native_query.set_include_vector(false)?;
-        let native_error = collection
-            .query(&native_query)
-            .err()
-            .expect("zvec 0.7.2 does not parse NOT LIKE");
-        assert!(native_error.to_string().contains("syntax error"));
-        let error = engine
-            .context(ContextOptions {
-                root: Some(root.to_path_buf()),
-                routes: vec![ContextRoute {
-                    mode,
-                    query: "orchard".into(),
-                }],
-                filter: QueryFilter {
-                    excluded_formats: vec![FileFormat::Rust],
-                    ..Default::default()
-                },
-                limit: Some(64),
-                auto_update: false,
-                allow_remote: true,
-                ..ContextOptions::default()
-            })
-            .await
-            .expect_err("native NOT LIKE error must not be replaced with a successful fallback");
-        assert_eq!(error.code(), zg_engine::EngineError::STORAGE_FAILURE);
-        assert_eq!(error.message(), format!("zvec {operation}: {native_error}"));
-    }
-    collection.close()?;
 
     engine.drop_index(info_options(root)).await?;
     engine.close();
@@ -697,8 +627,8 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
         .index(IndexOptions {
             scan: ScanRulesUpdate {
                 globs: Some(vec!["*.txt".into()]),
-                hidden: Some(true),
-                no_ignore: Some(true),
+                include_hidden: Some(true),
+                use_default_ignores: Some(false),
                 follow_symlinks: Some(true),
                 ignore_files: Some(vec![PathBuf::from(".customignore")]),
                 max_depth: Some(Some(1)),
@@ -727,7 +657,7 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
     assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
 
     let scan: ScanRulesUpdate = serde_json::from_value(json!({
-        "globs": [], "hidden": false, "no_ignore": false, "follow_symlinks": false,
+        "globs": [], "include_hidden": false, "use_default_ignores": true, "follow_symlinks": false,
         "ignore_files": [], "max_depth": null, "max_file_size_bytes": null
     }))?;
     let updated = engine
@@ -767,7 +697,7 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
         .await?;
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (3, 0));
     let rebuilt_info = engine.info(info_options(root)).await?;
-    assert_ne!(rebuilt_info.index_path, info.index_path);
+    assert_eq!(rebuilt_info.index_path, info.index_path);
     assert_eq!(
         rebuilt_info
             .workspace_index

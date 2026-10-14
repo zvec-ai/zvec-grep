@@ -5,6 +5,7 @@ mod install;
 mod jsonc;
 mod managed_rg;
 mod management;
+mod paths;
 mod progress;
 mod render;
 mod status;
@@ -13,10 +14,12 @@ pub use management::{
     write_authorization_revoke_result, write_authorization_status, write_index_drop_result,
     write_index_result, write_index_with_options,
 };
+pub use paths::output_path;
 pub use progress::IndexProgressDisplay;
 pub use status::{write_info_result, write_info_with_options};
 
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     io::{self, IsTerminal},
     path::{Path, PathBuf},
@@ -30,8 +33,8 @@ use zg_engine::api::{
     context::{
         ContextOptions,
         options::{
-            ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter, RgGlob,
-            SymbolType,
+            ContentKind, ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter,
+            QueryImage, RgGlob, SymbolType,
         },
     },
     index::{
@@ -71,7 +74,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum CommandLine {
     /// Search indexed context or run managed ripgrep.
-    Query(QueryArgs),
+    Query(Box<QueryArgs>),
     /// Build, rebuild, or drop the workspace index.
     Index(IndexArgs),
     /// Show workspace and index status.
@@ -98,6 +101,9 @@ pub struct AuthArgs {
     pub action: AuthAction,
     #[arg(global = true)]
     pub root: Option<PathBuf>,
+    /// Complete workspace index data directory.
+    #[arg(long, global = true, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     pub embedding: Option<String>,
     #[arg(long, global = true)]
@@ -319,8 +325,8 @@ impl ScanArgs {
     fn update(&self) -> ScanRulesUpdate {
         ScanRulesUpdate {
             globs: (!self.glob_rules.is_empty()).then(|| self.glob_rules.clone()),
-            hidden: self.hidden,
-            no_ignore: self.no_ignore,
+            include_hidden: self.hidden,
+            use_default_ignores: self.no_ignore.map(|value| !value),
             nested_git: self.nested_git,
             ignore_files: (!self.ignore_files.is_empty()).then(|| self.ignore_files.clone()),
             max_depth: self.max_depth.map(Some),
@@ -458,6 +464,9 @@ fn ordered_glob_rules(matches: &clap::ArgMatches) -> Vec<GlobRule> {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct QueryArgs {
+    /// Complete workspace index data directory.
+    #[arg(long, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
     #[arg(long = "force-direct")]
@@ -470,6 +479,9 @@ pub struct QueryArgs {
     pub trace: bool,
     #[arg(long)]
     pub compact: bool,
+    /// Emit the complete structured result as JSON.
+    #[arg(long)]
+    pub json: bool,
     #[arg(long, value_enum)]
     pub preview: Option<PreviewMode>,
     #[arg(long, value_enum)]
@@ -480,6 +492,12 @@ pub struct QueryArgs {
     pub limit: Option<usize>,
     #[arg(long = "hybrid", value_name = "QUERY")]
     pub hybrid_queries: Vec<String>,
+    /// Read query content from a file; currently PNG, JPEG or static WebP.
+    #[arg(long, value_name = "PATH")]
+    pub input: Option<PathBuf>,
+    /// Restrict indexed search to one content kind.
+    #[arg(long = "kind", value_parser = content_kind)]
+    pub target_kind: Option<ContentKind>,
     #[arg(long, value_name = "QUERY")]
     pub fts: Vec<String>,
     #[arg(long, value_name = "QUERY")]
@@ -518,7 +536,10 @@ pub struct QueryArgs {
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
     pub root: Option<PathBuf>,
-    /// Set or rename the unique workspace name; new workspaces default to the root directory name.
+    /// Complete workspace index data directory.
+    #[arg(long, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
+    /// Set or rename the workspace label; new workspaces default to the root directory name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
     #[arg(long)]
@@ -539,9 +560,9 @@ pub struct IndexArgs {
     pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
-    /// Single embedding model for this workspace; this version indexes text only.
-    #[arg(long)]
-    pub embedding: Option<String>,
+    /// Set the default model, KIND=MODEL, or KIND=default to restore inheritance.
+    #[arg(long, value_name = "[KIND=]MODEL")]
+    pub embedding: Vec<String>,
     #[arg(long = "model-cache")]
     pub model_cache: Option<PathBuf>,
     #[arg(long, value_enum, ignore_case = true)]
@@ -556,24 +577,23 @@ pub struct IndexArgs {
     pub allow_remote: bool,
     #[command(flatten)]
     pub files: ScanArgs,
-    /// Include ripgrep file types when scanning the workspace.
-    #[arg(short = 't', long = "type", value_name = "TYPE")]
-    pub file_types: Vec<String>,
-    /// Exclude ripgrep file types when scanning the workspace.
-    #[arg(short = 'T', long = "type-not", value_name = "TYPE")]
-    pub excluded_file_types: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct StatusArgs {
     pub root: Option<PathBuf>,
+    /// Complete workspace index data directory.
+    #[arg(long, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
     #[arg(long = "check-ready")]
     pub check_ready: bool,
     #[arg(long)]
     pub debug: bool,
+    #[arg(long)]
+    pub json: bool,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
     #[arg(long = "no-color", conflicts_with = "color")]
@@ -611,25 +631,25 @@ pub enum ServerAction {
 pub struct ServerStartArgs {
     #[arg(long)]
     pub listen: Option<String>,
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long, env = "ZVEC_GREP_MCP_TOOLSET", value_enum)]
     pub mcp_toolset: Option<McpToolset>,
-    #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
+    #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStopArgs {
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
-    #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
+    #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStatusArgs {
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long = "check-ready")]
     pub check_ready: bool,
@@ -666,7 +686,9 @@ pub enum CliPlan {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OutputOptions {
+    pub json: bool,
     pub debug: bool,
     pub trace: bool,
     pub human: bool,
@@ -692,9 +714,17 @@ pub enum ServerPlan {
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(
-        "zg requires text or --hybrid/--fts/--vector routes; use zg --help search for examples"
+        "zg requires text, --input, or --hybrid/--fts/--vector routes; use zg --help search for examples"
     )]
     MissingQuery,
+    #[error(
+        "--input cannot be combined with text queries, --rg, --hybrid, --fts, --vector, --fuse or --prefer-symbol"
+    )]
+    InputWithQuery,
+    #[error("invalid --embedding value: {0}")]
+    InvalidEmbedding(String),
+    #[error("unknown content kind {0:?}; expected text, code or image")]
+    InvalidContentKind(String),
     #[error("--rg cannot be combined with --hybrid, --fts, --vector, or --fuse")]
     RgWithIndexedRoutes,
     #[error("--rg cannot be combined with indexed preview, trace, refresh, or symbol options")]
@@ -711,8 +741,6 @@ pub enum CliError {
     InvalidFileCategory(String),
     #[error("--force-direct requires --mode direct")]
     ForceDirectMode,
-    #[error("--json is not supported; redirect output or use --compact for compact markdown")]
-    RemovedJson,
     #[error("--human has been removed; terminal output is human-readable by default")]
     RemovedHuman,
     #[error("unknown option: {0}")]
@@ -806,30 +834,34 @@ impl Cli {
     /// # Errors
     ///
     /// Returns [`CliError`] when options are incompatible.
-    pub fn into_plan(self, current_dir: PathBuf) -> Result<CliPlan, CliError> {
-        self.into_plan_with_terminal(current_dir, io::stdout().is_terminal())
+    pub fn into_plan(self, current_dir: impl AsRef<Path>) -> Result<CliPlan, CliError> {
+        self.into_plan_with_terminal(current_dir.as_ref(), io::stdout().is_terminal())
     }
 
     fn into_plan_with_terminal(
         self,
-        current_dir: PathBuf,
+        current_dir: &Path,
         terminal: bool,
     ) -> Result<CliPlan, CliError> {
         let Some(command) = self.command else {
             return Ok(CliPlan::Help(None));
         };
         match command {
-            CommandLine::Query(args) => query_plan(args, current_dir, terminal),
-            CommandLine::Index(args) => index_plan(args, &current_dir),
+            CommandLine::Query(args) => query_plan(*args, current_dir, terminal),
+            CommandLine::Index(args) => index_plan(args, current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
                 mode: resolve_client_mode(args.mode)?,
                 home: args.home,
                 request: InfoOptions {
-                    root: Some(resolve_from(&current_dir, args.root.as_deref())),
+                    root: Some(resolve_from(current_dir, args.root.as_deref())),
+                    index_dir: args
+                        .index_dir
+                        .map(|path| resolve_from(current_dir, Some(&path))),
                     include_status: true,
                 },
                 check_ready: args.check_ready,
                 output: OutputOptions {
+                    json: args.json,
                     debug: args.debug,
                     color: if args.no_color {
                         ColorMode::Never
@@ -844,7 +876,10 @@ impl Cli {
             CommandLine::Version => Ok(CliPlan::Version),
             CommandLine::Config(args) => Ok(CliPlan::Config(args)),
             CommandLine::Auth(mut args) => {
-                args.root = Some(resolve_from(&current_dir, args.root.as_deref()));
+                args.root = Some(resolve_from(current_dir, args.root.as_deref()));
+                args.index_dir = args
+                    .index_dir
+                    .map(|path| resolve_from(current_dir, Some(&path)));
                 Ok(CliPlan::Auth(args))
             }
             CommandLine::Install(args) => {
@@ -1100,6 +1135,7 @@ fn query_option_without_value(value: &str) -> bool {
             | "--debug"
             | "--trace"
             | "--compact"
+            | "--json"
             | "--no-color"
             | "--fuse"
             | "--prefer-symbol"
@@ -1120,12 +1156,15 @@ fn query_option_with_value(value: &str) -> bool {
             | "--color"
             | "--limit"
             | "--hybrid"
+            | "--input"
+            | "--kind"
             | "--fts"
             | "--vector"
             | "--refresh"
             | "--symbol-type"
             | "--modified-after"
             | "--modified-before"
+            | "--index-dir"
             | "--home"
             | "--api-key"
             | "--model-cache"
@@ -1151,12 +1190,15 @@ fn query_attached_option(value: &str) -> bool {
         || value.starts_with("--color=")
         || value.starts_with("--limit=")
         || value.starts_with("--hybrid=")
+        || value.starts_with("--input=")
+        || value.starts_with("--kind=")
         || value.starts_with("--fts=")
         || value.starts_with("--vector=")
         || value.starts_with("--refresh=")
         || value.starts_with("--symbol-type=")
         || value.starts_with("--modified-after=")
         || value.starts_with("--modified-before=")
+        || value.starts_with("--index-dir=")
         || value.starts_with("--home=")
         || value.starts_with("--api-key=")
         || value.starts_with("--model-cache=")
@@ -1234,6 +1276,17 @@ fn context_refresh_policy(
 }
 
 fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
+    if args.input.is_some()
+        && (args.rg
+            || !args.values.is_empty()
+            || !args.hybrid_queries.is_empty()
+            || !args.fts.is_empty()
+            || !args.vector.is_empty()
+            || args.fuse
+            || args.prefer_symbol)
+    {
+        return Err(CliError::InputWithQuery);
+    }
     if args.force_direct && mode != ClientMode::Direct {
         return Err(CliError::ForceDirectMode);
     }
@@ -1246,7 +1299,8 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
         return Err(CliError::RgWithIndexedRoutes);
     }
     if args.rg
-        && (args.preview.is_some()
+        && (args.target_kind.is_some()
+            || args.preview.is_some()
             || args.trace
             || args.refresh.is_some()
             || args.prefer_symbol
@@ -1266,30 +1320,20 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
             1
         };
     }
-    if !args.rg {
-        if values.iter().any(|value| value == "--json") {
-            return Err(CliError::RemovedJson);
-        }
-        if let Some(option) = values
+    if !args.rg
+        && let Some(option) = values
             .iter()
             .find(|value| value.starts_with('-') && *value != "-")
-        {
-            return Err(CliError::UnknownQueryOption(option.clone()));
-        }
+    {
+        return Err(CliError::UnknownQueryOption(option.clone()));
     }
     Ok(())
 }
 
-fn query_plan(
-    mut args: QueryArgs,
-    current_dir: PathBuf,
-    terminal: bool,
-) -> Result<CliPlan, CliError> {
-    let mode = resolve_query_mode(&args)?;
-    validate_query(&args, mode)?;
-    let home = args.home.clone();
-    let human = terminal && !args.compact;
-    let output = OutputOptions {
+fn query_output(args: &QueryArgs, terminal: bool) -> OutputOptions {
+    let human = terminal && !args.compact && !args.json;
+    OutputOptions {
+        json: args.json,
         debug: args.debug,
         trace: args.trace,
         human,
@@ -1303,7 +1347,17 @@ fn query_plan(
         } else {
             args.color.unwrap_or_default()
         },
-    };
+    }
+}
+
+fn query_plan(
+    mut args: QueryArgs,
+    current_dir: &Path,
+    terminal: bool,
+) -> Result<CliPlan, CliError> {
+    let mode = resolve_query_mode(&args)?;
+    validate_query(&args, mode)?;
+    let output = query_output(&args, terminal);
     let mut request = if args.rg {
         if args.literal_value_count > 0 {
             args.values
@@ -1330,10 +1384,14 @@ fn query_plan(
                 query,
             }))
             .collect::<Vec<_>>();
-        if queries.is_empty() && routes.is_empty() {
+        if queries.is_empty() && routes.is_empty() && args.input.is_none() {
             return Err(CliError::MissingQuery);
         }
         ContextOptions {
+            target_kind: args.target_kind,
+            query_image: args.input.map(|path| QueryImage::Path {
+                path: resolve_from(current_dir, Some(&path)),
+            }),
             queries,
             routes,
             fuse: args.fuse,
@@ -1357,7 +1415,7 @@ fn query_plan(
     request.device = args.device.map(Into::into);
     request.model_cache = args
         .model_cache
-        .map(|path| resolve_from(&current_dir, Some(&path)));
+        .map(|path| resolve_from(current_dir, Some(&path)));
     request.limit = args.limit;
     if request.rg {
         request.rg_options.modified_after_epoch_ms = args.modified_after;
@@ -1370,7 +1428,12 @@ fn query_plan(
     {
         return Err(CliError::InvalidModifiedRange);
     }
-    request.root = Some(current_dir);
+    request.root = Some(current_dir.to_path_buf());
+    if !request.rg {
+        request.index_dir = args
+            .index_dir
+            .map(|path| resolve_from(current_dir, Some(&path)));
+    }
     args.files.apply_context(&mut request)?;
     request.ignore_files = request
         .ignore_files
@@ -1379,9 +1442,75 @@ fn query_plan(
         .collect();
     Ok(CliPlan::Query {
         mode,
-        home,
+        home: args.home,
         request: Box::new(request),
         output,
+    })
+}
+
+fn content_kind(value: &str) -> Result<ContentKind, CliError> {
+    match value {
+        "text" => Ok(ContentKind::Text),
+        "code" => Ok(ContentKind::Code),
+        "image" => Ok(ContentKind::Image),
+        _ => Err(CliError::InvalidContentKind(value.to_owned())),
+    }
+}
+
+struct EmbeddingUpdates {
+    default_model: Option<EmbeddingModelSpec>,
+    routes: BTreeMap<ContentKind, EmbeddingModelSpec>,
+    inherited_kinds: Vec<ContentKind>,
+}
+
+fn parse_embeddings(args: &IndexArgs) -> Result<EmbeddingUpdates, CliError> {
+    let model = |reference: &str| EmbeddingModelSpec {
+        reference: reference.to_owned(),
+        revision: None,
+        cache_dir: args.model_cache.clone(),
+        endpoint: None,
+        device: args.device.unwrap_or(DeviceArg::Auto).into(),
+    };
+    let mut default = None;
+    let mut routes = BTreeMap::new();
+    let mut cleared = Vec::new();
+    for value in &args.embedding {
+        let (kind, reference) = value
+            .split_once('=')
+            .map_or((None, value.as_str()), |(kind, reference)| {
+                (Some(kind), reference)
+            });
+        if reference.trim().is_empty() {
+            return Err(CliError::InvalidEmbedding(format!(
+                "{value:?}; expected MODEL, KIND=MODEL or KIND=default"
+            )));
+        }
+        if let Some(kind) = kind {
+            let kind = content_kind(kind)?;
+            if routes.contains_key(&kind) || cleared.contains(&kind) {
+                return Err(CliError::InvalidEmbedding(format!(
+                    "duplicate configuration for {}",
+                    kind.as_str()
+                )));
+            }
+            if reference == "default" {
+                cleared.push(kind);
+            } else {
+                routes.insert(kind, model(reference));
+            }
+        } else {
+            if default.is_some() {
+                return Err(CliError::InvalidEmbedding(
+                    "default model specified more than once".to_owned(),
+                ));
+            }
+            default = Some(model(reference));
+        }
+    }
+    Ok(EmbeddingUpdates {
+        default_model: default,
+        routes,
+        inherited_kinds: cleared,
     })
 }
 
@@ -1389,9 +1518,12 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
     args.model_cache = args
         .model_cache
         .map(|path| resolve_from(current_dir, Some(&path)));
-    let root = resolve_from(current_dir, args.root.as_deref());
     let mode = resolve_client_mode(args.mode)?;
     let home = args.home.clone();
+    let index_dir = args
+        .index_dir
+        .as_ref()
+        .map(|path| resolve_from(current_dir, Some(path)));
     let output = OutputOptions {
         debug: args.debug,
         color: if args.no_color {
@@ -1405,7 +1537,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         if args.name.is_some()
             || args.rebuild
             || args.reset_paths
-            || args.embedding.is_some()
+            || !args.embedding.is_empty()
             || args.model_cache.is_some()
             || args.device.is_some()
             || args.api_key.is_some()
@@ -1414,8 +1546,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || args.allow_remote
             || args.debug
             || !args.files.is_empty()
-            || !args.file_types.is_empty()
-            || !args.excluded_file_types.is_empty()
         {
             return Err(CliError::DropWithIndexOptions);
         }
@@ -1426,39 +1556,49 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             mode,
             home,
             operation: IndexOperation::Drop(InfoOptions {
-                root: Some(root),
+                root: Some(resolve_from(current_dir, args.root.as_deref())),
+                index_dir,
                 include_status: false,
             }),
             output,
         });
     }
     let mut scan = args.files.update();
-    scan.file_types = (!args.file_types.is_empty()).then_some(args.file_types);
-    scan.excluded_file_types =
-        (!args.excluded_file_types.is_empty()).then_some(args.excluded_file_types);
     scan.ignore_files = scan.ignore_files.map(|paths| {
         paths
             .into_iter()
             .map(|path| resolve_from(current_dir, Some(&path)))
             .collect()
     });
-    let embedding = args.embedding.map(|reference| EmbeddingModelSpec {
-        reference,
-        revision: None,
-        cache_dir: args.model_cache.clone(),
-        endpoint: args.endpoint.clone(),
-        device: args.device.unwrap_or(DeviceArg::Auto).into(),
-    });
+    let embeddings = parse_embeddings(&args)?;
+    let location = if let Some(root) = &args.root {
+        zg_engine::api::workspace::WorkspaceLocation::resolve(
+            Some(&resolve_from(current_dir, Some(root))),
+            index_dir.as_deref(),
+        )?
+    } else if index_dir.is_some() {
+        zg_engine::api::workspace::WorkspaceLocation::for_index(None, index_dir.as_deref())?
+    } else {
+        zg_engine::api::workspace::WorkspaceLocation::discover(Some(current_dir), None)?
+    };
     Ok(CliPlan::Index {
         mode,
         home,
         operation: IndexOperation::Build(Box::new(IndexOptions {
-            root: Some(root),
+            root: Some(location.root),
+            index_dir: Some(location.home),
             name: args.name,
+            changes: if args.root.is_none() {
+                vec![zg_engine::api::index::options::WorkspaceChange::Rescan]
+            } else {
+                Vec::new()
+            },
             rebuild: args.rebuild,
             reset_paths: args.reset_paths,
             scan,
-            embedding,
+            embedding: embeddings.default_model,
+            embedding_routes: embeddings.routes,
+            clear_embedding_routes: embeddings.inherited_kinds,
             allow_remote: args.allow_remote,
             api_key: args.api_key,
             endpoint: args.endpoint.clone(),
@@ -1633,7 +1773,7 @@ mod tests {
     fn plan(arguments: &[&str], terminal: bool) -> CliPlan {
         Cli::try_parse_from(arguments.iter().copied())
             .expect("parse")
-            .into_plan_with_terminal(std::env::temp_dir(), terminal)
+            .into_plan_with_terminal(&std::env::temp_dir(), terminal)
             .expect("plan")
     }
 
@@ -2052,61 +2192,19 @@ mod tests {
     }
 
     #[test]
-    fn index_rejects_query_category_options() {
-        for (option, value) in [("--category", "code"), ("--category-not", "code")] {
+    fn index_rejects_query_format_and_category_options() {
+        for (option, value) in [
+            ("-t", "rust"),
+            ("--type", "rust"),
+            ("-T", "rust"),
+            ("--type-not", "rust"),
+            ("--category", "code"),
+            ("--category-not", "code"),
+        ] {
             assert!(
                 Cli::try_parse_from(["zg", "--index", option, value]).is_err(),
                 "index must reject query option {option}"
             );
-        }
-    }
-
-    #[test]
-    fn index_type_filters_reach_scan_request_and_reject_drop() {
-        let CliPlan::Index {
-            operation: IndexOperation::Build(request),
-            ..
-        } = Cli::try_parse_from([
-            "zg",
-            "--index",
-            "-t",
-            "rust",
-            "--type=go",
-            "-T",
-            "json",
-            "--type-not=toml",
-        ])
-        .expect("index type arguments")
-        .into_plan(std::env::temp_dir())
-        .expect("index plan")
-        else {
-            panic!("index build");
-        };
-        assert_eq!(
-            request.scan.file_types,
-            Some(vec!["rust".into(), "go".into()])
-        );
-        assert_eq!(
-            request.scan.excluded_file_types,
-            Some(vec!["json".into(), "toml".into()])
-        );
-        let wire = serde_json::to_value(request).expect("serialize index request");
-        assert_eq!(
-            wire["scan"]["file_types"],
-            serde_json::json!(["rust", "go"])
-        );
-        assert_eq!(
-            wire["scan"]["excluded_file_types"],
-            serde_json::json!(["json", "toml"])
-        );
-
-        for option in ["-t", "--type", "-T", "--type-not"] {
-            let parsed = Cli::try_parse_from(["zg", "--index", "--drop", "--yes", option, "rust"])
-                .expect("index drop syntax");
-            assert!(matches!(
-                parsed.into_plan(std::env::temp_dir()),
-                Err(super::CliError::DropWithIndexOptions)
-            ));
         }
     }
 
@@ -2180,28 +2278,30 @@ mod tests {
 
     #[test]
     fn index_scan_flags_distinguish_false_from_omission() {
-        let CliPlan::Index {
-            operation: IndexOperation::Build(request),
-            ..
-        } = Cli::try_parse_from([
-            "zg",
-            "--index",
-            "--hidden=false",
-            "--follow=false",
-            "--no-ignore=false",
-        ])
-        .expect("valid test fixture")
-        .into_plan(PathBuf::from("/workspace"))
-        .expect("valid test fixture")
-        else {
-            panic!("index");
-        };
-        assert_eq!(request.scan.hidden, Some(false));
-        assert_eq!(request.scan.follow_symlinks, Some(false));
-        assert_eq!(request.scan.no_ignore, Some(false));
-        assert_eq!(request.scan.globs, None);
-        assert_eq!(request.scan.ignore_files, None);
-        assert_eq!(request.scan.max_depth, None);
+        for (ignore_args, expected) in [
+            (vec![], None),
+            (vec!["--no-ignore"], Some(false)),
+            (vec!["--no-ignore=false"], Some(true)),
+        ] {
+            let mut args = vec!["zg", "--index", "--hidden=false", "--follow=false"];
+            args.extend(ignore_args);
+            let CliPlan::Index {
+                operation: IndexOperation::Build(request),
+                ..
+            } = Cli::try_parse_from(args)
+                .expect("valid test fixture")
+                .into_plan(PathBuf::from("/workspace"))
+                .expect("valid test fixture")
+            else {
+                panic!("index");
+            };
+            assert_eq!(request.scan.include_hidden, Some(false));
+            assert_eq!(request.scan.follow_symlinks, Some(false));
+            assert_eq!(request.scan.use_default_ignores, expected);
+            assert_eq!(request.scan.globs, None);
+            assert_eq!(request.scan.ignore_files, None);
+            assert_eq!(request.scan.max_depth, None);
+        }
     }
 
     #[test]
@@ -2263,14 +2363,17 @@ mod tests {
     }
 
     #[test]
-    fn index_accepts_one_model_and_rejects_model_routes() {
-        for args in [
-            vec!["zg", "--index", "--embedding", "one", "--embedding", "two"],
-            vec!["zg", "--index", "--embedding-route", "text=one"],
-            vec!["zg", "--config", "model", "set", "one", "--content", "text"],
-        ] {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
+    fn index_accepts_one_default_and_rejects_repeated_default() {
+        assert!(
+            Cli::try_parse_from(["zg", "--index", "--embedding", "one", "--embedding", "two"])
+                .expect("parse repeatable embedding")
+                .into_plan(PathBuf::from("/workspace"))
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["zg", "--config", "model", "set", "one", "--content", "text"])
+                .is_err()
+        );
         let CliPlan::Index {
             operation: IndexOperation::Build(request),
             ..
@@ -2294,6 +2397,148 @@ mod tests {
     }
 
     #[test]
+    fn file_input_is_explicit_and_independent_of_result_kind() {
+        let CliPlan::Query {
+            request, output, ..
+        } = plan(
+            &[
+                "zg",
+                "--input",
+                "sample.png",
+                "--limit",
+                "3",
+                "--kind=image",
+                "--json",
+            ],
+            false,
+        )
+        else {
+            panic!("query")
+        };
+        assert_eq!(
+            request.query_image,
+            Some(super::QueryImage::Path {
+                path: std::env::temp_dir().join("sample.png")
+            })
+        );
+        assert_eq!(request.limit, Some(3));
+        assert_eq!(request.target_kind, Some(super::ContentKind::Image));
+        assert!(output.json);
+        assert!(request.queries.is_empty() && request.routes.is_empty());
+        let CliPlan::Query { request, .. } = plan(&["zg", "--input=sample.png"], false) else {
+            panic!("query")
+        };
+        assert!(request.query_image.is_some());
+        assert!(request.target_kind.is_none());
+        let existing_file = std::env::current_exe().expect("existing file");
+        let path = existing_file.to_str().expect("test executable path");
+        let CliPlan::Query { request, .. } = plan(&["zg", path], false) else {
+            panic!("query")
+        };
+        assert_eq!(request.queries, [path]);
+        assert!(request.query_image.is_none());
+        for args in [
+            vec!["zg", "words", "--input", "sample.png"],
+            vec!["zg", "--input", "sample.png", "--fts", "words"],
+            vec!["zg", "--input", "sample.png", "--vector", "words"],
+            vec!["zg", "--input", "sample.png", "--hybrid", "words"],
+            vec!["zg", "--input", "sample.png", "--fuse"],
+            vec!["zg", "--input", "sample.png", "--rg"],
+            vec!["zg", "--rg", "words", "--kind", "code"],
+            vec!["zg", "--input", "sample.png", "--prefer-symbol"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args)
+                    .expect("parse")
+                    .into_plan(PathBuf::from("/workspace"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn content_routes_reject_conflicting_or_invalid_cli_settings() {
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = plan(
+            &[
+                "zg",
+                "--index",
+                "--embedding",
+                "local/text",
+                "--embedding",
+                "image=qwen/vision",
+                "--embedding",
+                "code=local/code",
+                "--embedding",
+                "text=default",
+                "--endpoint",
+                "https://example.test/default-model",
+            ],
+            false,
+        )
+        else {
+            panic!("index")
+        };
+        let default = request.embedding.expect("default");
+        assert_eq!(default.reference, "local/text");
+        assert_eq!(
+            request.endpoint.as_deref(),
+            Some("https://example.test/default-model")
+        );
+        assert!(default.endpoint.is_none());
+        assert_eq!(
+            request.embedding_routes[&super::ContentKind::Image].reference,
+            "qwen/vision"
+        );
+        assert_eq!(request.embedding_routes.len(), 2);
+        assert!(
+            request
+                .embedding_routes
+                .values()
+                .all(|model| model.endpoint.is_none())
+        );
+        assert_eq!(
+            request.clear_embedding_routes,
+            vec![super::ContentKind::Text]
+        );
+        for route_args in [
+            vec!["--embedding", "image=one", "--embedding", "image=two"],
+            vec!["--embedding", "image=one", "--embedding", "image=default"],
+            vec!["--embedding", "image="],
+            vec!["--embedding", "image= "],
+            vec!["--embedding", " "],
+            vec!["--embedding", "=one"],
+            vec!["--embedding", "unknown=one"],
+            vec![
+                "--embedding",
+                "image=default",
+                "--embedding",
+                "image=default",
+            ],
+        ] {
+            let args = [vec!["zg", "--index"], route_args].concat();
+            assert!(
+                Cli::try_parse_from(args)
+                    .expect("parse")
+                    .into_plan(PathBuf::from("/workspace"))
+                    .is_err()
+            );
+        }
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = plan(&["zg", "--embedding=image=default", "--index"], false)
+        else {
+            panic!("index")
+        };
+        assert!(request.embedding.is_none());
+        assert!(request.embedding_routes.is_empty());
+        assert_eq!(request.clear_embedding_routes, [super::ContentKind::Image]);
+    }
+
+    #[test]
     fn cli_glob_list_replaces_saved_insensitive_rules() {
         let rules = vec![
             super::GlobRule::from("secret/**"),
@@ -2306,15 +2551,41 @@ mod tests {
             glob_rules: rules.clone(),
             ..Default::default()
         };
-        let mut scan = zg_engine::api::index::options::ScanRules {
-            globs: vec![super::GlobRule {
+        let scan = zg_engine::api::index::options::ScanRulesUpdate {
+            globs: Some(vec![super::GlobRule {
                 pattern: "!secret/**".to_owned(),
                 case_insensitive: true,
-            }],
+            }]),
             ..Default::default()
+        }
+        .apply(&zg_engine::api::index::options::ScanRules::default())
+        .expect("saved scan rules");
+        let scan = args.update().apply(&scan).expect("updated scan rules");
+        assert_eq!(scan.globs(), rules);
+    }
+
+    #[test]
+    fn query_paths_resolve_against_the_callers_working_directory() {
+        let cwd = std::env::temp_dir();
+        let CliPlan::Query { request, .. } = Cli::try_parse_from([
+            "zg",
+            "--input",
+            "query.png",
+            "--index-dir",
+            "indexes",
+            "--mode",
+            "direct",
+        ])
+        .expect("args")
+        .into_plan(cwd.clone())
+        .expect("plan") else {
+            panic!("query plan")
         };
-        args.update().apply(&mut scan);
-        assert_eq!(scan.globs, rules);
+        assert_eq!(request.root, Some(cwd.clone()));
+        assert_eq!(request.index_dir, Some(cwd.join("indexes")));
+        assert!(
+            matches!(request.query_image, Some(zg_engine::api::context::options::QueryImage::Path {path}) if path == cwd.join("query.png"))
+        );
     }
 
     #[test]
@@ -2352,6 +2623,9 @@ mod tests {
 
     #[test]
     fn parses_index_options_into_engine_request() {
+        let workspace = std::env::temp_dir()
+            .canonicalize()
+            .expect("temporary directory");
         let cli = Cli::try_parse_from([
             "zg",
             "--index",
@@ -2377,11 +2651,11 @@ mod tests {
         let CliPlan::Index {
             operation: IndexOperation::Build(request),
             ..
-        } = cli.into_plan(PathBuf::from("/workspace")).expect("plan")
+        } = cli.into_plan(workspace.clone()).expect("plan")
         else {
             panic!("index build")
         };
-        assert_eq!(request.root, Some(PathBuf::from("/workspace/repo")));
+        assert_eq!(request.root, Some(workspace.join("repo")));
         assert_eq!(request.name.as_deref(), Some("search-engine"));
         assert_eq!(request.embedding_concurrency, Some(4));
         assert_eq!(
@@ -2491,10 +2765,14 @@ mod tests {
         assert_eq!(request.limit, Some(3));
         assert_eq!(request.routes.len(), 1);
 
-        let removed = Cli::try_parse_from(["zg", "--json", "query"])
-            .expect("shape validation follows syntax parsing")
-            .into_plan(PathBuf::from("/workspace"));
-        assert!(removed.is_err());
+        let CliPlan::Query { output, .. } = Cli::try_parse_from(["zg", "--json", "query"])
+            .expect("JSON syntax")
+            .into_plan(PathBuf::from("/workspace"))
+            .expect("JSON plan")
+        else {
+            panic!("query")
+        };
+        assert!(output.json);
     }
 
     #[test]

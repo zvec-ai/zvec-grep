@@ -71,7 +71,8 @@ impl Fixture {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
-            stdout.contains(&format!("  Embedding   {reference}")),
+            stdout.contains(&format!("  text        {reference}"))
+                && stdout.contains(&format!("  code        {reference}")),
             "{stdout}"
         );
     }
@@ -96,6 +97,46 @@ fn success(output: Output) -> Output {
 }
 
 #[test]
+fn explicit_missing_index_never_builds_and_managed_rg_ignores_index_selection() {
+    let mut fixture = Fixture::new();
+    fixture.start_server();
+    fs::write(fixture.root.path().join("notes.txt"), "portable orchard\n").expect("source text");
+    for mode in ["direct", "server"] {
+        for via_environment in [false, true] {
+            let missing = fixture
+                .root
+                .path()
+                .join(format!("missing-{mode}-{via_environment}"));
+            let mut query = fixture.command(&["orchard", "--mode", mode]);
+            if via_environment {
+                query.env("ZVEC_GREP_INDEX_DIR", &missing);
+            } else {
+                query.arg("--index-dir").arg(&missing);
+            }
+            let output = query.output().expect("query missing index");
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(!error.contains("creating one"), "{error}");
+            assert!(!missing.exists(), "explicit query must not create an index");
+        }
+    }
+    let broken = fixture.root.path().join("broken-index");
+    fs::create_dir(&broken).expect("broken index directory");
+    fs::write(broken.join("manifest.json"), "invalid manifest").expect("broken manifest");
+    for mode in ["direct", "server"] {
+        let output = success(
+            fixture
+                .command(&["--rg", "orchard", "notes.txt", "--mode", mode])
+                .env("ZVEC_GREP_INDEX_DIR", &broken)
+                .output()
+                .expect("direct file search"),
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("portable orchard"));
+    }
+}
+
+#[test]
 fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
     let fixture = Fixture::new();
     let root = fs::canonicalize(fixture.root.path()).expect("canonical workspace");
@@ -116,7 +157,7 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
         plain.starts_with("? Workspace index is not configured\n  ~\n"),
         "{plain}"
     );
-    let storage = std::path::Path::new(".zvec-grep").join("storage");
+    let storage = std::path::Path::new(".zvec-grep").join("index");
     assert!(
         plain.contains(&format!("\n\n  Storage     {}", storage.display())),
         "{plain}"
@@ -459,7 +500,7 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
 #[test]
 fn missing_index_uses_default_local_model_without_polluting_query_stdout() {
     let fixture = Fixture::new();
-    // Empty workspaces and FTS-only queries never download or execute a model.
+    // Building this empty workspace and querying FTS need no model inference.
     let output = fixture.success(&["--mode", "direct", "--fts", "needle", "--no-color"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -553,7 +594,8 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         let stdout = String::from_utf8_lossy(&status.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
-            stdout.contains(&format!("  Embedding   {expected}")),
+            stdout.contains(&format!("  text        {expected}"))
+                && stdout.contains(&format!("  code        {expected}")),
             "{stdout}"
         );
         assert!(!fixture.root.path().join(".zvec-grep").exists());
@@ -569,9 +611,9 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
     fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&json!({
+            "format": "zg-workspace",
+            "sourceRoot": "..",
             "name": "disabled-workspace",
-            "path": home,
-            "root": root,
             "indexPolicy": "disabled",
             "indexVersion": null,
             "createdTime": 0,
@@ -709,10 +751,9 @@ fn implicit_build_preserves_local_overrides_without_persisting_remote_credential
             &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
         )
         .expect("manifest JSON");
-        // These persisted runtime settings are shared with the Node client.
         let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
-        assert_eq!(runtime["device"], "cpu");
-        assert_eq!(runtime["cacheDir"], json!(cache));
+        assert!(runtime.get("device").is_none());
+        assert!(runtime.get("cacheDir").is_none());
         assert!(runtime.get("apiKey").is_none());
         assert!(runtime.get("endpoint").is_none());
         assert!(!manifest.to_string().contains("implicit-query-secret"));

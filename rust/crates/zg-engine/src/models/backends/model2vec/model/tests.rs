@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use tempfile::TempDir;
 
-use crate::domain::{Content, model::Metric};
+use crate::domain::{Content, model::EmbeddingMetric};
 use crate::{
     domain::model::{EmbeddingPurpose, ModelConfig, ModelProgress},
     models::{
@@ -37,7 +37,8 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
         },
         dependencies.clone(),
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     assert_eq!(model.concurrency_defaults().initial, 2);
 
     let progress = Arc::new(StdMutex::new(Vec::new()));
@@ -59,7 +60,7 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
             &[
                 vec![Content::Text("both tokens".to_owned())],
                 vec![Content::Text("unknown-only".to_owned())],
-                vec![Content::Text("third token".to_owned())],
+                vec![Content::Code("third token".to_owned())],
             ],
             EmbeddingOptions {
                 purpose: EmbeddingPurpose::Query,
@@ -94,20 +95,20 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
             .expect("progress lock should not be poisoned"),
         [
             ModelProgress::Preparing {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(16),
             },
             ModelProgress::Downloading {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
                 downloaded_bytes: Some(8),
                 total_bytes: Some(16),
             },
             ModelProgress::Ready {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
         ]
     );
@@ -149,7 +150,8 @@ async fn concurrent_embeddings_share_one_lazy_loaded_runtime() {
         },
         dependencies.clone(),
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let first = [vec![Content::Text("first".to_owned())]];
     let second = [vec![Content::Text("second".to_owned())]];
 
@@ -198,7 +200,8 @@ async fn reports_truncation_and_validates_inputs_like_typescript() {
         },
         dependencies,
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let result = model
         .embed(
             &[vec![Content::Text("too many tokens".to_owned())]],
@@ -256,7 +259,8 @@ async fn excludes_cached_artifacts_from_download_progress_like_typescript() {
         },
         dependencies.clone(),
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let progress = Arc::new(StdMutex::new(Vec::new()));
     let captured = Arc::clone(&progress);
 
@@ -283,15 +287,15 @@ async fn excludes_cached_artifacts_from_download_progress_like_typescript() {
             .expect("progress lock should not be poisoned"),
         [
             ModelProgress::Preparing {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Ready {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
         ]
     );
@@ -309,7 +313,8 @@ async fn rejects_out_of_range_token_ids_like_typescript() {
         },
         dependencies,
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
 
     let error = model
         .embed(
@@ -339,7 +344,8 @@ async fn rejects_cancelled_embeddings_without_corrupting_the_loaded_runtime() {
         },
         dependencies.clone(),
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
+    )
+    .expect("fixture model");
     let signal = tokio_util::sync::CancellationToken::new();
     signal.cancel();
 
@@ -390,7 +396,7 @@ fn fixture_entry() -> Model2VecConfig {
         embedding_tensor: "embeddings",
         tokenizer_file: "tokenizer.json",
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         normalize: true,
         max_input_tokens: 512,
         max_batch_size: 32,

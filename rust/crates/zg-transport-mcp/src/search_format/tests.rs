@@ -26,6 +26,115 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/mcp/search-presentation.json"),
     )
     .expect("captured Node.js MCP fixtures")
+    .into_iter()
+    .map(|mut fixture| {
+        adapt_context_fixture(&mut fixture.result);
+        // Rust results include the content kind alongside each path.
+        for expected in [&mut fixture.expected_short, &mut fixture.expected_full] {
+            *expected = expected
+                .split_inclusive('\n')
+                .map(|line| {
+                    if line.starts_with('#') && line.contains(" matchedBy=") {
+                        format!("{line}type: text\n")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect();
+        }
+        // Current engine replies already carry presentation order; old captured
+        // Node replies delegated their final rank sorting to this formatter.
+        if let Some(items) = fixture.result["items"].as_array_mut() {
+            items.sort_by_key(|item| item["rank"].as_u64().unwrap_or_default());
+        }
+        fixture
+    })
+    .collect()
+}
+
+pub(crate) fn adapt_context_fixture(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.contains_key("hits_returned") && object.contains_key("routes") {
+                object.insert("input_kind".into(), "text".into());
+                object.insert("targets".into(), serde_json::json!([]));
+                object.insert("result_groups".into(), serde_json::json!([]));
+                object.insert("incomplete".into(), false.into());
+                object.entry("limit").or_insert_with(|| 30.into());
+            }
+            if object.contains_key("rank") && object.contains_key("content") {
+                let text = object.remove("content").expect("content exists");
+                object.insert(
+                    "preview".into(),
+                    serde_json::json!({"kind":"text", "value":text}),
+                );
+                object.remove("entity_id");
+            }
+            for value in object.values_mut() {
+                adapt_context_fixture(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                adapt_context_fixture(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn kind_groups_preserve_engine_order_instead_of_globally_sorting_ranks() {
+    let mut value = fixtures().remove(0).result;
+    let mut first = value["items"][0].clone();
+    first["rank"] = 2.into();
+    first["relative_path"] = "text-result.txt".into();
+    let mut second = first.clone();
+    second["rank"] = 1.into();
+    second["relative_path"] = "code-result.rs".into();
+    value["items"] = serde_json::json!([first, second]);
+    value["diagnostics"]["index"] = serde_json::json!({
+        "input_kind":"text", "targets":[], "incomplete":false, "limit":30,
+        "hits_returned":2, "query_groups":[], "routes":[], "result_groups":[
+        {"id":"text", "kinds":["text"], "model_refs":["fixture/text"], "scoring":"hybrid", "rule_ranking":true, "item_start":0, "item_count":1},
+        {"id":"code", "kinds":["code"], "model_refs":["fixture/code"], "scoring":"hybrid", "rule_ranking":true, "item_start":1, "item_count":1},
+    ]});
+    let result: ContextResult = serde_json::from_value(value).expect("grouped result");
+    let rendered = format_search_result(&result, SearchPreview::Short);
+    assert!(
+        rendered.find("text-result.txt").expect("text path")
+            < rendered.find("code-result.rs").expect("code path")
+    );
+    assert!(rendered.contains("result group: text kinds=text"));
+    assert!(rendered.contains("result group: code kinds=code"));
+    assert!(rendered.contains("scoring=rule recall=Hybrid merge=independent_kind"));
+    assert!(!rendered.contains("trace:"));
+
+    let mut merged = serde_json::to_value(result).expect("context");
+    merged["diagnostics"]["index"]["result_groups"] = serde_json::json!([
+        {"id":"text-code", "kinds":["text", "code"], "model_refs":["fixture/text"],
+         "scoring":"full_text", "rule_ranking":true, "item_start":0, "item_count":2}
+    ]);
+    let trace = serde_json::json!({
+        "recall":[], "fusion":{"rank":1,"score":0.01,"forced":false},
+        "final_selection":{"returned_by_limit":true,"cutoff_rank":2}
+    });
+    merged["items"][0]["trace"] = trace.clone();
+    let merged: ContextResult = serde_json::from_value(merged).expect("merged context");
+    let rendered = format_search_result(&merged, SearchPreview::Short);
+    assert!(
+        rendered.contains(
+            "kinds=text,code scoring=rule recall=FullText merge=shared_recall_then_rules"
+        )
+    );
+    let rendered_trace = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("trace: "))
+        .expect("requested per-hit trace is displayed");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(rendered_trace).expect("trace JSON"),
+        trace
+    );
 }
 
 fn source_range_cases() -> Vec<McpSearchPresentationCase> {
@@ -55,7 +164,7 @@ fn source_range_cases() -> Vec<McpSearchPresentationCase> {
             item["range"] = entity.clone();
             item["excerpt_range"] = excerpt.clone();
             item["content_range"] = if whole_entity { entity } else { excerpt };
-            item["content"] = if whole_entity {
+            item["preview"]["value"] = if whole_entity {
                 source.clone()
             } else {
                 source[17..].to_owned()
@@ -67,7 +176,7 @@ fn source_range_cases() -> Vec<McpSearchPresentationCase> {
                 "2\tneedle"
             };
             let expected = format!(
-                "freshness: fresh\n#1 matchedBy=fts+vector sample.md:1-2\nmatched: 2\nsource:\n{lines}{}",
+                "freshness: fresh\n#1 matchedBy=fts+vector sample.md:1-2\ntype: text\nmatched: 2\nsource:\n{lines}{}",
                 if trailing_newline { "\n3\t" } else { "" }
             );
             cases.push(McpSearchPresentationCase {
@@ -204,7 +313,7 @@ async fn public_tool_preview_matches_node_without_changing_retrieval() {
             let server = ZvecGrepMcpServer::build_with_index_operations(Arc::new(ZvecGrep::new()), toolset, None, backend.clone());
             let tool = server.listed_tools().into_iter().find(|tool| tool.name == "zvec_grep_search").expect("search tool");
             assert_eq!(tool.input_schema["properties"]["preview"]["enum"], serde_json::json!(["short", "full"]));
-            assert!(!tool.input_schema["required"].as_array().expect("required fields").contains(&serde_json::json!("preview")));
+            assert!(!tool.input_schema.get("required").and_then(serde_json::Value::as_array).is_some_and(|required| required.contains(&serde_json::json!("preview"))));
             assert!(tool.description.as_deref().expect("description").contains("preview: \"full\""));
             let (server_io, client_io) = tokio::io::duplex(4096);
             let task = tokio::spawn(async move { server.serve(server_io).await.expect("server").waiting().await });
@@ -243,4 +352,40 @@ async fn public_tool_preview_matches_node_without_changing_retrieval() {
             task.await.expect("server task").expect("server stop");
         }
     }).await.expect("tool tests terminate");
+}
+
+#[test]
+fn image_search_results_show_metadata_without_text_ranges_or_bytes() {
+    use zg_engine::api::context::{
+        options::FileFormat,
+        result::{ContentPreview, ContentRange},
+    };
+    let mut result: ContextResult =
+        serde_json::from_value(fixtures().remove(0).result).expect("context");
+    result.items.truncate(1);
+    result.group_results.clear();
+    let item = &mut result.items[0];
+    item.relative_path = "image.png".into();
+    item.preview = ContentPreview::Image {
+        format: FileFormat::Png,
+        size_bytes: 1024,
+    };
+    item.range = ContentRange::File;
+    item.content_range = ContentRange::File;
+    result.diagnostics.index = Some(serde_json::from_value(serde_json::json!({
+        "input_kind":"image", "targets":[], "incomplete":false, "limit":30,
+        "hits_returned":1, "query_groups":[], "routes":[], "result_groups":[
+            {"id":"text", "kinds":["text"], "model_refs":["fixture/model"], "scoring":"vector", "rule_ranking":true, "item_start":0, "item_count":0},
+            {"id":"image", "kinds":["image"], "model_refs":["fixture/model"], "scoring":"vector", "rule_ranking":false, "item_start":0, "item_count":1}
+        ]
+    })).expect("leading empty group"));
+    let text = format_search_result(&result, SearchPreview::Full);
+    assert!(text.contains("image.png"));
+    assert!(!text.contains("image.png:"));
+    assert!(text.contains("type: image; format: png; size: 1024 bytes"));
+    assert!(!text.contains("source:"));
+    assert!(!text.contains("reference:"));
+    assert!(!text.contains("generation"));
+    assert!(text.contains("result group: image kinds=image scoring=Vector"));
+    assert!(!text.contains("result group: text"));
 }

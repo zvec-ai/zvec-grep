@@ -143,6 +143,36 @@ Indexed source size: 3060923 bytes
   }
 });
 
+test("content-kind status supports shared and distinct embedding models", () => {
+  const status = groupedReadyStatus.replace(
+    "  Embedding   local/potion-code-16m-v2\n              256 dimensions · cosine",
+    "  text        local/potion-code-16m-v2 (256 dimensions, cosine) · 4,269 entities · ready\n  code        local/potion-code-16m-v2 (256 dimensions, cosine) · 0 entities · empty\n  image       not enabled",
+  );
+  assert.deepEqual(
+    parseNativeStatus(status),
+    parseNativeStatus(groupedReadyStatus),
+  );
+  const mixed = status.replace(
+    "  image       not enabled",
+    "  image       local/vision (512 dimensions, cosine) · 1 entities · ready",
+  );
+  assert.equal(
+    parseNativeStatus(mixed).embedding,
+    "text=local/potion-code-16m-v2,code=local/potion-code-16m-v2,image=local/vision",
+  );
+  for (const [from, to] of [
+    ["256 dimensions", "broken dimensions"],
+    ["256 dimensions", "0 dimensions"],
+    ["4,269 entities", "4,26 entities"],
+    ["0 entities · empty", "0 entities · ready"],
+    ["  image       not enabled", ""],
+  ]) {
+    assert.throws(() => parseNativeStatus(status.replace(from, to)), {
+      name: "AssertionError",
+    });
+  }
+});
+
 test("grouped status accepts ANSI, CRLF, ASCII coverage and candidate HOME paths", () => {
   const plain = parseNativeStatus(groupedReadyStatus);
   for (const storage of [

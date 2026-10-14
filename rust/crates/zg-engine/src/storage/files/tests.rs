@@ -21,6 +21,7 @@ fn source_file_projection_preserves_paths_and_directory_membership_for_all_statu
     assert!(!files_schema().expect("file schema").has_field("formats"));
     let directories = [DirectoryId::new(0), DirectoryId::new(1)];
     let mut source = file(12, Path::new("src").join("nested").join("name.rs"));
+    let portable_path = r#"{"components":["src","nested","name.rs"]}"#;
     source.snapshot.content_hash = Some("fixture-hash".into());
     for status in [
         FileIndexStatus::NotIndexed,
@@ -37,6 +38,14 @@ fn source_file_projection_preserves_paths_and_directory_membership_for_all_statu
         let doc = encode_file_doc(&source, &directories).expect("encode source");
         assert_eq!(doc.get_pk(), Some("f12"));
         assert!(!doc.has_field("formats"));
+        assert_eq!(
+            string_field(&doc, "path").expect("portable path"),
+            portable_path
+        );
+        assert_eq!(
+            string_field(&doc, "path_key").expect("portable path key"),
+            hex::encode(portable_path.as_bytes())
+        );
         assert_eq!(
             string_field(&doc, "relative_path").expect("query path"),
             "src/nested/name.rs"
@@ -190,16 +199,7 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
     assert_eq!(remaining, ids[..ids.len() - 1]);
 }
 
-// TODO: re-enable on macOS once the zvec native binary registers the
-// `array_take` Arrow compute kernel. See bug report: `fetch_with_options`
-// silently returns a field-stripped Doc on macOS, so `mark_deleting`
-// (fetch → mutate → upsert) persists a corrupted record and the follow-up
-// `fetch` panics with "Field not found in document".
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "zvec macOS native missing array_take kernel; corrupts fetch→upsert path"
-)]
 fn deleting_preserves_file_projections_until_record_removal() {
     initialize().expect("initialize zvec");
     let root = tempfile::tempdir().expect("storage");
@@ -218,7 +218,13 @@ fn deleting_preserves_file_projections_until_record_removal() {
     files
         .put(&source, &[DirectoryId::new(3), DirectoryId::new(8)])
         .expect("source");
+    files.flush().expect("persist source");
+    drop(files);
+    let files = Files::open(root.path(), false).expect("reopen source");
     files.mark_deleting(id).expect("mark deleting");
+    files.flush().expect("persist deletion marker");
+    drop(files);
+    let mut files = Files::open(root.path(), false).expect("resume deletion");
     let mut deleting = source.clone();
     deleting.index_status = FileIndexStatus::Deleting;
     assert_eq!(files.fetch(&[id]).expect("file").get(&id), Some(&deleting));
@@ -243,8 +249,27 @@ fn deleting_preserves_file_projections_until_record_removal() {
         [id]
     );
     files.delete(id).expect("remove source");
+    files.flush().expect("persist deletion");
+    drop(files);
+    let mut files = Files::open(root.path(), false).expect("reopen deleted source");
     assert!(files.fetch(&[id]).expect("missing source").is_empty());
     assert_ne!(files.resolve_ids(&[path]).expect("new identity"), [id]);
+}
+
+#[test]
+fn allocation_metadata_is_required_for_writers_but_not_readers() {
+    initialize().expect("initialize zvec");
+    let root = tempfile::tempdir().expect("storage");
+    let files = Files::open(root.path(), false).expect("new files");
+    files.flush().expect("flush files");
+    drop(files);
+    let sequence = root.path().join("file-ids.json");
+    std::fs::remove_file(&sequence).expect("remove allocation metadata");
+    let reader = Files::open(root.path(), true).expect("reader needs only source records");
+    assert!(reader.list().expect("read empty collection").is_empty());
+    drop(reader);
+    assert!(Files::open(root.path(), false).is_err());
+    assert!(!sequence.exists());
 }
 
 #[test]

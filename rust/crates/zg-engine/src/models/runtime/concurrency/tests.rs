@@ -33,6 +33,7 @@ fn index_override_precedence_and_legacy_scope() {
     assert_eq!(resolve(llama, None, " 02 ", "1").0, Some(2));
     assert_eq!(resolve(llama, None, "", "4").0, Some(4));
     for reference in [
+        "local/embeddinggemma-2",
         "local/all-minilm-l6-v2",
         "local/potion-code-16m-v2",
         "qwen/text-embedding-v4",
@@ -67,7 +68,7 @@ fn invalid_environment_warns_and_uses_auto_without_legacy_retry() {
 }
 
 #[test]
-fn native_limits_cap_at_eight_and_llama_batches_are_serial() {
+fn native_limits_follow_backend_session_capacity() {
     let llama = "local/embeddinggemma-300m";
     let transformers = "local/all-minilm-l6-v2";
     assert_eq!(local_runtime_limit(llama, Some(24)), Some(8));
@@ -76,6 +77,16 @@ fn native_limits_cap_at_eight_and_llama_batches_are_serial() {
     assert_eq!(local_runtime_limit(transformers, None), Some(1));
     assert_eq!(batch_concurrency(llama, Some(24)), Some(1));
     assert_eq!(batch_concurrency(transformers, Some(24)), Some(8));
+    for requested in [None, Some(1), Some(24)] {
+        assert_eq!(
+            local_runtime_limit("local/embeddinggemma-2", requested),
+            Some(1)
+        );
+        assert_eq!(
+            batch_concurrency("local/embeddinggemma-2", requested),
+            Some(1)
+        );
+    }
     for reference in ["local/potion-code-16m-v2", "qwen/text-embedding-v4"] {
         assert_eq!(local_runtime_limit(reference, Some(24)), None);
         assert_eq!(batch_concurrency(reference, Some(24)), Some(24));

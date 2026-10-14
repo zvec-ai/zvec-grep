@@ -78,6 +78,18 @@ export function parseVisibleResponse(response) {
       fail("Unexpected background refresh status.");
     lines.shift();
   }
+  if (lines[0]?.startsWith("incomplete: "))
+    fail(
+      "Incomplete search results cannot be scored as a successful retrieval.",
+    );
+  while (lines[0]?.startsWith("route: ")) {
+    const route =
+      /^route: input=(text|code|image) target=(text|code|image) model=\S+ status=(Searched|Empty|Skipped|Failed)(?: \(.+\))?$/.exec(
+        lines.shift(),
+      );
+    if (!route) fail("Malformed public search route.");
+    if (route[3] === "Failed") fail("A target search failed.");
+  }
   // An empty string is not a successful empty search. The product has explicit empty labels.
   if (lines[0] === "No matches." || lines[0] === "No searchable files.") {
     const emptyReason =
@@ -89,10 +101,24 @@ export function parseVisibleResponse(response) {
   }
   const items = [];
   let item;
+  let resultGroup;
   let section = "metadata";
   const header =
     /^#([1-9]\d*)(?: \[(?:group_coverage: [^\]\n]+|global_fill)\])? matchedBy=(fts\+vector|fts|vector|lexical)(?: score=(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?))? (.+?):((?:[1-9]\d*(?:-[1-9]\d*)?)|file|page:[1-9]\d*|bytes:\d+-\d+)$/;
   for (const line of lines) {
+    if (line.startsWith("result group: ")) {
+      if (resultGroup || items.length > 0)
+        fail(
+          "Independently ranked result groups cannot be scored as a global top-10.",
+        );
+      const group =
+        /^result group: (\S+) kinds=(?:text|code|image)(?:,(?:text|code|image))* scoring=(?:rule|Vector|FullText|Hybrid|MultiQuery) recall=(?:Vector|FullText|Hybrid|MultiQuery) merge=(?:shared_recall_then_rules|independent_kind); ranked within this group$/.exec(
+          line,
+        );
+      if (!group) fail("Malformed public result group.");
+      resultGroup = group[1];
+      continue;
+    }
     const match = header.exec(line);
     if (match) {
       const rank = Number(match[1]);
@@ -140,7 +166,7 @@ export function parseVisibleResponse(response) {
     }
     if (
       section === "metadata" &&
-      /^(?:groups: |status: possibly_stale$|symbol: |heading: |heading_level: \d+$|scope: )/.test(
+      /^(?:type: (?:text|code)$|groups: |status: possibly_stale$|symbol: |heading: |heading_level: \d+$|scope: )/.test(
         line,
       )
     ) {

@@ -1,5 +1,6 @@
 //! Concrete embedding backends and catalog-backed construction.
 
+mod embedding_gemma2;
 mod factory;
 mod llama_cpp;
 mod model2vec;

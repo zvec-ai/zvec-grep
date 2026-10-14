@@ -61,7 +61,7 @@ impl WorkspaceRuntime {
             || options.scan != ScanRulesUpdate::default();
         let revision = self.dirty_revision.load(Ordering::Acquire);
         let full_epoch = (reason == JobReason::Watch && full).then_some(state.required_epoch);
-        let submitted = match scheduler.submit(self.canonical_root.clone(), options, reason) {
+        let submitted = match scheduler.submit(self.location.root.clone(), options, reason) {
             Ok(submitted) => submitted,
             Err(error) => {
                 // A later narrow batch cannot repair changes rejected by the queue.

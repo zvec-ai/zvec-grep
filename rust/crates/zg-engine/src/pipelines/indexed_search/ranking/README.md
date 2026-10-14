@@ -4,6 +4,14 @@ Rule ranking scores the entire recalled entity pool before applying the result
 limit. It runs in the shared indexed-search engine, so direct, server, and MCP
 queries use the same policy.
 
+The policy applies to every text/code plan, including single-vector searches.
+Compatible text/code tables pool raw recall before route fusion and rule ranking.
+Full-text-only plans can pool tables with different embedding models; vector and
+hybrid plans require compatible models and identical query encodings. Native BM25
+scores are compared across tables as an approximation, like Zvec's segment merge;
+identical tokenizer settings do not imply shared corpus statistics. Images stay in
+separate groups and do not use these rules.
+
 The policy normalizes RRF by the maximum possible score for the enabled routes,
 adds bounded symbol/definition bonuses, and applies the minimum applicable path
 factor. Name evidence comes from entity metadata, not arbitrary mentions in

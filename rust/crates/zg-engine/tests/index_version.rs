@@ -67,6 +67,7 @@ async fn assert_incompatible_operations(
         let info = engine
             .info(InfoOptions {
                 root: Some(root.to_path_buf()),
+                index_dir: None,
                 include_status,
             })
             .await?;
@@ -112,7 +113,7 @@ async fn assert_incompatible_operations(
     assert_rebuild_error(&error);
     assert_manifest_unchanged(root, manifest)?;
     let error = engine
-        .watch_workspace(root, &TaskControl::default())
+        .watch_workspace(root, None, &TaskControl::default())
         .await
         .err()
         .expect("watch must reject incompatible data before starting");
@@ -158,8 +159,8 @@ async fn incompatible_versions_require_explicit_rebuild_across_public_operations
             .as_str()
             .expect("current generation")
             .to_owned();
-        let old_storage = root.join(".zvec-grep/generations").join(&generation);
-        let old_records = native_file_records(&old_storage.join("storage"))?;
+        let old_storage = root.join(".zvec-grep/index");
+        let old_records = native_file_records(&old_storage)?;
         let actual_version = version
             .as_ref()
             .and_then(Value::as_u64)
@@ -178,10 +179,7 @@ async fn incompatible_versions_require_explicit_rebuild_across_public_operations
         let requests = server.requests.load(Ordering::Acquire);
         assert_incompatible_operations(&engine, &options, actual_version, &incompatible).await?;
         assert_eq!(server.requests.load(Ordering::Acquire), requests);
-        assert_eq!(
-            native_file_records(&old_storage.join("storage"))?,
-            old_records
-        );
+        assert_eq!(native_file_records(&old_storage)?, old_records);
 
         let rebuilt = engine
             .index(IndexOptions {
@@ -192,8 +190,27 @@ async fn incompatible_versions_require_explicit_rebuild_across_public_operations
         assert_eq!((rebuilt.files_added, rebuilt.files_failed), (1, 0));
         current = assert_current_index(&engine, root).await?;
         assert_ne!(current["storageGeneration"], generation);
-        assert!(!old_storage.exists(), "superseded generation is removed");
+        assert!(old_storage.is_dir(), "rebuild keeps the fixed index path");
+        assert!(!root.join(".zvec-grep/temp").exists());
     }
+    // Version 2 was never released: older development schemas must be rebuilt.
+    current
+        .as_object_mut()
+        .expect("manifest")
+        .remove("sourceRoot");
+    let incompatible = serde_json::to_vec(&current)?;
+    fs::write(root.join(".zvec-grep/manifest.json"), &incompatible)?;
+    assert_incompatible_operations(&engine, &options, Some(2), &incompatible).await?;
+    engine
+        .index(IndexOptions {
+            rebuild: true,
+            ..options.clone()
+        })
+        .await?;
+    assert_eq!(
+        assert_current_index(&engine, root).await?["sourceRoot"],
+        ".."
+    );
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())
@@ -273,18 +290,15 @@ async fn rebuilding_node_index_preserves_old_data_until_successful_publication()
         .expect_err("cancelled rebuild must not publish");
     assert_eq!(cancelled.code(), EngineError::CANCELLED);
     assert_node_index_preserved(root, &manifest)?;
-    assert!(!home.join("build.json").exists());
+    assert!(!home.join("temp/build.json").exists());
     assert!(
-        !home.join("generations").exists(),
+        !home.join("temp").exists(),
         "cancelled admission must not prepare generation storage"
     );
 
     // Fail stage creation after the ownership record is written, without touching
     // either legacy collection or its active manifest.
-    fs::write(
-        home.join("generations"),
-        "cannot create a generation below a file",
-    )?;
+    fs::write(home.join("temp"), "cannot create a generation below a file")?;
     let failed = engine
         .index(options.clone())
         .await
@@ -292,24 +306,28 @@ async fn rebuilding_node_index_preserves_old_data_until_successful_publication()
     assert_ne!(failed.code(), EngineError::CANCELLED);
     assert_node_index_preserved(root, &manifest)?;
     assert_eq!(server.requests.load(Ordering::Acquire), 0);
-    fs::remove_file(home.join("generations"))?;
+    fs::remove_file(home.join("temp"))?;
 
     let rebuilt = engine.index(options.clone()).await?;
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (1, 0));
     assert_eq!(server.inputs.load(Ordering::Acquire), 1);
     let current = assert_current_index(&engine, root).await?;
-    assert_eq!(current["embeddings"][0]["model"]["provider"], "qwen");
     assert_eq!(
-        current["embeddings"][0]["model"]["name"],
+        current["defaultEmbeddingModel"]["model"]["provider"],
+        "qwen"
+    );
+    assert_eq!(
+        current["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
     );
     assert!(current.get("rootPaths").is_none());
-    assert!(home.join("generations").is_dir());
+    assert!(home.join("index").is_dir());
+    assert!(!home.join("temp").exists());
     for directory in ["files.zvec", "index.zvec"] {
         assert!(!home.join(directory).exists());
     }
     assert_eq!(fs::read(home.join("authorization.json"))?, b"[]\n");
-    assert!(!home.join("build.json").exists());
+    assert!(!home.join("temp/build.json").exists());
     engine.drop_index(info_options(root)).await?;
     engine.close();
     Ok(())

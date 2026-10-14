@@ -23,6 +23,8 @@ use zg_daemon::{DaemonStatus, ListenAddress, McpToolset as DaemonMcpToolset, Ser
 use zg_daemon_protocol::{DaemonCommand, DaemonReply};
 use zg_engine::{EngineError, ZvecGrep, api::context::ContextOptions};
 
+mod process_limits;
+
 static DAEMON_LOGGING: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
@@ -73,6 +75,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     install_darwin_metal_residency_mitigation()?;
     // Emit after a possible re-exec so macOS prints each warning only once.
     warn();
+    process_limits::configure_file_limit();
     let debug = match &plan {
         CliPlan::Query { output, .. }
         | CliPlan::Index { output, .. }
@@ -172,18 +175,20 @@ async fn execute_plan(plan: CliPlan) -> Result<(), Box<dyn Error>> {
                 .as_deref()
                 .ok_or_else(|| io::Error::other("auth root is required"))?;
             if matches!(args.action, zg_cli::AuthAction::Revoke) {
-                let count = zg_engine::authorization::revoke_all(root)?;
+                let count = zg_engine::authorization::revoke_all(root, args.index_dir.as_deref())?;
                 zg_cli::write_authorization_revoke_result(io::stdout().lock(), count)?;
                 return Ok(());
             }
             if matches!(args.action, zg_cli::AuthAction::Grant { .. }) {
                 zg_engine::authorization::grant(
                     root,
+                    args.index_dir.as_deref(),
                     args.embedding.as_deref(),
                     args.endpoint.as_deref(),
                 )?;
             }
-            let status = zg_engine::authorization::status_snapshot(root)?;
+            let status =
+                zg_engine::authorization::status_snapshot(root, args.index_dir.as_deref())?;
             zg_cli::write_authorization_status(
                 io::stdout().lock(),
                 &status,
@@ -346,6 +351,10 @@ async fn ensure_query_index(
         info::{InfoOptions, result::WorkspaceIndexPolicy},
     };
 
+    if request.index_dir.is_some() {
+        return Ok(false);
+    }
+
     let server_home = if server {
         Some(zg_daemon::resolve_home(home.map(Path::to_owned))?)
     } else {
@@ -353,6 +362,7 @@ async fn ensure_query_index(
     };
     let info_request = InfoOptions {
         root: request.root.clone(),
+        index_dir: request.index_dir.clone(),
         ..InfoOptions::default()
     };
     let info = if let Some(home) = &server_home {
@@ -371,11 +381,15 @@ async fn ensure_query_index(
         return Ok(false);
     }
 
+    if request.query_image.is_some() {
+        return Err(EngineError::unsupported("image queries require an existing image index; configure --embedding image=<model> with zg --index first").into());
+    }
     let embedding = zg_engine::config::implicit_embedding_reference()?;
     eprintln!("No index found; creating one with {embedding}.");
     // Implicit builds must not inherit remote credentials or authorization.
     let mut index_request = IndexOptions {
         root: Some(info.root),
+        index_dir: Some(info.home),
         embedding: Some(EmbeddingModelSpec {
             reference: embedding,
             revision: None,
@@ -447,9 +461,8 @@ async fn authorize_query_with_io(
     let mut decisions = Vec::new();
     for authorization in &targets {
         let decision = zg_cli::prompt_query_authorization(
-            &authorization.target,
-            authorization.query_text,
-            authorization.workspace_content,
+            authorization,
+            request.query_image.is_none(),
             &mut input,
             &mut output,
         )?;
@@ -484,11 +497,6 @@ async fn authorize_query_with_io(
                 unreachable!()
             }
         }
-    }
-    // A single remote query destination can retain the legacy binding. Multiple
-    // models keep their individual saved endpoints instead of a global override.
-    if targets.len() == 1 {
-        request.authorization_model = Some(targets[0].target.model.clone());
     }
     Ok(())
 }
@@ -568,6 +576,7 @@ async fn execute_index(
     match operation {
         IndexOperation::Build(mut request) => {
             authorize_index(&mut request, server, home).await?;
+            let index_dir = request.index_dir.clone();
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
                 io::stderr().is_terminal(),
@@ -592,6 +601,7 @@ async fn execute_index(
                 home,
                 zg_engine::api::info::InfoOptions {
                     root: Some(root.clone()),
+                    index_dir,
                     include_status: false,
                 },
             )
@@ -621,6 +631,10 @@ async fn execute_index(
             }
         }
         IndexOperation::Drop(request) => {
+            let location = zg_engine::api::workspace::WorkspaceLocation::discover(
+                request.root.as_deref(),
+                request.index_dir.as_deref(),
+            )?;
             let removed = if server {
                 let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
                 let reply =
@@ -635,7 +649,12 @@ async fn execute_index(
                 engine.close();
                 removed
             };
-            zg_cli::write_index_drop_result(io::stdout().lock(), &root, removed)?;
+            zg_cli::write_index_drop_result(
+                io::stdout().lock(),
+                &location.root,
+                &location.home,
+                removed,
+            )?;
         }
     }
     Ok(())
@@ -752,7 +771,11 @@ async fn use_server(mode: ClientMode, home: Option<&Path>) -> Result<bool, Box<d
         ClientMode::Direct => Ok(false),
         ClientMode::Server => Ok(true),
         ClientMode::Auto => {
-            let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
+            let home = match zg_daemon::resolve_home(home.map(Path::to_owned)) {
+                Ok(home) => home,
+                Err(zg_daemon::DaemonError::MissingHome) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
             Ok(zg_daemon::server_status(&home).await?.ready)
         }
     }
@@ -936,10 +959,6 @@ mod query_authorization_tests {
         );
         assert_eq!(once.authorized_remote.len(), 1);
         assert_eq!(once.authorized_remote[0].model, "qwen/text-embedding-v4");
-        assert_eq!(
-            once.authorization_model.as_deref(),
-            Some("qwen/text-embedding-v4")
-        );
         assert!(!root.join(".zvec-grep/authorization.json").exists());
         assert!(
             String::from_utf8(prompt)

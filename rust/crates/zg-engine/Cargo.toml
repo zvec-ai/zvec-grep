@@ -18,6 +18,8 @@ vulkan = ["llama-cpp-2/vulkan", "ort/webgpu"]
 [dependencies]
 async-trait.workspace = true
 base64 = "0.23.1"
+chacha20poly1305 = { version = "0.10.1", features = ["std"] }
+getrandom = "0.4.3"
 encoding_rs = "0.8.35"
 futures-util = "0.3.34"
 globset.workspace = true
@@ -25,6 +27,7 @@ grep.workspace = true
 half = "2.7.1"
 hex = "0.4.3"
 ignore.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 hmac-sha256 = "1.1.14"
 httpdate = "1.0.3"
 llama-cpp-2 = { version = "0.1.154", default-features = false }
@@ -67,6 +70,9 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directm
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix.workspace = true
 
 [lints]
 workspace = true

@@ -66,7 +66,15 @@ fn search_help_describes_terminal_and_compact_defaults() {
     let help = stdout(&["--help", "search"]);
     assert!(help.starts_with("Usage:\n  zg <query> [options]\n"));
     assert!(help.contains("--compact"));
+    assert!(help.contains("--input"));
+    assert!(help.contains("--kind"));
+    assert!(!help.contains("--query-image"));
+    assert!(!help.contains("--root"));
+    assert!(!zg(&["needle", "--root", "."]).status.success());
     assert!(help.contains("full on TTY, none in compact mode"));
+    assert!(help.contains("All text/code searches apply rule ranking"));
+    assert!(help.contains("approximate BM25"));
+    assert!(help.contains("within each compatible result group"));
     assert!(!help.contains("--human"));
     assert!(!help.contains("zg query"));
 }
@@ -83,10 +91,13 @@ fn models_help_uses_the_rust_transformers_backend_name() {
 fn index_help_describes_the_optional_workspace_name() {
     let help = stdout(&["--index", "--help"]);
     assert!(help.contains("--name <NAME>"));
-    assert!(help.contains("defaults to root directory name"));
+    assert!(help.contains("defaults to its root directory name"));
     assert!(help.contains("Scan rules:"));
-    assert!(help.contains("-t, --type <type>"));
-    assert!(help.contains("-T, --type-not <type>"));
+    assert!(help.contains("--embedding"));
+    assert!(help.contains("image=default"));
+    assert!(!help.contains("--embedding-route"));
+    assert!(!help.contains("--clear-embedding-route"));
+    assert!(!help.contains("--type"));
     assert!(!help.contains("--category"));
 }
 
@@ -94,11 +105,11 @@ fn index_help_describes_the_optional_workspace_name() {
 fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
     let help = stdout(&["--help", "index"]);
     assert!(
-        help.contains("Explicit zg --index requires --embedding"),
+        help.contains("Explicit zg --index requires a default model from --embedding"),
         "{help}"
     );
     assert!(
-        help.contains("Search automatically creates a missing index"),
+        help.contains("Text search automatically creates a missing index"),
         "{help}"
     );
     assert!(help.contains("local/potion-code-16m-v2"), "{help}");

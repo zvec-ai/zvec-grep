@@ -2,7 +2,10 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -18,7 +21,8 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_debounces_changes_and_obeys_injected_selection_policy() -> TestResult {
     let temporary = tempdir_in(std::env::current_dir()?)?;
-    let root = temporary.path();
+    // Keep the parent watch isolated from other tests' temporary directories.
+    let root = temporary.path().join("workspace");
     fs::create_dir_all(root.join("node_modules/pkg"))?;
     fs::write(root.join("tracked.ts"), "export const value = 1;\n")?;
     fs::write(
@@ -39,7 +43,7 @@ async fn watcher_debounces_changes_and_obeys_injected_selection_policy() -> Test
         .watch(
             &WatchRequest {
                 root: RootSpec::new(
-                    root.to_path_buf(),
+                    root.clone(),
                     Arc::new(BlockSubtree(root.join("node_modules"))),
                 ),
             },
@@ -138,6 +142,58 @@ async fn watcher_flush_publishes_reconciliation_without_waiting_for_debounce() -
     let batch =
         tokio::time::timeout(Duration::from_secs(2), session.next_changes(&control)).await??;
     assert!(batch.changes.contains(&WorkspaceChange::Rescan));
+    session.close().await?;
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct FailingPolicy(AtomicBool);
+
+impl PathPolicy for FailingPolicy {
+    fn includes_file(&self, _: &Path) -> Result<bool, HostError> {
+        Ok(true)
+    }
+
+    fn can_descend(&self, _: &Path) -> Result<bool, HostError> {
+        if self.0.load(Ordering::Acquire) {
+            return Err(HostError::storage_failure(
+                "test-policy",
+                "injected read failure",
+            ));
+        }
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn watcher_barriers_report_registration_failures_and_recover() -> TestResult {
+    let temporary = tempdir_in(std::env::current_dir()?)?;
+    let policy = Arc::new(FailingPolicy::default());
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        poll_interval: Some(Duration::from_millis(30)),
+        ..NativeWatcherConfig::default()
+    });
+    let session = factory
+        .watch(
+            &WatchRequest {
+                root: RootSpec::new(temporary.path().to_path_buf(), policy.clone()),
+            },
+            &TaskControl::default(),
+        )
+        .await?;
+
+    policy.0.store(true, Ordering::Release);
+    let error = tokio::time::timeout(Duration::from_secs(2), session.flush())
+        .await?
+        .expect_err("reconciliation must fail when registrations cannot be read");
+    assert!(error.to_string().contains("injected read failure"));
+    let error = tokio::time::timeout(Duration::from_secs(2), session.flush_pending())
+        .await?
+        .expect_err("pending barriers must not claim that an incomplete watcher is healthy");
+    assert!(error.to_string().contains("injected read failure"));
+
+    policy.0.store(false, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(2), session.flush()).await??;
     session.close().await?;
     Ok(())
 }

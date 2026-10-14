@@ -1,12 +1,41 @@
 use super::types::{
-    EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig, TransformersConfig,
+    EmbeddingCatalogEntry, EmbeddingGemma2Config, LlamaCppConfig, Model2VecConfig, QwenConfig,
+    TransformersConfig,
 };
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 use crate::models::artifacts::{ArtifactConfig, ArtifactDownloadConfig, ArtifactSourceConfig};
 
 const DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT: &str =
     "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings";
 const DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT: &str = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding";
+
+const EMBEDDINGGEMMA2_ARTIFACTS: &[ArtifactConfig] = &[
+    ArtifactConfig {
+        path: "tokenizer.json",
+        size: 32_170_510,
+        sha256: "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4",
+    },
+    ArtifactConfig {
+        path: "onnx/model_q4.onnx",
+        size: 490_742,
+        sha256: "f9eeba97acddf139b8ee2ddf04bc30dceafa88de93fadf74d7644e0d61a477a9",
+    },
+    ArtifactConfig {
+        path: "onnx/model_q4.onnx_data",
+        size: 174_028_800,
+        sha256: "c3975f2d1ab7a1878ae31a7d7a9b7804a827aff3800b60dfceafce21cac3df49",
+    },
+    ArtifactConfig {
+        path: "onnx/vision_encoder_q4.onnx",
+        size: 159_400,
+        sha256: "7ea284226d4938f0ad921ab091f1d80a9ca699aa802984ef5cd5eec4f4761d96",
+    },
+    ArtifactConfig {
+        path: "onnx/vision_encoder_q4.onnx_data",
+        size: 108_957_696,
+        sha256: "0a9d6c927334f152a33dd90874f65d6ea5228999abe6a450d3f7813677fa704c",
+    },
+];
 
 const EMBEDDINGGEMMA_ARTIFACTS: &[ArtifactConfig] = &[ArtifactConfig {
     path: "embeddinggemma-300M-Q8_0.gguf",
@@ -207,7 +236,20 @@ const NOMIC_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
-const CATALOG: [EmbeddingCatalogEntry; 14] = [
+const CATALOG: [EmbeddingCatalogEntry; 15] = [
+    EmbeddingCatalogEntry::EmbeddingGemma2(EmbeddingGemma2Config {
+        reference: "local/embeddinggemma-2",
+        provider: "local",
+        model: "embeddinggemma-2",
+        source: ArtifactSourceConfig {
+            repo: "onnx-community/embeddinggemma-2-ONNX",
+            revision: "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+        },
+        artifacts: EMBEDDINGGEMMA2_ARTIFACTS,
+        dimension: 768,
+        max_input_tokens: 8_192,
+        max_image_bytes: 20 * 1_024 * 1_024,
+    }),
     EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
         reference: "local/embeddinggemma-300m",
         provider: "local",
@@ -226,7 +268,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
             artifacts: EMBEDDINGGEMMA_ARTIFACTS,
         },
         dimension: 768,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         format: "embeddinggemma",
         context_size: 2_048,
         max_batch_size: 16,
@@ -249,7 +291,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
             artifacts: QWEN3_GGUF_ARTIFACTS,
         },
         dimension: 1_024,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         format: "qwen3",
         context_size: 8_192,
         max_batch_size: 8,
@@ -260,7 +302,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         provider: "qwen",
         model: "text-embedding-v4",
         dimension: 1_024,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         default_endpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
         max_batch_size: 10,
         max_input_tokens: 8_192,
@@ -272,7 +314,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         provider: "qwen",
         model: "qwen3.7-text-embedding",
         dimension: 1_024,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         default_endpoint: DEFAULT_QWEN_TEXT_EMBEDDING_ENDPOINT,
         max_batch_size: 20,
         max_input_tokens: 128_000,
@@ -284,11 +326,12 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         provider: "qwen",
         model: "qwen3-vl-embedding",
         dimension: 2_560,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         default_endpoint: DEFAULT_QWEN3_VL_EMBEDDING_ENDPOINT,
-        max_batch_size: 20,
+        // Fusion combines every content part in a request into one input vector.
+        max_batch_size: 1,
         max_input_tokens: 32_000,
-        max_image_bytes: Some(10 * 1_024 * 1_024),
+        max_image_bytes: Some(5 * 1_024 * 1_024),
     }),
     EmbeddingCatalogEntry::Transformers(TransformersConfig {
         reference: "local/bge-small-en-v1.5",
@@ -309,7 +352,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         },
         dtype: "q4",
         dimension: 384,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling: "cls",
         normalize: true,
         query_prefix: Some("Represent this sentence for searching relevant passages: "),
@@ -336,7 +379,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         },
         dtype: "q4",
         dimension: 384,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling: "mean",
         normalize: true,
         query_prefix: None,
@@ -365,7 +408,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         embedding_tensor: "embeddings",
         tokenizer_file: "tokenizer.json",
         dimension: 512,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         normalize: true,
         max_input_tokens: 1_024,
         max_batch_size: 256,
@@ -394,7 +437,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         embedding_tensor: "embeddings",
         tokenizer_file: "tokenizer.json",
         dimension: 256,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         normalize: true,
         max_input_tokens: 1_024,
         max_batch_size: 256,
@@ -423,7 +466,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         embedding_tensor: "embeddings",
         tokenizer_file: "tokenizer.json",
         dimension: 256,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         normalize: true,
         max_input_tokens: 1_024,
         max_batch_size: 256,
@@ -450,7 +493,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         },
         dtype: "q8",
         dimension: 384,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling: "mean",
         normalize: true,
         query_prefix: Some("query: "),
@@ -477,7 +520,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         },
         dtype: "q8",
         dimension: 768,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling: "mean",
         normalize: true,
         query_prefix: None,
@@ -504,7 +547,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         },
         dtype: "q4",
         dimension: 768,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling: "cls",
         normalize: true,
         query_prefix: None,
@@ -531,7 +574,7 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         },
         dtype: "q4",
         dimension: 768,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         pooling: "mean",
         normalize: true,
         query_prefix: Some("search_query: "),
@@ -560,7 +603,7 @@ mod tests {
     use super::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry, list_embedding_models};
 
     #[test]
-    fn catalog_matches_typescript_order_and_model2vec_pins() {
+    fn catalog_preserves_legacy_order_and_pins_with_multimodal_addition() {
         let references = list_embedding_models()
             .into_iter()
             .map(EmbeddingCatalogEntry::reference)
@@ -568,6 +611,7 @@ mod tests {
         assert_eq!(
             references,
             [
+                "local/embeddinggemma-2",
                 "local/embeddinggemma-300m",
                 "local/qwen3-embedding-0.6b",
                 "qwen/text-embedding-v4",

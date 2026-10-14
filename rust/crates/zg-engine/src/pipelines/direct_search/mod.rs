@@ -9,9 +9,9 @@ use crate::{
     api::context::{
         ContextOptions, ContextResult,
         result::{
-            ContextContainer, ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItem,
-            ContextItemKind, ContextItemStatus, ContextSource, EmptyReason, MatchedBy,
-            RgDiagnostics, TimingEntry,
+            ContentPreview, ContextContainer, ContextContentRole, ContextCoverage,
+            ContextDiagnostics, ContextItem, ContextItemKind, ContextItemStatus, ContextSource,
+            EmptyReason, MatchedBy, RgDiagnostics, TimingEntry,
         },
     },
     lexical::{
@@ -56,6 +56,7 @@ impl DirectSearchService {
         let request = LexicalSearchRequest {
             signal: options.signal.clone(),
             root: Some(root.clone()),
+            index_home: None,
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
             paths: options.rg_paths,
@@ -198,7 +199,7 @@ fn context_from_lexical(
                     range: item.range.into(),
                     excerpt_range: item.excerpt_range.map(Into::into),
                     content_range: item.content_range.into(),
-                    content: item.content,
+                    preview: ContentPreview::Text(item.content),
                     outline: None,
                     content_role: Some(ContextContentRole::Source),
                     status: ContextItemStatus::Fresh,
@@ -208,7 +209,6 @@ fn context_from_lexical(
                         .as_ref()
                         .and_then(|value| value.metadata.as_ref())
                         .cloned(),
-                    entity_id: None,
                     container: container.map(|value| ContextContainer {
                         entity_id: None,
                         range: value.range.into(),
@@ -277,9 +277,15 @@ mod tests {
         else {
             panic!("source coordinates")
         };
-        assert_eq!(&source[start_byte_offset..end_byte_offset], item.content);
-        assert!(item.entity_id.is_none());
-        assert!(item.content.contains("needle"));
+        assert_eq!(
+            &source[start_byte_offset..end_byte_offset],
+            item.preview.text().expect("text preview")
+        );
+        assert!(
+            item.preview
+                .text()
+                .is_some_and(|text| text.contains("needle"))
+        );
         let container = item.container.as_ref().expect("function container");
         assert!(container.entity_id.is_none());
         assert!(matches!(
@@ -300,6 +306,63 @@ mod tests {
         let serialized = serde_json::to_value(container).expect("serialize container");
         assert_eq!(serialized.get("entity_id"), Some(&serde_json::Value::Null));
         assert!(!directory.path().join(".zvec-grep").exists());
+        engine.close();
+    }
+
+    #[tokio::test]
+    async fn direct_search_accepts_a_single_file_root_without_creating_index_paths() {
+        let directory = tempfile::tempdir().expect("source directory");
+        let path = directory.path().join("note.txt");
+        std::fs::write(&path, "orchard needle\n").expect("source file");
+        let engine = crate::ZvecGrep::new();
+        let result = engine
+            .context(ContextOptions {
+                root: Some(path.clone()),
+                rg: true,
+                query: Some("needle".into()),
+                ..ContextOptions::default()
+            })
+            .await
+            .expect("single file search");
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].absolute_path, path);
+        assert!(!directory.path().join(".zvec-grep").exists());
+        engine.close();
+    }
+
+    #[tokio::test]
+    async fn direct_search_excludes_recognizable_indexes_without_loading_the_selected_index() {
+        let directory = tempfile::tempdir().expect("source directory");
+        let root = directory.path();
+        let home = root.join("search-data");
+        std::fs::create_dir(&home).expect("data directory");
+        std::fs::write(root.join("note.txt"), "needle\n").expect("source file");
+        std::fs::write(home.join("private.txt"), "needle\n").expect("index data");
+        std::fs::write(home.join("manifest.json"), r#"{"format":"zg-workspace"}"#)
+            .expect("recognizable index marker with no usable configuration");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&home, root.join("data-alias")).expect("data alias");
+        let engine = crate::ZvecGrep::new();
+        let result = engine
+            .context(ContextOptions {
+                root: Some(root.to_path_buf()),
+                index_dir: Some(home),
+                rg: true,
+                query: Some("needle".into()),
+                follow: true,
+                hidden: true,
+                no_ignore: true,
+                ..ContextOptions::default()
+            })
+            .await
+            .expect("direct search with selected data directory");
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(
+            result.items[0].relative_path,
+            std::path::Path::new("note.txt")
+        );
         engine.close();
     }
 

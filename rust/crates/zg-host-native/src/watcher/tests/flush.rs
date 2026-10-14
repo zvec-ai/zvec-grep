@@ -50,6 +50,7 @@ impl Fixture {
                 ..NativeWatcherConfig::default()
             },
             watcher,
+            registration_error: (!healthy).then(|| "watcher unavailable".to_owned()),
             raw_sender: raw.clone(),
             raw_receiver,
             overflowed: overflowed.clone(),
@@ -70,6 +71,12 @@ impl Fixture {
     }
 
     async fn flush(&self, reconcile: bool) {
+        self.request_flush(reconcile)
+            .await
+            .expect("successful flush");
+    }
+
+    async fn request_flush(&self, reconcile: bool) -> Result<(), HostError> {
         let (acknowledge, acknowledged) = oneshot::channel();
         self.flush
             .send(FlushRequest {
@@ -81,7 +88,7 @@ impl Fixture {
         tokio::time::timeout(Duration::from_secs(2), acknowledged)
             .await
             .expect("flush completes")
-            .expect("acknowledged");
+            .expect("acknowledged")
     }
 
     async fn close(self) {
@@ -164,7 +171,10 @@ async fn pending_flush_preserves_overflow_and_backend_failure_reconciliation() {
     );
     fixture.close().await;
     let mut fixture = Fixture::new(false);
-    fixture.flush(false).await;
+    fixture
+        .request_flush(false)
+        .await
+        .expect_err("missing backend must fail the barrier");
     assert_eq!(
         fixture
             .batches

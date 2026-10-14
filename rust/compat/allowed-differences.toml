@@ -40,7 +40,7 @@ removal_condition = "Node.js 为这些 indexed-search 参数提供实际语义�
 [[difference]]
 id = "mcp-typed-filter-and-index-extensions"
 owner = "MCP/engine"
-reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力；均为可选扩展，不代替 Node 的 fileTypes、follow、scan_diagnostics 和 status 字段。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
+reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力。Rust 的持久扫描配置统一使用 glob；fileTypes/excludedFileTypes 只用于查询，不用于索引请求或扫描状态。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
 removal_condition = "Node.js 提供同等能力或这些扩展不再有客户端时，按字段评估统一；不能删除引擎能力来简化协议。"
 
 [[difference]]
@@ -66,3 +66,9 @@ id = "mcp-workspace-status-storage-metadata"
 owner = "MCP/storage"
 reason = "Rust workspace_index.id 使用持久工作区名称而非 Node 的内部标识格式；调用方应将其视为不透明标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
 removal_condition = "底层存储支持截断统计或统一工作区标识后补齐字段，并添加真实索引回归。"
+
+[[difference]]
+id = "mcp-portable-index-selection"
+owner = "MCP/workspace"
+reason = "Rust accepts indexDir without a redundant root for existing-index search, status, deletion and updates. The saved source path is resolved relative to that index; creating a new index still requires an explicit source root. Managed rg remains source-root based and independent of index selection. Tool instructions reflect these location rules."
+removal_condition = "Node supports the same portable index selection, or the TypeScript compatibility layer is retired."

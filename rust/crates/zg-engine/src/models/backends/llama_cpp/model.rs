@@ -26,14 +26,13 @@ use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::model::{
-    Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelInfo,
-    ModelProgress,
+    Device, EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult, ModelConfig, ModelProgress,
 };
 use crate::models::{
     artifacts::{
         ArtifactSource, ModelDownloadProgressReporter, ResolveArtifacts, resolve_model_artifacts,
     },
-    catalog::LlamaCppConfig,
+    catalog::{EmbeddingCatalogEntry, LlamaCppConfig},
     runtime::ModelComputeRuntime,
     spi::{
         EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
@@ -123,31 +122,26 @@ impl LlamaCppEmbeddingModel {
         entry: LlamaCppConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
-    ) -> Self {
+    ) -> Result<Self, ModelError> {
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
             .unwrap_or_else(default_model_cache_dir);
-        Self {
+        Ok(Self {
             entry,
-            info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: None,
-                },
-                dimension: entry.dimension,
-                metric: entry.metric,
-                max_batch_size: entry.max_batch_size,
-                max_input_tokens: Some(entry.context_size),
-                max_image_bytes: None,
-            },
+            info: EmbeddingCatalogEntry::LlamaCpp(entry)
+                .embedding_model_info()
+                .map_err(|error| {
+                    ModelError::internal("invalid catalog model info")
+                        .with_cause(error)
+                        .shared()
+                })?,
             model_cache_dir,
             device: options.device,
             compute_runtime,
             client: reqwest::Client::new(),
             state: Mutex::new(None),
-        }
+        })
     }
 
     async fn ensure_loaded(
@@ -250,6 +244,10 @@ impl LlamaCppEmbeddingModel {
 
 #[async_trait]
 impl EmbeddingModel for LlamaCppEmbeddingModel {
+    fn has_pinned_weights(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> &EmbeddingModelInfo {
         &self.info
     }
@@ -266,9 +264,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let on_progress = options.on_progress.clone();
         let model = self
             .ensure_loaded(options.on_progress, options.signal.as_ref())
@@ -424,13 +420,13 @@ const fn requested_device_name(device: Option<Device>) -> &'static str {
 }
 
 fn report_warning(
-    model: &str,
+    model_ref: &str,
     on_progress: Option<&Arc<dyn Fn(ModelProgress) + Send + Sync>>,
     message: String,
 ) {
     if let Some(on_progress) = on_progress {
         on_progress(ModelProgress::Warning {
-            model: model.to_owned(),
+            model_ref: model_ref.to_owned(),
             message,
         });
     } else {
@@ -803,14 +799,16 @@ fn format_text(text: &str, purpose: EmbeddingPurpose, format: &str) -> String {
     if format == "qwen3" {
         return match purpose {
             EmbeddingPurpose::Query => {
-                format!("Instruct: Retrieve relevant documents for the given query\nQuery: {text}")
+                format!("{}{text}", crate::models::catalog::QWEN3_QUERY_PREFIX)
             }
             EmbeddingPurpose::Document => text.to_owned(),
         };
     }
     match purpose {
-        EmbeddingPurpose::Query => format!("task: search result | query: {text}"),
-        EmbeddingPurpose::Document => format!("title: none | text: {text}"),
+        EmbeddingPurpose::Query => format!("{}{text}", crate::models::catalog::GEMMA_QUERY_PREFIX),
+        EmbeddingPurpose::Document => {
+            format!("{}{text}", crate::models::catalog::GEMMA_DOCUMENT_PREFIX)
+        }
     }
 }
 

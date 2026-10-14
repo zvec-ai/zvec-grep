@@ -14,7 +14,6 @@ use super::zvec::{
 };
 
 mod codec;
-pub(super) use codec::validate_content;
 
 pub(super) struct Entities {
     collection: Collection,

@@ -23,6 +23,11 @@ impl Fixture {
                 self.state.path().join("key"),
             )
             .env("ZVEC_GREP_HOME", self.state.path())
+            .env("ZVEC_GREP_CONFIG", self.state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                self.state.path().join("workspaces.json"),
+            )
             .env_remove("ZVEC_GREP_EMBEDDING")
             .env_remove("ZVEC_GREP_ENDPOINT")
             .env_remove("ZVEC_GREP_API_KEY")
@@ -108,7 +113,11 @@ fn grants_are_signed_scoped_and_revocable_without_remote_requests() {
         &original,
     )
     .expect("authorization test fixture operation");
-    assert!(!other.run(&["--auth", "status"]).status.success());
+    assert!(
+        other
+            .success(&["--auth", "status"])
+            .contains("not authorized")
+    );
     let mut value: serde_json::Value =
         serde_json::from_slice(&original).expect("authorization test fixture operation");
     value["grant"]["endpoint"] = "https://example.test/embeddings".into();
@@ -296,8 +305,20 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
     fixture.grant();
     // An empty workspace initializes the remote runtime without sending content.
     fixture.success(&args);
-    let search = ["--mode", "server", "--vector", "needle", "--refresh", "off"];
-    assert!(String::from_utf8_lossy(&fixture.run(&search).stderr).contains("requires an API key"));
+    let search = [
+        "--mode",
+        "server",
+        "--vector",
+        "needle",
+        "--glob",
+        "!**",
+        "--refresh",
+        "off",
+        "--json",
+    ];
+    // The explicit indexing key is retained. Excluding all paths avoids inference
+    // while still checking the daemon's current remote authorization.
+    fixture.success(&search);
     fixture.success(&["--auth", "revoke"]);
     assert!(
         String::from_utf8_lossy(&fixture.run(&search).stderr).contains("authorization required")
@@ -376,4 +397,58 @@ fn api_base_url_grants_match_resolved_index_endpoints() {
             assert_eq!(manifest["embeddingRuntimes"][model]["endpoint"], endpoint);
         }
     }
+}
+
+#[test]
+fn transferred_workspace_requires_fresh_machine_consent_without_losing_credentials() {
+    let fixture = Fixture::new();
+    fixture.grant();
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--api-key",
+        "portable-test-secret",
+    ]);
+    let manifest =
+        fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest");
+    let credentials =
+        fs::read(fixture.root.path().join(".zvec-grep/credentials.key")).expect("workspace key");
+    fs::remove_file(fixture.state.path().join("key")).expect("new machine has no signing key");
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("not authorized")
+    );
+    assert!(
+        String::from_utf8_lossy(&fixture.run(&["--index", "--mode", "direct"]).stderr)
+            .contains("authorization required")
+    );
+    // Another local identity's signing key must also require fresh consent.
+    fs::write(fixture.state.path().join("key"), [7_u8; 32]).expect("new machine key");
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("not authorized")
+    );
+    fixture.grant();
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("is authorized")
+    );
+    fixture.success(&["--index", "--mode", "direct"]);
+    let reopened: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("new manifest"),
+    )
+    .expect("JSON");
+    let before: serde_json::Value = serde_json::from_slice(&manifest).expect("JSON");
+    assert_eq!(before["embeddingRuntimes"], reopened["embeddingRuntimes"]);
+    assert_eq!(
+        credentials,
+        fs::read(fixture.root.path().join(".zvec-grep/credentials.key"))
+            .expect("same workspace key")
+    );
 }

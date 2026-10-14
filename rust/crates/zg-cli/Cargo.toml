@@ -16,6 +16,9 @@ thiserror.workspace = true
 uuid.workspace = true
 zg-engine = { path = "../zg-engine" }
 
+[target.'cfg(windows)'.dependencies]
+dunce = "1.0.5"
+
 [dev-dependencies]
 tempfile.workspace = true
 toml.workspace = true

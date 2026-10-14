@@ -13,7 +13,7 @@ use zg_engine::{
 };
 
 use crate::{
-    ColorMode, OutputOptions,
+    ColorMode, OutputOptions, output_path,
     theme::{StatusTheme, display_path, format_count, storage_path, write_status_field},
 };
 
@@ -26,6 +26,27 @@ pub fn write_info_with_options(
     options: OutputOptions,
     terminal: bool,
 ) -> io::Result<()> {
+    if options.json {
+        #[cfg(windows)]
+        let result = &{
+            let mut result = result.clone();
+            result.root = output_path(&result.root).to_path_buf();
+            result.home = output_path(&result.home).to_path_buf();
+            result.index_path = output_path(&result.index_path).to_path_buf();
+            if let Some(index) = &mut result.workspace_index {
+                index.root = output_path(&index.root).to_path_buf();
+                index.path = output_path(&index.path).to_path_buf();
+            }
+            if let Some(status) = &mut result.status {
+                for file in &mut status.failed_files {
+                    file.path = output_path(&file.path).to_path_buf();
+                }
+            }
+            result
+        };
+        serde_json::to_writer_pretty(&mut writer, result).map_err(io::Error::other)?;
+        return writeln!(writer);
+    }
     let theme = StatusTheme::new(options.color, terminal);
     writeln!(writer, "{}", heading(theme, result.index_status()))?;
     writeln!(writer, "  {}", theme.path(&display_path(&result.root)))?;
@@ -36,7 +57,7 @@ pub fn write_info_with_options(
     }
     if let Some(index) = &result.workspace_index {
         writeln!(writer)?;
-        write_embedding(&mut writer, theme, index)?;
+        write_embedding(&mut writer, theme, index, result)?;
     }
 
     writeln!(writer)?;
@@ -71,7 +92,7 @@ pub fn write_info_with_options(
             &mut writer,
             theme,
             "Nested Git",
-            &[if index.scan.nested_git {
+            &[if index.scan.nested_git() {
                 "included"
             } else {
                 "excluded"
@@ -222,29 +243,48 @@ fn write_embedding(
     writer: &mut impl Write,
     theme: StatusTheme,
     index: &WorkspaceIndexInfo,
+    result: &InfoResult,
 ) -> io::Result<()> {
-    let values = index.embedding.as_ref().map_or_else(
-        || vec![theme.warning("Not configured")],
-        |embedding| {
-            vec![
-                format!("{}/{}", embedding.provider, embedding.model),
-                format!(
-                    "{} dimensions {} {}",
-                    format_count(embedding.dimension),
-                    theme.muted("·"),
-                    embedding.metric
-                ),
-            ]
-        },
-    );
-    write_status_field(writer, theme, "Embedding", &values)?;
+    use zg_engine::api::context::options::ContentKind;
+    for kind in [ContentKind::Text, ContentKind::Code, ContentKind::Image] {
+        let Some(table) = index.tables.iter().find(|table| table.kind == kind) else {
+            write_status_field(writer, theme, kind.as_str(), &["not enabled".to_owned()])?;
+            continue;
+        };
+        let model = &table.embedding;
+        let count = result.status.as_ref().map(|stats| {
+            stats
+                .entities_by_kind
+                .get(&kind)
+                .copied()
+                .unwrap_or_default()
+        });
+        let state = match count {
+            None => "unknown",
+            Some(0) if result.index_status() == IndexStatus::Ready => "empty",
+            Some(_) => result.index_status().as_str(),
+        };
+        write_status_field(
+            writer,
+            theme,
+            kind.as_str(),
+            &[format!(
+                "{}/{} ({} dimensions, {}) · {} entities · {state}",
+                model.provider,
+                model.model,
+                format_count(model.dimension),
+                model.metric,
+                count.map_or_else(|| "unknown".to_owned(), format_count),
+            )],
+        )?;
+    }
     if let Some(fts) = &index.fts {
         write_status_field(
             writer,
             theme,
             "FTS",
             &[format!(
-                "tokenizer={} filters={}",
+                "text/code: tokenizer={} filters={}",
                 fts.tokenizer,
                 fts.filters.join(", ")
             )],
@@ -290,7 +330,7 @@ fn write_diagnostics(
                 } else {
                     compact
                 };
-                format!("{}: {compact}", path.display())
+                format!("{}: {compact}", output_path(path).display())
             })
             .collect();
         if files.len() > 3 {
@@ -311,7 +351,7 @@ fn write_diagnostics(
 
 pub(crate) fn scan_filters(scan: &ScanRules) -> String {
     let mut filters: Vec<_> = scan
-        .globs
+        .globs()
         .iter()
         .map(|glob| {
             format!(
@@ -325,38 +365,32 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
             )
         })
         .collect();
-    if !scan.file_types.is_empty() {
-        filters.push(format!("type={}", scan.file_types.join("|")));
-    }
-    if !scan.excluded_file_types.is_empty() {
-        filters.push(format!("type-not={}", scan.excluded_file_types.join("|")));
-    }
-    if scan.hidden {
+    if scan.include_hidden() {
         filters.push("hidden".into());
     }
-    if scan.no_ignore {
+    if !scan.use_default_ignores() {
         filters.push("no-ignore".into());
     }
-    if !scan.ignore_files.is_empty() {
+    if !scan.ignore_files().is_empty() {
         filters.push(format!(
             "ignore-file={}",
-            scan.ignore_files
+            scan.ignore_files()
                 .iter()
-                .map(|path| path.display().to_string())
+                .map(|path| output_path(path).display().to_string())
                 .collect::<Vec<_>>()
                 .join("|")
         ));
     }
-    if let Some(depth) = scan.max_depth {
+    if let Some(depth) = scan.max_depth() {
         filters.push(format!("max-depth={depth}"));
     }
-    if let Some(size) = scan.max_file_size_bytes {
+    if let Some(size) = scan.max_file_size_bytes() {
         filters.push(format!("max-filesize={size}"));
     }
-    if scan.follow_symlinks {
+    if scan.follow_symlinks() {
         filters.push("follow".into());
     }
-    if !scan.nested_git {
+    if !scan.nested_git() {
         filters.push("nested-git=false".into());
     }
     filters.join(" ")
@@ -366,7 +400,7 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
 mod tests {
     use super::*;
     use zg_engine::api::info::result::{
-        FailedFile, InfoSource, WorkspaceIndexEmbedding, WorkspaceIndexFts,
+        FailedFile, InfoSource, WorkspaceIndexEmbedding, WorkspaceIndexFts, WorkspaceIndexTable,
     };
 
     fn ready() -> InfoResult {
@@ -376,7 +410,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
                 name: "workspace".into(),
@@ -384,12 +418,21 @@ mod tests {
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
-                embedding: Some(WorkspaceIndexEmbedding {
-                    provider: "qwen".into(),
-                    model: "text-embedding-v4".into(),
-                    dimension: 1024,
-                    metric: "cosine".into(),
-                }),
+                default_embedding_model_ref: Some("qwen/text-embedding-v4".into()),
+                embedding_routes: std::collections::BTreeMap::default(),
+                tables: vec![WorkspaceIndexTable {
+                    kind: zg_engine::api::context::options::ContentKind::Text,
+                    embedding: WorkspaceIndexEmbedding {
+                        content_kinds: vec![
+                            zg_engine::api::context::options::ContentKind::Text,
+                            zg_engine::api::context::options::ContentKind::Code,
+                        ],
+                        provider: "qwen".into(),
+                        model: "text-embedding-v4".into(),
+                        dimension: 1024,
+                        metric: "cosine".into(),
+                    },
+                }],
                 fts: Some(WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
@@ -404,6 +447,10 @@ mod tests {
                 files_indexed: 1132,
                 files_unchanged: 1132,
                 entities_indexed: 22037,
+                entities_by_kind: std::collections::BTreeMap::from([(
+                    zg_engine::api::context::options::ContentKind::Text,
+                    22037,
+                )]),
                 indexed_size_bytes: 4_177_103,
                 ..IndexStats::default()
             }),
@@ -427,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_status_matches_node_layout_with_rust_metadata() {
+    fn ready_status_shows_effective_kind_tables_and_counts() {
         let bar = crate::progress::gradient_bar(
             20,
             20,
@@ -437,9 +484,57 @@ mod tests {
         assert_eq!(
             render(&ready(), ColorMode::Never),
             format!(
-                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/storage\n  Version     2\n  Nested Git  included\n"
+                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  text        qwen/text-embedding-v4 (1,024 dimensions, cosine) · 22,037 entities · ready\n  code        not enabled\n  image       not enabled\n  FTS         text/code: tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/index\n  Version     2\n  Nested Git  included\n"
             )
         );
+    }
+
+    #[test]
+    fn json_formats_path_fields_without_changing_status_or_messages() {
+        let mut info = ready();
+        let root = r"\\?\D:\workspace\repo";
+        info.root = root.into();
+        info.home = r"\\?\D:\workspace\repo\.zvec-grep".into();
+        info.index_path = r"\\?\D:\workspace\repo\.zvec-grep\index".into();
+        let index = info.workspace_index.as_mut().expect("workspace");
+        index.root = info.root.clone();
+        index.path = info.home.clone();
+        info.status.as_mut().expect("status").failed_files = vec![FailedFile {
+            path: r"\\?\D:\workspace\repo\failed.txt".into(),
+            reason: root.into(),
+        }];
+        info.suggestion = Some(root.into());
+        let original = info.clone();
+        let mut expected = serde_json::to_value(&info).expect("status");
+        if cfg!(windows) {
+            expected["root"] = r"D:\workspace\repo".into();
+            expected["home"] = r"D:\workspace\repo\.zvec-grep".into();
+            expected["index_path"] = r"D:\workspace\repo\.zvec-grep\index".into();
+            expected["workspace_index"]["root"] = expected["root"].clone();
+            expected["workspace_index"]["path"] = expected["home"].clone();
+            expected["status"]["failed_files"][0]["path"] = r"D:\workspace\repo\failed.txt".into();
+        }
+        let mut bytes = Vec::new();
+        write_info_with_options(
+            &mut bytes,
+            &info,
+            OutputOptions {
+                json: true,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("JSON status output");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("JSON"),
+            expected
+        );
+        assert_eq!(info, original);
+        assert!(render(&info, ColorMode::Never).contains(if cfg!(windows) {
+            "  D:\\workspace\\repo\n"
+        } else {
+            "  \\\\?\\D:\\workspace\\repo\n"
+        }));
     }
 
     #[test]
@@ -566,12 +661,18 @@ mod tests {
     fn scan_scope_and_missing_embedding_remain_visible() {
         let mut info = ready();
         let index = info.workspace_index.as_mut().expect("workspace");
-        index.embedding = None;
-        index.scan.globs = vec!["*.rs".into(), "!vendor/**".into()];
-        index.scan.hidden = true;
-        index.scan.max_depth = Some(0);
+        index.default_embedding_model_ref = None;
+        index.tables.clear();
+        index.scan = zg_engine::api::index::options::ScanRulesUpdate {
+            globs: Some(vec!["*.rs".into(), "!vendor/**".into()]),
+            include_hidden: Some(true),
+            max_depth: Some(Some(0)),
+            ..Default::default()
+        }
+        .apply(&index.scan)
+        .expect("updated scan rules");
         let output = render(&info, ColorMode::Never);
-        assert!(output.contains("Embedding   Not configured"));
+        assert!(output.contains("text        not enabled"));
         assert!(
             output
                 .contains("Roots       /workspace (glob=*.rs glob=!vendor/** hidden max-depth=0)")

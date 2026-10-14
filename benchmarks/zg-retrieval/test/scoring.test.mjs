@@ -253,6 +253,64 @@ test("Rust MCP served-from-current-index framing is parsed without changing rank
   assert.equal(parsed.items[0].rank, 1);
 });
 
+test("Rust MCP content routes and a shared result group preserve visible native ranks", () => {
+  const routes = [
+    "route: input=text target=text model=local/potion-code-16m-v2 status=Searched",
+    "route: input=text target=code model=local/potion-code-16m-v2 status=Searched",
+  ];
+  const group =
+    "result group: text kinds=text,code scoring=rule recall=Hybrid merge=shared_recall_then_rules; ranked within this group";
+  const parsed = parseVisibleResponse(
+    response(
+      [
+        ...routes,
+        group,
+        item(1, "type: code\nsource:\n20\tdef wanted():"),
+        item(2, "type: text\nsource:\n1\tManual", "README.md:1"),
+      ].join("\n"),
+    ),
+  );
+  assert.deepEqual(
+    parsed.items.map(({ rank, path }) => ({ rank, path })),
+    [
+      { rank: 1, path: "pkg/main.py" },
+      { rank: 2, path: "README.md" },
+    ],
+  );
+  assert.ok(parsed.items[0].metadata.includes("type: code"));
+  assert.ok(parsed.items[1].metadata.includes("type: text"));
+  assert.deepEqual(
+    parseVisibleResponse(response([...routes, "No matches."].join("\n"))).items,
+    [],
+  );
+  assert.throws(
+    () =>
+      parseVisibleResponse(
+        response(
+          [
+            ...routes,
+            group,
+            item(1),
+            "result group: code kinds=code scoring=rule recall=Hybrid merge=independent_kind; ranked within this group",
+            item(1),
+          ].join("\n"),
+        ),
+      ),
+    /Independently ranked result groups/,
+  );
+  for (const prefix of [
+    "incomplete: one or more target searches failed",
+    "route: input=text target=code model=local/potion-code-16m-v2 status=Failed (provider unavailable)",
+    "route: unknown framing",
+    "result group: unknown framing",
+  ]) {
+    assert.throws(
+      () => parseVisibleResponse(response(`${prefix}\n${item(1)}`)),
+      VisibleFormatError,
+    );
+  }
+});
+
 test("all suites accept at most one empty source line after the public range", () => {
   const body = (last) =>
     response(

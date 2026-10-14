@@ -32,7 +32,7 @@ async fn deliver(
         .await
         .expect("event");
     let runtime = manager
-        .runtime(root.to_path_buf(), &IndexOptions::default())
+        .runtime(root, &IndexOptions::default())
         .expect("runtime");
     manager.flush_watcher(&runtime).await.expect("flush");
     runtime.settle_jobs(&manager.inner.scheduler, None).await;
@@ -231,7 +231,10 @@ async fn restarting_a_watcher_requires_a_new_reconciliation() {
         .refresh_index(options.clone(), true)
         .await
         .expect("initial refresh");
-    manager.stop_watching(&root).await.expect("watcher stopped");
+    manager
+        .stop_watching(&WorkspaceLocation::resolve(Some(&root), None).expect("location"))
+        .await
+        .expect("watcher stopped");
     assert!(
         manager
             .refresh_index(options, true)

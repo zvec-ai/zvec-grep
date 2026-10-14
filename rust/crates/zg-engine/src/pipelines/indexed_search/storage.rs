@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::{
     EngineResult,
-    domain::FileId,
+    domain::{ContentKind, FileId},
     storage::{
         IndexStore,
         types::{StorageSearchFilter, StorageSearchHit, StoredFileAttributes, StoredSearchData},
@@ -18,13 +18,14 @@ pub(crate) trait SearchStorage: Send + Sync {
     fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData>;
     fn search_fts(
         &self,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>>;
     fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
@@ -50,20 +51,21 @@ impl SearchStorage for IndexStore {
 
     fn search_fts(
         &self,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.search_fts(query, limit, filter)
+        self.search_fts(kind, query, limit, filter)
     }
 
     fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.search_vector(model, vector, limit, filter)
+        self.search_vector(kind, vector, limit, filter)
     }
 }

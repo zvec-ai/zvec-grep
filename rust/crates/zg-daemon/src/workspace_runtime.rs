@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -16,6 +16,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use zg_engine::api::workspace::WorkspaceLocation;
 use zg_engine::{
     EngineError, ErrorSite, ZvecGrep,
     api::{
@@ -28,9 +29,11 @@ use zg_engine::{
     },
 };
 use zg_host_native::{
-    AllowAllPaths, HostError, HostErrorSite, RootSpec, TaskControl, WatchRequest, WorkspaceChange,
-    WorkspaceWatchSessionPort, WorkspaceWatcherFactoryPort,
+    HostError, HostErrorSite, TaskControl, WorkspaceChange, WorkspaceWatchSessionPort,
 };
+
+#[cfg(test)]
+use zg_host_native::{AllowAllPaths, RootSpec, WatchRequest, WorkspaceWatcherFactoryPort};
 
 use crate::job_scheduler::{
     IndexExecutor, IndexJobCompletion, IndexJobScheduler, IndexJobSnapshot, JobReason, JobState,
@@ -54,8 +57,8 @@ pub(crate) struct WorkspaceRuntimeManager {
 struct RuntimeManagerInner {
     executor: Arc<dyn IndexExecutor>,
     scheduler: IndexJobScheduler,
-    watcher_factory: Arc<dyn WorkspaceWatcherFactoryPort>,
-    runtimes: Mutex<HashMap<PathBuf, Arc<WorkspaceRuntime>>>,
+    watcher_factory: Arc<dyn IndexWatcherFactory>,
+    runtimes: Mutex<HashMap<WorkspaceLocation, Arc<WorkspaceRuntime>>>,
     shutdown: CancellationToken,
     closed: AtomicBool,
     idle_ttl: Option<std::time::Duration>,
@@ -64,7 +67,7 @@ struct RuntimeManagerInner {
 
 struct WorkspaceRuntime {
     lifecycle: Mutex<RuntimeLifecycle>,
-    canonical_root: PathBuf,
+    location: WorkspaceLocation,
     index_template: Mutex<IndexOptions>,
     pending_watcher_configuration: Mutex<Option<(uuid::Uuid, IndexOptions)>>,
     index_status: Mutex<CachedIndexStatus>,
@@ -217,19 +220,50 @@ impl IndexExecutor for ZvecGrepIndexExecutor {
     }
 }
 
+#[async_trait::async_trait]
+trait IndexWatcherFactory: Send + Sync {
+    async fn watch(
+        &self,
+        location: &WorkspaceLocation,
+        control: &TaskControl,
+    ) -> Result<Arc<dyn WorkspaceWatchSessionPort>, HostError>;
+}
+
+#[cfg(test)]
+struct TestWatcherFactory(Arc<dyn WorkspaceWatcherFactoryPort>);
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl IndexWatcherFactory for TestWatcherFactory {
+    async fn watch(
+        &self,
+        location: &WorkspaceLocation,
+        control: &TaskControl,
+    ) -> Result<Arc<dyn WorkspaceWatchSessionPort>, HostError> {
+        self.0
+            .watch(
+                &WatchRequest {
+                    root: RootSpec::new(location.root.clone(), Arc::new(AllowAllPaths)),
+                },
+                control,
+            )
+            .await
+    }
+}
+
 struct EngineWatcherFactory {
     engine: Arc<ZvecGrep>,
 }
 
 #[async_trait::async_trait]
-impl WorkspaceWatcherFactoryPort for EngineWatcherFactory {
+impl IndexWatcherFactory for EngineWatcherFactory {
     async fn watch(
         &self,
-        request: &WatchRequest,
+        location: &WorkspaceLocation,
         control: &TaskControl,
     ) -> Result<Arc<dyn WorkspaceWatchSessionPort>, HostError> {
         self.engine
-            .watch_workspace(&request.root.path, control)
+            .watch_workspace(&location.root, Some(&location.home), control)
             .await
             .map_err(|error| HostError::storage_failure("engine-file-selection", error.to_string()))
     }
@@ -245,7 +279,7 @@ impl WorkspaceRuntimeManager {
         engine: Arc<ZvecGrep>,
         idle_ttl: Option<std::time::Duration>,
     ) -> Self {
-        Self::new_with_idle_ttl(
+        Self::with_watcher_factory(
             Arc::new(ZvecGrepIndexExecutor {
                 engine: Arc::clone(&engine),
             }),
@@ -269,9 +303,24 @@ impl WorkspaceRuntimeManager {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_idle_ttl(
         executor: Arc<dyn IndexExecutor>,
         watcher_factory: Arc<dyn WorkspaceWatcherFactoryPort>,
+        scheduler_config: SchedulerConfig,
+        idle_ttl: Option<std::time::Duration>,
+    ) -> Self {
+        Self::with_watcher_factory(
+            executor,
+            Arc::new(TestWatcherFactory(watcher_factory)),
+            scheduler_config,
+            idle_ttl,
+        )
+    }
+
+    fn with_watcher_factory(
+        executor: Arc<dyn IndexExecutor>,
+        watcher_factory: Arc<dyn IndexWatcherFactory>,
         scheduler_config: SchedulerConfig,
         idle_ttl: Option<std::time::Duration>,
     ) -> Self {
@@ -311,8 +360,15 @@ impl WorkspaceRuntimeManager {
             // A submitted background job outlives the request that created it.
             options.signal = None;
         }
-        let canonical_root = canonical_root(options.root.as_deref())?;
+        let location =
+            WorkspaceLocation::for_index(options.root.as_deref(), options.index_dir.as_deref())?;
+        if options.root.is_none() && options.changes.is_empty() {
+            // A queued update must not turn an inferred source into an explicit rebind.
+            options.changes = vec![IndexChange::Rescan];
+        }
+        let canonical_root = location.root.clone();
         options.root = Some(canonical_root.clone());
+        options.index_dir = Some(location.home.clone());
         let runtime = self.runtime(canonical_root.clone(), &options)?;
         let reconfigure = options.reset_paths || options.scan != ScanRulesUpdate::default();
         let template = index_template(&options);
@@ -369,21 +425,21 @@ impl WorkspaceRuntimeManager {
                 )
                 .await
         {
-            warn!(%error, root = %completed.job.canonical_root.display(), "index succeeded but watcher activation failed");
+            warn!(%error, root = %completed.job.location.root.display(), "index succeeded but watcher activation failed");
         }
         if completed.job.state == JobState::Succeeded {
             // Policy installation acknowledges its reconciliation before returning.
             // A caller waiting for indexing must not race that followup writer.
             self.inner
                 .scheduler
-                .wait_for_root_idle(&runtime.canonical_root)
+                .wait_for_location_idle(&runtime.location)
                 .await;
             if let Err(error) = self.ensure_watching(Arc::clone(&runtime)).await {
                 warn!(%error, "index completed with pending watcher configuration");
             }
             self.inner
                 .scheduler
-                .wait_for_root_idle(&runtime.canonical_root)
+                .wait_for_location_idle(&runtime.location)
                 .await;
         }
         Ok(submission(completed, submitted.reused))
@@ -395,8 +451,11 @@ impl WorkspaceRuntimeManager {
         mut options: IndexOptions,
         wait: bool,
     ) -> Result<bool, EngineError> {
-        let root = canonical_root(options.root.as_deref())
-            .map_err(WorkspaceRuntimeError::into_engine_error)?;
+        let location =
+            WorkspaceLocation::discover(options.root.as_deref(), options.index_dir.as_deref())?;
+        let root = location.root.clone();
+        options.root = Some(root.clone());
+        options.index_dir = Some(location.home.clone());
         let runtime = self.runtime(root.clone(), &options)?;
         let reporter = options.on_progress.take();
         if !wait {
@@ -414,7 +473,7 @@ impl WorkspaceRuntimeManager {
                 refresh
             };
             let busy = self
-                .job_for_root(&root)
+                .job_for_location(&location)
                 .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running));
             if !wait && busy {
                 return Ok(true);
@@ -425,7 +484,7 @@ impl WorkspaceRuntimeManager {
             self.flush_watcher(&runtime).await?;
             if !wait
                 && self
-                    .job_for_root(&root)
+                    .job_for_location(&location)
                     .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running))
             {
                 return Ok(true);
@@ -433,7 +492,7 @@ impl WorkspaceRuntimeManager {
             // Apply proofs ourselves as well: completion callbacks can be scheduled
             // after scheduler waiters, and must not cause a duplicate reconciliation.
             if !runtime.settle_completed_jobs(&self.inner.scheduler)
-                || self.inner.scheduler.has_active_root(&root)
+                || self.inner.scheduler.has_active_location(&location)
             {
                 if !wait {
                     return Ok(true);
@@ -443,7 +502,7 @@ impl WorkspaceRuntimeManager {
                 drop(refresh);
                 self.inner
                     .scheduler
-                    .wait_for_root_idle_with_progress(&root, reporter.clone())
+                    .wait_for_location_idle_with_progress(&location, reporter.clone())
                     .await;
                 runtime
                     .settle_jobs(&self.inner.scheduler, reporter.clone())
@@ -489,16 +548,7 @@ impl WorkspaceRuntimeManager {
                 .await
                 .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
             runtime.complete_job(&completed);
-            ensure_refresh_succeeded(&completed.job)?;
-            if completed
-                .result
-                .as_ref()
-                .is_none_or(|result| result.files_failed != 0)
-            {
-                return Err(EngineError::storage_failure(
-                    "index refresh left failed files",
-                ));
-            }
+            ensure_refresh_succeeded(&completed)?;
             // Flush again after indexing to include events that arrived during it.
         }
     }
@@ -538,7 +588,8 @@ impl WorkspaceRuntimeManager {
                 "workspace runtimes have been closed",
             ));
         }
-        let _activity = self.existing_activity(options.root.as_deref())?;
+        let _activity =
+            self.existing_activity(options.root.as_deref(), options.index_dir.as_deref())?;
         if !options.include_status {
             return engine.info(options).await;
         }
@@ -546,6 +597,7 @@ impl WorkspaceRuntimeManager {
         let metadata = engine
             .info(InfoOptions {
                 root: options.root.clone(),
+                index_dir: options.index_dir.clone(),
                 include_status: false,
             })
             .await?;
@@ -553,20 +605,24 @@ impl WorkspaceRuntimeManager {
             metadata.root.clone(),
             &IndexOptions {
                 root: Some(metadata.root.clone()),
+                index_dir: Some(metadata.home.clone()),
                 ..IndexOptions::default()
             },
         )?;
         let epoch = lock(&runtime.index_status).invalidate();
         let observed_job = self
-            .job_for_root(&runtime.canonical_root)
+            .job_for_location(&runtime.location)
             .map(|job| (job.id, job.state));
         let mut info = engine
             .info(InfoOptions {
                 root: Some(metadata.root),
+                index_dir: Some(metadata.home),
                 include_status: true,
             })
             .await?;
-        let current_job = self.job_for_root(&info.root).map(|job| (job.id, job.state));
+        let current_job = self
+            .job_for_location(&runtime.location)
+            .map(|job| (job.id, job.state));
         let busy = current_job
             .is_some_and(|(_, state)| matches!(state, JobState::Queued | JobState::Running));
         // Never restore ready after a watcher notification, job submission or concurrent scan.
@@ -579,8 +635,8 @@ impl WorkspaceRuntimeManager {
         Ok(info)
     }
 
-    fn invalidate_status(&self, root: &Path) {
-        if let Some(runtime) = lock(&self.inner.runtimes).get(root) {
+    fn invalidate_status(&self, location: &WorkspaceLocation) {
+        if let Some(runtime) = lock(&self.inner.runtimes).get(location) {
             runtime.invalidate_status();
         }
     }
@@ -592,8 +648,8 @@ impl WorkspaceRuntimeManager {
         }
     }
 
-    pub(crate) fn runtime_snapshot(&self, canonical_root: &Path) -> WorkspaceRuntimeSnapshot {
-        lock(&self.inner.runtimes).get(canonical_root).map_or_else(
+    fn snapshot_for_location(&self, location: &WorkspaceLocation) -> WorkspaceRuntimeSnapshot {
+        lock(&self.inner.runtimes).get(location).map_or_else(
             WorkspaceRuntimeSnapshot::default,
             |runtime| WorkspaceRuntimeSnapshot {
                 watcher_active: runtime.watcher_active.load(Ordering::Acquire),
@@ -603,34 +659,43 @@ impl WorkspaceRuntimeManager {
         )
     }
 
-    pub(crate) fn job_for_root(&self, canonical_root: &Path) -> Option<IndexJobSnapshot> {
-        self.inner
-            .scheduler
-            .get_by_root(&canonical_root.to_path_buf())
+    fn job_for_location(&self, location: &WorkspaceLocation) -> Option<IndexJobSnapshot> {
+        self.inner.scheduler.get_by_location(location)
+    }
+
+    #[cfg(test)]
+    fn runtime_snapshot(&self, root: &Path) -> WorkspaceRuntimeSnapshot {
+        self.snapshot_for_location(
+            &WorkspaceLocation::resolve(Some(root), None).expect("test location"),
+        )
+    }
+
+    #[cfg(test)]
+    fn job_for_root(&self, root: &Path) -> Option<IndexJobSnapshot> {
+        self.job_for_location(&WorkspaceLocation::resolve(Some(root), None).expect("test location"))
     }
 
     pub(crate) async fn drop_index(
         &self,
         mut options: InfoOptions,
     ) -> Result<bool, WorkspaceRuntimeError> {
-        let canonical_root = canonical_root(options.root.as_deref())?;
-        options.root = Some(canonical_root.clone());
-        let _activity = self.existing_activity(Some(&canonical_root))?;
-        self.invalidate_status(&canonical_root);
-        self.stop_watching(&canonical_root).await?;
-        self.inner.scheduler.cancel_root(&canonical_root);
-        self.inner
-            .scheduler
-            .wait_for_root_idle(&canonical_root)
-            .await;
+        let location =
+            WorkspaceLocation::discover(options.root.as_deref(), options.index_dir.as_deref())?;
+        options.root = Some(location.root.clone());
+        options.index_dir = Some(location.home.clone());
+        let _activity = self.existing_activity(Some(&location.root), Some(&location.home))?;
+        self.invalidate_status(&location);
+        self.stop_watching(&location).await?;
+        self.inner.scheduler.cancel_location(&location);
+        self.inner.scheduler.wait_for_location_idle(&location).await;
         let removed = self.inner.executor.drop_index(options).await?;
         let retired = {
             let mut runtimes = lock(&self.inner.runtimes);
-            let runtime = runtimes.remove(&canonical_root);
+            let runtime = runtimes.remove(&location);
             if let Some(runtime) = &runtime {
                 runtime.retire();
             }
-            self.inner.scheduler.forget_root(&canonical_root);
+            self.inner.scheduler.forget_location(&location);
             runtime
         };
         if let Some(runtime) = retired {
@@ -669,20 +734,33 @@ impl WorkspaceRuntimeManager {
 
     fn runtime(
         &self,
-        canonical_root: PathBuf,
+        canonical_root: impl AsRef<Path>,
         options: &IndexOptions,
     ) -> Result<RuntimeActivity, EngineError> {
+        let location = WorkspaceLocation::resolve(
+            Some(canonical_root.as_ref()),
+            options.index_dir.as_deref(),
+        )?;
         let mut runtimes = lock(&self.inner.runtimes);
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(EngineError::resource_closed(
                 "workspace runtimes have been closed",
             ));
         }
-        let runtime = runtimes.entry(canonical_root.clone()).or_insert_with(|| {
+        if runtimes
+            .keys()
+            .any(|key| key.home == location.home && key.root != location.root)
+        {
+            return Err(EngineError::resource_busy(format!(
+                "index directory {} is already in use for another source root",
+                location.home.display()
+            )));
+        }
+        let runtime = runtimes.entry(location.clone()).or_insert_with(|| {
             let template = index_template(options);
             Arc::new(WorkspaceRuntime {
                 lifecycle: Mutex::new(RuntimeLifecycle::default()),
-                canonical_root,
+                location,
                 index_template: Mutex::new(template),
                 pending_watcher_configuration: Mutex::new(None),
                 index_status: Mutex::new(CachedIndexStatus::default()),
@@ -704,19 +782,36 @@ impl WorkspaceRuntimeManager {
     fn existing_activity(
         &self,
         root: Option<&Path>,
+        index_dir: Option<&Path>,
     ) -> Result<Option<RuntimeActivity>, EngineError> {
-        let root = canonical_root(root).map_err(WorkspaceRuntimeError::into_engine_error)?;
+        let location = WorkspaceLocation::discover(root, index_dir)?;
         let runtimes = lock(&self.inner.runtimes);
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(EngineError::resource_closed(
                 "workspace runtimes have been closed",
             ));
         }
+        if let Some(active) = runtimes
+            .keys()
+            .find(|key| key.home == location.home && key.root != location.root)
+        {
+            return Err(EngineError::resource_busy(format!(
+                "index directory {} is still in use for source {}; close that workspace before using source {}",
+                location.home.display(),
+                active.root.display(),
+                location.root.display(),
+            )));
+        }
         // Queries may name a subdirectory or a symlink to an active workspace.
         Ok(runtimes
             .iter()
-            .filter(|(candidate, _)| root.starts_with(candidate))
-            .max_by_key(|(candidate, _)| candidate.components().count())
+            .filter(|(candidate, _)| {
+                **candidate == location
+                    || (index_dir.is_none()
+                        && location.root.starts_with(&candidate.root)
+                        && candidate.home == candidate.root.join(".zvec-grep"))
+            })
+            .max_by_key(|(candidate, _)| candidate.root.components().count())
             .and_then(|(_, runtime)| RuntimeActivity::begin(runtime, true)))
     }
 
@@ -749,7 +844,7 @@ impl WorkspaceRuntimeManager {
                 manager
                     .inner
                     .scheduler
-                    .wait_for_root_idle(&runtime.canonical_root)
+                    .wait_for_location_idle(&runtime.location)
                     .await;
                 if let Err(error) = manager.ensure_watching(Arc::clone(&runtime)).await {
                     warn!(%error, "pending watcher configuration could not be activated");
@@ -800,14 +895,7 @@ impl WorkspaceRuntimeManager {
         let session = self
             .inner
             .watcher_factory
-            .watch(
-                &WatchRequest {
-                    // The native factory resolves saved engine policy; test factories
-                    // can still use this request solely as a root identifier.
-                    root: RootSpec::new(runtime.canonical_root.clone(), Arc::new(AllowAllPaths)),
-                },
-                &TaskControl::new(cancellation.clone()),
-            )
+            .watch(&runtime.location, &TaskControl::new(cancellation.clone()))
             .await?;
         if runtime.is_retired() || self.inner.closed.load(Ordering::Acquire) {
             cancellation.cancel();
@@ -869,8 +957,11 @@ impl WorkspaceRuntimeManager {
         Ok(())
     }
 
-    async fn stop_watching(&self, canonical_root: &Path) -> Result<(), WorkspaceRuntimeError> {
-        let runtime = lock(&self.inner.runtimes).get(canonical_root).cloned();
+    async fn stop_watching(
+        &self,
+        location: &WorkspaceLocation,
+    ) -> Result<(), WorkspaceRuntimeError> {
+        let runtime = lock(&self.inner.runtimes).get(location).cloned();
         let Some(runtime) = runtime else {
             return Ok(());
         };
@@ -907,7 +998,8 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .await
             .map_err(WorkspaceRuntimeError::into_engine_error)?;
         Ok(IndexOperationResult {
-            root: submitted.job.canonical_root,
+            root: submitted.job.location.root,
+            index_dir: submitted.job.location.home,
             job_id: submitted.job.id.to_string(),
             state: operation_state(submitted.job.state),
             reused: submitted.reused,
@@ -939,7 +1031,11 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         if request.rg {
             return engine.context(request).await;
         }
-        let _activity = self.existing_activity(request.root.as_deref())?;
+        let location =
+            WorkspaceLocation::discover(request.root.as_deref(), request.index_dir.as_deref())?;
+        request.root = Some(location.root.clone());
+        request.index_dir = Some(location.home.clone());
+        let _activity = self.existing_activity(Some(&location.root), Some(&location.home))?;
         let policy = request.refresh.unwrap_or(if request.auto_update {
             RefreshPolicy::Background
         } else {
@@ -953,20 +1049,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             reply.background_refresh = Some("off".to_owned());
             return Ok(reply);
         }
-        let options = IndexOptions {
-            root: request.root.clone(),
-            on_progress: request.on_progress.clone(),
-            signal: request.signal.clone(),
-            allow_remote: request.allow_remote,
-            authorized_remote: request.authorized_remote.clone(),
-            api_key: request.api_key.clone(),
-            endpoint: request.endpoint.clone(),
-            embedding_concurrency: request.embedding_concurrency,
-            lock_timeout_ms: request.lock_timeout_ms,
-            runtime_device: request.device,
-            model_cache: request.model_cache.clone(),
-            ..IndexOptions::default()
-        };
+        let options = refresh_options(&request);
         if policy == RefreshPolicy::Background {
             // Query first so our own refresh cannot lock out the current-index read.
             // A successful query also proves that this operation is not creating an index.
@@ -984,24 +1067,17 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             });
             return Ok(reply);
         }
-        let requested_root = canonical_root(request.root.as_deref())
-            .map_err(WorkspaceRuntimeError::into_engine_error)?;
-        let root = lock(&self.inner.runtimes)
-            .keys()
-            .filter(|root| requested_root.starts_with(root))
-            .max_by_key(|root| root.components().count())
-            .cloned()
-            .unwrap_or(requested_root);
         let _refresh_activity = wait_for_search_refresh(&request, async {
             let info = wait_for_search_admission(&request, async {
                 self.inner
                     .scheduler
-                    .wait_for_root_idle_with_progress(&root, request.on_progress.clone())
+                    .wait_for_location_idle_with_progress(&location, request.on_progress.clone())
                     .await;
                 // Metadata admission also waits on writers outside this daemon.
                 engine
                     .info(InfoOptions {
                         root: request.root.clone(),
+                        index_dir: request.index_dir.clone(),
                         include_status: false,
                     })
                     .await
@@ -1036,11 +1112,10 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .map_err(WorkspaceRuntimeError::into_engine_error)
     }
 
-    fn runtime_snapshot(&self, root: &Path) -> Option<IndexRuntimeSnapshot> {
-        let canonical_root = std::fs::canonicalize(root).ok()?;
-        let runtime = lock(&self.inner.runtimes).get(&canonical_root).cloned()?;
-        let snapshot = WorkspaceRuntimeManager::runtime_snapshot(self, &canonical_root);
-        let job = self.job_for_root(&canonical_root);
+    fn runtime_snapshot(&self, location: &WorkspaceLocation) -> Option<IndexRuntimeSnapshot> {
+        let runtime = lock(&self.inner.runtimes).get(location).cloned()?;
+        let snapshot = self.snapshot_for_location(location);
+        let job = self.job_for_location(location);
         let active = job
             .as_ref()
             .is_some_and(|job| matches!(job.state, JobState::Queued | JobState::Running));
@@ -1104,15 +1179,24 @@ async fn wait_for_search_admission<T>(
         .map_err(|_| EngineError::resource_busy("timed out waiting for search refresh admission"))?
 }
 
-fn ensure_refresh_succeeded(job: &IndexJobSnapshot) -> Result<(), EngineError> {
-    if job.state == JobState::Succeeded {
-        Ok(())
-    } else {
-        Err(job.error.as_ref().map_or_else(
+fn ensure_refresh_succeeded(completed: &IndexJobCompletion) -> Result<(), EngineError> {
+    let job = &completed.job;
+    if job.state != JobState::Succeeded {
+        return Err(job.error.as_ref().map_or_else(
             || EngineError::cancelled("index refresh did not complete successfully"),
             |error| EngineError::from_report(error.report.clone()),
-        ))
+        ));
     }
+    if completed
+        .result
+        .as_ref()
+        .is_none_or(|result| result.files_failed != 0)
+    {
+        return Err(EngineError::storage_failure(
+            "index refresh left failed files",
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for RuntimeManagerInner {
@@ -1167,7 +1251,8 @@ async fn watch_loop(
         options.name = None;
         options.signal = None;
         options.on_progress = None;
-        options.root = Some(runtime.canonical_root.clone());
+        options.root = Some(runtime.location.root.clone());
+        options.index_dir = Some(runtime.location.home.clone());
         options.rebuild = false;
         options.changes = batch.changes.into_iter().map(map_change).collect();
         if options.changes.contains(&IndexChange::Rescan) {
@@ -1210,41 +1295,41 @@ fn submission(completed: IndexJobCompletion, reused: bool) -> RuntimeIndexSubmis
     }
 }
 
-fn canonical_root(root: Option<&Path>) -> Result<PathBuf, WorkspaceRuntimeError> {
-    let requested = root.unwrap_or_else(|| Path::new("."));
-    std::fs::canonicalize(requested).map_err(|error| {
-        let message = format!(
-            "failed to resolve workspace root {}: {error}",
-            requested.display()
-        );
-        let error = match error.kind() {
-            std::io::ErrorKind::NotFound => EngineError::not_found(message),
-            std::io::ErrorKind::PermissionDenied => EngineError::permission_denied(message),
-            std::io::ErrorKind::WouldBlock => EngineError::resource_busy(message),
-            std::io::ErrorKind::TimedOut => EngineError::deadline_exceeded(message),
-            _ => EngineError::storage_failure(message),
-        };
-        WorkspaceRuntimeError::Engine(error)
-    })
+fn refresh_options(request: &ContextOptions) -> IndexOptions {
+    IndexOptions {
+        root: request.root.clone(),
+        index_dir: request.index_dir.clone(),
+        on_progress: request.on_progress.clone(),
+        signal: request.signal.clone(),
+        allow_remote: request.allow_remote,
+        authorized_remote: request.authorized_remote.clone(),
+        embedding_concurrency: request.embedding_concurrency,
+        runtime_device: request.device,
+        model_cache: request.model_cache.clone(),
+        lock_timeout_ms: request.lock_timeout_ms,
+        ..IndexOptions::default()
+    }
 }
 
 fn index_template(options: &IndexOptions) -> IndexOptions {
     let mut template = options.clone();
-    // Saved workspace settings are authoritative for subsequent watch jobs.
-    // Configuration patches and one-operation controls must never be replayed.
+    // Retain machine-local device/cache options for subsequent watch jobs.
+    // Saved workspace settings remain authoritative; never replay patches or consent.
     template.name = None;
     template.signal = None;
     template.lock_timeout_ms = None;
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
-    template.runtime_device = None;
+    template.api_key = None;
     template.embedding_concurrency = None;
     template.rebuild = false;
     template.reset_paths = false;
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
     template.embedding = None;
+    template.embedding_routes.clear();
+    template.clear_embedding_routes.clear();
     template
 }
 
@@ -1336,7 +1421,7 @@ mod tests {
 
     use crate::job_scheduler::{IndexExecutor, SchedulerConfig};
 
-    use super::WorkspaceRuntimeManager;
+    use super::{WorkspaceLocation, WorkspaceRuntimeManager};
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -1477,7 +1562,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: None,
             status: Some(IndexStats::default()),
@@ -1532,16 +1617,27 @@ mod tests {
         let engine = zg_engine::ZvecGrep::new();
         let manager = WorkspaceRuntimeManager::native(Arc::new(zg_engine::ZvecGrep::new()));
         let options = InfoOptions {
+            index_dir: None,
             root: Some(root.clone()),
             include_status: true,
         };
-        assert!(IndexOperationProvider::runtime_snapshot(&manager, &root).is_none());
+        assert!(
+            IndexOperationProvider::runtime_snapshot(
+                &manager,
+                &WorkspaceLocation::resolve(Some(&root), None).expect("location")
+            )
+            .is_none()
+        );
         let reply = manager
             .info(&engine, options.clone())
             .await
             .expect("inspection");
         assert_eq!(reply.index_status(), IndexStatus::Uninitialized);
-        let snapshot = IndexOperationProvider::runtime_snapshot(&manager, &root).expect("runtime");
+        let snapshot = IndexOperationProvider::runtime_snapshot(
+            &manager,
+            &WorkspaceLocation::resolve(Some(&root), None).expect("location"),
+        )
+        .expect("runtime");
         assert_eq!(
             snapshot.index_status.expect("inspection").status,
             IndexStatus::Uninitialized
@@ -1552,7 +1648,13 @@ mod tests {
             "inspection must not create storage"
         );
         manager.drop_index(options).await.expect("drop");
-        assert!(IndexOperationProvider::runtime_snapshot(&manager, &root).is_none());
+        assert!(
+            IndexOperationProvider::runtime_snapshot(
+                &manager,
+                &WorkspaceLocation::resolve(Some(&root), None).expect("location")
+            )
+            .is_none()
+        );
         manager.shutdown_all().await.expect("shutdown");
         engine.close();
     }
@@ -1728,7 +1830,9 @@ mod tests {
         manager
             .inner
             .scheduler
-            .wait_for_root_idle(&workspace.path().canonicalize().expect("root"))
+            .wait_for_location_idle(
+                &WorkspaceLocation::resolve(Some(workspace.path()), None).expect("location"),
+            )
             .await;
         manager.shutdown_all().await.expect("shutdown");
     }
@@ -1825,7 +1929,13 @@ mod tests {
             "other callers' job remains active"
         );
         executor.release.add_permits(1);
-        manager.inner.scheduler.wait_for_root_idle(&root).await;
+        manager
+            .inner
+            .scheduler
+            .wait_for_location_idle(
+                &WorkspaceLocation::resolve(Some(&root), None).expect("location"),
+            )
+            .await;
         manager.shutdown_all().await.expect("shutdown");
     }
 
@@ -1930,7 +2040,7 @@ mod tests {
             )
             .await
             .expect("index should complete");
-        assert_eq!(indexed.job.canonical_root, canonical_root);
+        assert_eq!(indexed.job.location.root, canonical_root);
         assert_eq!(manager.snapshot().active_runtimes, 1);
         assert!(manager.runtime_snapshot(&canonical_root).watcher_active);
         let runtime = manager
@@ -2094,7 +2204,7 @@ mod tests {
             "{:?}",
             indexed.job.error
         );
-        assert_eq!(indexed.job.canonical_root, child);
+        assert_eq!(indexed.job.location.root, child);
         assert!(child.join(".zvec-grep/manifest.json").is_file());
         assert_eq!(
             std::fs::read(parent_manifest).expect("parent manifest unchanged"),
@@ -2103,6 +2213,7 @@ mod tests {
         assert_eq!(
             engine
                 .info(InfoOptions {
+                    index_dir: None,
                     root: Some(child.clone()),
                     include_status: false
                 })
@@ -2191,6 +2302,7 @@ mod tests {
 
         let removed = manager
             .drop_index(InfoOptions {
+                index_dir: None,
                 root: Some(workspace.path().to_path_buf()),
                 include_status: false,
             })
@@ -2201,7 +2313,7 @@ mod tests {
         assert_eq!(watchers.closes.load(Ordering::Acquire), 1);
         assert_eq!(executor.drops.load(Ordering::Acquire), 1);
         assert_eq!(manager.snapshot().active_runtimes, 0);
-        assert!(manager.job_for_root(&indexed.job.canonical_root).is_none());
+        assert!(manager.job_for_root(&indexed.job.location.root).is_none());
         assert!(matches!(
             manager.inner.scheduler.wait(indexed.job.id).await,
             Err(crate::job_scheduler::SchedulerError::UnknownJob(_))
@@ -2271,6 +2383,7 @@ mod tests {
                     allow_remote: true,
                     embedding_concurrency: Some(8),
                     authorized_remote: vec![zg_engine::authorization::IndexAuthorization {
+                        index_dir: root.join(".zvec-grep"),
                         root: root.clone(),
                         workspace_roots: vec![root.clone()],
                         model: "qwen/text-embedding-v4".into(),
@@ -2279,7 +2392,7 @@ mod tests {
                     }],
                     scan: ScanRulesUpdate {
                         globs: Some(vec!["*.rs".into()]),
-                        hidden: Some(false),
+                        include_hidden: Some(false),
                         max_depth: Some(None),
                         ..ScanRulesUpdate::default()
                     },
@@ -2304,7 +2417,13 @@ mod tests {
         })
         .await
         .expect("watch job starts");
-        manager.inner.scheduler.wait_for_root_idle(&root).await;
+        manager
+            .inner
+            .scheduler
+            .wait_for_location_idle(
+                &WorkspaceLocation::resolve(Some(&root), None).expect("location"),
+            )
+            .await;
         {
             let calls = executor.calls.lock().expect("calls");
             assert_eq!(calls[1].embedding_concurrency, Some(8));
@@ -2367,7 +2486,7 @@ mod tests {
                     root: Some(root.clone()),
                     embedding_concurrency: Some(5),
                     scan: ScanRulesUpdate {
-                        hidden: Some(true),
+                        include_hidden: Some(true),
                         ..ScanRulesUpdate::default()
                     },
                     ..IndexOptions::default()
@@ -2458,7 +2577,7 @@ mod tests {
                     root: Some(root.clone()),
                     embedding_concurrency: Some(99),
                     scan: ScanRulesUpdate {
-                        hidden: Some(true),
+                        include_hidden: Some(true),
                         ..ScanRulesUpdate::default()
                     },
                     ..IndexOptions::default()
@@ -2488,4 +2607,45 @@ mod tests {
 
     mod freshness;
     mod lifecycle;
+    mod portable;
+    #[test]
+    fn watcher_templates_resolve_saved_routes_instead_of_replaying_configuration_patches() {
+        use zg_engine::api::context::options::ContentKind;
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+        let options = IndexOptions {
+            embedding_routes: std::collections::BTreeMap::from([(
+                ContentKind::Image,
+                EmbeddingModelSpec {
+                    reference: "qwen/vision".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Auto,
+                },
+            )]),
+            clear_embedding_routes: vec![ContentKind::Code],
+            ..Default::default()
+        };
+        let template = super::index_template(&options);
+        assert!(template.embedding_routes.is_empty());
+        assert!(template.clear_embedding_routes.is_empty());
+    }
+    #[test]
+    fn resident_refresh_does_not_apply_query_model_overrides_to_saved_routes() {
+        let request = zg_engine::api::context::ContextOptions {
+            api_key: Some("query-only-key".into()),
+            endpoint: Some("https://query-only.example".into()),
+            device: Some(zg_engine::api::index::options::Device::Cpu),
+            model_cache: Some("query-cache".into()),
+            ..Default::default()
+        };
+        let options = super::refresh_options(&request);
+        assert!(options.api_key.is_none());
+        assert!(options.endpoint.is_none());
+        assert_eq!(options.runtime_device, request.device);
+        assert_eq!(options.model_cache, request.model_cache);
+        let template = super::index_template(&options);
+        assert_eq!(template.runtime_device, request.device);
+        assert_eq!(template.model_cache, request.model_cache);
+    }
 }

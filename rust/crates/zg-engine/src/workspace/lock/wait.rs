@@ -66,21 +66,23 @@ impl<'a> LockWait<'a> {
     ) -> Result<FileLock, EngineError> {
         check_home_parent(home, operation)?;
         self.check_cancelled()?;
+        if mode == LockMode::Read {
+            loop {
+                if let Some(lock) = try_home_read(home, operation)? {
+                    return Ok(lock);
+                }
+                self.retry(home, operation).await?;
+            }
+        }
         // Writers share an intent lock while queued and while writing. Readers
         // need it exclusively only during admission, so active readers can drain
         // without a stream of new readers overtaking a waiting writer.
         let intent = open_lock_file(&home.join("locks/write-intent"), operation)?;
-        self.wait_file(&intent, home, opposite(mode), operation)
+        self.wait_file(&intent, home, LockMode::Read, operation)
             .await?;
         let file = open_lock_file(&home.join("locks/home"), operation)?;
-        self.wait_file(&file, home, mode, operation).await?;
-        if mode == LockMode::Read {
-            return Ok(FileLock {
-                _read_cache: None,
-                _file: file,
-                _intent: None,
-            });
-        }
+        self.wait_file(&file, home, LockMode::Write, operation)
+            .await?;
         crate::storage::read_session::release_for_write(home);
         let residency = open_lock_file(&home.join("locks/read-cache"), operation)?;
         // The same deadline covers active readers and idle cached handles.
@@ -118,18 +120,37 @@ pub(crate) fn try_home_read(home: &Path, operation: &str) -> Result<Option<FileL
         return Ok(None);
     }
     let file = open_lock_file(&home.join("locks/home"), operation)?;
-    Ok(try_file_lock(&file, LockMode::Read)?.then_some(FileLock {
+    if !try_file_lock(&file, LockMode::Read)? {
+        return Ok(None);
+    }
+    if crate::workspace::build::needs_recovery(home)? {
+        drop(file);
+        drop(intent);
+        try_recover_publication(home, operation)?;
+        return Ok(None);
+    }
+    Ok(Some(FileLock {
         _read_cache: None,
         _file: file,
         _intent: None,
     }))
 }
 
-fn opposite(mode: LockMode) -> LockMode {
-    match mode {
-        LockMode::Read => LockMode::Write,
-        LockMode::Write => LockMode::Read,
+fn try_recover_publication(home: &Path, operation: &str) -> Result<(), EngineError> {
+    let intent = open_lock_file(&home.join("locks/write-intent"), operation)?;
+    if !try_file_lock(&intent, LockMode::Read)? {
+        return Ok(());
     }
+    let file = open_lock_file(&home.join("locks/home"), operation)?;
+    if !try_file_lock(&file, LockMode::Write)? {
+        return Ok(());
+    }
+    crate::storage::read_session::release_for_write(home);
+    let residency = open_lock_file(&home.join("locks/read-cache"), operation)?;
+    if !try_file_lock(&residency, LockMode::Write)? {
+        return Ok(());
+    }
+    crate::workspace::build::recover_build(home)
 }
 
 fn try_file_lock(file: &File, mode: LockMode) -> Result<bool, EngineError> {

@@ -407,8 +407,8 @@ mod tests {
     }
 
     fn assert_source_backed(source: &super::TextSource, entity: &super::ExtractedEntity) {
-        let Content::Text(content) = &entity.content else {
-            panic!("text entity expected");
+        let Content::Code(content) = &entity.content else {
+            panic!("code entity expected");
         };
         let Range::Text(range) = entity.source_range else {
             panic!("text range expected");
@@ -1051,7 +1051,7 @@ mod tests {
             }))
         ));
         assert_source_backed(&source, owner);
-        assert_eq!(owner.content, Content::Text(source.text.clone()));
+        assert_eq!(owner.content, Content::Code(source.text.clone()));
         assert!(matches!(
             test_metadata(named(&fragments, "name")),
             Some(EntityMetadata::Code(CodeMetadata {
@@ -1165,19 +1165,19 @@ mod tests {
             let entity = &entities[0];
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(text) = &entity.content else {
-                    panic!("text entity expected");
+                let Content::Code(text) = &entity.content else {
+                    panic!("code entity expected");
                 };
                 let Range::Byte(range) = fragment.range else {
                     panic!("chunked entity expected");
                 };
                 let start = usize::try_from(range.start_offset()).expect("fragment start");
                 let end = usize::try_from(range.end_offset()).expect("fragment end");
-                let content = Content::Text(text[start..end].to_owned());
+                let content = Content::Code(text[start..end].to_owned());
                 let vector =
                     vector_content_for_fragment(&content, entity.metadata.as_ref(), Some(120));
-                let [Content::Text(vector)] = vector.as_slice() else {
-                    panic!("text embedding");
+                let [Content::Code(vector)] = vector.as_slice() else {
+                    panic!("code embedding");
                 };
                 assert!(crate::utils::utf16_len(vector) <= 120);
                 assert!(vector.starts_with("symbol: function"));
@@ -1244,7 +1244,7 @@ mod tests {
         assert_source_backed(&plain_script, &fallback[0]);
         assert_eq!(
             test_content(&fallback[0]),
-            Content::Text("\r\n// 没有声明\r\n".to_owned())
+            Content::Code("\r\n// 没有声明\r\n".to_owned())
         );
         assert!(test_metadata(&fallback[0]).is_none());
         assert!(matches!(
@@ -1257,7 +1257,7 @@ mod tests {
         assert_eq!(fallback.len(), 1);
         assert_eq!(
             test_content(&fallback[0]),
-            Content::Text(no_script.text.clone())
+            Content::Code(no_script.text.clone())
         );
         assert!(test_metadata(&fallback[0]).is_none());
     }
@@ -1320,8 +1320,8 @@ mod tests {
             assert!(entity.fragments.len() > 2);
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(text) = &entity.content else {
-                    panic!("text entity expected");
+                let Content::Code(text) = &entity.content else {
+                    panic!("code entity expected");
                 };
                 let Range::Byte(range) = fragment.range else {
                     panic!("chunked entity expected");
@@ -1370,7 +1370,7 @@ mod tests {
             assert_eq!(fragments.len(), 1);
             assert_eq!(
                 test_content(&fragments[0]),
-                Content::Text(source.text.clone())
+                Content::Code(source.text.clone())
             );
             assert!(test_metadata(&fragments[0]).is_none());
         }

@@ -1,7 +1,10 @@
 //! Index lifecycle and operations that span multiple tables.
 
+#[cfg(test)]
+use crate::domain::EntityId;
+
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, DirBuilder, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
@@ -12,13 +15,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord},
+    domain::{ContentIndex, ContentKind, Entity, FileId, FileIndexStatus, FileRecord},
     utils::{atomic_write as write_record, sync_directory},
 };
 
 use super::{
     directories::Directories,
-    entities::{self, Entities},
+    entities::Entities,
     files::Files,
     fragments::{self, Fragments},
     types::{
@@ -27,14 +30,14 @@ use super::{
     },
     zvec::{corrupt, initialize},
 };
-use crate::domain::model::EmbeddingModelInfo;
+use crate::domain::model::{EmbeddingMetric, EmbeddingModelInfo};
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
 
 struct SharedStore {
     state: Mutex<StoreState>,
-    schema: Vec<EmbeddingModelInfo>,
+    schema: Vec<ContentIndex>,
     read_only: bool,
     // The native handles must close before the operating-system lock is released.
     _lock: File,
@@ -57,43 +60,58 @@ pub(crate) struct IndexStore {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
-    embeddings: Vec<EmbeddingModelInfo>,
+    path_encoding: PathEncoding,
+    tables: Vec<ContentIndex>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PathEncoding {
+    Components,
 }
 
 impl SchemaRecord {
-    fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
+    fn new(tables: &[ContentIndex]) -> Self {
         Self {
-            embeddings: embeddings.to_vec(),
+            path_encoding: PathEncoding::Components,
+            tables: tables.to_vec(),
         }
     }
 
-    fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
-        validate_models(&self.embeddings).map_err(|error| {
+    fn tables(self) -> EngineResult<Vec<ContentIndex>> {
+        validate_tables(&self.tables).map_err(|error| {
             EngineError::storage_failure(format!(
-                "invalid stored embedding model information: {error}"
+                "invalid stored index table information: {error}; rebuild the index"
             ))
         })?;
-        Ok(self.embeddings)
+        Ok(self.tables)
     }
 }
 
-fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
-    if embeddings.is_empty() {
+fn validate_tables(tables: &[ContentIndex]) -> EngineResult<()> {
+    if tables.is_empty() {
         return Err(EngineError::invalid_argument(
-            "at least one embedding model is required",
+            "at least one content kind table is required",
         ));
     }
-    let mut models = std::collections::HashSet::new();
-    for embedding in embeddings {
-        embedding.validate()?;
-        if !(1..=20_000).contains(&embedding.dimension) {
+    let mut kinds = HashSet::new();
+    for table in tables {
+        let embedding = &table.embedding;
+        if !(1..=20_000).contains(&embedding.dimension()) {
             return Err(EngineError::invalid_argument(
                 "embedding dimension must be in 1..=20,000",
             ));
         }
-        if !models.insert(embedding.model.reference()) {
+        if !embedding.model().supports_content(table.kind) {
+            return Err(EngineError::invalid_argument(format!(
+                "model {} does not support {} content",
+                embedding.model().reference(),
+                table.kind.as_str()
+            )));
+        }
+        if !kinds.insert(table.kind) {
             return Err(EngineError::invalid_argument(
-                "embedding model references must be unique",
+                "content kind tables must be unique",
             ));
         }
     }
@@ -102,8 +120,8 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
 
 impl IndexStore {
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            validate_models(embeddings)?;
+        if let WorkspaceIndexStorageOptions::ReadWrite { tables, .. } = &options {
+            validate_tables(tables)?;
         }
         initialize()?;
         let home = options.storage_path();
@@ -131,9 +149,8 @@ impl IndexStore {
                 return Err(io_error("create index directory", home, &error));
             }
         }
-        let home = fs::canonicalize(home)
+        let path = fs::canonicalize(home)
             .map_err(|error| io_error("locate index directory", home, &error))?;
-        let path = home.join("storage");
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
             if read_only && shared.read_only {
@@ -146,7 +163,7 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema) = prepare_storage(&home, &path, options)?;
+        let (lock, schema) = prepare_storage(&path, options)?;
         let files = Files::open(&path, read_only)?;
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
@@ -157,7 +174,6 @@ impl IndexStore {
         if !read_only {
             // Repeat the same range after failures that leave directories in place.
             sync_directory(&path)?;
-            sync_directory(&home)?;
             if let Some(outer) = outer {
                 sync_directory(&outer)?;
             }
@@ -183,7 +199,7 @@ impl IndexStore {
     }
 
     pub(crate) fn exists(storage_path: &Path) -> EngineResult<bool> {
-        match fs::metadata(storage_path.join("storage")) {
+        match fs::metadata(storage_path) {
             Ok(metadata) => Ok(metadata.is_dir()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(io_error("inspect storage", storage_path, &error)),
@@ -196,7 +212,7 @@ impl IndexStore {
         }
         let home = fs::canonicalize(storage_path)
             .map_err(|error| io_error("locate storage", storage_path, &error))?;
-        let path = home.join("storage");
+        let path = home.clone();
         let mut registry = registry()?;
         if registry.get(&path).and_then(Weak::upgrade).is_some() {
             return Err(EngineError::resource_busy(
@@ -206,7 +222,9 @@ impl IndexStore {
         let _lock = acquire_storage_lock(&home, false)?;
         fs::remove_dir_all(&path)
             .map_err(|error| io_error("delete workspace storage", &path, &error))?;
-        sync_directory(&home)?;
+        if let Some(parent) = home.parent() {
+            sync_directory(parent)?;
+        }
         registry.remove(&path);
         Ok(())
     }
@@ -246,6 +264,24 @@ impl IndexStore {
         self.read_only
     }
 
+    pub(crate) fn ensure_compatible(&self, tables: &[ContentIndex]) -> EngineResult<()> {
+        validate_tables(tables)?;
+        ensure_tables_compatible(&self.shared()?.schema, tables)
+    }
+
+    pub(crate) fn entity_counts(&self) -> EngineResult<BTreeMap<ContentKind, u64>> {
+        self.read(|state| {
+            let indexed_files = state
+                .files
+                .list()?
+                .into_iter()
+                .filter(|file| matches!(file.index_status, FileIndexStatus::Indexed { .. }))
+                .map(|file| file.id)
+                .collect::<HashSet<_>>();
+            state.fragments.entity_counts(&indexed_files)
+        })
+    }
+
     pub(crate) fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.read(|state| state.files.list())
     }
@@ -273,8 +309,27 @@ impl IndexStore {
         self.read(|state| load_search_hits(state, hits))
     }
 
+    /// Read canonical indexed content, never the current source file.
+    #[cfg(test)]
+    pub(crate) fn read_entity(&self, id: &EntityId) -> EngineResult<Option<StoredEntity>> {
+        self.read(|state| {
+            let Some(entity) = state.entities.fetch(std::slice::from_ref(id))?.remove(id) else {
+                return Ok(None);
+            };
+            let Some(file) = state
+                .files
+                .fetch(&[entity.file_id])?
+                .remove(&entity.file_id)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(StoredEntity { entity, file }))
+        })
+    }
+
     pub(crate) fn search_fts(
         &self,
+        kind: ContentKind,
         query: &str,
         limit: usize,
         filter: Option<&StorageSearchFilter>,
@@ -284,27 +339,45 @@ impl IndexStore {
                 return Ok(Vec::new());
             }
             let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
-            state.fragments.search_fts(query, limit, filter.as_deref())
+            state
+                .fragments
+                .search_fts(kind, query, limit, filter.as_deref())
         })
     }
 
     pub(crate) fn search_vector(
         &self,
-        model: &str,
+        kind: ContentKind,
         vector: &[f32],
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
         let shared = self.shared()?;
-        validate_vector(vector, model_schema(&shared.schema, model)?)?;
+        let schema = table_schema(&shared.schema, kind)?;
+        validate_vector(vector, schema)?;
+        let metric = schema.metric();
         self.read(|state| {
             if limit == 0 || fragments::empty_filter(filter) {
                 return Ok(Vec::new());
             }
             let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
-            state
+            let mut hits = state
                 .fragments
-                .search_vector(model, vector, limit, filter.as_deref())
+                .search_vector(kind, vector, limit, filter.as_deref())?;
+            // zvec returns cosine/L2 distances but inner-product similarities.
+            // Orient all public scores higher-is-better without rescaling them.
+            if metric != EmbeddingMetric::DotProduct {
+                for hit in &mut hits {
+                    hit.score = -hit.score;
+                }
+            }
+            hits.sort_by(|left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.document_id.cmp(&right.document_id))
+            });
+            Ok(hits)
         })
     }
 
@@ -334,6 +407,27 @@ impl IndexStore {
         };
         file.validate()?;
         self.write(|state| replace_file(state, &file, &[], &[]))
+    }
+
+    pub(crate) fn update_file_snapshot(&self, file: &FileRecord) -> EngineResult<()> {
+        file.validate()?;
+        self.write(|state| {
+            let existing = state.files.fetch(&[file.id])?.remove(&file.id);
+            let valid = existing.as_ref().is_some_and(|existing| {
+                existing.index_status.is_indexed()
+                    && existing.index_status == file.index_status
+                    && existing.relative_path == file.relative_path
+                    && existing.snapshot.size_bytes == file.snapshot.size_bytes
+                    && existing.snapshot.content_hash == file.snapshot.content_hash
+            });
+            if !valid {
+                return Err(EngineError::invalid_argument(
+                    "snapshot refresh requires the same indexed file, content hash and size",
+                ));
+            }
+            let directories = state.directories.ensure(&file.relative_path)?;
+            state.files.put(file, &directories)
+        })
     }
 
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
@@ -491,7 +585,7 @@ fn validate_batch(
     file: &FileRecord,
     entities: &[Entity],
     entries: &[IndexedFragment],
-    schema: &[EmbeddingModelInfo],
+    schema: &[ContentIndex],
 ) -> EngineResult<()> {
     file.validate()?;
     let mut entity_ids = HashSet::new();
@@ -506,7 +600,6 @@ fn validate_batch(
             return Err(EngineError::invalid_argument("duplicate entity id"));
         }
         entity.validate()?;
-        entities::validate_content(&entity.content)?;
         for fragment in &entity.fragments {
             if !fragment_ids.insert(&fragment.id) {
                 return Err(EngineError::invalid_argument("duplicate fragment id"));
@@ -515,28 +608,43 @@ fn validate_batch(
     }
     fragments::validate_projections(entities, entries)?;
     for entry in entries {
-        validate_vector(&entry.vector, model_schema(schema, &entry.model)?)?;
+        validate_vector(&entry.vector, table_schema(schema, entry.kind)?)?;
     }
     Ok(())
 }
 
-fn model_schema<'a>(
-    schemas: &'a [EmbeddingModelInfo],
-    model: &str,
-) -> EngineResult<&'a EmbeddingModelInfo> {
+fn table_schema(schemas: &[ContentIndex], kind: ContentKind) -> EngineResult<&EmbeddingModelInfo> {
     schemas
         .iter()
-        .find(|schema| schema.model.reference() == model)
-        .ok_or_else(|| EngineError::invalid_argument(format!("unknown embedding model {model:?}")))
+        .find(|table| table.kind == kind)
+        .map(|table| &table.embedding)
+        .ok_or_else(|| {
+            EngineError::invalid_argument(format!("content kind {} is not enabled", kind.as_str()))
+        })
 }
 
 fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<()> {
-    if vector.len() != schema.dimension || vector.iter().any(|value| !value.is_finite()) {
+    if vector.len() != schema.dimension() || vector.iter().any(|value| !value.is_finite()) {
         return Err(EngineError::invalid_argument(format!(
             "expected a finite {}-dimensional vector, got {} values",
-            schema.dimension,
+            schema.dimension(),
             vector.len()
         )));
+    }
+    Ok(())
+}
+
+fn ensure_tables_compatible(stored: &[ContentIndex], current: &[ContentIndex]) -> EngineResult<()> {
+    if stored.len() != current.len() {
+        return Err(EngineError::invalid_argument(
+            "content kind table set changed; rebuild the index",
+        ));
+    }
+    for table in stored {
+        let current = table_schema(current, table.kind).map_err(|_| {
+            EngineError::invalid_argument("content kind table set changed; rebuild the index")
+        })?;
+        table.embedding.ensure_index_compatible(current)?;
     }
     Ok(())
 }
@@ -544,31 +652,45 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
 fn load_schema(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<Vec<EmbeddingModelInfo>> {
+) -> EngineResult<Vec<ContentIndex>> {
     let descriptor = path.join("schema.json");
     if descriptor.exists() {
-        let schema = read_json::<SchemaRecord>(&descriptor)?.embeddings()?;
-        if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
-            if schema.len() != embeddings.len() {
-                return Err(EngineError::invalid_argument(
-                    "embedding model set changed; rebuild the index",
-                ));
-            }
-            for stored in &schema {
-                let current =
-                    model_schema(embeddings, &stored.model.reference()).map_err(|_| {
-                        EngineError::invalid_argument(
-                            "embedding model set changed; rebuild the index",
-                        )
-                    })?;
-                stored.ensure_index_compatible(current)?;
+        let schema = read_json::<SchemaRecord>(&descriptor)
+            .map_err(|error| {
+                EngineError::storage_failure(format!(
+                    "unsupported or invalid storage schema: {error}; rebuild the index"
+                ))
+            })?
+            .tables()?;
+        if let WorkspaceIndexStorageOptions::ReadWrite { tables, .. } = &options {
+            ensure_tables_compatible(&schema, tables)?;
+        }
+        for collection in [
+            "files".to_owned(),
+            "directories".to_owned(),
+            "entities".to_owned(),
+        ]
+        .into_iter()
+        .chain(
+            schema
+                .iter()
+                .map(|table| fragments::fragment_collection_name(table.kind)),
+        ) {
+            if !path.join(&collection).is_dir() {
+                return Err(EngineError::storage_failure(format!(
+                    "index collection {collection} is missing; rebuild the index"
+                )));
             }
         }
         return Ok(schema);
     }
     if fs::read_dir(path)
         .map_err(|error| io_error("inspect storage directory", path, &error))?
-        .next()
+        .find(|entry| {
+            entry
+                .as_ref()
+                .map_or(true, |entry| entry.file_name() != "storage.lock")
+        })
         .transpose()
         .map_err(|error| io_error("inspect storage entry", path, &error))?
         .is_some()
@@ -577,17 +699,17 @@ fn load_schema(
             "existing workspace storage is missing its schema; rebuild the index",
         ));
     }
-    let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = options else {
+    let WorkspaceIndexStorageOptions::ReadWrite { tables, .. } = options else {
         return Err(EngineError::not_found(
             "workspace storage schema does not exist",
         ));
     };
-    validate_models(&embeddings)?;
+    validate_tables(&tables)?;
     write_record(
         &descriptor,
-        &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
+        &serde_json::to_vec(&SchemaRecord::new(&tables)).map_err(|error| json_error(&error))?,
     )?;
-    Ok(embeddings)
+    Ok(tables)
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -607,25 +729,10 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 }
 
 fn prepare_storage(
-    home: &Path,
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
-    let lock = acquire_storage_lock(home, options.is_read_only())?;
-    if !options.is_read_only() {
-        let mut builder = DirBuilder::new();
-        builder.recursive(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if let Err(error) = builder.create(path)
-            && !(error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir())
-        {
-            return Err(io_error("create storage directory", path, &error));
-        }
-    }
+) -> EngineResult<(File, Vec<ContentIndex>)> {
+    let lock = acquire_storage_lock(path, options.is_read_only())?;
     Ok((lock, load_schema(path, options)?))
 }
 

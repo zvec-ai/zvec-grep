@@ -147,7 +147,7 @@ mod tests {
             record,
             json!({
                 "id": 1, "index_status": {"kind": "not_indexed"},
-                "relative_path": {"encoding": "utf8", "value": "nested/tsconfig.json"},
+                "relative_path": {"components": ["nested", "tsconfig.json"]},
                 "snapshot": {"size_bytes": 123, "modified_epoch_ms": 456, "content_hash": "content-hash"},
             })
         );

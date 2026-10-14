@@ -27,6 +27,49 @@ pub(crate) struct FileLock {
     _intent: Option<File>,
 }
 
+/// A source binding is local runtime state: stale lock contents do not prevent relocation.
+pub(crate) fn bind_source(home: &Path, root: &Path) -> Result<FileLock, EngineError> {
+    use std::io::{Read, Seek, Write};
+
+    super::layout::validate_storage_paths(home)?;
+    let _gate = acquire_exclusive_lock(&home.join("locks/binding"), "bind source")?;
+    let mut file = open_lock_file(&home.join("locks/source"), "bind source")?;
+    let identity = crate::utils::sha256_hex(root.as_os_str().as_encoded_bytes());
+    match file.try_lock() {
+        Ok(()) => {
+            file.set_len(0)
+                .and_then(|()| write!(file, "{identity}\n{}", root.display()))
+                .and_then(|()| file.flush())
+                .and_then(|()| file.unlock())
+                .map_err(|error| EngineError::from_io("record active source binding", &error))?;
+        }
+        Err(TryLockError::WouldBlock) => {
+            let mut recorded = String::new();
+            file.rewind()
+                .and_then(|()| file.read_to_string(&mut recorded))
+                .map_err(|error| EngineError::from_io("read active source binding", &error))?;
+            if recorded.lines().next() != Some(identity.as_str()) {
+                return Err(EngineError::resource_busy(format!(
+                    "index directory {} is in use by source {}; close that workspace before binding it to {}",
+                    home.display(),
+                    recorded.lines().nth(1).unwrap_or("another source root"),
+                    root.display()
+                )));
+            }
+        }
+        Err(TryLockError::Error(error)) => {
+            return Err(EngineError::from_io("lock source binding", &error));
+        }
+    }
+    file.try_lock_shared()
+        .map_err(|error| EngineError::storage_failure(format!("retain source binding: {error}")))?;
+    Ok(FileLock {
+        _file: file,
+        _read_cache: None,
+        _intent: None,
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn acquire_home_lock(
     home: &Path,
@@ -162,6 +205,12 @@ pub(crate) fn acquire_exclusive_lock(
 }
 
 fn open_lock_file(lock_path: &Path, operation: &str) -> Result<File, EngineError> {
+    if fs::symlink_metadata(lock_path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(EngineError::invalid_argument(format!(
+            "workspace lock {} must not be a symbolic link",
+            lock_path.display()
+        )));
+    }
     let parent = lock_path.parent().unwrap_or_else(|| Path::new("."));
     let mut builder = DirBuilder::new();
     builder.recursive(true);
@@ -206,6 +255,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn active_source_binding_is_shared_and_can_relocate_after_release() {
+        let directory = tempdir().expect("workspace");
+        let home = directory.path().join("data");
+        let first_root = directory.path().join("source-a");
+        let second_root = directory.path().join("source-b");
+        let first = bind_source(&home, &first_root).expect("first binding");
+        let second = bind_source(&home, &first_root).expect("shared binding");
+        let error = bind_source(&home, &second_root).expect_err("conflicting source");
+        assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
+        assert!(error.message().contains("source-a"));
+        drop(first);
+        assert!(bind_source(&home, &second_root).is_err());
+        drop(second);
+        assert!(bind_source(&home, &second_root).is_ok());
+    }
 
     #[tokio::test]
     async fn queued_writer_waits_for_an_active_reader() {

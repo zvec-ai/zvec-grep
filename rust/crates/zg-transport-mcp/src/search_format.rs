@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use zg_engine::api::context::{
     ContextResult,
     result::{
-        ContentRange, ContextItem, ContextItemKind, ContextItemStatus, ContextQueryGroupRole,
-        ContextSelectionReason, EmptyReason, EntityMetadata,
+        ContentPreview, ContentRange, ContextItem, ContextItemKind, ContextItemStatus,
+        ContextQueryGroupRole, ContextSelectionReason, EmptyReason, EntityMetadata,
     },
 };
 
@@ -45,17 +45,20 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
     if let Some(refresh) = refresh {
         lines.push(format!("background_refresh: {refresh}"));
     }
+    append_target_diagnostics(&mut lines, reply);
     if reply.items.is_empty() {
         lines.push(
             match reply.diagnostics.empty_reason {
                 Some(EmptyReason::NoSearchableFiles) => "No searchable files.",
+                Some(EmptyReason::NoSupportedTargets) => {
+                    "No enabled index table supports this query."
+                }
                 _ => "No matches.",
             }
             .to_owned(),
         );
         return lines.join("\n");
     }
-
     if let Some(index) = &reply.diagnostics.index
         && index.query_groups.len() > 1
     {
@@ -72,20 +75,68 @@ pub(crate) fn format_search_result(reply: &ContextResult, preview: SearchPreview
         lines.push(String::new());
     }
 
-    let mut items: Vec<_> = reply.items.iter().collect();
-    items.sort_by(|left, right| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| left.range.start_line().cmp(&right.range.start_line()))
-            .then_with(|| range_label(&left.range).cmp(&range_label(&right.range)))
-    });
-    for (position, item) in items.into_iter().enumerate() {
+    for (position, item) in reply.items.iter().enumerate() {
+        if let Some(group) = reply.diagnostics.index.as_ref().and_then(|index| {
+            index
+                .result_groups
+                .iter()
+                .find(|group| group.item_count > 0 && group.item_start == position)
+        }) {
+            lines.push(format!(
+                "result group: {} kinds={} scoring={} recall={:?} merge={}; ranked within this group",
+                group.id,
+                group
+                    .kinds
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                if group.rule_ranking {
+                    "rule".to_owned()
+                } else {
+                    format!("{:?}", group.scoring)
+                },
+                group.scoring,
+                if group.kinds.len() > 1 {
+                    "shared_recall_then_rules"
+                } else {
+                    "independent_kind"
+                }
+            ));
+        }
         if position > 0 {
             lines.push(String::new());
         }
         append_item(&mut lines, item, preview);
+        if let Some(trace) = &item.trace {
+            lines.push(format!(
+                "trace: {}",
+                serde_json::to_string(trace).expect("search trace contains serializable fields")
+            ));
+        }
     }
     lines.join("\n")
+}
+
+fn append_target_diagnostics(lines: &mut Vec<String>, reply: &ContextResult) {
+    if let Some(index) = &reply.diagnostics.index {
+        if index.incomplete {
+            lines.push("incomplete: one or more target searches failed".into());
+        }
+        for target in &index.targets {
+            lines.push(format!(
+                "route: input={} target={} model={} status={:?}{}",
+                index.input_kind.as_str(),
+                target.kind.as_str(),
+                target.model_ref,
+                target.status,
+                target
+                    .reason
+                    .as_ref()
+                    .map_or_else(String::new, |reason| format!(" ({reason})")),
+            ));
+        }
+    }
 }
 
 fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPreview) {
@@ -97,14 +148,34 @@ fn append_item(lines: &mut Vec<String>, item: &ContextItem, preview: SearchPrevi
         Some(ContextSelectionReason::GlobalFill) => " [global_fill]".to_owned(),
         None => String::new(),
     };
+    if let ContentPreview::Image { format, size_bytes } = &item.preview {
+        lines.push(format!(
+            "#{}{selection} matchedBy={} {}",
+            item.rank,
+            matched_by_label(item.matched_by),
+            zg_cli::output_path(&item.relative_path).display()
+        ));
+        lines.push(format!(
+            "type: image; format: {}; size: {} bytes",
+            format.as_str(),
+            size_bytes
+        ));
+        if item.status == ContextItemStatus::PossiblyStale {
+            lines.push("status: possibly_stale".into());
+        }
+        return;
+    }
     let header_range = item.container.as_ref().map_or(&item.range, |c| &c.range);
     lines.push(format!(
         "#{}{selection} matchedBy={} {}:{}",
         item.rank,
         matched_by_label(item.matched_by),
-        item.relative_path.display(),
+        zg_cli::output_path(&item.relative_path).display(),
         range_label(header_range)
     ));
+    if item.kind == zg_engine::api::context::result::ContextItemKind::IndexedEntity {
+        lines.push(format!("type: {}", item.preview.kind().as_str()));
+    }
     if !item.query_groups.is_empty() {
         lines.push(format!(
             "groups: {}",
@@ -196,10 +267,11 @@ fn outline_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
 }
 
 fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
-    if item.content.is_empty() {
+    let text = item.preview.text().unwrap_or_default();
+    if text.is_empty() {
         return Vec::new();
     }
-    let content: Vec<_> = split_lines(&item.content).collect();
+    let content: Vec<_> = split_lines(text).collect();
     let first = item.content_range.start_line();
     let (start, end) = if preview == SearchPreview::Short && content.len() > 10 {
         let anchor = item
@@ -289,4 +361,4 @@ const fn group_role(role: ContextQueryGroupRole) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

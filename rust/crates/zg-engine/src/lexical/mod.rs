@@ -443,6 +443,19 @@ fn build_matcher(
     })
 }
 
+fn is_source_entry(path: &Path, root: &Path, index_home: Option<&Path>, directory: bool) -> bool {
+    if index_home.is_some_and(|home| crate::file_selection::is_within_index(path, home))
+        || is_hard_ignored_path(path.strip_prefix(root).unwrap_or(path))
+    {
+        return false;
+    }
+    !(directory && path != root && crate::workspace::layout::is_workspace_data_directory(path))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "configure one embedded ripgrep walker together"
+)]
 fn build_walker(
     root: &Path,
     request: &LexicalSearchRequest,
@@ -469,12 +482,14 @@ fn build_walker(
         .same_file_system(request.options.matching.one_file_system);
 
     let filter_root = root.to_path_buf();
+    let index_home = request.index_home.clone();
     walker.filter_entry(move |entry| {
-        let path = entry
-            .path()
-            .strip_prefix(&filter_root)
-            .unwrap_or_else(|_| entry.path());
-        !is_hard_ignored_path(path)
+        is_source_entry(
+            entry.path(),
+            &filter_root,
+            index_home.as_deref(),
+            entry.file_type().is_some_and(|kind| kind.is_dir()),
+        )
     });
 
     let options = &request.options.matching;

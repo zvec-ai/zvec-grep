@@ -12,7 +12,7 @@ use zg_engine::api::{
     info::{InfoOptions, InfoResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 15;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 18;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -292,7 +292,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
                 name: "search-engine".to_owned(),
@@ -300,7 +300,9 @@ mod tests {
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
                 policy: WorkspaceIndexPolicy::Enabled,
-                embedding: None,
+                default_embedding_model_ref: None,
+                tables: Vec::new(),
+                embedding_routes: std::collections::BTreeMap::new(),
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
@@ -391,5 +393,24 @@ mod tests {
         let decoded: ExecutionResult =
             serde_json::from_value(value).expect("error reply should deserialize");
         assert_eq!(decoded, result);
+    }
+    #[test]
+    fn image_query_roundtrips_without_losing_bytes() {
+        use zg_engine::api::context::options::{FileFormat, QueryImage};
+        let image = DaemonCommand::Context(ContextOptions {
+            target_kind: Some(zg_engine::api::context::options::ContentKind::Image),
+            query_image: Some(QueryImage::Bytes {
+                format: FileFormat::Png,
+                data: vec![1, 2, 3],
+            }),
+            ..Default::default()
+        });
+        let value = serde_json::to_value(&image).expect("image command");
+        assert_eq!(value["request"]["query_image"]["data"], "AQID");
+        assert_eq!(value["request"]["target_kind"], "image");
+        assert_eq!(
+            serde_json::from_value::<DaemonCommand>(value).expect("image decode"),
+            image
+        );
     }
 }

@@ -20,6 +20,7 @@ pub(crate) use runtime::{ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeReq
 pub(crate) use runtime::{batch_concurrency, resolve_index_concurrency};
 pub(crate) use spi::{
     EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelProgressReporter,
+    QueryEncoding,
 };
 
 #[cfg(test)]

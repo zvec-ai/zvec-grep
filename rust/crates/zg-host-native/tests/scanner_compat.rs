@@ -185,6 +185,79 @@ async fn scanner_rejects_overlapping_roots() -> TestResult {
     Ok(())
 }
 
+#[derive(Debug)]
+struct MoveRootDuringScan {
+    root: PathBuf,
+    destination: PathBuf,
+    replace: bool,
+}
+
+impl PathPolicy for MoveRootDuringScan {
+    fn includes_file(&self, _: &Path) -> Result<bool, HostError> {
+        Ok(true)
+    }
+
+    fn can_descend(&self, path: &Path) -> Result<bool, HostError> {
+        if path == self.root {
+            fs::rename(&self.root, &self.destination).expect("move root during traversal");
+            if self.replace {
+                fs::create_dir(&self.root).expect("replace root with empty directory");
+            }
+        }
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn scanner_rejects_roots_removed_or_replaced_after_initial_validation() -> TestResult {
+    for replace in [false, true] {
+        let temporary = tempdir()?;
+        let root = temporary.path().join("workspace");
+        fs::create_dir(&root)?;
+        fs::write(root.join("source.rs"), "fn source() {}")?;
+        let policy = Arc::new(MoveRootDuringScan {
+            root: root.clone(),
+            destination: temporary.path().join("moved"),
+            replace,
+        });
+        let error = discover(
+            &NativeScanner::default(),
+            RootSpec::new(root.clone(), policy),
+        )
+        .await
+        .expect_err("a missing or replaced root must not become an empty snapshot");
+        assert!(error.to_string().contains(&root.display().to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scanner_reports_unreadable_subdirectories_instead_of_a_partial_snapshot() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let child = root.join("restricted");
+    fs::create_dir(&child)?;
+    fs::write(child.join("source.txt"), "keep indexed content")?;
+    let permissions = fs::metadata(&child)?.permissions();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o000))?;
+    if fs::read_dir(&child).is_ok() {
+        fs::set_permissions(&child, permissions)?;
+        eprintln!(
+            "Skipping permission failure injection: this user can read chmod 000 directories."
+        );
+        return Ok(());
+    }
+    let result = discover(&NativeScanner::default(), root_spec(root)).await;
+    fs::set_permissions(&child, permissions)?;
+    let error = result.expect_err("unreadable source directories must fail discovery");
+    assert!(error.to_string().contains("read directory"));
+    assert!(error.to_string().contains("restricted"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn scanner_follows_links_without_visiting_the_same_directory_twice() -> TestResult {
@@ -194,6 +267,7 @@ async fn scanner_follows_links_without_visiting_the_same_directory_twice() -> Te
     fs::write(root.join("child/source.rs"), "fn source() {}")?;
     std::os::unix::fs::symlink(root, root.join("child/cycle"))?;
     std::os::unix::fs::symlink(root.join("child"), root.join("linked"))?;
+    std::os::unix::fs::symlink(root.join("removed"), root.join("broken"))?;
     let mut spec = root_spec(root);
     spec.follow = true;
     let snapshot = discover(&NativeScanner::default(), spec).await?;

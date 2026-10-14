@@ -121,10 +121,10 @@ async fn foreground_activity_protects_subdirectory_queries_and_renews_idle_deadl
             .expect("runtime"),
     );
     let activity = manager
-        .existing_activity(Some(&child))
+        .existing_activity(Some(&child), None)
         .expect("query admission")
         .expect("owning root");
-    assert_eq!(activity.canonical_root, root);
+    assert_eq!(activity.location.root, root);
     tokio::time::advance(WorkspaceRuntimeManager::DEFAULT_IDLE_TTL).await;
     manager.retire_idle(tokio::time::Instant::now()).await;
     assert_eq!(manager.snapshot().active_runtimes, 1);
@@ -376,7 +376,7 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
     assert_eq!(engine.runtime_snapshot().loaded_models, 1);
     assert_eq!(engine.runtime_snapshot().active_model_leases, 0);
     let active = manager
-        .existing_activity(Some(&second_root))
+        .existing_activity(Some(&second_root), None)
         .expect("admission")
         .expect("runtime");
     manager
@@ -390,6 +390,7 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
     assert!(
         engine
             .info(InfoOptions {
+                index_dir: None,
                 root: Some(first_root),
                 include_status: false
             })

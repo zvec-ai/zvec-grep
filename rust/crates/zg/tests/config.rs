@@ -25,12 +25,17 @@ impl Fixture {
             .env("USERPROFILE", self.user.path())
             .env("ZVEC_GREP_HOME", self.user.path().join("runtime"));
         for key in [
+            "ZVEC_GREP_INDEX_DIR",
+            "ZVEC_GREP_CONFIG",
             "ZVEC_GREP_DEVICE",
             "ZVEC_GREP_EMBEDDING",
             "ZVEC_GREP_API_KEY",
             "ZVEC_GREP_ENDPOINT",
             "ZVEC_GREP_MODEL_CACHE",
             "ZVEC_GREP_MODE",
+            "DASHSCOPE_API_KEY",
+            "QWEN_API_KEY",
+            "ZVEC_GREP_WORKSPACE_REGISTRY",
         ] {
             command.env_remove(key);
         }
@@ -162,19 +167,22 @@ fn force_direct_uses_resolved_environment_mode() {
     fixture.write_config(&json!({"version": 1, "client": {"mode": "server"}}));
 
     let direct = fixture
-        .command(&["--force-direct", "--json", "needle"])
+        .command(&["--force-direct", "--json", "--fts", "needle"])
         .env("ZVEC_GREP_MODE", "direct")
         .output()
         .expect("environment direct mode");
-    assert!(!direct.status.success());
     assert!(
-        String::from_utf8_lossy(&direct.stderr).contains("--json is not supported"),
-        "stderr:\n{}",
+        direct.status.success(),
+        "{}",
         String::from_utf8_lossy(&direct.stderr)
     );
+    let result: serde_json::Value =
+        serde_json::from_slice(&direct.stdout).expect("clean JSON output");
+    assert_eq!(result["source"], "index");
+    assert_eq!(result["items"], json!([]));
 
     let server = fixture
-        .command(&["--force-direct", "--json", "needle"])
+        .command(&["--force-direct", "--json", "--fts", "needle"])
         .env("ZVEC_GREP_MODE", "server")
         .output()
         .expect("environment server mode");
@@ -191,16 +199,19 @@ fn force_direct_uses_resolved_global_mode() {
     let fixture = Fixture::new();
     fixture.write_config(&json!({"version": 1, "client": {"mode": "direct"}}));
 
-    let direct = fixture.run(&["--force-direct", "--json", "needle"]);
-    assert!(!direct.status.success());
+    let direct = fixture.run(&["--force-direct", "--json", "--fts", "needle"]);
     assert!(
-        String::from_utf8_lossy(&direct.stderr).contains("--json is not supported"),
-        "stderr:\n{}",
+        direct.status.success(),
+        "{}",
         String::from_utf8_lossy(&direct.stderr)
     );
+    let result: serde_json::Value =
+        serde_json::from_slice(&direct.stdout).expect("clean JSON output");
+    assert_eq!(result["source"], "index");
+    assert_eq!(result["items"], json!([]));
 
     fixture.write_config(&json!({"version": 1, "client": {"mode": "server"}}));
-    let server = fixture.run(&["--force-direct", "--json", "needle"]);
+    let server = fixture.run(&["--force-direct", "--json", "--fts", "needle"]);
     assert!(!server.status.success());
     assert!(
         String::from_utf8_lossy(&server.stderr).contains("--force-direct requires --mode direct"),
@@ -331,17 +342,16 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddings"][0]["model"]["name"],
+        manifest["defaultEmbeddingModel"]["model"]["name"],
         "potion-code-16m-v2"
     );
-    assert_eq!(
-        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
-        "cpu"
-    );
+    let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
+    assert!(runtime.get("device").is_none());
+    assert!(runtime.get("cacheDir").is_none());
     let status = fixture.success(&["--status", "--mode", "direct"]);
     assert!(
         String::from_utf8_lossy(&status.stdout)
-            .contains("  FTS         tokenizer=jieba filters=lowercase")
+            .contains("  FTS         text/code: tokenizer=jieba filters=lowercase")
     );
 }
 
@@ -431,10 +441,35 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
         manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/embeddings"
     );
+    let previous_manifest = manifest;
+    let changed = fixture.run(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--api-key",
+        "test-key",
+        "--allow-remote",
+        "--endpoint",
+        "https://example.test/updated",
+    ]);
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    let preserved: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+    )
+    .expect("JSON");
+    assert_eq!(
+        preserved["storageGeneration"], previous_manifest["storageGeneration"],
+        "endpoint updates preserve the active index"
+    );
     fixture.success(&[
         "--index",
         "--mode",
         "direct",
+        "--rebuild",
         "--api-key",
         "test-key",
         "--allow-remote",
@@ -449,4 +484,195 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
         manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/updated"
     );
+    assert_ne!(
+        manifest["storageGeneration"],
+        previous_manifest["storageGeneration"]
+    );
+}
+
+fn saved_manifest(fixture: &Fixture) -> serde_json::Value {
+    serde_json::from_slice(
+        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+    )
+    .expect("manifest JSON")
+}
+
+fn remote_empty_index_args() -> [&'static str; 8] {
+    [
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        "https://example.test/embeddings",
+        "--allow-remote",
+    ]
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one CLI scenario verifies credential sources, home-free reopen, and schema rejection"
+)]
+fn workspace_credentials_follow_explicit_source_and_global_home_is_optional() {
+    let fixture = Fixture::new();
+    fixture
+        .write_config(&json!({"version":1,"providers":{"qwen":{"apiKey":"global-test-secret"}}}));
+    fixture.success(&remote_empty_index_args());
+    let reference = "qwen/text-embedding-v4";
+    assert!(saved_manifest(&fixture)["embeddingRuntimes"][reference]["apiKey"].is_null());
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join(".zvec-grep/credentials.key")
+            .exists()
+    );
+    fs::remove_file(fixture.user.path().join(".zvec-grep/config.json"))
+        .expect("remove global config");
+    let environment = fixture
+        .command(&remote_empty_index_args())
+        .env("ZVEC_GREP_API_KEY", "environment-test-secret")
+        .output()
+        .expect("index with environment key");
+    assert!(
+        environment.status.success(),
+        "{}",
+        String::from_utf8_lossy(&environment.stderr)
+    );
+    assert!(saved_manifest(&fixture)["embeddingRuntimes"][reference]["apiKey"].is_null());
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join(".zvec-grep/credentials.key")
+            .exists()
+    );
+    let mut args = remote_empty_index_args().to_vec();
+    args.extend(["--api-key", "explicit-test-secret"]);
+    fixture.success(&args);
+    let saved = saved_manifest(&fixture);
+    assert!(saved["embeddingRuntimes"][reference]["apiKey"]["ciphertext"].is_string());
+    assert!(!saved.to_string().contains("explicit-test-secret"));
+    let root = fixture.root.path().join(".zvec-grep");
+    assert_eq!(
+        fs::read(root.join("credentials.key")).expect("key").len(),
+        32
+    );
+
+    // A fresh process resolves the saved model and key without any user home.
+    // Exclude all paths for the vector query to validate runtime setup without inference.
+    for args in [
+        vec!["--index", "--mode", "direct", "--allow-remote"],
+        vec!["--status", "--json"],
+        vec![
+            "--fts",
+            "needle",
+            "--mode",
+            "direct",
+            "--refresh",
+            "off",
+            "--json",
+        ],
+        vec![
+            "--vector",
+            "needle",
+            "--glob",
+            "!**",
+            "--mode",
+            "direct",
+            "--refresh",
+            "off",
+            "--allow-remote",
+            "--json",
+        ],
+    ] {
+        let mut command = fixture.command(&args);
+        for name in [
+            "HOME",
+            "USERPROFILE",
+            "ZVEC_GREP_HOME",
+            "ZVEC_GREP_CONFIG",
+            "ZVEC_GREP_WORKSPACE_REGISTRY",
+            "DASHSCOPE_API_KEY",
+            "QWEN_API_KEY",
+        ] {
+            command.env_remove(name);
+        }
+        let output = command.output().expect("no-home operation");
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("explicit-test-secret"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("explicit-test-secret"));
+    }
+    assert_eq!(
+        saved_manifest(&fixture)["embeddingRuntimes"],
+        saved["embeddingRuntimes"]
+    );
+    assert!(!fixture.run(&["--read-content", "entity"]).status.success());
+
+    let mut legacy = saved;
+    legacy["embeddingRuntimes"][reference]["apiKey"] = json!("legacy-secret-do-not-log");
+    fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec(&legacy).expect("legacy JSON"),
+    )
+    .expect("old development schema");
+    let status = fixture.run(&["--status", "--mode", "direct", "--json"]);
+    let output = String::from_utf8_lossy(&status.stdout);
+    assert!(output.contains("rebuild_required"));
+    assert!(!output.contains("legacy-secret-do-not-log"));
+    assert!(!String::from_utf8_lossy(&status.stderr).contains("legacy-secret-do-not-log"));
+}
+
+#[test]
+fn index_directory_cli_overrides_environment_and_default() {
+    let fixture = Fixture::new();
+    for (args, environment, directory) in [
+        (
+            vec!["--status", "--mode", "direct", "--json"],
+            None,
+            fixture.root.path().join(".zvec-grep"),
+        ),
+        (
+            vec!["--status", "--mode", "direct", "--json"],
+            Some("environment-index"),
+            fixture.root.path().join("environment-index"),
+        ),
+        (
+            vec![
+                "--status",
+                "--mode",
+                "direct",
+                "--json",
+                "--index-dir",
+                "explicit-index",
+            ],
+            Some("environment-index"),
+            fixture.root.path().join("explicit-index"),
+        ),
+    ] {
+        let mut command = fixture.command(&args);
+        if let Some(value) = environment {
+            command.env("ZVEC_GREP_INDEX_DIR", value);
+        }
+        let output = command.output().expect("status");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let info: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON status");
+        let canonical_root = fixture.root.path().canonicalize().expect("root");
+        let expected_home = canonical_root.join(directory.file_name().expect("directory name"));
+        assert_eq!(info["home"], json!(zg_cli::output_path(&expected_home)));
+        assert!(
+            !directory.exists(),
+            "read-only status must not create an index"
+        );
+    }
 }

@@ -37,6 +37,11 @@ impl Fixture {
             .env("HOME", self.state.path())
             .env("USERPROFILE", self.state.path())
             .env("ZVEC_GREP_HOME", self.state.path().join("runtime"))
+            .env("ZVEC_GREP_CONFIG", self.state.path().join("config.json"))
+            .env(
+                "ZVEC_GREP_WORKSPACE_REGISTRY",
+                self.state.path().join("workspaces.json"),
+            )
             .env_remove("ZVEC_GREP_SERVER_TOKEN")
             .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE")
             .env_remove("ZVEC_GREP_EMBEDDING")
@@ -218,7 +223,7 @@ fn explicit_nested_index_owns_its_scope_in_direct_and_server_modes() {
         let child_root = std::fs::canonicalize(&nested).expect("child root");
         assert_eq!(
             roots_line(&child),
-            format!("roots\t{}", child_root.display()),
+            format!("roots\t{}", zg_cli::output_path(&child_root).display()),
             "{mode}: child uses its own root and scan scope"
         );
         assert!(nested.join(".zvec-grep/manifest.json").exists());

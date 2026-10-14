@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::model::EmbeddingModelInfo;
 use crate::domain::{
     ByteRange, Content, FileIndexStatus, FileSnapshot, MarkdownMetadata, Range, SymbolType,
     TextRange,
@@ -19,23 +20,36 @@ fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
 }
 
 fn model() -> EmbeddingModelInfo {
-    EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
-        dimension: 3,
-        metric: Metric::Cosine,
-        max_batch_size: 32,
-        max_input_tokens: None,
-        max_image_bytes: None,
-    }
+    EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+            32,
+        )
+        .expect("fixture model identity"),
+        3,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("embedding metadata")
 }
 
 fn metadata_store(path: &Path) -> Fragments {
     super::super::zvec::initialize().expect("initialize zvec");
-    Fragments::open(path, &[model()], false).expect("fragment storage")
+    Fragments::open(
+        path,
+        &[ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        }],
+        false,
+    )
+    .expect("fragment storage")
 }
 
 const DIRECTORY_LOOKUP: fn(&SourcePath) -> EngineResult<Option<DirectoryId>> =
@@ -110,7 +124,7 @@ fn metadata_fragments(
         ])
         .map(|(fragment, (vector, text))| IndexedFragment {
             fts_text: format!("harvest 春'\\crop\nGarden\npub async fn harvest() -> Crop\nProduces the seasonal crop.\n{text}"),
-            model: "fixture/fixture".into(),
+            kind: ContentKind::Text,
             entity_id: owner.id.clone(),
             fragment_id: fragment.id.clone(),
             vector,
@@ -180,7 +194,7 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
     {
-        let collection = &store.indexes["fixture/fixture"];
+        let collection = &store.indexes[&ContentKind::Text];
         let schema = collection.schema().expect("retrieval schema");
         for IndexField::String(name) in EntityMetadata::index_schema() {
             assert!(schema.has_field(name), "missing metadata field: {name}");
@@ -207,7 +221,7 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
         write_fixture(&store, &source, &entities, &entries);
         store.flush().expect("flush fragments");
         {
-            let collection = &store.indexes["fixture/fixture"];
+            let collection = &store.indexes[&ContentKind::Text];
             for entry in &entries {
                 let doc = fragment_document(collection, entry.fragment_id.as_str());
                 for IndexField::String(name) in EntityMetadata::index_schema() {
@@ -255,9 +269,12 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         };
         let filter = build_filter(Some(&filter), &DIRECTORY_LOOKUP).expect("symbol filter");
         for (hits, count) in [
-            (store.search_fts("orchard", 10, filter.as_deref()), 1),
             (
-                store.search_vector("fixture/fixture", &entries[1].vector, 10, filter.as_deref()),
+                store.search_fts(ContentKind::Text, "orchard", 10, filter.as_deref()),
+                1,
+            ),
+            (
+                store.search_vector(ContentKind::Text, &entries[1].vector, 10, filter.as_deref()),
                 2,
             ),
         ] {
@@ -290,13 +307,13 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
     let classified = build_filter(Some(&classified), &DIRECTORY_LOOKUP).expect("classified filter");
     for (all, filtered) in [
         (
-            store.search_fts("orchard", 10, None),
-            store.search_fts("orchard", 10, classified.as_deref()),
+            store.search_fts(ContentKind::Text, "orchard", 10, None),
+            store.search_fts(ContentKind::Text, "orchard", 10, classified.as_deref()),
         ),
         (
-            store.search_vector("fixture/fixture", &entries[1].vector, 10, None),
+            store.search_vector(ContentKind::Text, &entries[1].vector, 10, None),
             store.search_vector(
-                "fixture/fixture",
+                ContentKind::Text,
                 &entries[1].vector,
                 10,
                 classified.as_deref(),
@@ -388,7 +405,7 @@ fn filename_like_negation_propagates_native_query_errors() {
     ] {
         let mut query = SearchQuery::scalar(10).expect("native query");
         query.set_filter(sql).expect("native filter");
-        let native_error = store.indexes["fixture/fixture"]
+        let native_error = store.indexes[&ContentKind::Text]
             .query(&query)
             .err()
             .expect("the pinned zvec release does not parse NOT LIKE");
@@ -400,11 +417,11 @@ fn filename_like_negation_propagates_native_query_errors() {
         for (operation, result) in [
             (
                 "search full-text index",
-                store.search_fts("orchard", 10, filter.as_deref()),
+                store.search_fts(ContentKind::Text, "orchard", 10, filter.as_deref()),
             ),
             (
                 "search vector index",
-                store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, filter.as_deref()),
+                store.search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 10, filter.as_deref()),
             ),
         ] {
             let error = result.expect_err("native rejection reaches the caller");
@@ -444,12 +461,12 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
     for (label, result, fragments_per_file) in [
         (
             "FTS",
-            store.search_fts("orchard", 100, filter.as_deref()),
+            store.search_fts(ContentKind::Text, "orchard", 100, filter.as_deref()),
             1,
         ),
         (
             "vector",
-            store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 100, filter.as_deref()),
+            store.search_vector(ContentKind::Text, &[1.0, 0.0, 0.0], 100, filter.as_deref()),
             2,
         ),
     ] {
@@ -469,7 +486,15 @@ fn assert_filter_file_ids(store: &Fragments, path: &StoragePathFilter, expected:
 }
 
 fn reopen_filter_store(path: &Path) -> Fragments {
-    Fragments::open(path, &[model()], true).expect("reopen fragments")
+    Fragments::open(
+        path,
+        &[ContentIndex {
+            kind: ContentKind::Text,
+            embedding: model(),
+        }],
+        true,
+    )
+    .expect("reopen fragments")
 }
 
 #[test]
@@ -594,7 +619,7 @@ fn projection_validation_keeps_one_model_and_one_row_per_fragment() {
     duplicate.push(entries[0].clone());
     assert!(validate_projections(&entities, &duplicate).is_err());
     let mut mixed = entries;
-    mixed[1].model = "fixture/other".into();
+    mixed[1].kind = ContentKind::Code;
     assert!(validate_projections(&entities, &mixed).is_err());
 }
 
@@ -602,9 +627,36 @@ fn projection_validation_keeps_one_model_and_one_row_per_fragment() {
 fn fragment_ownership_is_checked_across_model_collections() {
     super::super::zvec::initialize().expect("initialize zvec");
     let home = tempfile::tempdir().expect("storage");
-    let mut other = model();
-    other.model.name = "other".into();
-    let store = Fragments::open(home.path(), &[model(), other], false).expect("two models");
+    let base = model();
+    let other = EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            base.model().provider(),
+            "other",
+            base.model().content_kinds().iter().copied(),
+            base.model().max_batch_size(),
+        )
+        .expect("fixture model identity"),
+        base.dimension(),
+        base.metric(),
+        base.max_input_tokens(),
+        base.max_image_bytes(),
+    )
+    .expect("embedding metadata");
+    let store = Fragments::open(
+        home.path(),
+        &[
+            ContentIndex {
+                kind: ContentKind::Text,
+                embedding: model(),
+            },
+            ContentIndex {
+                kind: ContentKind::Code,
+                embedding: other,
+            },
+        ],
+        false,
+    )
+    .expect("two models");
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
     store
@@ -612,10 +664,12 @@ fn fragment_ownership_is_checked_across_model_collections() {
         .expect("same file");
     let mut foreign = entries.clone();
     for entry in &mut foreign {
-        entry.model = "fixture/other".into();
+        entry.kind = ContentKind::Code;
     }
     assert!(store.validate_ownership(&foreign, FileId::new(0)).is_err());
-    let hits = store.search_fts("orchard", 10, None).expect("search");
+    let hits = store
+        .search_fts(ContentKind::Text, "orchard", 10, None)
+        .expect("search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].file_id, source.id);
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
@@ -624,7 +678,7 @@ fn fragment_ownership_is_checked_across_model_collections() {
     store.delete_file(source.id).expect("idempotent delete");
     assert!(
         store
-            .search_fts("orchard", 10, None)
+            .search_fts(ContentKind::Text, "orchard", 10, None)
             .expect("search deleted")
             .is_empty()
     );
@@ -633,6 +687,10 @@ fn fragment_ownership_is_checked_across_model_collections() {
 #[test]
 fn empty_selection_lists_compile_to_false_without_native_in_syntax() {
     for filter in [
+        StorageSearchFilter {
+            content_kinds: Some(Vec::new()),
+            ..Default::default()
+        },
         StorageSearchFilter {
             file_ids: Some(Vec::new()),
             ..Default::default()

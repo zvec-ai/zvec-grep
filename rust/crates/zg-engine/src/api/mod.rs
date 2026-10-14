@@ -3,3 +3,4 @@
 pub mod context;
 pub mod index;
 pub mod info;
+pub mod workspace;

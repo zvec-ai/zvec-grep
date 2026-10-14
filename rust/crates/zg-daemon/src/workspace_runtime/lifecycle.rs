@@ -112,14 +112,14 @@ impl WorkspaceRuntimeManager {
                 let mut state = lock(&runtime.lifecycle);
                 if state.active != 0
                     || now.saturating_duration_since(state.last_used) < idle_ttl
-                    || self.inner.scheduler.has_active_root(root)
+                    || self.inner.scheduler.has_active_location(root)
                 {
                     return true;
                 }
                 // Admission and history removal share the map lock. A replacement
                 // runtime cannot submit a job that this retirement would cancel.
                 state.retired = true;
-                self.inner.scheduler.forget_root(root);
+                self.inner.scheduler.forget_location(root);
                 retired.push(Arc::clone(runtime));
                 false
             });
@@ -127,7 +127,7 @@ impl WorkspaceRuntimeManager {
         };
         for runtime in retired {
             if let Err(error) = Self::close_watcher(&runtime).await {
-                tracing::warn!(%error, root = %runtime.canonical_root.display(), "idle watcher close failed");
+                tracing::warn!(%error, root = %runtime.location.root.display(), "idle watcher close failed");
             }
         }
     }

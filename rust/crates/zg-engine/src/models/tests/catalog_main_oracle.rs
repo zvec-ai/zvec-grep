@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    domain::model::Metric,
+    domain::model::EmbeddingMetric,
     models::{
         artifacts::ArtifactDownloadConfig,
         catalog::{
@@ -15,13 +15,23 @@ use crate::{
 const MAIN_CATALOG_SOURCE_REVISION: &str = "8d0d5e277f37d897e83749cdaa0e9c07f5e92efe";
 
 #[test]
-fn catalog_matches_main_typescript_field_for_field() {
-    let expected: Value = serde_json::from_str(include_str!("fixtures/catalog-main-oracle.json"))
+fn legacy_catalog_matches_typescript_except_qwen_fusion_limits() {
+    let mut expected: Value = serde_json::from_str(include_str!("fixtures/catalog-main-oracle.json"))
         .unwrap_or_else(|error| {
             panic!(
                 "TypeScript catalog oracle from {MAIN_CATALOG_SOURCE_REVISION} must be valid JSON: {error}"
             )
         });
+    // Rust uses Qwen fusion: one input per request, with a 5 MiB limit per image.
+    // Keep the original TypeScript fixture intact to make this divergence explicit.
+    let qwen = expected
+        .as_array_mut()
+        .expect("catalog array")
+        .iter_mut()
+        .find(|entry| entry["reference"] == "qwen/qwen3-vl-embedding")
+        .expect("Qwen multimodal entry");
+    qwen["maxBatchSize"] = json!(1);
+    qwen["maxImageBytes"] = json!(5 * 1_024 * 1_024);
     let actual = actual_catalog();
     assert_eq!(actual, expected);
 }
@@ -30,6 +40,8 @@ fn actual_catalog() -> Value {
     Value::Array(
         list_embedding_models()
             .into_iter()
+            // EmbeddingGemma 2 is a Rust-only addition, checked by its backend tests.
+            .filter(|entry| !matches!(entry, EmbeddingCatalogEntry::EmbeddingGemma2(_)))
             .map(entry_value)
             .collect(),
     )
@@ -47,6 +59,9 @@ fn print_current_catalog_fixture() {
 #[allow(clippy::too_many_lines)]
 fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
     match entry {
+        EmbeddingCatalogEntry::EmbeddingGemma2(_) => {
+            unreachable!("Rust-only multimodal model has its own catalog tests")
+        }
         EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
             reference,
             provider,
@@ -230,10 +245,10 @@ fn artifact_value(download: &ArtifactDownloadConfig) -> Value {
     )
 }
 
-const fn metric_name(metric: Metric) -> &'static str {
+const fn metric_name(metric: EmbeddingMetric) -> &'static str {
     match metric {
-        Metric::Cosine => "cosine",
-        Metric::DotProduct => "dot",
-        Metric::Euclidean => "euclidean",
+        EmbeddingMetric::Cosine => "cosine",
+        EmbeddingMetric::DotProduct => "dot",
+        EmbeddingMetric::Euclidean => "euclidean",
     }
 }

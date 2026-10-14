@@ -22,6 +22,13 @@ fn is_transformers(reference: &str) -> bool {
     )
 }
 
+fn is_embedding_gemma2(reference: &str) -> bool {
+    matches!(
+        get_embedding_model_catalog_entry(reference),
+        Some(EmbeddingCatalogEntry::EmbeddingGemma2(_))
+    )
+}
+
 /// Called only at the index boundary, including implicit builds and refreshes.
 pub(crate) fn resolve_index_concurrency(
     reference: &str,
@@ -75,7 +82,10 @@ fn resolve_override(
 
 /// Local native resources must not be shared across different fixed budgets.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
-    if is_transformers(reference) || is_llama(reference) {
+    if is_embedding_gemma2(reference) {
+        // Its text and vision sessions are one serial inference unit.
+        Some(1)
+    } else if is_transformers(reference) || is_llama(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
@@ -85,7 +95,7 @@ pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> 
 /// llama.cpp parallelizes contexts within a single batch; never multiply them
 /// by allowing several batches to execute on the same cached model.
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
-    if is_llama(reference) {
+    if is_llama(reference) || is_embedding_gemma2(reference) {
         Some(1)
     } else if is_transformers(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))

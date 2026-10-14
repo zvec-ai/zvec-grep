@@ -1,6 +1,9 @@
 //! Lossless identity keys and optional Unicode query projections are separate.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Component, Path, PathBuf},
+};
 
 use crate::{EngineError, EngineResult, domain::SourcePath};
 
@@ -10,10 +13,7 @@ use serde::{Deserialize, Serialize};
 use zvec_rust::{CollectionSchema, DataType, Doc};
 
 pub(super) fn encode_path(path: &SourcePath) -> EngineResult<String> {
-    // Component collection unifies accepted Windows separator spellings while
-    // leaving Unix backslashes and platform-native non-Unicode names intact.
-    let canonical: PathBuf = path.components().collect();
-    serde_json::to_string(&PathRecord::from_path(&canonical)?).map_err(|error| {
+    serde_json::to_string(&PathRecord::from_path(path)?).map_err(|error| {
         EngineError::storage_failure(format!("cannot encode identity path: {error}"))
     })
 }
@@ -25,7 +25,7 @@ pub(super) fn decode_path(value: &str) -> EngineResult<SourcePath> {
     SourcePath::new(record.into_path()?)
 }
 
-/// Hex preserves the full native representation and needs no SQL escaping.
+/// Hex preserves the portable identity representation and needs no SQL escaping.
 pub(super) fn path_key(path: &SourcePath) -> EngineResult<String> {
     Ok(hex::encode(encode_path(path)?.as_bytes()))
 }
@@ -39,29 +39,71 @@ pub(super) fn query_path(path: &Path) -> Option<String> {
     Some(value.to_owned())
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "encoding", content = "value", rename_all = "snake_case")]
-pub(super) enum PathRecord {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PathRecord {
+    components: Vec<PathComponent>,
+}
+
+impl PathRecord {
+    pub(crate) fn from_path(path: &Path) -> EngineResult<Self> {
+        let path = SourcePath::new(path)?;
+        let components = path
+            .components()
+            .map(|component| PathComponent::from_component(component.as_os_str()))
+            .collect::<EngineResult<_>>()?;
+        Ok(Self { components })
+    }
+
+    pub(crate) fn into_path(self) -> EngineResult<PathBuf> {
+        let mut path = PathBuf::new();
+        for component in self.components {
+            let component = component.into_component()?;
+            validate_component(&component)?;
+            path.push(component);
+        }
+        Ok(SourcePath::new(path)?.into_path_buf())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PathComponent {
     Utf8(String),
+    Native(NativeComponent),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "encoding",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum NativeComponent {
     UnixBytes(Vec<u8>),
     WindowsWide(Vec<u16>),
 }
 
-impl PathRecord {
-    pub(super) fn from_path(path: &Path) -> EngineResult<Self> {
-        validate_path(path)?;
-        if let Some(value) = path.to_str() {
+impl PathComponent {
+    fn from_component(component: &OsStr) -> EngineResult<Self> {
+        validate_component(component)?;
+        if let Some(value) = component.to_str() {
             return Ok(Self::Utf8(value.to_owned()));
         }
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            Ok(Self::UnixBytes(path.as_os_str().as_bytes().to_vec()))
+            Ok(Self::Native(NativeComponent::UnixBytes(
+                component.as_bytes().to_vec(),
+            )))
         }
         #[cfg(windows)]
         {
             use std::os::windows::ffi::OsStrExt;
-            Ok(Self::WindowsWide(path.as_os_str().encode_wide().collect()))
+            Ok(Self::Native(NativeComponent::WindowsWide(
+                component.encode_wide().collect(),
+            )))
         }
         #[cfg(not(any(unix, windows)))]
         Err(EngineError::storage_failure(
@@ -69,46 +111,92 @@ impl PathRecord {
         ))
     }
 
-    pub(super) fn into_path(self) -> EngineResult<PathBuf> {
+    fn into_component(self) -> EngineResult<OsString> {
         match self {
-            Self::Utf8(value) => Ok(PathBuf::from(value)),
-            Self::UnixBytes(bytes) => {
+            Self::Utf8(value) => Ok(OsString::from(value)),
+            Self::Native(NativeComponent::UnixBytes(bytes)) => {
+                if std::str::from_utf8(&bytes).is_ok() {
+                    return Err(invalid_component("non-canonical Unix byte encoding"));
+                }
                 #[cfg(unix)]
                 {
                     use std::os::unix::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_vec(bytes).into())
+                    Ok(OsString::from_vec(bytes))
                 }
                 #[cfg(not(unix))]
-                String::from_utf8(bytes).map(PathBuf::from).map_err(|_| {
-                    EngineError::invalid_argument(
-                        "stored Unix path cannot be represented on this platform",
-                    )
-                })
+                Err(invalid_component(
+                    "Unix bytes cannot be represented on this platform",
+                ))
             }
-            Self::WindowsWide(units) => {
+            Self::Native(NativeComponent::WindowsWide(units)) => {
+                if String::from_utf16(&units).is_ok() {
+                    return Err(invalid_component("non-canonical Windows wide encoding"));
+                }
                 #[cfg(windows)]
                 {
                     use std::os::windows::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_wide(&units).into())
+                    Ok(OsString::from_wide(&units))
                 }
                 #[cfg(not(windows))]
-                String::from_utf16(&units).map(PathBuf::from).map_err(|_| {
-                    EngineError::invalid_argument(
-                        "stored Windows path cannot be represented on this platform",
-                    )
-                })
+                Err(invalid_component(
+                    "Windows wide characters cannot be represented on this platform",
+                ))
             }
         }
     }
 }
 
-fn validate_path(path: &Path) -> EngineResult<()> {
-    if path.as_os_str().as_encoded_bytes().contains(&0) {
-        return Err(EngineError::invalid_argument(
-            "source file path must not contain NUL",
+fn validate_component(value: &OsStr) -> EngineResult<()> {
+    let mut components = Path::new(value).components();
+    if value.as_encoded_bytes().contains(&0)
+        || !matches!(components.next(), Some(Component::Normal(component)) if component == value)
+        || components.next().is_some()
+    {
+        return Err(invalid_component("not a single normal filename"));
+    }
+    #[cfg(windows)]
+    validate_windows_component(value.as_encoded_bytes())?;
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn validate_windows_component(value: &[u8]) -> EngineResult<()> {
+    let base = value
+        .split(|byte| *byte == b'.')
+        .next()
+        .unwrap_or_default()
+        .trim_ascii_end();
+    let reserved = [
+        b"CON".as_slice(),
+        b"PRN",
+        b"AUX",
+        b"NUL",
+        b"CONIN$",
+        b"CONOUT$",
+    ]
+    .iter()
+    .any(|name| base.eq_ignore_ascii_case(name))
+        || (base.len() >= 4
+            && (base[..3].eq_ignore_ascii_case(b"COM") || base[..3].eq_ignore_ascii_case(b"LPT"))
+            && (matches!(&base[3..], [b'1'..=b'9'])
+                || ["¹", "²", "³"]
+                    .iter()
+                    .any(|digit| &base[3..] == digit.as_bytes())));
+    if reserved
+        || value.last().is_some_and(|byte| matches!(byte, b'.' | b' '))
+        || value
+            .iter()
+            .any(|byte| *byte < 32 || b"<>:\"/\\|?*".contains(byte))
+    {
+        return Err(invalid_component(
+            "filename cannot be represented safely on Windows",
         ));
     }
     Ok(())
+}
+
+fn invalid_component(reason: &str) -> EngineError {
+    EngineError::invalid_argument(format!("invalid stored path component: {reason}"))
 }
 
 pub(super) fn file_membership_schema(schema: &mut CollectionSchema) -> EngineResult<()> {
@@ -143,4 +231,106 @@ pub(super) fn file_membership_doc(
         .unwrap_or("");
     native(doc.add_string("file_name", name), "encode file name")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_components_keep_identity_across_native_separator_spellings() {
+        let encoded = r#"{"components":["images","中文 房间","living.jpg"]}"#;
+        let path = decode_path(encoded).expect("portable fixture");
+        assert_eq!(
+            path.as_path(),
+            Path::new("images").join("中文 房间").join("living.jpg")
+        );
+        assert_eq!(
+            encode_path(&path).expect("encode on this platform"),
+            encoded
+        );
+        assert_eq!(
+            path_key(&path).expect("identity"),
+            hex::encode(encoded.as_bytes())
+        );
+        assert_eq!(
+            query_path(&path),
+            Some("images/中文 房间/living.jpg".into())
+        );
+    }
+
+    #[test]
+    fn rejects_old_records_and_components_that_change_path_structure() {
+        for encoded in [
+            r#"{"encoding":"utf8","value":"images/living.jpg"}"#,
+            r#"{"components":[]}"#,
+            r#"{"components":[""]}"#,
+            r#"{"components":["."]}"#,
+            r#"{"components":["..","outside"]}"#,
+            r#"{"components":["images/living.jpg"]}"#,
+            r#"{"components":["name\u0000"]}"#,
+            r#"{"components":[{"encoding":"unix_bytes","value":[97]}]}"#,
+        ] {
+            assert!(decode_path(encoded).is_err(), "{encoded}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_components_preserve_backslashes_and_non_unicode_without_splitting() {
+        use std::os::unix::ffi::OsStringExt;
+        let path =
+            SourcePath::new(Path::new("rooms").join(OsString::from_vec(b"name\\\xff".to_vec())))
+                .expect("native path");
+        let encoded = encode_path(&path).expect("encode native component");
+        assert_eq!(
+            decode_path(&encoded).expect("restore native component"),
+            path
+        );
+        assert!(
+            decode_path(r#"{"components":[{"encoding":"windows_wide","value":[55296]}]}"#).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_components_preserve_non_unicode_and_reject_unix_names() {
+        use std::os::windows::ffi::OsStringExt;
+        let path = SourcePath::new(Path::new("rooms").join(OsString::from_wide(&[0xd800])))
+            .expect("native path");
+        let encoded = encode_path(&path).expect("encode native component");
+        assert_eq!(
+            decode_path(&encoded).expect("restore native component"),
+            path
+        );
+        assert!(decode_path(r#"{"components":["name\\part"]}"#).is_err());
+        assert!(
+            decode_path(r#"{"components":[{"encoding":"unix_bytes","value":[255]}]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn windows_filename_validation_rejects_aliases_and_unrepresentable_names() {
+        for value in [
+            "CON",
+            "nul.txt",
+            "COM1.txt",
+            "COM¹.txt",
+            "CON .txt",
+            "LPT9",
+            "name.",
+            "name ",
+            "a:b",
+            "a\\b",
+            "a/b",
+        ] {
+            assert!(
+                validate_windows_component(value.as_bytes()).is_err(),
+                "{value}"
+            );
+        }
+        for value in ["living.jpg", "中文 房间", "COM10.txt"] {
+            validate_windows_component(value.as_bytes()).expect("portable Windows filename");
+        }
+    }
 }
