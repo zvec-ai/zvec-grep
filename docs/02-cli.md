@@ -180,7 +180,7 @@ The `grok` target keeps Grok Build's own per-call timeout default, which is
 already generous, and manages tool pre-approval through the `[permission]`
 table instead.
 
-The Rust `pi` target configures native user-level MCP and the active context
+The `pi` target configures user-level MCP and the active context
 file under `${PI_CODING_AGENT_DIR:-~/.pi/agent}`. Both transports start with
 direct tool exposure; reinstall preserves user exposure and enabled-state
 choices. HTTP authentication is retained when `--mcp-token-env` is omitted.

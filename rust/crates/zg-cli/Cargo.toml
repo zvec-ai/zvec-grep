@@ -11,7 +11,8 @@ publish.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
-serde_json.workspace = true
+# Configuration objects can contain first-match rules whose order must survive edits.
+serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
 uuid.workspace = true
 zg-engine = { path = "../zg-engine" }

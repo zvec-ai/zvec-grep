@@ -23,7 +23,7 @@ managed-rg route.
 | GitHub Copilot | `copilot` | `~/.copilot/mcp-config.json` and `~/.copilot/copilot-instructions.md` |
 | VS Code | `vscode` | the `mcp.json` of every detected VS Code profile, `~/.copilot/mcp-config.json`, and `~/.copilot/instructions/zvec-grep.instructions.md` |
 | Grok Build | `grok` | `~/.grok/config.toml` and `~/.grok/rules/zvec-grep.md` |
-| Pi (Rust distribution) | `pi` | `~/.pi/agent/mcp.json` and the active global context file |
+| Pi | `pi` | `~/.pi/agent/mcp.json` and the active global context file |
 
 The standard environment overrides used by each agent are respected, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `QWEN_HOME`, `QODER_CONFIG_DIR`,
@@ -230,12 +230,11 @@ an existing `claude` or `cursor` install may already expose the zg server
 there; the `grok` target replaces that compat-sourced entry with a native one
 and adds the guidance and pre-approval those sources cannot provide.
 
-For Pi, the Rust installer configures its built-in MCP support in
-`${PI_CODING_AGENT_DIR:-~/.pi/agent}/mcp.json`. Pi introduced native MCP in
+For Pi, the installer configures its built-in MCP support in
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}/mcp.json`. Pi introduced built-in MCP in
 0.99.0; replacement extensions such as `pi-mcp-adapter` can take over `/mcp`
 and prevent a session from loading this configuration. Enable built-in MCP
-and run `/reload` or start a new session after installation or removal. The
-TypeScript installer does not support the `pi` target.
+and run `/reload` or start a new session after installation or removal.
 
 Pi accepts stdio and streamable HTTP. New entries use `exposure: "direct"`
 and `--mcp-tool-timeout` in seconds (default 600). The default `agent` toolset
@@ -244,10 +243,12 @@ management tools. Stdio and HTTP use the same shared daemon. Pi's `direct`
 exposure controls tool discovery and is separate from zg's CLI execution mode.
 
 Reinstall preserves existing `enabled`, `exposure`, `toolExposure`, and other
-non-connection settings. Stdio reinstall retains user `env` and `cwd`, while
-switching transports removes fields belonging to the previous transport.
+non-connection settings, including the order of first-match exposure rules.
+Stdio reinstall retains user `env` and `cwd`, while switching transports removes
+fields belonging to the previous transport.
 HTTP reinstall preserves headers; an explicit `--mcp-token-env` replaces the
-Authorization value and removes conflicting OAuth/provider login settings.
+Authorization value regardless of header casing and removes conflicting
+OAuth/provider login settings.
 Omitting this option retains existing HTTP authentication. Edit `mcp.json`
 to remove authentication when needed. Only entries with the installer's stable
 description are managed; an unmarked `zvec_grep` needs `--force` before it is
@@ -256,9 +257,11 @@ because Pi treats that name as equivalent to `zvec_grep`.
 
 Global guidance uses the first existing readable context file in Pi's order:
 `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`.
-The installer creates `AGENTS.md` only when none exists, preserving user
-guidance and its priority. Uninstall scans these candidates and removes only
-the managed blocks. Directory overrides support native paths, relative paths,
+Installation stops scanning after selecting a file, so unreadable lower-priority
+files do not block it. If no readable candidate exists, the installer uses
+`AGENTS.md`; it refuses to overwrite an existing file that cannot be read
+losslessly. Uninstall scans all candidates and removes only the managed blocks.
+Directory overrides support native paths, relative paths,
 and `~`; nonempty values are not trimmed. `file://` URIs and Windows shell
 drive forms such as `/c/` are rejected; use a native filesystem path instead.
 Project `.pi/mcp.json` overrides remain under user control.

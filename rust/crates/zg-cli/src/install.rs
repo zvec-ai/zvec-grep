@@ -676,6 +676,27 @@ fn read_pi_file(path: &Path) -> Result<String, InstallError> {
         .map_err(|error| InstallError::Message(format!("Cannot read {}: {error}", path.display())))
 }
 
+fn pi_context_file(home: &Path) -> Result<PathBuf, InstallError> {
+    for name in PI_CONTEXT_FILES {
+        let path = home.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(_) => return Ok(path),
+            // Refuse to rewrite an active file that cannot be decoded losslessly.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                return Err(InstallError::Message(format!(
+                    "Cannot read {}: {error}",
+                    path.display()
+                )));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(home.join("AGENTS.md"))
+}
+
 fn pi_context_files(home: &Path) -> Result<Vec<(PathBuf, String)>, InstallError> {
     let mut files = Vec::new();
     for name in PI_CONTEXT_FILES {
@@ -714,7 +735,7 @@ fn pi_server(
     match options.transport {
         McpInstallTransport::Stdio => {
             for key in ["url", "headers", "oauth", "auth"] {
-                server.remove(key);
+                server.shift_remove(key);
             }
             server.insert("type".to_owned(), json!("stdio"));
             server.insert("command".to_owned(), json!("zg"));
@@ -723,19 +744,20 @@ fn pi_server(
         McpInstallTransport::Http => {
             let url = resolve_server_url()?;
             for key in ["command", "args", "env", "cwd"] {
-                server.remove(key);
+                server.shift_remove(key);
             }
             server.insert("type".to_owned(), json!("http"));
             server.insert("url".to_owned(), json!(url));
             if let Some(token) = &options.token_env {
                 let headers = object_field_mut(&mut server, "headers", false, path)?;
+                headers.retain(|key, _| !key.eq_ignore_ascii_case("Authorization"));
                 headers.insert(
                     "Authorization".to_owned(),
                     json!(format!("Bearer ${{{token}}}")),
                 );
                 // Explicit bearer authentication takes precedence over saved login providers.
-                server.remove("oauth");
-                server.remove("auth");
+                server.shift_remove("oauth");
+                server.shift_remove("auth");
             }
         }
     }
@@ -768,10 +790,7 @@ fn install_pi(options: &AgentOptions) -> Result<AgentInstallResult, InstallError
         )));
     }
     let server = pi_server(existing, options, &config)?;
-    let contexts = pi_context_files(&home)?;
-    let guidance = contexts
-        .first()
-        .map_or_else(|| home.join("AGENTS.md"), |(path, _)| path.clone());
+    let guidance = pi_context_file(&home)?;
     // Validate the default destination too when no readable context file exists.
     read_pi_file(&guidance)?;
     resolve_atomic_target(&config, &mut HashSet::new())?;
@@ -818,9 +837,9 @@ fn uninstall_pi() -> Result<(), InstallError> {
     if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut)
         && servers.get("zvec_grep").is_some_and(is_managed_pi_server)
     {
-        servers.remove("zvec_grep");
+        servers.shift_remove("zvec_grep");
         if servers.is_empty() {
-            root.remove("mcpServers");
+            root.shift_remove("mcpServers");
         }
         write_json_object(&config, &root)?;
     }
@@ -1742,9 +1761,9 @@ fn remove_strict_json_server(path: &Path, container_key: &str) -> Result<(), Ins
     {
         return Ok(());
     }
-    container.remove("zvec_grep");
+    container.shift_remove("zvec_grep");
     if container.is_empty() {
-        root.remove(container_key);
+        root.shift_remove(container_key);
     }
     write_json_object(path, &root)
 }
@@ -1777,7 +1796,7 @@ fn object_field_mut<'a>(
                 path.display()
             )));
         }
-        root.remove(key);
+        root.shift_remove(key);
     }
     root.entry(key.to_owned())
         .or_insert_with(|| json!({}))
@@ -1823,10 +1842,10 @@ fn update_claude_permission(path: &Path, grant: bool) -> Result<(), InstallError
     } else {
         allow.retain(|rule| rule != CLAUDE_PERMISSION);
         if allow.is_empty() {
-            permissions.remove("allow");
+            permissions.shift_remove("allow");
         }
         if permissions.is_empty() {
-            root.remove("permissions");
+            root.shift_remove("permissions");
         }
     }
     write_json_object(path, &root)

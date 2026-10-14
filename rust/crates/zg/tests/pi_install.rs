@@ -55,6 +55,163 @@ fn write_json(path: &Path, value: &Value) {
 }
 
 #[test]
+fn config_rewrites_preserve_ordered_exposure_rules_and_unrelated_servers() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let home = root.join("pi");
+    fs::create_dir_all(&home).expect("mkdir");
+    let path = home.join("mcp.json");
+    let original = r#"{
+        "zCustom": true,
+        "mcpServers": {
+            "first": {"command":"first", "toolExposure":{"zvec_grep_*":"direct","*":"hidden"}},
+            "zvec_grep": {
+                "description":"Workspace semantic search and exact text lookup. Managed by zg install.",
+                "toolExposure":{"zvec_grep_*":"direct","*":"hidden"}
+            },
+            "second": {"command":"second", "toolExposure":{"zvec_grep_*":"direct","*":"hidden"}},
+            "third": {"command":"third"}
+        },
+        "aCustom": true,
+        "bCustom": true
+    }"#;
+    fs::write(&path, original).expect("config");
+    for action in ["--install", "--install", "--uninstall"] {
+        run_ok(&mut command(action, root));
+        let source = fs::read_to_string(&path).expect("config");
+        for rules in source.split("\"toolExposure\"").skip(1) {
+            let rules = &rules[..rules.find('}').expect("rules object")];
+            assert!(
+                rules.find("\"zvec_grep_*\"").expect("specific rule")
+                    < rules.find("\"*\"").expect("fallback rule"),
+                "{action} changed first-match exposure rules: {rules}"
+            );
+        }
+        for keys in [
+            ["\"first\":", "\"second\":", "\"third\":"],
+            ["\"zCustom\":", "\"aCustom\":", "\"bCustom\":"],
+        ] {
+            let positions = keys.map(|key| source.find(key).expect("preserved key"));
+            assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+        }
+    }
+    let expected: Value = serde_json::from_str(original).expect("JSON");
+    let removed = read_json(&path);
+    for name in ["first", "second", "third"] {
+        assert_eq!(removed["mcpServers"][name], expected["mcpServers"][name]);
+    }
+    fs::write(&path, r#"{
+        "zCustom":true,
+        "mcpServers":{"zvec_grep":{"description":"Workspace semantic search and exact text lookup. Managed by zg install."}},
+        "aCustom":true,
+        "bCustom":true
+    }"#).expect("single server config");
+    run_ok(&mut command("--uninstall", root));
+    let source = fs::read_to_string(&path).expect("config");
+    assert!(!source.contains("mcpServers"));
+    assert!(
+        source.find("aCustom").expect("preserved field")
+            < source.find("bCustom").expect("preserved field")
+    );
+}
+
+#[test]
+fn explicit_token_replaces_all_authorization_header_casings() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let path = root.join("pi/mcp.json");
+    run_ok(command("--install", root).args(["--mcp-transport", "http"]));
+    let mut config = read_json(&path);
+    let server = &mut config["mcpServers"]["zvec_grep"];
+    server["headers"] = json!({
+        "authorization": "Bearer old-lowercase",
+        "AUTHORIZATION": "Bearer old-uppercase",
+        "aUtHoRiZaTiOn": "Bearer old-mixed-case",
+        "Authorization": "Bearer old-canonical",
+        "X-Custom": "keep"
+    });
+    server["oauth"] = json!(true);
+    server["auth"] = json!({"provider": "saved"});
+    write_json(&path, &config);
+    run_ok(command("--install", root).args(["--mcp-transport", "http"]));
+    assert_eq!(read_json(&path), config);
+    run_ok(command("--install", root).args([
+        "--mcp-transport",
+        "http",
+        "--mcp-token-env",
+        "NEW_TOKEN",
+    ]));
+    let updated = read_json(&path);
+    let server = &updated["mcpServers"]["zvec_grep"];
+    assert_eq!(
+        server["headers"],
+        json!({"X-Custom": "keep", "Authorization": "Bearer ${NEW_TOKEN}"})
+    );
+    assert!(server.get("oauth").is_none());
+    assert!(server.get("auth").is_none());
+}
+
+#[test]
+fn inactive_invalid_guidance_does_not_block_installation() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let home = root.join("pi");
+    fs::create_dir_all(&home).expect("mkdir");
+    fs::write(home.join("AGENTS.md"), "# Active guidance\n").expect("guidance");
+    let invalid = [0xff, 0xfe];
+    fs::write(home.join("CLAUDE.md"), invalid).expect("inactive guidance");
+    for _ in 0..2 {
+        run_ok(&mut command("--install", root));
+        assert!(home.join("mcp.json").exists());
+        assert!(
+            fs::read_to_string(home.join("AGENTS.md"))
+                .expect("active guidance")
+                .contains("ZVEC_GREP_START")
+        );
+        assert_eq!(
+            fs::read(home.join("CLAUDE.md")).expect("inactive guidance"),
+            invalid
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_guidance_is_skipped_when_a_readable_candidate_exists() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let home = root.join("pi");
+    fs::create_dir_all(&home).expect("mkdir");
+    let unreadable = home.join("AGENTS.override.md");
+    fs::write(&unreadable, "# Inaccessible guidance\n").expect("guidance");
+    fs::write(home.join("AGENTS.md"), "# Active guidance\n").expect("guidance");
+    let permissions = fs::metadata(&unreadable).expect("metadata").permissions();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("permissions");
+    let can_read = fs::read(&unreadable).is_ok();
+    let output = command("--install", root).output().expect("run zg");
+    fs::set_permissions(&unreadable, permissions).expect("restore permissions");
+    if can_read {
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(home.join("AGENTS.md"))
+            .expect("active guidance")
+            .contains("ZVEC_GREP_START")
+    );
+    assert_eq!(
+        fs::read_to_string(unreadable).expect("guidance"),
+        "# Inaccessible guidance\n"
+    );
+}
+
+#[test]
 fn stdio_install_is_idempotent_and_uninstall_preserves_user_content() {
     let temporary = TempDir::new().expect("tempdir");
     let root = temporary.path();
