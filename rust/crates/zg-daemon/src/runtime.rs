@@ -313,7 +313,7 @@ async fn execute_command(
                     retryable: error.retryable,
                 },
             )),
-            Err(error) => engine_execution::<DaemonReply>(Err(error.into_engine_error())),
+            Err(error) => engine_execution(Err(error.into_engine_error())),
         },
         DaemonCommand::DropIndex(request) => engine_execution(
             state
@@ -334,18 +334,10 @@ async fn execute_command(
     (StatusCode::OK, Json(result))
 }
 
-fn engine_execution<T>(result: Result<T, zg_engine::EngineError>) -> ExecutionResult
-where
-    T: Into<DaemonReply>,
-{
+fn engine_execution(result: Result<DaemonReply, zg_engine::EngineError>) -> ExecutionResult {
     result.map_or_else(
-        |error| {
-            ExecutionResult::Failure(ErrorReply {
-                retryable: error.is_retryable(),
-                report: error.report(),
-            })
-        },
-        |reply| ExecutionResult::Success(reply.into()),
+        |error| ExecutionResult::Failure(error_reply(error)),
+        ExecutionResult::Success,
     )
 }
 

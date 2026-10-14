@@ -60,17 +60,12 @@ impl BoundedSessionManager {
     async fn expire(&self) -> Result<(), SessionError> {
         let expired = {
             let mut entries = self.activities.lock().expect("session activity lock");
-            let ids: Vec<_> = entries
-                .iter()
-                .filter(|(_, activity)| {
+            entries
+                .extract_if(|_, activity| {
                     activity.active == 0 && activity.touched.elapsed() >= self.idle
                 })
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in &ids {
-                entries.remove(id);
-            }
-            ids
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
         };
         for id in expired {
             self.inner.close_session(&id).await?;

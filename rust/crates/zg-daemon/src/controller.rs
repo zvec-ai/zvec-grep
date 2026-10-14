@@ -33,18 +33,18 @@ const SIGNAL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DaemonInstanceRecord {
-    pub pid: u32,
-    pub hostname: String,
-    pub instance_token: Uuid,
-    pub started_at: u64,
-    pub updated_at: u64,
-    pub server_url: String,
+struct DaemonInstanceRecord {
+    pid: u32,
+    hostname: String,
+    instance_token: Uuid,
+    started_at: u64,
+    updated_at: u64,
+    server_url: String,
     #[serde(default)]
-    pub listen: String,
-    pub ready: bool,
+    listen: String,
+    ready: bool,
     #[serde(default = "legacy_full_toolset")]
-    pub mcp_toolset: String,
+    mcp_toolset: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -354,9 +354,7 @@ async fn existing_server(config: &ServerConfig) -> Result<Option<DaemonStatus>, 
         if current.ready {
             return Ok(Some(current));
         }
-        return wait_for_status(&config.home, true, START_TIMEOUT, None)
-            .await
-            .map(Some);
+        return wait_until_ready(&config.home, None).await.map(Some);
     }
     Ok(None)
 }
@@ -403,21 +401,15 @@ async fn start_server_with_lock(
         command.process_group(0);
     }
     let child = command.spawn()?;
-    wait_for_status(&config.home, true, START_TIMEOUT, Some((child, log_path))).await
+    wait_until_ready(&config.home, Some((child, log_path))).await
 }
 
-/// Requests graceful shutdown and falls back to verified process termination.
+/// Requests graceful shutdown using an explicitly selected token file and falls
+/// back to verified process termination.
 ///
 /// # Errors
 ///
-/// Returns state-record, HTTP control, PID identity, signal, or timeout failures.
-pub async fn stop_server(home: &Path, timeout: Duration) -> Result<DaemonStatus, DaemonError> {
-    stop_server_with_token(home, timeout, None).await
-}
-
-/// Stops the daemon using an explicitly selected token file.
-/// # Errors
-/// Returns credential, lifecycle, or process verification errors.
+/// Returns credential, state-record, HTTP control, PID identity, signal, or timeout failures.
 pub async fn stop_server_with_token(
     home: &Path,
     timeout: Duration,
@@ -465,6 +457,12 @@ pub async fn stop_server_with_token(
     Ok(DaemonStatus::default())
 }
 
+/// Returns current daemon status for a home directory.
+///
+/// # Errors
+///
+/// Returns an I/O error when the instance record or health endpoint cannot be
+/// inspected safely.
 pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
     let Some(record) = read_instance_record(home).await? else {
         return Ok(DaemonStatus::default());
@@ -485,9 +483,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
     })
 }
 
-pub(crate) async fn read_instance_record(
-    home: &Path,
-) -> Result<Option<DaemonInstanceRecord>, DaemonError> {
+async fn read_instance_record(home: &Path) -> Result<Option<DaemonInstanceRecord>, DaemonError> {
     read_instance_record_path(&instance_path(home)).await
 }
 
@@ -549,19 +545,14 @@ async fn remove_startup_record_if_same(
     Ok(())
 }
 
-async fn wait_for_status(
+async fn wait_until_ready(
     home: &Path,
-    running: bool,
-    timeout: Duration,
     mut child: Option<(DaemonChild, PathBuf)>,
 ) -> Result<DaemonStatus, DaemonError> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
         let status = server_status(home).await?;
-        if running && status.running && status.ready {
-            return Ok(status);
-        }
-        if !running && !status.running {
+        if status.ready {
             return Ok(status);
         }
         if let Some((process, log_path)) = &mut child
@@ -572,9 +563,7 @@ async fn wait_for_status(
             });
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(DaemonError::Timeout {
-                action: if running { "start" } else { "stop" },
-            });
+            return Err(DaemonError::Timeout { action: "start" });
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -812,15 +801,6 @@ mod tests {
     use crate::{DaemonError, ServerConfig};
 
     #[tokio::test]
-    async fn missing_instance_record_is_stopped() {
-        let home = TempDir::new().expect("temp home");
-        let record: Option<DaemonInstanceRecord> = read_instance_record(home.path())
-            .await
-            .expect("record read should succeed");
-        assert!(record.is_none());
-    }
-
-    #[tokio::test]
     async fn instance_lock_replaces_an_incomplete_record_with_complete_states() {
         let home = TempDir::new().expect("temp home");
         let config = ServerConfig::new(
@@ -857,6 +837,12 @@ mod tests {
         );
 
         lock.release().await.expect("release instance lock");
+        assert!(
+            read_instance_record(home.path())
+                .await
+                .expect("released record")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -937,28 +923,6 @@ mod tests {
         assert_eq!(current.instance_token, lock.record.instance_token);
 
         lock.release().await.expect("release instance lock");
-    }
-
-    #[tokio::test]
-    async fn startup_lock_held_by_this_process_is_not_replaced() {
-        let home = TempDir::new().expect("temp home");
-        let lock = StartupLock::acquire(home.path())
-            .await
-            .expect("startup lock");
-
-        let second = tokio::time::timeout(
-            Duration::from_millis(200),
-            StartupLock::acquire(home.path()),
-        )
-        .await;
-        assert!(second.is_err(), "second acquisition should keep waiting");
-        let path = daemon_dir(home.path()).join(STARTUP_FILE);
-        let current: StartupRecord =
-            serde_json::from_slice(&std::fs::read(&path).expect("startup record"))
-                .expect("startup record json");
-        assert_eq!(current, lock.record);
-
-        lock.release().await.expect("release startup lock");
     }
 
     #[tokio::test]

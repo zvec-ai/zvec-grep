@@ -147,12 +147,7 @@ fn numbered_backups(path: &Path) -> io::Result<Vec<u64>> {
         let Some(suffix) = name.strip_prefix("server.log.") else {
             continue;
         };
-        if !suffix
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| byte.is_ascii_digit() && *byte != b'0')
-            || !suffix.bytes().all(|byte| byte.is_ascii_digit())
-        {
+        if !matches!(suffix.as_bytes().first(), Some(b'1'..=b'9')) {
             continue;
         }
         if let Ok(index) = suffix.parse::<u64>() {

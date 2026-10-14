@@ -22,7 +22,6 @@ use crate::DaemonError;
 
 const SESSION_ID: &str = "Mcp-Session-Id";
 const LAST_EVENT_ID: &str = "Last-Event-Id";
-const PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 const EVENT_STREAM: &str = "text/event-stream";
 const JSON: &str = "application/json";
 
@@ -127,26 +126,6 @@ impl StreamableHttpClient for LoopbackHttpClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.post_message_with_max_sse_event_size(
-            uri,
-            message,
-            session_id,
-            auth_token,
-            custom_headers,
-            usize::MAX,
-        )
-        .await
-    }
-
-    async fn post_message_with_max_sse_event_size(
-        &self,
-        uri: Arc<str>,
-        message: ClientJsonRpcMessage,
-        session_id: Option<Arc<str>>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-        _max_sse_event_size: usize,
-    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let body = serde_json::to_vec(&message).map_err(LoopbackHttpError::from)?;
         let mut builder = request_builder(Method::POST, &uri)?
             .header(CONTENT_TYPE, JSON)
@@ -245,27 +224,6 @@ impl StreamableHttpClient for LoopbackHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
     {
-        self.get_stream_with_max_sse_event_size(
-            uri,
-            session_id,
-            last_event_id,
-            auth_token,
-            custom_headers,
-            usize::MAX,
-        )
-        .await
-    }
-
-    async fn get_stream_with_max_sse_event_size(
-        &self,
-        uri: Arc<str>,
-        session_id: Option<Arc<str>>,
-        last_event_id: Option<String>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-        _max_sse_event_size: usize,
-    ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
-    {
         let mut builder =
             request_builder(Method::GET, &uri)?.header(ACCEPT, format!("{EVENT_STREAM}, {JSON}"));
         builder = apply_optional_headers(builder, session_id.as_deref(), auth_token.as_deref());
@@ -335,7 +293,6 @@ fn apply_custom_headers(
         if reserved
             .iter()
             .any(|candidate| name.as_str().eq_ignore_ascii_case(candidate))
-            && !name.as_str().eq_ignore_ascii_case(PROTOCOL_VERSION)
         {
             return Err(StreamableHttpError::ReservedHeaderConflict(
                 name.to_string(),
@@ -423,7 +380,7 @@ mod tests {
     use http::{HeaderName, HeaderValue, Request};
     use rmcp::transport::streamable_http_client::StreamableHttpError;
 
-    use super::{PROTOCOL_VERSION, apply_custom_headers, is_loopback_host};
+    use super::{apply_custom_headers, is_loopback_host};
 
     #[tokio::test]
     async fn index_stream_delivers_fragmented_progress_before_the_result() {
@@ -548,7 +505,7 @@ mod tests {
     fn protocol_version_header_is_forwarded() {
         let mut headers = HashMap::new();
         headers.insert(
-            HeaderName::from_bytes(PROTOCOL_VERSION.as_bytes()).expect("valid header"),
+            HeaderName::from_static("mcp-protocol-version"),
             HeaderValue::from_static("2025-11-25"),
         );
         assert!(apply_custom_headers(Request::builder(), headers).is_ok());

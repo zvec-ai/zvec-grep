@@ -115,7 +115,7 @@ pub(crate) struct IndexJobScheduler {
 
 struct SchedulerInner {
     executor: Arc<dyn IndexExecutor>,
-    permits: Arc<Semaphore>,
+    permits: Semaphore,
     state: Mutex<SchedulerState>,
     outstanding: AtomicUsize,
     closed: AtomicBool,
@@ -164,7 +164,7 @@ impl IndexJobScheduler {
         Self {
             inner: Arc::new(SchedulerInner {
                 executor,
-                permits: Arc::new(Semaphore::new(concurrency)),
+                permits: Semaphore::new(concurrency),
                 state: Mutex::new(SchedulerState::default()),
                 outstanding: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
@@ -489,7 +489,7 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
                 finish_job(&inner, &job);
                 return;
             }
-            permit = Arc::clone(&inner.permits).acquire_owned() => permit,
+            permit = inner.permits.acquire() => permit,
         };
         let Ok(_permit) = permit else {
             finish_cancelled(&job, "the daemon job scheduler closed");
@@ -636,10 +636,6 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
     merge_runtime_options(current, &mut incoming);
     // An omitted name leaves a pending explicit rename intact.
     merge_update(&mut current.name, incoming.name.take());
-    if incoming.changes.is_empty() {
-        current.changes.clear();
-        return;
-    }
     if full_scan {
         current.changes.clear();
         return;
@@ -778,11 +774,12 @@ fn redact_job_error_text(message: &str) -> String {
         redacted = redact_assigned_value(&redacted, name, false);
     }
     redacted = redact_openai_keys(&redacted);
-    let mut truncated = redacted
-        .chars()
+    let mut characters = redacted.chars();
+    let mut truncated = characters
+        .by_ref()
         .take(MAX_PERSISTED_ERROR_CHARS)
         .collect::<String>();
-    if redacted.chars().count() > MAX_PERSISTED_ERROR_CHARS {
+    if characters.next().is_some() {
         truncated.push('…');
     }
     truncated
@@ -803,13 +800,8 @@ fn redact_url_userinfo(message: &str) -> String {
         {
             scheme_start -= 1;
         }
-        let valid_scheme = scheme_start < marker
-            && output.as_bytes()[scheme_start].is_ascii_alphabetic()
-            && (scheme_start == 0
-                || !matches!(
-                    output.as_bytes()[scheme_start - 1],
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'.' | b'-'
-                ));
+        let valid_scheme =
+            scheme_start < marker && output.as_bytes()[scheme_start].is_ascii_alphabetic();
         let authority_start = marker + 3;
         let authority_end = output.as_bytes()[authority_start..]
             .iter()
@@ -1119,9 +1111,7 @@ mod tests {
         async fn index(&self, _options: IndexOptions) -> Result<IndexResult, EngineError> {
             self.started.notify_one();
             self.release.notified().await;
-            Ok(IndexResult {
-                ..IndexResult::default()
-            })
+            Ok(IndexResult::default())
         }
     }
 
@@ -1146,8 +1136,7 @@ mod tests {
         let permits = scheduler
             .inner
             .permits
-            .clone()
-            .acquire_many_owned(2)
+            .acquire_many(2)
             .await
             .expect("permits");
         let submitted = scheduler
@@ -2151,7 +2140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_budget_queues_other_roots_and_reports_real_counts() {
+    async fn global_budget_queues_roots_reports_counts_and_rejects_excess_jobs() {
         let executor = Arc::new(RecordingExecutor {
             calls: Mutex::new(Vec::new()),
             started: Notify::new(),
@@ -2161,7 +2150,7 @@ mod tests {
             executor.clone(),
             SchedulerConfig {
                 concurrency: 1,
-                queue_capacity: 8,
+                queue_capacity: 1,
             },
         );
         let first = scheduler
@@ -2183,6 +2172,14 @@ mod tests {
         let snapshot = scheduler.snapshot();
         assert_eq!(snapshot.running, 1);
         assert_eq!(snapshot.queued, 1);
+        assert!(matches!(
+            scheduler.submit(
+                PathBuf::from("/third"),
+                IndexOptions::default(),
+                JobReason::Manual,
+            ),
+            Err(SchedulerError::QueueFull)
+        ));
         executor.releases.add_permits(1);
         executor.started.notified().await;
         executor.releases.add_permits(1);
@@ -2204,57 +2201,6 @@ mod tests {
                 .state,
             JobState::Succeeded
         );
-    }
-
-    #[tokio::test]
-    async fn queue_capacity_rejects_excess_jobs_without_unbounding_waiters() {
-        let executor = Arc::new(RecordingExecutor {
-            calls: Mutex::new(Vec::new()),
-            started: Notify::new(),
-            releases: tokio::sync::Semaphore::new(0),
-        });
-        let scheduler = IndexJobScheduler::new(
-            executor.clone(),
-            SchedulerConfig {
-                concurrency: 1,
-                queue_capacity: 1,
-            },
-        );
-        let first = scheduler
-            .submit(
-                PathBuf::from("/first"),
-                IndexOptions::default(),
-                JobReason::Manual,
-            )
-            .expect("running job should be accepted");
-        executor.started.notified().await;
-        let second = scheduler
-            .submit(
-                PathBuf::from("/second"),
-                IndexOptions::default(),
-                JobReason::Manual,
-            )
-            .expect("one queued job should be accepted");
-        assert!(matches!(
-            scheduler.submit(
-                PathBuf::from("/third"),
-                IndexOptions::default(),
-                JobReason::Manual,
-            ),
-            Err(SchedulerError::QueueFull)
-        ));
-
-        executor.releases.add_permits(1);
-        executor.started.notified().await;
-        executor.releases.add_permits(1);
-        scheduler
-            .wait(first.job.id)
-            .await
-            .expect("first should finish");
-        scheduler
-            .wait(second.job.id)
-            .await
-            .expect("second should finish");
     }
 
     struct CancellationAwareExecutor {
