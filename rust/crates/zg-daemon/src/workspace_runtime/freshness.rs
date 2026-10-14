@@ -14,6 +14,7 @@ use crate::job_scheduler::{
 pub(super) struct Freshness {
     required_epoch: u64,
     reconciled_epoch: u64,
+    probe_required: bool,
     jobs: HashMap<Uuid, Proof>,
 }
 
@@ -28,6 +29,7 @@ impl Default for Freshness {
         Self {
             required_epoch: 1,
             reconciled_epoch: 0,
+            probe_required: true,
             jobs: HashMap::new(),
         }
     }
@@ -35,17 +37,49 @@ impl Default for Freshness {
 
 impl WorkspaceRuntime {
     pub(super) fn require_reconciliation(&self) {
-        lock(&self.freshness).required_epoch += 1;
+        let mut state = lock(&self.freshness);
+        state.required_epoch += 1;
+        state.probe_required = true;
         self.invalidate_status();
+    }
+
+    pub(super) fn needs_reconciliation_probe(&self) -> bool {
+        lock(&self.freshness).probe_required
+    }
+
+    /// Accept a disk freshness probe for the revision observed after the
+    /// watcher barrier. A notification racing the probe invalidates it.
+    pub(super) fn complete_reconciliation_probe(&self, observed_revision: u64) -> bool {
+        if self.dirty_revision.load(Ordering::Acquire) != observed_revision {
+            return false;
+        }
+        let mut state = lock(&self.freshness);
+        if self.dirty_revision.load(Ordering::Acquire) != observed_revision {
+            return false;
+        }
+        state.probe_required = false;
+        state.reconciled_epoch = state.required_epoch;
+        self.indexed_revision
+            .store(observed_revision, Ordering::Release);
+        self.invalidate_status();
+        true
     }
 
     pub(super) fn is_reconciled(&self) -> bool {
         let state = lock(&self.freshness);
         self.watcher_active.load(Ordering::Acquire)
             && state.jobs.is_empty()
+            && !state.probe_required
             && state.reconciled_epoch == state.required_epoch
             && self.indexed_revision.load(Ordering::Acquire)
                 == self.dirty_revision.load(Ordering::Acquire)
+    }
+
+    pub(super) fn job_has_full_reconciliation_proof(&self, id: Uuid) -> bool {
+        lock(&self.freshness)
+            .jobs
+            .get(&id)
+            .is_some_and(|proof| proof.full_epoch.is_some())
     }
 
     pub(super) fn submit_tracked(
@@ -96,6 +130,7 @@ impl WorkspaceRuntime {
                 .fetch_max(proof.revision, Ordering::AcqRel);
             if let Some(epoch) = proof.full_epoch {
                 state.reconciled_epoch = state.reconciled_epoch.max(epoch);
+                state.probe_required = false;
             }
         } else {
             state.required_epoch += 1;
@@ -129,6 +164,7 @@ impl WorkspaceRuntime {
         lock(&self.freshness).jobs.is_empty()
     }
 
+    #[cfg(test)]
     pub(super) async fn settle_jobs(
         &self,
         scheduler: &IndexJobScheduler,

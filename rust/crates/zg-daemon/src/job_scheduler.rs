@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -28,6 +28,16 @@ const MAX_RETAINED_FINISHED_JOBS: usize = 256;
 #[async_trait]
 pub(crate) trait IndexExecutor: Send + Sync {
     async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError>;
+
+    /// Inspect persisted file snapshots without acquiring the embedding writer.
+    ///
+    /// `Some(true)` proves that the current workspace is ready to query, while
+    /// `Some(false)` means an index refresh is required. Test and alternate
+    /// executors may return `None` when they do not expose a probe; the daemon
+    /// then retains its conservative full-reconciliation behavior.
+    async fn probe_freshness(&self, _root: &Path) -> Result<Option<bool>, EngineError> {
+        Ok(None)
+    }
 
     async fn drop_index(&self, _options: InfoOptions) -> Result<bool, EngineError> {
         Ok(false)

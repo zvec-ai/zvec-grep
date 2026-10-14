@@ -24,7 +24,10 @@ use zg_engine::{
             IndexOptions, IndexResult,
             options::{ScanRulesUpdate, WorkspaceChange as IndexChange},
         },
-        info::{InfoOptions, InfoResult, result::IndexStatusSnapshot},
+        info::{
+            InfoOptions, InfoResult,
+            result::{IndexStatus, IndexStatusSnapshot},
+        },
     },
 };
 use zg_host_native::{
@@ -212,6 +215,18 @@ impl IndexExecutor for ZvecGrepIndexExecutor {
         }
     }
 
+    async fn probe_freshness(&self, root: &Path) -> Result<Option<bool>, EngineError> {
+        let info = self
+            .engine
+            .info(InfoOptions {
+                root: Some(root.to_path_buf()),
+                include_status: true,
+            })
+            .await?;
+        info.compatibility.ensure_compatible()?;
+        Ok(Some(matches!(info.index_status(), IndexStatus::Ready)))
+    }
+
     async fn drop_index(&self, options: InfoOptions) -> Result<bool, EngineError> {
         self.engine.drop_index(options).await
     }
@@ -390,6 +405,10 @@ impl WorkspaceRuntimeManager {
     }
 
     /// Returns whether refresh work was scheduled or is already in flight.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "strict admission, proof, and bounded writer coordination stay linear"
+    )]
     async fn refresh_index(
         &self,
         mut options: IndexOptions,
@@ -405,7 +424,7 @@ impl WorkspaceRuntimeManager {
         }
         let mut scheduled = false;
         loop {
-            let refresh = if wait {
+            let _refresh = if wait {
                 runtime.refresh.lock().await
             } else {
                 let Ok(refresh) = runtime.refresh.try_lock() else {
@@ -438,20 +457,56 @@ impl WorkspaceRuntimeManager {
                 if !wait {
                     return Ok(true);
                 }
-                // Coordination covers admission only. Every waiting request can
-                // subscribe to shared jobs while another request waits for them.
-                drop(refresh);
-                self.inner
+                // The refresh mutex serializes strict callers. Wait for the
+                // generation that was already active when this caller acquired
+                // the coordinator, then return. Changes delivered while that
+                // generation is running belong to the next watcher refresh;
+                // they must not make this request chase an unbounded successor
+                // chain.
+                let Some(active) = self.job_for_root(&root) else {
+                    tokio::task::yield_now().await;
+                    continue;
+                };
+                let captured_generation = runtime.job_has_full_reconciliation_proof(active.id)
+                    || (active.reason == JobReason::Watch && !runtime.needs_reconciliation_probe());
+                let completed = self
+                    .inner
                     .scheduler
-                    .wait_for_root_idle_with_progress(&root, reporter.clone())
-                    .await;
-                runtime
-                    .settle_jobs(&self.inner.scheduler, reporter.clone())
-                    .await;
-                // The watcher may have buffered changes during the existing job.
-                // Reacquire coordination and drain it before trusting the proof.
+                    .wait_with_progress(active.id, reporter.clone())
+                    .await
+                    .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
+                runtime.complete_job(&completed);
+                ensure_refresh_succeeded(&completed.job)?;
+                if completed
+                    .result
+                    .as_ref()
+                    .is_none_or(|result| result.files_failed != 0)
+                {
+                    return Err(EngineError::storage_failure(
+                        "index refresh left failed files",
+                    ));
+                }
+                if captured_generation {
+                    return Ok(scheduled);
+                }
+                if let Some(proven) = self.prove_clean_reconciliation(&root, &runtime).await?
+                    && proven
+                {
+                    return Ok(scheduled);
+                }
+                if runtime.is_reconciled() {
+                    return Ok(scheduled);
+                }
                 continue;
             }
+            if let Some(proven) = self.prove_clean_reconciliation(&root, &runtime).await?
+                && proven
+            {
+                return Ok(scheduled);
+            }
+            // A watcher event raced the read-only probe. Reconcile the
+            // captured disk state once instead of retrying the probe in a
+            // tight loop while the workspace is changing.
             if runtime.is_reconciled() {
                 return Ok(scheduled);
             }
@@ -460,6 +515,9 @@ impl WorkspaceRuntimeManager {
             let submitted = runtime
                 .submit_tracked(&self.inner.scheduler, options.clone(), JobReason::Watch)
                 .map_err(|error| WorkspaceRuntimeError::from(error).into_engine_error())?;
+            let captured_generation = runtime.job_has_full_reconciliation_proof(submitted.job.id)
+                || (submitted.job.reason == JobReason::Watch
+                    && !runtime.needs_reconciliation_probe());
             scheduled = true;
             {
                 let manager = self.clone();
@@ -481,7 +539,6 @@ impl WorkspaceRuntimeManager {
             if !wait {
                 return Ok(true);
             }
-            drop(refresh);
             let completed = self
                 .inner
                 .scheduler
@@ -499,8 +556,38 @@ impl WorkspaceRuntimeManager {
                     "index refresh left failed files",
                 ));
             }
-            // Flush again after indexing to include events that arrived during it.
+            // This request is fresh for the captured generation. Events that
+            // arrived while the job ran are intentionally left to the watcher
+            // successor and the next serialized strict caller.
+            if captured_generation {
+                return Ok(scheduled);
+            }
         }
+    }
+
+    async fn prove_clean_reconciliation(
+        &self,
+        root: &Path,
+        runtime: &WorkspaceRuntime,
+    ) -> Result<Option<bool>, EngineError> {
+        let Some(ready) = self.inner.executor.probe_freshness(root).await? else {
+            return Ok(None);
+        };
+        if !ready {
+            // A resident watcher can miss an external notification (for
+            // example, a host-side edit through a container bind mount). Do
+            // not let the in-memory revision proof turn that persisted stale
+            // status into a false clean result.
+            runtime.require_reconciliation();
+            return Ok(Some(false));
+        }
+        // The status scan and the watcher barrier form one proof: no event may
+        // have arrived between the disk observation and the indexed revision.
+        self.flush_watcher(runtime).await?;
+        let observed_revision = runtime.dirty_revision.load(Ordering::Acquire);
+        Ok(Some(
+            runtime.complete_reconciliation_probe(observed_revision) && runtime.is_reconciled(),
+        ))
     }
 
     async fn flush_watcher(&self, runtime: &WorkspaceRuntime) -> Result<(), EngineError> {
@@ -853,9 +940,11 @@ impl WorkspaceRuntimeManager {
             task,
         });
         // Cover the interval between indexing and installing a watcher, including
-        // first activation. A barrier ensures the daemon has queued the reconciliation.
+        // first activation. The strict refresh barrier performs the persisted
+        // snapshot probe; this pending-only barrier must not manufacture a full
+        // workspace rescan on every daemon restart.
         if let Some(handle) = watcher.as_ref() {
-            handle.session.flush().await?;
+            handle.session.flush_pending().await?;
             let (acknowledge, acknowledged) = oneshot::channel();
             handle
                 .barrier
@@ -939,7 +1028,8 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         if request.rg {
             return engine.context(request).await;
         }
-        let _activity = self.existing_activity(request.root.as_deref())?;
+        let existing_activity = self.existing_activity(request.root.as_deref())?;
+        let runtime_present = existing_activity.is_some();
         let policy = request.refresh.unwrap_or(if request.auto_update {
             RefreshPolicy::Background
         } else {
@@ -992,35 +1082,43 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             .max_by_key(|root| root.components().count())
             .cloned()
             .unwrap_or(requested_root);
-        let _refresh_activity = wait_for_search_refresh(&request, async {
-            let info = wait_for_search_admission(&request, async {
+        let known_runtime = runtime_present
+            && (self.runtime_snapshot(&root).watcher_active || self.job_for_root(&root).is_some());
+        let _refresh_activity = Box::pin(wait_for_search_refresh(&request, async {
+            wait_for_search_admission(&request, async {
+                if known_runtime {
+                    // A resident workspace already has its coordinator and
+                    // index identity. Enter it before metadata admission so a
+                    // concurrent strict request waits behind the caller that
+                    // is already refreshing, rather than independently
+                    // starting a second admission cycle.
+                    let mut options = options.clone();
+                    options.root = Some(root.clone());
+                    self.refresh_index(options, true).await?;
+                    return Ok(());
+                }
                 self.inner
                     .scheduler
                     .wait_for_root_idle_with_progress(&root, request.on_progress.clone())
                     .await;
                 // Metadata admission also waits on writers outside this daemon.
-                engine
+                let info = engine
                     .info(InfoOptions {
                         root: request.root.clone(),
                         include_status: false,
                     })
-                    .await
+                    .await?;
+                info.compatibility.ensure_compatible()?;
+                if info.indexed {
+                    let mut options = options;
+                    options.root = Some(info.root);
+                    self.refresh_index(options, true).await?;
+                }
+                // Preserve the engine's missing-index error without silently creating one.
+                Ok(())
             })
-            .await?;
-            info.compatibility.ensure_compatible()?;
-            let activity = if info.indexed {
-                Some(self.runtime(info.root.clone(), &options)?)
-            } else {
-                None
-            };
-            if info.indexed {
-                let mut options = options;
-                options.root = Some(info.root);
-                self.refresh_index(options, true).await?;
-            }
-            // Preserve the engine's missing-index error without silently creating one.
-            Ok(activity)
-        })
+            .await
+        }))
         .await?;
         // Resident Wait reconciles delivered watcher events. OS notifications
         // still in flight belong to a later refresh, not a second disk scan.
@@ -1343,6 +1441,7 @@ mod tests {
         calls: Mutex<Vec<IndexOptions>>,
         drops: AtomicUsize,
         fail: AtomicBool,
+        probe: Mutex<Option<bool>>,
     }
 
     struct FailingExecutor;
@@ -1365,6 +1464,13 @@ mod tests {
                 return Err(EngineError::internal("fixture index failed"));
             }
             Ok(IndexResult::default())
+        }
+
+        async fn probe_freshness(
+            &self,
+            _root: &std::path::Path,
+        ) -> Result<Option<bool>, EngineError> {
+            Ok(*self.probe.lock().expect("probe should be readable"))
         }
 
         async fn drop_index(&self, _options: InfoOptions) -> Result<bool, EngineError> {
@@ -1830,7 +1936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_refresh_drains_running_and_watcher_successor_jobs() {
+    async fn wait_refresh_returns_after_its_generation_and_leaves_successors_queued() {
         let workspace = tempdir().expect("workspace");
         let root = workspace.path().canonicalize().expect("root");
         let (started, mut jobs) = mpsc::unbounded_channel();
@@ -1885,17 +1991,17 @@ mod tests {
         .await
         .expect("watcher successor should queue");
         executor.release.add_permits(1);
-        jobs.recv().await.expect("watcher successor started");
-        assert!(
-            !waiting.is_finished(),
-            "wait must include watcher successors"
-        );
-        executor.release.add_permits(1);
         tokio::time::timeout(Duration::from_secs(2), waiting)
             .await
-            .expect("wait finishes")
+            .expect("wait finishes after its captured generation")
             .expect("task")
             .expect("fresh");
+        assert!(
+            manager.snapshot().jobs.running + manager.snapshot().jobs.queued > 0,
+            "watcher successor remains for the next serialized refresh"
+        );
+        executor.release.add_permits(1);
+        manager.inner.scheduler.wait_for_root_idle(&root).await;
         assert_eq!(manager.snapshot().jobs.running, 0);
         assert_eq!(manager.snapshot().jobs.queued, 0);
         manager.shutdown_all().await.expect("shutdown");
