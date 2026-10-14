@@ -131,13 +131,11 @@ fn request_binding(
         .get::<http::request::Parts>()
         .and_then(|parts| parts.headers.get(http::header::AUTHORIZATION))
         .map_or(&[][..], |value| value.as_bytes());
-    let data = serde_json::to_vec(&serde_json::json!([
-        request.name,
-        arguments,
-        targets,
-        principal
-    ]))
-    .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+    let mut binding = serde_json::json!([request.name, arguments, targets, principal]);
+    // Object key order is not part of the request identity; array order and values are.
+    binding.sort_all_objects();
+    let data = serde_json::to_vec(&binding)
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
     Ok(sha2::Sha256::digest(data).to_vec())
 }
 
@@ -255,6 +253,99 @@ mod tests {
             )])
             .into())
         }
+    }
+
+    #[tokio::test]
+    async fn wire_continuation_accepts_object_reordering_but_rejects_value_and_array_changes() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let root = tempfile::tempdir().expect("workspace");
+            let (server_io, client_io) = tokio::io::duplex(65536);
+            let task = tokio::spawn(async move {
+                Server(Arc::new(ContinuationState::default()))
+                    .serve(server_io)
+                    .await
+                    .expect("server")
+                    .waiting()
+                    .await
+            });
+            let mut info = ClientInfo::default();
+            info.protocol_version = ProtocolVersion::V_2026_07_28;
+            let client = info.serve(client_io).await.expect("client");
+            let request = CallToolRequestParams::new("zvec_grep_index").with_arguments(
+                serde_json::json!({
+                    "root": root.path(),
+                    "embedding": "qwen/text-embedding-v4",
+                    "endpoint": "https://embedding.example.test/v1",
+                    "globs": [
+                        {"pattern": "*.rs", "caseInsensitive": false},
+                        {"pattern": "!target/**", "caseInsensitive": false}
+                    ]
+                })
+                .as_object()
+                .expect("arguments")
+                .clone(),
+            );
+            for (reorder_top, reorder_nested) in [(true, false), (false, true), (true, true)] {
+                let CallToolResponse::InputRequired(required) = client
+                    .call_tool_once(request.clone())
+                    .await
+                    .expect("initial request")
+                else {
+                    panic!("consent required");
+                };
+                let responses = serde_json::from_value(serde_json::json!({
+                    "remote_embedding_authorization": {
+                        "action": "accept", "content": {"decision": "allow_once"}
+                    }
+                }))
+                .expect("responses");
+                let mut retry = request
+                    .clone()
+                    .with_request_state(required.request_state.expect("state"))
+                    .with_input_responses(responses);
+                if reorder_top {
+                    retry.arguments = retry
+                        .arguments
+                        .map(|arguments| arguments.into_iter().rev().collect());
+                }
+                let arguments = retry.arguments.as_mut().expect("arguments");
+                if reorder_nested {
+                    for rule in arguments["globs"].as_array_mut().expect("rules") {
+                        let fields = rule.as_object().expect("rule").clone();
+                        *rule = serde_json::Value::Object(fields.into_iter().rev().collect());
+                    }
+                }
+                assert_ne!(
+                    serde_json::to_vec(&arguments).expect("reordered JSON"),
+                    serde_json::to_vec(&request.arguments).expect("original JSON"),
+                    "fixture must change serialized key order"
+                );
+                let mut changed_value = retry.clone();
+                changed_value.arguments.as_mut().expect("arguments")["globs"][0]
+                    ["caseInsensitive"] = true.into();
+                let mut changed_array = retry.clone();
+                changed_array.arguments.as_mut().expect("arguments")["globs"]
+                    .as_array_mut()
+                    .expect("rules")
+                    .reverse();
+                for changed in [changed_value, changed_array] {
+                    let error = client.call_tool_once(changed).await.expect_err("changed request");
+                    assert!(error.to_string().contains("Invalid or expired requestState"));
+                }
+                let CallToolResponse::Complete(result) = client
+                    .call_tool_once(retry)
+                    .await
+                    .expect("object key order must not invalidate consent")
+                else {
+                    panic!("authorized request must complete");
+                };
+                assert!(!result.is_error.unwrap_or_default());
+            }
+            client.cancel().await.expect("client shutdown");
+            task.await.expect("server task").expect("server shutdown");
+        })
+        .await
+        .expect("continuation test terminates");
     }
 
     #[tokio::test]
