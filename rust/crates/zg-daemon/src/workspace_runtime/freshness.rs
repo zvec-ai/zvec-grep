@@ -48,6 +48,14 @@ impl Freshness {
         self.change_version += 1;
         self.unsubmitted_change = self.unsubmitted_change.max(Some(revision));
     }
+
+    fn lose_proof(&mut self, proof: &Proof) {
+        self.required_epoch += 1;
+        if proof.has_changes {
+            // Retain one bounded watermark for failed or lost change batches.
+            self.unreconciled_change = self.unreconciled_change.max(Some(proof.revision));
+        }
+    }
 }
 
 impl Default for Freshness {
@@ -201,11 +209,7 @@ impl WorkspaceRuntime {
                 state.reconciled_epoch = state.reconciled_epoch.max(epoch);
             }
         } else {
-            state.required_epoch += 1;
-            if proof.has_changes {
-                // Retain one bounded watermark for failed or lost change batches.
-                state.unreconciled_change = state.unreconciled_change.max(Some(proof.revision));
-            }
+            state.lose_proof(&proof);
         }
         self.invalidate_status();
     }
@@ -213,10 +217,7 @@ impl WorkspaceRuntime {
     pub(super) fn forget_job_proof(&self, id: Uuid) {
         let mut state = lock(&self.freshness);
         if let Some(proof) = state.jobs.remove(&id) {
-            state.required_epoch += 1;
-            if proof.has_changes {
-                state.unreconciled_change = state.unreconciled_change.max(Some(proof.revision));
-            }
+            state.lose_proof(&proof);
         }
     }
 

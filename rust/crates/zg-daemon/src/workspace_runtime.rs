@@ -1114,10 +1114,7 @@ fn set_search_freshness(
     before: SearchFreshness,
     after: SearchFreshness,
 ) {
-    let stale = after.changed_since(before)
-        || reply.items.iter().any(|item| {
-            item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale
-        });
+    let stale = after.changed_since(before) || reply.has_stale_items();
     reply.freshness = Some(if stale { "possibly_stale" } else { "fresh" }.to_owned());
 }
 

@@ -417,6 +417,16 @@ pub mod result {
         pub diagnostics: ContextDiagnostics,
     }
 
+    impl ContextResult {
+        /// Returns whether any retrieved item is marked as possibly stale.
+        #[must_use]
+        pub fn has_stale_items(&self) -> bool {
+            self.items
+                .iter()
+                .any(|item| item.status == ContextItemStatus::PossiblyStale)
+        }
+    }
+
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextIndexingStatus {
         pub state: String,
@@ -433,7 +443,7 @@ pub mod result {
                 || stats.files_deleted > 0
                 || stats.files_pending > 0
                 || stats.files_failed > 0)
-                .then_some(Self {
+                .then(|| Self {
                     state: "idle".to_owned(),
                     completed: Some(stats.files_unchanged),
                     total: Some(stats.files_scanned),

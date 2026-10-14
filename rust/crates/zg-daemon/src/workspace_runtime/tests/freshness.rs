@@ -1,3 +1,18 @@
+use std::path::Path;
+
+use zg_engine::{
+    ZvecGrep,
+    api::{
+        context::{
+            ContextOptions,
+            options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+        },
+        index::options::{Device, EmbeddingModelSpec},
+        info::result::IndexStats,
+    },
+};
+use zg_transport_mcp::IndexOperationProvider;
+
 use super::*;
 use crate::job_scheduler::JobReason;
 
@@ -38,10 +53,8 @@ async fn deliver(
     runtime.settle_jobs(&manager.inner.scheduler, None).await;
 }
 
-async fn empty_search_engine(root: &std::path::Path) -> Arc<zg_engine::ZvecGrep> {
-    use zg_engine::api::index::options::EmbeddingModelSpec;
-
-    let engine = Arc::new(zg_engine::ZvecGrep::new());
+async fn empty_search_engine(root: &Path) -> Arc<ZvecGrep> {
+    let engine = Arc::new(ZvecGrep::new());
     engine
         .index(IndexOptions {
             root: Some(root.to_path_buf()),
@@ -50,7 +63,7 @@ async fn empty_search_engine(root: &std::path::Path) -> Arc<zg_engine::ZvecGrep>
                 revision: None,
                 cache_dir: None,
                 endpoint: None,
-                device: zg_engine::api::index::options::Device::Cpu,
+                device: Device::Cpu,
             }),
             endpoint: Some("http://127.0.0.1:1/empty-index".into()),
             api_key: Some("fixture-key".into()),
@@ -62,12 +75,8 @@ async fn empty_search_engine(root: &std::path::Path) -> Arc<zg_engine::ZvecGrep>
     engine
 }
 
-fn lexical_search(
-    root: &std::path::Path,
-    policy: zg_engine::api::context::options::RefreshPolicy,
-) -> zg_engine::api::context::ContextOptions {
-    use zg_engine::api::context::options::{ContextRoute, ContextRouteMode};
-    zg_engine::api::context::ContextOptions {
+fn lexical_search(root: &Path, policy: RefreshPolicy) -> ContextOptions {
+    ContextOptions {
         root: Some(root.to_path_buf()),
         routes: vec![ContextRoute {
             mode: ContextRouteMode::Fts,
@@ -80,9 +89,6 @@ fn lexical_search(
 
 #[tokio::test]
 async fn clean_searches_remain_fresh_during_initial_reconciliation_and_idle() {
-    use zg_engine::api::context::options::RefreshPolicy;
-    use zg_transport_mcp::IndexOperationProvider;
-
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
     let engine = empty_search_engine(&root).await;
@@ -127,9 +133,6 @@ async fn clean_searches_remain_fresh_during_initial_reconciliation_and_idle() {
 
 #[tokio::test]
 async fn only_unindexed_file_notifications_make_unmatched_searches_stale() {
-    use zg_engine::api::context::options::RefreshPolicy;
-    use zg_transport_mcp::IndexOperationProvider;
-
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
     let engine = empty_search_engine(&root).await;
@@ -149,19 +152,29 @@ async fn only_unindexed_file_notifications_make_unmatched_searches_stale() {
         .expect("initial reconciliation");
     jobs.recv().await.expect("initial job");
     let runtime = manager.runtime(root.clone(), &options).expect("runtime");
-    for change in [
-        WorkspaceChange::Rescan,
-        WorkspaceChange::RescanDirectory("src".into()),
-        WorkspaceChange::Upsert("unmatched.txt".into()),
-        WorkspaceChange::Delete("unmatched.txt".into()),
-        WorkspaceChange::DeletePrefix("src".into()),
+    for (change, expected_freshness, expected_state) in [
+        (WorkspaceChange::Rescan, "fresh", None),
+        (
+            WorkspaceChange::RescanDirectory("src".into()),
+            "fresh",
+            None,
+        ),
+        (
+            WorkspaceChange::Upsert("unmatched.txt".into()),
+            "possibly_stale",
+            Some("running"),
+        ),
+        (
+            WorkspaceChange::Delete("unmatched.txt".into()),
+            "possibly_stale",
+            Some("running"),
+        ),
+        (
+            WorkspaceChange::DeletePrefix("src".into()),
+            "possibly_stale",
+            Some("running"),
+        ),
     ] {
-        let known_file_change = matches!(
-            change,
-            WorkspaceChange::Upsert(_)
-                | WorkspaceChange::Delete(_)
-                | WorkspaceChange::DeletePrefix(_)
-        );
         sender
             .send(WorkspaceChangeBatch {
                 changes: vec![change],
@@ -178,20 +191,13 @@ async fn only_unindexed_file_notifications_make_unmatched_searches_stale() {
             .await
             .expect("search during update");
         assert!(result.items.is_empty());
-        assert_eq!(
-            result.freshness.as_deref(),
-            Some(if known_file_change {
-                "possibly_stale"
-            } else {
-                "fresh"
-            })
-        );
+        assert_eq!(result.freshness.as_deref(), Some(expected_freshness));
         assert_eq!(
             result
                 .indexing
                 .as_ref()
                 .map(|indexing| indexing.state.as_str()),
-            known_file_change.then_some("running")
+            expected_state
         );
         executor.release.add_permits(1);
         manager
@@ -339,9 +345,6 @@ async fn a_new_recovery_epoch_cannot_be_cleared_by_an_older_full_refresh() {
 
 #[tokio::test]
 async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
-    use zg_engine::api::context::options::RefreshPolicy;
-    use zg_transport_mcp::IndexOperationProvider;
-
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
     let engine = empty_search_engine(&root).await;
@@ -435,9 +438,6 @@ impl IndexExecutor for DriftExecutor {
 
 #[tokio::test]
 async fn a_read_retains_changes_discovered_and_indexed_during_reconciliation() {
-    use zg_engine::api::context::options::RefreshPolicy;
-    use zg_transport_mcp::IndexOperationProvider;
-
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
     let engine = empty_search_engine(&root).await;
@@ -474,9 +474,6 @@ async fn a_read_retains_changes_discovered_and_indexed_during_reconciliation() {
 
 #[tokio::test]
 async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not() {
-    use zg_engine::api::{context::options::RefreshPolicy, info::result::IndexStats};
-    use zg_transport_mcp::IndexOperationProvider;
-
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
     let engine = empty_search_engine(&root).await;
@@ -497,28 +494,42 @@ async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not(
         })
         .await
         .expect("status");
-    for stats in [
-        IndexStats::default(),
-        IndexStats {
-            files_pending: 1,
-            files_failed: 1,
-            ..Default::default()
-        },
-        IndexStats {
-            files_added: 1,
-            ..Default::default()
-        },
-        IndexStats {
-            files_modified: 1,
-            ..Default::default()
-        },
-        IndexStats {
-            files_deleted: 1,
-            ..Default::default()
-        },
+    for (stats, expected_freshness, not_ready) in [
+        (IndexStats::default(), "fresh", false),
+        (
+            IndexStats {
+                files_pending: 1,
+                files_failed: 1,
+                ..Default::default()
+            },
+            "fresh",
+            true,
+        ),
+        (
+            IndexStats {
+                files_added: 1,
+                ..Default::default()
+            },
+            "possibly_stale",
+            true,
+        ),
+        (
+            IndexStats {
+                files_modified: 1,
+                ..Default::default()
+            },
+            "possibly_stale",
+            true,
+        ),
+        (
+            IndexStats {
+                files_deleted: 1,
+                ..Default::default()
+            },
+            "possibly_stale",
+            true,
+        ),
     ] {
-        let drift = stats.files_added + stats.files_modified + stats.files_deleted > 0;
-        let not_ready = drift || stats.files_pending > 0 || stats.files_failed > 0;
         info.status = Some(stats);
         let epoch = super::super::lock(&runtime.index_status).invalidate();
         let job = manager.job_for_root(&root).map(|job| (job.id, job.state));
@@ -527,10 +538,7 @@ async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not(
             .search(&engine, lexical_search(&root, RefreshPolicy::Off))
             .await
             .expect("search after inspection");
-        assert_eq!(
-            result.freshness.as_deref(),
-            Some(if drift { "possibly_stale" } else { "fresh" })
-        );
+        assert_eq!(result.freshness.as_deref(), Some(expected_freshness));
         assert_eq!(result.indexing.is_some(), not_ready);
         let refreshed = manager
             .refresh_index(options.clone(), true)
@@ -544,9 +552,6 @@ async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not(
 
 #[tokio::test]
 async fn background_scheduling_failure_does_not_imply_changed_files() {
-    use zg_engine::api::context::options::RefreshPolicy;
-    use zg_transport_mcp::IndexOperationProvider;
-
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
     let engine = empty_search_engine(&root).await;

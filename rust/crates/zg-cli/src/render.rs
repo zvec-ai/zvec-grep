@@ -48,36 +48,34 @@ pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> i
     if result.source != ContextSource::Index {
         return Ok(());
     }
-    let has_drift = result.freshness.as_deref() == Some("possibly_stale")
-        || result
-            .items
-            .iter()
-            .any(|item| item.status == ContextItemStatus::PossiblyStale);
+    let has_drift =
+        result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
     if !has_drift && result.indexing.is_none() {
         return Ok(());
     }
     writeln!(writer, "status: possibly_stale")?;
-    let state = result
+    let Some(state) = result
         .indexing
         .as_ref()
         .map(|indexing| indexing.state.as_str())
-        .or(result.background_refresh.as_deref());
-    if let Some(state) = state {
-        writeln!(writer, "results: served_from_current_index")?;
-        write!(
-            writer,
-            "background_refresh: {}",
-            if state == "off" { "idle" } else { state }
-        )?;
-        if let Some((completed, total)) = result
-            .indexing
-            .as_ref()
-            .and_then(|indexing| indexing.completed.zip(indexing.total))
-        {
-            write!(writer, " ({completed}/{total})")?;
-        }
-        writeln!(writer)?;
+        .or(result.background_refresh.as_deref())
+    else {
+        return Ok(());
+    };
+    writeln!(writer, "results: served_from_current_index")?;
+    write!(
+        writer,
+        "background_refresh: {}",
+        if state == "off" { "idle" } else { state }
+    )?;
+    if let Some((completed, total)) = result
+        .indexing
+        .as_ref()
+        .and_then(|indexing| indexing.completed.zip(indexing.total))
+    {
+        write!(writer, " ({completed}/{total})")?;
     }
+    writeln!(writer)?;
     Ok(())
 }
 
@@ -878,6 +876,22 @@ mod output_tests {
         }
     }
 
+    fn indexed_result() -> ContextResult {
+        ContextResult {
+            query: "needle".into(),
+            freshness: None,
+            background_refresh: None,
+            indexing: None,
+            root: std::env::temp_dir(),
+            source: ContextSource::Index,
+            coverage: ContextCoverage::RankedSample,
+            workspace_index: None,
+            group_results: vec![],
+            diagnostics: ContextDiagnostics::default(),
+            items: vec![indexed_item()],
+        }
+    }
+
     #[test]
     fn preview_numbers_follow_content_range_instead_of_match_or_entity_range() {
         for trailing_newline in [false, true] {
@@ -943,19 +957,10 @@ mod output_tests {
     #[test]
     fn context_status_is_independent_of_results_and_reports_index_progress() {
         use zg_engine::api::context::result::ContextIndexingStatus;
-        let mut result = ContextResult {
-            query: "needle".into(),
-            freshness: Some("fresh".into()),
-            background_refresh: Some("idle".into()),
-            indexing: None,
-            root: std::env::temp_dir(),
-            source: ContextSource::Index,
-            coverage: ContextCoverage::RankedSample,
-            workspace_index: None,
-            group_results: vec![],
-            diagnostics: ContextDiagnostics::default(),
-            items: vec![],
-        };
+        let mut result = indexed_result();
+        result.freshness = Some("fresh".into());
+        result.background_refresh = Some("idle".into());
+        result.items.clear();
         let render = |result: &ContextResult| {
             let mut output = Vec::new();
             super::write_context_status(&mut output, result).expect("status");
@@ -996,19 +1001,7 @@ mod output_tests {
 
     #[test]
     fn preview_modes_and_trace_preserve_indexed_result_information() {
-        let mut result = ContextResult {
-            query: "needle".into(),
-            freshness: None,
-            background_refresh: None,
-            indexing: None,
-            root: std::env::temp_dir(),
-            source: ContextSource::Index,
-            coverage: ContextCoverage::RankedSample,
-            workspace_index: None,
-            group_results: vec![],
-            diagnostics: ContextDiagnostics::default(),
-            items: vec![indexed_item()],
-        };
+        let mut result = indexed_result();
         let render = |preview, trace| {
             let mut buffer = Vec::new();
             write_context_with_options(
