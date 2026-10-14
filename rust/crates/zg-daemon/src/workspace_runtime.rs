@@ -44,7 +44,7 @@ use zg_transport_mcp::{
 };
 
 mod freshness;
-use freshness::Freshness;
+use freshness::{Freshness, SearchFreshness};
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceRuntimeManager {
@@ -570,9 +570,7 @@ impl WorkspaceRuntimeManager {
         let busy = current_job
             .is_some_and(|(_, state)| matches!(state, JobState::Queued | JobState::Running));
         // Never restore ready after a watcher notification, job submission or concurrent scan.
-        if busy
-            || current_job != observed_job
-            || !lock(&runtime.index_status).record(epoch, &info, current_job)
+        if busy || current_job != observed_job || !runtime.record_status(epoch, &info, current_job)
         {
             info.status = None;
         }
@@ -718,6 +716,32 @@ impl WorkspaceRuntimeManager {
             .filter(|(candidate, _)| root.starts_with(candidate))
             .max_by_key(|(candidate, _)| candidate.components().count())
             .and_then(|(_, runtime)| RuntimeActivity::begin(runtime, true)))
+    }
+
+    fn search_freshness_for(&self, root: &Path) -> Result<SearchFreshness, EngineError> {
+        Ok(self
+            .existing_activity(Some(root))?
+            .as_ref()
+            .map(|runtime| runtime.search_freshness())
+            .unwrap_or_default())
+    }
+
+    fn finalize_search_reply(
+        &self,
+        reply: &mut ContextResult,
+        before: SearchFreshness,
+        after: SearchFreshness,
+    ) {
+        set_search_freshness(reply, before, after);
+        let manual_update = self.job_for_root(&reply.root).is_some_and(|job| {
+            job.reason == JobReason::Manual
+                && matches!(job.state, JobState::Queued | JobState::Running)
+        });
+        reply.indexing = search_indexing_status(
+            reply,
+            IndexOperationProvider::runtime_snapshot(self, &reply.root).as_ref(),
+            manual_update,
+        );
     }
 
     async fn on_index_succeeded(
@@ -940,6 +964,10 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             return engine.context(request).await;
         }
         let _activity = self.existing_activity(request.root.as_deref())?;
+        let before = _activity
+            .as_ref()
+            .map(|runtime| runtime.search_freshness())
+            .unwrap_or_default();
         let policy = request.refresh.unwrap_or(if request.auto_update {
             RefreshPolicy::Background
         } else {
@@ -947,12 +975,6 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         });
         request.auto_update = false;
         request.refresh = Some(policy);
-        if policy == RefreshPolicy::Off {
-            let mut reply = engine.context(request).await?;
-            reply.freshness = Some("served_from_current_index".to_owned());
-            reply.background_refresh = Some("off".to_owned());
-            return Ok(reply);
-        }
         let options = IndexOptions {
             root: request.root.clone(),
             on_progress: request.on_progress.clone(),
@@ -967,21 +989,26 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             model_cache: request.model_cache.clone(),
             ..IndexOptions::default()
         };
-        if policy == RefreshPolicy::Background {
+        if matches!(policy, RefreshPolicy::Off | RefreshPolicy::Background) {
             // Query first so our own refresh cannot lock out the current-index read.
             // A successful query also proves that this operation is not creating an index.
             let mut reply = engine.context(request).await?;
             let mut options = options;
             options.root = Some(reply.root.clone());
-            reply.freshness = Some("served_from_current_index".to_owned());
-            reply.background_refresh = Some(match self.refresh_index(options, false).await {
-                Ok(true) => "scheduled".to_owned(),
-                Ok(false) => "idle".to_owned(),
-                Err(error) => {
-                    warn!(%error, "search background refresh could not be scheduled");
-                    "failed".to_owned()
+            reply.background_refresh = Some(if policy == RefreshPolicy::Off {
+                "off".to_owned()
+            } else {
+                match self.refresh_index(options, false).await {
+                    Ok(true) => "scheduled".to_owned(),
+                    Ok(false) => "idle".to_owned(),
+                    Err(error) => {
+                        warn!(%error, "search background refresh could not be scheduled");
+                        "failed".to_owned()
+                    }
                 }
             });
+            let after = self.search_freshness_for(&reply.root)?;
+            self.finalize_search_reply(&mut reply, before, after);
             return Ok(reply);
         }
         let requested_root = canonical_root(request.root.as_deref())
@@ -1024,9 +1051,17 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         .await?;
         // Resident Wait reconciles delivered watcher events. OS notifications
         // still in flight belong to a later refresh, not a second disk scan.
+        let before = _refresh_activity
+            .as_ref()
+            .map(|runtime| runtime.search_freshness())
+            .unwrap_or_default();
         let mut reply = engine.context_after_refresh(request).await?;
-        reply.freshness = Some("fresh".to_owned());
+        let after = _refresh_activity
+            .as_ref()
+            .map(|runtime| runtime.search_freshness())
+            .unwrap_or_default();
         reply.background_refresh = Some("idle".to_owned());
+        self.finalize_search_reply(&mut reply, before, after);
         Ok(reply)
     }
 
@@ -1072,6 +1107,74 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             }),
         })
     }
+}
+
+fn set_search_freshness(
+    reply: &mut ContextResult,
+    before: SearchFreshness,
+    after: SearchFreshness,
+) {
+    let stale = after.changed_since(before)
+        || reply.items.iter().any(|item| {
+            item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale
+        });
+    reply.freshness = Some(if stale { "possibly_stale" } else { "fresh" }.to_owned());
+}
+
+fn search_indexing_status(
+    reply: &ContextResult,
+    runtime: Option<&IndexRuntimeSnapshot>,
+    manual_update: bool,
+) -> Option<zg_engine::api::context::result::ContextIndexingStatus> {
+    use zg_engine::api::context::result::ContextIndexingStatus;
+
+    let stats = runtime
+        .and_then(|runtime| {
+            runtime
+                .index_status
+                .as_ref()
+                .or(runtime.completion_baseline.as_ref())
+        })
+        .and_then(|snapshot| snapshot.stats.as_ref());
+    let not_ready = stats.and_then(ContextIndexingStatus::from_stats);
+    if reply.freshness.as_deref() != Some("possibly_stale") && not_ready.is_none() && !manual_update
+    {
+        return None;
+    }
+    let refresh_state = runtime.and_then(|runtime| runtime.job_state).map_or_else(
+        || match reply.background_refresh.as_deref() {
+            Some("scheduled") => "queued",
+            Some("failed") => "failed",
+            _ => "idle",
+        },
+        |state| match state {
+            IndexOperationState::Queued => "queued",
+            IndexOperationState::Running => "running",
+            IndexOperationState::Succeeded => "succeeded",
+            IndexOperationState::Failed => "failed",
+            IndexOperationState::Cancelled => "cancelled",
+        },
+    );
+    let mut completion = stats.map(|stats| (stats.files_unchanged, stats.files_scanned));
+    if refresh_state == "running"
+        && let Some(progress) = runtime.and_then(|runtime| runtime.progress.as_ref())
+    {
+        let succeeded = progress
+            .files_indexed
+            .map(|indexed| indexed.saturating_sub(progress.files_failed.unwrap_or(0)));
+        completion = match completion {
+            Some((completed, total)) => Some((
+                completed.saturating_add(succeeded.unwrap_or(0)).min(total),
+                total,
+            )),
+            None => succeeded.zip(progress.files_total),
+        };
+    }
+    Some(ContextIndexingStatus {
+        state: refresh_state.to_owned(),
+        completed: completion.map(|(completed, _)| completed),
+        total: completion.map(|(_, total)| total),
+    })
 }
 
 async fn wait_for_search_refresh<T>(
@@ -1159,7 +1262,17 @@ async fn watch_loop(
             break;
         };
         runtime.invalidate_status();
-        runtime.dirty_revision.fetch_add(1, Ordering::AcqRel);
+        let revision = runtime.dirty_revision.fetch_add(1, Ordering::AcqRel) + 1;
+        if batch.changes.iter().any(|change| {
+            matches!(
+                change,
+                WorkspaceChange::Upsert(_)
+                    | WorkspaceChange::Delete(_)
+                    | WorkspaceChange::DeletePrefix(_)
+            )
+        }) {
+            runtime.observe_file_changes(revision);
+        }
         let mut options = lock(&runtime.index_template).clone();
         // One-operation consent must never authorize later watcher jobs.
         options.allow_remote = false;

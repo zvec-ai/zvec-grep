@@ -240,8 +240,10 @@ events and queued successors; concurrent waiters share one refresh. A clean
 `Background` query reports `idle` without submitting another job. Initial watcher
 installation, recovery, overflow, rejected batches, and failed indexing require a
 full reconciliation. Proofs retain their original revision and recovery epoch so
-an older completion cannot clear newer changes; partial file failures are never
-cached as fresh. Native `flush_pending` drains delivered events without forcing a
+an older completion cannot clear newer changes; partial file failures never
+establish a reconciliation proof. Public search freshness requires observed
+file-change evidence independently of reconciliation or background activity.
+Native `flush_pending` drains delivered events without forcing a
 scan, while explicit `flush` and periodic/recovery checks retain full rescans.
 Explicit `info` inspection still reads current disk status.
 

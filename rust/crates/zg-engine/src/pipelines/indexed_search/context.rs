@@ -210,6 +210,7 @@ fn build_context_result(
     Ok(ContextResult {
         freshness: None,
         background_refresh: None,
+        indexing: None,
         query: request.display_query.clone(),
         root: root.to_path_buf(),
         source: ContextSource::Index,
@@ -536,12 +537,20 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
 }
 
 fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextItemStatus {
-    if !file.index_status.is_indexed() {
-        return ContextItemStatus::PossiblyStale;
-    }
     let absolute_path = workspace_root.join(&file.relative_path);
-    let Ok(metadata) = fs::metadata(&absolute_path) else {
-        return ContextItemStatus::PossiblyStale;
+    let metadata = match fs::metadata(&absolute_path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            // Missing sources prove drift; inaccessible metadata alone does not.
+            return if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) {
+                ContextItemStatus::PossiblyStale
+            } else {
+                ContextItemStatus::Fresh
+            };
+        }
     };
     if !metadata.is_file() {
         return ContextItemStatus::PossiblyStale;
@@ -558,11 +567,24 @@ fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextIte
         return ContextItemStatus::Fresh;
     }
     if let Some(expected) = &file.snapshot.content_hash
-        && fs::read(&absolute_path).is_ok_and(|bytes| sha256_hex(&bytes) == *expected)
+        && let Ok(bytes) = fs::read(&absolute_path)
     {
-        return ContextItemStatus::Fresh;
+        return if sha256_hex(&bytes) == *expected {
+            ContextItemStatus::Fresh
+        } else {
+            ContextItemStatus::PossiblyStale
+        };
     }
-    ContextItemStatus::PossiblyStale
+    let metadata_changed = metadata.len() != file.snapshot.size_bytes
+        || modified
+            .zip(file.snapshot.modified_epoch_ms)
+            .is_some_and(|(current, indexed)| current != indexed);
+    if metadata_changed {
+        ContextItemStatus::PossiblyStale
+    } else {
+        // Missing index, timestamp or hash information is not proof of an update.
+        ContextItemStatus::Fresh
+    }
 }
 
 fn rank_as_f64(rank: usize) -> f64 {
@@ -960,6 +982,45 @@ mod tests {
             super::file_freshness_status(&moved_root, &future_indexed),
             ContextItemStatus::PossiblyStale,
             "an index clock ahead of file mtime does not prove the source is unchanged"
+        );
+    }
+
+    #[test]
+    fn source_freshness_requires_a_snapshot_mismatch_or_missing_file() {
+        use crate::domain::{FileId, FileIndexStatus, FileRecord, FileSnapshot, SourcePath};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("source.txt");
+        std::fs::write(&path, "source contents").expect("source");
+        let mut file = FileRecord {
+            id: FileId::new(1),
+            relative_path: SourcePath::new("source.txt").expect("source path"),
+            snapshot: FileSnapshot {
+                size_bytes: 15,
+                modified_epoch_ms: None,
+                content_hash: None,
+            },
+            index_status: FileIndexStatus::NotIndexed,
+        };
+        assert_eq!(
+            super::file_freshness_status(directory.path(), &file),
+            ContextItemStatus::Fresh,
+            "missing index/mtime/hash proof is not evidence of an updated file"
+        );
+        file.snapshot.content_hash = Some(crate::utils::sha256_hex(b"source contents"));
+        assert_eq!(
+            super::file_freshness_status(directory.path(), &file),
+            ContextItemStatus::Fresh
+        );
+        std::fs::write(&path, "edited contents").expect("same-size update");
+        assert_eq!(
+            super::file_freshness_status(directory.path(), &file),
+            ContextItemStatus::PossiblyStale
+        );
+        std::fs::remove_file(&path).expect("remove source");
+        assert_eq!(
+            super::file_freshness_status(directory.path(), &file),
+            ContextItemStatus::PossiblyStale
         );
     }
 

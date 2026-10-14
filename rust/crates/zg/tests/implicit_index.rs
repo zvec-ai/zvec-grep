@@ -436,6 +436,10 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
                 if !stdout.contains("anchor.txt") {
                     return Err(format!("--mode {mode} --refresh {refresh} did not return anchor.txt: {stdout}"));
                 }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: running") {
+                    return Err(format!("--mode {mode} --refresh {refresh} omitted the running index status: {stderr}"));
+                }
             }
         }
         Ok(())
@@ -454,6 +458,29 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
     indexed.expect("incremental index completes after gate release");
     success(stopped.expect("stop daemon"));
     result.expect("indexed CLI queries must finish before the writer is released");
+}
+
+#[test]
+fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
+    let fixture = Fixture::new();
+    let clean = fixture.success(&["--mode", "direct", "--fts", "needle", "--no-color"]);
+    assert!(!String::from_utf8_lossy(&clean.stderr).contains("status:"));
+    fs::write(
+        fixture.root.path().join("unmatched.txt"),
+        "unrelated contents",
+    )
+    .expect("unindexed source");
+    let stale = fixture.success(&[
+        "--mode",
+        "direct",
+        "--fts",
+        "needle",
+        "--refresh",
+        "off",
+        "--no-color",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&stale.stdout), "No matches.\n");
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle (0/1)\n"), "{}", String::from_utf8_lossy(&stale.stderr));
 }
 
 #[test]

@@ -38,6 +38,176 @@ async fn deliver(
     runtime.settle_jobs(&manager.inner.scheduler, None).await;
 }
 
+async fn empty_search_engine(root: &std::path::Path) -> Arc<zg_engine::ZvecGrep> {
+    use zg_engine::api::index::options::EmbeddingModelSpec;
+
+    let engine = Arc::new(zg_engine::ZvecGrep::new());
+    engine
+        .index(IndexOptions {
+            root: Some(root.to_path_buf()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/text-embedding-v4".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: zg_engine::api::index::options::Device::Cpu,
+            }),
+            endpoint: Some("http://127.0.0.1:1/empty-index".into()),
+            api_key: Some("fixture-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        })
+        .await
+        .expect("empty index requires no embedding request");
+    engine
+}
+
+fn lexical_search(
+    root: &std::path::Path,
+    policy: zg_engine::api::context::options::RefreshPolicy,
+) -> zg_engine::api::context::ContextOptions {
+    use zg_engine::api::context::options::{ContextRoute, ContextRouteMode};
+    zg_engine::api::context::ContextOptions {
+        root: Some(root.to_path_buf()),
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Fts,
+            query: "needle".into(),
+        }],
+        refresh: Some(policy),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn clean_searches_remain_fresh_during_initial_reconciliation_and_idle() {
+    use zg_engine::api::context::options::RefreshPolicy;
+    use zg_transport_mcp::IndexOperationProvider;
+
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (manager, _sender) = fixture(executor.clone());
+    let off = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("off search");
+    assert_eq!(off.freshness.as_deref(), Some("fresh"));
+    let first = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Background))
+        .await
+        .expect("initial search");
+    assert_eq!(first.freshness.as_deref(), Some("fresh"));
+    assert_eq!(first.background_refresh.as_deref(), Some("scheduled"));
+    jobs.recv().await.expect("initial reconciliation started");
+    executor.release.add_permits(1);
+    manager
+        .refresh_index(
+            IndexOptions {
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+            true,
+        )
+        .await
+        .expect("finish reconciliation");
+    let idle = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Background))
+        .await
+        .expect("idle search");
+    assert_eq!(idle.freshness.as_deref(), Some("fresh"));
+    assert_eq!(idle.background_refresh.as_deref(), Some("idle"));
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn only_unindexed_file_notifications_make_unmatched_searches_stale() {
+    use zg_engine::api::context::options::RefreshPolicy;
+    use zg_transport_mcp::IndexOperationProvider;
+
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(1),
+    });
+    let (manager, sender) = fixture(executor.clone());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial reconciliation");
+    jobs.recv().await.expect("initial job");
+    let runtime = manager.runtime(root.clone(), &options).expect("runtime");
+    for change in [
+        WorkspaceChange::Rescan,
+        WorkspaceChange::RescanDirectory("src".into()),
+        WorkspaceChange::Upsert("unmatched.txt".into()),
+        WorkspaceChange::Delete("unmatched.txt".into()),
+        WorkspaceChange::DeletePrefix("src".into()),
+    ] {
+        let known_file_change = matches!(
+            change,
+            WorkspaceChange::Upsert(_)
+                | WorkspaceChange::Delete(_)
+                | WorkspaceChange::DeletePrefix(_)
+        );
+        sender
+            .send(WorkspaceChangeBatch {
+                changes: vec![change],
+            })
+            .await
+            .expect("notification");
+        manager
+            .flush_watcher(&runtime)
+            .await
+            .expect("deliver notification");
+        jobs.recv().await.expect("watcher job started");
+        let result = manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+            .await
+            .expect("search during update");
+        assert!(result.items.is_empty());
+        assert_eq!(
+            result.freshness.as_deref(),
+            Some(if known_file_change {
+                "possibly_stale"
+            } else {
+                "fresh"
+            })
+        );
+        assert_eq!(
+            result
+                .indexing
+                .as_ref()
+                .map(|indexing| indexing.state.as_str()),
+            known_file_change.then_some("running")
+        );
+        executor.release.add_permits(1);
+        manager
+            .refresh_index(options.clone(), true)
+            .await
+            .expect("drain update");
+        let indexed = manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+            .await
+            .expect("search after update");
+        assert_eq!(indexed.freshness.as_deref(), Some("fresh"));
+    }
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
 #[tokio::test]
 async fn repeated_clean_refreshes_and_narrow_changes_do_not_rescan() {
     let workspace = tempdir().expect("workspace");
@@ -169,8 +339,12 @@ async fn a_new_recovery_epoch_cannot_be_cleared_by_an_older_full_refresh() {
 
 #[tokio::test]
 async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
+    use zg_engine::api::context::options::RefreshPolicy;
+    use zg_transport_mcp::IndexOperationProvider;
+
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
     let executor = Arc::new(RecordingExecutor::default());
     let (manager, sender) = fixture(executor.clone());
     let options = IndexOptions {
@@ -182,6 +356,16 @@ async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
         .await
         .expect("initial refresh");
     executor.fail.store(true, Ordering::Release);
+    deliver(&manager, &sender, &root, WorkspaceChange::Rescan).await;
+    let recovery = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("failed recovery search");
+    assert_eq!(
+        recovery.freshness.as_deref(),
+        Some("fresh"),
+        "recovery failure alone is not file-change evidence"
+    );
     deliver(
         &manager,
         &sender,
@@ -189,6 +373,11 @@ async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
         WorkspaceChange::Upsert("failed.rs".into()),
     )
     .await;
+    let failed = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("failed update search");
+    assert_eq!(failed.freshness.as_deref(), Some("possibly_stale"));
     executor.fail.store(false, Ordering::Release);
     deliver(
         &manager,
@@ -197,9 +386,18 @@ async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
         WorkspaceChange::Upsert("later.rs".into()),
     )
     .await;
+    let later = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("later update search");
+    assert_eq!(
+        later.freshness.as_deref(),
+        Some("possibly_stale"),
+        "a different successful batch cannot clear the failed file"
+    );
     assert!(
         !manager
-            .runtime(root, &options)
+            .runtime(root.clone(), &options)
             .expect("runtime")
             .is_reconciled()
     );
@@ -209,12 +407,171 @@ async fn a_successful_narrow_job_does_not_cover_an_earlier_failed_batch() {
             .await
             .expect("repair lost batch")
     );
-    assert_eq!(executor.calls.lock().expect("calls").len(), 4);
+    assert_eq!(executor.calls.lock().expect("calls").len(), 5);
     assert_eq!(
-        executor.calls.lock().expect("calls")[3].changes,
+        executor.calls.lock().expect("calls")[4].changes,
         [IndexChange::Rescan]
     );
+    let repaired = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("repaired search");
+    assert_eq!(repaired.freshness.as_deref(), Some("fresh"));
     manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+struct DriftExecutor;
+
+#[async_trait]
+impl IndexExecutor for DriftExecutor {
+    async fn index(&self, _options: IndexOptions) -> Result<IndexResult, EngineError> {
+        Ok(IndexResult {
+            files_modified: 1,
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_read_retains_changes_discovered_and_indexed_during_reconciliation() {
+    use zg_engine::api::context::options::RefreshPolicy;
+    use zg_transport_mcp::IndexOperationProvider;
+
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (manager, _sender) = fixture(Arc::new(DriftExecutor));
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    let runtime = manager.runtime(root.clone(), &options).expect("runtime");
+    let before = runtime.search_freshness();
+    let mut read = engine
+        .context(lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("current index read");
+    assert!(read.items.is_empty());
+    manager
+        .refresh_index(options, true)
+        .await
+        .expect("reconciliation discovers and indexes a change");
+    super::super::set_search_freshness(&mut read, before, runtime.search_freshness());
+    assert_eq!(
+        read.freshness.as_deref(),
+        Some("possibly_stale"),
+        "completion cannot change the freshness of an earlier read"
+    );
+    let current = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+        .await
+        .expect("read after completion");
+    assert_eq!(current.freshness.as_deref(), Some("fresh"));
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not() {
+    use zg_engine::api::{context::options::RefreshPolicy, info::result::IndexStats};
+    use zg_transport_mcp::IndexOperationProvider;
+
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (manager, _sender) = fixture(Arc::new(RecordingExecutor::default()));
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    manager
+        .refresh_index(options.clone(), true)
+        .await
+        .expect("initial reconciliation");
+    let runtime = manager.runtime(root.clone(), &options).expect("runtime");
+    let mut info = engine
+        .info(InfoOptions {
+            root: Some(root.clone()),
+            include_status: true,
+        })
+        .await
+        .expect("status");
+    for stats in [
+        IndexStats::default(),
+        IndexStats {
+            files_pending: 1,
+            files_failed: 1,
+            ..Default::default()
+        },
+        IndexStats {
+            files_added: 1,
+            ..Default::default()
+        },
+        IndexStats {
+            files_modified: 1,
+            ..Default::default()
+        },
+        IndexStats {
+            files_deleted: 1,
+            ..Default::default()
+        },
+    ] {
+        let drift = stats.files_added + stats.files_modified + stats.files_deleted > 0;
+        let not_ready = drift || stats.files_pending > 0 || stats.files_failed > 0;
+        info.status = Some(stats);
+        let epoch = super::super::lock(&runtime.index_status).invalidate();
+        let job = manager.job_for_root(&root).map(|job| (job.id, job.state));
+        assert!(runtime.record_status(epoch, &info, job));
+        let result = manager
+            .search(&engine, lexical_search(&root, RefreshPolicy::Off))
+            .await
+            .expect("search after inspection");
+        assert_eq!(
+            result.freshness.as_deref(),
+            Some(if drift { "possibly_stale" } else { "fresh" })
+        );
+        assert_eq!(result.indexing.is_some(), not_ready);
+        let refreshed = manager
+            .refresh_index(options.clone(), true)
+            .await
+            .expect("repair inspected drift");
+        assert_eq!(refreshed, not_ready);
+    }
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn background_scheduling_failure_does_not_imply_changed_files() {
+    use zg_engine::api::context::options::RefreshPolicy;
+    use zg_transport_mcp::IndexOperationProvider;
+
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (_sender, receiver) = mpsc::channel(8);
+    let manager = WorkspaceRuntimeManager::new(
+        Arc::new(RecordingExecutor::default()),
+        Arc::new(BusyWatcherFactory {
+            inner: ManualWatcherFactory {
+                receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+                watches: Mutex::new(Vec::new()),
+                closes: Arc::new(AtomicUsize::new(0)),
+            },
+            busy: AtomicBool::new(true),
+            blocked: tokio::sync::Notify::new(),
+        }),
+        SchedulerConfig::default(),
+    );
+    let result = manager
+        .search(&engine, lexical_search(&root, RefreshPolicy::Background))
+        .await
+        .expect("read despite refresh failure");
+    assert_eq!(result.freshness.as_deref(), Some("fresh"));
+    assert_eq!(result.background_refresh.as_deref(), Some("failed"));
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
 }
 
 #[tokio::test]

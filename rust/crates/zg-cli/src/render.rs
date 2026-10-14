@@ -40,6 +40,47 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
     Ok(())
 }
 
+/// Writes Node-compatible indexed-search status to the caller's diagnostic stream.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> io::Result<()> {
+    use zg_engine::api::context::result::ContextSource;
+    if result.source != ContextSource::Index {
+        return Ok(());
+    }
+    let has_drift = result.freshness.as_deref() == Some("possibly_stale")
+        || result
+            .items
+            .iter()
+            .any(|item| item.status == ContextItemStatus::PossiblyStale);
+    if !has_drift && result.indexing.is_none() {
+        return Ok(());
+    }
+    writeln!(writer, "status: possibly_stale")?;
+    let state = result
+        .indexing
+        .as_ref()
+        .map(|indexing| indexing.state.as_str())
+        .or(result.background_refresh.as_deref());
+    if let Some(state) = state {
+        writeln!(writer, "results: served_from_current_index")?;
+        write!(
+            writer,
+            "background_refresh: {}",
+            if state == "off" { "idle" } else { state }
+        )?;
+        if let Some((completed, total)) = result
+            .indexing
+            .as_ref()
+            .and_then(|indexing| indexing.completed.zip(indexing.total))
+        {
+            write!(writer, " ({completed}/{total})")?;
+        }
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
 /// Writes context using the selected terminal presentation.
 /// # Errors
 /// Returns the underlying writer error.
@@ -900,11 +941,66 @@ mod output_tests {
     }
 
     #[test]
+    fn context_status_is_independent_of_results_and_reports_index_progress() {
+        use zg_engine::api::context::result::ContextIndexingStatus;
+        let mut result = ContextResult {
+            query: "needle".into(),
+            freshness: Some("fresh".into()),
+            background_refresh: Some("idle".into()),
+            indexing: None,
+            root: std::env::temp_dir(),
+            source: ContextSource::Index,
+            coverage: ContextCoverage::RankedSample,
+            workspace_index: None,
+            group_results: vec![],
+            diagnostics: ContextDiagnostics::default(),
+            items: vec![],
+        };
+        let render = |result: &ContextResult| {
+            let mut output = Vec::new();
+            super::write_context_status(&mut output, result).expect("status");
+            String::from_utf8(output).expect("UTF-8")
+        };
+        assert_eq!(render(&result), "");
+        result.indexing = Some(ContextIndexingStatus {
+            state: "idle".into(),
+            completed: Some(2),
+            total: Some(3),
+        });
+        assert_eq!(
+            render(&result),
+            "status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle (2/3)\n"
+        );
+        for state in ["queued", "running", "failed", "cancelled", "succeeded"] {
+            result.indexing = Some(ContextIndexingStatus {
+                state: state.into(),
+                completed: None,
+                total: Some(3),
+            });
+            assert_eq!(
+                render(&result),
+                format!(
+                    "status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: {state}\n"
+                )
+            );
+        }
+        result.indexing = None;
+        result.freshness = Some("served_from_current_index".into());
+        assert_eq!(render(&result), "");
+        result.freshness = Some("possibly_stale".into());
+        result.background_refresh = None;
+        assert_eq!(render(&result), "status: possibly_stale\n");
+        result.source = ContextSource::Rg;
+        assert_eq!(render(&result), "");
+    }
+
+    #[test]
     fn preview_modes_and_trace_preserve_indexed_result_information() {
         let mut result = ContextResult {
             query: "needle".into(),
             freshness: None,
             background_refresh: None,
+            indexing: None,
             root: std::env::temp_dir(),
             source: ContextSource::Index,
             coverage: ContextCoverage::RankedSample,
