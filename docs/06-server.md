@@ -162,10 +162,32 @@ The execution mode changes the default indexed-search refresh policy:
 | `--refresh wait` | Wait for a fresh index | Update and wait in the current process |
 | `--refresh off` | Search without updating | Search without updating |
 
-Server searches return `freshness: possibly_stale` only with evidence of index
-drift. The first refresh after activation may use this conservative status; an
-hourly reconciliation remains `fresh` until its probe finds a mismatch. Use
-`--refresh wait` only when the latest file state is required.
+The Node.js Server may report `freshness: possibly_stale` for pending watcher
+activity or queued and running manual indexing tasks. The first refresh after
+activation can also use this conservative status; an hourly reconciliation
+remains `fresh` until its probe finds a mismatch.
+
+The Rust Server returns `freshness: possibly_stale` only with evidence of index
+drift: an observed file change that has not been indexed, a disk inspection
+that finds added, modified or deleted files, or a returned source that differs
+from its indexed snapshot. Activation, reconciliation requests and refresh
+failures alone do not prove drift. `fresh` means no file changes were observed
+for this read; it does not require a full workspace scan. Background refresh
+activity is reported separately. Use `--refresh wait` when the latest file
+state is required.
+
+Both Rust modes compare returned sources with their indexed snapshots. The
+resident Server also observes pending changes elsewhere in the workspace
+through its watcher and inspections; Direct has no resident watcher. The Server
+does not run a workspace-wide scan solely to label every search response. As in the Node.js
+CLI, Direct queries with refresh off inspect index health for the status warning.
+
+The Rust CLI, like the Node.js CLI, writes `status: possibly_stale` to stderr
+when the returned results may be stale or the observed index health is not
+ready. It also reports `results: served_from_current_index` and
+`background_refresh` with any known completion counts. Ready searches do not print this warning; stdout contains
+only search results. CLI index health warnings are independent of the MCP
+file-change freshness rule.
 
 Watcher-reported path updates skip workspace-wide status scans. Because
 file-system watchers can silently miss events, the Server schedules an hourly

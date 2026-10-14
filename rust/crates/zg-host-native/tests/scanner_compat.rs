@@ -41,7 +41,7 @@ async fn scanner_delegates_selection_and_prunes_directories_before_visiting_file
     let temporary = tempdir()?;
     let root = temporary.path();
     fs::create_dir_all(root.join("blocked/deep"))?;
-    fs::create_dir_all(root.join("nested/.git"))?;
+    fs::create_dir(root.join("nested"))?;
     fs::write(root.join("tracked.rs"), "fn tracked() {}\n")?;
     fs::write(root.join("excluded.txt"), "excluded\n")?;
     fs::write(root.join("blocked/deep/file.rs"), "blocked\n")?;
@@ -73,10 +73,8 @@ async fn scanner_delegates_selection_and_prunes_directories_before_visiting_file
         .iter()
         .find(|file| file.relative_path == Path::new("tracked.rs"))
         .expect("tracked file");
-    assert_eq!(
-        tracked.source_fingerprint,
-        metadata_fingerprint(&root.join("tracked.rs"))?
-    );
+    let fingerprint = metadata_fingerprint(&root.join("tracked.rs"))?;
+    assert_eq!(tracked.source_fingerprint, fingerprint);
     let sources = scanner
         .read_batch(
             &ReadBatchRequest {
@@ -85,11 +83,12 @@ async fn scanner_delegates_selection_and_prunes_directories_before_visiting_file
             &TaskControl::default(),
         )
         .await?;
-    assert!(
-        sources
-            .iter()
-            .any(|file| file.bytes == b"fn tracked() {}\n")
-    );
+    let tracked = sources
+        .iter()
+        .find(|file| file.relative_path == Path::new("tracked.rs"))
+        .expect("read tracked file");
+    assert_eq!(tracked.bytes, b"fn tracked() {}\n");
+    assert_eq!(tracked.source_fingerprint, fingerprint);
     Ok(())
 }
 

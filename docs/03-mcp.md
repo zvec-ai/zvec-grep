@@ -118,7 +118,16 @@ source:
 
 When `freshness` is `possibly_stale`, the response may also include current
 indexing state. Agents can use sufficient results immediately rather than
-running a status preflight.
+running a status preflight. The Node.js implementation also treats pending
+watcher activity and queued or running manual indexing tasks as possibly stale.
+
+**Rust implementation:** `freshness: possibly_stale` requires observed file
+changes: pending file notifications, added/modified/deleted files found by an
+inspection or refresh, or returned sources that differ from their indexed
+snapshots. Without this evidence the response is `fresh`, including an idle index or the first read
+after activation. `results: served_from_current_index` describes the source
+of the results; `background_refresh: scheduled` or `failed` describes refresh
+activity independently of freshness.
 
 Remote models may cause the tool to request explicit Remote Embedding
 authorization. See
