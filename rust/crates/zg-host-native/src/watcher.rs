@@ -167,19 +167,20 @@ impl WorkspaceWatcherFactoryPort for NativeWatcherFactory {
             close: close.clone(),
         }));
         Ok(Arc::new(NativeWatchSession {
-            inner: Arc::new(WatchSessionInner {
-                receiver: Mutex::new(batch_receiver),
-                flush_sender,
-                close,
-                task: StdMutex::new(Some(task)),
-            }),
+            receiver: Mutex::new(batch_receiver),
+            flush_sender,
+            close,
+            task: StdMutex::new(Some(task)),
         }))
     }
 }
 
 #[derive(Debug)]
 struct NativeWatchSession {
-    inner: Arc<WatchSessionInner>,
+    flush_sender: mpsc::Sender<FlushRequest>,
+    receiver: Mutex<mpsc::Receiver<WorkspaceChangeBatch>>,
+    close: CancellationToken,
+    task: StdMutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Debug)]
@@ -188,15 +189,7 @@ struct FlushRequest {
     acknowledge: oneshot::Sender<()>,
 }
 
-#[derive(Debug)]
-struct WatchSessionInner {
-    flush_sender: mpsc::Sender<FlushRequest>,
-    receiver: Mutex<mpsc::Receiver<WorkspaceChangeBatch>>,
-    close: CancellationToken,
-    task: StdMutex<Option<JoinHandle<()>>>,
-}
-
-impl Drop for WatchSessionInner {
+impl Drop for NativeWatchSession {
     fn drop(&mut self) {
         self.close.cancel();
         if let Ok(mut task) = self.task.lock()
@@ -210,8 +203,7 @@ impl Drop for WatchSessionInner {
 impl NativeWatchSession {
     async fn flush_changes(&self, reconcile: bool) -> Result<(), HostError> {
         let (sender, receiver) = oneshot::channel();
-        self.inner
-            .flush_sender
+        self.flush_sender
             .send(FlushRequest {
                 reconcile,
                 acknowledge: sender,
@@ -236,14 +228,14 @@ impl WorkspaceWatchSessionPort for NativeWatchSession {
 
     async fn next_changes(&self, control: &TaskControl) -> Result<WorkspaceChangeBatch, HostError> {
         check_control(control)?;
-        if self.inner.close.is_cancelled() {
+        if self.close.is_cancelled() {
             return Err(HostError::resource_closed(
                 "workspace watch session has been closed",
             ));
         }
-        let mut receiver = self.inner.receiver.lock().await;
+        let mut receiver = self.receiver.lock().await;
         tokio::select! {
-            () = self.inner.close.cancelled() => Err(HostError::resource_closed(
+            () = self.close.cancelled() => Err(HostError::resource_closed(
                 "workspace watch session has been closed",
             )),
             () = control.cancellation.cancelled() => Err(HostError::cancelled(
@@ -259,8 +251,8 @@ impl WorkspaceWatchSessionPort for NativeWatchSession {
     }
 
     async fn close(&self) -> Result<(), HostError> {
-        self.inner.close.cancel();
-        let task = lock_task(&self.inner.task).take();
+        self.close.cancel();
+        let task = lock_task(&self.task).take();
         if let Some(task) = task {
             task.await.map_err(|error| {
                 HostError::internal(format!("native watcher task failed: {error}"))
@@ -479,7 +471,6 @@ async fn watch_loop(mut state: WatchLoop) {
                             }
                             Err(error) => {
                                 warn!(%error, "native watcher event worker failed");
-                                state.watcher.take();
                                 consecutive_errors = consecutive_errors.saturating_add(1);
                                 stable_deadline = None;
                                 retry_deadline = Some(Instant::now() + retry_delay(consecutive_errors));
@@ -796,9 +787,11 @@ fn watch_directories(
 ) -> Result<WatchPlan, HostError> {
     let mut plan = WatchPlan::default();
     // Watching the parent preserves root replacement and recreation detection.
-    add_existing_parent(&root.path, &mut plan.directories);
+    plan.directories
+        .extend(existing_parent(&root.path).map(Path::to_path_buf));
     for control_path in root.policy.control_paths() {
-        add_existing_parent(&control_path, &mut plan.directories);
+        plan.directories
+            .extend(existing_parent(&control_path).map(Path::to_path_buf));
     }
     for path in &plan.directories {
         register(path)?;
@@ -813,26 +806,17 @@ fn watch_directories(
     }
     // Traversal may discover additional rule files (including symlink targets).
     for control in root.policy.control_paths() {
-        let mut parents = BTreeSet::new();
-        add_existing_parent(&control, &mut parents);
-        for parent in parents {
-            if plan.directories.insert(parent.clone()) {
-                register(&parent)?;
-            }
+        if let Some(parent) = existing_parent(&control)
+            && plan.directories.insert(parent.to_path_buf())
+        {
+            register(parent)?;
         }
     }
     Ok(plan)
 }
 
-fn add_existing_parent(path: &Path, directories: &mut BTreeSet<PathBuf>) {
-    let mut parent = path.parent();
-    while let Some(path) = parent {
-        if path.is_dir() {
-            directories.insert(path.to_path_buf());
-            break;
-        }
-        parent = path.parent();
-    }
+fn existing_parent(path: &Path) -> Option<&Path> {
+    path.ancestors().skip(1).find(|parent| parent.is_dir())
 }
 
 fn collect_watch_directories(
@@ -918,12 +902,10 @@ fn add_file_link(
         .entry(target.clone())
         .or_default()
         .insert(alias.to_path_buf());
-    let mut parents = BTreeSet::new();
-    add_existing_parent(&target, &mut parents);
-    for parent in parents {
-        if plan.directories.insert(parent.clone()) {
-            register(&parent)?;
-        }
+    if let Some(parent) = existing_parent(&target)
+        && plan.directories.insert(parent.to_path_buf())
+    {
+        register(parent)?;
     }
     Ok(())
 }
@@ -1116,20 +1098,15 @@ async fn sleep_until_option(deadline: Option<Instant>) {
 }
 
 async fn deadline_wait(deadline: Option<std::time::Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(Instant::from_std(deadline)).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
+    sleep_until_option(deadline.map(Instant::from_std)).await;
 }
 
 fn retry_delay(consecutive_errors: u32) -> Duration {
     let exponent = consecutive_errors.saturating_sub(1).min(6);
-    Duration::from_millis((100_u64.saturating_mul(2_u64.pow(exponent))).min(5_000))
+    Duration::from_millis((100 * 2_u64.pow(exponent)).min(5_000))
 }
 
 fn normalize_config(mut config: NativeWatcherConfig) -> NativeWatcherConfig {
-    config.max_changed_paths = config.max_changed_paths.max(1);
     config.raw_event_capacity = config.raw_event_capacity.max(1);
     config.batch_capacity = config.batch_capacity.max(1);
     config
@@ -1183,7 +1160,6 @@ mod tests {
     struct TestPolicy {
         excluded: PathBuf,
         control_file: PathBuf,
-        control_changes: AtomicUsize,
         invalidations: AtomicUsize,
     }
 
@@ -1200,7 +1176,6 @@ mod tests {
             if path != self.control_file {
                 return Ok(None);
             }
-            self.control_changes.fetch_add(1, Ordering::Relaxed);
             Ok(Some(PathBuf::new()))
         }
 
@@ -1220,7 +1195,6 @@ mod tests {
             Arc::new(TestPolicy {
                 excluded: path.join("blocked"),
                 control_file,
-                control_changes: AtomicUsize::new(0),
                 invalidations: AtomicUsize::new(0),
             }),
         )
@@ -1326,7 +1300,6 @@ mod tests {
         let policy = Arc::new(TestPolicy {
             excluded: temporary.path().join("blocked"),
             control_file: temporary.path().join(".rules"),
-            control_changes: AtomicUsize::new(0),
             invalidations: AtomicUsize::new(0),
         });
         let spec = RootSpec::new(temporary.path().to_path_buf(), policy.clone());
@@ -1373,7 +1346,6 @@ mod tests {
         let policy = Arc::new(TestPolicy {
             excluded: temporary.path().join("blocked"),
             control_file: temporary.path().join(".rules"),
-            control_changes: AtomicUsize::new(0),
             invalidations: AtomicUsize::new(0),
         });
         let spec = RootSpec::new(temporary.path().to_path_buf(), policy.clone());
