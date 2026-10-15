@@ -132,6 +132,16 @@ remain shared at engine scope and follow their own lease lifetime.
 The native engine supports indexing, indexed FTS and vector search, `zg --rg`,
 workspace discovery, `info`, and idempotent `drop_index`.
 
+Standalone code identifiers such as `zg verifyToken`, `zg request_service`, and
+`zg Request::Service` use case-sensitive whole-word literal search through embedded
+grep, without requiring an index or model. Plain `Request`/`request` and natural
+language retain hybrid search. Literal searches default to 7 matches and honor
+`--limit` and path globs. As with `--rg`, all transport modes execute them locally.
+Explicit retrieval routes, indexed type/category or symbol filters, and explicit
+`--refresh wait/background` preserve indexed search. Use `--hybrid verifyToken`
+when approximate matches are wanted. Automatic routing applies to CLI positionals;
+the engine and MCP indexed-query contracts are unchanged.
+
 Search directly with `zg "where authentication is validated"`, `zg --fts
 "AuthService"`, or `zg --rg -F "AuthService" src`. Management uses flags:
 `zg --index`, `zg --status`, `zg --server`, `zg --config`, `zg --auth`,

@@ -362,7 +362,7 @@ const SEARCH_HELP: &str = r#"Usage:
   zg --rg [rg-options] <pattern> [path...]
 
 Search routes:
-  positional query                  Hybrid FTS and vector search
+  positional query                  Hybrid search; standalone code identifiers use literal search
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
@@ -381,6 +381,15 @@ Result options:
 
 Indexed results are shown by query group, preserving each group's own rank.
 A result that matches more than one group is shown in each matching group.
+
+Standalone camelCase, PascalCase compounds, snake_case and Rust qualified names
+(verifyToken, RequestService, request_service, Request::Service) use embedded grep
+with case-sensitive whole-word literal matching, including when no index exists.
+Plain Request/request and natural-language queries retain hybrid search.
+Literal results use the managed-rg layout and default to 7 matches; --limit overrides it.
+Like --rg, automatic literal searches run locally in every transport mode.
+Explicit routes, --prefer-symbol, --symbol-type, type/category filters and
+--refresh wait/background retain indexed search. Use --hybrid for semantic fallback.
 
 Embedding runtime:
   --api-key <key>                   Embedding provider API key
