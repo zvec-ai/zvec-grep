@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "zvec_grep": {
+      "type": "stdio",
+      "command": "zg",
+      "args": [
+        "--server",
+        "--stdio"
+      ],
+      "timeout": 600,
+      "description": "Workspace semantic search and exact text lookup. Managed by zg install."
+    }
+  }
+}

@@ -244,6 +244,8 @@ exposure controls tool discovery and is separate from zg's CLI execution mode.
 
 Reinstall preserves existing `enabled`, `exposure`, `toolExposure`, and other
 non-connection settings, including the order of first-match exposure rules.
+An existing entry without `exposure` keeps Pi's default `codemode`, including
+when the field was removed by the MCP settings UI.
 Stdio reinstall retains user `env` and `cwd`, while switching transports removes
 fields belonging to the previous transport.
 HTTP reinstall preserves headers; an explicit `--mcp-token-env` replaces the
@@ -261,6 +263,8 @@ Installation stops scanning after selecting a file, so unreadable lower-priority
 files do not block it. If no readable candidate exists, the installer uses
 `AGENTS.md`; it refuses to overwrite an existing file that cannot be read
 losslessly. Uninstall scans all candidates and removes only the managed blocks.
+Files that cannot be read or updated are left in place with a warning; cleanup
+continues for the managed MCP entry and other guidance files.
 Directory overrides support native paths, relative paths,
 and `~`; nonempty values are not trimmed. `file://` URIs and Windows shell
 drive forms such as `/c/` are rejected; use a native filesystem path instead.

@@ -697,25 +697,26 @@ fn pi_context_file(home: &Path) -> Result<PathBuf, InstallError> {
     Ok(home.join("AGENTS.md"))
 }
 
-fn pi_context_files(home: &Path) -> Result<Vec<(PathBuf, String)>, InstallError> {
-    let mut files = Vec::new();
-    for name in PI_CONTEXT_FILES {
-        let path = home.join(name);
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => {
-                files.push((path.clone(), read_pi_file(&path)?));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(InstallError::Message(format!(
-                    "Cannot inspect {}: {error}",
-                    path.display()
-                )));
-            }
+fn remove_pi_context_file(path: &Path) -> Result<(), InstallError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(InstallError::Message(format!(
+                "Cannot inspect {}: {error}",
+                path.display()
+            )));
         }
     }
-    Ok(files)
+    let source = read_pi_file(path)?;
+    if source
+        .lines()
+        .any(|line| matches!(line.trim(), GUIDANCE_START | GUIDANCE_END))
+    {
+        remove_marked_file(path, GUIDANCE_START, GUIDANCE_END)?;
+    }
+    Ok(())
 }
 
 fn is_managed_pi_server(server: &Value) -> bool {
@@ -727,11 +728,10 @@ fn pi_server(
     options: &AgentOptions,
     path: &Path,
 ) -> Result<Value, InstallError> {
-    let mut server = existing
+    let existing = existing
         .filter(|server| is_managed_pi_server(server))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .and_then(Value::as_object);
+    let mut server = existing.cloned().unwrap_or_default();
     match options.transport {
         McpInstallTransport::Stdio => {
             for key in ["url", "headers", "oauth", "auth"] {
@@ -762,9 +762,10 @@ fn pi_server(
         }
     }
     server.insert("timeout".to_owned(), json!(options.timeout_seconds));
-    server
-        .entry("exposure".to_owned())
-        .or_insert_with(|| json!("direct"));
+    // A missing exposure field on an existing entry selects the host's default mode.
+    if existing.is_none() {
+        server.insert("exposure".to_owned(), json!("direct"));
+    }
     server.insert("description".to_owned(), json!(PI_DESCRIPTION));
     Ok(Value::Object(server))
 }
@@ -833,7 +834,6 @@ fn uninstall_pi() -> Result<(), InstallError> {
             config.display()
         )));
     }
-    let contexts = pi_context_files(&home)?;
     if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut)
         && servers.get("zvec_grep").is_some_and(is_managed_pi_server)
     {
@@ -843,12 +843,13 @@ fn uninstall_pi() -> Result<(), InstallError> {
         }
         write_json_object(&config, &root)?;
     }
-    for (path, source) in contexts {
-        if source
-            .lines()
-            .any(|line| matches!(line.trim(), GUIDANCE_START | GUIDANCE_END))
-        {
-            remove_marked_file(&path, GUIDANCE_START, GUIDANCE_END)?;
+    for name in PI_CONTEXT_FILES {
+        let path = home.join(name);
+        if let Err(error) = remove_pi_context_file(&path) {
+            eprintln!(
+                "    warning   Could not clean guidance {}: {error}",
+                path.display()
+            );
         }
     }
     Ok(())

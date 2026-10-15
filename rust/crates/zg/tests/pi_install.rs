@@ -152,26 +152,46 @@ fn explicit_token_replaces_all_authorization_header_casings() {
 }
 
 #[test]
-fn inactive_invalid_guidance_does_not_block_installation() {
+fn inactive_invalid_guidance_does_not_block_installation_or_uninstall() {
     let temporary = TempDir::new().expect("tempdir");
     let root = temporary.path();
     let home = root.join("pi");
     fs::create_dir_all(&home).expect("mkdir");
-    fs::write(home.join("AGENTS.md"), "# Active guidance\n").expect("guidance");
+    fs::write(home.join("CLAUDE.md"), "# Earlier guidance\n").expect("guidance");
+    run_ok(&mut command("--install", root));
+    fs::write(home.join("AGENTS.override.md"), "# Active guidance\n").expect("guidance");
     let invalid = [0xff, 0xfe];
-    fs::write(home.join("CLAUDE.md"), invalid).expect("inactive guidance");
+    let invalid_path = home.join("AGENTS.md");
+    fs::write(&invalid_path, invalid).expect("inactive guidance");
     for _ in 0..2 {
         run_ok(&mut command("--install", root));
         assert!(home.join("mcp.json").exists());
         assert!(
-            fs::read_to_string(home.join("AGENTS.md"))
+            fs::read_to_string(home.join("AGENTS.override.md"))
                 .expect("active guidance")
                 .contains("ZVEC_GREP_START")
         );
-        assert_eq!(
-            fs::read(home.join("CLAUDE.md")).expect("inactive guidance"),
-            invalid
+        assert_eq!(fs::read(&invalid_path).expect("inactive guidance"), invalid);
+    }
+    for _ in 0..2 {
+        let output = command("--uninstall", root).output().expect("run zg");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+        assert!(output.status.success(), "{stderr}");
+        assert!(stderr.contains("warning"), "{stderr}");
+        assert!(
+            stderr.contains(&invalid_path.display().to_string()),
+            "{stderr}"
         );
+        assert!(read_json(&home.join("mcp.json"))["mcpServers"]["zvec_grep"].is_null());
+        assert_eq!(
+            fs::read_to_string(home.join("AGENTS.override.md")).expect("active guidance"),
+            "# Active guidance\n"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("CLAUDE.md")).expect("earlier guidance"),
+            "# Earlier guidance\n"
+        );
+        assert_eq!(fs::read(&invalid_path).expect("inactive guidance"), invalid);
     }
 }
 
@@ -191,6 +211,8 @@ fn unreadable_guidance_is_skipped_when_a_readable_candidate_exists() {
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("permissions");
     let can_read = fs::read(&unreadable).is_ok();
     let output = command("--install", root).output().expect("run zg");
+    let active_guidance = fs::read_to_string(home.join("AGENTS.md")).expect("active guidance");
+    let uninstall = command("--uninstall", root).output().expect("run zg");
     fs::set_permissions(&unreadable, permissions).expect("restore permissions");
     if can_read {
         return;
@@ -200,10 +222,18 @@ fn unreadable_guidance_is_skipped_when_a_readable_candidate_exists() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(active_guidance.contains("ZVEC_GREP_START"));
+    let stderr = String::from_utf8(uninstall.stderr).expect("UTF-8 stderr");
+    assert!(uninstall.status.success(), "{stderr}");
+    assert!(stderr.contains("warning"), "{stderr}");
     assert!(
-        fs::read_to_string(home.join("AGENTS.md"))
-            .expect("active guidance")
-            .contains("ZVEC_GREP_START")
+        stderr.contains(&unreadable.display().to_string()),
+        "{stderr}"
+    );
+    assert!(read_json(&home.join("mcp.json"))["mcpServers"]["zvec_grep"].is_null());
+    assert_eq!(
+        fs::read_to_string(home.join("AGENTS.md")).expect("active guidance"),
+        "# Active guidance\n"
     );
     assert_eq!(
         fs::read_to_string(unreadable).expect("guidance"),
@@ -265,6 +295,31 @@ fn stdio_install_is_idempotent_and_uninstall_preserves_user_content() {
     let removed = fs::read_to_string(&path).expect("removed");
     run_ok(&mut command("--uninstall", root));
     assert_eq!(fs::read_to_string(&path).expect("config"), removed);
+}
+
+#[test]
+fn reinstall_preserves_codemode_saved_without_exposure() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let home = root.join("pi");
+    fs::create_dir_all(&home).expect("mkdir");
+    let path = home.join("mcp.json");
+    let saved = include_str!("fixtures/pi-1.2.0-codemode.json");
+    fs::write(&path, saved).expect("saved config");
+    for transport in ["stdio", "http"] {
+        for force in [false, true] {
+            let mut install = command("--install", root);
+            install.args(["--mcp-transport", transport]);
+            if force {
+                install.arg("--force");
+            }
+            run_ok(&mut install);
+            let config = read_json(&path);
+            let server = &config["mcpServers"]["zvec_grep"];
+            assert_eq!(server["type"], transport);
+            assert!(server.get("exposure").is_none(), "{server}");
+        }
+    }
 }
 
 #[test]
