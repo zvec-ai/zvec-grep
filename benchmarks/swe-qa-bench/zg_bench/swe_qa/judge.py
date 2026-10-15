@@ -126,7 +126,7 @@ def judge_pairs(
         judge_usage["cost_usd"] = None
     successful_judgements = judge_usage["calls"]
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "benchmark": "peng-weihan/SWE-QA-Bench",
         "usage_scope": compatible_usage_scope(
             [

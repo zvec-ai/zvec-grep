@@ -114,6 +114,14 @@ export async function prepare({ github, context, core, env }) {
   );
   const runE2e =
     context.eventName === "workflow_dispatch" && env.RUN_E2E === "true";
+  const trialsPerProfile = runE2e
+    ? JSON.parse(
+        await readFile(
+          new URL("../../benchmarks/swe-qa-bench/ci-config.json", import.meta.url),
+          "utf8",
+        ),
+      ).trials_per_profile
+    : null;
   const body = [
     marker(context),
     "## ZG Benchmark · running",
@@ -126,7 +134,7 @@ export async function prepare({ github, context, core, env }) {
     "| --- | --- | --- |",
     "| Retrieval | Queued | PR base vs head; SWE-QA20 + BEIR + DuRetrieval + Quarry; local embedding |",
     runE2e
-      ? "| e2e | Queued | SWE-QA20; OpenCode + GLM-5.2; baseline / zvec-grep; 5 trials per profile |"
+      ? `| e2e | Queued | SWE-QA20; OpenCode + GLM-5.2; baseline / zvec-grep; ${trialsPerProfile} trials per profile; trim one lowest and one highest score per task/profile |`
       : "| e2e | Skipped | Disabled by default |",
     "",
     `[View run and artifacts](${runUrl(context)})`,
@@ -223,7 +231,7 @@ function reportSection(name, jobResult, report, sha) {
     jobResult === "success" &&
     (name === "Retrieval"
       ? report.json.status === "success"
-      : report.json.schema_version === 2 &&
+      : [2, 3].includes(report.json.schema_version) &&
         report.json.gate?.passed === true &&
         Array.isArray(report.json.cases) &&
         report.json.cases.length === 20 &&

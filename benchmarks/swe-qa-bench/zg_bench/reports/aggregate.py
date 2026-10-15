@@ -139,7 +139,7 @@ def aggregate_reports(
     task_ids = [case["task_id"] for case in cases]
     successful_judgements = sum(_case_judgement_count(case) for case in cases)
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "benchmark": "peng-weihan/SWE-QA-Bench",
         "usage_scope": compatible_usage_scope(
             [

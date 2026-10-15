@@ -162,7 +162,7 @@ def _report_profile_trial_count(
 
 def validate_task_report(report: dict[str, Any], path: Path) -> dict[str, Any]:
     prefix = f"invalid per-task report {path}"
-    if report.get("schema_version") not in (1, 2):
+    if report.get("schema_version") not in (1, 2, 3):
         raise SweQaError(f"{prefix}: unsupported schema_version")
     if report.get("benchmark") != "peng-weihan/SWE-QA-Bench":
         raise SweQaError(f"{prefix}: unexpected benchmark")
