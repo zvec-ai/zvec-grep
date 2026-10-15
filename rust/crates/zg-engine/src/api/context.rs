@@ -334,6 +334,15 @@ pub mod result {
         pub definition_bonus: f64,
         #[serde(default)]
         pub path_bonus: f64,
+        /// Distinct query-term coverage in one bounded source window, not confidence.
+        #[serde(default)]
+        pub body_support: f64,
+        /// Existing name/path evidence scaled to [0, 1] for body corroboration.
+        #[serde(default)]
+        pub body_anchor: f64,
+        /// Bounded corroboration bonus within the remaining name/path lexical budget.
+        #[serde(default)]
+        pub body_bonus: f64,
         #[serde(default)]
         pub file_support_bonus: f64,
         #[serde(default)]

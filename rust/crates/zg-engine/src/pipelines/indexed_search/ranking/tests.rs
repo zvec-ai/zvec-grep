@@ -542,7 +542,14 @@ fn ranking_traces_default_omitted_evidence_fields() {
     let mut value =
         serde_json::to_value(out[0].trace.as_ref().expect("trace")).expect("trace JSON");
     let ranking = value["ranking"].as_object_mut().expect("ranking object");
-    for field in ["path_bonus", "file_support_bonus", "file_support_count"] {
+    for field in [
+        "path_bonus",
+        "file_support_bonus",
+        "file_support_count",
+        "body_support",
+        "body_anchor",
+        "body_bonus",
+    ] {
         ranking.remove(field);
     }
     let trace: SearchHitTrace = serde_json::from_value(value).expect("trace with omitted evidence");
@@ -550,4 +557,141 @@ fn ranking_traces_default_omitted_evidence_fields() {
     assert_eq!(ranking.path_bonus, 0.0);
     assert_eq!(ranking.file_support_bonus, 0.0);
     assert_eq!(ranking.file_support_count, 0);
+    assert_eq!(ranking.body_support, 0.0);
+    assert_eq!(ranking.body_anchor, 0.0);
+    assert_eq!(ranking.body_bonus, 0.0);
+}
+
+#[test]
+fn body_support_promotes_before_limit_and_preserves_recall_evidence() {
+    for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
+        let ordinary = hit("ordinary", 1, "src/a.rs", 0.9, 1, None);
+        let mut relevant = hit("relevant", 2, "src/connection.rs", 0.76, 2, None);
+        relevant.entity.content = Content::Text("connectionPool timeout".into());
+        let unchanged = rank_with_policy(
+            vec![ordinary.clone(), relevant.clone()],
+            &[ResolvedSearchRoute {
+                id: "route".into(),
+                mode,
+                query: "connection pool timeout".into(),
+            }],
+            &QueryFilter::default(),
+            1.0,
+            1,
+            Policy {
+                body_weight: 0.0,
+                ..Policy::CURRENT
+            },
+        );
+        assert_eq!(unchanged[0].entity.id.as_str(), "ordinary");
+        let output = rank(
+            vec![ordinary, relevant],
+            &[ResolvedSearchRoute {
+                id: "route".into(),
+                mode,
+                query: "connection pool timeout".into(),
+            }],
+            &QueryFilter::default(),
+            1.0,
+            1,
+        );
+        assert_eq!(output[0].entity.id.as_str(), "relevant");
+        assert_eq!(output[0].matched_by, MatchedBy::Fts);
+        let trace = output[0].trace.as_ref().expect("trace");
+        assert_eq!(trace.fusion.rank, 2);
+        assert_eq!(trace.fusion.score, 0.76);
+        let ranking = trace.ranking.as_ref().expect("ranking");
+        assert_eq!(ranking.body_support, 1.0);
+        assert!((ranking.body_bonus - 1.0 / 30.0).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn body_shares_lexical_budget_and_skips_symbol_and_multiple_query_intents() {
+    let mut relevant = hit(
+        "relevant",
+        1,
+        "src/connection_pool_timeout.rs",
+        0.8,
+        1,
+        None,
+    );
+    relevant.entity.content = Content::Text("connectionPool timeout".into());
+    let out = run(
+        "connection pool timeout",
+        vec![relevant.clone()],
+        &QueryFilter::default(),
+        1,
+    );
+    let ranking = out[0]
+        .trace
+        .as_ref()
+        .expect("trace")
+        .ranking
+        .as_ref()
+        .expect("ranking");
+    assert_eq!(ranking.body_support, 1.0);
+    assert_eq!(ranking.path_bonus, 0.35);
+    assert_eq!(ranking.body_bonus, 0.0);
+    let out = run(
+        "connectionPool",
+        vec![relevant.clone()],
+        &QueryFilter::default(),
+        1,
+    );
+    assert_eq!(
+        out[0]
+            .trace
+            .as_ref()
+            .expect("trace")
+            .ranking
+            .as_ref()
+            .expect("ranking")
+            .body_support,
+        0.0
+    );
+    let routes = ["connection pool", "pool timeout"].map(|query| ResolvedSearchRoute {
+        id: query.into(),
+        query: query.into(),
+        mode: ContextRouteMode::Fts,
+    });
+    let out = rank(vec![relevant], &routes, &QueryFilter::default(), 1.0, 1);
+    assert_eq!(
+        out[0]
+            .trace
+            .as_ref()
+            .expect("trace")
+            .ranking
+            .as_ref()
+            .expect("ranking")
+            .body_support,
+        0.0
+    );
+}
+
+#[test]
+fn body_requires_anchor_and_majority_coverage() {
+    for (path, text, expected_support) in [
+        ("src/generic.rs", "connection pool timeout retry limit", 1.0),
+        ("src/connection.rs", "connection pool", 0.4),
+        ("src/connection.rs", "short declaration", 0.0),
+    ] {
+        let mut candidate = hit("candidate", 1, path, 0.8, 1, None);
+        candidate.entity.content = Content::Text(text.into());
+        let out = run(
+            "connection pool timeout retry limit",
+            vec![candidate],
+            &QueryFilter::default(),
+            1,
+        );
+        let ranking = out[0]
+            .trace
+            .as_ref()
+            .expect("trace")
+            .ranking
+            .as_ref()
+            .expect("ranking");
+        assert_eq!(ranking.body_support, expected_support);
+        assert_eq!(ranking.body_bonus, 0.0);
+    }
 }
