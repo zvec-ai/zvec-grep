@@ -20,6 +20,8 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
                 symbol_type: Some(SymbolType::Function),
                 scope: Some("module".into()),
                 signature: Some("fn symbol()".into()),
+                visibility: None,
+                language: None,
                 documentation: Some("documentation".into()),
             })
         }),
