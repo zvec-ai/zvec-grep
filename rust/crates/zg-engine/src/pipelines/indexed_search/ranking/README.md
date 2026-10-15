@@ -4,6 +4,20 @@ Rule ranking scores the entire recalled entity pool before applying the result
 limit. It runs in the shared indexed-search engine, so direct, server, and MCP
 queries use the same policy.
 
+Before rule ranking, matching FTS/vector query routes use query-sensitive RRF
+weights. A bare code identifier such as `RequestService`, `request_service`, or
+`Request::Service` uses relative weights 1.4 / 0.6 (70% FTS / 30% vector).
+An explicit identifier inside prose uses 1.2 / 0.8; ordinary queries retain
+1.0 / 1.0. Embedded detection accepts camel-case, snake-case, qualified names,
+backticks and call syntax, while ignoring sentence capitalization, plain
+acronyms, paths and URLs. Single-mode routes and routes with different query
+text retain weight 1.0. Explicit prefer-symbol auxiliary routes also retain
+weight 1.0. Recall depth, raw scores, native ranks and structural bonuses do
+not change. The normalization denominator uses the same route weights.
+
+Each recall trace exposes `rrf_weight`; a missing field in older traces defaults
+to 1.0. This is a fusion preference, not proof that a result defines the symbol.
+
 The policy normalizes RRF by the maximum possible score for the enabled routes,
 adds bounded symbol/definition bonuses, and applies the minimum applicable path
 factor. Name evidence comes from entity metadata, not arbitrary mentions in

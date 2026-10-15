@@ -218,7 +218,8 @@ pub(crate) async fn search_workspace_index(
     let recall_duration = recall_started.elapsed();
 
     let fusion_started = Instant::now();
-    let fused = fuse_candidates(candidates);
+    let weights = super::fusion::route_weights(&routes);
+    let fused = fuse_candidates(candidates, &weights);
     let fusion_duration = fusion_started.elapsed();
 
     let load_started = Instant::now();
@@ -228,7 +229,7 @@ pub(crate) async fn search_workspace_index(
     let ranking_started = Instant::now();
     let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
         .iter()
-        .map(|_| 1.0 / (RRF_K + 1.0))
+        .map(|route| weights.get(&route.route.id).copied().unwrap_or(1.0) / (RRF_K + 1.0))
         .sum();
     let hits = super::ranking::rank(hits, &routes, &plan.filter, maximum_rrf, limit);
     let ranking_duration = ranking_started.elapsed();
@@ -474,6 +475,7 @@ fn add_recall_hits(
                 found: true,
                 rank: Some(rank),
                 score: Some(hit.score),
+                rrf_weight: 1.0,
                 forced: false,
                 reason: None,
             },
@@ -498,15 +500,22 @@ fn add_or_update_recall(recall: &mut Vec<SearchRecallTrace>, next: SearchRecallT
     }
 }
 
-fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
+fn fuse_candidates(
+    candidates: HashMap<EntityId, Candidate>,
+    weights: &HashMap<String, f64>,
+) -> Vec<Candidate> {
     let mut fused = candidates
         .into_values()
         .map(|mut candidate| {
             candidate.score = candidate
                 .recall
-                .iter()
-                .filter_map(|trace| trace.rank)
-                .map(|rank| 1.0 / (RRF_K + rank_as_f64(rank)))
+                .iter_mut()
+                .filter_map(|trace| {
+                    trace.rrf_weight = weights.get(&trace.route_id).copied().unwrap_or(1.0);
+                    trace
+                        .rank
+                        .map(|rank| trace.rrf_weight / (RRF_K + rank_as_f64(rank)))
+                })
                 .sum();
             candidate
         })
@@ -1166,6 +1175,93 @@ mod tests {
             model.calls.lock().expect("query calls").as_slice(),
             &[vec!["alpha".to_owned()]]
         );
+    }
+
+    #[tokio::test]
+    async fn symbol_hybrid_weights_change_fusion_without_changing_raw_recall() {
+        for (query, fts_weight, vector_weight) in [
+            ("RequestService", 1.4, 0.6),
+            ("request_service", 1.4, 0.6),
+            ("Request::Service", 1.4, 0.6),
+            ("Where is RequestService defined?", 1.2, 0.8),
+            ("Where is the service defined?", 1.0, 1.0),
+        ] {
+            let source = file(1, "src/lib.rs", 100);
+            let lexical = entity(&source, "lexical result");
+            let semantic = entity(&source, "semantic result");
+            let lexical_id = lexical.entity.id.clone();
+            let storage = FixtureStorage {
+                paths_only: false,
+                forbid_enumeration: false,
+                files: vec![source],
+                fts: HashMap::from([(
+                    query.to_owned(),
+                    vec![
+                        hit(&lexical, 0, StorageSearchPath::Fts, 9.0),
+                        hit(&semantic, 0, StorageSearchPath::Fts, 8.0),
+                    ],
+                )]),
+                vector: vec![
+                    hit(&semantic, 1, StorageSearchPath::Vector, 0.9),
+                    hit(&lexical, 1, StorageSearchPath::Vector, 0.8),
+                ],
+                entities: HashMap::from([
+                    (lexical.entity.id.as_str().to_owned(), lexical),
+                    (semantic.entity.id.as_str().to_owned(), semantic),
+                ]),
+                filters: Arc::new(Mutex::new(Vec::new())),
+                load_batches: Mutex::default(),
+            };
+            let root = tempfile::tempdir().expect("workspace");
+            let result = search_workspace_index(
+                root.path(),
+                plan(vec![
+                    SearchRoute {
+                        mode: SearchRouteMode::Fts,
+                        query: query.into(),
+                    },
+                    SearchRoute {
+                        mode: SearchRouteMode::Vector,
+                        query: query.into(),
+                    },
+                ]),
+                &storage,
+                &[&FixtureModel::new()],
+            )
+            .await
+            .expect("hybrid search");
+            assert_eq!(result.hits.len(), 2);
+            let lexical = result
+                .hits
+                .iter()
+                .find(|hit| hit.entity.id == lexical_id)
+                .expect("lexical hit");
+            let trace = lexical.trace.as_ref().expect("trace");
+            let expected = fts_weight / 61.0 + vector_weight / 62.0;
+            assert!((trace.fusion.score - expected).abs() < 1e-12, "{query}");
+            for recall in &trace.recall {
+                let (weight, rank, score) = match recall.path {
+                    SearchRouteMode::Fts => (fts_weight, 1, 9.0),
+                    SearchRouteMode::Vector => (vector_weight, 2, 0.8),
+                };
+                assert!((recall.rrf_weight - weight).abs() < 1e-12);
+                assert_eq!(recall.rank, Some(rank));
+                assert_eq!(recall.score, Some(score));
+                let mut serialized = serde_json::to_value(recall).expect("serialize trace");
+                serialized
+                    .as_object_mut()
+                    .expect("trace object")
+                    .remove("rrf_weight");
+                let legacy: crate::api::context::result::SearchRecallTrace =
+                    serde_json::from_value(serialized).expect("legacy trace");
+                assert!((legacy.rrf_weight - 1.0).abs() < 1e-12);
+            }
+            let ranking = trace.ranking.as_ref().expect("ranking trace");
+            assert!((ranking.normalized_base - expected / (2.0 / 61.0)).abs() < 1e-12);
+            if fts_weight > vector_weight {
+                assert_eq!(result.hits[0].entity.id, lexical_id);
+            }
+        }
     }
 
     #[tokio::test]
