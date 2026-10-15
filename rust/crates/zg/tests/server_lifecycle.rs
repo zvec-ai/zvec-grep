@@ -1,3 +1,5 @@
+#[path = "server_lifecycle/code_keyword.rs"]
+mod code_keyword;
 #[path = "server_lifecycle/mcp_parity.rs"]
 mod mcp_parity;
 

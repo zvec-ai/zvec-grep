@@ -132,6 +132,16 @@ remain shared at engine scope and follow their own lease lifetime.
 The native engine supports indexing, indexed FTS and vector search, `zg --rg`,
 workspace discovery, `info`, and idempotent `drop_index`.
 
+Standalone code identifiers such as `zg verifyToken`, `zg request_service`, and
+`zg Request::Service` use indexed FTS-only retrieval with the existing chunk and
+definition ranking, without query-vector inference. Plain `Request`/`request` and
+natural language retain hybrid search. FTS routing preserves indexed limits,
+filters, refresh policy and transport selection; it still requires an index.
+Explicit retrieval routes, indexed type/category or symbol filters, and explicit
+`--refresh wait/background` preserve indexed search. Use `--hybrid verifyToken`
+when vector recall is wanted. Automatic routing applies to CLI positionals;
+the engine and MCP indexed-query contracts are unchanged.
+
 Search directly with `zg "where authentication is validated"`, `zg --fts
 "AuthService"`, or `zg --rg -F "AuthService" src`. Management uses flags:
 `zg --index`, `zg --status`, `zg --server`, `zg --config`, `zg --auth`,
