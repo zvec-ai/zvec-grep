@@ -62,7 +62,6 @@ export async function smokeInstalledPackage({
       env: {
         ...process.env,
         ZVEC_GREP_HOME: join(fixtureRoot, "home"),
-        ZVEC_GREP_WORKSPACE_REGISTRY: join(fixtureRoot, "workspaces.json"),
         ZVEC_GREP_MODE: mode,
       },
     });

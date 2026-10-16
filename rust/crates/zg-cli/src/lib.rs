@@ -519,9 +519,6 @@ pub struct QueryArgs {
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
     pub root: Option<PathBuf>,
-    /// Set or rename the unique workspace name; new workspaces default to the root directory name.
-    #[arg(long, value_name = "NAME")]
-    pub name: Option<String>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
     #[arg(long)]
@@ -927,8 +924,7 @@ fn validate_index_concurrency_scope(
 fn management_option_with_value(text: &str) -> bool {
     matches!(
         text,
-        "--name"
-            | "--embedding"
+        "--embedding"
             | "--endpoint"
             | "--index-embedding-concurrency"
             | "--listen"
@@ -1403,8 +1399,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         ..OutputOptions::default()
     };
     if args.drop {
-        if args.name.is_some()
-            || args.rebuild
+        if args.rebuild
             || args.reset_paths
             || args.embedding.is_some()
             || args.model_cache.is_some()
@@ -1455,7 +1450,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         home,
         operation: IndexOperation::Build(Box::new(IndexOptions {
             root: Some(root),
-            name: args.name,
             rebuild: args.rebuild,
             reset_paths: args.reset_paths,
             scan,
@@ -2357,8 +2351,6 @@ mod tests {
             "zg",
             "--index",
             "repo",
-            "--name",
-            "search-engine",
             "--mode",
             "server",
             "--embedding",
@@ -2383,7 +2375,6 @@ mod tests {
             panic!("index build")
         };
         assert_eq!(request.root, Some(PathBuf::from("/workspace/repo")));
-        assert_eq!(request.name.as_deref(), Some("search-engine"));
         assert_eq!(request.embedding_concurrency, Some(4));
         assert_eq!(
             request.scan.globs.as_ref().expect("valid test fixture")[0].pattern,
@@ -2396,7 +2387,7 @@ mod tests {
     }
 
     #[test]
-    fn index_name_defaults_at_the_engine_and_cannot_be_used_with_drop() {
+    fn index_is_addressed_by_root_and_rejects_obsolete_names() {
         let CliPlan::Index {
             operation: IndexOperation::Build(request),
             ..
@@ -2405,15 +2396,10 @@ mod tests {
             .into_plan(PathBuf::from("/workspace"))
             .expect("index plan")
         else {
-            panic!("index build")
+            panic!("index build");
         };
-        assert!(request.name.is_none());
-
-        let error = Cli::try_parse_from(["zg", "--index", "--drop", "--yes", "--name", "repo"])
-            .expect("CLI should parse")
-            .into_plan(PathBuf::from("/workspace"))
-            .expect_err("drop cannot set an index name");
-        assert!(matches!(error, super::CliError::DropWithIndexOptions));
+        assert_eq!(request.root, Some(PathBuf::from("/workspace/repo")));
+        assert!(Cli::try_parse_from(["zg", "--index", "repo", "--name", "docs"]).is_err());
     }
 
     #[test]

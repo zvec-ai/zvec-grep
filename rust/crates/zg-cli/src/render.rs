@@ -423,7 +423,6 @@ const INDEX_HELP: &str = r"Usage:
   zg --index [root] --drop [--yes]
 
 Index options:
-  --name <NAME>                     Set or rename the unique workspace name
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
   --yes                             Confirm --drop without prompting
@@ -472,9 +471,7 @@ Scan rules:
 Interactive remote indexing asks to allow once, allow for this workspace, or
 cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
 
-A new workspace name defaults to root directory name; use --name if it is taken.
-Names are case-sensitive and unique within the per-user registry. Naming an
-existing workspace renames it while preserving file IDs and active storage.
+Workspaces are identified by their root paths; different roots may share a directory name.
 
 This version indexes text only with one embedding model per workspace.
 Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured

@@ -86,10 +86,9 @@ pub(crate) async fn context(
         }
         wait.retry(&location.home, "context").await?;
     };
-    let mut manifest = read_workspace_manifest(&location.home)?.ok_or_else(|| {
+    let manifest = read_workspace_manifest(&location.home)?.ok_or_else(|| {
         workspace_index_unavailable(&location.root, "workspace manifest disappeared")
     })?;
-    indexing.reconcile_name(&mut manifest)?;
     if manifest.workspace.index == IndexState::Disabled {
         return Err(EngineError::unsupported(format!(
             "workspace indexing is disabled at {}",

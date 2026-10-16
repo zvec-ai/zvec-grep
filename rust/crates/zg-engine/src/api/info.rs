@@ -157,7 +157,6 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct WorkspaceIndexInfo {
-        pub name: String,
         pub path: PathBuf,
         /// The single base directory for every source file in this workspace.
         pub root: PathBuf,
@@ -228,7 +227,6 @@ impl result::WorkspaceIndexInfo {
         index_version: Option<u32>,
     ) -> Self {
         Self {
-            name: workspace.name.clone(),
             path: home.to_path_buf(),
             root: workspace.root.clone(),
             scan: workspace.scan.clone(),

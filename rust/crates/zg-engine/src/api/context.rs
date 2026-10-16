@@ -476,7 +476,7 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextWorkspaceIndex {
-        pub name: String,
+        pub root: PathBuf,
         pub path: PathBuf,
     }
 

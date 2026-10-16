@@ -14,7 +14,7 @@ Work in progress. Usage examples will be added once the engine is stable.
 - `generations/` holds index data; `build.json` records storage ownership until publication and cleanup finish.
 - `authorization.json` stores saved consent for remote embedding services, when granted.
 
-The engine also uses per-user files: `~/.zvec-grep/workspaces.json` registers workspace names and locations, and `~/.zvec-grep/config.json` stores settings when saved. Saved remote consent uses a signing key at `~/.zvec-grep/authorization.key` by default. Lock and recovery files are managed automatically.
+The engine also uses per-user files: `~/.zvec-grep/config.json` stores settings when saved. Saved remote consent uses a signing key at `~/.zvec-grep/authorization.key` by default. Workspace roots are not registered globally. Lock and recovery files are managed automatically.
 
 **Models.** Local models download missing assets on first use and process content locally. On macOS and Linux, the default model cache is `~/.zvec-grep/models`. Set `ZVEC_GREP_MODEL_CACHE` to choose a cache directory. Remote models send content or queries to the configured embedding endpoint and require authorization.
 
@@ -32,9 +32,9 @@ Select the model with `zg --index --embedding <model>`. Every text fragment uses
 
 **Index compatibility.** `indexVersion` is the single version for persisted workspace configuration, storage layout, and record encoding. The current Rust format is version 2; Node.js indexes use version 1. Search, incremental indexing, and watching require the current version. Status reports `rebuild_required` with the actual and expected versions when existing data is incompatible, including a missing version or invalid current-format metadata. Status inspection does not open incompatible storage. There are no separate manifest, storage-schema, or record-codec version counters. Storage generation UUIDs select published data and do not describe compatibility.
 
-**Index updates.** Repeated indexing reuses unchanged files, updates changed files, and removes deleted files from the index. Unsupported files are skipped. A failed file keeps its path and error but loses all searchable records; the next index retries the whole file. `drop_index` removes index data, workspace configuration, and the name reservation while preserving source files and shared model caches.
+**Index updates.** Repeated indexing reuses unchanged files, updates changed files, and removes deleted files from the index. Unsupported files are skipped. A failed file keeps its path and error but loses all searchable records; the next index retries the whole file. `drop_index` removes index data and workspace configuration while preserving source files and shared model caches.
 
-**Workspace names.** Names are case-sensitive and unique within the per-user registry; new workspaces default to the root directory's name. Use `IndexOptions::name` to choose or change a name. Move the source root together with `.zvec-grep`; the next index operation updates its registered location once the original root no longer exists. A copy of an existing workspace needs a different name.
+**Workspace roots.** Workspaces are identified solely by root path, with no separate name or global registration. Different roots may have the same basename. Moving or copying the source root together with `.zvec-grep` preserves the index. Legacy metadata names are ignored on read and omitted on write.
 
 **Rebuilds and recovery.** An incompatible index format requires an explicit rebuild with `IndexOptions::rebuild` or `zg --index --rebuild`. Rebuilding an incompatible index uses an explicitly supplied embedding model or the configured default; it does not migrate the old configuration or reuse its stored model. Supply any desired scan settings again. Prior Rust development formats are not migrated. Every rebuild starts from empty storage. Individual file failures are recorded with paths and reasons; successful files are still published. Cancellation or a storage/finalization failure discards the build and preserves the previous active index. Ordinary `index` updates the active index, or builds a new one if none exists. Crash recovery discards unpublished storage or finishes cleanup after publication; it never resumes a build. Explicit drop remains available when persisted metadata cannot be decoded.
 
@@ -60,7 +60,7 @@ Nested Git repositories and checked-out submodules are scanned by default, subje
 - **Lexical** searches source files directly with embedded grep.
 - **Models** provides embedding backends and manages model runtimes.
 - **Storage** groups persistent data into `directories`, `files`, `entities`, and `fragments` modules. Each module owns its collection schema, encoding, and table operations. `IndexStore` coordinates their lifecycle, file write states, and cross-table reads and writes; `zvec.rs` contains shared native helpers.
-- **Workspace** manages workspace names, configuration, index locations, and locks.
+- **Workspace** manages workspace roots, configuration, index locations, and locks.
 - **Pipelines** coordinates index construction (`indexing`), indexed queries (`indexed_search`), and direct queries (`direct_search`). Direct queries combine lexical search with structural extraction and result assembly.
 - **Authorization** manages consent for sending data to remote embedding services.
 - **Config** manages global settings and resolves runtime configuration.

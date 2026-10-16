@@ -8,7 +8,6 @@ use super::{ContentKind, GlobRule, SourcePath, model::EmbeddingModelInfo};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Workspace {
-    pub name: String,
     pub root: PathBuf,
     pub scan: ScanRules,
     pub index: IndexState,
@@ -17,25 +16,8 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    /// Validate names without normalizing their case or whitespace.
-    pub(crate) fn validate_name(name: &str) -> EngineResult<()> {
-        if name.is_empty()
-            || name.trim() != name
-            || matches!(name, "." | "..")
-            || name
-                .chars()
-                .any(|character| character.is_control() || matches!(character, '/' | '\\'))
-        {
-            return Err(EngineError::invalid_argument(format!(
-                "invalid workspace name {name:?}",
-            )));
-        }
-        Ok(())
-    }
-
     #[allow(clippy::unnecessary_debug_formatting)] // Keep control characters in paths escaped.
     pub(crate) fn validate(&self) -> EngineResult<()> {
-        Self::validate_name(&self.name)?;
         if !self.root.is_absolute() {
             return Err(EngineError::invalid_argument(format!(
                 "workspace root {:?} must be an absolute path",
