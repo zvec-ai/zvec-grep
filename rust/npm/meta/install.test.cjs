@@ -53,7 +53,10 @@ function fixture() {
       target: entry.target,
       files: {
         "bin/zg": { bytes: binary.length, sha256: sha256(binary) },
-        "lib/libfixture.dylib": { bytes: library.length, sha256: sha256(library) },
+        "lib/libfixture.dylib": {
+          bytes: library.length,
+          sha256: sha256(library),
+        },
       },
     }),
   );
@@ -64,12 +67,18 @@ test("materializes a verified native package and replaces the placeholder last",
   const paths = fixture();
   try {
     materialize({ ...paths, entry, expectedVersion: "0.0.1" });
-    assert.match(readFileSync(join(paths.metaRoot, "bin", "zg.exe"), "utf8"), /0\.0\.1/);
+    assert.match(
+      readFileSync(join(paths.metaRoot, "bin", "zg.exe"), "utf8"),
+      /0\.0\.1/,
+    );
     assert.equal(
       readFileSync(join(paths.metaRoot, "lib", "libfixture.dylib"), "utf8"),
       "native-library-fixture\n",
     );
-    assert.notEqual(statSync(join(paths.metaRoot, "bin", "zg.exe")).mode & 0o111, 0);
+    assert.notEqual(
+      statSync(join(paths.metaRoot, "bin", "zg.exe")).mode & 0o111,
+      0,
+    );
   } finally {
     rmSync(paths.root, { recursive: true, force: true });
   }
@@ -87,7 +96,10 @@ test("rejects version and checksum mismatches without replacing the placeholder"
       () => materialize({ ...paths, entry, expectedVersion: "0.0.1" }),
       /checksum mismatch/,
     );
-    assert.equal(readFileSync(join(paths.metaRoot, "bin", "zg.exe"), "utf8"), "placeholder\n");
+    assert.equal(
+      readFileSync(join(paths.metaRoot, "bin", "zg.exe"), "utf8"),
+      "placeholder\n",
+    );
   } finally {
     rmSync(paths.root, { recursive: true, force: true });
   }
@@ -96,7 +108,10 @@ test("rejects version and checksum mismatches without replacing the placeholder"
 test("rejects native files that are not covered by the checksum manifest", () => {
   const paths = fixture();
   try {
-    writeFileSync(join(paths.platformRoot, "bin", "untracked.dylib"), "untracked\n");
+    writeFileSync(
+      join(paths.platformRoot, "bin", "untracked.dylib"),
+      "untracked\n",
+    );
     assert.throws(
       () => verifyPayload(paths.platformRoot, entry, "0.0.1"),
       /do not match the checksum manifest/,
@@ -109,7 +124,17 @@ test("rejects native files that are not covered by the checksum manifest", () =>
 test("selects one published platform and rejects unsupported libc", () => {
   assert.equal(selectPlatform([entry], "darwin", "arm64"), entry);
   assert.throws(
-    () => selectPlatform([entry], "linux", "x64", { glibcVersionRuntime: "2.39" }),
+    () =>
+      selectPlatform([entry], "linux", "x64", { glibcVersionRuntime: "2.39" }),
     /does not publish/,
   );
+});
+
+test("selects the ARM64 Windows optional dependency from the release manifest", () => {
+  const manifest = JSON.parse(
+    readFileSync(join(__dirname, "..", "platforms.json"), "utf8"),
+  );
+  const selected = selectPlatform(manifest.platforms, "win32", "arm64");
+  assert.equal(selected.package, "@zvec/zvec-grep-win32-arm64-msvc");
+  assert.equal(selected.binary, "zg.exe");
 });

@@ -441,7 +441,7 @@ The runtime library directory must include zvec's shared library and its
 `data/jieba_dict` directory. Without `--lib-dir`, these assets are read from
 the binary's directory.
 
-The `Publish Rust packages` workflow builds all five published native targets on matching
+The `Publish Rust packages` workflow builds all six native release targets on matching
 GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
 produce downloadable candidates without publishing to npm. Each runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
@@ -452,8 +452,8 @@ Developer ID, notarization, and Windows certificate signing are not required for
 candidate builds.
 
 Intel macOS is built and verified first. Only after its tarball installation,
-CLI startup, managed-rg, and daemon IPC checks pass do the other four native
-builds start. The final artifact is collected after all five targets pass.
+CLI startup, managed-rg, and daemon IPC checks pass do the other five native
+builds start. The final artifact is collected after all six targets pass.
 
 Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
 Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
@@ -463,8 +463,15 @@ pinned source revisions because neither dependency supplies prebuilt Intel
 macOS libraries. Both SDKs are cached and their shared libraries are included
 in the npm payload. The Intel release targets macOS 14 and later.
 
+Windows ARM64 builds and tests natively on `windows-11-arm` with ARM64 Node,
+Rust, and MSVC. It builds the zvec SDK from the same pinned source revision
+and prepares the ARM64 ONNX Runtime from the locked dependency's distribution
+manifest. npm selects `@zvec/zvec-grep-win32-arm64-msvc` for ARM64 Node on Windows.
+The Rust model runtime build uses Clang's MSVC-compatible `clang-cl` frontend
+and Ninja because ggml's ARM CPU backend does not support the MSVC compiler.
+
 Download the `rust-release-<version>` artifact from the successful workflow run
-and unzip it. It contains all five platform tarballs, the meta tarball,
+and unzip it. It contains all six platform tarballs, the meta tarball,
 `SHA256SUMS`, `release.json` with the source commit, and platform-specific install
 commands. For example, on an ARM64 Mac:
 
@@ -480,7 +487,7 @@ are retained for 14 days.
 
 To publish, update the Rust workspace version, tag the release commit on `main`
 as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured for all six
+publishing repository must have an npm trusted publisher configured for all seven
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.

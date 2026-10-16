@@ -39,6 +39,13 @@
       "os": "win32",
       "cpu": "x64",
       "binary": "zg.exe"
+    },
+    {
+      "target": "win32-arm64-msvc",
+      "package": "@zvec/zvec-grep-win32-arm64-msvc",
+      "os": "win32",
+      "cpu": "arm64",
+      "binary": "zg.exe"
     }
   ]
 }

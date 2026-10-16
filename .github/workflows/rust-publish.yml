@@ -100,6 +100,8 @@ jobs:
             runner: ubuntu-24.04-arm
           - target: win32-x64-msvc
             runner: windows-2022
+          - target: win32-arm64-msvc
+            runner: windows-11-arm
     uses: ./.github/workflows/rust-package-build.yml
     with:
       target: ${{ matrix.target }}
@@ -195,6 +197,8 @@ jobs:
             runner: ubuntu-24.04-arm
           - target: win32-x64-msvc
             runner: windows-2022
+          - target: win32-arm64-msvc
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@v6
         with:
@@ -202,6 +206,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Install the release npm version
         run: npm install --global npm@11.21.0
       - uses: actions/download-artifact@v8

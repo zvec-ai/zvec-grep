@@ -5,7 +5,7 @@ published target. `platforms.json` is the single source of truth for package
 names and npm `os`, `cpu`, and `libc` selectors.
 
 The current published targets are macOS ARM64/x64, Linux x64/ARM64 with glibc,
-and Windows x64.
+and Windows x64/ARM64.
 
 The platform package owns the complete runtime payload:
 
@@ -40,12 +40,12 @@ Release order:
 5. Verify CLI startup, managed-rg, daemon startup and IPC, then update from a
    distinct published baseline version and roll back to that version.
 6. Promote native `latest` tags and then the meta `latest` tag in a separate job,
-   only after all five registry install/update/rollback jobs pass.
+   only after all six registry install/update/rollback jobs pass.
 
 `.github/workflows/rust-publish.yml` builds and installs every target on its
 native runner, checks CLI startup, managed-rg and actual daemon IPC, and collects
 the candidates into a downloadable artifact. Regular runs do not publish.
-Intel macOS installation and runtime checks must pass before the other four
+Intel macOS installation and runtime checks must pass before the other five
 platform builds start. Its ONNX Runtime with CoreML and zvec SDK are built from
 pinned sources, cached, and bundled with the native package. The Intel release
 targets macOS 14 and later.
@@ -54,6 +54,13 @@ Windows prepares the prebuilt ONNX Runtime selected by locked `ort-sys` with
 bounded download retries, verifies its SHA-256, and caches the complete archive
 and extracted runtime before compiling. The original static-link configuration
 is preserved.
+Windows ARM64 uses the native `windows-11-arm` runner with ARM64 Node, Rust,
+and MSVC. Its zvec SDK is built from the same pinned revision as the Intel
+macOS SDK because zvec-rust 0.7.2 supplies no Windows ARM64 prebuilt library.
+The resulting DLLs and Jieba dictionaries are cached and bundled in
+`@zvec/zvec-grep-win32-arm64-msvc`.
+The Rust model runtimes use Clang's MSVC-compatible `clang-cl` frontend and
+Ninja because ggml's ARM CPU backend requires Clang; the zvec SDK itself uses MSVC.
 
 Explicit publication runs from a `rust-v<version>`-tagged commit on `main` and
 uses npm provenance with trusted publishing or `NPM_TOKEN`. Native packages are
@@ -68,7 +75,7 @@ while these inputs are missing. Both the initial source check and the tarball
 preflight fail before publication when compliance inputs are incomplete.
 
 Publication and promotion explicitly install npm 11.21.0, which supports OIDC
-authentication for `npm dist-tag`. Configure trusted publishing for all six
+authentication for `npm dist-tag`. Configure trusted publishing for all seven
 packages with repository `zvec-ai/zvec-grep`, workflow filename
 `rust-publish.yml`, and both **Allow npm publish** and **Allow npm dist-tag**.
 The dist-tag permission is independent and disabled by default; `id-token:

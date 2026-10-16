@@ -22,7 +22,7 @@ jobs:
   native:
     name: Build ${{ inputs.target }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ inputs.target == 'darwin-x64' && 180 || 90 }}
+    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'win32-arm64-msvc') && 180 || 90 }}
     defaults:
       run:
         working-directory: rust
@@ -33,22 +33,37 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Set up MSVC
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
+      - name: Select the native Windows ARM64 Rust host
+        if: inputs.target == 'win32-arm64-msvc'
+        run: rustup set default-host aarch64-pc-windows-msvc
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
+      - name: Verify native Windows toolchains
+        if: runner.os == 'Windows'
+        env:
+          EXPECTED_ARCH: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
+          EXPECTED_HOST: ${{ inputs.target == 'win32-arm64-msvc' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+        run: |
+          node -e "if (process.arch !== process.env.EXPECTED_ARCH) throw new Error('unexpected Node architecture: ' + process.arch)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostLine = rustc -vV | Select-String '^host: '
+          if ($hostLine.ToString() -ne "host: $env:EXPECTED_HOST") { throw "Unexpected Rust host: $hostLine" }
       - uses: actions/setup-python@v6
         if: runner.os == 'Windows'
         with:
           python-version: "3.12"
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Restore Cargo build state
         uses: actions/cache@v5
         with:
@@ -65,13 +80,34 @@ jobs:
         uses: actions/cache@v5
         with:
           path: rust/target/ort-prebuilt/
-          key: rust-ort-windows-v1-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
+          key: rust-ort-windows-v2-${{ inputs.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
       - name: Prepare the verified Windows ONNX Runtime
         if: runner.os == 'Windows'
+        env:
+          ORT_TARGET: ${{ inputs.target == 'win32-arm64-msvc' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
         run: |
           python scripts/test-prepare-onnxruntime-windows.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/prepare-onnxruntime-windows.py
+          python scripts/prepare-onnxruntime-windows.py --target $env:ORT_TARGET
+      - name: Restore the Windows ARM64 zvec SDK
+        if: inputs.target == 'win32-arm64-msvc'
+        id: zvec-arm64-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: rust/target/zvec-runtime/
+          key: rust-zvec-windows-arm64-v1-0.7.2-${{ hashFiles('rust/scripts/build-zvec-windows-arm64.py') }}
+      - name: Build the zvec SDK for Windows ARM64
+        if: inputs.target == 'win32-arm64-msvc' && steps.zvec-arm64-cache.outputs.cache-hit != 'true'
+        run: python scripts/build-zvec-windows-arm64.py
+      - name: Save the Windows ARM64 zvec SDK
+        if: inputs.target == 'win32-arm64-msvc' && steps.zvec-arm64-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: rust/target/zvec-runtime/
+          key: ${{ steps.zvec-arm64-cache.outputs.cache-primary-key }}
+      - name: Use the Windows ARM64 zvec SDK
+        if: inputs.target == 'win32-arm64-msvc'
+        run: '"ZVEC_LIB_DIR=$env:GITHUB_WORKSPACE/rust/target/zvec-runtime" >> $env:GITHUB_ENV'
       - name: Restore the Intel macOS ONNX Runtime
         if: inputs.target == 'darwin-x64'
         id: ort-cache
@@ -111,6 +147,20 @@ jobs:
           echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
           echo "ZVEC_LIB_DIR=$GITHUB_WORKSPACE/rust/target/zvec-runtime" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+      - name: Use Clang for Windows ARM64 model runtimes
+        if: inputs.target == 'win32-arm64-msvc'
+        run: |
+          # ggml's ARM CPU backend requires Clang for inline assembly.
+          # The Rust wrapper also passes MSVC-style compiler flags.
+          $clang = (Get-Command clang-cl).Source
+          & $clang --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CC=$clang" >> $env:GITHUB_ENV
+          "CXX=$clang" >> $env:GITHUB_ENV
+          "CXXFLAGS=/EHsc" >> $env:GITHUB_ENV
+          "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
+          "CMAKE_C_COMPILER_TARGET=aarch64-pc-windows-msvc" >> $env:GITHUB_ENV
+          "CMAKE_CXX_COMPILER_TARGET=aarch64-pc-windows-msvc" >> $env:GITHUB_ENV
       - name: Build the native target
         run: npm run build
       - name: Apply local macOS signatures after building
