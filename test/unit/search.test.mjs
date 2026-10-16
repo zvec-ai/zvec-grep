@@ -6,6 +6,7 @@ import {
   searchWorkspaceIndex,
 } from "../../dist/engine/pipeline/search/index.js";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
+import { inSearchWorker } from "../helpers/search-worker.mjs";
 
 function file(id, relativePath, lastModifiedTime = 100) {
   return {
@@ -299,6 +300,38 @@ test("indexed rg-style globs match nested basenames and honor later overrides", 
   );
 });
 
+test("indexed path filtering yields during large searches and rejects excessive rule counts", async () => {
+  const fixture = createFixture();
+  const files = Array.from({ length: 5000 }, (_, index) =>
+    file(`file-${index}`, `src/module-${index}.ts`),
+  );
+  fixture.context.storage.listFiles = () => files;
+  let eventLoopRan = false;
+  const immediate = setImmediate(() => {
+    eventLoopRan = true;
+  });
+  try {
+    const result = await searchWorkspaceIndex(
+      { routes: [{ mode: "fts", query: "symbol" }], globs: ["*.missing"] },
+      fixture.context,
+    );
+    assert.equal(result.hits.length, 0);
+    assert.equal(eventLoopRan, true);
+  } finally {
+    clearImmediate(immediate);
+  }
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "symbol" }],
+        globs: Array(10001).fill("*.ts"),
+      },
+      fixture.context,
+    ),
+    /rule limit/,
+  );
+});
+
 test("entity and file diagnosis handle missing targets and fallback entity selection", async () => {
   const fixture = createFixture();
   await assert.rejects(
@@ -335,5 +368,355 @@ test("entity and file diagnosis handle missing targets and fallback entity selec
       emptyFixture.context,
     ),
     null,
+  );
+});
+
+test("absolute path filters charge the budget from the matched path representation", async () => {
+  const longDir = `/${"d".repeat(3000)}`;
+  const files = [
+    { ...file("file-abs", "f.ts"), absolutePath: `${longDir}/f.ts` },
+    file("file-rel", "src/g.ts"),
+  ];
+  const storage = {
+    listFiles: () => files,
+    getFileById: (id) => files.find((item) => item.id === id) ?? null,
+    searchFts: (query, limit, filter) =>
+      files
+        .filter((item) => !filter?.fileIds || filter.fileIds.includes(item.id))
+        .map((item, index) => ({
+          fragment: {
+            id: `frag-${item.id}`,
+            fileId: item.id,
+            range: { kind: "text", startLine: 1, endLine: 2 },
+            content: "value",
+            metadata: {
+              symbolName: "Symbol",
+              symbolType: "function_declaration",
+            },
+          },
+          file: item,
+          path: "fts",
+          score: 1 - index * 0.1,
+        })),
+    searchVector: () => [],
+    optimize: () => {},
+    close: () => {},
+  };
+  const context = {
+    workspaceIndex: {
+      id: "wi",
+      name: "docs",
+      path: "/tmp/index",
+      rootPaths: [{ absolutePath: longDir, recursive: true }],
+      createdTime: 1,
+      updatedTime: 1,
+    },
+    storage,
+    embeddingModel: new FakeEmbeddingModel(),
+  };
+  const absolute = await searchWorkspaceIndex(
+    {
+      routes: [{ mode: "fts", query: "value" }],
+      includePaths: [`${longDir}/**`],
+    },
+    context,
+  );
+  assert.ok(absolute.hits.length >= 1);
+  assert.ok(absolute.hits.every((hit) => hit.file.id === "file-abs"));
+  const relative = await searchWorkspaceIndex(
+    { routes: [{ mode: "fts", query: "value" }], includePaths: ["f.ts"] },
+    context,
+  );
+  assert.ok(relative.hits.length >= 1);
+  assert.ok(relative.hits.every((hit) => hit.file.id === "file-abs"));
+});
+
+test("pattern failures carry their original field and request index", async () => {
+  const { context } = createFixture();
+  await assert.rejects(
+    searchWorkspaceIndex(
+      { routes: [{ mode: "fts", query: "value" }], excludePaths: ["[z-a]"] },
+      context,
+    ),
+    (error) =>
+      /excludePaths\[0\]/.test(error.message) && /z-a/.test(error.message),
+  );
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "value" }],
+        excludePaths: ["", "[z-a]"],
+      },
+      context,
+    ),
+    (error) => /excludePaths\[1\]/.test(error.message),
+  );
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "value" }],
+        includePaths: ["keep.ts", "", "[z-a]"],
+      },
+      context,
+    ),
+    (error) => /includePaths\[2\]/.test(error.message),
+  );
+});
+
+test("many absolute filters against a long path stay within the budget", async () => {
+  const longDir = `/${"d".repeat(3000)}`;
+  const files = [
+    { ...file("file-abs", "f.ts"), absolutePath: `${longDir}/f.ts` },
+  ];
+  const storage = {
+    listFiles: () => files,
+    getFileById: (id) => files.find((item) => item.id === id) ?? null,
+    searchFts: (query, limit, filter) =>
+      files
+        .filter((item) => !filter?.fileIds || filter.fileIds.includes(item.id))
+        .map((item) => ({
+          fragment: {
+            id: `frag-${item.id}`,
+            fileId: item.id,
+            range: { kind: "text", startLine: 1, endLine: 2 },
+            content: "value",
+            metadata: {
+              symbolName: "Symbol",
+              symbolType: "function_declaration",
+            },
+          },
+          file: item,
+          path: "fts",
+          score: 1,
+        })),
+    searchVector: () => [],
+    optimize: () => {},
+    close: () => {},
+  };
+  const context = {
+    workspaceIndex: {
+      id: "wi",
+      name: "docs",
+      path: "/tmp/index",
+      rootPaths: [{ absolutePath: longDir, recursive: true }],
+      createdTime: 1,
+      updatedTime: 1,
+    },
+    storage,
+    embeddingModel: new FakeEmbeddingModel(),
+  };
+  const absoluteFilters = [
+    ...Array.from({ length: 4999 }, () => "/nomatch"),
+    "/**",
+  ];
+  const result = await searchWorkspaceIndex(
+    {
+      routes: [{ mode: "fts", query: "value" }],
+      includePaths: absoluteFilters,
+    },
+    context,
+  );
+  assert.ok(result.hits.length >= 1);
+  assert.ok(result.hits.every((hit) => hit.file.id === "file-abs"));
+});
+
+test("oversized glob filters report their field and original index", async () => {
+  const { context } = createFixture();
+  const oversized = "x".repeat(4097);
+  await assert.rejects(
+    searchWorkspaceIndex(
+      { routes: [{ mode: "fts", query: "value" }], globs: [oversized] },
+      context,
+    ),
+    (error) =>
+      /globs\[0\]/.test(error.message) && /4096-character/.test(error.message),
+  );
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "value" }],
+        insensitiveGlobs: ["ok.ts", oversized],
+      },
+      context,
+    ),
+    (error) =>
+      /insensitiveGlobs\[1\]/.test(error.message) &&
+      /4096-character/.test(error.message),
+  );
+});
+
+test("search candidate evaluation yields under heavy slash-bearing admitted globs", async () => {
+  // Runs in a worker thread: the heartbeat monitor measures the worker's own
+  // event loop (the loop the stall blocks), while the parent enforces the
+  // external deadline and terminates the worker on timeout.
+  await inSearchWorker(
+    `
+    const files = [
+      {
+        id: "file-a",
+        absolutePath: "/repo/" + "s".repeat(990) + "/a.ts",
+        relativePath: "s".repeat(990) + "/a.ts",
+        rootPath: "/repo",
+        sizeBytes: 10,
+        lastModifiedTime: 100,
+        kind: "code",
+        format: "typescript",
+      },
+    ];
+    const storage = {
+      listFiles: () => files,
+      getFileById: (id) => files.find((item) => item.id === id) ?? null,
+      searchFts: (query, limit, filter) =>
+        files
+          .filter(
+            (item) => !filter?.fileIds || filter.fileIds.includes(item.id),
+          )
+          .map((item) => ({
+            fragment: {
+              id: "frag-" + item.id,
+              fileId: item.id,
+              range: { kind: "text", startLine: 1, endLine: 2 },
+              content: "value",
+              metadata: {
+                symbolName: "Symbol",
+                symbolType: "function_declaration",
+              },
+            },
+            file: item,
+            path: "fts",
+            score: 1,
+          })),
+      searchVector: () => [],
+      optimize: () => {},
+      close: () => {},
+    };
+    const context = {
+      workspaceIndex: {
+        id: "wi",
+        name: "docs",
+        path: "/tmp/index",
+        rootPaths: [{ absolutePath: "/repo", recursive: true }],
+        createdTime: 1,
+        updatedTime: 1,
+      },
+      storage,
+      embeddingModel: new FakeEmbeddingModel(),
+    };
+    const heavyGlobs = Array.from(
+      { length: 100 },
+      (_, i) => "*s".repeat(150) + "/b" + i + "*",
+    );
+    let maxGap = 0;
+    let last = Date.now();
+    let timer;
+    const tick = () => {
+      const now = Date.now();
+      maxGap = Math.max(maxGap, now - last);
+      last = now;
+    };
+    try {
+      timer = setInterval(tick, 5);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      last = Date.now();
+      let hits = -1;
+      await search(
+        {
+          routes: [{ mode: "fts", query: "value" }],
+          globs: [...heavyGlobs, "*a.ts"],
+        },
+        context,
+      ).then((result) => {
+        hits = result.hits.length;
+      });
+      assert.ok(hits >= 1, "expected the file to match");
+      assert.ok(
+        maxGap < 250,
+        "max event-loop block was " + maxGap + "ms",
+      );
+    } finally {
+      clearInterval(timer);
+      maxGap = Math.max(maxGap, Date.now() - last);
+    }
+    assert.ok(maxGap < 250, "max event-loop block (drained) was " + maxGap + "ms");
+  `,
+    undefined,
+    120_000,
+  );
+});
+
+function searchCancellationFixture() {
+  const files = [file("file-a", "src/a.ts")];
+  const storage = {
+    listFiles: () => files,
+    getFileById: (id) => files.find((item) => item.id === id) ?? null,
+    searchFts: () => [],
+    searchVector: () => [],
+    optimize: () => {},
+    close: () => {},
+  };
+  return {
+    context: {
+      workspaceIndex: {
+        id: "wi",
+        name: "docs",
+        path: "/tmp/index",
+        rootPaths: [{ absolutePath: "/repo", recursive: true }],
+        createdTime: 1,
+        updatedTime: 1,
+      },
+      storage,
+      embeddingModel: new FakeEmbeddingModel(),
+    },
+  };
+}
+
+test("pre-aborted search rejects at entry preserving its reason", async () => {
+  const { context } = searchCancellationFixture();
+  const reason = new Error("stop-entry");
+  const pre = new AbortController();
+  pre.abort(reason);
+  await assert.rejects(
+    searchWorkspaceIndex(
+      { routes: [{ mode: "vector", query: "value" }] },
+      context,
+      { signal: pre.signal },
+    ),
+    (error) => error === reason,
+  );
+});
+
+test("unfiltered search aborting after entry rejects before success", async () => {
+  const { context } = searchCancellationFixture();
+  const reason = new Error("stop-after-entry");
+  const controller = new AbortController();
+  // The entry check runs synchronously at call time; aborting immediately
+  // after the call delivers the signal after entry but before any result.
+  const pending = searchWorkspaceIndex(
+    { routes: [{ mode: "vector", query: "value" }] },
+    context,
+    { signal: controller.signal },
+  );
+  controller.abort(reason);
+  await assert.rejects(pending, (error) => error === reason);
+});
+
+test("abort during embedding rejects preserving its reason", async () => {
+  const { context } = searchCancellationFixture();
+  const controller = new AbortController();
+  const reason = new Error("stop-embedding");
+  const slowModel = new FakeEmbeddingModel();
+  const originalEmbed = slowModel.embed.bind(slowModel);
+  slowModel.embed = async (...args) => {
+    controller.abort(reason);
+    await new Promise((resolve) => setImmediate(resolve));
+    return originalEmbed(...args);
+  };
+  await assert.rejects(
+    searchWorkspaceIndex(
+      { routes: [{ mode: "vector", query: "value" }] },
+      { ...context, embeddingModel: slowModel },
+      { signal: controller.signal },
+    ),
+    (error) => error === reason,
   );
 });
