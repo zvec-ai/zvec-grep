@@ -863,7 +863,20 @@ test("wait_for_fresh consumes a running watch job without a status scan or full 
       },
       "watch",
     );
-    await watchStarted;
+    await Promise.race([
+      watchStarted,
+      new Promise((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                "watch embedding barrier was never reached (bounded wait); the changed path was likely not processed",
+              ),
+            ),
+          30_000,
+        ).unref(),
+      ),
+    ]);
     const watchJob = backend.scheduler.getByRoot(canonicalRoot);
     assert.equal(watchJob.reason, "watch");
     const eventualResult = await backend.search({

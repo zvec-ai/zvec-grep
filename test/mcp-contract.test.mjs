@@ -304,6 +304,9 @@ test("full server contract exposes all tools with stable annotations", async (t)
     [
       "zvec_grep_index",
       "zvec_grep_index_drop",
+      "zvec_grep_index_export",
+      "zvec_grep_index_import",
+      "zvec_grep_index_migrate",
       "zvec_grep_index_status",
       "zvec_grep_rg",
       "zvec_grep_search",

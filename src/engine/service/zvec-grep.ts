@@ -45,9 +45,18 @@ import {
   CURRENT_MANIFEST_VERSION,
   readWorkspaceManifest,
   type WorkspaceManifest,
+  type WorkspaceManifestEmbeddingRuntime,
   writeWorkspaceManifest,
 } from "../manifest.js";
-import { validateRootPaths } from "../pipeline/indexing/root-paths.js";
+import {
+  createCanonicalPathResolver,
+  tryRealpathSync,
+} from "../utils/canonical-path.js";
+import { WorkspaceBindingStore } from "../bindings.js";
+import {
+  manifestRootPathsFromRuntime,
+  validateRootPaths,
+} from "../pipeline/indexing/root-paths.js";
 import {
   findNearestWorkspace,
   hasWorkspaceIndex,
@@ -235,10 +244,13 @@ class ZvecGrepService implements ZvecGrep {
           options.rebuild ? "index.rebuild" : "index",
           async () => {
             const existing = readWorkspaceManifest(location.home);
+            const existingInfo = existing
+              ? resolveWorkspaceIndexInfo(existing, location)
+              : null;
             const existingRuntime = existing?.embeddingRuntime ?? {};
             const { model: embeddingModel, concurrency: embeddingConcurrency } =
               await this.embeddingModelForIndex(
-                existing,
+                existingInfo,
                 "index",
                 existingRuntime,
                 options.embeddingConcurrency,
@@ -247,21 +259,21 @@ class ZvecGrepService implements ZvecGrep {
               this.options,
               embeddingModel,
               runtimeForModelProvider(
-                existing,
+                existingInfo,
                 embeddingModel,
                 existingRuntime,
               ),
             );
             if (!options.rebuild) {
               assertWorkspaceEndpointMatchesCurrentRuntime(
-                existing,
+                existingInfo,
                 existingRuntime,
                 effectiveRuntime,
                 "zg --index --endpoint <url> --rebuild",
               );
             }
             const rootPaths = resolveIndexRootPaths(
-              existing,
+              existingInfo,
               options.rootPaths,
               root,
               {
@@ -280,11 +292,20 @@ class ZvecGrepService implements ZvecGrep {
                 follow: options.follow,
               },
             );
-            if (options.rebuild || !isWorkspaceIndexed(existing)) {
+            if (options.rebuild || !isWorkspaceIndexed(existingInfo)) {
+              // Supported replacement workflow: reset invalidates the old
+              // binding explicitly; directory identity alone cannot prove
+              // non-replacement.
+              if (existing?.id) {
+                new WorkspaceBindingStore().invalidate(
+                  existing.id,
+                  location.root,
+                );
+              }
               resetWorkspaceIndex(location);
             }
 
-            const existingAfterRebuild = options.rebuild ? null : existing;
+            const existingAfterRebuild = options.rebuild ? null : existingInfo;
             if (isWorkspaceIndexed(existingAfterRebuild)) {
               assertWorkspaceEmbeddingMatchesCurrentModel(
                 existingAfterRebuild,
@@ -294,11 +315,8 @@ class ZvecGrepService implements ZvecGrep {
             }
 
             const embeddingRuntime = embeddingRuntimeAfterIndex(
-              existing,
-              existingRuntime,
               embeddingModel,
               effectiveRuntime,
-              this.options,
             );
 
             const manifest = prepareWorkspaceManifest(
@@ -308,10 +326,13 @@ class ZvecGrepService implements ZvecGrep {
               embeddingModel,
               embeddingRuntime,
             );
-            const workspaceIndex = new WorkspaceIndex(manifest, {
-              mode: "write",
-              embeddingModel,
-            });
+            const workspaceIndex = new WorkspaceIndex(
+              resolveWorkspaceIndexInfo(manifest, location),
+              {
+                mode: "write",
+                embeddingModel,
+              },
+            );
             writeWorkspaceManifest(location.home, manifest);
 
             try {
@@ -326,6 +347,7 @@ class ZvecGrepService implements ZvecGrep {
               try {
                 const result = await workspaceIndex.index({
                   rebuild: false,
+                  reconcile: options.reconcile,
                   embeddingConcurrency,
                   onProgress: options.onProgress,
                   changedPaths: options.changedPaths,
@@ -367,11 +389,13 @@ class ZvecGrepService implements ZvecGrep {
     );
     const location = workspaceIndexLocation(root);
     try {
-      if (!readWorkspaceManifest(location.home)) {
+      const existing = readWorkspaceManifest(location.home);
+      if (!existing) {
         return false;
       }
 
       return await withHomeWriteLock(location.home, "index.drop", async () => {
+        new WorkspaceBindingStore().invalidate(existing.id, location.root);
         resetWorkspaceIndex(location);
         return true;
       });
@@ -394,12 +418,14 @@ class ZvecGrepService implements ZvecGrep {
       await withHomeWriteLock(location.home, "index.disable", async () => {
         const existing = readWorkspaceManifest(location.home);
         const now = Date.now();
+        const resolver = createCanonicalPathResolver(location.root);
         writeWorkspaceManifest(location.home, {
           manifestVersion: CURRENT_MANIFEST_VERSION,
           id: existing?.id ?? randomUUID(),
           name: existing?.name ?? workspaceDisplayName(root),
-          path: location.home,
-          rootPaths: existing?.rootPaths ?? validateRootPaths([root]),
+          rootPaths:
+            existing?.rootPaths ??
+            manifestRootPathsFromRuntime(validateRootPaths([root]), resolver),
           indexPolicy: "disabled",
           embedding: null,
           indexVersion: null,
@@ -488,27 +514,28 @@ class ZvecGrepService implements ZvecGrep {
 
     return await withHomeReadLock(nearest.location.home, "info", async () => {
       const workspaceIndex = readWorkspaceManifest(nearest.location.home);
+      const info = workspaceIndex
+        ? resolveWorkspaceIndexInfo(workspaceIndex, nearest.location)
+        : null;
       const indexed =
-        workspaceIndex !== null &&
-        workspaceIndex.indexPolicy !== "disabled" &&
-        isWorkspaceIndexed(workspaceIndex) &&
+        info !== null &&
+        info.indexPolicy !== "disabled" &&
+        isWorkspaceIndexed(info) &&
         hasWorkspaceIndex(nearest.location);
 
       return {
         root: nearest.location.root,
         indexed,
-        indexPolicy: workspaceIndex?.indexPolicy ?? "undecided",
+        indexPolicy: info?.indexPolicy ?? "undecided",
         home: nearest.location.home,
         indexPath: nearest.location.indexPath,
         source: indexed ? "index" : "unindexed",
-        workspaceIndex: workspaceIndex
-          ? workspaceIndexInfoFromManifest(workspaceIndex)
-          : undefined,
+        workspaceIndex: info ?? undefined,
         status:
           indexed && options.includeStatus !== false
-            ? await workspaceIndexStatus(workspaceIndex, nearest.location)
+            ? await workspaceIndexStatus(info, nearest.location)
             : null,
-        suggestion: workspaceInfoSuggestion(workspaceIndex),
+        suggestion: workspaceInfoSuggestion(info),
       };
     });
   }
@@ -538,17 +565,17 @@ class ZvecGrepService implements ZvecGrep {
     options: ZvecGrepContextOptions,
     timings: TimingCollector,
   ): Promise<ZvecGrepContextResult> {
-    const info = readWorkspaceManifest(location.home);
-    if (!info) {
+    const manifest = readWorkspaceManifest(location.home);
+    if (!manifest) {
       throw new EngineError("Workspace index manifest not found", {
         code: "ZVEC_GREP.ENGINE.MANIFEST.NOT_FOUND",
       });
     }
 
     const workspaceIndex = await this.openWorkspaceIndexForSearch(
-      info,
+      resolveWorkspaceIndexInfo(manifest, location),
       request,
-      info.embeddingRuntime,
+      manifest.embeddingRuntime,
     );
     try {
       return await contextFromOpenWorkspaceIndex({
@@ -577,7 +604,10 @@ class ZvecGrepService implements ZvecGrep {
         withHomeReadLock(location.home, "context.status", async () => {
           const manifest = readWorkspaceManifest(location.home);
           const status = manifest
-            ? await workspaceIndexStatus(manifest, location)
+            ? await workspaceIndexStatus(
+                resolveWorkspaceIndexInfo(manifest, location),
+                location,
+              )
             : null;
           return indexStatusNeedsRefresh(status);
         }),
@@ -593,6 +623,7 @@ class ZvecGrepService implements ZvecGrep {
           if (!existing) {
             return;
           }
+          const existingInfo = resolveWorkspaceIndexInfo(existing, location);
 
           const stillNeedsRefresh = await timings.time(
             "refresh_status_scan",
@@ -605,13 +636,13 @@ class ZvecGrepService implements ZvecGrep {
           const workspaceRuntime = existing.embeddingRuntime;
           const { model: embeddingModel, concurrency: embeddingConcurrency } =
             await this.embeddingModelForIndex(
-              existing,
+              existingInfo,
               "context.refresh",
               workspaceRuntime,
               options.embeddingConcurrency,
             );
           assertWorkspaceEndpointMatchesCurrentRuntime(
-            existing,
+            existingInfo,
             workspaceRuntime,
             effectiveEmbeddingRuntime(
               this.options,
@@ -621,12 +652,12 @@ class ZvecGrepService implements ZvecGrep {
             "zg --index --endpoint <url> --rebuild",
           );
           assertWorkspaceEmbeddingMatchesCurrentModel(
-            existing,
+            existingInfo,
             embeddingModel,
             "zg --index --rebuild",
           );
 
-          const workspaceIndex = new WorkspaceIndex(existing, {
+          const workspaceIndex = new WorkspaceIndex(existingInfo, {
             mode: "write",
             embeddingModel,
           });
@@ -1183,7 +1214,10 @@ async function workspaceIndexNeedsRefresh(
 ): Promise<boolean> {
   const manifest = readWorkspaceManifest(location.home);
   const status = manifest
-    ? await workspaceIndexStatus(manifest, location)
+    ? await workspaceIndexStatus(
+        resolveWorkspaceIndexInfo(manifest, location),
+        location,
+      )
     : null;
   return indexStatusNeedsRefresh(status);
 }
@@ -1253,14 +1287,28 @@ function withContextTimings(
 
 type WorkspaceIndexRecord = {
   location: WorkspaceIndexLocation;
-  info: WorkspaceManifest;
+  info: WorkspaceIndexInfo;
 };
+
+/** Resolve a persisted manifest against the current workspace location. */
+function resolveWorkspaceIndexInfo(
+  manifest: WorkspaceManifest,
+  location: WorkspaceIndexLocation,
+): WorkspaceIndexInfo {
+  return workspaceIndexInfoFromManifest(
+    manifest,
+    { home: location.home, root: location.root },
+    createCanonicalPathResolver(location.root),
+  );
+}
 
 function findNearestWorkspaceIndex(start: string): WorkspaceIndexRecord | null {
   const location = findNearestWorkspace(start);
   if (!location) return null;
-  const info = readWorkspaceManifest(location.home);
-  return info ? { location, info } : null;
+  const manifest = readWorkspaceManifest(location.home);
+  return manifest
+    ? { location, info: resolveWorkspaceIndexInfo(manifest, location) }
+    : null;
 }
 
 function workspaceInfoSuggestion(
@@ -1383,9 +1431,21 @@ function inheritRequestedRootPathSettings(
     const absolutePath = normalizePath(
       typeof rootPath === "string" ? rootPath : rootPath.absolutePath,
     );
-    const inherited = existing.find(
-      (candidate) => normalizePath(candidate.absolutePath) === absolutePath,
-    );
+    const requestedReal = tryRealpathSync(absolutePath);
+    const inherited = existing.find((candidate) => {
+      if (normalizePath(candidate.absolutePath) === absolutePath) {
+        return true;
+      }
+      // The same physical root may be addressed through an equivalent
+      // spelling (macOS /var, Windows short names); inheritance must
+      // follow physical identity, not textual spelling.
+      const candidateReal = tryRealpathSync(candidate.absolutePath);
+      return (
+        requestedReal !== undefined &&
+        candidateReal !== undefined &&
+        candidateReal === requestedReal
+      );
+    });
     if (!inherited) {
       return rootPath;
     }
@@ -1471,18 +1531,21 @@ function applyRootPathOverrides(
 
 function prepareWorkspaceManifest(
   location: WorkspaceIndexLocation,
-  existing: WorkspaceManifest | null,
+  existing: WorkspaceIndexInfo | null,
   rootPaths: readonly (string | RootPath)[],
   embeddingModel: EmbeddingModel,
-  embeddingRuntime: EmbeddingRuntimeConfig,
+  embeddingRuntime: WorkspaceManifestEmbeddingRuntime,
 ): WorkspaceManifest {
   const now = Date.now();
+  const resolver = createCanonicalPathResolver(location.root);
   return {
     manifestVersion: CURRENT_MANIFEST_VERSION,
     id: existing?.id ?? randomUUID(),
     name: existing?.name ?? workspaceDisplayName(location.root),
-    path: location.home,
-    rootPaths: validateRootPaths(rootPaths),
+    rootPaths: manifestRootPathsFromRuntime(
+      validateRootPaths(rootPaths),
+      resolver,
+    ),
     indexPolicy: "enabled",
     embedding: currentEmbeddingSchema(embeddingModel),
     indexVersion: CURRENT_INDEX_VERSION,
@@ -1735,29 +1798,19 @@ function runtimeForModelProvider(
     : workspaceRuntime;
 }
 
+/**
+ * Runtime configuration persisted after indexing. Only the embedding
+ * endpoint is portable identity; API keys and device selection are
+ * host-local and are resolved per session, never persisted.
+ */
 function embeddingRuntimeAfterIndex(
-  existing: WorkspaceIndexInfo | null,
-  existingRuntime: EmbeddingRuntimeConfig,
   model: EmbeddingModel,
   effectiveRuntime: ResolvedEmbeddingRuntimeConfig,
-  explicit: CreateZvecGrepOptions,
-): EmbeddingRuntimeConfig {
-  const sameProvider =
-    isWorkspaceIndexed(existing) &&
-    existing.embedding.provider === model.info.provider;
-  const apiKey =
-    model.info.provider === "local"
-      ? undefined
-      : (explicit.apiKey ??
-        (sameProvider ? existingRuntime.apiKey : undefined));
+): WorkspaceManifestEmbeddingRuntime {
   return {
-    ...(apiKey !== undefined ? { apiKey } : {}),
     ...(model.info.provider !== "local" &&
     effectiveRuntime.endpoint !== undefined
       ? { endpoint: effectiveRuntime.endpoint }
-      : {}),
-    ...(model.info.provider === "local"
-      ? { device: effectiveRuntime.device ?? "auto" }
       : {}),
   };
 }

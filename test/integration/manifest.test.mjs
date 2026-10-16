@@ -9,20 +9,18 @@ import {
 } from "../../dist/engine/manifest.js";
 import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
 
-test("workspace manifest persists index metadata and embedding runtime", async (t) => {
+test("workspace manifest persists portable index metadata and embedding runtime", async (t) => {
   const temporaryDirectory = await createTemporaryDirectory(
     t,
     "zvec-grep-manifest-",
   );
   const home = join(temporaryDirectory, ".zvec-grep");
-  const root = join(temporaryDirectory, "repo");
   const now = Date.now();
   const manifest = {
-    manifestVersion: 1,
+    manifestVersion: 2,
     id: "workspace-id",
     name: "repo",
-    path: home,
-    rootPaths: [{ absolutePath: root, recursive: true }],
+    rootPaths: [{ path: ".", recursive: true }],
     indexPolicy: "enabled",
     embedding: {
       provider: "fake",
@@ -30,11 +28,10 @@ test("workspace manifest persists index metadata and embedding runtime", async (
       dimension: 8,
       metric: "cosine",
     },
-    indexVersion: 1,
+    indexVersion: 2,
     createdTime: now,
     updatedTime: now,
     embeddingRuntime: {
-      apiKey: "workspace-key",
       endpoint: "https://example.test/embeddings",
     },
   };
@@ -47,6 +44,61 @@ test("workspace manifest persists index metadata and embedding runtime", async (
     assert.equal((await stat(home)).mode & 0o777, 0o700);
     assert.equal((await stat(workspaceManifestPath(home))).mode & 0o777, 0o600);
   }
+});
+
+test("workspace manifest rejects persisted host bindings", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-manifest-bindings-",
+  );
+  const home = join(temporaryDirectory, ".zvec-grep");
+  const now = Date.now();
+  const base = {
+    manifestVersion: 2,
+    id: "workspace-id",
+    name: "repo",
+    rootPaths: [{ path: ".", recursive: true }],
+    indexPolicy: "enabled",
+    embedding: null,
+    indexVersion: null,
+    createdTime: now,
+    updatedTime: now,
+  };
+
+  for (const embeddingRuntime of [{ apiKey: "secret" }, { device: "metal" }]) {
+    writeWorkspaceManifest(home, { ...base, embeddingRuntime });
+    assert.throws(
+      () => readWorkspaceManifest(home),
+      (error) => error.code === "ZVEC_GREP.ENGINE.MANIFEST.INVALID",
+    );
+  }
+});
+
+test("workspace manifest reports legacy format as needing migration", async (t) => {
+  const temporaryDirectory = await createTemporaryDirectory(
+    t,
+    "zvec-grep-manifest-legacy-",
+  );
+  const home = join(temporaryDirectory, ".zvec-grep");
+  const now = Date.now();
+  writeWorkspaceManifest(home, {
+    manifestVersion: 1,
+    id: "legacy-id",
+    name: "legacy",
+    path: home,
+    rootPaths: [{ absolutePath: temporaryDirectory, recursive: true }],
+    indexPolicy: "enabled",
+    embedding: null,
+    indexVersion: null,
+    createdTime: now,
+    updatedTime: now,
+    embeddingRuntime: {},
+  });
+
+  assert.throws(
+    () => readWorkspaceManifest(home),
+    (error) => error.code === "ZVEC_GREP.ENGINE.MANIFEST.MIGRATION_REQUIRED",
+  );
 });
 
 test("workspace manifest rejects unsupported or malformed data", async (t) => {
