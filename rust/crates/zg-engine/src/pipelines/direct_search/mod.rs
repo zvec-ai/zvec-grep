@@ -2,7 +2,10 @@
 
 mod structure;
 
-use std::{path::Path, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use crate::{
     EngineError, EngineResult,
@@ -40,6 +43,22 @@ impl DirectSearchService {
     }
 
     pub(crate) async fn context(&self, options: ContextOptions) -> EngineResult<ContextResult> {
+        self.context_with_selected_files(options, None).await
+    }
+
+    pub(super) async fn context_selected_files(
+        &self,
+        options: ContextOptions,
+        files: Vec<PathBuf>,
+    ) -> EngineResult<ContextResult> {
+        self.context_with_selected_files(options, Some(files)).await
+    }
+
+    async fn context_with_selected_files(
+        &self,
+        options: ContextOptions,
+        selected_files: Option<Vec<PathBuf>>,
+    ) -> EngineResult<ContextResult> {
         let root = std::path::absolute(options.root.as_deref().unwrap_or_else(|| Path::new(".")))
             .map_err(|error| {
             EngineError::from_io("failed to resolve workspace root", &error)
@@ -58,7 +77,8 @@ impl DirectSearchService {
             root: Some(root.clone()),
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
-            paths: options.rg_paths,
+            paths_selected: selected_files.is_some(),
+            paths: selected_files.unwrap_or(options.rg_paths),
             limit: options.limit,
             options: LexicalOptions {
                 matching: options.rg_options,

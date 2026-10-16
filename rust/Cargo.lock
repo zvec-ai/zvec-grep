@@ -4038,6 +4038,7 @@ dependencies = [
  "zg-daemon",
  "zg-daemon-protocol",
  "zg-engine",
+ "zg-testkit",
  "zvec-rust",
  "zvec-rust-build",
 ]

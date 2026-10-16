@@ -23,6 +23,7 @@ use api::{
     context::{ContextOptions, ContextResult},
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
+    paths::{PathLookupResult, PathsOptions, PathsResult},
 };
 
 pub use error::{EngineError, EngineResult, ErrorReport, ErrorSite};
@@ -52,6 +53,24 @@ impl ZvecGrep {
     pub async fn context(&self, options: ContextOptions) -> EngineResult<ContextResult> {
         self.service
             .context(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Finds current file paths using the workspace's saved scanning rules.
+    /// This operation does not open storage, load models, or create an index.
+    pub async fn paths(&self, options: PathsOptions) -> EngineResult<PathsResult> {
+        self.service
+            .paths(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Looks up current file names first, then literal references in selected source files.
+    /// Neither branch opens an index or loads an embedding model.
+    pub async fn lookup_path(&self, options: PathsOptions) -> EngineResult<PathLookupResult> {
+        self.service
+            .lookup_path(options)
             .await
             .map_err(|error| error.report_here())
     }

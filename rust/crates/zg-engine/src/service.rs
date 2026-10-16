@@ -95,6 +95,22 @@ impl EngineService {
         self.indexing.index(&self.models, options).await
     }
 
+    pub(crate) async fn paths(
+        &self,
+        options: crate::api::paths::PathsOptions,
+    ) -> crate::EngineResult<crate::api::paths::PathsResult> {
+        self.ensure_open()?;
+        crate::pipelines::path_search::search(options).await
+    }
+
+    pub(crate) async fn lookup_path(
+        &self,
+        options: crate::api::paths::PathsOptions,
+    ) -> crate::EngineResult<crate::api::paths::PathLookupResult> {
+        self.ensure_open()?;
+        crate::pipelines::path_search::lookup(&self.direct_search, options).await
+    }
+
     /// Returns workspace index metadata and status.
     ///
     /// # Errors

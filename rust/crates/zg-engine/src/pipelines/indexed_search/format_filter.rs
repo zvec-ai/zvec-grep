@@ -8,7 +8,9 @@ use crate::{
 
 use super::path_filter::{all, any, negate};
 
-pub(super) fn compile_format_filter(filter: &QueryFilter) -> Option<StoragePathFilter> {
+pub(in crate::pipelines) fn compile_format_filter(
+    filter: &QueryFilter,
+) -> Option<StoragePathFilter> {
     if filter.formats.is_empty()
         && filter.excluded_formats.is_empty()
         && filter.categories.is_empty()
@@ -170,7 +172,7 @@ fn extension_predicate(extension: &str) -> StoragePathFilter {
 
 /// Fallback for backends without path predicates or native non-Unicode basenames.
 /// Evaluate the compiled rules directly without constructing per-file formats.
-pub(super) fn matches_file_name(predicate: &StoragePathFilter, name: &OsStr) -> bool {
+pub(in crate::pipelines) fn matches_file_name(predicate: &StoragePathFilter, name: &OsStr) -> bool {
     let bytes = name.as_encoded_bytes();
     match predicate {
         StoragePathFilter::All => true,

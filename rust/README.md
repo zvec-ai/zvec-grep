@@ -180,6 +180,30 @@ metadata included in search projections. Index format 5 uses this layout.
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
 
+A single file name or path, such as `zg auth.ts` or `zg src/auth.ts`, first
+looks up current file paths. Matches use `#1 matchedBy=path src/auth.ts`, with
+forward slashes on every platform and exact workspace-relative paths before suffix
+matches. Ties use deterministic native path ordering; `--limit` bounds the list
+(default: 10). Lookup uses the nearest workspace's saved scan rules and query
+file filters, and includes empty files. It runs locally in direct, server, and
+auto modes without loading a model, creating an index, or requiring a daemon.
+File discovery does not apply index-only default exclusions for build directories,
+lock files, or images; saved scanning rules and ignore files still apply.
+File matches do not read or embed contents. If no file matches, lookup searches
+the selected current source text literally using the same scan rules and filters.
+A path mentioned only in source text returns those text matches. No match prints
+`No matches.` instead of unrelated vector neighbors, even with an existing index.
+Text results deduplicate structural containers before applying `--limit` and show
+line numbers, match/context markers, and structural headings. Terminal output also
+shows coverage and per-file/per-hit metadata. Truncated file or text results warn
+on stderr. Unlike the Node.js CLI, truncated text remains local instead of starting
+indexed retrieval; direct, server, and auto modes share this behavior and never
+require model loading or indexing. Native glob ordering, format aliases, ignore
+handling, and path normalization retain the Rust CLI's existing semantics.
+Explicit `--hybrid`, `--fts`, `--vector`, `--fuse`, symbol options, `--trace`, and
+`--refresh` retain their indexed behavior. Text questions, URLs, and glob patterns
+do not trigger automatic path lookup.
+
 Managed `zg --rg` preserves literal pattern whitespace and supports empty
 patterns with `-e ''`. Matching options include fixed strings (`-F`), case
 selection (`-i`, `-s`, `-S`, with the last option winning), word/whole-line

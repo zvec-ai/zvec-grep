@@ -315,7 +315,7 @@ const MAIN_HELP_BODY: &str = r#"Usage:
   zg --<management-command> [options]
 
 Search:
-  <query>        Search indexed context (no command prefix)
+  <query>        Search file paths or indexed context (no command prefix)
   --rg           Run managed ripgrep
 
 Management:
@@ -362,12 +362,19 @@ const SEARCH_HELP: &str = r#"Usage:
   zg --rg [rg-options] <pattern> [path...]
 
 Search routes:
-  positional query                  Hybrid FTS and vector search
+  positional query                  File paths use current files and literal text; other queries use hybrid search
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
   --fuse                            Fuse all query groups into one ranked list
   --rg                              Run exhaustive managed ripgrep
+
+Single file names and paths (auth.ts, src/auth.ts) return current matching paths
+without reading or embedding contents. Exact paths precede suffix matches.
+If no file matches, search selected source text literally. No match prints
+"No matches." without vector neighbors, even when an index exists.
+Path lookup runs locally in direct, server, and auto modes using saved scan rules.
+Explicit routes, symbol options, --trace, and --refresh skip this lookup.
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)

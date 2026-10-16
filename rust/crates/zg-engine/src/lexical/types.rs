@@ -12,6 +12,9 @@ pub(crate) struct LexicalSearchRequest {
     pub patterns: Vec<String>,
     pub pattern_files: Vec<PathBuf>,
     pub paths: Vec<PathBuf>,
+    /// An empty preselected file list means no files, rather than the whole root.
+    #[serde(skip)]
+    pub paths_selected: bool,
     pub limit: Option<usize>,
     pub options: LexicalOptions,
 }

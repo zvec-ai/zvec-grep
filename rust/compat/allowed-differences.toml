@@ -2,6 +2,18 @@
 # reason and removal condition.
 
 [[difference]]
+id = "cli-path-lookup-local-admission"
+owner = "CLI/current-source"
+reason = "路径查找在 direct/server/auto 均先读取本地当前文件，显式 server 不跳过。文本覆盖被结果或候选上限截断时输出不完整警告，保持本地检索，不启动索引或补入无关向量近邻。验证：path_lookup_reports_file_and_text_truncation_without_indexing_in_all_modes、warm_index_path_lookups_return_current_text_or_no_matches_without_vector_neighbors。"
+removal_condition = "Node.js 采用相同本地查找边界，或产品明确要求不完整路径文本查找继续使用索引后重新评估。"
+
+[[difference]]
+id = "cli-path-lookup-native-selection"
+owner = "CLI/file-selection"
+reason = "文件命中同级排序保留跨运行确定的原生路径顺序，不依赖系统 locale；保留 Rust 已有混合 glob 输入顺序、引擎格式别名、非 Git 目录中的 ignore 处理，以及重复 ./、目录别名、Windows 扩展路径规范化。输出路径统一为正斜杠。结构预览使用引擎实际提供的元数据字段和明确内容坐标。"
+removal_condition = "两端统一文件选择、结构元数据和排序契约后更新对照；不得为复制旧行为而破坏 Rust 已有扫描规则。"
+
+[[difference]]
 id = "rust-pi-agent-integration"
 owner = "CLI/installer"
 reason = "Rust adds the pi install/uninstall target for native user-level MCP, stable ownership and active global context. The TypeScript installer does not support this target. Both transports retain shared daemon behavior; native client limitations require manual Remote Embedding authorization. Validation: pi_install and CLI help integration tests."

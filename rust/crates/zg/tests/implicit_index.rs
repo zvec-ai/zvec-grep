@@ -747,3 +747,73 @@ fn implicit_build_preserves_local_overrides_without_persisting_remote_credential
         assert!(!String::from_utf8_lossy(&output.stderr).contains("implicit-query-secret"));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_index_path_lookups_return_current_text_or_no_matches_without_vector_neighbors() {
+    let embedding = GatedEmbedding::start().await;
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.path().join("anchor.txt"),
+        "Unrelated orchard documentation.\n",
+    )
+    .expect("source");
+    let mut index = spawn_cli(fixture.command(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &embedding.endpoint,
+        "--allow-remote",
+        "--api-key",
+        "local-test-key",
+    ]))
+    .expect("index process");
+    wait_cli(&mut index, Duration::from_secs(30))
+        .await
+        .expect("warm index");
+    let mut vector = spawn_cli(fixture.command(&[
+        "--vector",
+        "missing.ts",
+        "--mode",
+        "direct",
+        "--refresh",
+        "off",
+        "--allow-remote",
+        "--api-key",
+        "local-test-key",
+    ]))
+    .expect("explicit vector query");
+    let neighbors = wait_cli(&mut vector, Duration::from_secs(30))
+        .await
+        .expect("vector neighbors");
+    assert!(String::from_utf8_lossy(&neighbors.stdout).contains("anchor.txt"));
+    // New source references must be visible even though the index has not been refreshed.
+    fs::write(
+        fixture.root.path().join("references.txt"),
+        "Import src/auth.ts here.\n",
+    )
+    .expect("current reference");
+    embedding.server.abort();
+    for mode in ["direct", "server", "auto"] {
+        for query in ["missing.ts", "src/auth.ts"] {
+            let mut command = fixture.command(&[query, "--mode", mode]);
+            command.env("ZVEC_GREP_EMBEDDING", "unsupported/model");
+            let mut query_process = spawn_cli(command).expect("path query");
+            let output = wait_cli(&mut query_process, Duration::from_secs(30))
+                .await
+                .expect("local lookup");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stdout.contains("anchor.txt"), "{mode}: {stdout}");
+            assert!(stderr.is_empty(), "{mode}: {stderr}");
+            if query == "missing.ts" {
+                assert_eq!(stdout, "No matches.\n");
+            } else {
+                assert!(stdout.contains("references.txt"), "{stdout}");
+                assert!(stdout.contains("Import src/auth.ts"), "{stdout}");
+            }
+        }
+    }
+}

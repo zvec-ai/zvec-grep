@@ -5,6 +5,7 @@ mod install;
 mod jsonc;
 mod managed_rg;
 mod management;
+mod path_lookup;
 mod progress;
 mod render;
 mod status;
@@ -51,6 +52,7 @@ pub use install::{
     resolve_server_url,
 };
 pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
+pub use path_lookup::write_path_lookup_result;
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
     write_context_with_options,
@@ -642,6 +644,7 @@ pub enum CliPlan {
         mode: ClientMode,
         home: Option<PathBuf>,
         request: Box<ContextOptions>,
+        path_lookup: bool,
         output: OutputOptions,
     },
     Index {
@@ -1288,6 +1291,7 @@ fn query_plan(
 ) -> Result<CliPlan, CliError> {
     let mode = resolve_query_mode(&args)?;
     validate_query(&args, mode)?;
+    let path_lookup = uses_path_lookup(&args);
     let home = args.home.clone();
     let human = terminal && !args.compact;
     let output = OutputOptions {
@@ -1382,8 +1386,36 @@ fn query_plan(
         mode,
         home,
         request: Box::new(request),
+        path_lookup,
         output,
     })
+}
+
+fn uses_path_lookup(args: &QueryArgs) -> bool {
+    !args.rg
+        && args.hybrid_queries.is_empty()
+        && args.fts.is_empty()
+        && args.vector.is_empty()
+        && !args.fuse
+        && !args.prefer_symbol
+        && !args.trace
+        && args.refresh.is_none()
+        && args.symbol_types.is_empty()
+        && args.values.len() == 1
+        && is_path_query(&args.values[0])
+}
+
+fn is_path_query(query: &str) -> bool {
+    let query = query.trim();
+    !query.is_empty()
+        && !query.chars().any(char::is_whitespace)
+        && !query.contains("://")
+        && !query.contains(['?', '*', '<', '>', '|'])
+        && (query.contains(['/', '\\'])
+            || query.rsplit_once('.').is_some_and(|(_, extension)| {
+                (1..=12).contains(&extension.len())
+                    && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            }))
 }
 
 fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliError> {
@@ -1636,6 +1668,44 @@ mod tests {
             .expect("parse")
             .into_plan_with_terminal(std::env::temp_dir(), terminal)
             .expect("plan")
+    }
+
+    #[test]
+    fn only_ordinary_single_path_queries_enable_file_lookup() {
+        for query in [
+            "auth.ts",
+            "src/auth.ts",
+            ".\\src\\auth.ts",
+            ".gitignore",
+            "src/auth",
+        ] {
+            let CliPlan::Query { path_lookup, .. } = plan(&["zg", query], false) else {
+                panic!("query plan");
+            };
+            assert!(path_lookup, "{query}");
+        }
+        for args in [
+            vec!["zg", "authentication"],
+            vec!["zg", "find auth.ts"],
+            vec!["zg", "auth.ts", "login"],
+            vec!["zg", "https://example.com/auth.ts"],
+            vec!["zg", "*.ts"],
+            vec!["zg", "auth.ts", "--hybrid", "login"],
+            vec!["zg", "--hybrid", "auth.ts"],
+            vec!["zg", "--fts", "auth.ts"],
+            vec!["zg", "--vector", "auth.ts"],
+            vec!["zg", "auth.ts", "--fuse"],
+            vec!["zg", "auth.ts", "--prefer-symbol"],
+            vec!["zg", "auth.ts", "--trace"],
+            vec!["zg", "auth.ts", "--refresh", "wait"],
+            vec!["zg", "auth.ts", "--symbol-type", "function"],
+            vec!["zg", "--rg", "auth.ts"],
+        ] {
+            let CliPlan::Query { path_lookup, .. } = plan(&args, false) else {
+                panic!("query plan");
+            };
+            assert!(!path_lookup, "{args:?}");
+        }
     }
 
     #[test]
