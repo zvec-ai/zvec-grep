@@ -1,6 +1,9 @@
 #[path = "server_lifecycle/mcp_parity.rs"]
 mod mcp_parity;
 
+#[path = "server_lifecycle/positional_queries.rs"]
+mod positional_queries;
+
 use std::{
     error::Error,
     io::{BufRead, BufReader, Read, Write},

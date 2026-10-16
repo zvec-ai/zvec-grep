@@ -330,6 +330,7 @@ Management:
   --version      Print the installed version
 
 Bare words such as query, index, and help are literal search text.
+Positional words are joined into one query; repeat --hybrid for separate queries.
 Terminal searches use human-readable output and full previews; pipes use compact
 output. Use --compact to force compact output.
 
@@ -362,12 +363,23 @@ const SEARCH_HELP: &str = r#"Usage:
   zg --rg [rg-options] <pattern> [path...]
 
 Search routes:
-  positional query                  Hybrid FTS and vector search
+  positional words                  Joined into one hybrid FTS and vector query
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
   --fuse                            Fuse all query groups into one ranked list
   --rg                              Run exhaustive managed ripgrep
+
+Positional arguments are joined with spaces, even if separately quoted:
+  zg connection pool timeout                 One query: connection pool timeout
+  zg "connection pool" "timeout"             The same query, with a warning
+  zg "connection pool" "socket timeout"      One query, with a warning
+  zg --hybrid "connection pool" --hybrid "socket timeout"
+                                            Two explicit queries
+The warning is written to stderr when multiple nonempty positional arguments
+include one with internal whitespace. Shell quote characters are not available.
+--hybrid, --fts, and --vector remain separate, repeatable queries.
+Managed --rg keeps its pattern and path arguments separate.
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)

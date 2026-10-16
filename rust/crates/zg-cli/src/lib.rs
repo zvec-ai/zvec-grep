@@ -515,6 +515,15 @@ pub struct QueryArgs {
     pub literal_value_count: usize,
 }
 
+impl QueryArgs {
+    fn positional_query_parts(&self) -> impl Iterator<Item = &str> {
+        self.values
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    }
+}
+
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
@@ -800,6 +809,26 @@ impl Cli {
             _ => {}
         }
         Ok(cli)
+    }
+
+    /// Warns when multiple positional arguments include a phrase that may have
+    /// been intended as a separate query. Shell quote characters are unavailable.
+    #[must_use]
+    pub fn positional_query_warning(&self) -> Option<String> {
+        let Some(CommandLine::Query(args)) = &self.command else {
+            return None;
+        };
+        if args.rg {
+            return None;
+        }
+        let parts = args.positional_query_parts().collect::<Vec<_>>();
+        if parts.len() < 2 || !parts.iter().any(|part| part.contains(char::is_whitespace)) {
+            return None;
+        }
+        Some(format!(
+            "warning: positional query arguments are merged into one query: {:?}. For separate queries, use repeated --hybrid flags, e.g. zg --hybrid \"connection pool\" --hybrid \"socket timeout\".",
+            parts.join(" ")
+        ))
     }
 
     /// Converts terminal arguments into a transport-independent execution plan.
@@ -1312,9 +1341,8 @@ fn query_plan(
         }
         parse_managed_rg_args(&args.values)?
     } else {
-        let queries = args
-            .values
-            .into_iter()
+        let positional_query = args.positional_query_parts().collect::<Vec<_>>().join(" ");
+        let queries = std::iter::once(positional_query)
             .chain(args.hybrid_queries)
             .map(|query| query.trim().to_owned())
             .filter(|query| !query.is_empty())
@@ -1659,7 +1687,7 @@ mod tests {
             else {
                 panic!("{word} must not run an action")
             };
-            assert_eq!(request.queries, [word, "second"]);
+            assert_eq!(request.queries, [format!("{word} second")]);
             assert_eq!(request.limit, Some(3));
         }
     }
@@ -1729,9 +1757,7 @@ mod tests {
         };
         assert_eq!(
             request.queries,
-            [
-                "query", "--index", "--status", "--help", "--human", "--json", "-v"
-            ]
+            ["query --index --status --help --human --json -v"]
         );
         let CliPlan::Query { request, .. } = plan(&["zg", "--rg", "--", "--index"], false) else {
             panic!("literal rg")
@@ -2476,6 +2502,172 @@ mod tests {
             serde_json::json!(request.filter.symbol_types),
             serde_json::json!(types)
         );
+    }
+
+    #[test]
+    fn positional_words_form_one_query_in_every_client_mode() {
+        for mode in ["direct", "server", "auto"] {
+            for (words, expected, warns) in [
+                (
+                    vec!["connection", "pool", "timeout"],
+                    "connection pool timeout",
+                    false,
+                ),
+                (
+                    vec!["connection pool timeout"],
+                    "connection pool timeout",
+                    false,
+                ),
+                (
+                    vec!["connection pool", "timeout"],
+                    "connection pool timeout",
+                    true,
+                ),
+                (
+                    vec!["connection pool", "socket timeout"],
+                    "connection pool socket timeout",
+                    true,
+                ),
+                (
+                    vec!["connection", "pool timeout"],
+                    "connection pool timeout",
+                    true,
+                ),
+                (
+                    vec!["", " connection ", " ", "pool", "timeout "],
+                    "connection pool timeout",
+                    false,
+                ),
+                (
+                    vec![" connection  pool ", " timeout "],
+                    "connection  pool timeout",
+                    true,
+                ),
+                (vec!["连接\t池", "超时"], "连接\t池 超时", true),
+                (vec!["连接\u{3000}池", "超时"], "连接\u{3000}池 超时", true),
+                (vec!["", "connection pool", " "], "connection pool", false),
+            ] {
+                let mut arguments = vec!["zg", "--mode", mode];
+                arguments.extend(words);
+                let cli = Cli::try_parse_from(arguments).expect("query syntax");
+                let warning = cli.positional_query_warning();
+                assert_eq!(warning.is_some(), warns, "{expected}");
+                if let Some(warning) = warning {
+                    assert!(warning.contains(&format!("{expected:?}")), "{warning}");
+                    assert!(
+                        warning.contains(
+                            "zg --hybrid \"connection pool\" --hybrid \"socket timeout\""
+                        ),
+                        "{warning}"
+                    );
+                }
+                let CliPlan::Query { request, .. } =
+                    cli.into_plan(std::env::temp_dir()).expect("query plan")
+                else {
+                    panic!("query")
+                };
+                assert_eq!(request.queries, [expected]);
+            }
+        }
+    }
+
+    #[test]
+    fn positional_merge_preserves_explicit_routes_options_and_literal_separator() {
+        let CliPlan::Query { request, .. } = plan(
+            &[
+                "zg",
+                "connection",
+                "--hybrid",
+                "first query",
+                "pool",
+                "--limit=3",
+                "--hybrid=second query",
+                "--fts",
+                "exact phrase",
+                "--fts=another phrase",
+                "--vector",
+                "semantic intent",
+                "--vector=another intent",
+                "--fuse",
+                "--",
+                "--timeout",
+                "literal words",
+            ],
+            false,
+        ) else {
+            panic!("query")
+        };
+        assert_eq!(
+            request.queries,
+            [
+                "connection pool --timeout literal words",
+                "first query",
+                "second query"
+            ]
+        );
+        assert_eq!(request.limit, Some(3));
+        assert!(request.fuse);
+        assert_eq!(
+            request
+                .routes
+                .iter()
+                .map(|route| (route.mode, route.query.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (super::ContextRouteMode::Fts, "exact phrase"),
+                (super::ContextRouteMode::Fts, "another phrase"),
+                (super::ContextRouteMode::Vector, "semantic intent"),
+                (super::ContextRouteMode::Vector, "another intent"),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_queries_and_non_query_arguments_do_not_trigger_merge_warning() {
+        for arguments in [
+            vec![
+                "zg",
+                "--hybrid",
+                "connection pool",
+                "--hybrid",
+                "socket timeout",
+            ],
+            vec![
+                "zg",
+                "--fts",
+                "connection pool",
+                "--vector",
+                "socket timeout",
+            ],
+            vec!["zg", "connection", "--hybrid", "socket timeout"],
+            vec!["zg", "connection", "pool", "--glob", "path with spaces/**"],
+            vec!["zg", "--rg", "connection pool", "path with spaces"],
+            vec!["zg", "--help", "search"],
+            vec!["zg", "--index", "path with spaces"],
+        ] {
+            let cli = Cli::try_parse_from(arguments).expect("syntax");
+            assert!(cli.positional_query_warning().is_none());
+        }
+        let CliPlan::Query { request, .. } = plan(
+            &[
+                "zg",
+                "",
+                " ",
+                "--hybrid",
+                "connection pool",
+                "--hybrid",
+                "socket timeout",
+            ],
+            false,
+        ) else {
+            panic!("query")
+        };
+        assert_eq!(request.queries, ["connection pool", "socket timeout"]);
+        let error = Cli::try_parse_from(["zg", "--mode", "direct", "", " "])
+            .expect("empty query syntax")
+            .into_plan(std::env::temp_dir())
+            .expect_err("empty query rejected");
+        assert!(matches!(error, super::CliError::MissingQuery));
     }
 
     #[test]

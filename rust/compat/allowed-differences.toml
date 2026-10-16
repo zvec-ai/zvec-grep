@@ -2,6 +2,12 @@
 # reason and removal condition.
 
 [[difference]]
+id = "cli-positional-words-form-one-query"
+owner = "CLI"
+reason = "Rust adopts the positional-query behavior proposed in PR #134: nonempty positional arguments form one hybrid query, while repeated --hybrid/--fts/--vector options retain explicit groups. Ambiguous phrase arguments warn on stderr. Direct and Server modes share this parsing; managed --rg keeps pattern/path semantics."
+removal_condition = "The TypeScript CLI adopts the same positional-query and warning behavior, or the TypeScript compatibility layer is retired."
+
+[[difference]]
 id = "rust-pi-agent-integration"
 owner = "CLI/installer"
 reason = "Rust adds the pi install/uninstall target for native user-level MCP, stable ownership and active global context. The TypeScript installer does not support this target. Both transports retain shared daemon behavior; native client limitations require manual Remote Embedding authorization. Validation: pi_install and CLI help integration tests."
