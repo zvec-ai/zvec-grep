@@ -365,6 +365,7 @@ export class RootRuntime {
       root: session.root,
       modelKey: lease.key,
       context: (contextOptions) => session.context(contextOptions),
+      status: () => session.status(),
       async close() {
         if (closed) {
           return;
