@@ -635,8 +635,11 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     });
     let response = post_json(port, Some(&session), &call.to_string())?;
     assert!(response.contains("error[ZG.ENGINE.NOT_FOUND]"));
-    assert!(response.contains("workspace index at"));
-    assert!(response.contains("no workspace manifest was found"));
+    assert!(response.contains("No index found"));
+    assert!(
+        response.contains("zg --index --embedding &lt;model&gt;")
+            || response.contains("zg --index --embedding <model>")
+    );
     assert!(response.contains("\"isError\":true"));
 
     // CLI administration uses the typed daemon protocol rather than the
@@ -1877,15 +1880,55 @@ fn post_json(port: u16, session: Option<&str>, body: &str) -> Result<String, Box
     let session_header = session.map_or_else(String::new, |value| {
         format!("Mcp-Session-Id: {value}\r\nMCP-Protocol-Version: 2025-11-25\r\n")
     });
-    write!(
-        stream,
+    let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    )?;
+    );
+    stream.write_all(request.as_bytes())?;
     stream.flush()?;
+    Ok(read_http_response(&mut stream)?)
+}
+
+fn read_http_response(reader: &mut impl Read) -> std::io::Result<String> {
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    if let Err(error) = reader.read_to_string(&mut response) {
+        // Early HTTP rejection can reset a connection with an unread request body.
+        // Accept the response only when its declared body has already arrived in full.
+        let complete = response
+            .split_once("\r\n\r\n")
+            .is_some_and(|(headers, body)| {
+                headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    == Some(body.len())
+            });
+        if error.kind() != std::io::ErrorKind::ConnectionReset || !complete {
+            return Err(error);
+        }
+    }
     Ok(response)
+}
+
+#[test]
+fn http_test_reader_accepts_reset_only_after_a_complete_response() {
+    struct ResetAfterBytes(std::io::Cursor<Vec<u8>>);
+    impl Read for ResetAfterBytes {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.position() == self.0.get_ref().len() as u64 {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            } else {
+                self.0.read(bytes)
+            }
+        }
+    }
+    for (body, complete) in [("okay", true), ("ok", false)] {
+        let bytes =
+            format!("HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\n{body}").into_bytes();
+        let mut reader = ResetAfterBytes(std::io::Cursor::new(bytes));
+        assert_eq!(read_http_response(&mut reader).is_ok(), complete);
+    }
 }
 
 fn path_text(path: &Path) -> Result<&str, Box<dyn Error>> {

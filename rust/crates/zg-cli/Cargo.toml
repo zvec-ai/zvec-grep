@@ -10,11 +10,12 @@ publish.workspace = true
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
-crossterm.workspace = true
+crossterm = { workspace = true, features = ["bracketed-paste"] }
 # Configuration objects can contain first-match rules whose order must survive edits.
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
 uuid.workspace = true
+tokio-util.workspace = true
 zg-engine = { path = "../zg-engine" }
 
 [dev-dependencies]

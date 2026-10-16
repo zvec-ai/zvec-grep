@@ -3,6 +3,9 @@
 pub use options::IndexOptions;
 pub use result::IndexResult;
 
+/// Read-only model choices for interactive index creation.
+pub mod setup;
+
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
     use std::path::PathBuf;

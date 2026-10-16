@@ -85,6 +85,17 @@ impl ZvecGrep {
             .map_err(|error| error.report_here())
     }
 
+    /// Lists index model choices without loading models, downloading or writing state.
+    pub async fn index_setup(
+        &self,
+        options: api::index::setup::IndexSetupOptions,
+    ) -> EngineResult<api::index::setup::IndexSetup> {
+        self.service
+            .index_setup(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
     /// Watches a workspace using its saved, resolved file selection.
     /// The caller owns the returned session and schedules incremental indexing.
     pub async fn watch_workspace(

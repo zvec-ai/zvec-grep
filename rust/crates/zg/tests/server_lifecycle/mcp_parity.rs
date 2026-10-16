@@ -27,15 +27,13 @@ fn protocol_post(
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    write!(
-        stream,
+    let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: {version}\r\nMcp-Method: {method}\r\n{name_header}{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    )?;
+    );
+    stream.write_all(request.as_bytes())?;
     stream.flush()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response)
+    Ok(read_http_response(&mut stream)?)
 }
 
 fn rpc(response: &str) -> serde_json::Value {
@@ -144,6 +142,54 @@ fn modern_http_discovery_tools_errors_and_remote_continuation() -> Result<(), Bo
         }
         assert_command_success(&guard.stop()?);
     }
+    Ok(())
+}
+
+#[test]
+fn modern_http_missing_index_requires_selection_and_survives_request_completion()
+-> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
+    let port = guard.listen.parse::<SocketAddr>()?.port();
+    let original = json!({"name": "zvec_grep_search", "arguments": {"root": workspace.path(), "fts": "needle"}});
+    let selection = rpc(&modern_post(port, "tools/call", original.clone(), "")?);
+    assert_eq!(
+        selection["result"]["resultType"], "input_required",
+        "{selection}"
+    );
+    assert!(!workspace.path().join(".zvec-grep").exists());
+    let mut accepted = original.clone();
+    accepted["requestState"] = selection["result"]["requestState"].clone();
+    accepted["inputResponses"] = json!({"index_setup": {"action": "accept", "content": {"model": "local/potion-code-16m-v2"}}});
+    let submitted = rpc(&modern_post(port, "tools/call", accepted, "")?);
+    assert_eq!(
+        submitted["result"]["structuredContent"]["status"], "indexing",
+        "{submitted}"
+    );
+    assert!(submitted["result"]["structuredContent"]["job_id"].is_string());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let result = rpc(&modern_post(port, "tools/call", original.clone(), "")?);
+        assert_ne!(result["result"]["isError"], true, "{result}");
+        assert_ne!(
+            result["result"]["resultType"], "input_required",
+            "model selection must not repeat: {result}"
+        );
+        if result["result"]["structuredContent"]["status"] != "indexing" {
+            assert!(workspace.path().join(".zvec-grep/manifest.json").is_file());
+            break;
+        }
+        assert!(Instant::now() < deadline, "background build did not finish");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !home.path().join("models").exists(),
+        "empty workspaces must not download a model"
+    );
+    assert_command_success(&guard.stop()?);
     Ok(())
 }
 

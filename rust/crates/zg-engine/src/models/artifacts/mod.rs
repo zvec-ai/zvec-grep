@@ -4,6 +4,7 @@ mod cache_lock;
 mod downloader;
 mod error;
 mod identity;
+mod inspection;
 mod manifest;
 mod progress;
 mod publish;
@@ -11,6 +12,7 @@ mod source;
 mod spec;
 
 pub(super) use downloader::{ResolveArtifacts, resolve_model_artifacts};
+pub(crate) use inspection::{default_model_cache, model_is_cached};
 #[cfg(test)]
 pub(super) use progress::ArtifactDownloadProgress;
 pub(super) use progress::ModelDownloadProgressReporter;

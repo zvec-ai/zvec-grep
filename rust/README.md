@@ -162,6 +162,40 @@ piped output is compact. `--compact` forces compact output, and
 `--preview=full` explicitly requests full previews even in compact output.
 The former `--human` option is no longer accepted.
 
+When an interactive search finds no index, it asks you to choose an embedding
+model before building. The picker has **Local models** and **Remote models** tabs:
+downloaded local models and globally configured remote models appear first.
+Use ↑/↓ to select, ←/→ or Tab to switch, Enter to confirm and Esc to exit.
+Each tab keeps its selection when switching. A valid model preference selects the
+initial tab; without one the picker opens Local models. Remote models show whether
+credentials are available. Selecting one with missing credentials opens a masked
+API Key prompt, with paste, Backspace, Ctrl+U to clear and Esc to exit. Enter saves
+a non-empty key to the provider's global configuration and continues to remote
+authorization. The new key is used for both the build and following CLI query.
+
+Local selection starts the build. Remote selection first discloses the workspace,
+model, endpoint, data sent and possible API charges, then offers Allow once, Allow
+for this workspace, or Back to model selection. Existing matching workspace consent
+skips this step. Allow once covers the CLI build and the following query without
+persisting a grant. Esc exits either screen before any workspace content is sent.
+
+CLI searches display model preparation/download and file indexing progress and wait
+for the full index to be published before running the original search. This also
+applies to `--mode server`, where the CLI follows the daemon's background job.
+Non-interactive searches never create a missing index; initialize it explicitly
+with `zg --index --embedding <model>` first. Empty workspaces do not download models.
+
+On MCP connections with background scheduling and form elicitation, missing-index
+searches ask the user to select a model and authorize remote use when needed.
+MCP model choices require credentials to be configured beforehand.
+Acceptance submits a background build and returns its job ID immediately; retry
+search after completion. Allow once covers that background build only. Later search
+requests report current build progress without repeating model selection. Unsupported
+clients receive CLI initialization instructions. Native terminal tabs and Escape
+handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exact
+`requestState` and unchanged tool arguments with `inputResponses.index_setup`;
+each model selection or remote authorization round issues a new, single-use state.
+
 This version indexes text with one embedding model per workspace. Choose it with
 `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use

@@ -201,8 +201,13 @@ pub async fn index_with_progress(
     reporter: &zg_engine::api::index::progress::IndexProgressReporter,
 ) -> Result<zg_engine::api::index::IndexResult, DaemonError> {
     let url = admin_url(home, "index").await?;
-    let result =
-        http_client::post_index_stream(&url, serde_json::to_vec(&request)?, reporter).await?;
+    let result = http_client::post_index_stream(
+        &url,
+        serde_json::to_vec(&request)?,
+        reporter,
+        request.signal.as_ref(),
+    )
+    .await?;
     match result {
         zg_daemon_protocol::ExecutionResult::Success(zg_daemon_protocol::DaemonReply::Index(
             result,
