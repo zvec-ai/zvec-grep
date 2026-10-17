@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+cuda = ["zg-engine/cuda"]
+
 [dependencies]
 serde_json.workspace = true
 clap.workspace = true
@@ -20,6 +24,7 @@ zg-engine = { path = "../zg-engine" }
 zvec-rust.workspace = true
 
 [build-dependencies]
+cc = "1.4.4"
 zvec-rust-build.workspace = true
 
 [dev-dependencies]

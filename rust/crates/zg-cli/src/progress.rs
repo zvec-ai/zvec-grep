@@ -70,7 +70,7 @@ impl ProgressOutput {
         if self.finished {
             return Ok(());
         }
-        let (stage, plain) = format_progress(progress);
+        let (stage, plain) = format_progress(progress, self.terminal);
         let line = if self.terminal {
             format_terminal_progress(progress, self.last_indexing.as_ref(), self.color)
         } else {
@@ -188,7 +188,7 @@ fn format_terminal_progress(
         return format!(
             "{rail}  {} {}",
             green(spinner[index], color),
-            format_progress(progress).1
+            format_progress(progress, true).1
         );
     }
     let done = progress.phase == IndexProgressPhase::Done;
@@ -215,7 +215,7 @@ fn format_terminal_progress(
         } else {
             "Indexing files"
         };
-        return format!("{rail}  {} {}", green(glyph, color), clean(label));
+        return format!("{rail}  {} {}", green(glyph, color), clean(label, true));
     }
     let percent = (indexed as u128 * 100 + total as u128 / 2) / total as u128;
     let core = format!("  {percent:>3}%  {indexed}/{total}");
@@ -253,11 +253,14 @@ fn format_terminal_progress(
     )
 }
 
-fn format_progress(progress: &IndexProgress) -> (String, String) {
+fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String) {
     if let Some(embedding) = &progress.embedding
         && let Some(stage) = embedding.stage
     {
-        let model = clean(embedding.model.as_deref().unwrap_or("embedding model"));
+        let model = clean(
+            embedding.model.as_deref().unwrap_or("embedding model"),
+            terminal,
+        );
         let label = match stage {
             IndexEmbeddingStage::Preparing => "Preparing model",
             IndexEmbeddingStage::Downloading => "Downloading model",
@@ -278,7 +281,7 @@ fn format_progress(progress: &IndexProgress) -> (String, String) {
             }
         }
         if let Some(message) = &embedding.message {
-            let _ = write!(line, " — {}", clean(message));
+            let _ = write!(line, " — {}", clean(message, terminal));
         }
         return (label.into(), line);
     }
@@ -299,7 +302,7 @@ fn format_progress(progress: &IndexProgress) -> (String, String) {
         let _ = write!(line, ", {failed} failed");
     }
     if let Some(detail) = &progress.detail {
-        let _ = write!(line, " — {}", clean(detail));
+        let _ = write!(line, " — {}", clean(detail, terminal));
     }
     (label.into(), line)
 }
@@ -314,11 +317,12 @@ fn bytes(value: u64) -> String {
     }
 }
 
-fn clean(value: &str) -> String {
+fn clean(value: &str, terminal: bool) -> String {
+    // Keep live terminal output compact, but retain complete diagnostics in logs.
     value
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .take(100)
+        .take(if terminal { 100 } else { usize::MAX })
         .collect()
 }
 
@@ -382,6 +386,72 @@ mod tests {
     }
 
     #[test]
+    fn warning_output_is_complete_unless_interactive() {
+        let warning = "Transformers cuda embedding initialization failed (Unable to configure CUDA ONNX embedding model), falling back to CPU.";
+        for terminal in [false, true] {
+            let buffer = Arc::new(Mutex::new(Vec::new()));
+            let display =
+                IndexProgressDisplay::new(Capture(buffer.clone()), terminal, ColorMode::Never);
+            display.reporter().report(IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: None,
+                files_indexed: None,
+                files_failed: None,
+                detail: None,
+                embedding: Some(IndexEmbeddingProgress {
+                    stage: Some(IndexEmbeddingStage::Warning),
+                    model: Some("local/all-minilm-l6-v2".into()),
+                    message: Some(warning.into()),
+                    ..IndexEmbeddingProgress::default()
+                }),
+            });
+            drop(display);
+            let output = String::from_utf8(buffer.lock().expect("capture").clone()).expect("UTF-8");
+            if terminal {
+                assert!(output.contains(&warning.chars().take(100).collect::<String>()));
+                assert!(!output.contains(warning));
+            } else {
+                assert!(output.contains(warning));
+                assert!(output.contains("falling back to CPU."));
+            }
+            assert!(output.ends_with('\n'));
+        }
+    }
+
+    #[test]
+    fn plain_progress_preserves_long_fields_and_sanitizes_controls() {
+        let long_text = format!("{}\n\t\r\u{1b}tail", "模".repeat(120));
+        let sanitized = format!("{}    tail", "模".repeat(120));
+        let mut progress = IndexProgress {
+            phase: IndexProgressPhase::Done,
+            files_total: None,
+            files_indexed: None,
+            files_failed: None,
+            detail: Some(long_text.clone()),
+            embedding: None,
+        };
+        assert_eq!(
+            format_progress(&progress, false).1,
+            format!("Index complete — {sanitized}")
+        );
+        progress.embedding = Some(IndexEmbeddingProgress {
+            stage: Some(IndexEmbeddingStage::Warning),
+            model: Some(long_text.clone()),
+            message: Some(long_text),
+            ..IndexEmbeddingProgress::default()
+        });
+        assert_eq!(
+            format_progress(&progress, false).1,
+            format!("Model warning: {sanitized} — {sanitized}")
+        );
+        let compact = "模".repeat(100);
+        assert_eq!(
+            format_progress(&progress, true).1,
+            format!("Model warning: {compact} — {compact}")
+        );
+    }
+
+    #[test]
     fn formats_download_bytes_and_index_counts() {
         let mut progress = IndexProgress {
             phase: IndexProgressPhase::Indexing,
@@ -392,7 +462,7 @@ mod tests {
             embedding: None,
         };
         assert_eq!(
-            format_progress(&progress).1,
+            format_progress(&progress, false).1,
             "Indexing: 3/8 files, 1 failed"
         );
         progress.embedding = Some(IndexEmbeddingProgress {
@@ -403,10 +473,10 @@ mod tests {
             ..IndexEmbeddingProgress::default()
         });
         assert_eq!(
-            format_progress(&progress).1,
+            format_progress(&progress, false).1,
             "Downloading model: local/model 50% (1 KiB/2 KiB)"
         );
         progress.embedding.as_mut().expect("embedding").total_bytes = None;
-        assert!(format_progress(&progress).1.ends_with("1 KiB"));
+        assert!(format_progress(&progress, false).1.ends_with("1 KiB"));
     }
 }

@@ -13,6 +13,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+#[cfg(feature = "cuda")]
+use llama_cpp_2::llama_backend::BACKENDS_DIR;
 use llama_cpp_2::{
     LlamaBackendDevice, LlamaBackendDeviceType,
     context::{LlamaContext, params::LlamaContextParams},
@@ -324,11 +326,20 @@ fn load_model_with_fallback(
     reporter: &ModelDownloadProgressReporter,
 ) -> Result<LoadedLlamaModel, ModelError> {
     llama_backend()?;
+    let device = resolve_device(device);
     let wants_gpu = !matches!(device, None | Some(Device::Cpu));
     if wants_gpu {
         if let Some(selected) = select_gpu_device(device) {
             match load_gpu_model(path, selected.index) {
-                Ok(model) => return Ok(model),
+                Ok(model) => {
+                    tracing::debug!(
+                        requested_device = requested_device_name(device),
+                        backend = %selected.backend,
+                        gpu = %selected.name,
+                        "llama.cpp GPU embedding backend selected"
+                    );
+                    return Ok(model);
+                }
                 Err(error) => {
                     let warning =
                         format!("llama.cpp GPU model load failed ({error}), falling back to CPU.");
@@ -349,6 +360,14 @@ fn load_model_with_fallback(
     }
 
     load_cpu_model(path)
+}
+
+const fn resolve_device(device: Option<Device>) -> Option<Device> {
+    if device.is_none() {
+        crate::config::default_runtime_device()
+    } else {
+        device
+    }
 }
 
 fn load_gpu_model(path: &Path, device_index: usize) -> Result<LoadedLlamaModel, ModelError> {
@@ -823,18 +842,69 @@ fn embed_error(entry: LlamaCppConfig, cause: ModelError) -> ModelError {
 
 fn llama_backend() -> Result<&'static LlamaBackend, ModelError> {
     match LLAMA_BACKEND.get_or_init(|| {
+        #[cfg(feature = "cuda")]
+        load_packaged_llama_backends()?;
         LlamaBackend::init()
+            .map_err(|error| error.to_string())
             .map(|mut backend| {
-                backend.void_logs();
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    // Preserve native offload evidence for --debug / GPU CI.
+                    llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
+                } else {
+                    backend.void_logs();
+                }
                 backend
             })
-            .map_err(|error| error.to_string())
     }) {
         Ok(backend) => Ok(backend),
         Err(error) => {
             Err(ModelError::internal("Unable to initialize llama.cpp backend").with_cause(error))
         }
     }
+}
+
+#[cfg(feature = "cuda")]
+fn load_packaged_llama_backends() -> Result<(), String> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env::var_os("ZVEC_GREP_NATIVE_LIB_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(executable) = env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        if let Some(root) = directory.parent() {
+            let packaged = root.join("lib");
+            if packaged.is_dir() {
+                candidates.push(packaged);
+            }
+        }
+        candidates.push(directory.to_path_buf());
+    }
+    if let Some(directory) = BACKENDS_DIR {
+        candidates.push(PathBuf::from(directory));
+    }
+
+    for directory in candidates {
+        if directory.to_str().is_none() || !contains_ggml_backend(&directory) {
+            continue;
+        }
+        super::backend_loading::load(&directory);
+        return Ok(());
+    }
+
+    Err("Unable to locate packaged llama.cpp backend modules; keep them under ../lib relative to zg or set ZVEC_GREP_NATIVE_LIB_DIR".to_owned())
+}
+
+#[cfg(feature = "cuda")]
+fn contains_ggml_backend(directory: &Path) -> bool {
+    std::fs::read_dir(directory).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.starts_with("libggml-cpu") || name.starts_with("ggml-cpu"))
+                && (name.contains(".so") || name.ends_with(".dylib") || name.ends_with(".dll"))
+        })
+    })
 }
 
 fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError> {

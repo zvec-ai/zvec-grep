@@ -19,7 +19,7 @@ const CI_MODELS: [&str; 3] = [
 ];
 
 #[tokio::test]
-#[ignore = "downloads pinned public model artifacts; run by Rust Models CI"]
+#[ignore = "downloads pinned public model artifacts; run by Rust Models CI / Rust CUDA CI"]
 async fn selected_local_model_downloads_loads_and_embeds() {
     let reference =
         env::var("ZVEC_GREP_SMOKE_MODEL").expect("ZVEC_GREP_SMOKE_MODEL must select the CI model");
@@ -31,14 +31,38 @@ async fn selected_local_model_downloads_loads_and_embeds() {
         .map(PathBuf::from)
         .expect("ZVEC_GREP_MODEL_CACHE must isolate downloaded smoke artifacts");
 
-    let mut devices = vec![Device::Cpu];
-    if cfg!(all(target_os = "linux", target_arch = "x86_64"))
-        && reference == "local/all-minilm-l6-v2"
-    {
-        // Match the Node.js smoke coverage that caught accelerator
-        // initialization failures hidden by a forced CPU configuration.
-        devices.push(Device::Auto);
-    }
+    let devices = match env::var("ZVEC_GREP_SMOKE_DEVICE") {
+        Ok(device) if device == "cuda" && !cfg!(feature = "cuda") => {
+            panic!("CUDA smoke requires --features cuda");
+        }
+        Ok(device) if device == "cuda" => {
+            assert!(
+                reference != "local/potion-code-16m-v2",
+                "model2vec has no CUDA backend"
+            );
+            // The CUDA workflow checks native offload / graph-placement evidence
+            // with the same validator as the packaged CLI, and rejects fallback.
+            tracing_subscriber::fmt()
+                .with_env_filter("warn,zg_engine=debug,ort=trace,llama-cpp-2=info")
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .try_init()
+                .expect("CUDA smoke must retain native execution evidence");
+            vec![Device::Cuda]
+        }
+        Err(env::VarError::NotPresent) => {
+            let mut devices = vec![Device::Cpu];
+            if cfg!(all(target_os = "linux", target_arch = "x86_64"))
+                && reference == "local/all-minilm-l6-v2"
+            {
+                // Match the Node.js smoke coverage that caught accelerator
+                // initialization failures hidden by a forced CPU configuration.
+                devices.push(Device::Auto);
+            }
+            devices
+        }
+        device => panic!("ZVEC_GREP_SMOKE_DEVICE must be unset or cuda, got {device:?}"),
+    };
 
     for device in devices {
         download_load_and_embed(&reference, cache_dir.clone(), device).await;

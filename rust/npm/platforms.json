@@ -23,7 +23,8 @@
       "os": "linux",
       "cpu": "x64",
       "libc": "glibc",
-      "binary": "zg"
+      "binary": "zg",
+      "defaultVariant": "cuda"
     },
     {
       "target": "linux-arm64-gnu",
@@ -38,7 +39,8 @@
       "package": "@zvec/zvec-grep-win32-x64-msvc",
       "os": "win32",
       "cpu": "x64",
-      "binary": "zg.exe"
+      "binary": "zg.exe",
+      "defaultVariant": "cuda"
     }
   ]
 }

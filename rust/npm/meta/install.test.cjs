@@ -41,6 +41,7 @@ function fixture() {
   writeFileSync(join(metaRoot, "bin", "zg.exe"), "placeholder\n");
   writeFileSync(join(platformRoot, "bin", "zg"), binary);
   chmodSync(join(platformRoot, "bin", "zg"), 0o755);
+  writeFileSync(join(platformRoot, "lib", "libbackend.dylib"), library);
   writeFileSync(join(platformRoot, "lib", "libfixture.dylib"), library);
   writeFileSync(
     join(platformRoot, "package.json"),
@@ -53,6 +54,7 @@ function fixture() {
       target: entry.target,
       files: {
         "bin/zg": { bytes: binary.length, sha256: sha256(binary) },
+        "lib/libbackend.dylib": { bytes: library.length, sha256: sha256(library) },
         "lib/libfixture.dylib": { bytes: library.length, sha256: sha256(library) },
       },
     }),
@@ -65,6 +67,10 @@ test("materializes a verified native package and replaces the placeholder last",
   try {
     materialize({ ...paths, entry, expectedVersion: "0.0.1" });
     assert.match(readFileSync(join(paths.metaRoot, "bin", "zg.exe"), "utf8"), /0\.0\.1/);
+    assert.equal(
+      readFileSync(join(paths.metaRoot, "lib", "libbackend.dylib"), "utf8"),
+      "native-library-fixture\n",
+    );
     assert.equal(
       readFileSync(join(paths.metaRoot, "lib", "libfixture.dylib"), "utf8"),
       "native-library-fixture\n",

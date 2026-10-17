@@ -1,0 +1,3 @@
+# Windows x64 libclang for bindgen on the hosted Data Science GPU image.
+libclang==18.1.1 \
+    --hash=sha256:4dd2d3b82fab35e2bf9ca717d7b63ac990a3519c7e312f19fa8e86dcc712f7fb

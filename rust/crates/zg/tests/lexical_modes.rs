@@ -274,8 +274,12 @@ async fn managed_rg_handles_crlf_nul_and_multiple_multiline_hits() -> Result<(),
     let reply = search_args(root.path(), &["--crlf", "-x", "needle", "crlf.txt"]).await?;
     assert_eq!(start_lines(&reply), [1]);
     assert_eq!(reply.items[0].content, "needle");
-    fs::write(root.path().join("nul.txt"), "before\0needle\nafter\n")?;
-    let reply = search_args(root.path(), &["-a", "needle", "nul.txt"]).await?;
+    // `nul.txt` is a reserved Windows device name, not a portable fixture name.
+    let nul_path = root.path().join("contains-nul.txt");
+    let nul_content = b"before\0needle\nafter\n";
+    fs::write(&nul_path, nul_content)?;
+    assert_eq!(fs::read(&nul_path)?, nul_content);
+    let reply = search_args(root.path(), &["-a", "needle", "contains-nul.txt"]).await?;
     assert_eq!(start_lines(&reply), [1]);
     fs::write(
         root.path().join("multi.txt"),

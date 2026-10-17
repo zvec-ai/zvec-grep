@@ -17,12 +17,15 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   cargoPackageVersion,
+  buildNative,
+  existingNativeBuild,
   loadReleaseManifest,
   npmEnvironment,
   platformByTarget,
   run,
   selectPlatform,
   sha256File,
+  stageRuntimeBundle,
   stageZvecRuntime,
   workspaceDir,
 } from "./npm-package-core.mjs";
@@ -37,6 +40,7 @@ import {
 } from "./npm-release-compliance.mjs";
 import {
   rollbackVersion,
+  smokeArtifactRelease,
   smokeInstalledPackage,
   smokeRegistryRelease,
 } from "./npm-release-smoke.mjs";
@@ -51,8 +55,11 @@ function parseOptions(args) {
   const options = {
     build: true,
     binary: undefined,
+    bundleDir: undefined,
+    cpuOnly: false,
     libDir: undefined,
     target: undefined,
+    targets: undefined,
   };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -60,10 +67,16 @@ function parseOptions(args) {
       options.build = false;
       continue;
     }
+    if (argument === "--cpu-only") {
+      options.cpuOnly = true;
+      continue;
+    }
     const fields = new Map([
       ["--binary", "binary"],
+      ["--bundle-dir", "bundleDir"],
       ["--lib-dir", "libDir"],
       ["--target", "target"],
+      ["--targets", "targets"],
     ]);
     const field = fields.get(argument);
     if (field) {
@@ -71,11 +84,22 @@ function parseOptions(args) {
       if (!value) {
         throw new Error(`${argument} requires a value`);
       }
-      options[field] = field === "target" ? value : resolve(value);
+      options[field] =
+        field === "targets"
+          ? value.split(",").map((target) => target.trim())
+          : field === "target"
+            ? value
+            : resolve(value);
       index += 1;
       continue;
     }
     throw new Error(`unknown option: ${argument}`);
+  }
+  if (options.bundleDir && (options.binary || options.libDir)) {
+    throw new Error("--bundle-dir cannot be combined with --binary or --lib-dir");
+  }
+  if (options.cpuOnly && options.bundleDir) {
+    throw new Error("--cpu-only cannot be combined with --bundle-dir");
   }
   return options;
 }
@@ -157,17 +181,19 @@ async function packPlatform(options) {
   const entry = options.target
     ? platformByTarget(manifest, options.target)
     : current;
-  if (options.build) {
-    if (entry.target !== current.target) {
-      throw new Error(
-        "cross-platform packaging requires --no-build and --binary",
-      );
-    }
-    run("cargo", ["build", "--locked", "--release", "--package", "zg"]);
+  if (options.bundleDir && options.build) {
+    throw new Error("--bundle-dir requires --no-build");
   }
-
-  const binary =
-    options.binary ?? join(workspaceDir, "target", "release", entry.binary);
+  if (options.build && entry.target !== current.target) {
+    throw new Error("cross-platform packaging requires --no-build and explicit artifacts");
+  }
+  const build = options.build
+    ? await buildNative(entry, options)
+    : await existingNativeBuild(entry, options);
+  const bundleDir = options.bundleDir ?? (options.binary || options.libDir ? undefined : build.bundleDir);
+  const binary = bundleDir
+    ? join(bundleDir, "bin", entry.binary)
+    : options.binary ?? join(build.profileDir, entry.binary);
   await stat(binary).catch(() => {
     throw new Error(`missing native release binary: ${binary}`);
   });
@@ -175,18 +201,18 @@ async function packPlatform(options) {
   const destination = join(stagingRoot, entry.target);
   await replaceDirectory(destination, async (temporary) => {
     const binDir = join(temporary, "bin");
+    const libDir = join(temporary, "lib");
     await mkdir(binDir, { recursive: true });
-    const packagedBinary = join(binDir, entry.binary);
-    await copyFile(binary, packagedBinary);
-    if (entry.os !== "win32") {
-      await chmod(packagedBinary, 0o755);
+    await mkdir(libDir, { recursive: true });
+    if (bundleDir) {
+      await stageRuntimeBundle(bundleDir, temporary, entry.os, entry.binary);
+    } else {
+      const packagedBinary = join(binDir, entry.binary);
+      await copyFile(binary, packagedBinary);
+      await stageZvecRuntime(options.libDir ?? dirname(binary), libDir, entry.os);
     }
-    await stageZvecRuntime(options.libDir ?? dirname(binary), binDir, entry.os);
-    if (options.libDir) {
-      await cp(options.libDir, join(temporary, "lib"), {
-        recursive: true,
-        dereference: true,
-      });
+    if (entry.os !== "win32") {
+      await chmod(join(binDir, entry.binary), 0o755);
     }
 
     const checksums = await checksumManifest(temporary, entry.target);
@@ -203,15 +229,14 @@ async function packPlatform(options) {
       repository: "https://github.com/zvec-ai/zvec-grep",
       os: [entry.os],
       cpu: [entry.cpu],
-      files: [
-        "bin",
-        "lib",
-        "checksums.json",
-        "README.md",
-        "LICENSES",
-        "SBOM.spdx.json",
-      ],
+      files: ["bin", "lib", "checksums.json", "README.md", "LICENSES", "SBOM.spdx.json"],
       publishConfig: { access: "public", provenance: true },
+      zvecGrep: {
+        variant: bundleDir ? "cuda" : "cpu",
+        accelerators: bundleDir ? ["cpu", "cuda"]
+          : entry.os === "darwin" ? ["cpu", "metal"]
+          : entry.os === "win32" ? ["cpu", "directml"] : ["cpu"],
+      },
     };
     if (entry.libc) {
       packageJson.libc = [entry.libc];
@@ -226,7 +251,7 @@ async function packPlatform(options) {
     );
     await writeFile(
       join(temporary, "README.md"),
-      `# ${entry.package}\n\nNative zvec-grep payload for ${entry.target}. Install @zvec/zvec-grep instead.\n`,
+      `# ${entry.package}\n\nNative ${bundleDir ? "CPU/CUDA" : "CPU"} zvec-grep payload for ${entry.target}. Install @zvec/zvec-grep instead.\n`,
     );
   });
   const tarball = await packDirectory(destination);
@@ -321,6 +346,13 @@ async function smokeCurrent(options) {
 async function main() {
   const command = process.argv[2];
   const options = parseOptions(process.argv.slice(3));
+  if (options.targets !== undefined && command !== "collect") {
+    throw new Error("--targets is only supported by collect");
+  }
+  if (command === "build") {
+    await buildNative(currentPlatform(loadReleaseManifest()), options);
+    return;
+  }
   if (command === "pack-platform") {
     await packPlatform(options);
     return;
@@ -349,12 +381,22 @@ async function main() {
     await smokeCurrent(options);
     return;
   }
+  if (command === "smoke-artifacts") {
+    await smokeArtifactRelease({
+      manifest: loadReleaseManifest(),
+      release: JSON.parse(await readFile(join(tarballRoot, "release.json"), "utf8")),
+      tarballRoot,
+      prefixRoot: join(releaseRoot, "artifact-smoke"),
+    });
+    return;
+  }
   if (command === "collect") {
     await packMeta();
     await collectRelease({
       manifest: loadReleaseManifest(),
       version: cargoPackageVersion(),
       tarballRoot,
+      targets: options.targets,
     });
     return;
   }
@@ -388,7 +430,7 @@ async function main() {
     return;
   }
   throw new Error(
-    "usage: npm-release.mjs <verify|verify-publication|pack-platform|pack-meta|pack-current|smoke-current|collect|publish|promote|rollback-version|smoke-registry> [--target TARGET] [--binary PATH] [--lib-dir PATH] [--no-build]",
+    "usage: npm-release.mjs <build|verify|verify-publication|pack-platform|pack-meta|pack-current|smoke-current|smoke-artifacts|collect|publish|promote|rollback-version|smoke-registry> [--target TARGET] [--targets TARGET,... (collect only)] [--binary PATH] [--lib-dir PATH] [--bundle-dir PATH] [--cpu-only] [--no-build]",
   );
 }
 

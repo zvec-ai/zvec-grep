@@ -117,31 +117,26 @@ function materialize({ metaRoot, platformRoot, entry, expectedVersion }) {
   mkdirSync(temporaryRoot, { recursive: true });
 
   try {
-    copyTreeSync(sourceBin, stagedBin);
-    if (existsSync(sourceLib)) {
-      copyTreeSync(sourceLib, stagedLib);
+    const nativeEntries = readdirSync(sourceBin);
+    if (nativeEntries.length !== 1 || nativeEntries[0] !== entry.binary) {
+      throw new Error("native package bin/ must contain only the zg executable");
     }
+    mkdirSync(stagedBin, { recursive: true });
+    copyFileSync(join(sourceBin, entry.binary), join(stagedBin, entry.binary));
+    copyTreeSync(sourceLib, stagedLib);
 
     mkdirSync(metaBin, { recursive: true });
-    for (const name of readdirSync(stagedBin)) {
-      if (name === entry.binary) {
-        continue;
-      }
-      copyTreeSync(join(stagedBin, name), join(metaBin, name));
-    }
-
-    if (existsSync(stagedLib)) {
-      const metaLib = join(metaRoot, "lib");
-      rmSync(metaLib, { recursive: true, force: true });
-      renameSync(stagedLib, metaLib);
-    }
+    const metaLib = join(metaRoot, "lib");
+    rmSync(metaLib, { recursive: true, force: true });
+    renameSync(stagedLib, metaLib);
 
     const finalBinary = join(metaBin, "zg.exe");
     const temporaryBinary = join(metaBin, `.zg-${process.pid}.tmp`);
     copyFileSync(join(stagedBin, entry.binary), temporaryBinary);
     if (process.platform !== "win32") {
       chmodSync(temporaryBinary, 0o755);
-    } else {
+    }
+    if (process.platform === "win32") {
       rmSync(finalBinary, { force: true });
     }
     renameSync(temporaryBinary, finalBinary);

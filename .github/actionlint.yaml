@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - gpu-linux-t4
+    - gpu-windows-t4

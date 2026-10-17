@@ -339,6 +339,8 @@ impl SessionPool {
         device: Option<Device>,
         reporter: &ModelDownloadProgressReporter,
     ) -> Result<Self, ModelError> {
+        #[cfg(feature = "cuda")]
+        super::native_runtime::initialize()?;
         let prepacked_weights = PrepackedWeights::new();
         let requested = resolve_execution_provider(device);
         if cfg!(target_os = "macos")
@@ -378,6 +380,10 @@ impl SessionPool {
                 }
             }
         };
+        tracing::debug!(
+            "Transformers ONNX {} embedding execution provider selected",
+            provider.name()
+        );
         Ok(Self {
             model_path,
             prepacked_weights,
@@ -634,7 +640,7 @@ impl TransformersExecutionProvider {
 }
 
 fn resolve_execution_provider(device: Option<Device>) -> TransformersExecutionProvider {
-    match device {
+    match device.or_else(crate::config::default_runtime_device) {
         None | Some(Device::Cpu) => TransformersExecutionProvider::Cpu,
         Some(Device::Metal | Device::Auto) if cfg!(target_os = "macos") => {
             TransformersExecutionProvider::Cpu
@@ -643,6 +649,10 @@ fn resolve_execution_provider(device: Option<Device>) -> TransformersExecutionPr
         Some(Device::Cuda) => TransformersExecutionProvider::Cuda,
         // ORT's CPU/MLAS path is both faster and substantially smaller than
         // CoreML for the catalog's quantized ONNX model on Apple Silicon.
+        Some(Device::Auto) if cfg!(all(target_os = "windows", feature = "cuda")) => {
+            // The official CUDA 12 runtime contains CPU and CUDA, not DirectML.
+            TransformersExecutionProvider::Cuda
+        }
         Some(Device::Auto) if cfg!(target_os = "windows") => {
             TransformersExecutionProvider::DirectMl
         }

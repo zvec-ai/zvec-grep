@@ -1,5 +1,9 @@
 //! Shared zvec initialization and collection operations.
-use std::{collections::HashMap, path::Path, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 use zvec_rust::{
     Collection, CollectionOptions, CollectionSchema, DataType, Doc, FieldSchema, IndexParams,
 };
@@ -11,17 +15,83 @@ static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub(super) fn initialize() -> EngineResult<()> {
     match INITIALIZED.get_or_init(|| {
-        let config = zvec_rust::ConfigBuilder::new()
+        let mut config = zvec_rust::ConfigBuilder::new()
             .num_threads(2)
-            .memory_limit(512 * 1024 * 1024)
-            .build();
-        zvec_rust::initialize(Some(&config)).map_err(|error| error.to_string())
+            .memory_limit(512 * 1024 * 1024);
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("cannot locate executable for jieba dictionaries: {error}"))?;
+        let environment_dir = std::env::var_os("ZVEC_JIEBA_DICT_DIR").filter(|dir| !dir.is_empty());
+        let default_dir = zvec_rust::get_default_jieba_dict_dir();
+        if let Some(dir) = jieba_dict_dir(
+            &executable,
+            environment_dir.as_deref().map(Path::new),
+            (!default_dir.is_empty()).then(|| Path::new(&default_dir)),
+        )? {
+            config = config.jieba_dict_dir(native_path(&dir).map_err(|error| error.to_string())?);
+        }
+        zvec_rust::initialize(Some(&config.build())).map_err(|error| error.to_string())
     }) {
         Ok(()) => Ok(()),
         Err(message) => Err(EngineError::storage_failure(format!(
             "cannot initialize zvec: {message}"
         ))),
     }
+}
+
+fn jieba_dict_dir(
+    executable: &Path,
+    environment_dir: Option<&Path>,
+    default_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    // Preserve explicit application/user configuration without mutating the
+    // process environment (other engine instances may be running concurrently).
+    if let Some(dir) = environment_dir.or(default_dir) {
+        return require_jieba_dict_dir(dir).map(Some);
+    }
+    let Some(executable_dir) = executable.parent() else {
+        return Ok(None);
+    };
+    let is_cli = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("zg") || name.eq_ignore_ascii_case("zg.exe"));
+    if is_cli && executable_dir.file_name().is_some_and(|name| name == "bin") {
+        // Windows delay-loaded imports can resolve to a thunk in zg.exe when
+        // zvec tries to locate its DLL. Use our bin/lib package layout directly,
+        // and never let a build-machine SDK cache hide an incomplete package.
+        let package_dir = executable_dir.parent().unwrap_or(executable_dir);
+        return require_jieba_dict_dir(&package_dir.join("lib/data/jieba_dict")).map(Some);
+    }
+    let adjacent = executable_dir.join("data/jieba_dict");
+    if adjacent.exists() {
+        return require_jieba_dict_dir(&adjacent).map(Some);
+    }
+    // Cargo stages assets in target/<profile>, also for tests and examples.
+    if executable_dir
+        .file_name()
+        .is_some_and(|name| name == "deps" || name == "examples")
+        && let Some(profile_dir) = executable_dir.parent()
+    {
+        let staged = profile_dir.join("data/jieba_dict");
+        if staged.exists() {
+            return require_jieba_dict_dir(&staged).map(Some);
+        }
+    }
+    // Development/embedded callers without staged assets retain the SDK's
+    // existing discovery of its linked library or build-time dictionary path.
+    Ok(None)
+}
+
+fn require_jieba_dict_dir(dir: &Path) -> Result<PathBuf, String> {
+    for name in ["jieba.dict.utf8", "hmm_model.utf8"] {
+        if !dir.join(name).is_file() {
+            return Err(format!(
+                "jieba dictionary directory {} is missing required file {name}",
+                dir.display()
+            ));
+        }
+    }
+    Ok(dir.to_path_buf())
 }
 
 pub(super) fn open_collection(
@@ -174,4 +244,97 @@ pub(super) fn corrupt(message: impl std::fmt::Display) -> EngineError {
 #[track_caller]
 pub(super) fn native<T>(result: zvec_rust::Result<T>, operation: &str) -> EngineResult<T> {
     result.map_err(|error| EngineError::storage_failure(format!("zvec {operation}: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dictionaries(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("dictionary directory");
+        for name in ["jieba.dict.utf8", "hmm_model.utf8"] {
+            std::fs::write(dir.join(name), "fixture").expect("dictionary file");
+        }
+    }
+
+    #[test]
+    fn packaged_dictionary_uses_sibling_lib_with_spaces_and_unicode() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let package = root.path().join("包 with spaces");
+        let dir = package.join("lib/data/jieba_dict");
+        dictionaries(&dir);
+        for binary in ["zg", "zg.exe"] {
+            assert_eq!(
+                jieba_dict_dir(&package.join("bin").join(binary), None, None)
+                    .expect("packaged dictionary"),
+                Some(dir.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn packaged_dictionary_rejects_missing_files_without_sdk_fallback() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let executable = root.path().join("bin/zg.exe");
+        let dir = root.path().join("lib/data/jieba_dict");
+        let error = jieba_dict_dir(&executable, None, None).expect_err("absent dictionaries");
+        assert!(error.contains("jieba.dict.utf8"));
+        std::fs::create_dir_all(&dir).expect("dictionary directory");
+        std::fs::write(dir.join("jieba.dict.utf8"), "fixture").expect("dictionary file");
+        let error = jieba_dict_dir(&executable, None, None).expect_err("absent HMM model");
+        assert!(error.contains("hmm_model.utf8"));
+        assert!(error.contains(&dir.display().to_string()));
+    }
+
+    #[test]
+    fn explicit_dictionary_overrides_default_and_package_discovery() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let environment_dir = root.path().join("environment");
+        let default_dir = root.path().join("default");
+        dictionaries(&environment_dir);
+        dictionaries(&default_dir);
+        let executable = root.path().join("broken-package/bin/zg.exe");
+        assert_eq!(
+            jieba_dict_dir(&executable, Some(&environment_dir), Some(&default_dir))
+                .expect("environment override"),
+            Some(environment_dir)
+        );
+        assert_eq!(
+            jieba_dict_dir(&executable, None, Some(&default_dir)).expect("default override"),
+            Some(default_dir.clone())
+        );
+        assert!(
+            jieba_dict_dir(
+                &executable,
+                Some(&root.path().join("missing")),
+                Some(&default_dir)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cargo_dictionary_layout_supports_binaries_tests_and_examples() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let profile = root.path().join("target/debug");
+        let dir = profile.join("data/jieba_dict");
+        dictionaries(&dir);
+        for binary in ["zg.exe", "deps/zg-engine-test.exe", "examples/example.exe"] {
+            assert_eq!(
+                jieba_dict_dir(&profile.join(binary), None, None).expect("Cargo dictionary"),
+                Some(dir.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn unstaged_development_dictionary_retains_sdk_discovery() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        for binary in ["target/debug/deps/test", "venv/bin/embedded-app.exe"] {
+            assert_eq!(
+                jieba_dict_dir(&root.path().join(binary), None, None).expect("SDK discovery"),
+                None
+            );
+        }
+    }
 }

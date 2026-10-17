@@ -15,14 +15,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: 2
-  CMAKE_BUILD_PARALLEL_LEVEL: 2
 
 jobs:
   native:
     name: Build ${{ inputs.target }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ inputs.target == 'darwin-x64' && 180 || 90 }}
+    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && 180 || 90 }}
     defaults:
       run:
         working-directory: rust
@@ -33,45 +31,107 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+      - name: Configure native build parallelism
+        shell: node {0}
+        run: |
+          const os = require("node:os");
+          const fs = require("node:fs");
+          const cores = os.availableParallelism();
+          const memoryGiB = os.totalmem() / (1024 ** 3);
+          // A conservative per-job memory budget, not a guarantee against OOM.
+          const jobs = Math.max(1, Math.min(cores, Math.floor(memoryGiB / 3), 8));
+          fs.appendFileSync(process.env.GITHUB_ENV,
+            `CARGO_BUILD_JOBS=${jobs}\nCMAKE_BUILD_PARALLEL_LEVEL=${jobs}\n`);
+          console.log(`Native build resources: cores=${cores}, RAM=${memoryGiB.toFixed(1)} GiB, jobs=${jobs} (3 GiB/job, cap 8)`);
+      - uses: actions/setup-python@v6
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.12"
+      - name: Install the CUDA 12.4 compatible MSVC toolset before compiling
+        if: inputs.target == 'win32-x64-msvc'
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            throw "vswhere.exe is missing; Visual Studio 2022 C++ build tools must be installed first"
+          }
+          $vs = & $vswhere -latest -products '*' -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vs)) {
+            throw "Unable to locate a Visual Studio 2022 installation with the x64 C++ tools"
+          }
+          $vs = $vs.Trim()
+          $compiler = "$vs/VC/Tools/MSVC/14.38.*/bin/Hostx64/x64/cl.exe"
+          if (-not (Test-Path -Path $compiler -PathType Leaf)) {
+            $installer = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/setup.exe"
+            if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+              throw "Visual Studio Installer is missing; cannot install MSVC 14.38"
+            }
+            $result = Start-Process $installer -ArgumentList @('modify', '--installPath', "`"$vs`"", '--add', 'Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64', '--quiet', '--norestart') -Wait -PassThru
+            if ($result.ExitCode -notin @(0, 3010)) { throw "MSVC 14.38 installation failed: $($result.ExitCode)" }
+          }
+          if (-not (Test-Path -Path $compiler -PathType Leaf)) {
+            throw "MSVC 14.38 x64 compiler is still missing after installation: $compiler"
+          }
+          Write-Host "MSVC 14.38 is ready for the later CUDA 12.4 fallback build: $vs"
       - name: Set up MSVC
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          vsversion: "2022"
+      - name: Install the pinned Windows CUDA toolkit
+        if: inputs.target == 'win32-x64-msvc'
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "13.1.1"
+          method: network
+          sub-packages: '["nvcc", "nvvm", "crt", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          # Keep each installer in a version-specific directory: the action's
+          # uncached download directory cannot contain two CUDA versions.
+          use-local-cache: true
+      - name: Configure Windows CUDA 13 runtime lookup
+        if: inputs.target == 'win32-x64-msvc'
+        shell: python
+        run: |
+          import os, pathlib, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import configure_windows_cuda_paths
+          configure_windows_cuda_paths(pathlib.Path(os.environ["CUDA_PATH"]))
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
-      - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - uses: actions/setup-python@v6
-        if: runner.os == 'Windows'
+      - name: Read the pinned Rust toolchain
+        id: rust-version
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - name: Install the pinned Rust toolchain, including rustup if missing
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          python-version: "3.12"
+          toolchain: ${{ steps.rust-version.outputs.channel }}
+          components: rustfmt, clippy
       - name: Restore Cargo build state
-        uses: actions/cache@v5
+        id: cargo-cache
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
             ~/.cargo/git/db/
             rust/target/release/
+            rust/target/ggml-cuda12/
+            rust/target/.zvec-grep-cuda-build-config
           key: rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
             rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
-      - name: Restore the Windows ONNX Runtime
-        if: runner.os == 'Windows'
+      - name: Restore the CUDA 12 ONNX Runtime archives
+        if: inputs.target == 'win32-x64-msvc' || inputs.target == 'linux-x64-gnu'
         uses: actions/cache@v5
         with:
-          path: rust/target/ort-prebuilt/
-          key: rust-ort-windows-v1-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
-      - name: Prepare the verified Windows ONNX Runtime
-        if: runner.os == 'Windows'
-        run: |
-          python scripts/test-prepare-onnxruntime-windows.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/prepare-onnxruntime-windows.py
+          path: rust/target/ort-cuda12/
+          key: rust-ort-cuda12-v1-${{ inputs.target }}-${{ hashFiles('rust/scripts/cuda/prepare-onnxruntime.py') }}
       - name: Restore the Intel macOS ONNX Runtime
         if: inputs.target == 'darwin-x64'
         id: ort-cache
@@ -111,8 +171,110 @@ jobs:
           echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
           echo "ZVEC_LIB_DIR=$GITHUB_WORKSPACE/rust/target/zvec-runtime" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+      - name: Build the pinned CUDA toolchain image
+        if: inputs.target == 'linux-x64-gnu'
+        working-directory: ${{ github.workspace }}
+        run: >-
+          docker build --platform linux/amd64
+          --file rust/scripts/cuda/cuda-builder.Dockerfile
+          --tag zvec-grep-cuda-builder .
+      - name: Build the Linux CPU/CUDA bundle
+        if: inputs.target == 'linux-x64-gnu'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
+            --env CARGO_TARGET_DIR=/work-target \
+            --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
+            zvec-grep-cuda-builder \
+            bash scripts/cuda/build.sh --primary-only
+      - name: Build the Linux CUDA 12.4 fallback plugin
+        if: inputs.target == 'linux-x64-gnu'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker build --platform linux/amd64 --file rust/scripts/cuda/cuda-builder.Dockerfile \
+            --build-arg CUDA_IMAGE=nvidia/cuda:12.4.1-devel-ubuntu22.04@sha256:da6791294b0b04d7e65d87b7451d6f2390b4d36225ab0701ee7dfec5769829f5 \
+            --tag zvec-grep-cuda12-builder .
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
+            --env CARGO_TARGET_DIR=/work-target \
+            --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
+            zvec-grep-cuda12-builder bash -euo pipefail -c '
+              python3 scripts/cuda/build-fallback.py --bundle /work-target/release/zg-cuda
+              bash scripts/cuda/check.sh /work-target/release/zg-cuda
+            '
+      - name: Restore ownership of Linux build output
+        if: ${{ always() && inputs.target == 'linux-x64-gnu' }}
+        run: sudo chown -R "$(id -u):$(id -g)" target
+      - name: Run the Linux bundle without any CUDA runtime installed
+        if: inputs.target == 'linux-x64-gnu'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target/release/zg-cuda:/opt/zg:ro" \
+            ubuntu:24.04 bash -euo pipefail -c '
+              apt-get update >/dev/null
+              apt-get install --yes --no-install-recommends libstdc++6 >/dev/null
+              ldd /opt/zg/lib/libggml-cuda.so | grep -Eq "lib(cuda|cudart|cublas).*not found"
+              /opt/zg/bin/zg --help >/dev/null
+              /opt/zg/bin/zg --rg -F "zvec-grep Rust rewrite" /workspace/rust/README.md >/dev/null
+            '
+      - name: Build the Windows CPU/CUDA bundle
+        if: inputs.target == 'win32-x64-msvc'
+        run: >-
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass
+          -File scripts/cuda/build.ps1 -PrimaryOnly
+      - name: Install the Windows CUDA 12.4 fallback toolkit
+        if: inputs.target == 'win32-x64-msvc'
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.4.1"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust"]'
+          use-local-cache: true
+      - name: Configure Windows CUDA 12 runtime lookup
+        if: inputs.target == 'win32-x64-msvc'
+        shell: python
+        run: |
+          import os, pathlib, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import configure_windows_cuda_paths
+          configure_windows_cuda_paths(pathlib.Path(os.environ["CUDA_PATH"]))
+      - name: Use the CUDA 12.4 compatible MSVC toolset
+        if: inputs.target == 'win32-x64-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: "2022"
+          toolset: "14.38"
+      - name: Build the Windows CUDA 12.4 fallback plugin
+        if: inputs.target == 'win32-x64-msvc'
+        run: python scripts/cuda/build-fallback.py --bundle target/release/zg-cuda --cuda-root "$env:CUDA_PATH"
       - name: Build the native target
+        if: inputs.target != 'linux-x64-gnu' && inputs.target != 'win32-x64-msvc'
         run: npm run build
+      - name: Save Cargo build state
+        if: ${{ always() && steps.cargo-cache.outputs.cache-primary-key != '' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            rust/target/release/
+            rust/target/ggml-cuda12/
+            rust/target/.zvec-grep-cuda-build-config
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Audit the Windows CPU/CUDA bundle
+        if: inputs.target == 'win32-x64-msvc'
+        run: >-
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass
+          -File scripts/cuda/check.ps1
+          -Bundle target/release/zg-cuda
       - name: Apply local macOS signatures after building
         if: runner.os == 'macOS'
         run: |
@@ -123,9 +285,9 @@ jobs:
             fi
           done
       - name: Package the native target
-        run: npm run release:platform -- --no-build --target ${{ inputs.target }}
+        run: npm run release:platform -- --no-build --target ${{ inputs.target }} ${{ (inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && '--bundle-dir target/release/zg-cuda' || '' }}
       - name: Install the tarballs and run the packaged CLI
-        run: npm run release:smoke -- --no-build --target ${{ inputs.target }}
+        run: npm run release:smoke -- --no-build --target ${{ inputs.target }} ${{ (inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && '--bundle-dir target/release/zg-cuda' || '' }}
       - name: Upload the platform package
         uses: actions/upload-artifact@v7
         with:

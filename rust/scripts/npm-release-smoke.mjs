@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import {
+  defaultReleaseVariant,
   npmEnvironment,
   run,
   selectPlatform,
@@ -117,6 +118,78 @@ export async function smokeInstalledPackage({
   console.log(
     `release smoke passed: zg ${version} (${entry.target}), managed-rg and daemon IPC`,
   );
+}
+
+export async function smokeArtifactRelease({
+  manifest,
+  release,
+  tarballRoot,
+  prefixRoot,
+  runNpm = run,
+  probe = smokeInstalledPackage,
+}) {
+  if (
+    release.schemaVersion !== 1 || !Array.isArray(release.packages) ||
+    !/^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.test(release.version)
+  ) {
+    throw new Error("invalid artifact release manifest");
+  }
+  const entry = selectPlatform(
+    manifest,
+    process.platform,
+    process.arch,
+    process.report?.getReport().header ?? {},
+  );
+  const tarballs = [];
+  for (const [name, target] of [
+    [entry.package, entry.target],
+    [manifest.metaPackage, "meta"],
+  ]) {
+    const matches = release.packages.filter((candidate) => candidate.name === name);
+    const candidate = matches[0];
+    const file = `${name.replace(/^@/, "").replaceAll("/", "-")}-${release.version}.tgz`;
+    if (
+      matches.length !== 1 || candidate.version !== release.version ||
+      candidate.target !== target || candidate.file !== file
+    ) {
+      throw new Error(`artifact package identity mismatch: ${name}`);
+    }
+    const path = join(tarballRoot, file);
+    if ((await sha256File(path)) !== candidate.sha256) {
+      throw new Error(`artifact tarball checksum mismatch: ${file}`);
+    }
+    tarballs.push(path);
+  }
+  // Use the exact downloaded bytes, a fresh prefix/cache and no registry fallback.
+  // Unlike smoke-current, this must never rebuild or repack a native package.
+  await rm(prefixRoot, { recursive: true, force: true });
+  const prefix = join(prefixRoot, "prefix");
+  await runNpm(
+    "npm",
+    [
+      "install", "--global", "--prefix", prefix,
+      "--offline", "--no-audit", "--no-fund",
+      `--allow-scripts=${tarballs[1]}`, ...tarballs,
+    ],
+    { env: npmEnvironment(join(prefixRoot, "cache")) },
+  );
+  const metadata = JSON.parse(
+    await readFile(join(installedPackageRoot(prefix, entry.package), "package.json"), "utf8"),
+  );
+  if (
+    metadata.name !== entry.package || metadata.version !== release.version ||
+    metadata.zvecGrep?.variant !== defaultReleaseVariant(entry)
+  ) {
+    throw new Error(`installed artifact identity or variant mismatch: ${entry.target}`);
+  }
+  await probe({
+    manifest,
+    entry,
+    version: release.version,
+    prefix,
+    fixtureRoot: join(prefixRoot, "workspace"),
+  });
+  return { entry, prefix, bundle: installedPackageRoot(prefix, manifest.metaPackage) };
 }
 
 export async function rollbackVersion(

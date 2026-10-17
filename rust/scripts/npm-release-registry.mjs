@@ -22,8 +22,28 @@ function expectedPackages(manifest, version) {
   }));
 }
 
-export async function collectRelease({ manifest, version, tarballRoot }) {
-  const packages = expectedPackages(manifest, version);
+export async function collectRelease({ manifest, version, tarballRoot, targets }) {
+  if (
+    targets !== undefined &&
+    (!Array.isArray(targets) ||
+      targets.length === 0 ||
+      new Set(targets).size !== targets.length ||
+      targets.some(
+        (target) => !manifest.platforms.some((entry) => entry.target === target),
+      ))
+  ) {
+    throw new Error(
+      "collect targets must be a nonempty list of unique known platforms",
+    );
+  }
+  const platforms = manifest.platforms.filter(
+    (entry) => targets === undefined || targets.includes(entry.target),
+  );
+  const selectedTargets = platforms.map((entry) => entry.target);
+  const partial = platforms.length !== manifest.platforms.length;
+  const packages = expectedPackages(manifest, version).filter(
+    (entry) => entry.target === "meta" || selectedTargets.includes(entry.target),
+  );
   const actual = (await readdir(tarballRoot))
     .filter((name) => name.endsWith(".tgz"))
     .sort();
@@ -32,7 +52,7 @@ export async function collectRelease({ manifest, version, tarballRoot }) {
     JSON.stringify(packages.map((entry) => entry.file).sort())
   ) {
     throw new Error(
-      "release tarballs do not cover exactly the published platform manifest and meta package",
+      "release tarballs do not cover exactly the selected platform manifest and meta package",
     );
   }
   for (const entry of packages) {
@@ -82,6 +102,8 @@ export async function collectRelease({ manifest, version, tarballRoot }) {
       process.env.GITHUB_SHA ??
       run("git", ["rev-parse", "HEAD"], { capture: true }).trim(),
     repository: process.env.GITHUB_REPOSITORY ?? "zvec-ai/zvec-grep",
+    partial,
+    targets: selectedTargets,
     packages,
   };
   await writeFile(
@@ -93,14 +115,22 @@ export async function collectRelease({ manifest, version, tarballRoot }) {
     packages.map((entry) => `${entry.sha256}  ${entry.file}\n`).join(""),
   );
   const instructions = [
-    `# Rust zvec-grep ${version}`,
+    `# Rust zvec-grep ${version}${partial ? " — partial validation candidate" : ""}`,
     "",
     `Source commit: ${release.commit}`,
     "",
+    ...(partial
+      ? [
+          "Validation only: this is a partial candidate, not a complete release. It cannot be published or promoted.",
+          `Included platforms: ${selectedTargets.join(", ")}.`,
+          "The unchanged meta package still locks every supported platform to this version; only the native tarballs listed below are included.",
+          "",
+        ]
+      : []),
     "Unzip the Actions artifact, then install the meta tarball together with the native tarball for your machine:",
     "",
     "```sh",
-    ...manifest.platforms.map(
+    ...platforms.map(
       (platform) =>
         `# ${platform.target}\nnpm install --global --allow-scripts=./${filename(manifest.metaPackage, version)} ./${filename(platform.package, version)} ./${filename(manifest.metaPackage, version)}`,
     ),
@@ -119,7 +149,7 @@ export async function collectRelease({ manifest, version, tarballRoot }) {
   if (process.env.GITHUB_STEP_SUMMARY) {
     await appendFile(
       process.env.GITHUB_STEP_SUMMARY,
-      `## Rust release ${version}\n\nSource: \`${release.commit}\`\n\nDownload **rust-release-${version}** for all ${manifest.platforms.length} native packages, the meta package, checksums, and installation instructions.\n`,
+      `## Rust ${partial ? "validation candidate" : "release"} ${version}\n\nSource: \`${release.commit}\`\n\nDownload **rust-${partial ? "candidate" : "release"}-${version}** for ${platforms.length} native packages (${selectedTargets.join(", ")}), the meta package, checksums, and installation instructions.${partial ? " This partial candidate is validation-only and cannot be published or promoted." : ""}\n`,
     );
   }
   console.log(`collected ${packages.length} verified packages for ${version}`);
@@ -149,6 +179,11 @@ async function preflightRelease({ manifest, tarballRoot, registryFetch }) {
   const release = JSON.parse(
     await readFile(join(tarballRoot, "release.json"), "utf8"),
   );
+  if (release.partial) {
+    throw new Error(
+      "partial validation candidates cannot be published or promoted",
+    );
+  }
   if (
     release.schemaVersion !== 1 ||
     !/^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.test(release.version)
