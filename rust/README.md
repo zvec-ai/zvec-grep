@@ -7,6 +7,22 @@ and [user documentation](../docs/README.md) describe that implementation.
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 
+The Rust CLI joins positional words into one hybrid query:
+`zg connection pool timeout` is equivalent to `zg "connection pool timeout"`.
+Separately quoted positional arguments also merge: both
+`zg "connection pool" "timeout"` and `zg "connection pool" "socket timeout"`
+produce one query. When at least two nonempty positional arguments include a
+phrase with internal whitespace, a warning on stderr explains the merge and
+recommends explicit queries, such as
+`zg --hybrid "connection pool" --hybrid "socket timeout"`.
+Shell quote characters are not available to the CLI, so separately quoted single
+words behave like unquoted words without a warning. Each positional argument is
+trimmed, empty arguments are ignored, and the remaining parts are joined with one
+space while preserving internal whitespace. Existing scripts relying on multiple
+positional query groups should switch to repeated `--hybrid` flags. Explicit
+`--hybrid`, `--fts`, and `--vector` queries stay separate. Direct and Server modes
+use the same parsing; managed `--rg` retains its pattern/path syntax.
+
 This workspace preserves its own crates, scripts, compatibility fixtures, and
 benchmarks. The application API is centered on one reusable `ZvecGrep` engine
 value:

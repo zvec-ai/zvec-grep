@@ -54,6 +54,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         warn();
         error.exit();
     });
+    let positional_warning = cli.positional_query_warning();
     let plan = cli
         .into_plan(std::env::current_dir()?)
         .inspect_err(|_| warn())?;
@@ -73,6 +74,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     install_darwin_metal_residency_mitigation()?;
     // Emit after a possible re-exec so macOS prints each warning only once.
     warn();
+    if let Some(warning) = positional_warning {
+        eprintln!("{warning}");
+    }
     let debug = match &plan {
         CliPlan::Query { output, .. }
         | CliPlan::Index { output, .. }
