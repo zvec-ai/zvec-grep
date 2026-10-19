@@ -238,7 +238,7 @@ impl SetupState {
             if context.ct.is_cancelled() {
                 return Err(EngineError::cancelled("Index setup cancelled"));
             }
-            let (message, schema) = form(&phase);
+            let (message, schema) = form(&phase, context.protocol_version().as_ref());
             let answer = if let Some(response) = response.take() {
                 accepted_content(&response)?
             } else if context
@@ -461,7 +461,32 @@ fn accepted_content(response: &Value) -> Result<Value, EngineError> {
         .ok_or_else(|| EngineError::invalid_argument("Invalid index setup response"))
 }
 
-fn form(phase: &Phase) -> (String, Value) {
+fn choice_property(
+    title: &str,
+    choices: &[Value],
+    default: Option<&str>,
+    version: Option<&ProtocolVersion>,
+) -> Value {
+    let mut property = json!({"type": "string", "title": title});
+    if version.is_some_and(|version| *version >= ProtocolVersion::V_2025_11_25) {
+        property["oneOf"] = json!(choices);
+    } else {
+        property["enum"] = choices
+            .iter()
+            .map(|choice| choice["const"].clone())
+            .collect();
+        property["enumNames"] = choices
+            .iter()
+            .map(|choice| choice["title"].clone())
+            .collect();
+    }
+    if let Some(default) = default {
+        property["default"] = json!(default);
+    }
+    property
+}
+
+fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
     match phase {
         Phase::Model { root, setup } => {
             let choices = setup.models.iter().filter(|model| model.available()).map(|model| json!({
@@ -492,7 +517,7 @@ fn form(phase: &Phase) -> (String, Value) {
                     "No index found in {}. Select an embedding model to create a persistent index in the background. Local models run on this server. Remote models require a separate authorization step. Cancel to exit without creating an index.",
                     root.display()
                 ),
-                json!({"type": "object", "properties": {"model": {"type": "string", "title": "Embedding model", "oneOf": choices, "default": default}}, "required": ["model"]}),
+                json!({"type": "object", "properties": {"model": choice_property("Embedding model", &choices, default.as_deref(), version)}, "required": ["model"]}),
             )
         }
         Phase::Authorization { target, .. } => (
@@ -502,11 +527,11 @@ fn form(phase: &Phase) -> (String, Value) {
                 target.model,
                 target.endpoint
             ),
-            json!({"type": "object", "properties": {"decision": {"type": "string", "title": "Remote embedding authorization", "oneOf": [
-                {"const": "allow_once", "title": "Allow once"},
-                {"const": "allow_workspace", "title": "Allow for this workspace"},
-                {"const": "back", "title": "Back to model selection"}
-            ]}}, "required": ["decision"]}),
+            json!({"type": "object", "properties": {"decision": choice_property("Remote embedding authorization", &[
+                json!({"const": "allow_once", "title": "Allow once"}),
+                json!({"const": "allow_workspace", "title": "Allow for this workspace"}),
+                json!({"const": "back", "title": "Back to model selection"})
+            ], None, version)}, "required": ["decision"]}),
         ),
     }
 }

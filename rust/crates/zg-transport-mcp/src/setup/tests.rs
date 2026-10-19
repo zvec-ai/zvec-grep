@@ -118,9 +118,29 @@ impl ClientHandler for Client {
 
     fn create_elicitation(
         &self,
-        _: ElicitRequestParams,
+        request: ElicitRequestParams,
         _: RequestContext<rmcp::RoleClient>,
     ) -> impl Future<Output = Result<ElicitResult, ErrorData>> {
+        let ElicitRequestParams::FormElicitationParams {
+            requested_schema, ..
+        } = request
+        else {
+            panic!("form required");
+        };
+        let schema = json!(requested_schema);
+        let properties = schema["properties"].as_object().expect("form properties");
+        for property in properties.values() {
+            if self.version < ProtocolVersion::V_2025_11_25 {
+                assert!(property["enum"].is_array(), "legacy choices: {property}");
+                assert!(
+                    property["enumNames"].is_array(),
+                    "legacy titles: {property}"
+                );
+                assert!(property.get("oneOf").is_none());
+            } else {
+                assert!(property["oneOf"].is_array(), "titled choices: {property}");
+            }
+        }
         std::future::ready(Ok(self
             .answers
             .lock()
@@ -154,6 +174,99 @@ fn value(response: CallToolResponse) -> Value {
         other => panic!("expected complete response, got {other:?}"),
     };
     result.structured_content.expect("structured response")
+}
+
+#[test]
+fn model_and_authorization_forms_follow_the_negotiated_protocol() {
+    let root = PathBuf::from("/workspace");
+    let setup = IndexSetup {
+        models: vec![zg_engine::api::index::setup::EmbeddingChoice {
+            reference: "qwen/text-embedding-v4".into(),
+            local: false,
+            downloaded: false,
+            configured: true,
+            credential_available: true,
+            download_bytes: None,
+        }],
+        default_model: Some("qwen/text-embedding-v4".into()),
+    };
+    let model = Phase::Model {
+        root: root.clone(),
+        setup: setup.clone(),
+    };
+    let authorization = Phase::Authorization {
+        options: Box::default(),
+        target: IndexAuthorization {
+            workspace_roots: vec![root.clone()],
+            root,
+            model: "qwen/text-embedding-v4".into(),
+            endpoint: "https://embedding.example.test/v1".into(),
+            endpoint_host: "embedding.example.test".into(),
+        },
+        setup,
+    };
+    for version in [
+        None,
+        Some(ProtocolVersion::V_2025_06_18),
+        Some(ProtocolVersion::V_2025_11_25),
+        Some(ProtocolVersion::V_2026_07_28),
+    ] {
+        for (phase, field, values, titles) in [
+            (
+                &model,
+                "model",
+                json!(["qwen/text-embedding-v4"]),
+                json!(["Remote · qwen/text-embedding-v4 · Credential available"]),
+            ),
+            (
+                &authorization,
+                "decision",
+                json!(["allow_once", "allow_workspace", "back"]),
+                json!([
+                    "Allow once",
+                    "Allow for this workspace",
+                    "Back to model selection"
+                ]),
+            ),
+        ] {
+            let (message, schema) = form(phase, version.as_ref());
+            let request = ElicitRequestParams::FormElicitationParams {
+                meta: None,
+                message,
+                requested_schema: serde_json::from_value(schema).expect("valid elicitation schema"),
+            };
+            let wire = json!(request);
+            let property = &wire["requestedSchema"]["properties"][field];
+            if version
+                .as_ref()
+                .is_some_and(|version| *version >= ProtocolVersion::V_2025_11_25)
+            {
+                let choices = property["oneOf"].as_array().expect("titled choices");
+                assert_eq!(
+                    choices
+                        .iter()
+                        .map(|choice| choice["const"].clone())
+                        .collect::<Value>(),
+                    values
+                );
+                assert_eq!(
+                    choices
+                        .iter()
+                        .map(|choice| choice["title"].clone())
+                        .collect::<Value>(),
+                    titles
+                );
+                assert!(property.get("enumNames").is_none());
+            } else {
+                assert_eq!(property["enum"], values);
+                assert_eq!(property["enumNames"], titles);
+                assert!(property.get("oneOf").is_none());
+            }
+            if field == "model" {
+                assert_eq!(property["default"], "qwen/text-embedding-v4");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -405,7 +518,12 @@ async fn cancelled_or_expired_setup_never_submits_an_index() {
 #[tokio::test]
 async fn legacy_forms_can_select_models_and_unsupported_clients_receive_instructions() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        for forms in [true, false] {
+        for (version, forms) in [
+            (ProtocolVersion::V_2025_06_18, true),
+            (ProtocolVersion::V_2025_06_18, false),
+            (ProtocolVersion::V_2025_11_25, true),
+            (ProtocolVersion::V_2025_11_25, false),
+        ] {
             let root = tempfile::tempdir().expect("workspace");
             let jobs = Arc::new(Jobs::default());
             let server = ZvecGrepMcpServer::build_with_index_operations(
@@ -426,7 +544,7 @@ async fn legacy_forms_can_select_models_and_unsupported_clients_receive_instruct
             let mut selection = ElicitResult::new(ElicitationAction::Accept);
             selection.content = Some(json!({"model": "local/potion-code-16m-v2"}));
             let client = Client {
-                version: ProtocolVersion::V_2025_11_25,
+                version,
                 answers: Mutex::new(VecDeque::from([selection])),
                 forms,
             }

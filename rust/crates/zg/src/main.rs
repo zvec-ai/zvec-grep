@@ -534,6 +534,7 @@ async fn select_query_index(
             )
             .into());
         }
+        request.device = index_request.device;
         request
             .authorized_remote
             .extend(index_request.authorized_remote.clone());

@@ -11,7 +11,7 @@ mod backends;
 mod runtime;
 
 // Model catalog and reference resolution.
-pub(crate) use artifacts::{default_model_cache, model_is_cached};
+pub(crate) use artifacts::model_is_cached;
 pub(crate) use catalog::list_embedding_models;
 pub(crate) use catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry};
 pub(crate) use catalog::{ResolveEmbeddingReferenceOptions, resolve_embedding_reference};

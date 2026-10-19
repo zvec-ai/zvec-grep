@@ -3,8 +3,8 @@ use crate::{
     api::index::setup::{EmbeddingChoice, IndexSetup, IndexSetupOptions},
     config,
     models::{
-        EmbeddingCatalogEntry, ResolveEmbeddingReferenceOptions, default_model_cache,
-        list_embedding_models, model_is_cached, resolve_embedding_reference,
+        EmbeddingCatalogEntry, ResolveEmbeddingReferenceOptions, list_embedding_models,
+        model_is_cached, resolve_embedding_reference,
     },
 };
 
@@ -23,8 +23,7 @@ pub(crate) async fn index_setup(options: IndexSetupOptions) -> Result<IndexSetup
             "Unsupported default embedding model; run zg --help models",
         ));
     }
-    let cache =
-        config::model_cache(&config, options.model_cache, None).unwrap_or_else(default_model_cache);
+    let cache = config::model_cache(&config, options.model_cache, None);
     let mut models = Vec::new();
     for entry in list_embedding_models() {
         let reference = entry.reference();
@@ -39,7 +38,7 @@ pub(crate) async fn index_setup(options: IndexSetupOptions) -> Result<IndexSetup
         models.push(EmbeddingChoice {
             reference: reference.to_owned(),
             local,
-            downloaded: local && model_is_cached(entry, &cache).await,
+            downloaded: local && model_is_cached(entry, cache.as_deref()).await,
             configured: config["models"].get(reference).is_some()
                 || config["defaults"]["embedding"].as_str() == Some(reference),
             credential_available: local

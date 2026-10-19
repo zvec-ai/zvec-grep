@@ -1,26 +1,23 @@
 //! Read-only inspection of the same snapshots used by model preparation.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::models::catalog::EmbeddingCatalogEntry;
 
 use super::{
-    ArtifactSource,
+    ArtifactSource, LocalModelBackend, default_model_cache,
     manifest::{Manifest, validate_snapshot},
 };
 
-pub(crate) fn default_model_cache() -> PathBuf {
-    std::env::var_os("ZVEC_GREP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                .map(|home| PathBuf::from(home).join(".zvec-grep"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".zvec-grep"))
-        .join("models")
-}
-
-pub(crate) async fn model_is_cached(entry: EmbeddingCatalogEntry, cache: &Path) -> bool {
+pub(crate) async fn model_is_cached(entry: EmbeddingCatalogEntry, cache: Option<&Path>) -> bool {
+    let backend = match entry {
+        EmbeddingCatalogEntry::LlamaCpp(_) => LocalModelBackend::LlamaCpp,
+        EmbeddingCatalogEntry::Model2Vec(_) => LocalModelBackend::Model2Vec,
+        EmbeddingCatalogEntry::Transformers(_) => LocalModelBackend::Transformers,
+        EmbeddingCatalogEntry::Qwen(_) => return false,
+    };
+    let cache = cache.map_or_else(|| default_model_cache(backend), Path::to_path_buf);
+    let cache = cache.as_path();
     let (download, sources) = match entry {
         EmbeddingCatalogEntry::Qwen(_) => return false,
         EmbeddingCatalogEntry::LlamaCpp(model) => (
@@ -131,6 +128,34 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn windows_transformers_inspection_finds_the_preparation_cache() {
+        let directory = tempfile::tempdir().expect("isolated user profile");
+        let profile = directory.path();
+        let EmbeddingCatalogEntry::Transformers(mut model) =
+            get_embedding_model_catalog_entry("local/multilingual-e5-small")
+                .expect("catalog model")
+        else {
+            panic!("transformers");
+        };
+        model.download = &DOWNLOAD;
+        let snapshot = profile.join("models/fixture/model/fixture");
+        std::fs::create_dir_all(&snapshot).expect("prepared snapshot");
+        for artifact in DOWNLOAD.artifacts {
+            std::fs::write(snapshot.join(artifact.path), b"abc").expect("prepared artifact");
+        }
+        let cache = super::super::cache_paths::default_model_cache_from_env(
+            LocalModelBackend::Transformers,
+            true,
+            |key| (key == "USERPROFILE").then(|| profile.as_os_str().to_owned()),
+        );
+        assert!(
+            model_is_cached(EmbeddingCatalogEntry::Transformers(model), Some(&cache)).await,
+            "downloaded Transformers snapshots must be found in USERPROFILE/models"
+        );
+        assert!(!profile.join(".zvec-grep").exists());
+    }
+
+    #[tokio::test]
     async fn inspection_checks_every_artifact_without_downloading_or_writing_markers() {
         let directory = tempfile::tempdir().expect("isolated cache");
         let cache = directory.path().join("models");
@@ -143,7 +168,7 @@ mod tests {
         model.model_file = "model.safetensors";
         model.tokenizer_file = "tokenizer.json";
         let entry = EmbeddingCatalogEntry::Model2Vec(model);
-        assert!(!model_is_cached(entry, &cache).await);
+        assert!(!model_is_cached(entry, Some(&cache)).await);
         assert!(
             !cache.exists(),
             "inspection must not create cache directories"
@@ -152,11 +177,11 @@ mod tests {
         std::fs::create_dir_all(snapshot.join("tokenizer")).expect("snapshot");
         std::fs::write(snapshot.join("model.safetensors"), b"abc").expect("model");
         assert!(
-            !model_is_cached(entry, &cache).await,
+            !model_is_cached(entry, Some(&cache)).await,
             "partial downloads are unavailable"
         );
         std::fs::write(snapshot.join("tokenizer/tokenizer.json"), b"abc").expect("tokenizer");
-        assert!(model_is_cached(entry, &cache).await);
+        assert!(model_is_cached(entry, Some(&cache)).await);
         assert_eq!(
             std::fs::read_dir(&snapshot).expect("cache entries").count(),
             2,
@@ -164,7 +189,7 @@ mod tests {
         );
         std::fs::write(snapshot.join("model.safetensors"), b"xyz").expect("corrupt model");
         assert!(
-            !model_is_cached(entry, &cache).await,
+            !model_is_cached(entry, Some(&cache)).await,
             "matching file sizes do not prove integrity"
         );
         let fallback = cache.join("modelscope/model2vec/fixture--model/fixture");
@@ -173,7 +198,7 @@ mod tests {
         std::fs::write(fallback.join("tokenizer/tokenizer.json"), b"abc")
             .expect("fallback tokenizer");
         assert!(
-            model_is_cached(entry, &cache).await,
+            model_is_cached(entry, Some(&cache)).await,
             "verified fallback snapshots count as downloaded"
         );
     }

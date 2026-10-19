@@ -820,6 +820,8 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
             "direct",
             "--fts",
             "needle",
+            "--device",
+            "cpu",
             "--api-key",
             "setup-test-secret",
             "--no-color",
@@ -832,6 +834,14 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
         ],
     ));
     fixture.assert_model("direct", "local/potion-code-16m-v2");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+    )
+    .expect("manifest JSON");
+    assert_eq!(
+        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
+        "cpu"
+    );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
 }
@@ -901,8 +911,16 @@ async fn missing_remote_credential_can_be_saved_before_build_and_query() {
         if mode == "server" {
             fixture.start_server();
         }
-        let command =
-            fixture.command(&["--mode", mode, "needle", "--refresh", "off", "--no-color"]);
+        let command = fixture.command(&[
+            "--mode",
+            mode,
+            "needle",
+            "--device",
+            "cpu",
+            "--refresh",
+            "off",
+            "--no-color",
+        ]);
         let before = embedding.authorized_requests.load(Ordering::SeqCst);
         let output = success(
             tokio::task::spawn_blocking(move || {
