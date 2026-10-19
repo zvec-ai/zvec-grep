@@ -1071,6 +1071,8 @@ mod tests {
                     scope: None,
                     signature: None,
                     documentation: None,
+                    visibility: None,
+                    language: None,
                 },
             ));
         }

@@ -20,6 +20,8 @@ fn code(kind: SymbolType, name: &str, scope: Option<&str>) -> CodeMetadata {
         scope: scope.map(str::to_owned),
         signature: None,
         documentation: None,
+        visibility: None,
+        language: None,
     }
 }
 
