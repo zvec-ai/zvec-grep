@@ -2290,6 +2290,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn declaration_documentation_reaches_lexical_and_embedding_inputs() {
+        let fixtures = [
+            (
+                FileFormat::Rust,
+                "docs.rs",
+                "#[doc = \"recallneedle\"]\n#[diagnostic::on_unimplemented(note = \"diagnostic_only\")]\npub trait Documented {}",
+            ),
+            (
+                FileFormat::JavaScript,
+                "docs.js",
+                "/** recallneedle */\nexport const read = () => {};",
+            ),
+            (
+                FileFormat::TypeScript,
+                "docs.ts",
+                "/** recallneedle */\nexport declare function read(): void;",
+            ),
+            (
+                FileFormat::Go,
+                "docs.go",
+                "package demo\n// recallneedle\ntype Service struct {}",
+            ),
+        ];
+        for (format, path, text) in fixtures {
+            let source = TextSource {
+                relative_path: SourcePath::new(path).expect("source path"),
+                formats: vec![format],
+                text: text.to_owned(),
+            };
+            let options = crate::extraction::ChunkOptions::default();
+            let extracted = extract_for_indexing(&source, options).expect("extract code");
+            let entities =
+                bind_entities(FileId::new(42), extracted.fragments).expect("bind entities");
+            assert_eq!(entities.len(), 1, "{format:?}");
+            let entity = &entities[0];
+            let Some(EntityMetadata::Code(metadata)) = &entity.metadata else {
+                panic!("code metadata expected");
+            };
+            assert!(
+                !metadata
+                    .signature
+                    .as_deref()
+                    .expect("signature")
+                    .contains("recallneedle")
+            );
+            let Content::Text(content) = &entity.content else {
+                panic!("text content expected");
+            };
+            assert!(!content.contains("recallneedle"));
+            let prepared =
+                prepare_fragments(&entities, options.max_chunk_chars).expect("index inputs");
+            assert!(!prepared.is_empty());
+            for item in prepared {
+                assert!(item.fts_text.contains("recallneedle"), "{format:?}");
+                let [Content::Text(embedding_text)] = item.embedding_content.as_slice() else {
+                    panic!("text embedding expected");
+                };
+                assert!(embedding_text.contains("recallneedle"), "{format:?}");
+                assert!(!item.fts_text.contains("diagnostic_only"));
+                assert!(!embedding_text.contains("diagnostic_only"));
+            }
+        }
+    }
+
+    #[test]
     fn binding_preserves_complete_entities_and_independent_fragment_ids() {
         let source = TextSource {
             relative_path: SourcePath::new("README.md").expect("source path"),
