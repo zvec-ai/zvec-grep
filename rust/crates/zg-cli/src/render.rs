@@ -297,9 +297,10 @@ pub fn help_text(topic: Option<&str>) -> Result<String, HelpTopicError> {
 ///
 /// # Errors
 ///
-/// Returns an error when `topic` is not part of the public help surface.
-pub fn print_help(topic: Option<&str>) -> Result<(), HelpTopicError> {
-    println!("{}", help_text(topic)?);
+/// Returns an error when `topic` is not part of the public help surface or
+/// stdout fails for a reason other than a closed pipe.
+pub fn print_help(topic: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(crate::stdout(), "{}", help_text(topic)?)?;
     Ok(())
 }
 

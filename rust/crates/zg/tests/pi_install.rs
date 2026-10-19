@@ -1,4 +1,8 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -52,6 +56,28 @@ fn write_json(path: &Path, value: &Value) {
         serde_json::to_string_pretty(value).expect("serialize"),
     )
     .expect("write JSON");
+}
+
+#[test]
+fn closed_stdout_allows_installation_and_removal_to_complete() {
+    let temporary = TempDir::new().expect("tempdir");
+    let root = temporary.path();
+    let path = root.join("pi/mcp.json");
+    for action in ["--install", "--uninstall"] {
+        let (reader, writer) = std::io::pipe().expect("stdout pipe");
+        drop(reader);
+        let output = command(action, root)
+            .stdout(Stdio::from(writer))
+            .output()
+            .expect("run with closed stdout");
+        assert_eq!(output.status.code(), Some(0), "{action}: {output:?}");
+        assert!(output.stderr.is_empty(), "{action}: {output:?}");
+        assert_eq!(
+            read_json(&path)["mcpServers"]["zvec_grep"].is_object(),
+            action == "--install",
+            "{action} must complete after its first stdout write"
+        );
+    }
 }
 
 #[test]
