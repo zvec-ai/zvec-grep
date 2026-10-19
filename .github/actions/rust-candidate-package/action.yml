@@ -50,10 +50,9 @@ runs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           candidate/rust/target/
-        key: ${{ inputs.cache_namespace }}-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('candidate/rust/Cargo.lock', 'candidate/rust/rust-toolchain.toml') }}-${{ steps.source.outputs.commit }}
+        key: ${{ inputs.cache_namespace }}-cargo-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('candidate/rust/Cargo.lock', 'candidate/rust/rust-toolchain.toml') }}
         restore-keys: |
-          ${{ inputs.cache_namespace }}-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('candidate/rust/Cargo.lock', 'candidate/rust/rust-toolchain.toml') }}-
-          ${{ inputs.cache_namespace }}-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+          ${{ inputs.cache_namespace }}-cargo-v2-${{ runner.os }}-${{ runner.arch }}-
     - name: Install the candidate's pinned Rust toolchain
       if: steps.rust-package-cache.outputs.cache-hit != 'true'
       shell: bash

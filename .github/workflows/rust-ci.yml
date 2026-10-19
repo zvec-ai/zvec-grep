@@ -100,8 +100,19 @@ jobs:
           prefix-key: rust-ci-v2
           workspaces: rust -> target
           save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest@0.9.148
+      # The default Windows temp directory is on C:, which is much slower than the D: workspace drive.
+      - name: Keep test temp files on the workspace drive
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Run workspace tests
-        run: cargo test --locked --workspace --all-targets
+        run: cargo nextest run --locked --workspace --all-targets --no-fail-fast
       - name: Smoke test the CLI
         shell: bash
         run: ./target/debug/zg${{ runner.os == 'Windows' && '.exe' || '' }} --rg "zvec-grep Rust rewrite" README.md
