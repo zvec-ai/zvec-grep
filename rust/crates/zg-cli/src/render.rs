@@ -362,7 +362,7 @@ const SEARCH_HELP: &str = r#"Usage:
   zg --rg [rg-options] <pattern> [path...]
 
 Search routes:
-  positional query                  Hybrid FTS and vector search
+  positional query                  Hybrid search; standalone code identifiers use FTS only
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
@@ -381,6 +381,15 @@ Result options:
 
 Indexed results are shown by query group, preserving each group's own rank.
 A result that matches more than one group is shown in each matching group.
+
+Standalone camelCase, PascalCase compounds, snake_case and Rust qualified names
+(verifyToken, RequestService, request_service, Request::Service) use indexed FTS
+without query-vector inference, retaining chunk results and definition ranking.
+Plain Request/request and natural-language queries retain hybrid search.
+Automatic FTS routing requires an index and preserves indexed limits, filters,
+refresh policy and direct/server/auto transport selection.
+Explicit routes, --prefer-symbol, --symbol-type, type/category filters and
+--refresh wait/background retain their original routes. Use --hybrid for vector recall.
 
 Embedding runtime:
   --api-key <key>                   Embedding provider API key

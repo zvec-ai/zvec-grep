@@ -1,6 +1,7 @@
 //! Command-line parsing, validation, request construction, and terminal rendering.
 
 mod authorization;
+mod code_keyword;
 mod install;
 mod jsonc;
 mod managed_rg;
@@ -1288,6 +1289,7 @@ fn query_plan(
 ) -> Result<CliPlan, CliError> {
     let mode = resolve_query_mode(&args)?;
     validate_query(&args, mode)?;
+    let fts_search = code_keyword::uses_fts_search(&args);
     let home = args.home.clone();
     let human = terminal && !args.compact;
     let output = OutputOptions {
@@ -1360,6 +1362,7 @@ fn query_plan(
         .model_cache
         .map(|path| resolve_from(&current_dir, Some(&path)));
     request.limit = args.limit;
+    code_keyword::configure_fts_search(&mut request, fts_search);
     if request.rg {
         request.rg_options.modified_after_epoch_ms = args.modified_after;
         request.rg_options.modified_before_epoch_ms = args.modified_before;
@@ -1636,6 +1639,92 @@ mod tests {
             .expect("parse")
             .into_plan_with_terminal(std::env::temp_dir(), terminal)
             .expect("plan")
+    }
+
+    #[test]
+    fn standalone_code_keywords_use_only_fts_in_every_mode() {
+        for mode in ["direct", "server", "auto"] {
+            for query in [
+                "verifyToken",
+                "RequestService",
+                "request_service",
+                "Request::Service",
+            ] {
+                let CliPlan::Query { request, .. } = plan(&["zg", query, "--mode", mode], false)
+                else {
+                    panic!("query")
+                };
+                assert!(!request.rg, "{mode}: {query}");
+                assert!(request.queries.is_empty());
+                assert_eq!(request.limit, None);
+                assert_eq!(
+                    request.routes,
+                    [super::ContextRoute {
+                        mode: super::ContextRouteMode::Fts,
+                        query: query.into(),
+                    }]
+                );
+            }
+        }
+        let CliPlan::Query { request, .. } = plan(
+            &[
+                "zg",
+                "verifyToken",
+                "--limit",
+                "3",
+                "-g",
+                "*.ts",
+                "-g",
+                "!test.ts",
+                "--modified-after",
+                "1",
+            ],
+            false,
+        ) else {
+            panic!("query")
+        };
+        assert_eq!(request.limit, Some(3));
+        assert_eq!(request.filter.globs.len(), 2);
+        assert_eq!(request.filter.modified_after_epoch_ms, Some(1));
+    }
+
+    #[test]
+    fn explicit_indexed_intent_and_ambiguous_queries_keep_indexed_search() {
+        for args in [
+            vec!["zg", "Request"],
+            vec!["zg", "request"],
+            vec!["zg", "how verifyToken works"],
+            vec!["zg", "verifyToken", "request_service"],
+            vec!["zg", "--hybrid", "verifyToken"],
+            vec!["zg", "--fts", "verifyToken"],
+            vec!["zg", "--vector", "verifyToken"],
+            vec!["zg", "verifyToken", "--hybrid", "request_service"],
+            vec!["zg", "verifyToken", "--fts", "request_service"],
+            vec!["zg", "verifyToken", "--fuse"],
+            vec!["zg", "verifyToken", "--prefer-symbol"],
+            vec!["zg", "verifyToken", "--symbol-type", "function"],
+            vec!["zg", "verifyToken", "--type", "typescript"],
+            vec!["zg", "verifyToken", "--type-not", "rust"],
+            vec!["zg", "verifyToken", "--category", "code"],
+            vec!["zg", "verifyToken", "--category-not", "document"],
+            vec!["zg", "verifyToken", "--refresh", "wait"],
+            vec!["zg", "verifyToken", "--refresh", "background"],
+        ] {
+            let CliPlan::Query { request, .. } = plan(&args, false) else {
+                panic!("query")
+            };
+            assert!(!request.rg, "{args:?}");
+            if !args.contains(&"--fts") && !args.contains(&"--vector") {
+                assert!(!request.queries.is_empty(), "{args:?}");
+                assert!(request.routes.is_empty(), "{args:?}");
+            }
+        }
+        let CliPlan::Query { request, .. } = plan(&["zg", "--rg", "verifyToken"], false) else {
+            panic!("query")
+        };
+        assert!(request.rg);
+        assert!(!request.rg_options.word_regexp);
+        assert_eq!(request.limit, None);
     }
 
     #[test]
