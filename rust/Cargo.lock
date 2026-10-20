@@ -4118,6 +4118,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "dunce",
  "grep",
  "serde_json",
  "tempfile",
@@ -4125,6 +4126,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "uuid",
+ "winapi-util",
  "zg-engine",
 ]
 

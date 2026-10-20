@@ -13,7 +13,7 @@ use zg_engine::{
 };
 
 use crate::{
-    ColorMode, OutputOptions,
+    ColorMode, OutputOptions, output_path,
     theme::{StatusTheme, display_path, format_count, storage_path, write_status_field},
 };
 
@@ -290,7 +290,7 @@ fn write_diagnostics(
                 } else {
                     compact
                 };
-                format!("{}: {compact}", path.display())
+                format!("{}: {compact}", output_path(path).display())
             })
             .collect();
         if files.len() > 3 {
@@ -352,7 +352,7 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
             "ignore-file={}",
             scan.ignore_files()
                 .iter()
-                .map(|path| path.display().to_string())
+                .map(|path| output_path(path).display().to_string())
                 .collect::<Vec<_>>()
                 .join("|")
         ));

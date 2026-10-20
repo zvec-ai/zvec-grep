@@ -147,11 +147,11 @@ async fn ask(
         target.endpoint,
         target.endpoint_host,
         target.model,
-        target.root.display(),
+        zg_cli::output_path(&target.root).display(),
         target
             .workspace_roots
             .iter()
-            .map(|root| root.display().to_string())
+            .map(|root| zg_cli::output_path(root).display().to_string())
             .collect::<Vec<_>>()
             .join(", "),
     );

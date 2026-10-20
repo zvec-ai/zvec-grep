@@ -11,7 +11,7 @@ use zg_engine::{
 };
 
 use crate::{
-    ColorMode, OutputOptions,
+    ColorMode, OutputOptions, output_path,
     status::scan_filters,
     theme::{StatusTheme, display_path, storage_path, write_status_field},
 };
@@ -78,9 +78,9 @@ pub fn write_index_with_options(
     )?;
     let filters = scan.map(scan_filters).unwrap_or_default();
     let roots = if filters.is_empty() {
-        root.display().to_string()
+        output_path(root).display().to_string()
     } else {
-        format!("{} ({filters})", root.display())
+        format!("{} ({filters})", output_path(root).display())
     };
     index_field(&mut writer, theme, "roots", &theme.path(&roots))?;
     for file in &result.failed_files {
@@ -90,7 +90,7 @@ pub fn write_index_with_options(
             "failed",
             &format!(
                 "{}: {}",
-                theme.path(&file.path.display().to_string()),
+                theme.path(&output_path(&file.path).display().to_string()),
                 theme.danger(&file.reason),
             ),
         )?;
@@ -146,7 +146,7 @@ pub fn write_index_drop_result(
         } else {
             "No index found for"
         },
-        root.display(),
+        output_path(root).display(),
     )
 }
 
@@ -284,6 +284,29 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes).expect("render output"),
             "Workspace index\nfiles\t9 scanned, 2 added, 1 modified, 1 retried, 4 unchanged, 3 deleted, 1 failed\nentities\t24\nduration\t1m 2s (61500ms)\nroots\t/workspace\n",
+        );
+    }
+
+    #[test]
+    fn index_and_drop_summaries_format_windows_paths() {
+        let root = Path::new(r"\\?\D:\workspace\repo");
+        let expected = if cfg!(windows) {
+            r"D:\workspace\repo"
+        } else {
+            r"\\?\D:\workspace\repo"
+        };
+        let mut bytes = Vec::new();
+        write_index_result(&mut bytes, root, &IndexResult::default()).expect("index output");
+        assert!(
+            String::from_utf8(bytes)
+                .expect("UTF-8")
+                .contains(&format!("roots\t{expected}\n"))
+        );
+        let mut bytes = Vec::new();
+        write_index_drop_result(&mut bytes, root, true).expect("drop output");
+        assert_eq!(
+            String::from_utf8(bytes).expect("UTF-8"),
+            format!("Dropped index for {expected}\n")
         );
     }
 

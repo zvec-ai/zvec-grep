@@ -12,6 +12,8 @@ use zg_engine::api::context::{
     },
 };
 
+use crate::output_path;
+
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
 /// # Errors
@@ -50,7 +52,7 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             if previous_path.is_some() {
                 writeln!(writer)?;
             }
-            writeln!(writer, "{}", item.relative_path.display())?;
+            writeln!(writer, "{}", output_path(&item.relative_path).display())?;
             previous_path = Some(item.relative_path.as_path());
         }
         if let Some(first) = item.content_range.start_line() {
@@ -155,13 +157,18 @@ pub fn write_context_with_options(
         let range = range_label(&item.range);
         let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
         let label = if options.human {
-            format!("{}. {}:{}", item.rank, item.relative_path.display(), range)
+            format!(
+                "{}. {}:{}",
+                item.rank,
+                output_path(&item.relative_path).display(),
+                range
+            )
         } else {
             format!(
                 "#{} matchedBy={} {}:{}",
                 item.rank,
                 matched_by.as_str().unwrap_or_default(),
-                item.relative_path.display(),
+                output_path(&item.relative_path).display(),
                 range
             )
         };
@@ -966,6 +973,39 @@ mod output_tests {
             diagnostics: ContextDiagnostics::default(),
             items: vec![indexed_item()],
         }
+    }
+
+    #[test]
+    fn context_formats_paths_without_rewriting_source_content() {
+        let path = r"\\?\D:\workspace\sample.rs";
+        let expected = if cfg!(windows) {
+            r"D:\workspace\sample.rs"
+        } else {
+            path
+        };
+        let mut result = indexed_result();
+        result.items[0].relative_path = path.into();
+        result.items[0].content = path.into();
+        let original = result.clone();
+        for source in [ContextSource::Index, ContextSource::Rg] {
+            result.source = source;
+            let mut bytes = Vec::new();
+            write_context_with_options(
+                &mut bytes,
+                &result,
+                OutputOptions {
+                    preview: PreviewMode::Full,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("context output");
+            let text = String::from_utf8(bytes).expect("UTF-8");
+            assert!(text.contains(expected));
+            assert!(text.contains(&format!("1: {path}")));
+        }
+        result.source = original.source;
+        assert_eq!(result, original);
     }
 
     #[test]

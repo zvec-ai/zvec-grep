@@ -6,21 +6,25 @@ mod jsonc;
 mod managed_rg;
 mod management;
 mod path_lookup;
+mod paths;
 mod progress;
 mod render;
 mod setup;
 mod status;
+mod terminal;
 mod theme;
 pub use management::{
     write_authorization_revoke_result, write_authorization_status, write_index_drop_result,
     write_index_result, write_index_with_options,
 };
+pub use paths::output_path;
 pub use progress::IndexProgressDisplay;
 pub use setup::{
     IndexCancellation, ModelSelection, SetupAuthorizationDecision, prompt_setup_authorization,
     prompt_setup_credential,
 };
 pub use status::{write_info_result, write_info_with_options};
+pub use terminal::{stderr_supports_ansi, stdout_supports_ansi};
 
 use std::{
     ffi::{OsStr, OsString},

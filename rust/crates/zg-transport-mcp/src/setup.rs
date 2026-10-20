@@ -169,7 +169,7 @@ impl SetupState {
             }
             if !provider.supports_background_indexing() || !form_supported(context) {
                 return Err(EngineError::not_found(format!(
-                    "No index found in {}. This MCP connection cannot request interactive background indexing. Run `zg --index --embedding <model>` in the workspace, then retry the search. No index was created.", info.root.display()
+                    "No index found in {}. This MCP connection cannot request interactive background indexing. Run `zg --index --embedding <model>` in the workspace, then retry the search. No index was created.", zg_cli::output_path(&info.root).display()
                 )));
             }
             let setup = engine.index_setup(IndexSetupOptions {
@@ -515,7 +515,7 @@ fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
             (
                 format!(
                     "No index found in {}. Select an embedding model to create a persistent index in the background. Local models run on this server. Remote models require a separate authorization step. Cancel to exit without creating an index.",
-                    root.display()
+                    zg_cli::output_path(root).display()
                 ),
                 json!({"type": "object", "properties": {"model": choice_property("Embedding model", &choices, default.as_deref(), version)}, "required": ["model"]}),
             )
@@ -523,7 +523,7 @@ fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
         Phase::Authorization { target, .. } => (
             format!(
                 "Allow remote embedding? Workspace: {}. Model: {}. Destination: {}. Sends selected workspace files. API charges may apply. Allow once covers this background build only; a later query requires its own authorization. Workspace approval also authorizes later matching queries and refreshes. No workspace content has been sent. Cancel to exit.",
-                target.root.display(),
+                zg_cli::output_path(&target.root).display(),
                 target.model,
                 target.endpoint
             ),

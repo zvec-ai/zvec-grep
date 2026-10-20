@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::ColorMode;
+use crate::{ColorMode, output_path};
 
 #[derive(Clone, Copy)]
 pub(crate) struct StatusTheme {
@@ -79,11 +79,11 @@ fn display_path_with_home(path: &Path, home: Option<&Path>) -> String {
         }
         return PathBuf::from("~").join(relative).display().to_string();
     }
-    path.display().to_string()
+    output_path(path).display().to_string()
 }
 
 fn relative_to_home(path: &Path, home: &Path) -> Option<PathBuf> {
-    if let Ok(relative) = path.strip_prefix(home) {
+    if let Ok(relative) = output_path(path).strip_prefix(output_path(home)) {
         return Some(relative.to_path_buf());
     }
     // Windows can report the same directory as C:\... and \\?\C:\...,
@@ -101,7 +101,7 @@ fn relative_to_home(path: &Path, home: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn storage_path(path: &Path, root: &Path) -> String {
-    if let Ok(relative) = path.strip_prefix(root)
+    if let Ok(relative) = output_path(path).strip_prefix(output_path(root))
         && !relative.as_os_str().is_empty()
         && !relative
             .components()
@@ -149,6 +149,26 @@ mod tests {
             storage_path(Path::new("/elsewhere/storage"), &root),
             "/elsewhere/storage"
         );
+        let verbatim = Path::new(r"\\?\D:\workspace\repo");
+        assert_eq!(
+            display_path_with_home(verbatim, None),
+            if cfg!(windows) {
+                r"D:\workspace\repo"
+            } else {
+                r"\\?\D:\workspace\repo"
+            }
+        );
+        let long_path = format!(r"\\?\D:\{}file.txt", "folder\\".repeat(50));
+        for path in [
+            r"\\?\UNC\server\share\repo",
+            r"\\server\share\repo",
+            r"\\?\D:\workspace\NUL.txt",
+            r"\\?\D:\workspace\trailing.",
+            r"\\?\D:\workspace\trailing ",
+            long_path.as_str(),
+        ] {
+            assert_eq!(display_path_with_home(Path::new(path), None), path);
+        }
     }
 
     #[test]
@@ -168,5 +188,12 @@ mod tests {
             .expect("canonical temporary directory");
         assert_eq!(display_path_with_home(&ordinary, Some(&canonical)), "~");
         assert_eq!(display_path_with_home(&canonical, Some(&ordinary)), "~");
+        assert_eq!(
+            display_path_with_home(
+                Path::new(r"\\?\D:\users\alice\repo"),
+                Some(Path::new(r"D:\users\alice")),
+            ),
+            r"~\repo"
+        );
     }
 }

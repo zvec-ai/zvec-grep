@@ -22,6 +22,7 @@ pub fn prompt_index_authorization(
         .iter()
         .take(2)
         .map(|root| {
+            let root = crate::output_path(root);
             label(
                 &root
                     .file_name()
@@ -77,11 +78,11 @@ pub fn prompt_query_authorization(
         (false, true) => "selected workspace files",
         _ => "query text",
     };
+    let root = crate::output_path(&target.root);
     let root = label(
-        &target
-            .root
+        &root
             .file_name()
-            .unwrap_or(target.root.as_os_str())
+            .unwrap_or(root.as_os_str())
             .to_string_lossy(),
         32,
     );
