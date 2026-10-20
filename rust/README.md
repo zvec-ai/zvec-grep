@@ -517,8 +517,8 @@ The runtime library directory must include zvec's shared library and its
 the binary's directory.
 
 The `Publish Rust packages` workflow builds all five published native targets on matching
-GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
-produce downloadable candidates without publishing to npm. Each runner installs
+GitHub runners. It runs only through manual dispatch. With `publish` left at its
+default `false`, it produces downloadable candidates without publishing to npm. Each runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
 starts the packaged daemon, compares workspace status in direct and server
 modes, and stops the daemon. The server status request crosses the IPC boundary;
