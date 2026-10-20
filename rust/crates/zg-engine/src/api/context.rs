@@ -356,8 +356,15 @@ pub mod result {
         pub found: bool,
         pub rank: Option<usize>,
         pub score: Option<f64>,
+        /// Relative contribution to reciprocal-rank fusion; legacy traces use one.
+        #[serde(default = "default_rrf_weight")]
+        pub rrf_weight: f64,
         pub forced: bool,
         pub reason: Option<String>,
+    }
+
+    fn default_rrf_weight() -> f64 {
+        1.0
     }
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
