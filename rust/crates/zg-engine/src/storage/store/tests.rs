@@ -296,7 +296,7 @@ fn failed_files_retain_queryable_paths_and_directory_ownership() {
     );
     storage.close().expect("checkpoint");
 
-    let path = temporary.path().join("storage/files");
+    let path = temporary.path().join("files");
     let mut options = zvec_rust::CollectionOptions::new().expect("options");
     options.set_read_only(true).expect("read only");
     #[cfg(windows)]
@@ -400,7 +400,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     .expect("create index")
     .close()
     .expect("close index");
-    let descriptor = home.join("storage/schema.json");
+    let descriptor = home.join("schema.json");
     let persisted = fs::read(&descriptor).expect("read descriptor");
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
     assert_eq!(record, serde_json::json!({"embeddings": [original]}));
@@ -471,8 +471,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
 #[test]
 fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     let directory = tempfile::tempdir().expect("fixture directory");
-    let path = directory.path().join("storage");
-    fs::create_dir(&path).expect("storage directory");
+    let path = directory.path().to_path_buf();
     for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
         let mut record =
             serde_json::to_value(SchemaRecord::new(&[schema()])).expect("descriptor JSON");
@@ -500,14 +499,13 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
             assert!(error.message().contains("schema.json"));
         }
     }
-    assert_eq!(fs::read_dir(path).expect("storage files").count(), 1);
+    assert_eq!(fs::read_dir(path).expect("storage files").count(), 2);
 }
 
 #[test]
 fn initializes_schema_only_in_empty_storage() {
     let directory = tempfile::tempdir().expect("fixture directory");
-    let path = directory.path().join("storage");
-    fs::create_dir(&path).expect("empty storage directory");
+    let path = directory.path().to_path_buf();
     open(directory.path(), false)
         .close()
         .expect("initialize empty storage");
@@ -521,7 +519,7 @@ fn initializes_schema_only_in_empty_storage() {
 fn rejects_existing_collections_without_schema_before_opening_them() {
     for collection in ["files", "directories", "entities", "fragments_existing"] {
         let directory = tempfile::tempdir().expect("fixture directory");
-        let path = directory.path().join("storage");
+        let path = directory.path().to_path_buf();
         let collection_path = path.join(collection);
         fs::create_dir_all(&collection_path).expect("existing collection");
         let marker = collection_path.join("preserved");
@@ -1156,7 +1154,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
         .replace_fixture_file(&file, &[entry])
         .expect("indexed source");
     storage.close().expect("checkpoint");
-    assert!(home.path().join("storage/directories").is_dir());
+    assert!(home.path().join("directories").is_dir());
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(
             crate::domain::SourcePath::new("src").expect("path"),
@@ -1331,7 +1329,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         .expect("complete file");
     writer.close().expect("checkpoint");
 
-    let storage_path = home.path().join("storage");
+    let storage_path = home.path().to_path_buf();
     let mut collections = fs::read_dir(&storage_path)
         .expect("storage layout")
         .map(|entry| entry.expect("directory entry"))

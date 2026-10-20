@@ -203,7 +203,11 @@ Remote Embedding authorization. Configuration examples are in
 ## Rust compatibility notes
 
 Rust uses the same search routing, preview and freshness rules in `agent` and
-`full`. Search credentials and device selection come from the configured runtime;
+`full`. Indexed search, index, status and drop accept `indexDir` to select
+a workspace data directory; when it is supplied, `root` can be omitted for an
+existing index. The saved relative source location follows a moved bundle.
+Creating a new index in an explicit directory requires a source root.
+`ZVEC_GREP_INDEX_DIR` supplies the server default. Search credentials and device selection come from the configured runtime;
 public search does not accept `apiKey` or `device`. Index accepts runtime overrides,
 `follow`, ordered globs and native ripgrep type filters, and defaults to `wait: false`.
 Completed debug indexing returns `scan_diagnostics` alongside extended diagnostics.

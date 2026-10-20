@@ -188,6 +188,7 @@ mod tests {
     fn query_prompt_offers_fts_without_granting_remote_consent() {
         let target = IndexAuthorization {
             root: std::env::temp_dir().join("docs"),
+            index_dir: std::env::temp_dir().join("docs/.zvec-grep"),
             workspace_roots: vec![std::env::temp_dir().join("docs")],
             model: "qwen/text-embedding-v4".into(),
             endpoint: "https://dashscope.aliyuncs.com/embeddings".into(),
@@ -223,6 +224,7 @@ mod tests {
     fn matches_legacy_prompt_and_requires_explicit_consent() {
         let target = IndexAuthorization {
             root: "/workspace/docs".into(),
+            index_dir: "/workspace/docs/.zvec-grep".into(),
             workspace_roots: vec!["/workspace/docs".into()],
             model: "qwen/text-embedding-v4".into(),
             endpoint: "https://dashscope.aliyuncs.com/embeddings".into(),

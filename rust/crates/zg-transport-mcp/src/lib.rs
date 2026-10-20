@@ -54,6 +54,7 @@ use zg_engine::{
             InfoOptions, InfoResult,
             result::{IndexCompatibility, InfoSource, WorkspaceIndexPolicy},
         },
+        workspace::WorkspaceLocation,
     },
 };
 
@@ -95,7 +96,7 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
-    "- Every workspace operation requires an absolute root path visible to the daemon.\n",
+    "- Select an index with an absolute indexDir or provide an absolute source root visible to the daemon. An existing indexDir can resolve its saved source root; rg still requires root.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.\n",
     "- When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.\n",
@@ -106,7 +107,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval and lifecycle rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
-    "- Every workspace operation requires an absolute root path visible to the daemon.\n",
+    "- Select an index with an absolute indexDir or provide an absolute source root visible to the daemon. An existing indexDir can resolve its saved source root; rg still requires root.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
     "- Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
@@ -175,6 +176,7 @@ pub struct IndexOperationError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexOperationResult {
     pub root: PathBuf,
+    pub index_dir: PathBuf,
     pub job_id: String,
     pub state: IndexOperationState,
     pub reused: bool,
@@ -224,7 +226,11 @@ pub trait IndexOperationProvider: Send + Sync {
         engine.context(request).await
     }
 
-    fn runtime_snapshot(&self, _root: &Path) -> Option<IndexRuntimeSnapshot> {
+    fn runtime_snapshot(
+        &self,
+        _root: &Path,
+        _index_dir: Option<&Path>,
+    ) -> Option<IndexRuntimeSnapshot> {
         None
     }
 }
@@ -240,10 +246,12 @@ impl IndexOperationProvider for DirectIndexOperationProvider {
         options: IndexOptions,
         _wait: bool,
     ) -> Result<IndexOperationResult, EngineError> {
-        let root = request_root(options.root.as_deref());
+        let location =
+            WorkspaceLocation::for_index(options.root.as_deref(), options.index_dir.as_deref())?;
         let result = self.engine.index(options).await?;
         Ok(IndexOperationResult {
-            root,
+            root: location.root,
+            index_dir: location.home,
             job_id: uuid::Uuid::new_v4().to_string(),
             state: IndexOperationState::Succeeded,
             reused: false,
@@ -266,6 +274,7 @@ pub struct ZvecGrepMcpServer {
     router: ToolRouter<Self>,
     consent_state: Arc<consent::ContinuationState>,
     setup_state: Arc<setup::SetupState>,
+    default_index_dir: Option<PathBuf>,
 }
 
 impl ZvecGrepMcpServer {
@@ -344,6 +353,7 @@ impl ZvecGrepMcpServer {
             router,
             consent_state: Arc::new(consent::ContinuationState::default()),
             setup_state: Arc::new(setup::SetupState::default()),
+            default_index_dir: std::env::var_os("ZVEC_GREP_INDEX_DIR").map(PathBuf::from),
         }
     }
 
@@ -386,10 +396,11 @@ impl ZvecGrepMcpServer {
                 )
                 .await;
         }
-        if let Some(reply) = self
-            .setup_state
-            .running(request.root.as_deref(), self.index_operations.as_ref())
-        {
+        if let Some(reply) = self.setup_state.running(
+            request.root.as_deref(),
+            request.index_dir.as_deref(),
+            self.index_operations.as_ref(),
+        ) {
             return Ok(reply.into());
         }
         if let Err(error) = consent::search(&mut request, &context).await {
@@ -426,7 +437,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_index",
-        description = "Activate an absolute workspace root to create, incrementally update, rebuild, or explicitly drop its index. Do not call this tool to create, rebuild, or drop an index unless the user requested persistent indexing or index deletion.",
+        description = "Select a workspace by absolute root or indexDir to create, incrementally update, rebuild, or explicitly drop its index. Do not call this tool to create, rebuild, or drop an index unless the user requested persistent indexing or index deletion.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<IndexOutput>(),
         annotations(
             title = "Ensure or drop zvec-grep index",
@@ -465,9 +476,15 @@ impl ZvecGrepMcpServer {
                 }
             }
             IndexToolRequest::Drop(request) => {
-                let root = request_root(request.root.as_deref());
+                let location = match WorkspaceLocation::discover(
+                    request.root.as_deref(),
+                    request.index_dir.as_deref(),
+                ) {
+                    Ok(location) => location,
+                    Err(error) => return Ok(error_result(&error)),
+                };
                 match self.index_operations.drop_index(request).await {
-                    Ok(removed) => drop_result_to_index_result(&root, removed),
+                    Ok(removed) => drop_result_to_index_result(&location, removed),
                     Err(error) => error_result(&error),
                 }
             }
@@ -476,7 +493,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_index_drop",
-        description = "Delete the persisted index for an absolute workspace root and release its daemon runtime.",
+        description = "Delete the persisted index selected by absolute root or indexDir and release its daemon runtime.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<IndexDropOutput>(),
         annotations(
             title = "Drop zvec-grep workspace index",
@@ -491,14 +508,18 @@ impl ZvecGrepMcpServer {
         Parameters(input): Parameters<RootInput>,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let root = absolute_root(&input.root)
+        let request = input
+            .into_request(false)
             .map_err(|message| ErrorData::invalid_params(message, None))?;
-        let request = InfoOptions {
-            root: Some(root.clone()),
-            include_status: false,
+        let location = match WorkspaceLocation::discover(
+            request.root.as_deref(),
+            request.index_dir.as_deref(),
+        ) {
+            Ok(location) => location,
+            Err(error) => return Ok(error_result(&error)),
         };
         Ok(match self.index_operations.drop_index(request).await {
-            Ok(removed) => drop_result_to_result(&root, removed),
+            Ok(removed) => drop_result_to_result(&location, removed),
             Err(error) => error_result(&error),
         })
     }
@@ -538,7 +559,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_index_status",
-        description = "Read persisted index status for an absolute root. Use only after a missing-index response, indexing failure or cancellation, explicit progress monitoring, or daemon diagnostics.",
+        description = "Read persisted index status selected by absolute root or indexDir. Use only after a missing-index response, indexing failure or cancellation, explicit progress monitoring, or daemon diagnostics.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<IndexStatusOutput>(),
         annotations(
             title = "Inspect zvec-grep index status",
@@ -553,16 +574,15 @@ impl ZvecGrepMcpServer {
         Parameters(input): Parameters<RootInput>,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let root = absolute_root(&input.root)
+        let request = input
+            .into_request(true)
             .map_err(|message| ErrorData::invalid_params(message, None))?;
-        let request = InfoOptions {
-            root: Some(root),
-            include_status: true,
-        };
         Ok(
             match self.index_operations.info(&self.engine, request).await {
                 Ok(reply) => {
-                    let runtime = self.index_operations.runtime_snapshot(&reply.root);
+                    let runtime = self
+                        .index_operations
+                        .runtime_snapshot(&reply.root, Some(&reply.home));
                     info_result_to_tool_result(reply, runtime)
                 }
                 Err(error) => error_result(&error),
@@ -613,9 +633,32 @@ impl ServerHandler for ZvecGrepMcpServer {
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         mut context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if matches!(
+            request.name.as_ref(),
+            "zvec_grep_search"
+                | "zvec_grep_index"
+                | "zvec_grep_index_status"
+                | "zvec_grep_index_drop"
+        ) {
+            let arguments = request.arguments.get_or_insert_default();
+            if !arguments.contains_key("indexDir")
+                && let Some(path) = &self.default_index_dir
+            {
+                if !path.is_absolute() {
+                    return Err(ErrorData::invalid_params(
+                        "ZVEC_GREP_INDEX_DIR must be an absolute server path",
+                        None,
+                    ));
+                }
+                let path = path.to_str().ok_or_else(|| {
+                    ErrorData::invalid_params("ZVEC_GREP_INDEX_DIR must be Unicode for MCP", None)
+                })?;
+                arguments.insert("indexDir".to_owned(), serde_json::json!(path));
+            }
+        }
         if let Some(arguments) = &request.arguments {
             for (field, value) in arguments {
                 if value.is_null()
@@ -743,9 +786,12 @@ pub enum GlobListInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchInput {
-    /// Absolute workspace root visible to the daemon.
-    #[schemars(length(min = 1, max = 1024))]
-    pub root: String,
+    /// Absolute source root visible to the daemon; omit to use the source saved in indexDir.
+    #[schemars(length(min = 1, max = 1024), extend("type" = "string"))]
+    pub root: Option<String>,
+    /// Absolute index directory visible to the daemon; defaults to root/.zvec-grep.
+    #[schemars(length(min = 1, max = 1024), extend("type" = "string"))]
+    pub index_dir: Option<String>,
     /// One primary hybrid-search group.
     #[schemars(length(max = 4000))]
     pub query: Option<String>,
@@ -811,10 +857,13 @@ pub struct SearchInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IndexInput {
-    /// Absolute workspace root visible to the daemon.
-    #[schemars(length(min = 1, max = 1024))]
-    pub root: String,
-    /// Set or rename the unique workspace name; new workspaces default to the root directory name.
+    /// Absolute source root visible to the daemon; omit to use the source saved in indexDir.
+    #[schemars(length(min = 1, max = 1024), extend("type" = "string"))]
+    pub root: Option<String>,
+    /// Absolute index directory visible to the daemon; defaults to root/.zvec-grep.
+    #[schemars(length(min = 1, max = 1024), extend("type" = "string"))]
+    pub index_dir: Option<String>,
+    /// Set or rename the workspace label; new workspaces default to the root directory name.
     pub name: Option<String>,
     /// One-request embedding provider API key override.
     #[schemars(length(min = 1, max = 8192))]
@@ -870,10 +919,14 @@ pub struct IndexInput {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RootInput {
-    /// Absolute workspace root visible to the daemon.
-    #[schemars(length(min = 1, max = 1024))]
-    pub root: String,
+    /// Absolute source root visible to the daemon; omit to use the source saved in indexDir.
+    #[schemars(length(min = 1, max = 1024), extend("type" = "string"))]
+    pub root: Option<String>,
+    /// Absolute index directory visible to the daemon; defaults to root/.zvec-grep.
+    #[schemars(length(min = 1, max = 1024), extend("type" = "string"))]
+    pub index_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -918,6 +971,7 @@ enum IndexActionOutput {
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct IndexOutput {
     root: String,
+    index_dir: String,
     job_id: String,
     state: IndexJobState,
     reused: bool,
@@ -1021,6 +1075,7 @@ struct ErrorSiteOutput {
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct IndexDropOutput {
     root: String,
+    index_dir: String,
     removed: bool,
 }
 
@@ -1518,7 +1573,8 @@ fn normalize_filter_names<T>(
 
 impl SearchInput {
     fn into_request(self) -> Result<ContextOptions, String> {
-        let root = absolute_root(&self.root)?;
+        let root = optional_workspace_root(self.root.as_deref(), self.index_dir.as_deref())?;
+        let index_dir = absolute_index_dir(self.index_dir.as_deref())?;
         if self
             .limit
             .is_some_and(|limit| limit == 0 || limit > MAX_SEARCH_LIMIT)
@@ -1556,7 +1612,8 @@ impl SearchInput {
 
         let request = ContextOptions {
             query: None,
-            root: Some(root.clone()),
+            root,
+            index_dir,
             queries,
             routes,
             fuse: self.fuse.unwrap_or(false),
@@ -1624,7 +1681,8 @@ impl From<DeviceInput> for Device {
 
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
-        let root = absolute_root(&self.root)?;
+        let root = optional_workspace_root(self.root.as_deref(), self.index_dir.as_deref())?;
+        let index_dir = absolute_index_dir(self.index_dir.as_deref())?;
         if self.drop.unwrap_or(false) {
             if self.has_index_options() {
                 return Err(
@@ -1633,10 +1691,15 @@ impl IndexInput {
                 );
             }
             return Ok(IndexToolRequest::Drop(InfoOptions {
-                root: Some(root),
+                root,
+                index_dir,
                 include_status: false,
             }));
         }
+        let use_saved_source = root.is_none();
+        let location = WorkspaceLocation::for_index(root.as_deref(), index_dir.as_deref())
+            .map_err(|error| error.to_string())?;
+        let root = location.root;
         if let Some(api_key) = &self.api_key {
             validate_text("apiKey", api_key, 1, 8_192)?;
         }
@@ -1691,7 +1754,8 @@ impl IndexInput {
         };
         Ok(IndexToolRequest::Index {
             options: Box::new(IndexOptions {
-                root: Some(root),
+                root: (!use_saved_source).then_some(root),
+                index_dir: Some(location.home),
                 name: self.name,
                 rebuild: self.rebuild.unwrap_or(false),
                 reset_paths: self.reset_paths.unwrap_or(false),
@@ -1744,6 +1808,39 @@ impl RgInput {
         request.root = Some(root);
         Ok(request)
     }
+}
+
+impl RootInput {
+    fn into_request(self, include_status: bool) -> Result<InfoOptions, String> {
+        Ok(InfoOptions {
+            root: optional_workspace_root(self.root.as_deref(), self.index_dir.as_deref())?,
+            index_dir: absolute_index_dir(self.index_dir.as_deref())?,
+            include_status,
+        })
+    }
+}
+
+fn optional_workspace_root(
+    root: Option<&str>,
+    index_dir: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    if root.is_none() && index_dir.is_none() {
+        return Err("provide an absolute root or indexDir".to_owned());
+    }
+    root.map(absolute_root).transpose()
+}
+
+fn absolute_index_dir(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    value
+        .map(|value| {
+            validate_text("indexDir", value, 1, MAX_PATH_CHARS)?;
+            let path = PathBuf::from(value.trim());
+            if !path.is_absolute() {
+                return Err("indexDir must be an absolute path".to_owned());
+            }
+            Ok(path)
+        })
+        .transpose()
 }
 
 fn absolute_root(value: &str) -> Result<PathBuf, String> {
@@ -2037,13 +2134,10 @@ fn structured_result(value: impl Serialize) -> CallToolResult {
     }
 }
 
-fn request_root(root: Option<&Path>) -> PathBuf {
-    root.map_or_else(|| PathBuf::from("."), Path::to_path_buf)
-}
-
 fn index_operation_to_result(reply: &IndexOperationResult, debug: bool) -> CallToolResult {
     structured_result(IndexOutput {
         root: reply.root.display().to_string(),
+        index_dir: reply.index_dir.display().to_string(),
         job_id: reply.job_id.clone(),
         state: match reply.state {
             IndexOperationState::Queued => IndexJobState::Queued,
@@ -2076,9 +2170,10 @@ fn index_operation_to_result(reply: &IndexOperationResult, debug: bool) -> CallT
     })
 }
 
-fn drop_result_to_index_result(root: &Path, removed: bool) -> CallToolResult {
+fn drop_result_to_index_result(location: &WorkspaceLocation, removed: bool) -> CallToolResult {
     structured_result(IndexOutput {
-        root: root.display().to_string(),
+        root: location.root.display().to_string(),
+        index_dir: location.home.display().to_string(),
         job_id: "drop".to_owned(),
         state: IndexJobState::Succeeded,
         reused: false,
@@ -2091,9 +2186,10 @@ fn drop_result_to_index_result(root: &Path, removed: bool) -> CallToolResult {
     })
 }
 
-fn drop_result_to_result(root: &Path, removed: bool) -> CallToolResult {
+fn drop_result_to_result(location: &WorkspaceLocation, removed: bool) -> CallToolResult {
     structured_result(IndexDropOutput {
-        root: root.display().to_string(),
+        root: location.root.display().to_string(),
+        index_dir: location.home.display().to_string(),
         removed,
     })
 }
@@ -2389,7 +2485,8 @@ mod tests {
 
     fn input() -> SearchInput {
         SearchInput {
-            root: test_root().display().to_string(),
+            root: Some(test_root().display().to_string()),
+            index_dir: None,
             query: Some("call chain".to_owned()),
             queries: None,
             fts: Some(QueryListInput::One("run".to_owned())),
@@ -2624,6 +2721,58 @@ mod tests {
     }
 
     #[test]
+    fn indexed_tools_accept_an_explicit_home_without_root() {
+        let home = test_root().join("portable-index");
+        let search: SearchInput =
+            serde_json::from_value(serde_json::json!({"indexDir": home, "query": "needle"}))
+                .expect("search input");
+        let request = search.into_request().expect("selected index");
+        assert!(request.root.is_none());
+        assert_eq!(request.index_dir.as_deref(), Some(home.as_path()));
+        let input: super::RootInput =
+            serde_json::from_value(serde_json::json!({"indexDir": home})).expect("status input");
+        let request = input.into_request(true).expect("selected index");
+        assert!(request.root.is_none());
+        assert_eq!(request.index_dir.as_deref(), Some(home.as_path()));
+        let drop: IndexInput =
+            serde_json::from_value(serde_json::json!({"indexDir": home, "drop": true}))
+                .expect("drop input");
+        let IndexToolRequest::Drop(request) = drop.into_request().expect("drop request") else {
+            panic!("drop");
+        };
+        assert!(request.root.is_none());
+        assert_eq!(request.index_dir.as_deref(), Some(home.as_path()));
+        let mut index = index_input();
+        index.index_dir = Some(home.display().to_string());
+        let IndexToolRequest::Index { options, .. } = index.into_request().expect("index request")
+        else {
+            panic!("index");
+        };
+        assert_eq!(options.index_dir.as_deref(), Some(home.as_path()));
+    }
+
+    #[test]
+    fn indexed_tools_require_a_location_and_reject_relative_index_directories() {
+        for arguments in [
+            serde_json::json!({"query": "needle"}),
+            serde_json::json!({"root": test_root(), "indexDir": "relative", "query": "needle"}),
+        ] {
+            let input: SearchInput = serde_json::from_value(arguments).expect("input");
+            assert!(input.into_request().is_err());
+        }
+        let input: super::RootInput = serde_json::from_value(serde_json::json!({})).expect("input");
+        assert!(input.into_request(false).is_err());
+        let input: IndexInput = serde_json::from_value(
+            serde_json::json!({"indexDir": test_root().join("not-created")}),
+        )
+        .expect("input");
+        assert!(
+            input.into_request().is_err(),
+            "a new index needs an explicit source root"
+        );
+    }
+
+    #[test]
     fn public_search_rejects_runtime_overrides() {
         let schema =
             serde_json::to_value(schemars::schema_for!(SearchInput)).expect("search schema");
@@ -2686,6 +2835,7 @@ mod tests {
     fn index_debug_is_opt_in_and_requires_completed_statistics() {
         let mut reply = super::IndexOperationResult {
             root: test_root(),
+            index_dir: test_root().join(".zvec-grep"),
             job_id: "test".into(),
             state: super::IndexOperationState::Succeeded,
             reused: false,
@@ -2735,7 +2885,9 @@ mod tests {
         ] {
             let instructions = server.get_info().instructions.expect("instructions");
             assert!(instructions.contains("Respect declined or cancelled index setup"));
+            assert!(instructions.contains("absolute indexDir"));
             let legacy_instructions = instructions
+                .replace("- Select an index with an absolute indexDir or provide an absolute source root visible to the daemon. An existing indexDir can resolve its saved source root; rg still requires root.\n", "- Every workspace operation requires an absolute root path visible to the daemon.\n")
                 .replace("- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n", "")
                 .replace("When an index is missing, search can ask the user to choose an embedding model and approve a background build. Only explicit user confirmation creates an index. Read the returned indexing state and retry search after completion; use native Grep or rg only when literal lookup answers the task.", "When an index is missing and literal or regex search can answer the task, use native Grep or rg. Creating or rebuilding a persistent index requires explicit user authorization.");
             assert_eq!(
@@ -2816,8 +2968,10 @@ mod tests {
                     _ => continue,
                 };
                 let schema = serde_json::to_value(&tool.input_schema).expect("input schema");
-                let required = schema["required"].as_array().expect("required root");
-                assert!(required.contains(&serde_json::json!("root")));
+                let required = schema["required"].as_array().cloned().unwrap_or_default();
+                assert!(!required.contains(&serde_json::json!("root")));
+                assert_eq!(schema["properties"]["root"]["type"], "string");
+                assert_eq!(schema["properties"]["indexDir"]["type"], "string");
                 assert_eq!(schema["additionalProperties"], false);
                 for (field, scalar) in fields {
                     let property = &schema["properties"][field];
@@ -3275,8 +3429,8 @@ mod tests {
         assert!(
             !schema["required"]
                 .as_array()
-                .expect("required properties")
-                .iter()
+                .into_iter()
+                .flatten()
                 .any(|field| field == "name")
         );
     }
@@ -3334,7 +3488,7 @@ mod tests {
     #[test]
     fn rejects_relative_roots_and_empty_queries() {
         let mut relative = input();
-        relative.root = PathBuf::from("workspace").display().to_string();
+        relative.root = Some(PathBuf::from("workspace").display().to_string());
         assert!(relative.into_request().is_err());
 
         let mut empty = input();
@@ -3365,7 +3519,8 @@ mod tests {
 
     fn index_input() -> IndexInput {
         IndexInput {
-            root: test_root().display().to_string(),
+            root: Some(test_root().display().to_string()),
+            index_dir: None,
             name: Some("search-engine".to_owned()),
             api_key: None,
             device: None,

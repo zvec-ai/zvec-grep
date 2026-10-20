@@ -212,6 +212,16 @@ handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exa
 `requestState` and unchanged tool arguments with `inputResponses.index_setup`;
 each model selection or remote authorization round issues a new, single-use state.
 
+Workspace storage defaults to `.zvec-grep` within the source directory. Use
+`--index-dir <directory>` (or `ZVEC_GREP_INDEX_DIR`) to choose another location
+for indexing, search, status and authorization; MCP uses `indexDir`.
+The active data lives in `index/` below that location. Source files and index
+storage can move together without rebuilding when their relative layout is
+preserved. If the source moves separately, run `zg --index <source> --index-dir
+<directory>` to repair the binding. Workspace names are labels, so copies do not
+need unique names. Credentials, devices and model caches are configured on the
+machine using the workspace rather than saved with its index.
+
 This version indexes text and code with one embedding model per workspace. Choose
 it with `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use
@@ -226,7 +236,7 @@ either full content or UTF-8 byte offsets relative to the entity's content. Sour
 locations, including line and column numbers, are calculated when needed;
 fragments do not duplicate content or source coordinates.
 Model collections store the text and vectors needed for retrieval, with entity
-metadata included in search projections. Index format 5 uses this layout.
+metadata included in search projections. Index format 2 uses this layout.
 
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.

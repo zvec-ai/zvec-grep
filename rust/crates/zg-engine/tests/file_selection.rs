@@ -48,11 +48,12 @@ fn stored_paths(index_path: &Path) -> TestResult<BTreeSet<PathBuf>> {
     Ok(native_file_records(index_path)?
         .iter()
         .map(|file| {
-            PathBuf::from(
-                file["relative_path"]["value"]
-                    .as_str()
-                    .expect("UTF-8 fixture path"),
-            )
+            file["relative_path"]["components"]
+                .as_array()
+                .expect("path components")
+                .iter()
+                .map(|part| part.as_str().expect("UTF-8 fixture component"))
+                .collect::<PathBuf>()
         })
         .collect())
 }
@@ -74,6 +75,7 @@ async fn search_paths(
             limit: Some(64),
             auto_update: false,
             allow_remote: true,
+            api_key: Some("local-test-key".into()),
             ..ContextOptions::default()
         })
         .await?;
@@ -461,7 +463,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     let files = native_file_records(&info.index_path)?;
     let script = files
         .iter()
-        .find(|file| file["relative_path"]["value"] == "script")
+        .find(|file| file["relative_path"]["components"] == json!(["script"]))
         .expect("stored script");
     assert!(script.get("formats").is_none());
 
@@ -482,7 +484,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     assert!(
         files
             .iter()
-            .all(|file| file["relative_path"]["value"] != "script")
+            .all(|file| file["relative_path"]["components"] != json!(["script"]))
     );
     assert_index_and_queries(
         &engine,
@@ -656,6 +658,7 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
                 limit: Some(64),
                 auto_update: false,
                 allow_remote: true,
+                api_key: Some("local-test-key".into()),
                 ..ContextOptions::default()
             })
             .await
@@ -767,7 +770,7 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
         .await?;
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (3, 0));
     let rebuilt_info = engine.info(info_options(root)).await?;
-    assert_ne!(rebuilt_info.index_path, info.index_path);
+    assert_eq!(rebuilt_info.index_path, info.index_path);
     assert_eq!(
         rebuilt_info
             .workspace_index
@@ -839,6 +842,7 @@ async fn query_filters_combine_without_changing_saved_scan_rules() -> TestResult
                 },
                 auto_update: false,
                 allow_remote: true,
+                api_key: Some("local-test-key".into()),
                 ..ContextOptions::default()
             })
             .await?;

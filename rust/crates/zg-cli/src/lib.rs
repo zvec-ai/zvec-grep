@@ -105,6 +105,8 @@ pub struct AuthArgs {
     pub action: AuthAction,
     #[arg(global = true)]
     pub root: Option<PathBuf>,
+    #[arg(long, global = true, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     pub embedding: Option<String>,
     #[arg(long, global = true)]
@@ -465,6 +467,9 @@ fn ordered_glob_rules(matches: &clap::ArgMatches) -> Vec<GlobRule> {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct QueryArgs {
+    /// Complete workspace index data directory.
+    #[arg(long, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
     #[arg(long = "force-direct")]
@@ -552,8 +557,11 @@ impl QueryArgs {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
+    /// Complete workspace index data directory.
+    #[arg(long, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     pub root: Option<PathBuf>,
-    /// Set or rename the unique workspace name; new workspaces default to the root directory name.
+    /// Set or rename the workspace label; new workspaces default to the root directory name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
     #[arg(long)]
@@ -596,6 +604,9 @@ pub struct IndexArgs {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct StatusArgs {
+    /// Complete workspace index data directory.
+    #[arg(long, env = "ZVEC_GREP_INDEX_DIR")]
+    pub index_dir: Option<PathBuf>,
     pub root: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
@@ -883,6 +894,9 @@ impl Cli {
                 home: args.home,
                 request: InfoOptions {
                     root: Some(resolve_from(&current_dir, args.root.as_deref())),
+                    index_dir: args
+                        .index_dir
+                        .map(|path| resolve_from(&current_dir, Some(&path))),
                     include_status: true,
                 },
                 check_ready: args.check_ready,
@@ -902,6 +916,9 @@ impl Cli {
             CommandLine::Config(args) => Ok(CliPlan::Config(args)),
             CommandLine::Auth(mut args) => {
                 args.root = Some(resolve_from(&current_dir, args.root.as_deref()));
+                args.index_dir = args
+                    .index_dir
+                    .map(|path| resolve_from(&current_dir, Some(&path)));
                 Ok(CliPlan::Auth(args))
             }
             CommandLine::Install(args) => {
@@ -1184,6 +1201,7 @@ fn query_option_with_value(value: &str) -> bool {
             | "--modified-after"
             | "--modified-before"
             | "--home"
+            | "--index-dir"
             | "--api-key"
             | "--model-cache"
             | "--device"
@@ -1215,6 +1233,7 @@ fn query_attached_option(value: &str) -> bool {
         || value.starts_with("--modified-after=")
         || value.starts_with("--modified-before=")
         || value.starts_with("--home=")
+        || value.starts_with("--index-dir=")
         || value.starts_with("--api-key=")
         || value.starts_with("--model-cache=")
         || value.starts_with("--device=")
@@ -1416,6 +1435,11 @@ fn query_plan(
     {
         return Err(CliError::InvalidModifiedRange);
     }
+    if !request.rg {
+        request.index_dir = args
+            .index_dir
+            .map(|path| resolve_from(&current_dir, Some(&path)));
+    }
     request.root = Some(current_dir);
     args.files.apply_context(&mut request)?;
     request.ignore_files = request
@@ -1444,7 +1468,10 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
     args.model_cache = args
         .model_cache
         .map(|path| resolve_from(current_dir, Some(&path)));
-    let root = resolve_from(current_dir, args.root.as_deref());
+    let index_dir = args
+        .index_dir
+        .as_ref()
+        .map(|path| resolve_from(current_dir, Some(path)));
     let mode = resolve_client_mode(args.mode)?;
     let home = args.home.clone();
     let output = OutputOptions {
@@ -1479,7 +1506,8 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             mode,
             home,
             operation: IndexOperation::Drop(InfoOptions {
-                root: Some(root),
+                root: Some(resolve_from(current_dir, args.root.as_deref())),
+                index_dir,
                 include_status: false,
             }),
             output,
@@ -1492,6 +1520,17 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             .map(|path| resolve_from(current_dir, Some(&path)))
             .collect()
     });
+    let location = if let Some(root) = &args.root {
+        let root = resolve_from(current_dir, Some(root));
+        zg_engine::api::workspace::WorkspaceLocation {
+            home: index_dir.clone().unwrap_or_else(|| root.join(".zvec-grep")),
+            root,
+        }
+    } else if index_dir.is_some() {
+        zg_engine::api::workspace::WorkspaceLocation::for_index(None, index_dir.as_deref())?
+    } else {
+        zg_engine::api::workspace::WorkspaceLocation::discover(Some(current_dir), None)?
+    };
     let embedding = args.embedding.map(|reference| EmbeddingModelSpec {
         reference,
         revision: None,
@@ -1503,7 +1542,13 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         mode,
         home,
         operation: IndexOperation::Build(Box::new(IndexOptions {
-            root: Some(root),
+            root: Some(location.root),
+            index_dir: Some(location.home),
+            changes: if args.root.is_none() {
+                vec![zg_engine::api::index::options::WorkspaceChange::Rescan]
+            } else {
+                Vec::new()
+            },
             name: args.name,
             rebuild: args.rebuild,
             reset_paths: args.reset_paths,
@@ -2428,6 +2473,56 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(args.clone()).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn explicit_index_directory_reaches_search_index_status_and_authorization() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let root = directory.path();
+        let expected_home = root.join("data");
+        for args in [
+            vec!["zg", "--index-dir", "data", "needle"],
+            vec!["zg", "needle", "--index-dir=data"],
+        ] {
+            let CliPlan::Query { request, .. } = Cli::try_parse_from(args)
+                .expect("query arguments")
+                .into_plan(root.to_path_buf())
+                .expect("query plan")
+            else {
+                panic!("query");
+            };
+            assert_eq!(request.index_dir.as_deref(), Some(expected_home.as_path()));
+            assert_eq!(request.query.as_deref(), Some("needle"));
+        }
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = Cli::try_parse_from(["zg", "--index-dir", "data", "--index", "."])
+            .expect("index arguments")
+            .into_plan(root.to_path_buf())
+            .expect("index plan")
+        else {
+            panic!("index");
+        };
+        assert_eq!(request.index_dir.as_deref(), Some(expected_home.as_path()));
+        let CliPlan::Status { request, .. } =
+            Cli::try_parse_from(["zg", "--status", "--index-dir", "data"])
+                .expect("status arguments")
+                .into_plan(root.to_path_buf())
+                .expect("status plan")
+        else {
+            panic!("status");
+        };
+        assert_eq!(request.index_dir.as_deref(), Some(expected_home.as_path()));
+        let CliPlan::Auth(args) =
+            Cli::try_parse_from(["zg", "--auth", "status", "--index-dir", "data"])
+                .expect("authorization arguments")
+                .into_plan(root.to_path_buf())
+                .expect("authorization plan")
+        else {
+            panic!("authorization");
+        };
+        assert_eq!(args.index_dir.as_deref(), Some(expected_home.as_path()));
     }
 
     #[test]

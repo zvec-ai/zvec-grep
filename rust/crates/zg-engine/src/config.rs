@@ -15,16 +15,27 @@ use std::{
 /// # Errors
 /// Returns an error when the user home cannot be resolved.
 pub fn global_config_path() -> Result<PathBuf, EngineError> {
+    optional_global_config_path()
+        .ok_or_else(|| EngineError::invalid_argument("Cannot determine user home directory"))
+}
+
+pub(crate) fn optional_global_config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ZVEC_GREP_CONFIG") {
+        return Some(PathBuf::from(path));
+    }
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
     #[cfg(not(windows))]
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map(|home| PathBuf::from(home).join(".zvec-grep/config.json"))
-        .ok_or_else(|| EngineError::invalid_argument("Cannot determine user home directory"))
+    home.filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".zvec-grep/config.json"))
 }
 
 pub(crate) fn read() -> Result<Value, EngineError> {
-    read_at(&global_config_path()?)
+    match optional_global_config_path() {
+        Some(path) => read_at(&path),
+        None => Ok(json!({"version": 1})),
+    }
 }
 
 /// Reads the configured client mode after validating the global configuration.
@@ -370,29 +381,23 @@ pub(crate) fn runtime_device(
     config: &Value,
     reference: &str,
     explicit: Option<Device>,
-    workspace: Option<Device>,
 ) -> Result<Option<Device>, EngineError> {
-    if let Some(device) = explicit.or(workspace).or_else(|| device(config, reference)) {
+    if let Some(device) = explicit {
         return Ok(Some(device));
     }
-    let Some(value) = std::env::var("ZVEC_GREP_DEVICE")
+    if let Some(value) = std::env::var("ZVEC_GREP_DEVICE")
         .ok()
         .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    serde_json::from_value(json!(value.trim().to_lowercase()))
-        .map(Some)
-        .map_err(|_| EngineError::invalid_argument("Invalid ZVEC_GREP_DEVICE"))
+    {
+        return serde_json::from_value(json!(value.trim().to_lowercase()))
+            .map(Some)
+            .map_err(|_| EngineError::invalid_argument("Invalid ZVEC_GREP_DEVICE"));
+    }
+    Ok(device(config, reference))
 }
 
-pub(crate) fn model_cache(
-    config: &Value,
-    explicit: Option<PathBuf>,
-    workspace: Option<PathBuf>,
-) -> Option<PathBuf> {
+pub(crate) fn model_cache(config: &Value, explicit: Option<PathBuf>) -> Option<PathBuf> {
     explicit
-        .or(workspace)
         .or_else(|| std::env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
         .or_else(|| string(config, &["defaults", "modelCacheDir"]).map(PathBuf::from))
 }

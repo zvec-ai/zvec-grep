@@ -2,7 +2,7 @@ use super::*;
 use crate::{IndexOperationResult, IndexRuntimeSnapshot, McpToolset, ZvecGrepMcpServer};
 use async_trait::async_trait;
 use rmcp::{ClientHandler, ServiceExt, model::*};
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 #[derive(Default)]
 struct Jobs(Mutex<Vec<IndexOptions>>);
@@ -60,12 +60,17 @@ impl IndexOperationProvider for Jobs {
             options.signal.is_none(),
             "accepted jobs must survive request completion"
         );
-        let root =
-            std::fs::canonicalize(options.root.as_ref().expect("root")).expect("canonical root");
+        let location =
+            WorkspaceLocation::for_index(options.root.as_deref(), options.index_dir.as_deref())
+                .expect("workspace location");
+        let root = location.root;
+        let index_dir = location.home;
         options.root = Some(root.clone());
+        options.index_dir = Some(index_dir.clone());
         self.0.lock().expect("jobs").push(options);
         Ok(IndexOperationResult {
             root,
+            index_dir,
             job_id: "setup-job".into(),
             state: IndexOperationState::Queued,
             reused: false,
@@ -78,12 +83,14 @@ impl IndexOperationProvider for Jobs {
         panic!("setup must never drop an index")
     }
 
-    fn runtime_snapshot(&self, root: &Path) -> Option<IndexRuntimeSnapshot> {
-        self.0
-            .lock()
-            .expect("jobs")
-            .iter()
-            .find(|options| options.root.as_deref() == Some(root))?;
+    fn runtime_snapshot(
+        &self,
+        root: &Path,
+        index_dir: Option<&Path>,
+    ) -> Option<IndexRuntimeSnapshot> {
+        self.0.lock().expect("jobs").iter().find(|options| {
+            options.root.as_deref() == Some(root) && options.index_dir.as_deref() == index_dir
+        })?;
         Some(IndexRuntimeSnapshot {
             index_status: None,
             completion_baseline: None,
@@ -191,13 +198,17 @@ fn model_and_authorization_forms_follow_the_negotiated_protocol() {
         default_model: Some("qwen/text-embedding-v4".into()),
     };
     let model = Phase::Model {
-        root: root.clone(),
+        location: WorkspaceLocation {
+            root: root.clone(),
+            home: root.join(".zvec-grep"),
+        },
         setup: setup.clone(),
     };
     let authorization = Phase::Authorization {
         options: Box::default(),
         target: IndexAuthorization {
             workspace_roots: vec![root.clone()],
+            index_dir: root.join(".zvec-grep"),
             root,
             model: "qwen/text-embedding-v4".into(),
             endpoint: "https://embedding.example.test/v1".into(),
@@ -342,6 +353,14 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
         .await
         .expect("client");
         let mut original = request(root.path());
+        let home = std::fs::canonicalize(root.path())
+            .expect("root")
+            .join("selected-index");
+        original
+            .arguments
+            .as_mut()
+            .expect("arguments")
+            .insert("indexDir".into(), json!(home));
         original.arguments.as_mut().expect("arguments").insert(
             "globs".into(),
             json!([
@@ -393,7 +412,13 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
             .as_array_mut()
             .expect("rules")
             .reverse();
-        for changed in [changed_value, changed_array] {
+        let mut changed_home = retry.clone();
+        changed_home
+            .arguments
+            .as_mut()
+            .expect("arguments")
+            .insert("indexDir".into(), json!(home.with_file_name("other-index")));
+        for changed in [changed_value, changed_array, changed_home] {
             assert!(client.call_tool_once(changed).await.is_err());
         }
         let result = value(
@@ -404,6 +429,11 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
         );
         assert_eq!(result["status"], "indexing");
         assert_eq!(result["job_id"], "setup-job");
+        assert_eq!(result["index_dir"], json!(home));
+        assert_eq!(
+            jobs.0.lock().expect("jobs")[0].index_dir.as_deref(),
+            Some(home.as_path())
+        );
         assert_eq!(jobs.0.lock().expect("jobs").len(), 1);
         assert!(
             client.call_tool_once(retry).await.is_err(),
@@ -411,11 +441,29 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
         );
         let status = value(
             client
-                .call_tool_once(original)
+                .call_tool_once(original.clone())
                 .await
                 .expect("pending index"),
         );
         assert_eq!(status["state"], "queued");
+        assert_eq!(status["index_dir"], json!(home));
+        let mut other_home = original;
+        other_home
+            .arguments
+            .as_mut()
+            .expect("arguments")
+            .insert("indexDir".into(), json!(home.with_file_name("other-index")));
+        assert!(
+            matches!(
+                client
+                    .call_tool_once(other_home)
+                    .await
+                    .expect("other index"),
+                CallToolResponse::InputRequired(_)
+            ),
+            "another home must receive its own setup prompt"
+        );
+        assert!(!root.path().join(".zvec-grep").exists());
         assert_eq!(
             jobs.0.lock().expect("jobs").len(),
             1,
@@ -571,4 +619,85 @@ async fn legacy_forms_can_select_models_and_unsupported_clients_receive_instruct
     })
     .await
     .expect("setup test terminates");
+}
+
+#[tokio::test]
+async fn configured_index_directory_does_not_initialize_an_implicit_source() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let home = directory.path().join("selected-index");
+    let jobs = Arc::new(Jobs::default());
+    let mut server = ZvecGrepMcpServer::build_with_index_operations(
+        Arc::new(ZvecGrep::new()),
+        McpToolset::Agent,
+        None,
+        jobs.clone(),
+    );
+    server.default_index_dir = Some(home.clone());
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let task = tokio::spawn(async move {
+        server
+            .serve(server_io)
+            .await
+            .expect("server")
+            .waiting()
+            .await
+    });
+    let client = Client {
+        version: ProtocolVersion::V_2026_07_28,
+        answers: Mutex::default(),
+        forms: true,
+    }
+    .serve(client_io)
+    .await
+    .expect("client");
+    let rootless = CallToolRequestParams::new("zvec_grep_search").with_arguments(
+        json!({"fts": "needle"})
+            .as_object()
+            .expect("arguments")
+            .clone(),
+    );
+    let CallToolResponse::Complete(result) = client
+        .call_tool_once(rootless)
+        .await
+        .expect("rootless search")
+    else {
+        panic!("a new index without a source must not prompt for creation");
+    };
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        serde_json::to_string(&result)
+            .expect("result")
+            .contains("sourceRoot")
+    );
+    assert!(jobs.0.lock().expect("jobs").is_empty());
+    assert!(!home.exists());
+    let original = request(directory.path());
+    let CallToolResponse::InputRequired(required) = client
+        .call_tool_once(original.clone())
+        .await
+        .expect("explicit source")
+    else {
+        panic!("an explicit source can start setup in the configured index directory");
+    };
+    let result = value(
+        client
+            .call_tool_once(answer(
+                original,
+                required.request_state.expect("state"),
+                &json!({"model": "local/potion-code-16m-v2"}),
+            ))
+            .await
+            .expect("accept setup"),
+    );
+    let expected_home = std::fs::canonicalize(directory.path())
+        .expect("root")
+        .join("selected-index");
+    assert_eq!(result["index_dir"], json!(expected_home));
+    assert_eq!(
+        jobs.0.lock().expect("jobs")[0].index_dir.as_deref(),
+        Some(expected_home.as_path())
+    );
+    assert!(!directory.path().join(".zvec-grep").exists());
+    client.cancel().await.expect("close client");
+    task.await.expect("server task").expect("stop server");
 }

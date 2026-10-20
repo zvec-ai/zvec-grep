@@ -117,6 +117,7 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
 
 pub(crate) struct IndexingContext<'context> {
     pub workspace_index: &'context Workspace,
+    pub index_home: Option<&'context Path>,
     pub storage: &'context dyn IndexStorage,
     pub scanner: &'context dyn WorkspaceScannerPort,
     pub embedding_models: &'context [&'context dyn IndexEmbeddingRuntime],
@@ -219,16 +220,19 @@ pub(crate) async fn index_workspace(
 
 pub(crate) async fn get_workspace_index_status(
     workspace_index: &Workspace,
+    index_home: None,
+    index_home: Option<&Path>,
     storage: &dyn IndexStorage,
     scanner: &dyn WorkspaceScannerPort,
     signal: Option<CancellationToken>,
 ) -> Result<IndexStats, EngineError> {
     let stored_files = storage.list_files()?;
+    crate::file_selection::verify_source_paths(&workspace_index.root, &stored_files)?;
     let control = task_control(signal);
     let snapshot = scanner
         .discover(
             &ScanRequest {
-                roots: vec![host_root(workspace_index)?],
+                roots: vec![host_root(workspace_index, index_home)?],
                 scope_paths: Vec::new(),
             },
             &control,
@@ -400,6 +404,7 @@ async fn run_index_pass(
         ChangeScope::from_changes(&context.workspace_index.root, context.changes)?
     };
     let all_stored = context.storage.list_files()?;
+    crate::file_selection::verify_source_paths(&context.workspace_index.root, &all_stored)?;
     scope.include_unfinished(&context.workspace_index.root, &all_stored);
     let existing = scope.filter_stored(&context.workspace_index.root, &all_stored);
     let scan_started = Instant::now();
@@ -408,7 +413,7 @@ async fn run_index_pass(
         .scanner
         .discover(
             &ScanRequest {
-                roots: vec![host_root(context.workspace_index)?],
+                roots: vec![host_root(context.workspace_index, context.index_home)?],
                 scope_paths: scope.scan_paths(),
             },
             &control,
@@ -1850,8 +1855,8 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn host_root(workspace: &Workspace) -> Result<RootSpec, EngineError> {
-    ScanPolicy::root_spec(&workspace.root, &workspace.scan)
+fn host_root(workspace: &Workspace, index_home: Option<&Path>) -> Result<RootSpec, EngineError> {
+    ScanPolicy::root_spec(&workspace.root, &workspace.scan, index_home)
 }
 
 async fn classify_files(
@@ -3018,6 +3023,7 @@ mod tests {
 
             let error = index_workspace(&IndexingContext {
                 workspace_index: &workspace,
+                index_home: None,
                 storage: &storage,
                 scanner: &scanner,
                 embedding_models: &[&model],
@@ -3058,6 +3064,7 @@ mod tests {
 
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3098,6 +3105,7 @@ mod tests {
         model.prepare_failures.store(1, Ordering::Release);
         let context = IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3143,6 +3151,7 @@ mod tests {
 
         let error = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3178,6 +3187,7 @@ mod tests {
         let model = DrainingFailureModel::new();
         let context = IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3272,6 +3282,7 @@ mod tests {
 
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3310,6 +3321,7 @@ mod tests {
 
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3349,6 +3361,7 @@ mod tests {
 
         let error = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3401,6 +3414,7 @@ mod tests {
             };
             let context = IndexingContext {
                 workspace_index: &workspace,
+                index_home: None,
                 storage: &storage,
                 scanner: &scanner,
                 embedding_models: &models,
@@ -3427,7 +3441,7 @@ mod tests {
         let workspace = workspace(directory.path());
         let scanner = UnknownModifiedScanner(NativeScanner::default());
         let storage = MemoryStorage::default();
-        let status = get_workspace_index_status(&workspace, &storage, &scanner, None)
+        let status = get_workspace_index_status(&workspace, None, &storage, &scanner, None)
             .await
             .expect("status");
         assert_eq!(status.files_added, 1);
@@ -3435,6 +3449,7 @@ mod tests {
         let model = ConcurrentModel::new();
         let context = IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3465,7 +3480,7 @@ mod tests {
         );
         std::fs::write(&path, "changed content").expect("update");
         std::fs::write(directory.path().join("new.txt"), "new source").expect("new source");
-        let status = get_workspace_index_status(&workspace, &storage, &scanner, None)
+        let status = get_workspace_index_status(&workspace, None, &storage, &scanner, None)
             .await
             .expect("updated status");
         assert_eq!(status.files_added, 1);
@@ -3557,6 +3572,7 @@ mod tests {
         let model = ConcurrentModel::new();
         let context = IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3572,7 +3588,7 @@ mod tests {
         assert_eq!(model.calls.load(Ordering::Acquire), calls);
 
         std::fs::write(&path, "bravo").expect("same size, different bytes");
-        let status = get_workspace_index_status(&workspace, &storage, &scanner, None)
+        let status = get_workspace_index_status(&workspace, None, &storage, &scanner, None)
             .await
             .expect("status");
         assert_eq!(status.files_modified, 1);
@@ -3589,7 +3605,7 @@ mod tests {
         storage
             .mark_file_failed(&files[0], "test failure")
             .expect("failed state");
-        let status = get_workspace_index_status(&workspace, &storage, &scanner, None)
+        let status = get_workspace_index_status(&workspace, None, &storage, &scanner, None)
             .await
             .expect("failed status");
         assert_eq!(status.files_failed, 1);
@@ -3621,6 +3637,7 @@ mod tests {
         });
         let context = IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3677,6 +3694,7 @@ mod tests {
         let model = ConcurrentModel::new();
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3693,6 +3711,7 @@ mod tests {
         let changes = [WorkspaceChange::Upsert(first_path.clone())];
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3747,6 +3766,7 @@ mod tests {
         let model = ConcurrentModel::new();
         index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3794,6 +3814,7 @@ mod tests {
         let changes = [WorkspaceChange::Upsert(PathBuf::from("requested.txt"))];
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -3885,6 +3906,7 @@ mod tests {
         let model = ConcurrentModel::new();
         let result = index_workspace(&IndexingContext {
             workspace_index: &workspace,
+            index_home: None,
             storage: &storage,
             scanner: &scanner,
             embedding_models: &[&model],
@@ -4156,5 +4178,57 @@ mod tests {
         assert_eq!(error.origin().line, origin_line);
         let invalid = map_host_error(HostError::invalid_argument("bad root"));
         assert_eq!(invalid.code(), EngineError::INVALID_ARGUMENT);
+    }
+
+    #[tokio::test]
+    async fn moving_source_preserves_file_ids_and_does_not_embed_unchanged_files() {
+        let directory = tempdir().expect("package");
+        let original = directory.path().join("original");
+        let moved = directory.path().join("moved");
+        std::fs::create_dir(&original).expect("source directory");
+        std::fs::write(original.join("file.txt"), "portable contents").expect("source");
+        let mut workspace = workspace(&original);
+        let scanner = RecordingScanner::new();
+        let storage = MemoryStorage::default();
+        let model = ConcurrentModel::new();
+        let first = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            index_home: None,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("initial index");
+        assert_eq!(first.files_added, 1);
+        let before = storage.list_files().expect("stored files");
+        let calls = model.calls.load(Ordering::Acquire);
+        let prepared = model.prepare_calls.load(Ordering::Acquire);
+        std::fs::rename(&original, &moved).expect("move source");
+        workspace.root = moved;
+        let result = index_workspace(&IndexingContext {
+            workspace_index: &workspace,
+            index_home: None,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("index after relocation");
+        assert_eq!(result.files_unchanged, 1);
+        assert_eq!(result.files_added, 0);
+        assert_eq!(result.files_deleted, 0);
+        assert_eq!(result.entities_created, 0);
+        assert_eq!(storage.list_files().expect("stored files"), before);
+        assert_eq!(model.calls.load(Ordering::Acquire), calls);
+        assert_eq!(model.prepare_calls.load(Ordering::Acquire), prepared);
     }
 }

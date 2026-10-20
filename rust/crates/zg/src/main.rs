@@ -177,18 +177,20 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
                 .as_deref()
                 .ok_or_else(|| io::Error::other("auth root is required"))?;
             if matches!(args.action, zg_cli::AuthAction::Revoke) {
-                let count = zg_engine::authorization::revoke_all(root)?;
+                let count = zg_engine::authorization::revoke_all(root, args.index_dir.as_deref())?;
                 zg_cli::write_authorization_revoke_result(io::stdout().lock(), count)?;
                 return Ok(ExitCode::SUCCESS);
             }
             if matches!(args.action, zg_cli::AuthAction::Grant { .. }) {
                 zg_engine::authorization::grant(
                     root,
+                    args.index_dir.as_deref(),
                     args.embedding.as_deref(),
                     args.endpoint.as_deref(),
                 )?;
             }
-            let status = zg_engine::authorization::status_snapshot(root)?;
+            let status =
+                zg_engine::authorization::status_snapshot(root, args.index_dir.as_deref())?;
             zg_cli::write_authorization_status(
                 io::stdout().lock(),
                 &status,
@@ -386,6 +388,7 @@ async fn ensure_query_index(
     };
     let info_request = InfoOptions {
         root: request.root.clone(),
+        index_dir: request.index_dir.clone(),
         ..InfoOptions::default()
     };
     let info = read_workspace_info(server, home, info_request).await?;
@@ -510,6 +513,7 @@ async fn select_query_index(
         }
         let mut index_request = IndexOptions {
             root: Some(root.to_path_buf()),
+            index_dir: request.index_dir.clone(),
             embedding: Some(EmbeddingModelSpec {
                 reference: model.reference,
                 revision: None,
@@ -703,11 +707,13 @@ async fn execute_direct_context(
     let engine = ZvecGrep::new();
     let inspect_status = !request.rg
         && request.refresh == Some(zg_engine::api::context::options::RefreshPolicy::Off);
+    let index_dir = request.index_dir.clone();
     let mut result = engine.context(request).await?;
     if inspect_status {
         let info = engine
             .info(zg_engine::api::info::InfoOptions {
                 root: Some(result.root.clone()),
+                index_dir,
                 include_status: true,
             })
             .await?;
@@ -739,11 +745,18 @@ async fn execute_index(
     operation: IndexOperation,
     output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
-    let root = match &operation {
-        IndexOperation::Build(request) => request.root.clone(),
-        IndexOperation::Drop(request) => request.root.clone(),
-    }
-    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "index root is required"))?;
+    let location = match &operation {
+        IndexOperation::Build(request) => zg_engine::api::workspace::WorkspaceLocation::for_index(
+            request.root.as_deref(),
+            request.index_dir.as_deref(),
+        )?,
+        IndexOperation::Drop(request) => zg_engine::api::workspace::WorkspaceLocation::discover(
+            request.root.as_deref(),
+            request.index_dir.as_deref(),
+        )?,
+    };
+    let root = location.root;
+    let index_dir = location.home;
     let server = use_server(mode, home).await?;
     match operation {
         IndexOperation::Build(mut request) => {
@@ -772,6 +785,7 @@ async fn execute_index(
                 home,
                 zg_engine::api::info::InfoOptions {
                     root: Some(root.clone()),
+                    index_dir: Some(index_dir.clone()),
                     include_status: false,
                 },
             )
@@ -815,7 +829,7 @@ async fn execute_index(
                 engine.close();
                 removed
             };
-            zg_cli::write_index_drop_result(io::stdout().lock(), &root, removed)?;
+            zg_cli::write_index_drop_result(io::stdout().lock(), &root, &index_dir, removed)?;
         }
     }
     Ok(())
@@ -863,6 +877,7 @@ async fn authorize_index(
         }
     }
     request.root = Some(targets[0].root.clone());
+    request.index_dir = Some(targets[0].index_dir.clone());
     Ok(())
 }
 

@@ -539,7 +539,8 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |command| {
         command
             .env("HOME", config_home.path())
-            .env("USERPROFILE", config_home.path());
+            .env("USERPROFILE", config_home.path())
+            .env_remove("ZVEC_GREP_CONFIG");
     })?;
     let log_dir = home.path().join("daemon").join("logs");
     let active_path = log_dir.join("server.log");
@@ -551,6 +552,7 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
     let duplicate = Command::new(&binary)
         .env("HOME", config_home.path())
         .env("USERPROFILE", config_home.path())
+        .env_remove("ZVEC_GREP_CONFIG")
         .args(["--server", "run", "--home"])
         .arg(home.path())
         .args(["--listen", &guard.listen])
@@ -1088,6 +1090,11 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let workspace = TempDir::new()?;
+    let index_home = if toolset == "full" {
+        home.path().join("workspace-index")
+    } else {
+        workspace.path().join(".zvec-grep")
+    };
     let missing = TempDir::new()?;
     let embedding = EmbeddingServer::start()?;
     let endpoint = format!("http://{}/embeddings", embedding.address);
@@ -1111,9 +1118,15 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
             "qwen/text-embedding-v4",
             "--endpoint",
             &endpoint,
+            "--index-dir",
+            path_text(&index_home)?,
         ])
         .output()?;
     assert_command_success(&indexed);
+    assert!(index_home.join("index").is_dir());
+    if toolset == "full" {
+        assert!(!workspace.path().join(".zvec-grep").exists());
+    }
     let signing_key = home.path().join("authorization.key");
     let consent = Command::new(&binary)
         .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
@@ -1129,6 +1142,8 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
             "qwen/text-embedding-v4",
             "--endpoint",
             &endpoint,
+            "--index-dir",
+            path_text(&index_home)?,
         ])
         .output()?;
     assert_command_success(&consent);
@@ -1172,6 +1187,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": { "name": "zvec_grep_search", "arguments": {
                     "root": root, "fts": query, "freshness": freshness,
+                    "indexDir": (root == workspace.path()).then_some(&index_home),
                     "autoUpdate": auto_update
                 } }
             })
@@ -1321,6 +1337,7 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let workspace = TempDir::new()?;
+    let index_home = home.path().join("workspace-index");
     let embedding = EmbeddingServer::start()?;
     let endpoint = format!("http://{}/embeddings", embedding.address);
     let direct = |extra: &[&str]| {
@@ -1333,7 +1350,8 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
                 home.path().join("workspaces.json"),
             )
             .env("ZVEC_GREP_API_KEY", "local-test-key")
-            .args(["--index", "--mode", "direct"])
+            .args(["--index", "--mode", "direct", "--index-dir"])
+            .arg(&index_home)
             .args(extra);
         if !extra.contains(&"--drop") {
             command.arg("--allow-remote");
@@ -1347,6 +1365,8 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         "--endpoint",
         &endpoint,
     ])?);
+    assert!(!workspace.path().join(".zvec-grep").exists());
+    assert!(index_home.join("index").is_dir());
     // CLI writers are separate processes, not children of the native cache owner.
     // This also avoids inheriting the native library's open lock descriptors.
     let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
@@ -1381,7 +1401,7 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
             &json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": { "name": "zvec_grep_search", "arguments": {
-                    "root": workspace.path(), "fts": query, "autoUpdate": false
+                    "root": workspace.path(), "indexDir": index_home, "fts": query, "autoUpdate": false
                 } }
             })
             .to_string(),
@@ -1410,17 +1430,21 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         "old index contents remained cached: {response}"
     );
 
-    let manifest_path = workspace.path().join(".zvec-grep/manifest.json");
+    let manifest_path = index_home.join("manifest.json");
     let before: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
     assert_command_success(&direct(&["--rebuild"])?);
     let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
     assert_ne!(before["storageGeneration"], after["storageGeneration"]);
+    assert!(index_home.join("index").is_dir());
+    assert!(!index_home.join("generations").exists());
     let response = search("vineyard")?;
     assert!(
         response.contains("source.txt") && response.contains("\"isError\":false"),
         "{response}"
     );
     assert_command_success(&direct(&["--drop", "--yes"])?);
+    assert!(!index_home.join("index").exists());
+    assert!(!workspace.path().join(".zvec-grep").exists());
     let response = search("vineyard")?;
     assert!(
         response.contains("\"isError\":true"),

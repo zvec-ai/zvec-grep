@@ -109,6 +109,7 @@ impl ZvecGrep {
     pub async fn watch_workspace(
         &self,
         root: &std::path::Path,
+        index_dir: Option<&std::path::Path>,
         control: &zg_host_native::TaskControl,
     ) -> EngineResult<std::sync::Arc<dyn zg_host_native::WorkspaceWatchSessionPort>> {
         use zg_host_native::WorkspaceWatcherFactoryPort;
@@ -116,10 +117,16 @@ impl ZvecGrep {
         let info = self
             .info(InfoOptions {
                 root: Some(root.to_path_buf()),
+                index_dir: index_dir.map(std::path::Path::to_path_buf),
                 include_status: false,
             })
             .await?;
         info.compatibility.ensure_compatible()?;
+        if index_dir.is_some() && workspace::layout::canonical_path(root)? != info.root {
+            return Err(EngineError::resource_busy(
+                "workspace source directory changed; reopen the workspace before starting its watcher",
+            ));
+        }
         if !info.indexed {
             return Err(EngineError::invalid_argument(
                 "workspace must have an index before it can be watched",
@@ -128,11 +135,20 @@ impl ZvecGrep {
         let workspace = info
             .workspace_index
             .ok_or_else(|| EngineError::invalid_argument("workspace configuration is missing"))?;
-        let root = file_selection::ScanPolicy::root_spec(&workspace.root, &workspace.scan)?;
-        zg_host_native::NativeWatcherFactory::default()
+        let binding = bind_watch_source(&info.home, &workspace.root)?;
+        let root = file_selection::ScanPolicy::root_spec(
+            &workspace.root,
+            &workspace.scan,
+            Some(&info.home),
+        )?;
+        let session = zg_host_native::NativeWatcherFactory::default()
             .watch(&zg_host_native::WatchRequest { root }, control)
             .await
-            .map_err(pipelines::indexing::pipeline::map_host_error)
+            .map_err(pipelines::indexing::pipeline::map_host_error)?;
+        Ok(std::sync::Arc::new(BoundWatchSession {
+            session,
+            binding: std::sync::Mutex::new(Some(binding)),
+        }))
     }
 
     pub async fn drop_index(&self, options: InfoOptions) -> EngineResult<bool> {
@@ -162,6 +178,52 @@ impl ZvecGrep {
     #[must_use]
     pub fn runtime_snapshot(&self) -> EngineRuntimeSnapshot {
         self.service.runtime_snapshot()
+    }
+}
+
+fn bind_watch_source(
+    home: &std::path::Path,
+    root: &std::path::Path,
+) -> EngineResult<workspace::lock::FileLock> {
+    let binding = workspace::lock::bind_source(home, root)?;
+    // Inspection releases its lease; recheck after acquiring the watcher's lease.
+    if workspace::manifest::read_source_root(home)?.as_deref() != Some(root) {
+        return Err(EngineError::resource_busy(
+            "workspace source directory changed; reopen the workspace before starting its watcher",
+        ));
+    }
+    Ok(binding)
+}
+
+struct BoundWatchSession {
+    session: std::sync::Arc<dyn zg_host_native::WorkspaceWatchSessionPort>,
+    binding: std::sync::Mutex<Option<workspace::lock::FileLock>>,
+}
+
+#[async_trait::async_trait]
+impl zg_host_native::WorkspaceWatchSessionPort for BoundWatchSession {
+    async fn flush(&self) -> Result<(), zg_host_native::HostError> {
+        self.session.flush().await
+    }
+
+    async fn flush_pending(&self) -> Result<(), zg_host_native::HostError> {
+        self.session.flush_pending().await
+    }
+
+    async fn next_changes(
+        &self,
+        control: &zg_host_native::TaskControl,
+    ) -> Result<zg_host_native::WorkspaceChangeBatch, zg_host_native::HostError> {
+        self.session.next_changes(control).await
+    }
+
+    async fn close(&self) -> Result<(), zg_host_native::HostError> {
+        self.session.close().await?;
+        self.binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Ok(())
     }
 }
 

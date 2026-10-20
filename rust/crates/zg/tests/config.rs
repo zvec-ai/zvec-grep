@@ -25,6 +25,7 @@ impl Fixture {
             .env("USERPROFILE", self.user.path())
             .env("ZVEC_GREP_HOME", self.user.path().join("runtime"));
         for key in [
+            "ZVEC_GREP_CONFIG",
             "ZVEC_GREP_DEVICE",
             "ZVEC_GREP_EMBEDDING",
             "ZVEC_GREP_API_KEY",
@@ -335,8 +336,8 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
         "potion-code-16m-v2"
     );
     assert_eq!(
-        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
-        "cpu"
+        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        json!({})
     );
     let status = fixture.success(&["--status", "--mode", "direct"]);
     assert!(

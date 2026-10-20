@@ -328,7 +328,9 @@ mod tests {
                     .as_array_mut()
                     .expect("rules")
                     .reverse();
-                for changed in [changed_value, changed_array] {
+                let mut changed_home = retry.clone();
+                changed_home.arguments.as_mut().expect("arguments").insert("indexDir".into(), serde_json::json!(root.path().join("other-index")));
+                for changed in [changed_value, changed_array, changed_home] {
                     let error = client.call_tool_once(changed).await.expect_err("changed request");
                     assert!(error.to_string().contains("Invalid or expired requestState"));
                 }

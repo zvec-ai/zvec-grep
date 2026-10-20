@@ -73,14 +73,14 @@ impl WriterContexts {
         }
     }
 
-    pub(crate) fn borrow(&self, home: &Path, storage_home: &Path) -> Option<WriterLease> {
+    pub(crate) fn borrow(&self, home: &Path, generation: Option<&str>) -> Option<WriterLease> {
         let entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session = entries.get(home)?.upgrade()?;
         // Never expose a rebuild's unpublished generation or a different index.
-        if session.manifest.storage_home() != storage_home {
+        if session.manifest.storage_generation.as_deref() != generation {
             return None;
         }
         session.active.fetch_add(1, Ordering::AcqRel);

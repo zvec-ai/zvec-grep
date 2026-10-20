@@ -90,9 +90,12 @@ fn modern_http_discovery_tools_errors_and_remote_continuation() -> Result<(), Bo
                 let schema = &search["inputSchema"];
                 assert_eq!(schema["properties"]["limit"]["type"], "integer");
                 assert_eq!(schema["properties"]["fuse"]["type"], "boolean");
-                let required = schema["required"].as_array().expect("required root");
+                assert_eq!(schema["properties"]["indexDir"]["type"], "string");
+                let required = schema["required"].as_array().map_or(&[][..], Vec::as_slice);
                 assert!(!required.contains(&json!("limit")));
                 assert!(!required.contains(&json!("fuse")));
+                assert!(!required.contains(&json!("indexDir")));
+                assert!(!required.contains(&json!("root")));
             }
         }
         let forbidden = modern_post(
@@ -152,9 +155,10 @@ fn modern_http_missing_index_requires_selection_and_survives_request_completion(
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let workspace = TempDir::new()?;
+    let index_home = home.path().join("selected-index");
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
-    let original = json!({"name": "zvec_grep_search", "arguments": {"root": workspace.path(), "fts": "needle"}});
+    let original = json!({"name": "zvec_grep_search", "arguments": {"root": workspace.path(), "indexDir": index_home, "fts": "needle"}});
     let selection = rpc(&modern_post(port, "tools/call", original.clone(), "")?);
     assert_eq!(
         selection["result"]["resultType"], "input_required",
@@ -179,7 +183,9 @@ fn modern_http_missing_index_requires_selection_and_survives_request_completion(
             "model selection must not repeat: {result}"
         );
         if result["result"]["structuredContent"]["status"] != "indexing" {
-            assert!(workspace.path().join(".zvec-grep/manifest.json").is_file());
+            assert!(index_home.join("manifest.json").is_file());
+            assert!(index_home.join("index").is_dir());
+            assert!(!workspace.path().join(".zvec-grep").exists());
             break;
         }
         assert!(Instant::now() < deadline, "background build did not finish");

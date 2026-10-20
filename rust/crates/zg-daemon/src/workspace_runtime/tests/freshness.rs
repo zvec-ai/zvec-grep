@@ -490,6 +490,7 @@ async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not(
     let mut info = engine
         .info(InfoOptions {
             root: Some(root.clone()),
+            index_dir: None,
             include_status: true,
         })
         .await
@@ -593,7 +594,10 @@ async fn restarting_a_watcher_requires_a_new_reconciliation() {
         .refresh_index(options.clone(), true)
         .await
         .expect("initial refresh");
-    manager.stop_watching(&root).await.expect("watcher stopped");
+    manager
+        .stop_watching(&WorkspaceLocation::resolve(Some(&root), None).expect("location"))
+        .await
+        .expect("watcher stopped");
     assert!(
         manager
             .refresh_index(options, true)

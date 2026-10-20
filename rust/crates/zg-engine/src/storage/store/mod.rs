@@ -130,9 +130,8 @@ impl IndexStore {
                 return Err(io_error("create index directory", home, &error));
             }
         }
-        let home = fs::canonicalize(home)
+        let path = fs::canonicalize(home)
             .map_err(|error| io_error("locate index directory", home, &error))?;
-        let path = home.join("storage");
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
             if read_only && shared.read_only {
@@ -145,7 +144,7 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema) = prepare_storage(&home, &path, options)?;
+        let (lock, schema) = prepare_storage(&path, options)?;
         let files = Files::open(&path, read_only)?;
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
@@ -156,7 +155,6 @@ impl IndexStore {
         if !read_only {
             // Repeat the same range after failures that leave directories in place.
             sync_directory(&path)?;
-            sync_directory(&home)?;
             if let Some(outer) = outer {
                 sync_directory(&outer)?;
             }
@@ -182,7 +180,7 @@ impl IndexStore {
     }
 
     pub(crate) fn exists(storage_path: &Path) -> EngineResult<bool> {
-        match fs::metadata(storage_path.join("storage")) {
+        match fs::metadata(storage_path) {
             Ok(metadata) => Ok(metadata.is_dir()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(io_error("inspect storage", storage_path, &error)),
@@ -195,7 +193,7 @@ impl IndexStore {
         }
         let home = fs::canonicalize(storage_path)
             .map_err(|error| io_error("locate storage", storage_path, &error))?;
-        let path = home.join("storage");
+        let path = home.clone();
         let mut registry = registry()?;
         if registry.get(&path).and_then(Weak::upgrade).is_some() {
             return Err(EngineError::resource_busy(
@@ -205,7 +203,9 @@ impl IndexStore {
         let _lock = acquire_storage_lock(&home, false)?;
         fs::remove_dir_all(&path)
             .map_err(|error| io_error("delete workspace storage", &path, &error))?;
-        sync_directory(&home)?;
+        if let Some(parent) = home.parent() {
+            sync_directory(parent)?;
+        }
         registry.remove(&path);
         Ok(())
     }
@@ -567,7 +567,11 @@ fn load_schema(
     }
     if fs::read_dir(path)
         .map_err(|error| io_error("inspect storage directory", path, &error))?
-        .next()
+        .find(|entry| {
+            entry
+                .as_ref()
+                .map_or(true, |entry| entry.file_name() != "storage.lock")
+        })
         .transpose()
         .map_err(|error| io_error("inspect storage entry", path, &error))?
         .is_some()
@@ -606,25 +610,10 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 }
 
 fn prepare_storage(
-    home: &Path,
     path: &Path,
     options: WorkspaceIndexStorageOptions,
 ) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
-    let lock = acquire_storage_lock(home, options.is_read_only())?;
-    if !options.is_read_only() {
-        let mut builder = DirBuilder::new();
-        builder.recursive(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if let Err(error) = builder.create(path)
-            && !(error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir())
-        {
-            return Err(io_error("create storage directory", path, &error));
-        }
-    }
+    let lock = acquire_storage_lock(path, options.is_read_only())?;
     Ok((lock, load_schema(path, options)?))
 }
 

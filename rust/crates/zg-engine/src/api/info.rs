@@ -12,6 +12,9 @@ pub mod options {
     pub struct InfoOptions {
         /// Workspace to inspect or mutate. `None` uses the working directory.
         pub root: Option<PathBuf>,
+        /// Exact workspace data directory. Absent uses `.zvec-grep` discovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub index_dir: Option<PathBuf>,
         pub include_status: bool,
     }
 }

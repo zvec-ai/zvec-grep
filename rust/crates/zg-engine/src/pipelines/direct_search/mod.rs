@@ -56,6 +56,7 @@ impl DirectSearchService {
         let request = LexicalSearchRequest {
             signal: options.signal.clone(),
             root: Some(root.clone()),
+            index_home: None,
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
             paths: options.rg_paths,

@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -27,6 +27,7 @@ use zg_engine::{
             setup::{IndexSetup, IndexSetupOptions},
         },
         info::{InfoOptions, result::WorkspaceIndexPolicy},
+        workspace::WorkspaceLocation,
     },
     authorization::{self, IndexAuthorization},
 };
@@ -48,7 +49,7 @@ pub(crate) fn is_setup_state(request: &CallToolRequestParams) -> bool {
 #[derive(Default)]
 pub(crate) struct SetupState {
     pending: Mutex<HashMap<String, Pending>>,
-    builds: Mutex<HashMap<PathBuf, String>>,
+    builds: Mutex<HashMap<WorkspaceLocation, String>>,
 }
 
 struct Pending {
@@ -60,7 +61,7 @@ struct Pending {
 #[derive(Clone)]
 enum Phase {
     Model {
-        root: PathBuf,
+        location: WorkspaceLocation,
         setup: IndexSetup,
     },
     Authorization {
@@ -81,40 +82,60 @@ impl SetupState {
     pub(crate) fn running(
         &self,
         root: Option<&Path>,
+        index_dir: Option<&Path>,
         provider: &dyn IndexOperationProvider,
     ) -> Option<CallToolResult> {
-        let requested = std::fs::canonicalize(root?).ok()?;
         let mut builds = self.builds.lock().ok()?;
-        let tracked = builds
-            .keys()
-            .filter(|root| requested.starts_with(root))
-            .max_by_key(|root| root.components().count())
-            .cloned();
-        // An initial CLI build has no published manifest either. Follow its job
-        // without waiting on the writer or asking for a second model selection.
-        let root = tracked.or_else(|| {
-            requested
-                .ancestors()
-                .find(|root| {
-                    !root.join(".zvec-grep/manifest.json").is_file()
-                        && provider.runtime_snapshot(root).is_some_and(|snapshot| {
-                            matches!(
-                                snapshot.job_state,
-                                Some(IndexOperationState::Queued | IndexOperationState::Running)
-                            )
-                        })
+        let location = if index_dir.is_some() {
+            let requested = WorkspaceLocation::discover(root, index_dir).ok()?;
+            // A build may not have published its source relationship yet.
+            builds
+                .keys()
+                .find(|location| {
+                    location.home == requested.home
+                        && (root.is_none() || location.root == requested.root)
                 })
-                .map(Path::to_path_buf)
-        })?;
-        if requested
-            .ancestors()
-            .take_while(|path| *path != root)
-            .any(|path| path.join(".zvec-grep/manifest.json").is_file())
-        {
-            return None;
-        }
-        let snapshot = provider.runtime_snapshot(&root);
-        let job_id = builds.get(&root).cloned().or_else(|| {
+                .cloned()
+                .unwrap_or(requested)
+        } else {
+            let requested = std::fs::canonicalize(root?).ok()?;
+            let tracked = builds
+                .keys()
+                .filter(|location| {
+                    requested.starts_with(&location.root)
+                        && location.home == location.root.join(".zvec-grep")
+                })
+                .max_by_key(|location| location.root.components().count())
+                .cloned();
+            // Follow an initial CLI build before it publishes its manifest.
+            let location = tracked.or_else(|| {
+                requested.ancestors().find_map(|root| {
+                    let location = WorkspaceLocation::resolve(Some(root), None).ok()?;
+                    (!location.home.join("manifest.json").is_file()
+                        && provider
+                            .runtime_snapshot(&location.root, Some(&location.home))
+                            .is_some_and(|snapshot| {
+                                matches!(
+                                    snapshot.job_state,
+                                    Some(
+                                        IndexOperationState::Queued | IndexOperationState::Running
+                                    )
+                                )
+                            }))
+                    .then_some(location)
+                })
+            })?;
+            if requested
+                .ancestors()
+                .take_while(|path| *path != location.root)
+                .any(|path| path.join(".zvec-grep/manifest.json").is_file())
+            {
+                return None;
+            }
+            location
+        };
+        let snapshot = provider.runtime_snapshot(&location.root, Some(&location.home));
+        let job_id = builds.get(&location).cloned().or_else(|| {
             snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.active_job_id.clone())
@@ -127,22 +148,22 @@ impl SetupState {
                 Some(IndexOperationState::Queued | IndexOperationState::Running)
             ) {
                 return Some(structured_result(json!({
-                    "status": "indexing", "root": root, "job_id": job_id,
+                    "status": "indexing", "root": location.root, "index_dir": location.home, "job_id": job_id,
                     "state": if snapshot.job_state == Some(IndexOperationState::Queued) { "queued" } else { "running" },
                     "progress": snapshot.progress,
                     "message": "The initial index is still building. No search was performed. Retry the original search after indexing completes."
                 })));
             }
             if let Some(error) = snapshot.error {
-                builds.remove(&root);
-                return Some(structured_result(
-                    json!({"status": "indexing_failed", "root": root,
+                builds.remove(&location);
+                return Some(structured_result(json!({
+                    "status": "indexing_failed", "root": location.root, "index_dir": location.home,
                     "job_id": job_id, "error": error.report,
-                    "message": "The index build failed. Retry the search to review model setup again."}),
-                ));
+                    "message": "The index build failed. Retry the search to review model setup again."
+                })));
             }
         }
-        builds.remove(&root);
+        builds.remove(&location);
         None
     }
 
@@ -155,7 +176,11 @@ impl SetupState {
         original_error: EngineError,
     ) -> Result<CallToolResponse, ErrorData> {
         let result = async {
-            let info = provider.info(engine, InfoOptions { root: request.root.clone(), include_status: false }).await?;
+            if request.root.is_none() {
+                // Never initialize the daemon's working directory for a rootless request.
+                WorkspaceLocation::for_index(None, request.index_dir.as_deref())?;
+            }
+            let info = provider.info(engine, InfoOptions { root: request.root.clone(), index_dir: request.index_dir.clone(), include_status: false }).await?;
             info.compatibility.ensure_compatible()?;
             if info.indexed {
                 // A model/provider NOT_FOUND must not become an index creation prompt.
@@ -175,7 +200,7 @@ impl SetupState {
             let setup = engine.index_setup(IndexSetupOptions {
                 model_cache: request.model_cache.clone(), ..Default::default()
             }).await?;
-            self.drive(engine, provider, &request, context, Phase::Model { root: info.root, setup }, None).await
+            self.drive(engine, provider, &request, context, Phase::Model { location: WorkspaceLocation { root: info.root, home: info.home }, setup }, None).await
         }.await;
         Ok(result.unwrap_or_else(|error| error_result(&error).into()))
     }
@@ -258,7 +283,7 @@ impl SetupState {
                     .ok_or_else(|| EngineError::invalid_argument("Missing index setup response"))?
             };
             match phase {
-                Phase::Model { root, setup } => {
+                Phase::Model { location, setup } => {
                     let reference =
                         answer.get("model").and_then(Value::as_str).ok_or_else(|| {
                             EngineError::invalid_argument("Select a supported embedding model")
@@ -271,7 +296,8 @@ impl SetupState {
                             EngineError::invalid_argument("Selected embedding model is unavailable")
                         })?;
                     let options = IndexOptions {
-                        root: Some(root),
+                        root: Some(location.root),
+                        index_dir: Some(location.home),
                         embedding: Some(EmbeddingModelSpec {
                             reference: reference.to_owned(),
                             revision: None,
@@ -301,7 +327,10 @@ impl SetupState {
                 } => {
                     if answer.get("decision").and_then(Value::as_str) == Some("back") {
                         phase = Phase::Model {
-                            root: target.root,
+                            location: WorkspaceLocation {
+                                root: target.root,
+                                home: target.index_dir,
+                            },
                             setup,
                         };
                         continue;
@@ -416,14 +445,24 @@ impl SetupState {
             .builds
             .lock()
             .map_err(|_| EngineError::internal("Index task status unavailable"))?;
-        builds.retain(|root, _| provider.runtime_snapshot(root).is_some());
+        builds.retain(|location, _| {
+            provider
+                .runtime_snapshot(&location.root, Some(&location.home))
+                .is_some()
+        });
         if builds.len() >= 4096 {
             builds.clear();
         }
-        builds.insert(result.root.clone(), result.job_id.clone());
+        builds.insert(
+            WorkspaceLocation {
+                root: result.root.clone(),
+                home: result.index_dir.clone(),
+            },
+            result.job_id.clone(),
+        );
         Ok(structured_result(json!({
             "status": if result.state == IndexOperationState::Succeeded { "ready" } else { "indexing" },
-            "root": result.root, "job_id": result.job_id, "reused": result.reused,
+            "root": result.root, "index_dir": result.index_dir, "job_id": result.job_id, "reused": result.reused,
             "message": "Index creation was authorized and submitted. No search was performed. Retry the original search after indexing completes."
         })).into())
     }
@@ -488,7 +527,7 @@ fn choice_property(
 
 fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
     match phase {
-        Phase::Model { root, setup } => {
+        Phase::Model { location, setup } => {
             let choices = setup.models.iter().filter(|model| model.available()).map(|model| json!({
                 "const": model.reference,
                 "title": format!("{} · {} · {}", if model.local { "Local" } else { "Remote" }, model.reference,
@@ -514,16 +553,18 @@ fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
                 });
             (
                 format!(
-                    "No index found in {}. Select an embedding model to create a persistent index in the background. Local models run on this server. Remote models require a separate authorization step. Cancel to exit without creating an index.",
-                    root.display()
+                    "No index found for {} at {}. Select an embedding model to create a persistent index in the background. Local models run on this server. Remote models require a separate authorization step. Cancel to exit without creating an index.",
+                    location.root.display(),
+                    location.home.display()
                 ),
                 json!({"type": "object", "properties": {"model": choice_property("Embedding model", &choices, default.as_deref(), version)}, "required": ["model"]}),
             )
         }
         Phase::Authorization { target, .. } => (
             format!(
-                "Allow remote embedding? Workspace: {}. Model: {}. Destination: {}. Sends selected workspace files. API charges may apply. Allow once covers this background build only; a later query requires its own authorization. Workspace approval also authorizes later matching queries and refreshes. No workspace content has been sent. Cancel to exit.",
+                "Allow remote embedding? Workspace: {}. Index directory: {}. Model: {}. Destination: {}. Sends selected workspace files. API charges may apply. Allow once covers this background build only; a later query requires its own authorization. Workspace approval also authorizes later matching queries and refreshes. No workspace content has been sent. Cancel to exit.",
                 target.root.display(),
+                target.index_dir.display(),
                 target.model,
                 target.endpoint
             ),

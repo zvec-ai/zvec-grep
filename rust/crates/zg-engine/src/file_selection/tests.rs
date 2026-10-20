@@ -23,6 +23,7 @@ fn make_policy(
             ..ScanRulesUpdate::default()
         }
         .apply(options)?,
+        None,
     )
 }
 
@@ -50,6 +51,7 @@ async fn scan(
                         }
                         .apply(options)
                         .expect("scan rules"),
+                        None,
                     )
                     .expect("policy"),
                 ],
@@ -541,4 +543,54 @@ fn nested_ignore_symlinks_are_controls_without_following_source_symlinks() {
             .can_descend(&root.join("src/blocked"))
             .expect("included")
     );
+}
+
+#[test]
+fn explicit_index_home_and_other_known_indexes_are_excluded() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path().canonicalize().expect("root");
+    let home = root.join("custom-data");
+    fs::create_dir(&home).expect("selected home");
+    write(&root, "custom-data/chunk.txt", "internal index content");
+    write(
+        &root,
+        "another-data/manifest.json",
+        r#"{"format":"zg-workspace"}"#,
+    );
+    write(&root, "source.txt", "source content");
+    let rules = ScanRulesUpdate {
+        include_hidden: Some(true),
+        use_default_ignores: Some(false),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    let policy = ScanPolicy::new(&root, &rules, Some(&home)).expect("policy");
+    assert!(!policy.can_descend(&home).expect("selected home"));
+    assert!(
+        !policy
+            .includes_file(&home.join("chunk.txt"))
+            .expect("selected content")
+    );
+    assert!(
+        !policy
+            .can_descend(&root.join("another-data"))
+            .expect("other index")
+    );
+    assert!(
+        policy
+            .includes_file(&root.join("source.txt"))
+            .expect("source")
+    );
+    #[cfg(unix)]
+    {
+        let alias = root.join("data-alias");
+        std::os::unix::fs::symlink(&home, &alias).expect("index alias");
+        assert!(!policy.can_descend(&alias).expect("index alias excluded"));
+        assert!(
+            !policy
+                .includes_file(&alias.join("chunk.txt"))
+                .expect("aliased content excluded")
+        );
+    }
 }

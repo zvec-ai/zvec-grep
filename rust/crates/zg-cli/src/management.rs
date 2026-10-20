@@ -136,6 +136,7 @@ fn format_duration(milliseconds: u64) -> String {
 pub fn write_index_drop_result(
     mut writer: impl Write,
     root: &Path,
+    index_dir: &Path,
     removed: bool,
 ) -> io::Result<()> {
     writeln!(
@@ -147,7 +148,8 @@ pub fn write_index_drop_result(
             "No index found for"
         },
         root.display(),
-    )
+    )?;
+    writeln!(writer, "  Index directory: {}", index_dir.display())
 }
 
 /// Writes verified workspace authorization in the Node.js CLI's grouped layout.

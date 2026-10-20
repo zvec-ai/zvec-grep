@@ -42,7 +42,10 @@ pub(crate) async fn index(
     for (target, decision) in targets.iter().zip(decisions) {
         apply(decision, target, &mut options.authorized_remote)?;
     }
-    options.root = Some(targets[0].root.clone());
+    if options.root.is_some() {
+        options.root = Some(targets[0].root.clone());
+    }
+    options.index_dir = Some(targets[0].index_dir.clone());
     Ok(())
 }
 
@@ -143,11 +146,12 @@ async fn ask(
         }}, "required": ["choice"]
     });
     let message = format!(
-        "Allow remote embedding? Destination: {} (host: {}). Model: {}. Workspace: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}. Only explicit acceptance permits transmission. Do not enter credentials in this form.",
+        "Allow remote embedding? Destination: {} (host: {}). Model: {}. Workspace: {}. Index directory: {}. Source roots: {}. Query text sent: {query_text}. Workspace content sent for indexing/refresh: {workspace_content}. Only explicit acceptance permits transmission. Do not enter credentials in this form.",
         target.endpoint,
         target.endpoint_host,
         target.model,
         target.root.display(),
+        target.index_dir.display(),
         target
             .workspace_roots
             .iter()
@@ -245,6 +249,7 @@ mod tests {
         ) -> Result<CallToolResponse, rmcp::ErrorData> {
             let target = IndexAuthorization {
                 root: std::env::temp_dir().join("consent-workspace"),
+                index_dir: std::env::temp_dir().join("consent-workspace/.zvec-grep"),
                 workspace_roots: vec![std::env::temp_dir().join("consent-source")],
                 model: "remote/test-model".into(),
                 endpoint: "https://embedding.example.test/v1".into(),
@@ -442,6 +447,7 @@ mod tests {
     fn once_consent_records_only_the_disclosed_destination() {
         let target = IndexAuthorization {
             root: std::env::temp_dir().join("consent-workspace"),
+            index_dir: std::env::temp_dir().join("consent-workspace/.zvec-grep"),
             workspace_roots: vec![std::env::temp_dir().join("consent-workspace")],
             model: "qwen/text-embedding-v4".into(),
             endpoint: "https://embedding.example.test/v1".into(),

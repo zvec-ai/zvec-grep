@@ -394,4 +394,43 @@ mod tests {
             serde_json::from_value(value).expect("error reply should deserialize");
         assert_eq!(decoded, result);
     }
+    #[test]
+    fn workspace_locations_roundtrip_across_commands() {
+        use zg_engine::api::{index::IndexOptions, info::InfoOptions};
+
+        let root = std::path::PathBuf::from("/sources");
+        let index_dir = std::path::PathBuf::from("/indexes/selected");
+        for command in [
+            DaemonCommand::Context(ContextOptions {
+                root: Some(root.clone()),
+                index_dir: Some(index_dir.clone()),
+                ..ContextOptions::default()
+            }),
+            DaemonCommand::Index(IndexOptions {
+                root: Some(root.clone()),
+                index_dir: Some(index_dir.clone()),
+                ..IndexOptions::default()
+            }),
+            DaemonCommand::Info(InfoOptions {
+                root: None,
+                index_dir: Some(index_dir.clone()),
+                include_status: false,
+            }),
+            DaemonCommand::DropIndex(InfoOptions {
+                root: Some(root.clone()),
+                index_dir: Some(index_dir.clone()),
+                include_status: false,
+            }),
+        ] {
+            let encoded = serde_json::to_value(&command).expect("encode command");
+            assert_eq!(
+                encoded["request"]["index_dir"],
+                serde_json::json!(index_dir)
+            );
+            assert_eq!(
+                serde_json::from_value::<DaemonCommand>(encoded).expect("decode command"),
+                command,
+            );
+        }
+    }
 }

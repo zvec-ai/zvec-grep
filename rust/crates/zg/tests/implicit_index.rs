@@ -58,6 +58,7 @@ impl Fixture {
             .env("HOME", self.user.path())
             .env("USERPROFILE", self.user.path())
             .env("ZVEC_GREP_HOME", self.user.path().join("runtime"))
+            .env_remove("ZVEC_GREP_CONFIG")
             .env("ZVEC_GREP_MODEL_CACHE", self.user.path().join("models"))
             .env(
                 "ZVEC_GREP_AUTHORIZATION_KEY_FILE",
@@ -123,7 +124,7 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
         plain.starts_with("? Workspace index is not configured\n  ~\n"),
         "{plain}"
     );
-    let storage = std::path::Path::new(".zvec-grep").join("storage");
+    let storage = std::path::Path::new(".zvec-grep").join("index");
     assert!(
         plain.contains(&format!("\n\n  Storage     {}", storage.display())),
         "{plain}"
@@ -775,10 +776,10 @@ fn implicit_build_preserves_local_overrides_without_persisting_remote_credential
             &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
         )
         .expect("manifest JSON");
-        // These persisted runtime settings are shared with the Node client.
+        // Machine execution settings and credentials stay out of portable metadata.
         let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
-        assert_eq!(runtime["device"], "cpu");
-        assert_eq!(runtime["cacheDir"], json!(cache));
+        assert!(runtime.get("device").is_none());
+        assert!(runtime.get("cacheDir").is_none());
         assert!(runtime.get("apiKey").is_none());
         assert!(runtime.get("endpoint").is_none());
         assert!(!manifest.to_string().contains("implicit-query-secret"));
@@ -839,8 +840,8 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
     )
     .expect("manifest JSON");
     assert_eq!(
-        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
-        "cpu"
+        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        json!({})
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");

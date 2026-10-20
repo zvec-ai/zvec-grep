@@ -9,6 +9,7 @@ pub(crate) struct LexicalSearchRequest {
     #[serde(skip)]
     pub signal: Option<tokio_util::sync::CancellationToken>,
     pub root: Option<PathBuf>,
+    pub index_home: Option<PathBuf>,
     pub patterns: Vec<String>,
     pub pattern_files: Vec<PathBuf>,
     pub paths: Vec<PathBuf>,
