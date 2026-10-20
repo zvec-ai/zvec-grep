@@ -441,7 +441,7 @@ async fn ensure_query_index(
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err(EngineError::not_found(format!(
             "No index found in {}. Run `zg --index --embedding <model>` to build it, then retry the query. Run `zg --help models` to list supported models.",
-            info.root.display()
+            zg_cli::output_path(&info.root).display()
         )).into());
     }
     let options = zg_engine::api::index::setup::IndexSetupOptions {
@@ -476,7 +476,7 @@ async fn ensure_query_index(
     .await?;
     eprintln!(
         "\nBuilding index · {}\nEmbedding      · {}\nEsc Cancel · Ctrl+C Cancel",
-        info.root.display(),
+        zg_cli::output_path(&info.root).display(),
         index_request
             .embedding
             .as_ref()
@@ -484,11 +484,8 @@ async fn ensure_query_index(
     );
     let cancellation = zg_cli::IndexCancellation::new()?;
     index_request.signal = Some(cancellation.signal());
-    let progress = zg_cli::IndexProgressDisplay::new(
-        io::stderr(),
-        zg_cli::stderr_supports_ansi(),
-        output.color,
-    );
+    let ansi = zg_cli::stderr_supports_ansi();
+    let progress = zg_cli::IndexProgressDisplay::new(io::stderr(), ansi, output.color);
     let reporter = progress.reporter();
     let result: Result<_, Box<dyn Error>> = if let Some(home) = &server_home {
         zg_daemon::index_with_progress(home, index_request, &reporter)
