@@ -66,6 +66,12 @@ jobs:
         run: >-
           uv run --project benchmarks/swe-qa-bench python -m unittest discover
           -s benchmarks/swe-qa-bench/tests -v
+      - name: Verify Harbor container shutdown without model calls
+        env:
+          ZG_BENCH_RUN_DOCKER_TESTS: "1"
+        run: >-
+          uv run --project benchmarks/swe-qa-bench python -m unittest discover
+          -s benchmarks/swe-qa-bench/tests -p test_container_shutdown.py -v
       - name: Test shared Rust package identity helper
         run: node --test benchmarks/zg-retrieval/test/rust-package-cache.test.mjs
       - name: Test Benchmark comments and reusable Retrieval authorization

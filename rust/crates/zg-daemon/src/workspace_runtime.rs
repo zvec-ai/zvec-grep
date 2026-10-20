@@ -930,6 +930,9 @@ impl WorkspaceRuntimeManager {
 
 #[async_trait::async_trait]
 impl IndexOperationProvider for WorkspaceRuntimeManager {
+    fn supports_background_indexing(&self) -> bool {
+        true
+    }
     async fn submit_index(
         &self,
         options: IndexOptions,

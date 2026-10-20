@@ -78,6 +78,8 @@ fn search_help_describes_terminal_and_compact_defaults() {
     let help = stdout(&["--help", "search"]);
     assert!(help.starts_with("Usage:\n  zg <query> [options]\n"));
     assert!(help.contains("--compact"));
+    assert!(help.contains("zg --rg --files [discovery-options] [path...]"));
+    assert!(help.contains("-0/--null"));
     assert!(help.contains("full on TTY, none in compact mode"));
     assert!(!help.contains("--human"));
     assert!(!help.contains("zg query"));
@@ -110,11 +112,17 @@ fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
         "{help}"
     );
     assert!(
-        help.contains("Search automatically creates a missing index"),
+        help.contains("Interactive searches prompt to select an embedding model"),
         "{help}"
     );
-    assert!(help.contains("local/potion-code-16m-v2"), "{help}");
-    assert!(help.contains("never a remote model"), "{help}");
+    assert!(
+        help.contains("Remote models require data authorization"),
+        "{help}"
+    );
+    assert!(
+        help.contains("Non-interactive searches never create an index"),
+        "{help}"
+    );
 }
 
 #[test]

@@ -57,9 +57,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/target/release/
-          key: rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            rust-release-v2-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}-
+          # Per-commit keys would exhaust the 10 GB repository cache quota and evict Rust CI caches.
+          key: rust-release-v3-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
       - name: Restore the Windows ONNX Runtime
         if: runner.os == 'Windows'
         uses: actions/cache@v5

@@ -26,5 +26,8 @@ zvec-rust-build.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
+rustix = { version = "1.1", features = ["fs", "pty", "termios"] }
+
 [lints]
 workspace = true

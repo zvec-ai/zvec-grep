@@ -32,7 +32,8 @@ use crate::domain::model::{
 };
 use crate::models::{
     artifacts::{
-        ArtifactSource, ModelDownloadProgressReporter, ResolveArtifacts, resolve_model_artifacts,
+        ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
+        default_model_cache, resolve_model_artifacts,
     },
     catalog::TransformersConfig,
     runtime::ModelComputeRuntime,
@@ -126,7 +127,7 @@ impl TransformersEmbeddingModel {
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
-            .unwrap_or_else(default_model_cache_dir);
+            .unwrap_or_else(|| default_model_cache(LocalModelBackend::Transformers));
         Self {
             entry,
             info: EmbeddingModelInfo {
@@ -1278,26 +1279,6 @@ fn onnx_artifact(dtype: &str) -> Result<&'static str, ModelError> {
             "Unsupported Transformers dtype: {value}"
         ))),
     }
-}
-
-fn default_model_cache_dir() -> PathBuf {
-    env::var_os("ZVEC_GREP_HOME")
-        .map(PathBuf::from)
-        .or_else(user_home_dir)
-        .unwrap_or_else(|| PathBuf::from(".zvec-grep"))
-        .join("models")
-}
-
-#[cfg(windows)]
-fn user_home_dir() -> Option<PathBuf> {
-    env::var_os("USERPROFILE").map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn user_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".zvec-grep"))
 }
 
 #[cfg(test)]

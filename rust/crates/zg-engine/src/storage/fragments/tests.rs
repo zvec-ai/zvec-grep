@@ -88,6 +88,8 @@ fn metadata_fragments(
             symbol_name: Some("harvest 春'\\crop".into()),
             scope: Some("Garden".into()),
             signature: Some("pub async fn harvest() -> Crop".into()),
+            visibility: None,
+            language: None,
             documentation: Some("Produces the seasonal crop.".into()),
         })),
         fragments: vec![

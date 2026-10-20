@@ -14,6 +14,7 @@ use zg_engine::api::{
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "request")]
 pub enum DaemonCommand {
+    IndexSetup(zg_engine::api::index::setup::IndexSetupOptions),
     Context(ContextOptions),
     Index(IndexOptions),
     IndexAuthorization(IndexOptions),
@@ -41,6 +42,7 @@ pub enum IndexStreamEvent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "reply")]
 pub enum DaemonReply {
+    IndexSetup(zg_engine::api::index::setup::IndexSetup),
     Context(Box<ContextResult>),
     Index(Box<IndexResult>),
     IndexAuthorization(Vec<zg_engine::authorization::IndexAuthorization>),

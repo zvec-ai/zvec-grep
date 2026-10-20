@@ -541,7 +541,6 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
     }),
 ];
 
-#[cfg(test)]
 #[must_use]
 pub fn list_embedding_models() -> Vec<EmbeddingCatalogEntry> {
     CATALOG.to_vec()

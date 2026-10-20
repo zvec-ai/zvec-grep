@@ -4,6 +4,7 @@ import { compatibilityWarningForArgs, parseArgs } from "./args.js";
 import { runParsedCommand } from "./commands.js";
 import { colorModeFromArgs, printError } from "./errors.js";
 import { printHelp } from "./help.js";
+import { installStdoutErrorHandler } from "./stdio.js";
 import { readPackageVersion } from "./version.js";
 
 const PACKAGE_VERSION = readPackageVersion();
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
     if (compatibilityWarning) console.error(compatibilityWarning);
 
     const parsed = parseArgs(args);
+    installStdoutErrorHandler(parsed);
     if (parsed.command === "query" && parsed.options.human === undefined) {
       parsed.options.human = process.stdout.isTTY === true;
     }

@@ -362,23 +362,6 @@ pub(crate) fn string(value: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(str::to_owned)
 }
 
-/// Selects a local model for CLI-only implicit indexing, never a remote default.
-/// # Errors
-/// Returns configuration I/O, validation, and invalid environment model errors.
-pub fn implicit_embedding_reference() -> Result<String, EngineError> {
-    let config = read()?;
-    let configured = crate::models::resolve_embedding_reference(
-        crate::models::ResolveEmbeddingReferenceOptions {
-            global_default: string(&config, &["defaults", "embedding"]),
-            ..crate::models::ResolveEmbeddingReferenceOptions::default()
-        },
-    )
-    .map_err(crate::models::ModelError::into_engine_error)?;
-    Ok(configured
-        .filter(|reference| reference.starts_with("local/"))
-        .unwrap_or_else(|| "local/potion-code-16m-v2".to_owned()))
-}
-
 pub(crate) fn device(value: &Value, reference: &str) -> Option<Device> {
     serde_json::from_value(value["models"][reference]["device"].clone()).ok()
 }

@@ -1,28 +1,16 @@
 use tree_sitter::Node;
 
-use crate::domain::{FileFormat, SymbolType};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdapterKind {
-    C,
-    Cpp,
-    Go,
-    Java,
-    JavaScript,
-    Python,
-    Rust,
-    TypeScript,
-}
+use crate::domain::{FileFormat, Language, SymbolType};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LanguageAdapter {
-    kind: AdapterKind,
+    kind: Language,
     entity_types: &'static [&'static str],
     scope_types: &'static [&'static str],
 }
 
 const C: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::C,
+    kind: Language::C,
     entity_types: &[
         "declaration",
         "field_declaration",
@@ -36,7 +24,7 @@ const C: LanguageAdapter = LanguageAdapter {
     scope_types: &["struct_specifier", "union_specifier"],
 };
 const CPP: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Cpp,
+    kind: Language::Cpp,
     entity_types: &[
         "alias_declaration",
         "declaration",
@@ -56,7 +44,7 @@ const CPP: LanguageAdapter = LanguageAdapter {
     ],
 };
 const GO: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Go,
+    kind: Language::Go,
     entity_types: &[
         "function_declaration",
         "method_elem",
@@ -68,7 +56,7 @@ const GO: LanguageAdapter = LanguageAdapter {
     scope_types: &["type_spec"],
 };
 const JAVA: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Java,
+    kind: Language::Java,
     entity_types: &[
         "annotation_type_declaration",
         "class_declaration",
@@ -89,7 +77,7 @@ const JAVA: LanguageAdapter = LanguageAdapter {
     ],
 };
 const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::JavaScript,
+    kind: Language::JavaScript,
     entity_types: &[
         "class_declaration",
         "field_definition",
@@ -102,7 +90,7 @@ const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
     scope_types: &["class_declaration"],
 };
 const PYTHON: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Python,
+    kind: Language::Python,
     entity_types: &[
         "class_definition",
         "decorated_definition",
@@ -111,7 +99,7 @@ const PYTHON: LanguageAdapter = LanguageAdapter {
     scope_types: &["class_definition", "decorated_definition"],
 };
 const RUST: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::Rust,
+    kind: Language::Rust,
     entity_types: &[
         "enum_item",
         "const_item",
@@ -128,7 +116,7 @@ const RUST: LanguageAdapter = LanguageAdapter {
     scope_types: &["impl_item", "mod_item", "trait_item"],
 };
 const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
-    kind: AdapterKind::TypeScript,
+    kind: Language::TypeScript,
     entity_types: &[
         "abstract_class_declaration",
         "abstract_method_signature",
@@ -186,7 +174,7 @@ impl LanguageAdapter {
         node: Node<'tree>,
         source: &[u8],
     ) -> Vec<Node<'tree>> {
-        if matches!(self.kind, AdapterKind::JavaScript | AdapterKind::TypeScript)
+        if matches!(self.kind, Language::JavaScript | Language::TypeScript)
             && node.kind() == "variable_declarator"
         {
             let entities = exported_object_function_entities(node, source);
@@ -199,8 +187,8 @@ impl LanguageAdapter {
 
     pub(super) fn enter_scope_node(self, node: Node<'_>) -> Node<'_> {
         match self.kind {
-            AdapterKind::Go => node.child_by_field_name("type").unwrap_or(node),
-            AdapterKind::Python if node.kind() == "decorated_definition" => {
+            Language::Go => node.child_by_field_name("type").unwrap_or(node),
+            Language::Python if node.kind() == "decorated_definition" => {
                 inner_python_definition(node)
                     .filter(|inner| inner.kind() == "class_definition")
                     .unwrap_or(node)
@@ -211,19 +199,19 @@ impl LanguageAdapter {
 
     pub(super) fn extract_name(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp => extract_c_family_name(node, source),
-            AdapterKind::Go => field_text(node, "name", source),
-            AdapterKind::Java
+            Language::C | Language::Cpp => extract_c_family_name(node, source),
+            Language::Go => field_text(node, "name", source),
+            Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
             {
                 node.child_by_field_name("declarator")
                     .and_then(|declarator| field_text(declarator, "name", source))
             }
-            AdapterKind::Java => name_field(node, source),
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::Java => name_field(node, source),
+            Language::JavaScript | Language::TypeScript => {
                 extract_javascript_typescript_name(node, source)
             }
-            AdapterKind::Python => {
+            Language::Python => {
                 if node.kind() == "decorated_definition" {
                     inner_python_definition(node)
                         .and_then(|inner| field_text(inner, "name", source))
@@ -231,7 +219,7 @@ impl LanguageAdapter {
                     field_text(node, "name", source)
                 }
             }
-            AdapterKind::Rust => {
+            Language::Rust => {
                 if node.kind() == "impl_item" {
                     field_text(node, "type", source)
                 } else {
@@ -248,7 +236,7 @@ impl LanguageAdapter {
         breadcrumb: &[String],
     ) -> Vec<String> {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp if is_c_function_type(node.kind()) => {
+            Language::C | Language::Cpp if is_c_function_type(node.kind()) => {
                 let Some(name) = extract_raw_c_function_name(node, source) else {
                     return breadcrumb.to_vec();
                 };
@@ -266,7 +254,7 @@ impl LanguageAdapter {
                 }
                 breadcrumb.iter().cloned().chain(qualifier).collect()
             }
-            AdapterKind::Go if node.kind() == "method_declaration" => {
+            Language::Go if node.kind() == "method_declaration" => {
                 let Some(receiver) = node.child_by_field_name("receiver") else {
                     return breadcrumb.to_vec();
                 };
@@ -282,7 +270,7 @@ impl LanguageAdapter {
                     .chain([receiver_type.to_owned()])
                     .collect()
             }
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::JavaScript | Language::TypeScript => {
                 let Some(object_name) = exported_object_variable_name(node, source) else {
                     return breadcrumb.to_vec();
                 };
@@ -294,59 +282,62 @@ impl LanguageAdapter {
 
     pub(super) fn classify(self, node: Node<'_>) -> Option<SymbolType> {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp => classify_c_family(node),
-            AdapterKind::Go => classify_go(node),
-            AdapterKind::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
-                classify_javascript_typescript(node)
-            }
+            Language::C | Language::Cpp => classify_c_family(node),
+            Language::Go => classify_go(node),
+            Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
+            Language::JavaScript | Language::TypeScript => classify_javascript_typescript(node),
             _ => classify_code_node(node),
         }
     }
 
     pub(super) fn extract_signature(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         match self.kind {
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::JavaScript | Language::TypeScript => {
                 extract_javascript_signature(node, source)
             }
-            AdapterKind::Python => {
+            Language::Python => {
                 let definition = inner_python_definition(node).unwrap_or(node);
-                let signature = extract_generic_signature(definition, source)?;
-                let mut lines = named_children(node)
-                    .into_iter()
-                    .filter(|child| child.kind() == "decorator")
-                    .map(|decorator| text(decorator, source).trim().to_owned())
-                    .collect::<Vec<_>>();
-                lines.push(signature);
-                Some(lines.join("\n"))
-            }
-            AdapterKind::Rust => {
-                let signature = extract_generic_signature(node, source)?;
-                let mut attributes = Vec::new();
-                let mut sibling = node.prev_named_sibling();
-                while let Some(item) = sibling {
-                    match item.kind() {
-                        "attribute_item" => attributes.push(text(item, source).trim().to_owned()),
-                        "line_comment" | "block_comment" => {}
-                        _ => break,
-                    }
-                    sibling = item.prev_named_sibling();
-                }
-                attributes.reverse();
-                attributes.push(signature);
-                Some(attributes.join("\n"))
+                extract_generic_signature(definition, source)
             }
             _ => extract_generic_signature(node, source),
         }
     }
 
-    pub(super) fn extract_doc(node: Node<'_>, source: &[u8]) -> Option<String> {
-        extract_preceding_doc(node, source)
+    pub(super) fn extract_doc(self, node: Node<'_>, source: &[u8]) -> Option<String> {
+        let mut documentation = extract_preceding_doc(node, source);
+        let mut declaration = node;
+        while let Some(parent) = declaration.parent().filter(|parent| match self.kind {
+            Language::JavaScript | Language::TypeScript => matches!(
+                parent.kind(),
+                "export_statement"
+                    | "ambient_declaration"
+                    | "lexical_declaration"
+                    | "variable_declaration"
+            ),
+            Language::Go => parent.kind() == "type_declaration",
+            _ => false,
+        }) {
+            if let Some(outer) = extract_preceding_doc(parent, source) {
+                documentation = Some(match documentation {
+                    Some(inner) => format!("{outer}\n{inner}"),
+                    None => outer,
+                });
+            }
+            declaration = parent;
+        }
+        if self.kind == Language::Rust {
+            let inner = extract_rust_inner_doc(node, source);
+            documentation = match (documentation, inner) {
+                (Some(outer), Some(inner)) => Some(format!("{outer}\n{inner}")),
+                (outer, inner) => outer.or(inner),
+            };
+        }
+        documentation
     }
 
     fn should_index_entity(self, node: Node<'_>) -> bool {
         match self.kind {
-            AdapterKind::C | AdapterKind::Cpp => {
+            Language::C | Language::Cpp => {
                 if matches!(node.kind(), "declaration" | "field_declaration") {
                     find_descendant_by_kind(node, "function_declarator").is_some()
                 } else if node.kind() == "macro_type_specifier" {
@@ -357,10 +348,10 @@ impl LanguageAdapter {
                     true
                 }
             }
-            AdapterKind::JavaScript | AdapterKind::TypeScript => {
+            Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
             }
-            AdapterKind::Java
+            Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
             {
                 named_children(node)
@@ -376,10 +367,10 @@ impl LanguageAdapter {
 
     fn should_enter_scope(self, node: Node<'_>) -> bool {
         match self.kind {
-            AdapterKind::Go if node.kind() == "type_spec" => node
+            Language::Go if node.kind() == "type_spec" => node
                 .child_by_field_name("type")
                 .is_some_and(|kind| matches!(kind.kind(), "interface_type" | "struct_type")),
-            AdapterKind::Python if node.kind() == "decorated_definition" => {
+            Language::Python if node.kind() == "decorated_definition" => {
                 inner_python_definition(node)
                     .is_some_and(|inner| inner.kind() == "class_definition")
             }
@@ -676,7 +667,7 @@ fn extract_javascript_signature(node: Node<'_>, source: &[u8]) -> Option<String>
             "arrow_function" | "function_expression" | "generator_function"
         )
     }) {
-        let prefix = std::str::from_utf8(&source[node.start_byte()..value.start_byte()]).ok()?;
+        let prefix = extract_signature_prefix(node, source, value.start_byte());
         format!(
             "{} {}",
             prefix.trim(),
@@ -703,8 +694,7 @@ fn extract_javascript_signature(node: Node<'_>, source: &[u8]) -> Option<String>
         .parent()
         .filter(|parent| matches!(parent.kind(), "ambient_declaration" | "export_statement"))
     {
-        let prefix =
-            std::str::from_utf8(&source[wrapper.start_byte()..declaration.start_byte()]).ok()?;
+        let prefix = extract_signature_prefix(wrapper, source, declaration.start_byte());
         signature = format!("{} {signature}", prefix.trim());
         declaration = wrapper;
     }
@@ -713,13 +703,44 @@ fn extract_javascript_signature(node: Node<'_>, source: &[u8]) -> Option<String>
 
 fn extract_generic_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut raw = String::new();
-    append_signature(node, source, false, &mut raw);
+    append_signature(node, source, node.end_byte(), false, &mut raw);
     let signature = raw.trim().trim_end_matches(['{', ';']).trim();
     (!signature.is_empty()).then(|| signature.to_owned())
 }
 
+fn extract_signature_prefix(node: Node<'_>, source: &[u8], end_byte: usize) -> String {
+    let mut prefix = String::new();
+    append_signature(node, source, end_byte, false, &mut prefix);
+    prefix
+}
+
 // Empty nested bodies preserve declaration suffixes, such as a C typedef's alias.
-fn append_signature(node: Node<'_>, source: &[u8], nested: bool, out: &mut String) {
+fn append_signature(
+    node: Node<'_>,
+    source: &[u8],
+    end_byte: usize,
+    nested: bool,
+    out: &mut String,
+) {
+    // Exclude prose-bearing syntax by node kind, preserving literal types and defaults.
+    if matches!(
+        node.kind(),
+        "comment"
+            | "line_comment"
+            | "block_comment"
+            | "documentation_comment"
+            | "attribute_item"
+            | "inner_attribute_item"
+            | "attribute_specifier"
+            | "attribute_declaration"
+            | "annotation"
+            | "marker_annotation"
+            | "decorator"
+    ) {
+        // A comment may be the only separator between two declaration tokens.
+        out.push(' ');
+        return;
+    }
     let body = node.child_by_field_name("body").or_else(|| {
         named_children(node).into_iter().find(|child| {
             matches!(
@@ -735,6 +756,9 @@ fn append_signature(node: Node<'_>, source: &[u8], nested: bool, out: &mut Strin
     });
     let mut offset = node.start_byte();
     for child in named_children(node) {
+        if child.start_byte() >= end_byte {
+            break;
+        }
         out.push_str(std::str::from_utf8(&source[offset..child.start_byte()]).unwrap_or_default());
         if Some(child) == body {
             if !nested {
@@ -750,25 +774,31 @@ fn append_signature(node: Node<'_>, source: &[u8], nested: bool, out: &mut Strin
         {
             out.push_str("{}");
         } else {
-            append_signature(child, source, true, out);
+            append_signature(child, source, child.end_byte(), true, out);
         }
         offset = child.end_byte();
     }
-    out.push_str(std::str::from_utf8(&source[offset..node.end_byte()]).unwrap_or_default());
+    out.push_str(std::str::from_utf8(&source[offset..end_byte]).unwrap_or_default());
 }
 
 fn extract_preceding_doc(node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut comments = Vec::new();
     let mut sibling = node.prev_named_sibling();
     while let Some(item) = sibling {
-        if item.kind() == "attribute_item" {
+        // File documentation remains context for the leading declaration because
+        // structured extraction has no separate file entity to carry it.
+        let file_level = item
+            .parent()
+            .is_some_and(|parent| parent.kind() == "source_file");
+        if item.kind() == "attribute_item" || (file_level && item.kind() == "inner_attribute_item")
+        {
+            if let Some(doc) = extract_rust_doc_attribute(item, source) {
+                comments.push(doc);
+            }
             sibling = item.prev_named_sibling();
             continue;
         }
-        if !matches!(
-            item.kind(),
-            "comment" | "line_comment" | "block_comment" | "documentation_comment"
-        ) {
+        if !is_comment(item) || (!file_level && item.child_by_field_name("inner").is_some()) {
             break;
         }
         comments.push(clean_comment_text(text(item, source)));
@@ -779,9 +809,135 @@ fn extract_preceding_doc(node: Node<'_>, source: &[u8]) -> Option<String> {
     (!doc.is_empty()).then_some(doc)
 }
 
+fn is_comment(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "comment" | "line_comment" | "block_comment" | "documentation_comment"
+    )
+}
+
+fn extract_rust_inner_doc(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let body = node.child_by_field_name("body")?;
+    let mut comments = Vec::new();
+    for child in named_children(body) {
+        if child.kind() == "inner_attribute_item" {
+            if let Some(doc) = extract_rust_doc_attribute(child, source) {
+                comments.push(doc);
+            }
+        } else if is_comment(child) {
+            if child.child_by_field_name("inner").is_some() {
+                comments.push(clean_comment_text(text(child, source)));
+            }
+        } else {
+            break;
+        }
+    }
+    let doc = comments.join("\n").trim().to_owned();
+    (!doc.is_empty()).then_some(doc)
+}
+
+fn extract_rust_doc_attribute(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let attribute = named_children(node)
+        .into_iter()
+        .find(|child| child.kind() == "attribute")?;
+    let name = named_children(attribute)
+        .into_iter()
+        .find(|child| !is_comment(*child))?;
+    if name.kind() != "identifier" || text(name, source) != "doc" {
+        return None;
+    }
+    let value = attribute.child_by_field_name("value")?;
+    let literal = if attribute.has_error() && value.kind() == "string_literal" {
+        // The grammar can recover Unicode escapes containing digit separators as
+        // an error before the value node. Decode the complete literal in that case.
+        let mut cursor = attribute.walk();
+        let assignment = attribute
+            .children(&mut cursor)
+            .find(|child| child.kind() == "=")?;
+        std::str::from_utf8(&source[assignment.end_byte()..attribute.end_byte()])
+            .ok()?
+            .trim()
+    } else {
+        text(value, source)
+    };
+    match value.kind() {
+        "raw_string_literal" => {
+            let (hashes, rest) = literal.strip_prefix('r')?.split_once('"')?;
+            if !hashes.chars().all(|ch| ch == '#') {
+                return None;
+            }
+            rest.strip_suffix(&format!("\"{hashes}")).map(str::to_owned)
+        }
+        "string_literal" => decode_rust_string(literal),
+        // Macro values need expansion context; never treat their tokens as documentation.
+        _ => None,
+    }
+}
+
+fn decode_rust_string(literal: &str) -> Option<String> {
+    let mut chars = literal
+        .strip_prefix('"')?
+        .strip_suffix('"')?
+        .chars()
+        .peekable();
+    let mut decoded = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            return None;
+        }
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '0' => decoded.push('\0'),
+            ch @ ('\\' | '\'' | '"') => decoded.push(ch),
+            'x' => {
+                let high = chars.next()?.to_digit(16)?;
+                let low = chars.next()?.to_digit(16)?;
+                let code = high * 16 + low;
+                if code > 0x7f {
+                    return None;
+                }
+                decoded.push(char::from_u32(code)?);
+            }
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut digits = String::new();
+                loop {
+                    match chars.next()? {
+                        '}' => break,
+                        '_' => {}
+                        ch if ch.is_ascii_hexdigit() && digits.len() < 6 => digits.push(ch),
+                        _ => return None,
+                    }
+                }
+                decoded.push(char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?);
+            }
+            ch @ ('\n' | '\r') => {
+                if ch == '\r' && chars.next()? != '\n' {
+                    return None;
+                }
+                while chars
+                    .next_if(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
+                    .is_some()
+                {}
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
+}
+
 fn clean_comment_text(value: &str) -> String {
     let stripped = value
         .strip_prefix("/**")
+        .or_else(|| value.strip_prefix("/*!"))
         .or_else(|| value.strip_prefix("/*"))
         .unwrap_or(value);
     let stripped = stripped.strip_suffix("*/").unwrap_or(stripped);
@@ -790,7 +946,7 @@ fn clean_comment_text(value: &str) -> String {
         .map(|line| {
             let trimmed = line.trim_start();
             if let Some(rest) = trimmed.strip_prefix("//") {
-                rest.strip_prefix('/').unwrap_or(rest).trim_start()
+                rest.strip_prefix(['/', '!']).unwrap_or(rest).trim_start()
             } else if let Some(rest) = trimmed.strip_prefix('#') {
                 rest.trim_start()
             } else if let Some(rest) = trimmed.strip_prefix('*') {

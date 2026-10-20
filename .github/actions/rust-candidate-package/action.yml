@@ -41,19 +41,9 @@ runs:
       with:
         path: ${{ runner.temp }}/rust-package-cache
         key: ${{ inputs.cache_namespace }}-package-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.commit }}
-    - name: Restore Cargo build state after a package cache miss
-      if: steps.rust-package-cache.outputs.cache-hit != 'true'
-      uses: actions/cache@v5
-      with:
-        path: |
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          candidate/rust/target/
-        key: ${{ inputs.cache_namespace }}-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('candidate/rust/Cargo.lock', 'candidate/rust/rust-toolchain.toml') }}-${{ steps.source.outputs.commit }}
-        restore-keys: |
-          ${{ inputs.cache_namespace }}-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('candidate/rust/Cargo.lock', 'candidate/rust/rust-toolchain.toml') }}-
-          ${{ inputs.cache_namespace }}-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+    # No Cargo build cache: callers run on pull_request events, so saved entries
+    # stay in PR-scoped caches that other PRs never restore while each one
+    # still costs about 400 MB of the repository cache quota.
     - name: Install the candidate's pinned Rust toolchain
       if: steps.rust-package-cache.outputs.cache-hit != 'true'
       shell: bash
