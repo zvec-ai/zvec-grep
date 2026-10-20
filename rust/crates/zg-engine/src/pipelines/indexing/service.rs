@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use zg_host_native::NativeScanner;
 
@@ -289,13 +289,27 @@ impl WorkspaceIndexService {
             .iter()
             .map(|model| model as &dyn IndexEmbeddingRuntime)
             .collect::<Vec<_>>();
+        let completion = Arc::new(Mutex::new(None));
+        let pipeline_progress = options.on_progress.as_ref().map(|reporter| {
+            let reporter = reporter.clone();
+            let completion = Arc::clone(&completion);
+            crate::api::index::progress::IndexProgressReporter::new(move |progress| {
+                if progress.phase == crate::api::index::progress::IndexProgressPhase::Done {
+                    *completion
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(progress);
+                } else {
+                    reporter.report(progress);
+                }
+            })
+        });
         let result = index_workspace(&IndexingContext {
             workspace_index: &manifest.workspace,
             storage: &writer.session.storage,
             scanner: &self.scanner,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
-            on_progress: options.on_progress,
+            on_progress: pipeline_progress,
             signal: options.signal.clone(),
             changes: &options.changes,
         })
@@ -330,6 +344,14 @@ impl WorkspaceIndexService {
         } else {
             manifest.record_update(now);
             write_workspace_manifest(&manifest.path, &manifest)?;
+        }
+        // Completion is observable only after storage has closed and publication succeeded.
+        let completed = completion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let (Some(reporter), Some(progress)) = (&options.on_progress, completed) {
+            reporter.report(progress);
         }
         Ok(indexed)
     }
@@ -1024,6 +1046,49 @@ mod tests {
             .expect_err("workspace requires a directory");
         assert!(error.message().contains("existing directory"));
         assert_eq!(models.snapshot().cached_runtimes, 0);
+    }
+
+    #[tokio::test]
+    async fn completion_progress_is_sent_only_after_successful_publication() {
+        use crate::api::index::progress::{IndexProgressPhase, IndexProgressReporter};
+        for fail in [false, true] {
+            let directory = tempdir().expect("workspace");
+            let mut service = WorkspaceIndexService::with_test_registry();
+            service.fail_index_completion = fail;
+            let models = ModelRuntimeManager::new();
+            let home = directory.path().join(".zvec-grep");
+            let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let captured = observed.clone();
+            let result = service
+                .index(
+                    &models,
+                    IndexOptions {
+                        root: Some(directory.path().to_path_buf()),
+                        embedding: Some(EmbeddingModelSpec {
+                            reference: "local/potion-code-16m-v2".into(),
+                            revision: None,
+                            cache_dir: None,
+                            endpoint: None,
+                            device: Device::Cpu,
+                        }),
+                        on_progress: Some(IndexProgressReporter::new(move |progress| {
+                            if progress.phase == IndexProgressPhase::Done {
+                                assert!(
+                                    super::read_workspace_manifest(&home)
+                                        .expect("published metadata")
+                                        .is_some()
+                                );
+                                captured.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(observed.load(std::sync::atomic::Ordering::Acquire), !fail);
+            models.close();
+        }
     }
 
     #[tokio::test]

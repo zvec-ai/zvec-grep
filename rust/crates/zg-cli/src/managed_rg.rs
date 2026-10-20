@@ -19,13 +19,26 @@ pub enum ManagedRgArgumentError {
     InvalidOptionValue { option: String, value: String },
 }
 
-/// Parses the safe managed-ripgrep argument dialect used by the CLI.
+/// Parses the managed-ripgrep content-search dialect shared with MCP.
 ///
 /// # Errors
 ///
 /// Returns [`ManagedRgArgumentError`] for missing patterns, invalid values,
 /// unsupported options, or options that replace managed output formatting.
 pub fn parse_managed_rg_args(args: &[String]) -> Result<ContextOptions, ManagedRgArgumentError> {
+    Ok(parse_rg_args(args, false)?.request)
+}
+
+pub(crate) struct ParsedRgArgs {
+    pub request: ContextOptions,
+    pub files: bool,
+    pub null: bool,
+}
+
+pub(crate) fn parse_rg_args(
+    args: &[String],
+    allow_files: bool,
+) -> Result<ParsedRgArgs, ManagedRgArgumentError> {
     let mut request = ContextOptions {
         rg: true,
         ..ContextOptions::default()
@@ -34,6 +47,8 @@ pub fn parse_managed_rg_args(args: &[String]) -> Result<ContextOptions, ManagedR
     let mut options_finished = false;
     let mut positionals = Vec::new();
     let mut unrestricted = 0;
+    let mut files = false;
+    let mut null = false;
     while index < args.len() {
         let arg = &args[index];
         if options_finished || !arg.starts_with('-') || arg == "-" {
@@ -54,10 +69,18 @@ pub fn parse_managed_rg_args(args: &[String]) -> Result<ContextOptions, ManagedR
             } else if inline.is_some() {
                 return Err(ManagedRgArgumentError::UnsupportedOption(arg.clone()));
             } else {
-                apply_switch(&name, &mut request)?;
+                match name.as_str() {
+                    "--files" if allow_files => files = true,
+                    "--null" if allow_files => null = true,
+                    _ => apply_switch(&name, &mut request)?,
+                }
             }
         } else {
             for (offset, flag) in arg.char_indices().skip(1) {
+                if flag == '0' && allow_files {
+                    null = true;
+                    continue;
+                }
                 if flag == 'u' {
                     unrestricted += 1;
                     request.no_ignore = true;
@@ -88,14 +111,62 @@ pub fn parse_managed_rg_args(args: &[String]) -> Result<ContextOptions, ManagedR
         }
         index += 1;
     }
-    if request.queries.is_empty() && request.rg_options.pattern_files.is_empty() {
+    if null && !files {
+        return Err(ManagedRgArgumentError::OutputOption("--null".into()));
+    }
+    if !files && request.queries.is_empty() && request.rg_options.pattern_files.is_empty() {
         if positionals.is_empty() {
             return Err(ManagedRgArgumentError::MissingPattern);
         }
         request.query = Some(positionals.remove(0));
     }
     request.rg_paths = positionals.into_iter().map(PathBuf::from).collect();
-    Ok(request)
+    Ok(ParsedRgArgs {
+        request,
+        files,
+        null,
+    })
+}
+
+pub(crate) fn files_options(request: ContextOptions) -> zg_engine::api::files::FilesOptions {
+    let options = request.rg_options;
+    zg_engine::api::files::FilesOptions {
+        root: request.root,
+        paths: request.rg_paths,
+        globs: request
+            .globs
+            .into_iter()
+            .map(|pattern| zg_engine::api::context::options::RgGlob {
+                pattern,
+                case_insensitive: false,
+            })
+            .chain(request.insensitive_globs.into_iter().map(|pattern| {
+                zg_engine::api::context::options::RgGlob {
+                    pattern,
+                    case_insensitive: true,
+                }
+            }))
+            .chain(options.glob_rules)
+            .collect(),
+        glob_case_insensitive: options.glob_case_insensitive,
+        file_types: request.file_types,
+        excluded_file_types: request.excluded_file_types,
+        hidden: request.hidden,
+        no_ignore: request.no_ignore,
+        no_ignore_dot: options.no_ignore_dot,
+        no_ignore_files: options.no_ignore_files,
+        no_ignore_global: options.no_ignore_global,
+        no_ignore_parent: options.no_ignore_parent,
+        no_ignore_vcs: options.no_ignore_vcs,
+        ignore_files: request.ignore_files,
+        max_depth: request.max_depth,
+        max_file_size_bytes: request.max_file_size_bytes,
+        follow: request.follow,
+        one_file_system: options.one_file_system,
+        modified_after_epoch_ms: options.modified_after_epoch_ms,
+        modified_before_epoch_ms: options.modified_before_epoch_ms,
+        signal: request.signal,
+    }
 }
 
 fn short_option(flag: char) -> Option<&'static str> {
@@ -371,6 +442,7 @@ mod tests {
             "--mmap",
             "--smart-case=true",
             "--json",
+            "--files",
         ] {
             assert!(
                 parse_managed_rg_args(&[flag.into(), "needle".into()]).is_err(),

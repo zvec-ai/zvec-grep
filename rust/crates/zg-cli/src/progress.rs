@@ -110,7 +110,7 @@ impl ProgressOutput {
 
     fn finish(&mut self) -> io::Result<()> {
         if !self.finished && self.terminal && self.last.is_some() {
-            writeln!(self.writer)?;
+            write!(self.writer, "\r\n")?;
             self.writer.flush()?;
         }
         self.finished = true;

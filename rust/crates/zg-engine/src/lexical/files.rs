@@ -1,0 +1,138 @@
+use std::path::{Path, PathBuf};
+
+use crate::{
+    EngineError, EngineResult,
+    api::{
+        context::options::RgOptions,
+        files::{FilesOptions, FilesResult},
+    },
+};
+
+use super::{
+    CheckedPaths, build_walker, check_cancelled, matches_modified_time, run_blocking,
+    types::{LexicalOptions, LexicalSearchRequest},
+};
+
+pub(crate) async fn list(options: FilesOptions) -> EngineResult<FilesResult> {
+    let root = std::path::absolute(options.root.as_deref().unwrap_or_else(|| Path::new(".")))
+        .map_err(|error| EngineError::from_io("failed to resolve file discovery root", &error))?;
+    let signal = options.signal.as_ref().map_or_else(
+        tokio_util::sync::CancellationToken::new,
+        tokio_util::sync::CancellationToken::child_token,
+    );
+    let _cancel_on_drop = signal.clone().drop_guard();
+    let request = LexicalSearchRequest {
+        signal: Some(signal),
+        paths: options.paths,
+        options: LexicalOptions {
+            matching: RgOptions {
+                glob_rules: options.globs,
+                glob_case_insensitive: options.glob_case_insensitive,
+                no_ignore_dot: options.no_ignore_dot,
+                no_ignore_files: options.no_ignore_files,
+                no_ignore_global: options.no_ignore_global,
+                no_ignore_parent: options.no_ignore_parent,
+                no_ignore_vcs: options.no_ignore_vcs,
+                one_file_system: options.one_file_system,
+                ..RgOptions::default()
+            },
+            hidden: options.hidden,
+            no_ignore: options.no_ignore,
+            follow: options.follow,
+            file_types: options.file_types,
+            excluded_file_types: options.excluded_file_types,
+            ignore_files: options.ignore_files,
+            max_depth: options.max_depth,
+            max_file_size_bytes: options.max_file_size_bytes,
+            modified_after_epoch_ms: options.modified_after_epoch_ms,
+            modified_before_epoch_ms: options.modified_before_epoch_ms,
+            ..LexicalOptions::default()
+        },
+        ..LexicalSearchRequest::default()
+    };
+    check_cancelled(&request)?;
+    run_blocking(move || list_sync(&root, request)).await
+}
+
+fn list_sync(root: &Path, mut request: LexicalSearchRequest) -> EngineResult<FilesResult> {
+    let implicit_root = request.paths.is_empty();
+    let inputs = if implicit_root {
+        vec![PathBuf::from(".")]
+    } else {
+        std::mem::take(&mut request.paths)
+    };
+    let mut result = FilesResult::default();
+    for input in inputs {
+        check_cancelled(&request)?;
+        if input.as_os_str().is_empty() {
+            result
+                .errors
+                .push("file discovery input path must not be empty".into());
+            continue;
+        }
+        if input == Path::new("-") {
+            result.paths.push(PathBuf::from("<stdin>"));
+            continue;
+        }
+        request.paths = vec![input.clone()];
+        // Let the walker report missing or inaccessible inputs rather than skipping them.
+        let checked = CheckedPaths {
+            existing: request.paths.clone(),
+            missing: Vec::new(),
+        };
+        let walker = build_walker(root, &request, &checked, 1)?;
+        for entry in walker.build() {
+            check_cancelled(&request)?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    result.errors.push(error.to_string());
+                    continue;
+                }
+            };
+            if let Some(error) = entry.error() {
+                result.errors.push(error.to_string());
+            }
+            let file = entry.file_type().is_some_and(|kind| kind.is_file())
+                || (entry.depth() == 0 && entry.path().is_file());
+            if !file || !matches_modified_time(entry.path(), &request) {
+                continue;
+            }
+            let path = entry.into_path();
+            result.paths.push(if input.is_absolute() {
+                path
+            } else if implicit_root {
+                path.strip_prefix(root).unwrap_or(&path).to_path_buf()
+            } else {
+                let base = root.join(&input);
+                let suffix = path.strip_prefix(&base).unwrap_or(&path);
+                if suffix.as_os_str().is_empty() {
+                    input.clone()
+                } else {
+                    input.join(suffix)
+                }
+            });
+        }
+    }
+    check_cancelled(&request)?;
+    result.paths.sort();
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_discovery_returns_before_traversal() {
+        let signal = tokio_util::sync::CancellationToken::new();
+        signal.cancel();
+        let error = list(FilesOptions {
+            signal: Some(signal),
+            ..FilesOptions::default()
+        })
+        .await
+        .expect_err("cancelled discovery");
+        assert_eq!(error.code(), EngineError::CANCELLED);
+    }
+}

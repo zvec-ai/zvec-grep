@@ -49,6 +49,8 @@ pub struct CodeMetadata {
     pub symbol_type: Option<SymbolType>,
     pub symbol_name: Option<String>,
     pub scope: Option<String>,
+    /// Declaration syntax without comments, attributes, decorators or implementation bodies.
+    /// Literal types and parameter defaults remain part of the declaration.
     pub signature: Option<String>,
     pub documentation: Option<String>,
     pub visibility: Option<Visibility>,

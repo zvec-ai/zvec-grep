@@ -21,6 +21,7 @@ mod workspace;
 
 use api::{
     context::{ContextOptions, ContextResult},
+    files::{FilesOptions, FilesResult},
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
 };
@@ -56,6 +57,13 @@ impl ZvecGrep {
             .map_err(|error| error.report_here())
     }
 
+    /// Enumerates current files without reading source contents or opening an index.
+    pub async fn files(&self, options: FilesOptions) -> EngineResult<FilesResult> {
+        lexical::files::list(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
     /// Queries an index after a resident coordinator has completed its refresh.
     /// The caller must drain delivered watcher events and wait for indexing
     /// before each call. OS notifications still in flight are outside that
@@ -81,6 +89,17 @@ impl ZvecGrep {
     pub async fn info(&self, options: InfoOptions) -> EngineResult<InfoResult> {
         self.service
             .info(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Lists index model choices without loading models, downloading or writing state.
+    pub async fn index_setup(
+        &self,
+        options: api::index::setup::IndexSetupOptions,
+    ) -> EngineResult<api::index::setup::IndexSetup> {
+        self.service
+            .index_setup(options)
             .await
             .map_err(|error| error.report_here())
     }

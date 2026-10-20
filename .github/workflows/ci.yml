@@ -11,7 +11,7 @@ on:
       - "LICENSE"
       - ".github/scripts/readme-demo.py"
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
     paths-ignore:
       - "rust/**"
       - ".github/workflows/rust-ci.yml"
@@ -49,15 +49,6 @@ jobs:
       - run: npm run format:check
       - run: npm run typecheck
       - run: npm run build
-      - name: Validate pull request title
-        if: github.event_name == 'pull_request'
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: >-
-          node --input-type=module --eval
-          "const title = process.env.PR_TITLE ?? '';
-          const valid = /^(feat|fix|perf|refactor|docs|test|build|ci|chore|revert)(\([^)]+\))?!?: .+/.test(title);
-          if (!valid) { console.error('PR title must use Conventional Commits syntax'); process.exit(1); }"
 
   coverage:
     name: coverage

@@ -12,6 +12,28 @@ use zg_engine::api::context::{
     },
 };
 
+/// Writes only native file paths, separated by newlines or NUL bytes.
+///
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_file_paths(
+    mut writer: impl Write,
+    paths: &[std::path::PathBuf],
+    null: bool,
+) -> io::Result<()> {
+    for path in paths {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            writer.write_all(path.as_os_str().as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        writer.write_all(path.to_string_lossy().as_bytes())?;
+        writer.write_all(if null { b"\0" } else { b"\n" })?;
+    }
+    writer.flush()
+}
+
 /// Writes a context reply in the stable CLI text layout.
 ///
 /// # Errors
@@ -331,6 +353,7 @@ Management:
   --version      Print the installed version
 
 Bare words such as query, index, and help are literal search text.
+Positional words are joined into one query; repeat --hybrid for separate queries.
 Terminal searches use human-readable output and full previews; pipes use compact
 output. Use --compact to force compact output.
 
@@ -338,6 +361,7 @@ Examples:
   zg "where authentication is validated"
   zg --fts "AuthService"
   zg --rg -F "AuthService" src
+  zg --rg --files src -g '*.ts'
   zg --index --embedding local/potion-code-16m-v2
   zg --status
   zg --auth status
@@ -361,14 +385,28 @@ const SEARCH_HELP: &str = r#"Usage:
   zg <query> [options]
   zg --hybrid <query> --fts <query> --vector <query> [--fuse]
   zg --rg [rg-options] <pattern> [path...]
+  zg --rg --files [discovery-options] [path...]
 
 Search routes:
-  positional query                  Hybrid FTS and vector search
+  positional words                  Joined into one hybrid FTS and vector query
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
   --fuse                            Fuse all query groups into one ranked list
   --rg                              Run exhaustive managed ripgrep
+
+Positional arguments are joined with spaces, even if separately quoted:
+  zg connection pool timeout                 One query: connection pool timeout
+  zg "connection pool" "timeout"             The same query, with a warning
+  zg "connection pool" "socket timeout"      One query, with a warning
+  zg --hybrid "connection pool" --hybrid "socket timeout"
+                                            Two explicit queries
+The warning is written to stderr when multiple nonempty positional arguments
+include one with internal whitespace. Shell quote characters are not available.
+--hybrid, --fts, and --vector remain separate, repeatable queries.
+Managed --rg keeps its pattern and path arguments separate.
+With --files, every positional argument is an input file or directory; no pattern
+is required. Use -g 'auth.ts' to select files by name.
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
@@ -405,6 +443,12 @@ Managed --rg uses the embedded Rust regex engine (--engine default).
 Matching: -F, -i/-s/-S, -w/-x, -v, -U, --multiline-dotall, --crlf, -a.
 Bounds: -A/-B/-C, -m/--max-count (per file), -j/--threads (0 = automatic).
 Discovery: -u/-uu/-uuu, --no-ignore-*, --one-file-system, globs and types.
+File listing: --files prints all selected paths without reading their contents;
+-0/--null uses NUL separators. No index or daemon is needed in any client mode.
+The list is sorted and has no headings or result limit. Recursive discovery
+skips .git and .zvec-grep; explicit file inputs are still listed.
+--limit is rejected with --files.
+Exit status for --files: 0 = files found, 1 = no files, 2 = discovery error.
 Patterns preserve whitespace; -e accepts empty patterns and leading "-".
 Unicode BOM decoding is automatic. PCRE2, compressed search, explicit encoding,
 and options that replace rg's output format are not supported.
@@ -480,8 +524,12 @@ existing workspace renames it while preserving file IDs and active storage.
 This version indexes text only with one embedding model per workspace.
 Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured
 default when creating a new index.
-Search automatically creates a missing index with a configured local model or
-local/potion-code-16m-v2, never a remote model.
+Interactive searches prompt to select an embedding model before creating a
+missing index. Local and remote models have separate tabs; downloaded local
+models and configured remote models appear first. Use arrows or Tab to switch,
+Enter to confirm, and Esc to exit. Remote models require data authorization.
+CLI searches wait for the complete index, including in --mode server.
+Non-interactive searches never create an index; run zg --index first.
 Model changes require --rebuild. Failed files are recorded; successful files
 remain searchable after a rebuild. Compatible indexes reuse their stored model.
 Rebuilding an incompatible index uses --embedding or the configured default;
@@ -844,6 +892,16 @@ mod output_tests {
         ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource,
         MatchedBy,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn file_output_preserves_non_utf8_path_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"file-\xff.ts".to_vec()));
+        let mut output = Vec::new();
+        write_file_paths(&mut output, &[path], true).expect("file output");
+        assert_eq!(output, b"file-\xff.ts\0");
+    }
 
     fn indexed_item() -> ContextItem {
         ContextItem {

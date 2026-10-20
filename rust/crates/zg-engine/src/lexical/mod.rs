@@ -1,5 +1,6 @@
 //! File scanning and matching backed by ripgrep's embedded `grep` crates.
 
+pub(crate) mod files;
 pub(crate) mod types;
 
 use std::{

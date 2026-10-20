@@ -105,6 +105,14 @@ impl EngineService {
         self.indexing.info(options).await
     }
 
+    pub(crate) async fn index_setup(
+        &self,
+        options: crate::api::index::setup::IndexSetupOptions,
+    ) -> Result<crate::api::index::setup::IndexSetup, EngineError> {
+        self.ensure_open()?;
+        crate::pipelines::indexing::setup::index_setup(options).await
+    }
+
     /// Drops the persisted workspace index.
     ///
     /// # Errors

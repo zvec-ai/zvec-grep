@@ -221,7 +221,10 @@ async fn stream_index(
             let _ = progress_sender.try_send(IndexStreamEvent::Progress(progress));
         },
     ));
+    let signal = state.shutdown.child_token();
+    options.signal = Some(signal.clone());
     tokio::spawn(async move {
+        let _guard = signal.clone().drop_guard();
         let initial = zg_engine::api::index::progress::IndexProgress {
             phase: zg_engine::api::index::progress::IndexProgressPhase::Indexing,
             files_total: None,
@@ -231,8 +234,16 @@ async fn stream_index(
             embedding: None,
         };
         let _ = sender.send(IndexStreamEvent::Progress(initial)).await;
-        let (_, Json(result)) =
-            execute_command(State(state), headers, Json(DaemonCommand::Index(options))).await;
+        let operation = execute_command(State(state), headers, Json(DaemonCommand::Index(options)));
+        tokio::pin!(operation);
+        let (_, Json(result)) = tokio::select! {
+            result = &mut operation => result,
+            () = sender.closed() => {
+                // Cancelling an exclusive foreground request must reach its engine job.
+                signal.cancel();
+                operation.await
+            }
+        };
         let _ = sender.send(IndexStreamEvent::Finished(result)).await;
     });
     let stream = futures::stream::unfold(receiver, |mut receiver| async {
@@ -269,6 +280,13 @@ async fn execute_command(
         );
     }
     let result = match command {
+        DaemonCommand::IndexSetup(options) => engine_execution(
+            state
+                .engine
+                .index_setup(options)
+                .await
+                .map(DaemonReply::IndexSetup),
+        ),
         DaemonCommand::QueryAuthorization(request) => engine_execution(
             zg_engine::authorization::query_authorizations(&request)
                 .map(DaemonReply::QueryAuthorization),

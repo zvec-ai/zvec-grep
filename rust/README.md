@@ -7,6 +7,22 @@ and [user documentation](../docs/README.md) describe that implementation.
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 
+The Rust CLI joins positional words into one hybrid query:
+`zg connection pool timeout` is equivalent to `zg "connection pool timeout"`.
+Separately quoted positional arguments also merge: both
+`zg "connection pool" "timeout"` and `zg "connection pool" "socket timeout"`
+produce one query. When at least two nonempty positional arguments include a
+phrase with internal whitespace, a warning on stderr explains the merge and
+recommends explicit queries, such as
+`zg --hybrid "connection pool" --hybrid "socket timeout"`.
+Shell quote characters are not available to the CLI, so separately quoted single
+words behave like unquoted words without a warning. Each positional argument is
+trimmed, empty arguments are ignored, and the remaining parts are joined with one
+space while preserving internal whitespace. Existing scripts relying on multiple
+positional query groups should switch to repeated `--hybrid` flags. Explicit
+`--hybrid`, `--fts`, and `--vector` queries stay separate. Direct and Server modes
+use the same parsing; managed `--rg` retains its pattern/path syntax.
+
 This workspace preserves its own crates, scripts, compatibility fixtures, and
 benchmarks. The application API is centered on one reusable `ZvecGrep` engine
 value:
@@ -162,6 +178,40 @@ piped output is compact. `--compact` forces compact output, and
 `--preview=full` explicitly requests full previews even in compact output.
 The former `--human` option is no longer accepted.
 
+When an interactive search finds no index, it asks you to choose an embedding
+model before building. The picker has **Local models** and **Remote models** tabs:
+downloaded local models and globally configured remote models appear first.
+Use ↑/↓ to select, ←/→ or Tab to switch, Enter to confirm and Esc to exit.
+Each tab keeps its selection when switching. A valid model preference selects the
+initial tab; without one the picker opens Local models. Remote models show whether
+credentials are available. Selecting one with missing credentials opens a masked
+API Key prompt, with paste, Backspace, Ctrl+U to clear and Esc to exit. Enter saves
+a non-empty key to the provider's global configuration and continues to remote
+authorization. The new key is used for both the build and following CLI query.
+
+Local selection starts the build. Remote selection first discloses the workspace,
+model, endpoint, data sent and possible API charges, then offers Allow once, Allow
+for this workspace, or Back to model selection. Existing matching workspace consent
+skips this step. Allow once covers the CLI build and the following query without
+persisting a grant. Esc exits either screen before any workspace content is sent.
+
+CLI searches display model preparation/download and file indexing progress and wait
+for the full index to be published before running the original search. This also
+applies to `--mode server`, where the CLI follows the daemon's background job.
+Non-interactive searches never create a missing index; initialize it explicitly
+with `zg --index --embedding <model>` first. Empty workspaces do not download models.
+
+On MCP connections with background scheduling and form elicitation, missing-index
+searches ask the user to select a model and authorize remote use when needed.
+MCP model choices require credentials to be configured beforehand.
+Acceptance submits a background build and returns its job ID immediately; retry
+search after completion. Allow once covers that background build only. Later search
+requests report current build progress without repeating model selection. Unsupported
+clients receive CLI initialization instructions. Native terminal tabs and Escape
+handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exact
+`requestState` and unchanged tool arguments with `inputResponses.index_setup`;
+each model selection or remote authorization round issues a new, single-use state.
+
 This version indexes text with one embedding model per workspace. Choose it with
 `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use
@@ -193,7 +243,32 @@ automatic thread count. Ignore controls include `-u`/`-uu`/`-uuu`,
 `--no-ignore-parent`, and `--no-ignore-vcs`. Managed search still excludes its
 internal directories. The full MCP toolset uses the same argument parser and
 engine. PCRE2, compressed-file search, explicit encoding selection, and native
-ripgrep output-format switches are rejected; Unicode BOM decoding is automatic.
+ripgrep output-format switches other than file listing are rejected; Unicode
+BOM decoding is automatic.
+
+Use `zg --rg --files` for explicit file discovery:
+
+```sh
+zg --rg --files
+zg --rg --files -g 'auth.ts'
+zg --rg --files src -g '*.ts' -g '!*.test.ts'
+zg --rg --files -t rust -0
+```
+
+Every positional argument is an input file or directory, so `auth.ts` by itself
+selects that input path; `-g 'auth.ts'` finds that name throughout the inputs.
+Discovery reuses managed rg's glob, type, ignore, hidden, symlink, depth, size,
+and modification-time filters. It reads filesystem metadata and ignore rules,
+without opening source contents, loading models, or opening an index. All client
+modes run locally. Output contains all selected paths in sorted order, one per
+line or NUL-delimited with `-0`/`--null`, without headings or match metadata.
+Absolute inputs retain absolute output paths; relative inputs retain relative
+paths. `--limit` is rejected to avoid silently truncating the enumeration.
+Exit status is 0 when files are found, 1 for an empty list, and 2 for a discovery
+error; traversal errors go to stderr while accessible paths remain on stdout.
+Like managed content search, recursive discovery skips `.git` and `.zvec-grep`;
+explicit file inputs are still listed.
+This is a CLI entry point; the MCP rg tool retains its content-search contract.
 
 ## Remote embedding authorization
 

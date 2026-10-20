@@ -62,11 +62,23 @@ pub(crate) async fn post_index_stream(
     uri: &str,
     body: Vec<u8>,
     reporter: &zg_engine::api::index::progress::IndexProgressReporter,
+    signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<zg_daemon_protocol::ExecutionResult, DaemonError> {
     use zg_daemon_protocol::IndexStreamEvent;
-    let mut response = post_response(uri, body).await?.into_body();
+    let mut response = tokio::select! {
+        biased;
+        () = index_cancelled(signal) => return Err(zg_engine::EngineError::cancelled("Indexing cancelled").into()),
+        response = post_response(uri, body) => response?.into_body(),
+    };
     let mut pending = Vec::new();
-    while let Some(frame) = response.frame().await {
+    loop {
+        let frame = tokio::select! {
+            frame = response.frame() => frame,
+            () = index_cancelled(signal) => return Err(zg_engine::EngineError::cancelled("Indexing cancelled").into()),
+        };
+        let Some(frame) = frame else {
+            break;
+        };
         let frame = frame.map_err(|error| DaemonError::McpBridge(error.to_string()))?;
         if let Ok(data) = frame.into_data() {
             for byte in data {
@@ -90,6 +102,13 @@ pub(crate) async fn post_index_stream(
     Err(DaemonError::McpBridge(
         "Index progress stream ended without a result".into(),
     ))
+}
+
+async fn index_cancelled(signal: Option<&tokio_util::sync::CancellationToken>) {
+    match signal {
+        Some(signal) => signal.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -439,6 +458,7 @@ mod tests {
                 &format!("http://{address}/admin/index"),
                 b"{}".to_vec(),
                 &reporter,
+                None,
             )
             .await
         });
@@ -481,11 +501,46 @@ mod tests {
             &format!("http://{address}/admin/index"),
             b"{}".to_vec(),
             &reporter,
+            None,
         )
         .await
         .expect_err("missing final result");
         assert!(error.to_string().contains("without a result"));
         server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn index_stream_cancellation_interrupts_an_unfinished_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let address = listener.local_addr().expect("address");
+            let (ready, received) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(stream.read_u8().await.expect("request header"));
+                }
+                let mut body = [0; 2];
+                stream.read_exact(&mut body).await.expect("request body");
+                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.expect("response headers");
+                ready.send(()).expect("ready");
+                let mut discarded = Vec::new();
+                let _ = stream.read_to_end(&mut discarded).await;
+            });
+            let signal = tokio_util::sync::CancellationToken::new();
+            let client_signal = signal.clone();
+            let client = tokio::spawn(async move {
+                let reporter = zg_engine::api::index::progress::IndexProgressReporter::new(|_| {});
+                super::post_index_stream(&format!("http://{address}/admin/index"), b"{}".to_vec(), &reporter, Some(&client_signal)).await
+            });
+            received.await.expect("response started");
+            signal.cancel();
+            let error = client.await.expect("client").expect_err("cancelled stream");
+            assert!(matches!(error, crate::DaemonError::Engine(error) if error.code() == zg_engine::EngineError::CANCELLED));
+            server.await.expect("server");
+        }).await.expect("cancelled connection must close");
     }
 
     #[test]

@@ -1,12 +1,13 @@
 //! MCP transport adapter for the public agent and full toolsets.
 //!
-//! This crate owns MCP schemas and formatting only. It translates tool input
+//! This crate owns MCP schemas, formatting and user-mediated index setup. It translates tool input
 //! into typed requests executed by the engine or the resident workspace provider.
 
 mod consent;
 mod request;
 mod rg_format;
 mod search_format;
+mod setup;
 
 pub use search_format::SearchPreview;
 
@@ -95,9 +96,10 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     workspace_evidence_rules!(),
     search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
+    "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.\n",
     "- When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.\n",
-    "- When an index is missing and literal or regex search can answer the task, use native Grep or rg. Creating or rebuilding a persistent index requires explicit user authorization.",
+    "- When an index is missing, search can ask the user to choose an embedding model and approve a background build. Only explicit user confirmation creates an index. Read the returned indexing state and retry search after completion; use native Grep or rg only when literal lookup answers the task.",
 );
 
 pub const FULL_INSTRUCTIONS: &str = concat!(
@@ -105,6 +107,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     workspace_evidence_rules!(),
     search_routing_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
+    "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
     "- Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
     "- When results are served_from_current_index, use them immediately when they are sufficient; do not call status merely because a background refresh is active.\n",
@@ -194,6 +197,9 @@ pub struct IndexRuntimeSnapshot {
 
 #[async_trait]
 pub trait IndexOperationProvider: Send + Sync {
+    fn supports_background_indexing(&self) -> bool {
+        false
+    }
     async fn submit_index(
         &self,
         options: IndexOptions,
@@ -259,6 +265,7 @@ pub struct ZvecGrepMcpServer {
     toolset: McpToolset,
     router: ToolRouter<Self>,
     consent_state: Arc<consent::ContinuationState>,
+    setup_state: Arc<setup::SetupState>,
 }
 
 impl ZvecGrepMcpServer {
@@ -336,6 +343,7 @@ impl ZvecGrepMcpServer {
             toolset,
             router,
             consent_state: Arc::new(consent::ContinuationState::default()),
+            setup_state: Arc::new(setup::SetupState::default()),
         }
     }
 
@@ -349,7 +357,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_search",
-        description = "Search an existing workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: \"full\" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient.",
+        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: \"full\" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
         annotations(
             title = "Search with zvec-grep",
             read_only_hint = false,
@@ -362,14 +370,32 @@ impl ZvecGrepMcpServer {
         &self,
         Parameters(input): Parameters<SearchInput>,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         let preview = input.preview;
         let mut request = input
             .into_request()
             .map_err(|message| ErrorData::invalid_params(message, None))?;
-        if let Err(error) = consent::search(&mut request, &context).await {
-            return Ok(error_result(&error));
+        if setup::SetupState::is_continuation(&context) {
+            return self
+                .setup_state
+                .resume(
+                    &self.engine,
+                    self.index_operations.as_ref(),
+                    request,
+                    &context,
+                )
+                .await;
         }
+        if let Some(reply) = self
+            .setup_state
+            .running(request.root.as_deref(), self.index_operations.as_ref())
+        {
+            return Ok(reply.into());
+        }
+        if let Err(error) = consent::search(&mut request, &context).await {
+            return Ok(error_result(&error).into());
+        }
+        let original = request.clone();
         let result = request::run(&context, |progress, signal| {
             request.on_progress = progress;
             request.signal = Some(signal);
@@ -380,8 +406,21 @@ impl ZvecGrepMcpServer {
         Ok(match result {
             Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
                 search_format::format_search_result(&reply, preview),
-            )]),
-            Err(error) => error_result(&error),
+            )])
+            .into(),
+            Err(error) if error.code() == EngineError::NOT_FOUND => {
+                return self
+                    .setup_state
+                    .start(
+                        &self.engine,
+                        self.index_operations.as_ref(),
+                        original,
+                        &context,
+                        error,
+                    )
+                    .await;
+            }
+            Err(error) => error_result(&error).into(),
         })
     }
 
@@ -614,10 +653,19 @@ impl ServerHandler for ZvecGrepMcpServer {
             .iter()
             .any(|tool| tool.name == request.name)
         {
-            match self.consent_state.prepare(&request, &mut context) {
-                Ok(Some(result)) => return Ok(result),
-                Ok(None) => {}
-                Err(error) => return Err(error),
+            if setup::is_setup_state(&request) && request.name != AGENT_TOOL_NAME {
+                return Err(ErrorData::invalid_params(
+                    "Index setup state belongs to its original search",
+                    None,
+                ));
+            }
+            context.extensions.insert(setup::SetupCall(request.clone()));
+            if !setup::is_setup_state(&request) {
+                match self.consent_state.prepare(&request, &mut context) {
+                    Ok(Some(result)) => return Ok(result),
+                    Ok(None) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         self.router
@@ -2689,7 +2737,7 @@ mod tests {
     }
 
     #[test]
-    fn toolset_metadata_matches_node() {
+    fn toolset_metadata_preserves_node_contract_with_interactive_setup_guidance() {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../../../compat/mcp/toolsets.json"))
                 .expect("Node.js toolset metadata");
@@ -2703,8 +2751,13 @@ mod tests {
                 ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus)),
             ),
         ] {
+            let instructions = server.get_info().instructions.expect("instructions");
+            assert!(instructions.contains("Respect declined or cancelled index setup"));
+            let legacy_instructions = instructions
+                .replace("- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n", "")
+                .replace("When an index is missing, search can ask the user to choose an embedding model and approve a background build. Only explicit user confirmation creates an index. Read the returned indexing state and retry search after completion; use native Grep or rg only when literal lookup answers the task.", "When an index is missing and literal or regex search can answer the task, use native Grep or rg. Creating or rebuilding a persistent index requires explicit user authorization.");
             assert_eq!(
-                server.get_info().instructions.as_deref(),
+                Some(legacy_instructions.as_str()),
                 expected[profile]["instructions"].as_str()
             );
             let search = server
@@ -2712,8 +2765,13 @@ mod tests {
                 .into_iter()
                 .find(|tool| tool.name == AGENT_TOOL_NAME)
                 .expect("search tool");
+            let description = search.description.expect("search description");
+            assert!(description.contains("accepted setup starts a background build"));
+            let legacy_description = description
+                .replace("Search a workspace index", "Search an existing workspace index")
+                .replace(" A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.", "");
             assert_eq!(
-                search.description.as_deref(),
+                Some(legacy_description.as_str()),
                 expected[profile]["search_description"].as_str()
             );
         }

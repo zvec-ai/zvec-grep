@@ -291,8 +291,9 @@ test("the selected source is built from rust/ and exact-commit package caching b
   assert.match(rustAction, /ref: \$\{\{ inputs\.candidate_ref \}\}/);
   assert.match(rustAction, /path: candidate/);
   assert.match(rustAction, /working-directory: candidate\/rust/);
-  assert.match(rustAction, /candidate\/rust\/target\//);
-  assert.match(rustAction, /candidate\/rust\/Cargo\.lock/);
+  // PR-scoped Cargo caches are never restored by other PRs, so only the
+  // commit-bound package is cached.
+  assert.doesNotMatch(rustAction, /candidate\/rust\/target\//);
   assert.match(
     rustAction,
     /\$\{\{ inputs\.cache_namespace \}\}-package-v1-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ steps\.source\.outputs\.commit \}\}/,

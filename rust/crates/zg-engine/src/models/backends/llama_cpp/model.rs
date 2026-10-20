@@ -31,7 +31,8 @@ use crate::domain::model::{
 };
 use crate::models::{
     artifacts::{
-        ArtifactSource, ModelDownloadProgressReporter, ResolveArtifacts, resolve_model_artifacts,
+        ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
+        default_model_cache, resolve_model_artifacts,
     },
     catalog::LlamaCppConfig,
     runtime::ModelComputeRuntime,
@@ -127,7 +128,7 @@ impl LlamaCppEmbeddingModel {
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
-            .unwrap_or_else(default_model_cache_dir);
+            .unwrap_or_else(|| default_model_cache(LocalModelBackend::LlamaCpp));
         Self {
             entry,
             info: EmbeddingModelInfo {
@@ -887,22 +888,6 @@ async fn validate_gguf_file(path: &Path, uri: &str) -> Result<(), ModelError> {
             path.display()
         )),
     ))
-}
-
-fn default_model_cache_dir() -> PathBuf {
-    env::var_os("ZVEC_GREP_HOME")
-        .map(PathBuf::from)
-        .or_else(default_home)
-        .unwrap_or_else(|| PathBuf::from(".zvec-grep"))
-        .join("models")
-}
-
-fn default_home() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let home = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME"));
-    #[cfg(not(windows))]
-    let home = env::var_os("HOME");
-    home.map(PathBuf::from).map(|home| home.join(".zvec-grep"))
 }
 
 #[cfg(test)]
