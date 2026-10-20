@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply, ErrorReply, ExecutionResult};
-use zg_engine::ZvecGrep;
+use zg_engine::{
+    ZvecGrep,
+    api::relationships::{RelationshipDirection, RelationshipOptions},
+};
 use zg_transport_mcp::{
     IndexOperationProvider, McpToolset, ServerStatusProvider, ServerStatusSnapshot,
     ZvecGrepMcpServer,
@@ -313,6 +316,12 @@ async fn execute_command(
                     .map(|reply| DaemonReply::Context(Box::new(reply))),
             )
         }
+        DaemonCommand::Callers(request) => {
+            execute_relationships(&state, RelationshipDirection::Callers, request).await
+        }
+        DaemonCommand::Callees(request) => {
+            execute_relationships(&state, RelationshipDirection::Callees, request).await
+        }
         DaemonCommand::Index(request) => match state.runtimes.submit_index(request, true).await {
             Ok(submitted) if submitted.job.state == JobState::Succeeded => {
                 submitted.result.map_or_else(
@@ -466,6 +475,26 @@ async fn wait_for_shutdown_signal() {
 #[cfg(not(unix))]
 async fn wait_for_shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn execute_relationships(
+    state: &ControlState,
+    direction: RelationshipDirection,
+    mut request: RelationshipOptions,
+) -> ExecutionResult {
+    let signal = state.shutdown.child_token();
+    let _guard = signal.clone().drop_guard();
+    request.signal = Some(signal);
+    engine_execution(
+        state
+            .engine
+            .relationships(direction, request)
+            .await
+            .map(|result| match direction {
+                RelationshipDirection::Callers => DaemonReply::Callers(result),
+                RelationshipDirection::Callees => DaemonReply::Callees(result),
+            }),
+    )
 }
 
 #[cfg(test)]

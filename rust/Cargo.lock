@@ -4524,6 +4524,7 @@ dependencies = [
  "cc",
  "clap",
  "llama-cpp-sys-2",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

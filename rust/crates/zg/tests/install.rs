@@ -186,6 +186,22 @@ fn qoder_manages_owned_permissions_and_both_clients() {
             .iter()
             .any(|rule| rule == "mcp__zvec_grep__zvec_grep_search")
     );
+    for tool in ["callers", "callees"] {
+        assert!(
+            parsed["permissions"]["allow"]
+                .as_array()
+                .expect("allow")
+                .iter()
+                .any(|rule| rule == &format!("mcp__zvec_grep__{tool}"))
+        );
+        assert!(
+            parsed["mcpServers"]["zvec_grep"]["alwaysAllow"]
+                .as_array()
+                .expect("alwaysAllow")
+                .iter()
+                .any(|rule| rule == tool)
+        );
+    }
     assert_eq!(parsed["mcpServers"]["zvec_grep"]["trust"], true);
     assert!(
         json(&ide)["mcpServers"]["zvec_grep"]["command"]
@@ -276,7 +292,7 @@ fn qoder_force_drops_unmanaged_always_allow_tools() {
     let installed = json(&settings);
     assert_eq!(
         installed["mcpServers"]["zvec_grep"]["alwaysAllow"],
-        serde_json::json!(["zvec_grep_search", "zvec_grep_rg"])
+        serde_json::json!(["zvec_grep_search", "zvec_grep_rg", "callers", "callees"])
     );
 }
 
@@ -366,6 +382,9 @@ fn claude_opencode_and_cursor_match_the_typescript_shapes() {
         claude_settings["permissions"]["deny"],
         serde_json::json!(["Bash(rm *)"])
     );
+    let guidance =
+        fs::read_to_string(temporary.path().join("AGENTS.md")).expect("OpenCode guidance");
+    assert!(guidance.contains("use `zvec_grep_callers` or `zvec_grep_callees`"));
     assert_eq!(
         json(&opencode)["mcp"]["zvec_grep"]["headers"]["Authorization"],
         "Bearer {env:TOKEN}"
