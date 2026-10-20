@@ -2386,7 +2386,10 @@ fn range_label(range: &ContentRange) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use rmcp::ServerHandler;
     use rmcp::model::ContentBlock;
