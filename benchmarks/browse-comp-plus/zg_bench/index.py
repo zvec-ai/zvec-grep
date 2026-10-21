@@ -5,6 +5,7 @@ import platform
 import re
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from .artifacts import read_json, utc_now, write_json
 from .config import BenchmarkConfig
@@ -35,6 +36,25 @@ def prepared_index(config: BenchmarkConfig, artifacts: Path) -> Path | None:
     ):
         return None
     return state_path
+
+
+def resumable_index(config: BenchmarkConfig, artifacts: Path) -> bool:
+    """Only resume an attempt whose inputs are known to match this corpus."""
+    pending = artifacts / "state" / "index.pending.json"
+    corpus = artifacts / "state" / "corpus.json"
+    root = workspace_root(artifacts, "zvec-grep")
+    if (
+        not pending.is_file()
+        or not corpus.is_file()
+        or not (root / ".zvec-grep").is_dir()
+    ):
+        return False
+    state = read_json(pending)
+    return (
+        state.get("resumable") is True
+        and state.get("root") == str(root)
+        and state.get("fingerprint") == _index_fingerprint(config, read_json(corpus))
+    )
 
 
 def index_is_ready(
@@ -86,7 +106,8 @@ def build_index(
     _prepare_remote_authorization(config, executable, root, environment)
 
     existing = artifacts / "state" / "index.json"
-    if not rebuild and existing.is_file() and index_dir.is_dir():
+    can_resume = not rebuild and resumable_index(config, artifacts)
+    if not rebuild and not can_resume and existing.is_file() and index_dir.is_dir():
         state = read_json(existing)
         expected = _index_fingerprint(config, corpus_state)
         if (
@@ -125,18 +146,46 @@ def build_index(
         command.append("--rebuild")
     if config.zvec_grep.embedding.startswith("local/"):
         command.extend(["--device", config.zvec_grep.device])
-    stdout_log = artifacts / "logs" / "index.stdout.log"
-    stderr_log = artifacts / "logs" / "index.stderr.log"
-    started_at = utc_now()
+    pending_path = artifacts / "state" / "index.pending.json"
+    previous = read_json(pending_path) if can_resume else {}
+    attempts = list(previous.get("attempts", []))
+    # Unique logs preserve earlier attempts, including ones killed without cleanup.
+    attempt_id = uuid4().hex
+    stdout_log = artifacts / "logs" / f"index.{attempt_id}.stdout.log"
+    stderr_log = artifacts / "logs" / f"index.{attempt_id}.stderr.log"
+    started_at = previous.get("started_at", utc_now())
+    attempt = {
+        "started_at": utc_now(),
+        "stdout_log": str(stdout_log.resolve()),
+        "stderr_log": str(stderr_log.resolve()),
+    }
+    attempts.append(attempt)
+    pending = {
+        "root": str(root),
+        "fingerprint": _index_fingerprint(config, corpus_state),
+        "started_at": started_at,
+        # A killed rebuild may not have replaced the old index yet. Stay conservative.
+        "resumable": not rebuild,
+        "attempts": attempts,
+    }
+    write_json(pending_path, pending)
+    existing.unlink(missing_ok=True)
     started = time.monotonic()
-    result = run_streaming_command(
-        command,
-        cwd=root,
-        env=environment,
-        stdout_log=stdout_log,
-        stderr_log=stderr_log,
-    )
-    build_wall_seconds = time.monotonic() - started
+    try:
+        result = run_streaming_command(
+            command,
+            cwd=root,
+            env=environment,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+        )
+        if result.ok:
+            pending["resumable"] = True
+    finally:
+        attempt["wall_seconds"] = time.monotonic() - started
+        attempt["finished_at"] = utc_now()
+        write_json(pending_path, pending)
+    build_wall_seconds = sum(item.get("wall_seconds", 0) for item in attempts)
     if not result.ok:
         raise RuntimeError(
             _index_failure(config, result.stderr, result.stdout, stderr_log)
@@ -161,6 +210,8 @@ def build_index(
         "zvec_grep_version": actual_version,
         "command": [str(part) for part in command],
         "build_wall_seconds": build_wall_seconds,
+        "build_time_complete": all("wall_seconds" in item for item in attempts),
+        "attempts": attempts,
         "index_bytes": _directory_bytes(index_dir),
         "runtime_bytes": _directory_bytes(artifacts / "runtime" / "zvec-home"),
         "status_output": status.stdout,
@@ -169,6 +220,7 @@ def build_index(
         "build_stderr_log": str(stderr_log.resolve()),
     }
     write_json(existing, state)
+    pending_path.unlink(missing_ok=True)
     return existing
 
 
