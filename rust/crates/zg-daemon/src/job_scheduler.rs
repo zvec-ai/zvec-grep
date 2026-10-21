@@ -1073,9 +1073,12 @@ mod tests {
     use tokio::sync::Notify;
     use zg_engine::{
         EngineError,
-        api::index::{
-            IndexOptions, IndexResult,
-            options::{ScanRulesUpdate, WorkspaceChange},
+        api::{
+            context::options::FileFormat,
+            index::{
+                IndexOptions, IndexResult,
+                options::{ScanRulesUpdate, WorkspaceChange},
+            },
         },
     };
 
@@ -1708,12 +1711,8 @@ mod tests {
                     root.clone(),
                     IndexOptions {
                         scan: ScanRulesUpdate {
-                            included_formats: Some(vec![
-                                zg_engine::api::context::options::FileFormat::Rust,
-                            ]),
-                            excluded_formats: Some(vec![
-                                zg_engine::api::context::options::FileFormat::Json,
-                            ]),
+                            included_formats: Some(vec![FileFormat::Rust]),
+                            excluded_formats: Some(vec![FileFormat::Json]),
                             globs: Some(vec!["*.rs".into()]),
                             include_hidden: Some(true),
                             use_default_ignores: Some(true),
@@ -1733,9 +1732,7 @@ mod tests {
                     root.clone(),
                     IndexOptions {
                         scan: ScanRulesUpdate {
-                            included_formats: Some(vec![
-                                zg_engine::api::context::options::FileFormat::Python,
-                            ]),
+                            included_formats: Some(vec![FileFormat::Python]),
                             excluded_formats: Some(Vec::new()),
                             globs: Some(Vec::new()),
                             include_hidden: Some(false),
@@ -1783,7 +1780,7 @@ mod tests {
     fn assert_merged_selection(applied: &IndexOptions) {
         assert_eq!(
             applied.scan.included_formats,
-            Some(vec![zg_engine::api::context::options::FileFormat::Python])
+            Some(vec![FileFormat::Python])
         );
         assert_eq!(applied.scan.excluded_formats, Some(Vec::new()));
         assert_eq!(applied.scan.globs, Some(Vec::new()));
@@ -2046,8 +2043,8 @@ mod tests {
 
         let mut pending = Some(IndexOptions {
             scan: ScanRulesUpdate {
-                included_formats: Some(vec![zg_engine::api::context::options::FileFormat::Rust]),
-                excluded_formats: Some(vec![zg_engine::api::context::options::FileFormat::Json]),
+                included_formats: Some(vec![FileFormat::Rust]),
+                excluded_formats: Some(vec![FileFormat::Json]),
                 globs: Some(vec!["old/**".into()]),
                 include_hidden: Some(true),
                 max_depth: Some(Some(3)),
