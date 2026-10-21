@@ -46,6 +46,19 @@ struct IgnoreCache {
 
 impl ScanPolicy {
     pub(crate) fn new(root: &Path, options: &ScanRules) -> EngineResult<Self> {
+        Self::with_default_exclusions(root, options, true)
+    }
+
+    /// Current-source discovery follows saved rules without index-only default exclusions.
+    pub(crate) fn for_current_source(root: &Path, options: &ScanRules) -> EngineResult<Self> {
+        Self::with_default_exclusions(root, options, false)
+    }
+
+    fn with_default_exclusions(
+        root: &Path,
+        options: &ScanRules,
+        exclude_defaults: bool,
+    ) -> EngineResult<Self> {
         let matcher = GlobMatcher::new(root, options.globs())?;
         let ignore_files: Vec<_> = options
             .ignore_files()
@@ -53,15 +66,17 @@ impl ScanPolicy {
             .map(|path| control_alias(&root.join(path)))
             .collect();
         let mut defaults = GitignoreBuilder::new(root);
-        for name in DEFAULT_IGNORED_DIRECTORY_NAMES {
-            defaults
-                .add_line(None, &format!("{name}/"))
-                .map_err(|error| ignore_error(&error))?;
-        }
-        for pattern in DEFAULT_IGNORED_FILE_PATTERNS {
-            defaults
-                .add_line(None, pattern)
-                .map_err(|error| ignore_error(&error))?;
+        if exclude_defaults {
+            for name in DEFAULT_IGNORED_DIRECTORY_NAMES {
+                defaults
+                    .add_line(None, &format!("{name}/"))
+                    .map_err(|error| ignore_error(&error))?;
+            }
+            for pattern in DEFAULT_IGNORED_FILE_PATTERNS {
+                defaults
+                    .add_line(None, pattern)
+                    .map_err(|error| ignore_error(&error))?;
+            }
         }
         let control_paths = control_paths(root, options.use_default_ignores(), &ignore_files);
         let policy = Self {

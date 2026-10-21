@@ -125,8 +125,18 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
             mode,
             home,
             request,
+            path_lookup,
             output,
-        } => Box::pin(execute_request(mode, home.as_deref(), *request, output)).await,
+        } => {
+            Box::pin(execute_request(
+                mode,
+                home.as_deref(),
+                *request,
+                path_lookup,
+                output,
+            ))
+            .await
+        }
         CliPlan::Index {
             mode,
             home,
@@ -304,8 +314,34 @@ async fn execute_request(
     mode: ClientMode,
     home: Option<&Path>,
     mut request: ContextOptions,
+    path_lookup: bool,
     output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
+    if path_lookup {
+        // Current-file lookup is local in every client mode, before index or model admission.
+        eprintln!(
+            "warning: automatically performing path lookup; use --hybrid to force hybrid search."
+        );
+        let engine = ZvecGrep::new();
+        let result = engine
+            .lookup_path(zg_engine::api::paths::PathsOptions {
+                query: request.queries[0].clone(),
+                root: request.root.clone(),
+                limit: request.limit,
+                filter: request.filter.clone(),
+                signal: request.signal.clone(),
+            })
+            .await;
+        engine.close();
+        zg_cli::write_path_lookup_result(
+            io::stdout().lock(),
+            io::stderr().lock(),
+            &result?,
+            output,
+            io::stdout().is_terminal(),
+        )?;
+        return Ok(());
+    }
     if request.rg {
         if mode == ClientMode::Server {
             debug!("managed --rg remains local in server mode");

@@ -2,6 +2,13 @@
 # semantic differences and must be exercised by compatibility tests.
 
 [[difference]]
+id = "path-lookup-is-local"
+operation = "path_lookup"
+direct = "look up current file names and literal source in the invoking process"
+server = "use the same local lookup without requiring or contacting a daemon"
+reason = "file names and exhaustive current text are independent of index availability; truncated local text explicitly reports incomplete coverage"
+
+[[difference]]
 id = "managed-rg-is-local"
 operation = "lexical_search"
 direct = "run in the invoking process"

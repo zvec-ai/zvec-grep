@@ -24,6 +24,7 @@ use api::{
     files::{FilesOptions, FilesResult},
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
+    paths::{PathLookupResult, PathsOptions, PathsResult},
 };
 
 pub use error::{EngineError, EngineResult, ErrorReport, ErrorSite};
@@ -60,6 +61,22 @@ impl ZvecGrep {
     /// Enumerates current files without reading source contents or opening an index.
     pub async fn files(&self, options: FilesOptions) -> EngineResult<FilesResult> {
         lexical::files::list(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Looks up current file paths without reading their contents or opening an index.
+    pub async fn paths(&self, options: PathsOptions) -> EngineResult<PathsResult> {
+        self.service
+            .paths(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Resolves path-shaped queries against current file names, then literal source text.
+    pub async fn lookup_path(&self, options: PathsOptions) -> EngineResult<PathLookupResult> {
+        self.service
+            .lookup_path(options)
             .await
             .map_err(|error| error.report_here())
     }

@@ -231,6 +231,33 @@ metadata included in search projections. Index format 5 uses this layout.
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
 
+A single file name or path, such as `zg auth.ts` or `zg src/auth.ts`, first
+looks up current file paths. Matches use `#1 matchedBy=path src/auth.ts`, with
+forward slashes on every platform and exact workspace-relative paths before suffix
+matches. Ties use deterministic native path ordering; `--limit` bounds the list
+(default: 10). Lookup uses the nearest workspace's saved scan rules and query
+file filters, and includes empty files. It runs locally in direct, server, and
+auto modes without loading a model, creating an index, or requiring a daemon.
+File discovery does not apply index-only default exclusions for build directories,
+lock files, or images; saved scanning rules and ignore files still apply.
+File matches do not read or embed contents. If no file matches, lookup searches
+the selected current source text literally using the same scan rules and filters.
+A path mentioned only in source text returns those text matches. No match prints
+`No matches.` instead of unrelated vector neighbors, even with an existing index.
+Text results deduplicate complete structural entities before applying `--limit`;
+multiple retrieval fragments of one function or Markdown section count once.
+Literal matching and highlighting use the same smart-case rules: queries with
+uppercase letters are case-sensitive; lowercase queries ignore case.
+Results show line numbers, match/context markers, and structural headings. Terminal output also
+shows coverage and per-file/per-hit metadata. Truncated file or text results warn
+on stderr. Unlike the Node.js CLI, truncated text remains local instead of starting
+indexed retrieval; direct, server, and auto modes share this behavior and never
+require model loading or indexing. Native glob ordering, format aliases, ignore
+handling, and path normalization retain the Rust CLI's existing semantics.
+Explicit `--hybrid`, `--fts`, `--vector`, `--fuse`, symbol options, `--trace`, and
+`--refresh` retain their indexed behavior. Text questions, URLs, and glob patterns
+do not trigger automatic path lookup.
+
 Managed `zg --rg` preserves literal pattern whitespace and supports empty
 patterns with `-e ''`. Matching options include fixed strings (`-F`), case
 selection (`-i`, `-s`, `-S`, with the last option winning), word/whole-line
@@ -246,6 +273,17 @@ internal directories. The full MCP toolset uses the same argument parser and
 engine. PCRE2, compressed-file search, explicit encoding selection, and native
 ripgrep output-format switches other than file listing are rejected; Unicode
 BOM decoding is automatic.
+
+Automatic path lookup emits
+`warning: automatically performing path lookup; use --hybrid to force hybrid search.`
+on stderr only when the default query actually enters that branch. `--hybrid`
+overrides the inference, including ambiguous inputs such as `config.timeout` and
+`v1.2`.
+
+When no file path matches and lookup falls back to literal source search, it also
+prints `warning: no matching file paths; searching current file contents literally (rg).`
+on stderr. This appears for both text matches and `No matches.`; stdout contains
+only the search results.
 
 Use `zg --rg --files` for explicit file discovery:
 
@@ -524,8 +562,8 @@ The runtime library directory must include zvec's shared library and its
 the binary's directory.
 
 The `Publish Rust packages` workflow builds all five published native targets on matching
-GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
-produce downloadable candidates without publishing to npm. Each runner installs
+GitHub runners. It runs only through manual dispatch. With `publish` left at its
+default `false`, it produces downloadable candidates without publishing to npm. Each runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
 starts the packaged daemon, compares workspace status in direct and server
 modes, and stops the daemon. The server status request crosses the IPC boundary;

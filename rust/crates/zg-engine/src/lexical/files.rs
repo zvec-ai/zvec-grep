@@ -1,4 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+use zg_host_native::PathPolicy;
 
 use crate::{
     EngineError, EngineResult,
@@ -9,11 +14,26 @@ use crate::{
 };
 
 use super::{
-    CheckedPaths, build_walker, check_cancelled, matches_modified_time, run_blocking,
+    CheckedPaths, build_walker, check_cancelled, is_hard_ignored_path, matches_modified_time,
+    run_blocking,
     types::{LexicalOptions, LexicalSearchRequest},
 };
 
 pub(crate) async fn list(options: FilesOptions) -> EngineResult<FilesResult> {
+    list_with_selection(options, None).await
+}
+
+pub(crate) async fn list_with_policy(
+    options: FilesOptions,
+    policy: Arc<dyn PathPolicy>,
+) -> EngineResult<FilesResult> {
+    list_with_selection(options, Some(policy)).await
+}
+
+async fn list_with_selection(
+    options: FilesOptions,
+    policy: Option<Arc<dyn PathPolicy>>,
+) -> EngineResult<FilesResult> {
     let root = std::path::absolute(options.root.as_deref().unwrap_or_else(|| Path::new(".")))
         .map_err(|error| EngineError::from_io("failed to resolve file discovery root", &error))?;
     let signal = options.signal.as_ref().map_or_else(
@@ -51,10 +71,14 @@ pub(crate) async fn list(options: FilesOptions) -> EngineResult<FilesResult> {
         ..LexicalSearchRequest::default()
     };
     check_cancelled(&request)?;
-    run_blocking(move || list_sync(&root, request)).await
+    run_blocking(move || list_sync(&root, request, policy.as_ref())).await
 }
 
-fn list_sync(root: &Path, mut request: LexicalSearchRequest) -> EngineResult<FilesResult> {
+fn list_sync(
+    root: &Path,
+    mut request: LexicalSearchRequest,
+    policy: Option<&Arc<dyn PathPolicy>>,
+) -> EngineResult<FilesResult> {
     let implicit_root = request.paths.is_empty();
     let inputs = if implicit_root {
         vec![PathBuf::from(".")]
@@ -62,6 +86,7 @@ fn list_sync(root: &Path, mut request: LexicalSearchRequest) -> EngineResult<Fil
         std::mem::take(&mut request.paths)
     };
     let mut result = FilesResult::default();
+    let policy_errors = Arc::new(Mutex::new(Vec::new()));
     for input in inputs {
         check_cancelled(&request)?;
         if input.as_os_str().is_empty() {
@@ -80,7 +105,15 @@ fn list_sync(root: &Path, mut request: LexicalSearchRequest) -> EngineResult<Fil
             existing: request.paths.clone(),
             missing: Vec::new(),
         };
-        let walker = build_walker(root, &request, &checked, 1)?;
+        let mut walker = build_walker(root, &request, &checked, 1)?;
+        if let Some(policy) = policy {
+            apply_policy(
+                &mut walker,
+                root,
+                Arc::clone(policy),
+                Arc::clone(&policy_errors),
+            );
+        }
         for entry in walker.build() {
             check_cancelled(&request)?;
             let entry = match entry {
@@ -115,8 +148,40 @@ fn list_sync(root: &Path, mut request: LexicalSearchRequest) -> EngineResult<Fil
         }
     }
     check_cancelled(&request)?;
+    result.errors.extend(std::mem::take(
+        &mut *policy_errors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    ));
     result.paths.sort();
     Ok(result)
+}
+
+fn apply_policy(
+    walker: &mut ignore::WalkBuilder,
+    root: &Path,
+    policy: Arc<dyn PathPolicy>,
+    errors: Arc<Mutex<Vec<String>>>,
+) {
+    let root = root.to_path_buf();
+    walker.filter_entry(move |entry| {
+        let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+        if is_hard_ignored_path(relative) {
+            return false;
+        }
+        let selected = if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            policy.can_descend(entry.path())
+        } else {
+            policy.includes_file(entry.path())
+        };
+        selected.unwrap_or_else(|error| {
+            errors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(error.to_string());
+            false
+        })
+    });
 }
 
 #[cfg(test)]

@@ -387,7 +387,7 @@ const SEARCH_HELP: &str = r#"Usage:
   zg --rg --files [discovery-options] [path...]
 
 Search routes:
-  positional words                  Joined into one hybrid FTS and vector query
+  positional words                  File paths use current files and literal text; other words form one hybrid query
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
@@ -404,6 +404,11 @@ The warning is written to stderr when multiple nonempty positional arguments
 include one with internal whitespace. Shell quote characters are not available.
 --hybrid, --fts, and --vector remain separate, repeatable queries.
 Managed --rg keeps its pattern and path arguments separate.
+An ordinary single path-shaped query such as auth.ts first matches current file
+names without reading contents. If no name matches, current source is searched
+literally. A complete miss returns No matches., including with a warm index.
+Automatic path lookup prints a warning on stderr; use --hybrid to force
+hybrid search. Explicit query routes, trace, refresh and symbol options bypass it.
 With --files, every positional argument is an input file or directory; no pattern
 is required. Use -g 'auth.ts' to select files by name.
 
