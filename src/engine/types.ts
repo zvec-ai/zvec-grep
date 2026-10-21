@@ -371,6 +371,9 @@ export type SearchPlan = {
   symbolTypes?: readonly CodeSymbolType[];
   includePaths?: readonly string[];
   excludePaths?: readonly string[];
+  /** Original request indices of the retained includePaths entries. */
+  includePathOrigins?: readonly number[];
+  excludePathOrigins?: readonly number[];
   globs?: readonly string[];
   insensitiveGlobs?: readonly string[];
   fileTypes?: readonly string[];

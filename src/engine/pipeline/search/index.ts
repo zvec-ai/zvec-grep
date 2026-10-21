@@ -1,3 +1,15 @@
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import {
+  checkActiveRuleWeight,
+  checkGlobCancellation,
+  checkGlobLength,
+  checkGlobRuleCount,
+  globWorkNeedsYield,
+  labeledGlobError,
+  withGlobBudget,
+  withGlobPathBudget,
+  yieldGlobWorkIfNeeded,
+} from "../../utils/glob-budget.js";
 import {
   workspaceIndexDetail,
   detail,
@@ -25,11 +37,13 @@ import type {
 } from "../../types.js";
 import { TimingCollector } from "../../utils/timing.js";
 import {
+  globPatternWeight,
   hasPathGlob,
   isAbsolutePathPattern,
   normalizePathForMatch,
   normalizePathPattern,
   pathPatternMatches,
+  ripgrepPatternWeight,
 } from "../../utils/glob.js";
 import {
   matchesFileSelection,
@@ -89,7 +103,9 @@ type RecallRoute = ResolvedSearchPlanRoute & {
 export async function searchWorkspaceIndex(
   plan: SearchPlan,
   ctx: SearchContext,
+  options: { signal?: AbortSignal } = {},
 ): Promise<SearchPlanResult> {
+  checkGlobCancellation(options.signal);
   const timings = new TimingCollector();
 
   const result = await timings.time("search_total", async () => {
@@ -105,11 +121,19 @@ export async function searchWorkspaceIndex(
         normalized.excludedFileTypes,
       ),
     );
-    const filter = timings.timeSync("search_filter", () =>
-      searchPlanToStorageFilter(normalized, ctx.storage, fileTypePatterns),
+    const filter = await timings.time("search_filter", () =>
+      withGlobBudget(() =>
+        searchPlanToStorageFilter(
+          normalized,
+          ctx.storage,
+          fileTypePatterns,
+          options.signal,
+        ),
+      ),
     );
     const hasSearchableFiles = !filterMatchesNoFiles(filter);
     const candidates = new Map<string, Candidate>();
+    checkGlobCancellation(options.signal);
     const vectorByRoute =
       hasSearchableFiles && planUsesVector(normalized)
         ? await timings.time("query_embedding", () =>
@@ -119,6 +143,7 @@ export async function searchWorkspaceIndex(
             ),
           )
         : new Map<string, number[]>();
+    checkGlobCancellation(options.signal);
     let recallDepth = RECALL_INITIAL_DEPTH;
 
     if (hasSearchableFiles) {
@@ -289,11 +314,21 @@ function validateSearchPlan(plan: SearchPlan): ResolvedSearchPlan {
     );
   }
 
+  const includeFilters = normalizePathFilters(
+    plan.includePaths,
+    "includePaths",
+  );
+  const excludeFilters = normalizePathFilters(
+    plan.excludePaths,
+    "excludePaths",
+  );
   return {
     ...plan,
     routes,
-    includePaths: normalizePathFilters(plan.includePaths, "includePaths"),
-    excludePaths: normalizePathFilters(plan.excludePaths, "excludePaths"),
+    includePaths: includeFilters.patterns,
+    excludePaths: excludeFilters.patterns,
+    includePathOrigins: includeFilters.origins,
+    excludePathOrigins: excludeFilters.origins,
     globs: normalizeStringFilters(plan.globs, "globs"),
     insensitiveGlobs: normalizeStringFilters(
       plan.insensitiveGlobs,
@@ -352,9 +387,9 @@ function requireEmbeddingModel(
 function normalizePathFilters(
   value: readonly string[] | undefined,
   field: "includePaths" | "excludePaths",
-): string[] | undefined {
+): { patterns: string[] | undefined; origins: number[] | undefined } {
   if (value === undefined) {
-    return undefined;
+    return { patterns: undefined, origins: undefined };
   }
 
   if (!Array.isArray(value)) {
@@ -364,7 +399,11 @@ function normalizePathFilters(
     });
   }
 
+  checkGlobRuleCount(value.length);
   const patterns: string[] = [];
+  // Original request positions of the retained patterns, so labels report
+  // the user's indices even when empty entries are dropped.
+  const origins: number[] = [];
 
   for (const [index, item] of value.entries()) {
     if (typeof item !== "string") {
@@ -374,13 +413,28 @@ function normalizePathFilters(
       });
     }
 
-    const pattern = normalizePathFilterPattern(item);
+    let pattern: string;
+    try {
+      pattern = normalizePathFilterPattern(item);
+    } catch (error) {
+      throw new EngineError(
+        `Search path filter ${field}[${index}] is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_PATH_FILTER",
+          context: `field=${field} index=${index}`,
+          cause: error,
+        },
+      );
+    }
     if (pattern.length > 0) {
       patterns.push(pattern);
+      origins.push(index);
     }
   }
 
-  return patterns.length > 0 ? patterns : undefined;
+  return patterns.length > 0
+    ? { patterns, origins }
+    : { patterns: undefined, origins: undefined };
 }
 
 function normalizeStringFilters(
@@ -396,12 +450,25 @@ function normalizeStringFilters(
       context: `field=${field}`,
     });
   }
+  checkGlobRuleCount(value.length);
   const values = value.map((item, index) => {
     if (typeof item !== "string" || !item.trim()) {
       throw new EngineError("Search plan filters must contain strings", {
         code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_FILTER",
         context: `field=${field} index=${index}`,
       });
+    }
+    try {
+      checkGlobLength(item, "pattern");
+    } catch (error) {
+      throw new EngineError(
+        `Search filter ${field}[${index}] is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          code: "ZVEC_GREP.ENGINE.SEARCH_PLAN.INVALID_FILTER",
+          context: `field=${field} index=${index}`,
+          cause: error,
+        },
+      );
     }
     return item.trim();
   });
@@ -1033,15 +1100,17 @@ function restrictFilterToFile(
   };
 }
 
-function searchPlanToStorageFilter(
+async function searchPlanToStorageFilter(
   plan: SearchPlan,
   storage: WorkspaceIndexStorage,
   fileTypePatterns: FileTypePatterns,
-): StorageSearchFilter | undefined {
-  const fileIds = resolveFilteredFileIds(
+  signal?: AbortSignal,
+): Promise<StorageSearchFilter | undefined> {
+  const fileIds = await resolveFilteredFileIds(
     plan,
     storage.listFiles(),
     fileTypePatterns,
+    signal,
   );
   const symbolTypes =
     plan.symbolTypes && plan.symbolTypes.length > 0
@@ -1064,13 +1133,40 @@ function filterMatchesNoFiles(
   return filter?.fileIds !== undefined && filter.fileIds.length === 0;
 }
 
-function resolveFilteredFileIds(
+async function resolveFilteredFileIds(
   plan: SearchPlan,
   files: readonly FileInfo[],
   fileTypePatterns: FileTypePatterns,
-): string[] | undefined {
-  const includeMatchers = (plan.includePaths ?? []).map(compilePathFilter);
-  const excludeMatchers = (plan.excludePaths ?? []).map(compilePathFilter);
+  signal?: AbortSignal,
+): Promise<string[] | undefined> {
+  checkGlobRuleCount(
+    (plan.includePaths?.length ?? 0) +
+      (plan.excludePaths?.length ?? 0) +
+      (plan.globs?.length ?? 0) +
+      (plan.insensitiveGlobs?.length ?? 0) +
+      fileTypePatterns.include.length +
+      fileTypePatterns.exclude.length,
+  );
+  let matchesAbsolutePath = false;
+  const includeOriginOf = (index: number) =>
+    plan.includePathOrigins?.[index] ?? index;
+  const excludeOriginOf = (index: number) =>
+    plan.excludePathOrigins?.[index] ?? index;
+  const includeMatchers = (plan.includePaths ?? []).map((pattern, index) => {
+    if (isAbsolutePathPattern(pattern)) matchesAbsolutePath = true;
+    return compilePathFilter(
+      pattern,
+      `includePaths[${includeOriginOf(index)}]`,
+    );
+  });
+  const excludeMatchers = (plan.excludePaths ?? []).map((pattern, index) => {
+    if (isAbsolutePathPattern(pattern)) matchesAbsolutePath = true;
+    return compilePathFilter(
+      pattern,
+      `excludePaths[${excludeOriginOf(index)}]`,
+    );
+  });
+  const activeWeight = searchFilterWeight(plan, fileTypePatterns);
   const hasModifiedFilter =
     plan.modifiedAfter !== undefined || plan.modifiedBefore !== undefined;
   const hasSharedSelection =
@@ -1085,24 +1181,98 @@ function resolveFilteredFileIds(
     !hasModifiedFilter &&
     !hasSharedSelection
   ) {
+    checkGlobCancellation(signal);
     return undefined;
   }
 
-  return files
-    .filter((file) => {
-      const included =
-        includeMatchers.length === 0 ||
-        includeMatchers.some((matcher) => matcher(file));
-      const excluded = excludeMatchers.some((matcher) => matcher(file));
+  const matched: string[] = [];
+  for (let index = 0; index < files.length; index++) {
+    if (index > 0 && (index % 128 === 0 || globWorkNeedsYield()))
+      await yieldToEventLoop();
+    const file = files[index];
+    // Charge the allowance from the path representation actually matched:
+    // absolute-pattern filters match file.absolutePath, which can be far
+    // longer than the relative name.
+    const budgetPathLength = matchesAbsolutePath
+      ? Math.max(file.relativePath.length, file.absolutePath.length)
+      : file.relativePath.length;
+    const keep = await withGlobPathBudget(
+      budgetPathLength,
+      activeWeight,
+      async () => {
+        if (includeMatchers.length !== 0) {
+          let included = false;
+          for (const matcher of includeMatchers) {
+            await yieldGlobWorkIfNeeded(yieldToEventLoop, signal);
+            if (matcher(file)) {
+              included = true;
+              break;
+            }
+          }
+          if (!included) {
+            return false;
+          }
+        }
+        for (const matcher of excludeMatchers) {
+          await yieldGlobWorkIfNeeded(yieldToEventLoop, signal);
+          if (matcher(file)) {
+            return false;
+          }
+        }
+        const selected = await matchesFileSelection(
+          file.relativePath,
+          plan,
+          fileTypePatterns,
+          {
+            signal,
+            yieldToEventLoop,
+          },
+        );
+        await yieldGlobWorkIfNeeded(yieldToEventLoop, signal);
+        return selected && matchesModifiedTimeFilter(file, plan);
+      },
+    );
+    if (keep) {
+      matched.push(file.id);
+    }
+  }
+  // A filter matching no files never enters the per-candidate path; check
+  // cancellation before returning a successful (possibly empty) result.
+  checkGlobCancellation(signal);
+  return matched;
+}
 
-      return (
-        included &&
-        !excluded &&
-        matchesFileSelection(file.relativePath, plan, fileTypePatterns) &&
-        matchesModifiedTimeFilter(file, plan)
-      );
-    })
-    .map((file) => file.id);
+function searchFilterWeight(
+  plan: SearchPlan,
+  fileTypePatterns: FileTypePatterns,
+): number {
+  let weight = 0;
+  for (const [index, pattern] of (plan.includePaths ?? []).entries()) {
+    weight += globPatternWeight(
+      pattern,
+      `includePaths[${plan.includePathOrigins?.[index] ?? index}]`,
+    );
+  }
+  for (const [index, pattern] of (plan.excludePaths ?? []).entries()) {
+    weight += globPatternWeight(
+      pattern,
+      `excludePaths[${plan.excludePathOrigins?.[index] ?? index}]`,
+    );
+  }
+  for (const [index, pattern] of (plan.globs ?? []).entries()) {
+    weight += ripgrepPatternWeight(pattern, false, `globs[${index}]`);
+  }
+  for (const [index, pattern] of (plan.insensitiveGlobs ?? []).entries()) {
+    weight += ripgrepPatternWeight(pattern, true, `insensitiveGlobs[${index}]`);
+  }
+  for (const entry of fileTypePatterns.include) {
+    weight += ripgrepPatternWeight(entry.pattern, false, entry.origin);
+  }
+  for (const entry of fileTypePatterns.exclude) {
+    weight += ripgrepPatternWeight(entry.pattern, false, entry.origin);
+  }
+  checkActiveRuleWeight(weight, "active search filters");
+  return weight;
 }
 
 function matchesModifiedTimeFilter(file: FileInfo, plan: SearchPlan): boolean {
@@ -1123,20 +1293,32 @@ function matchesModifiedTimeFilter(file: FileInfo, plan: SearchPlan): boolean {
   return true;
 }
 
-function compilePathFilter(pattern: string): PathFilterMatcher {
+function compilePathFilter(pattern: string, label: string): PathFilterMatcher {
   const pathTarget = isAbsolutePathPattern(pattern)
     ? "absolutePath"
     : "relativePath";
 
   if (hasPathGlob(pattern)) {
-    return (file) =>
-      pathPatternMatches(pattern, normalizePathForMatch(file[pathTarget]));
+    return (file) => {
+      try {
+        return pathPatternMatches(
+          pattern,
+          normalizePathForMatch(file[pathTarget]),
+        );
+      } catch (error) {
+        throw labeledGlobError(label, pattern, error);
+      }
+    };
   }
 
   return (file) => {
-    const path = normalizePathForMatch(file[pathTarget]);
+    try {
+      const path = normalizePathForMatch(file[pathTarget]);
 
-    return pathPatternMatches(pattern, path);
+      return pathPatternMatches(pattern, path);
+    } catch (error) {
+      throw labeledGlobError(label, pattern, error);
+    }
   };
 }
 

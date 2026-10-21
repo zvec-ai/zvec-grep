@@ -860,7 +860,7 @@ test("file, model, content, and entity helpers classify inputs", () => {
   assert.notEqual(makeEntityId("file", 3), makeEntityId("file", 4));
 });
 
-test("glob and path helpers cover literal, wildcard, and descendant matching", () => {
+test("glob and path helpers cover literal, wildcard, and descendant matching", async () => {
   assert.equal(normalizePathPattern("./src\\**\\*.ts"), "src/**/*.ts");
   assert.equal(normalizePathForMatch("src\\file.ts"), "src/file.ts");
   assert.equal(isAbsolutePathPattern("/tmp/file"), true);
@@ -889,7 +889,7 @@ test("glob and path helpers cover literal, wildcard, and descendant matching", (
     true,
   );
   assert.equal(
-    matchesFileSelection(
+    await matchesFileSelection(
       "src/main.ts",
       { globs: ["!*.ts", "main.ts"] },
       { include: [], exclude: [] },
@@ -908,9 +908,9 @@ test("glob and path helpers cover literal, wildcard, and descendant matching", (
 
 test("file type filters accept extension aliases for ripgrep types", async () => {
   const types = await resolveFileTypePatterns([".h", "cc"], undefined);
-  assert.equal(matchesFileSelection("include/api.h", {}, types), true);
-  assert.equal(matchesFileSelection("src/main.cc", {}, types), true);
-  assert.equal(matchesFileSelection("src/main.ts", {}, types), false);
+  assert.equal(await matchesFileSelection("include/api.h", {}, types), true);
+  assert.equal(await matchesFileSelection("src/main.cc", {}, types), true);
+  assert.equal(await matchesFileSelection("src/main.ts", {}, types), false);
 });
 
 test("timing helpers aggregate entries and concurrent work", async () => {

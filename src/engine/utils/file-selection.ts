@@ -1,5 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setImmediate as defaultYieldToEventLoop } from "node:timers/promises";
+import {
+  checkGlobLength,
+  checkGlobRuleCount,
+  labeledGlobError,
+  yieldGlobWorkIfNeeded,
+} from "./glob-budget.js";
 import {
   ripgrepGlobMatches,
   ripgrepGlobMatchesCaseInsensitive,
@@ -7,9 +14,15 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+export type FileTypePattern = {
+  pattern: string;
+  /** Request field and type name this pattern was expanded from. */
+  origin: string;
+};
+
 export type FileTypePatterns = {
-  include: readonly string[];
-  exclude: readonly string[];
+  include: readonly FileTypePattern[];
+  exclude: readonly FileTypePattern[];
 };
 
 export type FileSelection = {
@@ -56,52 +69,117 @@ export async function resolveFileTypePatterns(
 
   const types = await ripgrepTypeMap();
   return {
-    include: resolveTypeNames(includedTypes, types),
-    exclude: resolveTypeNames(excludedTypes, types),
+    include: resolveTypeNames(includedTypes, types, "fileTypes"),
+    exclude: resolveTypeNames(excludedTypes, types, "excludedFileTypes"),
   };
 }
 
-export function matchesFileSelection(
+export type SelectionYieldOptions = {
+  signal?: AbortSignal;
+  yieldToEventLoop?: () => Promise<unknown>;
+};
+
+export async function matchesFileSelection(
   path: string,
   selection: FileSelection,
   types: FileTypePatterns,
-): boolean {
-  const includedByGlob = matchesOrderedGlobs(path, selection);
+  options: SelectionYieldOptions = {},
+): Promise<boolean> {
+  checkGlobRuleCount(
+    (selection.globs?.length ?? 0) +
+      (selection.insensitiveGlobs?.length ?? 0) +
+      types.include.length +
+      types.exclude.length,
+  );
+  const yieldFn = options.yieldToEventLoop ?? defaultYieldToEventLoop;
+  const includedByGlob = await matchesOrderedGlobs(
+    path,
+    selection,
+    yieldFn,
+    options.signal,
+  );
   const includedByType =
     types.include.length === 0 ||
-    types.include.some((glob) => ripgrepGlobMatches(glob, path));
-  const excludedByType = types.exclude.some((glob) =>
-    ripgrepGlobMatches(glob, path),
+    (await someTypeMatches(types.include, path, yieldFn, options.signal));
+  const excludedByType = await someTypeMatches(
+    types.exclude,
+    path,
+    yieldFn,
+    options.signal,
   );
 
   return includedByGlob && includedByType && !excludedByType;
 }
 
-function matchesOrderedGlobs(path: string, selection: FileSelection): boolean {
+async function someTypeMatches(
+  entries: readonly FileTypePattern[],
+  path: string,
+  yieldFn: () => Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  for (const entry of entries) {
+    await yieldGlobWorkIfNeeded(yieldFn, signal);
+    if (applyLabeledPattern(entry.origin, entry.pattern, path, false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function applyLabeledPattern(
+  label: string,
+  pattern: string,
+  path: string,
+  caseInsensitive: boolean,
+): boolean {
+  try {
+    return caseInsensitive
+      ? ripgrepGlobMatchesCaseInsensitive(pattern, path)
+      : ripgrepGlobMatches(pattern, path);
+  } catch (error) {
+    throw labeledGlobError(label, pattern, error);
+  }
+}
+
+async function matchesOrderedGlobs(
+  path: string,
+  selection: FileSelection,
+  yieldFn: () => Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
   const rules = [
-    ...(selection.globs ?? []).map((pattern) => ({
+    ...(selection.globs ?? []).map((pattern, index) => ({
+      label: `globs[${index}]`,
       pattern,
       caseInsensitive: false,
     })),
-    ...(selection.insensitiveGlobs ?? []).map((pattern) => ({
+    ...(selection.insensitiveGlobs ?? []).map((pattern, index) => ({
+      label: `insensitiveGlobs[${index}]`,
       pattern,
       caseInsensitive: true,
     })),
   ]
-    .map((rule) => ({ ...rule, pattern: rule.pattern.trim() }))
+    .map((rule) => {
+      checkGlobLength(rule.pattern, "pattern");
+      return { ...rule, pattern: rule.pattern.trim() };
+    })
     .filter((rule) => rule.pattern.length > 0);
   const hasPositiveRule = rules.some((rule) => !rule.pattern.startsWith("!"));
   let included = !hasPositiveRule;
 
   for (const rule of rules) {
+    await yieldGlobWorkIfNeeded(yieldFn, signal);
     const negated = rule.pattern.startsWith("!");
     const pattern = negated ? rule.pattern.slice(1).trim() : rule.pattern;
     if (!pattern) {
       continue;
     }
-    const matches = rule.caseInsensitive
-      ? ripgrepGlobMatchesCaseInsensitive(pattern, path)
-      : ripgrepGlobMatches(pattern, path);
+    const matches = applyLabeledPattern(
+      rule.label,
+      pattern,
+      path,
+      rule.caseInsensitive,
+    );
     if (matches) {
       included = !negated;
     }
@@ -113,15 +191,17 @@ function matchesOrderedGlobs(path: string, selection: FileSelection): boolean {
 function resolveTypeNames(
   names: readonly string[] | undefined,
   types: ReadonlyMap<string, readonly string[]>,
-): string[] {
-  const patterns: string[] = [];
+  originField: string,
+): FileTypePattern[] {
+  const patterns: FileTypePattern[] = [];
   for (const rawName of names ?? []) {
     const name = rawName.trim().toLowerCase();
     if (!name) {
       continue;
     }
+    const origin = `${originField} "${rawName}"`;
     if (name === "all") {
-      patterns.push("**");
+      patterns.push({ pattern: "**", origin });
       continue;
     }
     const typeName = resolveRipgrepTypeName(name, types);
@@ -129,9 +209,16 @@ function resolveTypeNames(
     if (!typePatterns) {
       throw new Error(`Unknown ripgrep file type: ${rawName}`);
     }
-    patterns.push(...typePatterns);
+    for (const pattern of typePatterns) {
+      patterns.push({ pattern, origin });
+    }
   }
-  return [...new Set(patterns)];
+  const seen = new Set<string>();
+  return patterns.filter((entry) => {
+    if (seen.has(entry.pattern)) return false;
+    seen.add(entry.pattern);
+    return true;
+  });
 }
 
 function resolveRipgrepTypeName(
