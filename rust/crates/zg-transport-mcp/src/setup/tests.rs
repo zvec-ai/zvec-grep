@@ -5,7 +5,10 @@ use rmcp::{ClientHandler, ServiceExt, model::*};
 use std::{collections::VecDeque, sync::Arc};
 
 #[derive(Default)]
-struct Jobs(Mutex<Vec<IndexOptions>>);
+struct Jobs(
+    Mutex<Vec<IndexOptions>>,
+    Mutex<Option<crate::IndexOperationError>>,
+);
 
 struct ExistingIndex;
 
@@ -84,6 +87,7 @@ impl IndexOperationProvider for Jobs {
             .expect("jobs")
             .iter()
             .find(|options| options.root.as_deref() == Some(root))?;
+        let error = self.1.lock().expect("job error").clone();
         Some(IndexRuntimeSnapshot {
             index_status: None,
             completion_baseline: None,
@@ -91,9 +95,13 @@ impl IndexOperationProvider for Jobs {
             dirty_revision: 0,
             indexed_revision: 0,
             active_job_id: Some("setup-job".into()),
-            job_state: Some(IndexOperationState::Queued),
+            job_state: Some(if error.is_some() {
+                IndexOperationState::Failed
+            } else {
+                IndexOperationState::Queued
+            }),
             progress: None,
-            error: None,
+            error,
         })
     }
 }
@@ -174,6 +182,26 @@ fn value(response: CallToolResponse) -> Value {
         other => panic!("expected complete response, got {other:?}"),
     };
     result.structured_content.expect("structured response")
+}
+
+fn setup_value(response: CallToolResponse, root: &Path) -> Value {
+    let CallToolResponse::Complete(result) = &response else {
+        panic!("expected setup result");
+    };
+    let ContentBlock::Text(text) = &result.content[0] else {
+        panic!("expected JSON text");
+    };
+    let text: Value = serde_json::from_str(&text.text).expect("JSON text");
+    let result = value(response);
+    assert_eq!(text, result);
+    let canonical = std::fs::canonicalize(root).expect("canonical root");
+    let expected = canonical.to_str().expect("Unicode temporary directory");
+    #[cfg(windows)]
+    let expected = expected
+        .strip_prefix(r"\\?\")
+        .expect("verbatim fixture path");
+    assert_eq!(result["root"], expected);
+    result
 }
 
 #[test]
@@ -396,11 +424,12 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
         for changed in [changed_value, changed_array] {
             assert!(client.call_tool_once(changed).await.is_err());
         }
-        let result = value(
+        let result = setup_value(
             client
                 .call_tool_once(retry.clone())
                 .await
                 .expect("accepted setup"),
+            root.path(),
         );
         assert_eq!(result["status"], "indexing");
         assert_eq!(result["job_id"], "setup-job");
@@ -409,17 +438,32 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
             client.call_tool_once(retry).await.is_err(),
             "state is single use"
         );
-        let status = value(
+        let status = setup_value(
             client
-                .call_tool_once(original)
+                .call_tool_once(original.clone())
                 .await
                 .expect("pending index"),
+            root.path(),
         );
         assert_eq!(status["state"], "queued");
         assert_eq!(
             jobs.0.lock().expect("jobs").len(),
             1,
             "pending queries must not submit another job"
+        );
+        *jobs.1.lock().expect("job error") = Some(crate::IndexOperationError {
+            report: EngineError::storage_failure("injected build failure").into_report(),
+            retryable: true,
+        });
+        let failed = setup_value(
+            client.call_tool_once(original).await.expect("failed index"),
+            root.path(),
+        );
+        assert_eq!(failed["status"], "indexing_failed");
+        assert_eq!(
+            jobs.0.lock().expect("jobs")[0].root,
+            Some(std::fs::canonicalize(root.path()).expect("canonical root")),
+            "formatting replies must preserve the internal job location"
         );
         client.cancel().await.expect("close client");
         task.await.expect("server task").expect("stop server");

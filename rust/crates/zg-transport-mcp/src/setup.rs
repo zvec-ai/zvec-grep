@@ -127,7 +127,7 @@ impl SetupState {
                 Some(IndexOperationState::Queued | IndexOperationState::Running)
             ) {
                 return Some(structured_result(json!({
-                    "status": "indexing", "root": root, "job_id": job_id,
+                    "status": "indexing", "root": zg_cli::output_path(&root), "job_id": job_id,
                     "state": if snapshot.job_state == Some(IndexOperationState::Queued) { "queued" } else { "running" },
                     "progress": snapshot.progress,
                     "message": "The initial index is still building. No search was performed. Retry the original search after indexing completes."
@@ -136,7 +136,7 @@ impl SetupState {
             if let Some(error) = snapshot.error {
                 builds.remove(&root);
                 return Some(structured_result(
-                    json!({"status": "indexing_failed", "root": root,
+                    json!({"status": "indexing_failed", "root": zg_cli::output_path(&root),
                     "job_id": job_id, "error": error.report,
                     "message": "The index build failed. Retry the search to review model setup again."}),
                 ));
@@ -423,7 +423,7 @@ impl SetupState {
         builds.insert(result.root.clone(), result.job_id.clone());
         Ok(structured_result(json!({
             "status": if result.state == IndexOperationState::Succeeded { "ready" } else { "indexing" },
-            "root": result.root, "job_id": result.job_id, "reused": result.reused,
+            "root": zg_cli::output_path(&result.root), "job_id": result.job_id, "reused": result.reused,
             "message": "Index creation was authorized and submitted. No search was performed. Retry the original search after indexing completes."
         })).into())
     }
