@@ -6,6 +6,7 @@ import test from "node:test";
 import { readWorkspaceManifest } from "../dist/engine/manifest.js";
 import { updateGlobalConfig } from "../dist/engine/config.js";
 import { createZvecGrep } from "../dist/index.js";
+import { useIsolatedZvecGrepHome } from "./helpers/isolated-home.mjs";
 import {
   createRemoteEmbeddingOperationPermit,
   createRemoteEmbeddingTarget,
@@ -13,7 +14,9 @@ import {
 } from "../dist/authorization/index.js";
 import { createFakeEmbeddingServer } from "./helpers/fake-embedding.mjs";
 
-test("workspace runtime persists explicit key and endpoint but search overrides stay one-shot", async (t) => {
+useIsolatedZvecGrepHome();
+
+test("workspace runtime persists the endpoint but never the key", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-workspace-runtime-"),
   );
@@ -40,11 +43,23 @@ test("workspace runtime persists explicit key and endpoint but search overrides 
   assert.doesNotMatch(JSON.stringify(publicInfo), /workspace-key/);
   await service.close();
 
-  assert.deepEqual(readRuntime(root), {
-    apiKey: "workspace-key",
-    endpoint,
-  });
+  // Only the endpoint is portable identity; the key is never persisted.
+  assert.deepEqual(readRuntime(root), { endpoint });
 
+  // A later session without credentials cannot use the remote provider...
+  service = await createZvecGrep({ root });
+  await assert.rejects(
+    service.context({
+      root,
+      query: "where is answer defined",
+      autoUpdate: false,
+    }),
+    /api key/i,
+  );
+  await service.close();
+  assert.deepEqual(readRuntime(root), { endpoint });
+
+  // ...but a session-scoped key works and is still not persisted.
   service = await createZvecGrep({
     root,
     apiKey: "one-shot-key",
@@ -57,13 +72,11 @@ test("workspace runtime persists explicit key and endpoint but search overrides 
     }),
   );
   await service.close();
-  assert.deepEqual(readRuntime(root), {
-    apiKey: "workspace-key",
-    endpoint,
-  });
+  assert.deepEqual(readRuntime(root), { endpoint });
 
   service = await createZvecGrep({
     root,
+    apiKey: "one-shot-key",
     endpoint: replacementEndpoint,
   });
   await assert.rejects(
@@ -76,23 +89,18 @@ test("workspace runtime persists explicit key and endpoint but search overrides 
   );
   await assert.rejects(service.index(), /different embedding endpoint/i);
   await service.close();
-  assert.deepEqual(readRuntime(root), {
-    apiKey: "workspace-key",
-    endpoint,
-  });
+  assert.deepEqual(readRuntime(root), { endpoint });
 
   service = await createZvecGrep({
     root,
+    apiKey: "workspace-key",
     endpoint: replacementEndpoint,
   });
   await withPermit(root, replacementEndpoint, () =>
     service.index({ rebuild: true }),
   );
   await service.close();
-  assert.deepEqual(readRuntime(root), {
-    apiKey: "workspace-key",
-    endpoint: replacementEndpoint,
-  });
+  assert.deepEqual(readRuntime(root), { endpoint: replacementEndpoint });
 });
 
 test("inherited provider keys are not copied into workspace metadata", async (t) => {

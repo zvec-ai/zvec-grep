@@ -117,6 +117,7 @@ Core options:
 | --- | --- |
 | `--embedding <model>` | Model for a new or rebuilt index |
 | `--rebuild` | Recreate an existing index |
+| `--reconcile` | Force a full content-hash reconciliation, ignoring stored trust |
 | `--drop` | Permanently remove the Workspace index |
 | `--yes` | Confirm `--drop` without a prompt |
 | `--reset-paths` | Replace stored file-selection settings |
@@ -143,6 +144,42 @@ zg --index
 zg --index --rebuild --embedding local/jina-embeddings-v2-base-code
 zg --index --drop --yes
 ```
+
+## `zg --migrate-index`
+
+```text
+zg --migrate-index <legacy-home> <destination-root>
+```
+
+Converts a legacy (version 1, absolute-path) Workspace index into the portable
+format. The source is never modified; the destination is built in an exclusive
+staging directory, verified, and only then moved into place. Stored vectors and
+fragment content are preserved exactly and no embedding computation occurs, so
+migrated indexes keep the compute already invested in them.
+
+`legacy-home` is the legacy `.zvec-grep` directory. `destination-root` is
+required and must not already contain a workspace index. Persisted credentials
+and device settings are not carried over: credentials resolve per session
+(environment, global config, or explicit options) and device selection is
+host-local. The migrated index is unverified: its first indexing run
+reconciles content by hash.
+
+## `zg --export-index` / `zg --import-index`
+
+```text
+zg --export-index <index-home> <artifact-dir>
+zg --import-index <artifact-dir> <destination-root>
+```
+
+Exports a workspace index (legacy or portable format) to a versioned,
+credential-free transfer artifact, and imports such an artifact at another
+workspace. The artifact carries the portable manifest, every file record, and
+every fragment with its vector — no credentials and no host bindings — so an
+index can move between hosts without its native database files crossing
+platforms and without re-embedding. The import is verified (counts,
+identities, ownership, inventories, groups, vectors) before activation, and
+the imported index is unverified: its first indexing run reconciles content
+by hash.
 
 ## `zg --status`
 

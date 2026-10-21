@@ -18,6 +18,7 @@ and implementation details, see the [Rust README](../rust/README.md).
 | --- | --- |
 | Connect Codex, Claude Code, Qwen Code, Cursor, GitHub Copilot, VS Code, Grok Build, or OpenCode | [Agent integrations](./01-agents.md) |
 | Use zg directly from a terminal | [CLI guide](./02-cli.md) |
+| Move a workspace or transfer its index to another host | [Move and reuse an index](./09-portable-indexes.md) |
 | Understand the tools exposed to an agent | [MCP guide](./03-mcp.md) |
 | Understand indexing, updates, and search routes | [Retrieval pipeline](./04-pipeline.md) |
 | See how the components and trust boundaries fit together | [Architecture](./05-architecture.md) |

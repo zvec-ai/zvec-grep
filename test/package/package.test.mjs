@@ -151,6 +151,8 @@ test("npm package contains and exposes the supported public surface", async (t) 
     HOME: packageHome,
     NO_COLOR: "1",
     ZVEC_GREP_HOME: packageHome,
+    // Credentials resolve per session; the manifest never persists them.
+    ZVEC_GREP_API_KEY: "test-key",
   };
   await runExecutable(
     cli,

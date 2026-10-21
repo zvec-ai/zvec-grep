@@ -17,6 +17,7 @@ import {
   scanFilePath,
 } from "../dist/engine/pipeline/indexing/scanner/index.js";
 import { createZvecGrep } from "../dist/index.js";
+import { endsWithRelative } from "./helpers/native-path.mjs";
 
 test("path scanners rebuild gitignore rules and stay inside the requested subtree", async () => {
   const temporaryDirectory = await mkdtemp(
@@ -366,3 +367,185 @@ class InputLimitedEmbeddingModel extends CountingEmbeddingModel {
     };
   }
 }
+
+test("changedPaths addressed through a workspace alias are indexed", async () => {
+  // Hosted macOS stall (CI runs 36770541712 and 36778689252): changed
+  // paths carrying an equivalent spelling of the workspace (macOS /var,
+  // Windows short names) matched no scan root and no stored path, so
+  // watch jobs completed without touching the changed file and their
+  // barriers never released.
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-path-alias-"),
+  );
+  const physicalRoot = join(temporaryDirectory, "real", "repo");
+  const aliasRoot = join(temporaryDirectory, "var", "repo");
+  await mkdir(physicalRoot, { recursive: true });
+  await symlink(
+    join(temporaryDirectory, "real"),
+    join(temporaryDirectory, "var"),
+  );
+  const changedFile = join(physicalRoot, "changed.ts");
+  const untouchedFile = join(physicalRoot, "untouched.ts");
+  await writeFile(changedFile, "export const value = 1;\n");
+  await writeFile(untouchedFile, "export const untouched = true;\n");
+  const model = new CountingEmbeddingModel();
+  const service = await createZvecGrep({
+    root: physicalRoot,
+    embeddingModel: model,
+  });
+  try {
+    await service.index();
+    model.embeddedTexts.length = 0;
+    await writeFile(changedFile, "export const value = 2;\n");
+    const changed = await service.index({
+      changedPaths: [join(aliasRoot, "changed.ts")],
+    });
+    assert.equal(changed.filesScanned, 1);
+    assert.equal(changed.filesModified, 1);
+    assert.ok(model.embeddedTexts.some((text) => text.includes("value = 2")));
+    assert.ok(model.embeddedTexts.every((text) => !text.includes("untouched")));
+  } finally {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("deleted files reported through a workspace alias remove their stored entry", async () => {
+  // Round-35 review probe: alias-spelled deletion notifications threw
+  // CANONICAL_RESOLUTION_FAILED before stored-entry removal.
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-alias-del-"),
+  );
+  const physical = join(temporaryDirectory, "real", "repo");
+  await mkdir(physical, { recursive: true });
+  await symlink(
+    join(temporaryDirectory, "real"),
+    join(temporaryDirectory, "var"),
+  );
+  const deletedFile = join(physical, "deleted.ts");
+  const keptFile = join(physical, "kept.ts");
+  await writeFile(deletedFile, "export const DeletedSymbol = 1;\n");
+  await writeFile(keptFile, "export const KeptSymbol = 1;\n");
+  const model = new CountingEmbeddingModel();
+  const service = await createZvecGrep({
+    root: physical,
+    embeddingModel: model,
+  });
+  try {
+    await service.index();
+    await rm(deletedFile);
+    const result = await service.index({
+      changedPaths: [join(temporaryDirectory, "var", "repo", "deleted.ts")],
+    });
+    assert.equal(result.filesDeleted, 1);
+    const info = await service.info();
+    assert.equal(info.status.filesStored, 1);
+    const search = await service.context({
+      query: "KeptSymbol",
+      route: "fts",
+      autoUpdate: false,
+    });
+    const hitPaths = search.items.map((item) => item.file?.absolutePath ?? "");
+    assert.ok(
+      hitPaths.some((file) => endsWithRelative(file, "kept.ts")),
+      "the preserved stored file is kept.ts itself",
+    );
+  } finally {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("removed directories reported through a workspace alias remove their stored subtree", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-alias-rmdir-"),
+  );
+  const physical = join(temporaryDirectory, "real", "repo");
+  await mkdir(join(physical, "removed"), { recursive: true });
+  await symlink(
+    join(temporaryDirectory, "real"),
+    join(temporaryDirectory, "var"),
+  );
+  await writeFile(
+    join(physical, "removed", "nested.ts"),
+    "export const NestedSymbol = 1;\n",
+  );
+  await writeFile(join(physical, "kept.ts"), "export const KeptSymbol = 1;\n");
+  const model = new CountingEmbeddingModel();
+  const service = await createZvecGrep({
+    root: physical,
+    embeddingModel: model,
+  });
+  try {
+    await service.index();
+    await rm(join(physical, "removed"), { recursive: true, force: true });
+    const result = await service.index({
+      changedPaths: [join(temporaryDirectory, "var", "repo", "removed")],
+    });
+    assert.equal(result.filesDeleted, 1);
+    const info = await service.info();
+    assert.equal(info.status.filesStored, 1);
+    const search = await service.context({
+      query: "KeptSymbol",
+      route: "fts",
+      autoUpdate: false,
+    });
+    const hitPaths = search.items.map((item) => item.file?.absolutePath ?? "");
+    assert.ok(
+      hitPaths.some((file) => endsWithRelative(file, "kept.ts")),
+      "the preserved stored file is kept.ts itself",
+    );
+  } finally {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("workspace-root notifications through an alias process all changes", async () => {
+  // Round-36 review probe: changedPaths naming the workspace root through
+  // an equivalent spelling silently scanned nothing (0/0/0/0), while the
+  // physical spelling processed every pending change.
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-alias-root-"),
+  );
+  const physical = join(temporaryDirectory, "real", "repo");
+  await mkdir(join(physical, "docs"), { recursive: true });
+  await symlink(
+    join(temporaryDirectory, "real"),
+    join(temporaryDirectory, "var"),
+  );
+  await writeFile(join(physical, "docs", "one.md"), "# One\n");
+  await writeFile(join(physical, "two.md"), "# Two\n");
+  const model = new CountingEmbeddingModel();
+  const service = await createZvecGrep({
+    root: physical,
+    embeddingModel: model,
+  });
+  try {
+    await service.index();
+    await writeFile(join(physical, "docs", "one.md"), "# One edited\n");
+    await rm(join(physical, "two.md"));
+    await writeFile(join(physical, "three.md"), "# Three\n");
+
+    const notified = await service.index({
+      changedPaths: [join(temporaryDirectory, "var", "repo")],
+    });
+    assert.equal(notified.filesAdded, 1);
+    assert.equal(notified.filesModified, 1);
+    assert.equal(notified.filesDeleted, 1);
+    // The two surviving files are scanned; the deleted entry is removed
+    // through storage comparison rather than scanned.
+    assert.equal(notified.filesScanned, 2);
+
+    // Everything settled: the physical-spelling control finds no remaining
+    // change (a root rescan still scans the live files).
+    const control = await service.index({ changedPaths: [physical] });
+    assert.equal(
+      control.filesAdded + control.filesModified + control.filesDeleted,
+      0,
+    );
+  } finally {
+    await service.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});

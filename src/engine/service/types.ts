@@ -36,6 +36,7 @@ export type ZvecGrepIndexOptions = {
   root?: string;
   rootPaths?: readonly (string | RootPath)[];
   rebuild?: boolean;
+  reconcile?: boolean;
   resetPaths?: boolean;
   includePaths?: readonly string[];
   excludePaths?: readonly string[];

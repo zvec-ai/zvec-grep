@@ -5,6 +5,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -254,3 +255,39 @@ function status(filesModified) {
     entitiesIndexed: 1,
   };
 }
+
+test("authorization targets and grants are stable across equivalent workspace spellings", async (t) => {
+  // Spelling-stability guard for the hosted macOS e2e investigation
+  // (runs 36827233150/36829847220/36835086578: incremental index ran with
+  // permit=none). Targets and grants must not depend on which equivalent
+  // spelling of the workspace root an invocation happens to compute.
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "zg-auth-alias-"));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const physical = join(temporaryDirectory, "real", "repo");
+  await mkdir(physical, { recursive: true });
+  await symlink(
+    join(temporaryDirectory, "real"),
+    join(temporaryDirectory, "var"),
+  );
+  const alias = join(temporaryDirectory, "var", "repo");
+  const store = new RemoteEmbeddingAuthorizationStore({
+    signingKeyPath: join(temporaryDirectory, "signing.key"),
+  });
+
+  const granted = await createRemoteEmbeddingTarget({
+    roots: [physical],
+    provider: "qwen",
+    model: "m",
+    endpoint: "https://example.test/embeddings",
+  });
+  await store.grant(granted);
+
+  const lookedUp = await createRemoteEmbeddingTarget({
+    roots: [alias],
+    provider: "qwen",
+    model: "m",
+    endpoint: "https://example.test/embeddings",
+  });
+  assert.equal(lookedUp.targetFingerprint, granted.targetFingerprint);
+  assert.equal(await store.hasGrant(lookedUp), true);
+});
