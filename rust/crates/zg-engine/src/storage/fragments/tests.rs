@@ -633,6 +633,43 @@ fn fragment_ownership_is_checked_across_model_collections() {
 }
 
 #[test]
+fn embeddings_round_trip_as_fp16_and_remain_searchable() {
+    let home = tempfile::tempdir().expect("storage");
+    let store = metadata_store(home.path());
+    let (source, entities, entries) = metadata_fragments(1, "fp16");
+    let mut entries = entries;
+    entries[1].vector = vec![0.1, -0.2, 1.25];
+    write_fixture(&store, &source, &entities, &entries);
+    store.flush().expect("flush storage");
+
+    let collection = store
+        .collection("fixture/fixture")
+        .expect("model collection");
+    let stored = collection
+        .fetch(&[entries[1].fragment_id.as_str()])
+        .expect("fetch fragment");
+    assert_eq!(stored.len(), 1);
+    let decoded = zg_zvec_fp16::decode_embedding(&stored[0], "embedding")
+        .expect("decode embedding")
+        .expect("stored vector");
+    assert_eq!(decoded.len(), entries[1].vector.len());
+    for (decoded, original) in decoded.iter().zip(&entries[1].vector) {
+        assert_eq!(
+            decoded.to_bits(),
+            half::f16::from_f32(*original).to_f32().to_bits()
+        );
+    }
+    assert_ne!(decoded[0].to_bits(), entries[1].vector[0].to_bits());
+
+    let hits = store
+        .search_vector("fixture/fixture", &entries[1].vector, 1, None)
+        .expect("vector search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
+    assert_eq!(hits[0].path, StorageSearchPath::Vector);
+}
+
+#[test]
 fn empty_selection_lists_compile_to_false_without_native_in_syntax() {
     for filter in [
         StorageSearchFilter {

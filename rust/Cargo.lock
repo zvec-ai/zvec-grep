@@ -4144,6 +4144,7 @@ dependencies = [
  "uuid",
  "zg-engine-macros",
  "zg-host-native",
+ "zg-zvec-fp16",
  "zvec-rust",
 ]
 
@@ -4202,6 +4203,15 @@ dependencies = [
  "zg-cli",
  "zg-engine",
  "zg-testkit",
+]
+
+[[package]]
+name = "zg-zvec-fp16"
+version = "0.0.1"
+dependencies = [
+ "half",
+ "tempfile",
+ "zvec-rust",
 ]
 
 [[package]]

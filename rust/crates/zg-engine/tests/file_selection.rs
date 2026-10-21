@@ -630,7 +630,7 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         (
             ContextRouteMode::Vector,
             "search vector index",
-            zvec_rust::SearchQuery::new("embedding", &vec![1.0; dimension], 64)?,
+            zg_zvec_fp16::embedding_query("embedding", &vec![1.0; dimension], 64)?,
         ),
     ] {
         // Excluding Rust negates both its suffix and the dot-only filename exception.

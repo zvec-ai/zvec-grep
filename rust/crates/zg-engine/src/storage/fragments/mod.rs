@@ -1,4 +1,4 @@
-//! Search projections: one zvec collection per embedding model, with FTS and vectors.
+//! Search projections: one zvec collection per embedding model, with FTS and FP16 vectors.
 
 use std::{
     borrow::Cow,
@@ -117,7 +117,7 @@ impl Fragments {
                 "encode searchable text",
             )?;
             native(
-                doc.add_vector_f32("embedding", &entry.vector),
+                zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
                 "encode embedding vector",
             )?;
             projections
@@ -242,7 +242,7 @@ impl Fragments {
             return Ok(Vec::new());
         }
         let mut request = native(
-            SearchQuery::new("embedding", vector, top_k(limit)?),
+            zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
             "create vector query",
         )?;
         configure_query(
@@ -325,7 +325,7 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     native(schema.add_field(&text), "add full-text field")?;
 
     let mut vector = native(
-        FieldSchema::new("embedding", DataType::VectorFp32, false, dimension),
+        FieldSchema::new("embedding", DataType::VectorFp16, false, dimension),
         "define vector field",
     )?;
     native(

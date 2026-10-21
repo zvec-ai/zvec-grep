@@ -658,12 +658,18 @@ mod tests {
         let home = directory.path().join(".zvec-grep");
         fs::create_dir_all(&home).expect("workspace home");
         fs::write(workspace_manifest_path(&home), r#"{"indexVersion":2}"#)
-            .expect("invalid manifest");
-        assert!(read_workspace_manifest(&home).is_err());
+            .expect("previous fp32 manifest");
+        let stale = read_workspace_manifest(&home).expect_err("fp32 index must be rebuilt");
+        assert!(stale.message().contains("unsupported index version 2"));
+        assert!(stale.message().contains(&format!(
+            "expected {}",
+            crate::workspace::CURRENT_INDEX_VERSION
+        )));
+        assert!(stale.message().contains("zg --index --rebuild"));
         let current = fixture_manifest(&home);
         write_workspace_manifest(&home, &current).expect("current manifest");
         let bytes = fs::read(workspace_manifest_path(&home)).expect("persisted manifest");
-        for version in [0, 1, 3, 4, 5, u32::MAX] {
+        for version in [0, 1, 2, 4, 5, u32::MAX] {
             let mut unsupported = current.clone();
             unsupported.index_version = Some(version);
             assert!(write_workspace_manifest(&home, &unsupported).is_err());
@@ -689,7 +695,10 @@ mod tests {
                     .message()
                     .contains(&format!("unsupported index version {version}"))
             );
-            assert!(error.message().contains("expected 2"));
+            assert!(error.message().contains(&format!(
+                "expected {}",
+                crate::workspace::CURRENT_INDEX_VERSION
+            )));
             assert!(error.message().contains("zg --index --rebuild"));
             fs::write(workspace_manifest_path(&home), &bytes).expect("restore current manifest");
         }

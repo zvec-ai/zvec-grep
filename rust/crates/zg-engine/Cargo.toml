@@ -53,6 +53,7 @@ tree-sitter-typescript.workspace = true
 uuid.workspace = true
 zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
+zg-zvec-fp16 = { path = "../zg-zvec-fp16" }
 zvec-rust.workspace = true
 
 [target.'cfg(unix)'.dependencies]

@@ -95,7 +95,7 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
         "root": root, "scan": {},
         "indexPolicy": "enabled", "embeddings": [{ "model": { "provider": "qwen", "name": "text-embedding-v4", "endpoint": format!("http://{address}/embeddings") }, "dimension": 1024, "metric": "cosine", "maxBatchSize": 10, "maxInputTokens": 8192, "maxImageBytes": null }],
         "embeddingRoutes": { "text": "qwen/text-embedding-v4" },
-        "indexVersion": 2, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
+        "indexVersion": 3, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
         "embeddingRuntimes": { "qwen/text-embedding-v4": { "apiKey": "local-test-key", "endpoint": format!("http://{address}/embeddings") } }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)

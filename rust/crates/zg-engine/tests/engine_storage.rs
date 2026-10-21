@@ -70,7 +70,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(2)
+        Some(3)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -83,7 +83,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
-    assert_eq!(manifest["indexVersion"], 2);
+    assert_eq!(manifest["indexVersion"], 3);
     assert_eq!(manifest["embeddings"].as_array().expect("models").len(), 1);
     assert_eq!(
         manifest["embeddingRoutes"],
