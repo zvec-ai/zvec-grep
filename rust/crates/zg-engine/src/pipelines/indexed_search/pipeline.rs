@@ -1475,7 +1475,7 @@ mod tests {
                         predicate_matches(predicate, file.relative_path().as_path())
                     })
             })
-            .map(|file| file.id())
+            .map(FileRecord::id)
             .collect()
     }
 
@@ -2145,8 +2145,12 @@ mod tests {
         let mut plan = plan(Vec::new());
         plan.filter.globs = glob_rules(&["*.rs"]);
         assert_eq!(
-            super::resolve_filtered_file_ids(Path::new("/workspace"), &plan, &[source.clone()])
-                .expect("valid fixture"),
+            super::resolve_filtered_file_ids(
+                Path::new("/workspace"),
+                &plan,
+                std::slice::from_ref(&source),
+            )
+            .expect("valid fixture"),
             vec![source.id()]
         );
         plan.filter.globs = glob_rules(&["*\u{fffd}.rs"]);
