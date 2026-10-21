@@ -133,16 +133,17 @@ fn write_text(home: &Path, storage_home: &Path, text: &str) {
         .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("file ID")[0];
     fs::write(home.parent().expect("root").join("source.txt"), text).expect("source file");
-    let file = FileRecord {
+    let file = FileRecord::new(
         id,
         relative_path,
-        snapshot: FileSnapshot {
+        FileSnapshot {
             size_bytes: text.len() as u64,
             modified_epoch_ms: None,
             content_hash: Some(crate::utils::sha256_hex(text.as_bytes())),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    };
+        FileIndexStatus::NotIndexed,
+    )
+    .expect("file record");
     let content = Content::Text(text.into());
     let entity_id = EntityId::new(id, &content, Range::Full).expect("entity ID");
     let fragment_id = FragmentId::new(&entity_id, 0);

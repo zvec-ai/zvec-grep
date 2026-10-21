@@ -7,19 +7,68 @@ use super::path::SourcePath;
 /// A file relative to the workspace root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FileRecord {
-    pub id: FileId,
-    pub relative_path: SourcePath,
-    pub snapshot: FileSnapshot,
-    pub index_status: FileIndexStatus,
+    id: FileId,
+    relative_path: SourcePath,
+    snapshot: FileSnapshot,
+    index_status: FileIndexStatus,
 }
 
 impl FileRecord {
-    #[track_caller]
-    pub(crate) fn validate(&self) -> EngineResult<()> {
-        if self.index_status.is_indexed() && self.snapshot.content_hash.is_none() {
+    pub(crate) fn new(
+        id: FileId,
+        relative_path: SourcePath,
+        snapshot: FileSnapshot,
+        index_status: FileIndexStatus,
+    ) -> EngineResult<Self> {
+        Self::validate_state(&relative_path, &snapshot, &index_status)?;
+
+        Ok(Self {
+            id,
+            relative_path,
+            snapshot,
+            index_status,
+        })
+    }
+
+    pub(crate) fn id(&self) -> FileId {
+        self.id
+    }
+
+    pub(crate) fn relative_path(&self) -> &SourcePath {
+        &self.relative_path
+    }
+
+    pub(crate) fn snapshot(&self) -> &FileSnapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn index_status(&self) -> &FileIndexStatus {
+        &self.index_status
+    }
+
+    pub(crate) fn set_snapshot(&mut self, snapshot: FileSnapshot) -> EngineResult<()> {
+        Self::validate_state(&self.relative_path, &snapshot, &self.index_status)?;
+
+        self.snapshot = snapshot;
+        Ok(())
+    }
+
+    pub(crate) fn set_index_status(&mut self, index_status: FileIndexStatus) -> EngineResult<()> {
+        Self::validate_state(&self.relative_path, &self.snapshot, &index_status)?;
+
+        self.index_status = index_status;
+        Ok(())
+    }
+
+    fn validate_state(
+        relative_path: &SourcePath,
+        snapshot: &FileSnapshot,
+        index_status: &FileIndexStatus,
+    ) -> EngineResult<()> {
+        if index_status.is_indexed() && snapshot.content_hash.is_none() {
             return Err(EngineError::invalid_argument(format!(
                 "indexed files must have a content hash: {}",
-                self.relative_path.display()
+                relative_path.display()
             )));
         }
         Ok(())

@@ -53,13 +53,20 @@ impl IndexStore {
 }
 
 fn file_at(storage: &IndexStore, path: &str) -> (FileRecord, FixtureEntity) {
-    let (mut file, mut entry) = fixture(None, "template", "orchard", vec![1.0, 0.0, 0.0]);
-    file.relative_path = crate::domain::SourcePath::new(path).expect("source path");
-    file.id = storage
-        .resolve_file_ids(&[file.relative_path.to_path_buf()])
+    let (file, mut entry) = fixture(None, "template", "orchard", vec![1.0, 0.0, 0.0]);
+    let relative_path = SourcePath::new(path).expect("source path");
+    let id = storage
+        .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("reserve identity")[0];
+    let file = FileRecord::new(
+        id,
+        relative_path,
+        file.snapshot().clone(),
+        file.index_status().clone(),
+    )
+    .expect("file record");
     entry.entity = fixture_entity(
-        file.id,
+        file.id(),
         entry.entity.content().clone(),
         entry.entity.metadata().cloned(),
     );
@@ -169,7 +176,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
         };
         let mut expected = indices
             .into_iter()
-            .map(|index| files[index].id)
+            .map(|index| files[index].id())
             .collect::<Vec<_>>();
         expected.sort();
         for hits in [
@@ -186,7 +193,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
         }
     }
     storage
-        .delete_file(files[2].id)
+        .delete_file(files[2].id())
         .expect("delete nested file");
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(nested.clone())),
@@ -227,7 +234,7 @@ fn file_ids_are_local_to_index_records_and_rebuilds_are_independent() {
         reopened
             .resolve_file_ids(&[PathBuf::from("src/main.rs")])
             .expect("stored ID"),
-        [file.id]
+        [file.id()]
     );
     // An unstored reservation is not a durable source record.
     assert_eq!(
@@ -255,14 +262,20 @@ fn deleting_a_record_releases_its_path_but_never_reuses_a_live_id() {
     storage
         .replace_fixture_file(&file, &[entry])
         .expect("write");
-    storage.delete_file(file.id).expect("delete");
+    storage.delete_file(file.id()).expect("delete");
     let (replacement, entry) = file_at(&storage, "src/main.rs");
-    assert_ne!(file.id, replacement.id);
+    assert_ne!(file.id(), replacement.id());
     storage
         .replace_fixture_file(&replacement, &[entry])
         .expect("replace");
-    let (mut mismatched, entry) = file_at(&storage, "other.rs");
-    mismatched.relative_path = replacement.relative_path.clone();
+    let (mismatched, entry) = file_at(&storage, "other.rs");
+    let mismatched = FileRecord::new(
+        mismatched.id(),
+        replacement.relative_path().clone(),
+        mismatched.snapshot().clone(),
+        mismatched.index_status().clone(),
+    )
+    .expect("file record");
     assert!(storage.replace_fixture_file(&mismatched, &[entry]).is_err());
     storage.close().expect("checkpoint");
     let reopened = open(temporary.path(), false);
@@ -270,13 +283,13 @@ fn deleting_a_record_releases_its_path_but_never_reuses_a_live_id() {
         reopened
             .resolve_file_ids(&[PathBuf::from("src/main.rs")])
             .expect("retained"),
-        [replacement.id]
+        [replacement.id()]
     );
     assert!(
         reopened
             .resolve_file_ids(&[PathBuf::from("new.rs")])
             .expect("new")[0]
-            > replacement.id
+            > replacement.id()
     );
     reopened.close().expect("close");
 }
@@ -292,7 +305,7 @@ fn failed_files_retain_queryable_paths_and_directory_ownership() {
         .expect("record failure");
     assert_eq!(
         storage.list_file_paths().expect("paths"),
-        [(file.id, file.relative_path.to_path_buf())]
+        [(file.id(), file.relative_path().to_path_buf())]
     );
     storage.close().expect("checkpoint");
 
@@ -324,7 +337,11 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
     let temporary = tempfile::tempdir().expect("workspace");
     let storage = open(temporary.path(), false);
     let (mut file, entry) = file_at(&storage, "source.txt");
-    file.snapshot.modified_epoch_ms = Some(0);
+    file.set_snapshot(FileSnapshot {
+        modified_epoch_ms: Some(0),
+        ..file.snapshot().clone()
+    })
+    .expect("file snapshot");
     storage
         .replace_fixture_file(&file, &[entry])
         .expect("write");
@@ -333,7 +350,11 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
         [StoredFileAttributes::from(&file)]
     );
 
-    file.snapshot.modified_epoch_ms = None;
+    file.set_snapshot(FileSnapshot {
+        modified_epoch_ms: None,
+        ..file.snapshot().clone()
+    })
+    .expect("file snapshot");
     storage
         .mark_file_failed(&file, "extractor failed")
         .expect("replace with failed record");
@@ -350,7 +371,7 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
             .expect("persisted attributes"),
         [StoredFileAttributes::from(&file)]
     );
-    reopened.delete_file(file.id).expect("delete");
+    reopened.delete_file(file.id()).expect("delete");
     assert!(
         reopened
             .list_file_attributes()
@@ -579,16 +600,17 @@ fn fixture(
                 .expect("reserve file ID")[0]
         },
     );
-    let file = FileRecord {
+    let file = FileRecord::new(
         id,
         relative_path,
-        snapshot: FileSnapshot {
+        FileSnapshot {
             size_bytes: text.len() as u64,
             modified_epoch_ms: Some(1),
             content_hash: Some(crate::utils::sha256_hex(text.as_bytes())),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    };
+        FileIndexStatus::NotIndexed,
+    )
+    .expect("file record");
     let content = Content::Text(text.to_owned());
     let entry = FixtureEntity {
         fts_text: format!("quoted'\\name\0suffix\n{text}\n"),
@@ -650,7 +672,7 @@ fn persists_filters_and_replaces_complete_files() {
 
     let filter = StorageSearchFilter {
         path: None,
-        file_ids: Some(vec![first.id]),
+        file_ids: Some(vec![first.id()]),
         entity_ids: Some(vec![entry.entity.id().clone()]),
         symbol_names: Some(vec!["quoted'\\name\0suffix".to_owned()]),
         symbol_types: Some(vec![SymbolType::Function]),
@@ -670,11 +692,11 @@ fn persists_filters_and_replaces_complete_files() {
         .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, Some(&filter))
         .expect("filtered ANN");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].file_id, first.id);
+    assert_eq!(hits[0].file_id, first.id());
     let loaded = storage.load_search_hits(&hits).expect("ANN result details");
     let stored = &loaded.entities[&hits[0].entity_id];
-    assert_eq!(stored.file.snapshot, first.snapshot);
-    assert!(stored.file.index_status.is_indexed());
+    assert_eq!(stored.file.snapshot(), first.snapshot());
+    assert!(stored.file.index_status().is_indexed());
     let ranked = storage
         .search_vector("fixture/fixture-model", &[1.0, 0.0, 0.0], 10, None)
         .expect("ranked ANN");
@@ -688,12 +710,12 @@ fn persists_filters_and_replaces_complete_files() {
     );
     for rejected in [
         StorageSearchFilter {
-            file_ids: Some(vec![second.id]),
+            file_ids: Some(vec![second.id()]),
             ..filter.clone()
         },
         StorageSearchFilter {
             entity_ids: Some(vec![
-                EntityId::new(first.id, &Content::Text("missing".into()), Range::Full)
+                EntityId::new(first.id(), &Content::Text("missing".into()), Range::Full)
                     .expect("entity id"),
             ]),
             ..filter.clone()
@@ -759,13 +781,15 @@ fn persists_filters_and_replaces_complete_files() {
             .is_empty()
     );
     assert_eq!(
-        storage.list_files().expect("files")[0].index_status.error(),
+        storage.list_files().expect("files")[0]
+            .index_status()
+            .error(),
         Some("fixture extraction error")
     );
     storage
         .replace_fixture_file(&first, &[entry])
         .expect("retry failed file");
-    storage.delete_file(second.id).expect("delete file");
+    storage.delete_file(second.id()).expect("delete file");
     storage.close().expect("close writer");
     assert_eq!(
         storage.list_files().expect_err("closed lease").code(),
@@ -787,7 +811,7 @@ fn persists_filters_and_replaces_complete_files() {
             .len(),
         1
     );
-    assert!(reader.delete_file(first.id).is_err());
+    assert!(reader.delete_file(first.id()).is_err());
     let second_reader = open(home, true);
     reader.close().expect("close one reader");
     assert_eq!(
@@ -833,9 +857,9 @@ fn checkpoint_preserves_failure_status() {
     let files = reader.list_files().expect("finalized file status");
     let stored = files
         .iter()
-        .find(|file| file.id == failed.id)
+        .find(|file| file.id() == failed.id())
         .expect("failed source remains");
-    let status = &stored.index_status;
+    let status = stored.index_status();
     assert_eq!(status.error(), Some("fixture failure"));
     assert_eq!(status.indexed_epoch_ms(), None);
     reader.close().expect("close reader");
@@ -946,7 +970,7 @@ fn persists_zero_cosine_vector_without_failing_its_file() {
     let reader = open(directory.path(), true);
     let files = reader.list_files().expect("read indexed file");
     assert_eq!(files.len(), 1);
-    assert!(files[0].index_status.is_indexed());
+    assert!(files[0].index_status().is_indexed());
     assert_eq!(
         reader
             .search_fts("hexadecimal", 10, None)
@@ -968,14 +992,24 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
         vec![1.0, 0.0, 0.0],
     );
     let mut unread = file.clone();
-    unread.snapshot.content_hash = None;
+    unread
+        .set_snapshot(FileSnapshot {
+            content_hash: None,
+            ..unread.snapshot().clone()
+        })
+        .expect("unread file snapshot");
     assert!(
         storage
             .replace_fixture_file(&unread, std::slice::from_ref(&entry))
             .is_err()
     );
-    let mut other = file.clone();
-    other.id = FileId::new(99);
+    let other = FileRecord::new(
+        FileId::new(99),
+        file.relative_path().clone(),
+        file.snapshot().clone(),
+        file.index_status().clone(),
+    )
+    .expect("file record");
     assert!(
         storage
             .replace_fixture_file(&other, std::slice::from_ref(&entry))
@@ -996,7 +1030,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     .expect("valid entity with duplicate ID");
     let mut duplicate_fragment = entry.clone();
     duplicate_fragment.entity = Entity::new(
-        EntityId::new(file.id, &Content::Text("other".into()), Range::Full).expect("entity id"),
+        EntityId::new(file.id(), &Content::Text("other".into()), Range::Full).expect("entity id"),
         entry.entity.file_id(),
         entry.entity.source_range(),
         entry.entity.content().clone(),
@@ -1016,7 +1050,8 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     let (entities, entries) = fixture_records(std::slice::from_ref(&entry));
     let mut wrong_owner = entries[0].clone();
     wrong_owner.entity_id =
-        EntityId::new(file.id, &Content::Text("unrelated".into()), Range::Full).expect("entity id");
+        EntityId::new(file.id(), &Content::Text("unrelated".into()), Range::Full)
+            .expect("entity id");
     let mut unknown_fragment = entries[0].clone();
     unknown_fragment.fragment_id = FragmentId::new(entry.entity.id(), 1);
     for invalid in [
@@ -1038,9 +1073,9 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     let reader = open(directory.path(), true);
     let files = reader.list_files().expect("read empty indexed source");
     assert_eq!(files.len(), 1);
-    assert!(files[0].index_status.is_indexed());
-    assert_eq!(files[0].index_status.entity_count(), 0);
-    assert_eq!(files[0].snapshot, file.snapshot);
+    assert!(files[0].index_status().is_indexed());
+    assert_eq!(files[0].index_status().entity_count(), 0);
+    assert_eq!(files[0].snapshot(), file.snapshot());
     reader.close().expect("close reader");
 }
 
@@ -1053,7 +1088,7 @@ fn writes_fragments_across_native_batch_boundaries() {
     let entries = (0..1025)
         .map(|index| {
             let entity = fixture_entity(
-                file.id,
+                file.id(),
                 Content::Text(format!("harvest {index}")),
                 prototype.entity.metadata().cloned(),
             );
@@ -1125,12 +1160,19 @@ fn reopened_readers_detect_non_unicode_names_without_loading_the_allocation_cach
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
     let temporary = tempfile::tempdir().expect("workspace");
     let storage = open(temporary.path(), false);
-    let (mut file, _) = fixture(None, "native", "source", vec![1.0, 0.0, 0.0]);
-    file.relative_path =
+    let (file, _) = fixture(None, "native", "source", vec![1.0, 0.0, 0.0]);
+    let relative_path =
         SourcePath::new(OsString::from_vec(b"src/\xff.rs".to_vec())).expect("native path");
-    file.id = storage
-        .resolve_file_ids(&[file.relative_path.to_path_buf()])
+    let id = storage
+        .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("ID")[0];
+    let file = FileRecord::new(
+        id,
+        relative_path,
+        file.snapshot().clone(),
+        file.index_status().clone(),
+    )
+    .expect("file record");
     storage
         .mark_file_failed(&file, "fixture")
         .expect("file record");
@@ -1140,7 +1182,7 @@ fn reopened_readers_detect_non_unicode_names_without_loading_the_allocation_cach
     assert!(reader.has_non_unicode_file_names().expect("reader"));
     reader.close().expect("close");
     let writer = open(temporary.path(), false);
-    writer.delete_file(file.id).expect("delete");
+    writer.delete_file(file.id()).expect("delete");
     writer.close().expect("checkpoint");
     let reader = open(temporary.path(), true);
     assert!(!reader.has_non_unicode_file_names().expect("empty reader"));
@@ -1227,7 +1269,7 @@ fn multi_model_file(storage: &IndexStore) -> (FileRecord, Vec<FixtureEntity>) {
         crate::domain::ImageContent::new(vec![1, 2, 3], crate::domain::FileFormat::Png)
             .expect("image"),
     );
-    image.entity = fixture_entity(file.id, content, image.entity.metadata().cloned());
+    image.entity = fixture_entity(file.id(), content, image.entity.metadata().cloned());
     image.fts_text = "quoted'\\name\0suffix\n[image:png]\n".into();
     (file, vec![text, image])
 }
@@ -1294,7 +1336,7 @@ fn finalization_preserves_replacements_and_deletions_after_reopen() {
     writer
         .replace_fixture_file(&replacement, &[entry])
         .expect("replacement");
-    writer.delete_file(second.id).expect("deletion");
+    writer.delete_file(second.id()).expect("deletion");
     writer.finalize_writes().expect("optimize changed indexes");
     writer.close().expect("close writer");
 
@@ -1312,7 +1354,7 @@ fn finalization_preserves_replacements_and_deletions_after_reopen() {
         .search_fts("meadow", 10, None)
         .expect("replacement FTS");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].file_id, first.id);
+    assert_eq!(hits[0].file_id, first.id());
     let vectors = reader
         .search_vector("fixture/fixture-model", &[0.0, 0.0, 1.0], 10, None)
         .expect("replacement vector");
@@ -1398,7 +1440,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         .expect("file failure");
     let failed = writer.list_files().expect("failed files");
     assert!(
-        matches!(&failed[0].index_status, FileIndexStatus::Failed { error } if error == "vision request failed")
+        matches!(failed[0].index_status(), FileIndexStatus::Failed { error } if error == "vision request failed")
     );
     assert!(
         writer

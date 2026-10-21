@@ -19,7 +19,7 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
         {
             continue;
         }
-        files.entry(item.hit.file.id).or_default().push(index);
+        files.entry(item.hit.file.id()).or_default().push(index);
     }
     for mut indices in files.into_values() {
         indices.sort_by(|&a, &b| {

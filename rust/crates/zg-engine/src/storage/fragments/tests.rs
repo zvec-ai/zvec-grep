@@ -6,16 +6,20 @@ use crate::domain::{
 use std::path::PathBuf;
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
-    FileRecord {
-        id: FileId::new(id),
-        relative_path: crate::domain::SourcePath::new(path).expect("source path"),
-        snapshot: FileSnapshot {
-            size_bytes: 0,
+    FileRecord::new(
+        FileId::new(id),
+        crate::domain::SourcePath::new(path).expect("source path"),
+        FileSnapshot {
+            size_bytes: 100,
             modified_epoch_ms: None,
-            content_hash: None,
+            content_hash: Some("fixture-hash".into()),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    }
+        FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: 1,
+        },
+    )
+    .expect("file record")
 }
 
 fn model() -> EmbeddingModelInfo {
@@ -53,7 +57,7 @@ fn write_fixture(
     entities: &[Entity],
     entries: &[IndexedFragment],
 ) {
-    let directories = if file.relative_path.as_path().starts_with("src") {
+    let directories = if file.relative_path().as_path().starts_with("src") {
         vec![DirectoryId::new(u32::MAX)]
     } else {
         Vec::new()
@@ -67,13 +71,7 @@ fn metadata_fragments(
     file_id: u32,
     label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
-    let mut source = file(file_id, "harvest.rs");
-    source.snapshot.size_bytes = 100;
-    source.snapshot.content_hash = Some("fixture-hash".into());
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 1,
-    };
+    let source = file(file_id, "harvest.rs");
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
     text.push_str("orchard fruit");
@@ -83,10 +81,10 @@ fn metadata_fragments(
     let content = Content::Text(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
-    let id = EntityId::new(source.id, &content, source_range).expect("entity id");
+    let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
     let owner = Entity::new(
         id.clone(),
-        source.id,
+        source.id(),
         source_range,
         content,
         Some(EntityMetadata::Code(CodeMetadata {
@@ -219,7 +217,7 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
         )
         .expect("valid entity with replacement metadata");
         store
-            .delete_file(source.id)
+            .delete_file(source.id())
             .expect("remove prior projection");
         write_fixture(&store, &source, &entities, &entries);
         store.flush().expect("flush fragments");
@@ -267,14 +265,19 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         )
         .expect("valid entity with replacement symbol type");
     }
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 3,
-    };
+    source
+        .set_index_status(FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: 3,
+        })
+        .expect("file status");
     write_fixture(&store, &source, &entities, &entries);
     store.flush().expect("flush storage");
 
-    for symbol_type in [SymbolType::Class, SymbolType::Enum] {
+    for (index, symbol_type) in [SymbolType::Class, SymbolType::Enum]
+        .into_iter()
+        .enumerate()
+    {
         let filter = StorageSearchFilter {
             symbol_types: Some(vec![symbol_type]),
             ..StorageSearchFilter::default()
@@ -289,15 +292,10 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         ] {
             let hits = hits.expect("filtered results");
             assert_eq!(hits.len(), count);
-            assert!(hits.iter().all(|hit| {
-                &hit.entity_id
-                    == entities[match symbol_type {
-                        SymbolType::Class => 0,
-                        SymbolType::Enum => 1,
-                        _ => unreachable!(),
-                    }]
-                    .id()
-            }));
+            assert!(
+                hits.iter()
+                    .all(|hit| &hit.entity_id == entities[index].id())
+            );
         }
     }
 
@@ -451,8 +449,14 @@ fn filename_like_negation_propagates_native_query_errors() {
 fn index_named_filter_sources(store: &Fragments, paths: &[&str]) {
     for (index, path) in paths.iter().enumerate() {
         let id = u32::try_from(index + 1).expect("file ID");
-        let (mut source, entities, entries) = metadata_fragments(id, &format!("owner-{id}"));
-        source.relative_path = SourcePath::new(*path).expect("source path");
+        let (source, entities, entries) = metadata_fragments(id, &format!("owner-{id}"));
+        let source = FileRecord::new(
+            source.id(),
+            SourcePath::new(*path).expect("source path"),
+            source.snapshot().clone(),
+            source.index_status().clone(),
+        )
+        .expect("file record");
         write_fixture(store, &source, &entities, &entries);
     }
 }
@@ -634,7 +638,7 @@ fn fragment_ownership_is_checked_across_model_collections() {
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
     store
-        .validate_ownership(&entries, source.id)
+        .validate_ownership(&entries, source.id())
         .expect("same file");
     let mut foreign = entries.clone();
     for entry in &mut foreign {
@@ -643,11 +647,11 @@ fn fragment_ownership_is_checked_across_model_collections() {
     assert!(store.validate_ownership(&foreign, FileId::new(0)).is_err());
     let hits = store.search_fts("orchard", 10, None).expect("search");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].file_id, source.id);
+    assert_eq!(hits[0].file_id, source.id());
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
     assert_eq!(hits[0].entity_id, *entities[0].id());
-    store.delete_file(source.id).expect("delete projections");
-    store.delete_file(source.id).expect("idempotent delete");
+    store.delete_file(source.id()).expect("delete projections");
+    store.delete_file(source.id()).expect("idempotent delete");
     assert!(
         store
             .search_fts("orchard", 10, None)

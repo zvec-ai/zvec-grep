@@ -48,8 +48,8 @@ impl IndexStore {
         entries: &[IndexedFragment],
     ) -> EngineResult<()> {
         assert_eq!(
-            self.resolve_file_ids(&[file.relative_path.to_path_buf()])?,
-            [file.id]
+            self.resolve_file_ids(&[file.relative_path().to_path_buf()])?,
+            [file.id()]
         );
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
@@ -80,29 +80,27 @@ fn fragment_document(store: &IndexStore, model: &str, id: &str) -> Doc {
 }
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
-    FileRecord {
-        id: FileId::new(id),
-        relative_path: crate::domain::SourcePath::new(path).expect("source path"),
-        snapshot: FileSnapshot {
-            size_bytes: 0,
+    FileRecord::new(
+        FileId::new(id),
+        crate::domain::SourcePath::new(path).expect("source path"),
+        FileSnapshot {
+            size_bytes: 100,
             modified_epoch_ms: None,
-            content_hash: None,
+            content_hash: Some("fixture-hash".into()),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    }
+        FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: 1,
+        },
+    )
+    .expect("file record")
 }
 
 fn metadata_fragments(
     file_id: u32,
     label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
-    let mut source = file(file_id, "harvest.rs");
-    source.snapshot.size_bytes = 100;
-    source.snapshot.content_hash = Some("fixture-hash".into());
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 1,
-    };
+    let source = file(file_id, "harvest.rs");
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
     text.push_str("orchard fruit");
@@ -112,10 +110,10 @@ fn metadata_fragments(
     let content = Content::Text(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
-    let id = EntityId::new(source.id, &content, source_range).expect("entity id");
+    let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
     let owner = Entity::new(
         id.clone(),
-        source.id,
+        source.id(),
         source_range,
         content,
         Some(EntityMetadata::Code(CodeMetadata {
@@ -444,7 +442,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
         .expect("search schemas");
     // Removing a derived projection does not remove or redefine the canonical fragment.
     store
-        .write(|state| state.fragments.delete_file(source.id))
+        .write(|state| state.fragments.delete_file(source.id()))
         .expect("remove projection");
     assert_eq!(
         store
@@ -491,16 +489,20 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("original owner");
-    let mut foreign_source = source.clone();
-    foreign_source.id = FileId::new(1);
-    foreign_source.relative_path = SourcePath::new("other.rs").expect("path");
+    let foreign_source = FileRecord::new(
+        FileId::new(1),
+        SourcePath::new("other.rs").expect("path"),
+        source.snapshot().clone(),
+        source.index_status().clone(),
+    )
+    .expect("file record");
     let owner = &entities[0];
-    let foreign_id =
-        EntityId::new(foreign_source.id, owner.content(), owner.source_range()).expect("entity id");
+    let foreign_id = EntityId::new(foreign_source.id(), owner.content(), owner.source_range())
+        .expect("entity id");
     let foreign_entities = vec![
         Entity::new(
             foreign_id,
-            foreign_source.id,
+            foreign_source.id(),
             owner.source_range(),
             owner.content().clone(),
             owner.metadata().cloned(),
@@ -538,8 +540,14 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
 fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() {
     let home = tempfile::tempdir().expect("storage");
     let store = metadata_store(home.path());
-    let (mut source, entities, entries) = metadata_fragments(0, "old-owner");
-    source.relative_path = SourcePath::new("src/nested/harvest.rs").expect("path");
+    let (source, entities, entries) = metadata_fragments(0, "old-owner");
+    let source = FileRecord::new(
+        source.id(),
+        SourcePath::new("src/nested/harvest.rs").expect("path"),
+        source.snapshot().clone(),
+        source.index_status().clone(),
+    )
+    .expect("file record");
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
@@ -547,10 +555,12 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
 
     // Simulate interruption after the retry marker but before replacing old rows.
     let mut unfinished = source.clone();
-    unfinished.index_status = FileIndexStatus::NotIndexed;
+    unfinished
+        .set_index_status(FileIndexStatus::NotIndexed)
+        .expect("file status");
     store
         .write(|state| {
-            let directories = state.directories.ensure(&unfinished.relative_path)?;
+            let directories = state.directories.ensure(unfinished.relative_path())?;
             state.files.put(&unfinished, &directories)
         })
         .expect("retry state");
@@ -615,13 +625,15 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
     let mut deleting = source.clone();
-    deleting.index_status = FileIndexStatus::Deleting;
+    deleting
+        .set_index_status(FileIndexStatus::Deleting)
+        .expect("file status");
     store
-        .write(|state| state.files.mark_deleting(source.id))
+        .write(|state| state.files.mark_deleting(source.id()))
         .expect("delete intent");
     // One collection can be cleared while another still contains old results.
     store
-        .write(|state| state.entities.delete_file(source.id))
+        .write(|state| state.entities.delete_file(source.id()))
         .expect("delete entities");
     store.checkpoint().expect("persist interruption");
     drop(store);
@@ -640,8 +652,8 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
             .entities
             .is_empty()
     );
-    store.delete_file(source.id).expect("finish deleting");
-    store.delete_file(source.id).expect("repeat deletion");
+    store.delete_file(source.id()).expect("finish deleting");
+    store.delete_file(source.id()).expect("repeat deletion");
     assert!(store.list_files().expect("no files").is_empty());
     assert!(
         store
@@ -678,7 +690,7 @@ fn result_loading_skips_missing_files_and_canonical_fragments() {
     assert!(!loaded.fragments.contains_key(&hits[0].document_id));
 
     store
-        .write(|state| state.files.delete(source.id))
+        .write(|state| state.files.delete(source.id()))
         .expect("missing file");
     let loaded = store
         .load_search_hits(&hits)
@@ -713,8 +725,14 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     drop(directory_table);
 
     let store = metadata_store(temporary.path());
-    let (mut source, entities, entries) = metadata_fragments(0, "owner");
-    source.relative_path = SourcePath::new("edge/harvest.rs").expect("path");
+    let (source, entities, entries) = metadata_fragments(0, "owner");
+    let source = FileRecord::new(
+        source.id(),
+        SourcePath::new("edge/harvest.rs").expect("path"),
+        source.snapshot().clone(),
+        source.index_status().clone(),
+    )
+    .expect("file record");
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("maximum membership");
@@ -770,7 +788,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
         .expect("source records");
     assert_eq!(
         docs[0].get_u32("file_id").expect("u32 file ID"),
-        Some(source.id.get())
+        Some(source.id().get())
     );
     assert_eq!(
         docs[0]

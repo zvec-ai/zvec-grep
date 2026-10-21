@@ -48,19 +48,20 @@ pub(super) fn hit(
             vec![fragment],
         )
         .expect("entity"),
-        file: FileRecord {
-            id: FileId::new(file_id),
-            relative_path: SourcePath::new(path).expect("path"),
-            snapshot: FileSnapshot {
+        file: FileRecord::new(
+            FileId::new(file_id),
+            SourcePath::new(path).expect("path"),
+            FileSnapshot {
                 size_bytes: 6,
                 modified_epoch_ms: Some(0),
-                content_hash: None,
+                content_hash: Some(crate::utils::sha256_hex(b"source")),
             },
-            index_status: FileIndexStatus::Indexed {
+            FileIndexStatus::Indexed {
                 indexed_epoch_ms: 0,
                 entity_count: 1,
             },
-        },
+        )
+        .expect("file"),
         evidence: vec![],
         rank,
         score,

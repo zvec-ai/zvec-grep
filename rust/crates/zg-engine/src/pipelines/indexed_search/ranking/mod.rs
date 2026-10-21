@@ -90,7 +90,7 @@ fn rank_with_policy(
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
-        .map(|hit| Roles::from_path(&hit.file.relative_path.display().to_string()))
+        .map(|hit| Roles::from_path(&hit.file.relative_path().display().to_string()))
         .collect::<Vec<_>>();
     // A common dependency prior carries no information within this search scope.
     overrides.dependency |= roles.iter().all(|r| r.dependency);
@@ -104,7 +104,7 @@ fn rank_with_policy(
             };
             let base = hit.score / maximum_rrf;
             let mut path_bonus = policy.path_weight
-                * query.path_affinity(&hit.file.relative_path.display().to_string());
+                * query.path_affinity(&hit.file.relative_path().display().to_string());
             // Weak lexical coverage is one signal even when repeated in the path.
             if symbol_match == "tokens" {
                 path_bonus = (path_bonus - symbol_bonus).max(0.0);
@@ -141,7 +141,7 @@ fn select(
 ) -> Vec<SearchHit> {
     let single_file = scored
         .iter()
-        .all(|s| s.hit.file.id == scored[0].hit.file.id);
+        .all(|s| s.hit.file.id() == scored[0].hit.file.id());
     let mut selected_per_file = HashMap::<FileId, u32>::new();
     let mut output = Vec::with_capacity(limit.min(scored.len()));
     while output.len() < limit && !scored.is_empty() {
@@ -150,7 +150,7 @@ fn select(
                 0
             } else {
                 selected_per_file
-                    .get(&item.hit.file.id)
+                    .get(&item.hit.file.id())
                     .copied()
                     .unwrap_or(0)
             };
@@ -167,7 +167,7 @@ fn select(
             })
             .map_or(0, |(index, _)| index);
         let mut item = scored.swap_remove(best);
-        let count = selected_per_file.entry(item.hit.file.id).or_default();
+        let count = selected_per_file.entry(item.hit.file.id()).or_default();
         let factor = if single_file {
             1.0
         } else {

@@ -283,8 +283,8 @@ fn search_plan_to_context_items(
             Ok(ContextItem {
                 kind: ContextItemKind::IndexedEntity,
                 rank: hit.rank,
-                absolute_path: workspace_root.join(&hit.file.relative_path),
-                relative_path: hit.file.relative_path.to_path_buf(),
+                absolute_path: workspace_root.join(hit.file.relative_path()),
+                relative_path: hit.file.relative_path().to_path_buf(),
                 range: hit.entity.source_range().into(),
                 excerpt_range: target.excerpt_range,
                 content_range: target.content_range,
@@ -537,7 +537,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
 }
 
 fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextItemStatus {
-    let absolute_path = workspace_root.join(&file.relative_path);
+    let absolute_path = workspace_root.join(file.relative_path());
     let metadata = match fs::metadata(&absolute_path) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -560,13 +560,13 @@ fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextIte
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| duration.as_millis().try_into().ok());
-    if metadata.len() == file.snapshot.size_bytes
+    if metadata.len() == file.snapshot().size_bytes
         && modified.is_some()
-        && modified == file.snapshot.modified_epoch_ms
+        && modified == file.snapshot().modified_epoch_ms
     {
         return ContextItemStatus::Fresh;
     }
-    if let Some(expected) = &file.snapshot.content_hash
+    if let Some(expected) = &file.snapshot().content_hash
         && let Ok(bytes) = fs::read(&absolute_path)
     {
         return if sha256_hex(&bytes) == *expected {
@@ -575,9 +575,9 @@ fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextIte
             ContextItemStatus::PossiblyStale
         };
     }
-    let metadata_changed = metadata.len() != file.snapshot.size_bytes
+    let metadata_changed = metadata.len() != file.snapshot().size_bytes
         || modified
-            .zip(file.snapshot.modified_epoch_ms)
+            .zip(file.snapshot().modified_epoch_ms)
             .is_some_and(|(current, indexed)| current != indexed);
     if metadata_changed {
         ContextItemStatus::PossiblyStale
@@ -655,23 +655,20 @@ mod tests {
                 vec![fragment.clone(), full.clone()],
             )
             .expect("entity"),
-            file: FileRecord {
-                id: file_id,
-                relative_path: crate::domain::SourcePath::new("file.txt").expect("source path"),
-                snapshot: FileSnapshot {
+            file: FileRecord::new(
+                file_id,
+                crate::domain::SourcePath::new("file.txt").expect("source path"),
+                FileSnapshot {
                     size_bytes: (9 + source.len()) as u64,
                     modified_epoch_ms: None,
                     content_hash: None,
                 },
-                index_status: FileIndexStatus::NotIndexed,
-            },
+                FileIndexStatus::NotIndexed,
+            )
+            .expect("file"),
             evidence: vec![
-                SearchEvidence {
-                    fragment: fragment.clone(),
-                },
-                SearchEvidence {
-                    fragment: full.clone(),
-                },
+                SearchEvidence { fragment },
+                SearchEvidence { fragment: full },
             ],
             rank: 1,
             score: 1.0,
@@ -761,16 +758,17 @@ mod tests {
                     vec![fragment.clone()],
                 )
                 .expect("entity"),
-                file: FileRecord {
-                    id: file_id,
-                    relative_path: input.relative_path,
-                    snapshot: FileSnapshot {
+                file: FileRecord::new(
+                    file_id,
+                    input.relative_path,
+                    FileSnapshot {
                         size_bytes: source.len() as u64,
                         modified_epoch_ms: None,
                         content_hash: None,
                     },
-                    index_status: FileIndexStatus::NotIndexed,
-                },
+                    FileIndexStatus::NotIndexed,
+                )
+                .expect("file"),
                 evidence: vec![SearchEvidence { fragment }],
                 rank: 1,
                 score: 1.0,
@@ -812,28 +810,28 @@ mod tests {
         std::fs::create_dir_all(original_root.join("src")).expect("source directory");
         let content = "source contents";
         std::fs::write(original_root.join("src/file.txt"), content).expect("source file");
-        let source = FileRecord {
-            id: FileId::new(1),
-            relative_path: crate::domain::SourcePath::new("src/file.txt").expect("source path"),
-            snapshot: FileSnapshot {
+        let source = FileRecord::new(
+            FileId::new(1),
+            crate::domain::SourcePath::new("src/file.txt").expect("source path"),
+            FileSnapshot {
                 size_bytes: content.len() as u64,
                 modified_epoch_ms: None,
                 content_hash: Some(sha256_hex(content.as_bytes())),
             },
-            index_status: FileIndexStatus::NotIndexed,
-        };
-        let file = FileRecord {
-            index_status: FileIndexStatus::Indexed {
-                indexed_epoch_ms: 0,
-                entity_count: 1,
-            },
-            ..source.clone()
-        };
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file");
+        let mut file = source.clone();
+        file.set_index_status(FileIndexStatus::Indexed {
+            indexed_epoch_ms: 0,
+            entity_count: 1,
+        })
+        .expect("indexed file");
         let source_range = Range::Text(
             TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len()).expect("range"),
         );
         let content = Content::Text(content.to_owned());
-        let id = EntityId::new(source.id, &content, source_range).expect("entity id");
+        let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&id, 0),
             range: Range::Full,
@@ -841,7 +839,7 @@ mod tests {
         let search = SearchPlanResult {
             routes: Vec::new(),
             hits: vec![SearchHit {
-                entity: Entity::new(id, source.id, source_range, content, None, vec![fragment])
+                entity: Entity::new(id, source.id(), source_range, content, None, vec![fragment])
                     .expect("entity"),
                 file: file.clone(),
                 evidence: Vec::new(),
@@ -923,10 +921,12 @@ mod tests {
             ContextItemStatus::PossiblyStale
         );
         let mut future_indexed = file;
-        future_indexed.index_status = FileIndexStatus::Indexed {
-            indexed_epoch_ms: u64::MAX,
-            entity_count: 1,
-        };
+        future_indexed
+            .set_index_status(FileIndexStatus::Indexed {
+                indexed_epoch_ms: u64::MAX,
+                entity_count: 1,
+            })
+            .expect("future indexed file");
         assert_eq!(
             super::file_freshness_status(&moved_root, &future_indexed),
             ContextItemStatus::PossiblyStale,
@@ -941,22 +941,27 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("source.txt");
         std::fs::write(&path, "source contents").expect("source");
-        let mut file = FileRecord {
-            id: FileId::new(1),
-            relative_path: SourcePath::new("source.txt").expect("source path"),
-            snapshot: FileSnapshot {
+        let mut file = FileRecord::new(
+            FileId::new(1),
+            SourcePath::new("source.txt").expect("source path"),
+            FileSnapshot {
                 size_bytes: 15,
                 modified_epoch_ms: None,
                 content_hash: None,
             },
-            index_status: FileIndexStatus::NotIndexed,
-        };
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file");
         assert_eq!(
             super::file_freshness_status(directory.path(), &file),
             ContextItemStatus::Fresh,
             "missing index/mtime/hash proof is not evidence of an updated file"
         );
-        file.snapshot.content_hash = Some(crate::utils::sha256_hex(b"source contents"));
+        file.set_snapshot(FileSnapshot {
+            content_hash: Some(crate::utils::sha256_hex(b"source contents")),
+            ..file.snapshot().clone()
+        })
+        .expect("file snapshot");
         assert_eq!(
             super::file_freshness_status(directory.path(), &file),
             ContextItemStatus::Fresh

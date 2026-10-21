@@ -316,22 +316,19 @@ impl IndexStore {
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
         let mut file = file.clone();
-        file.index_status = FileIndexStatus::Indexed {
+        file.set_index_status(FileIndexStatus::Indexed {
             indexed_epoch_ms: now_epoch_ms()?,
             entity_count: u64::try_from(entities.len())
                 .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
-        };
-        file.validate()?;
+        })?;
         self.write(|state| replace_file(state, &file, entities, entries))
     }
 
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
-        file.validate()?;
         let mut file = file.clone();
-        file.index_status = FileIndexStatus::Failed {
+        file.set_index_status(FileIndexStatus::Failed {
             error: error.to_owned(),
-        };
-        file.validate()?;
+        })?;
         self.write(|state| replace_file(state, &file, &[], &[]))
     }
 
@@ -401,18 +398,18 @@ fn replace_file(
     entries: &[IndexedFragment],
 ) -> EngineResult<()> {
     state.files.validate(file)?;
-    state.entities.validate_ownership(entities, file.id)?;
-    state.fragments.validate_ownership(entries, file.id)?;
+    state.entities.validate_ownership(entities, file.id())?;
+    state.fragments.validate_ownership(entries, file.id())?;
     state.needs_optimize = true;
-    let directories = state.directories.ensure(&file.relative_path)?;
+    let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
     let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
     let mut unfinished = file.clone();
-    unfinished.index_status = FileIndexStatus::NotIndexed;
+    unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;
-    state.fragments.delete_file(file.id)?;
-    state.entities.delete_file(file.id)?;
+    state.fragments.delete_file(file.id())?;
+    state.entities.delete_file(file.id())?;
     state.entities.write(&entity_docs)?;
     state.fragments.write(&fragment_docs)?;
     state.files.put(file, &directories)
@@ -461,7 +458,7 @@ fn load_search_hits(
     }
     for hit in hits {
         if let Some(owner) = entities.get(&hit.entity_id)
-            && owner.file.id != hit.file_id
+            && owner.file.id() != hit.file_id
         {
             return Err(corrupt("search identities differ from their stored entity"));
         }
@@ -492,11 +489,10 @@ fn validate_batch(
     entries: &[IndexedFragment],
     schema: &[EmbeddingModelInfo],
 ) -> EngineResult<()> {
-    file.validate()?;
     let mut entity_ids = HashSet::new();
     let mut fragment_ids = HashSet::new();
     for entity in entities {
-        if entity.file_id() != file.id {
+        if entity.file_id() != file.id() {
             return Err(EngineError::invalid_argument(
                 "entity belongs to a different file",
             ));
