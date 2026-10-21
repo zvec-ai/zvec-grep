@@ -531,9 +531,8 @@ async function validateSnapshot(
   artifacts: readonly ModelArtifact[],
   manifest: SourceManifest,
 ): Promise<boolean> {
-  if (await hasValidCompleteMarker(source, artifacts, manifest)) {
-    return true;
-  }
+  // Matching file metadata does not prove that cached contents are unchanged.
+  // Always check each artifact against the pinned digest before returning it.
   for (const artifact of artifacts) {
     if (!(await validateArtifact(model, source, artifact, manifest))) {
       return false;
@@ -542,7 +541,7 @@ async function validateSnapshot(
   return true;
 }
 
-async function hasValidCompleteMarker(
+async function completeMarkerMatchesMetadata(
   source: ModelArtifactSource,
   artifacts: readonly ModelArtifact[],
   manifest: SourceManifest,
@@ -651,9 +650,7 @@ async function downloadSourceSnapshot(
     });
     try {
       // Another process may have completed the snapshot while we waited.
-      if (await hasValidCompleteMarker(source, options.artifacts, manifest)) {
-        return;
-      }
+      // Verify its contents too; a completion marker cannot replace hashing.
       const missingArtifacts: ModelArtifact[] = [];
       for (const artifact of options.artifacts) {
         if (
@@ -662,9 +659,11 @@ async function downloadSourceSnapshot(
           missingArtifacts.push(artifact);
         }
       }
-      invokeDownloadPlanCallback(options, source, missingArtifacts);
-      for (const artifact of missingArtifacts) {
-        await downloadArtifact(options, source, artifact, manifest, lock);
+      if (missingArtifacts.length > 0) {
+        invokeDownloadPlanCallback(options, source, missingArtifacts);
+        for (const artifact of missingArtifacts) {
+          await downloadArtifact(options, source, artifact, manifest, lock);
+        }
       }
       await lock.assertOwned();
       await writeCompleteMarker(source, manifest);
@@ -1040,13 +1039,13 @@ async function writeCompleteMarkerBestEffort(
   manifest: SourceManifest,
 ): Promise<void> {
   try {
-    if (await hasValidCompleteMarker(source, artifacts, manifest)) {
+    if (await completeMarkerMatchesMetadata(source, artifacts, manifest)) {
       return;
     }
     await writeCompleteMarker(source, manifest);
   } catch {
-    // A complete marker is only a hashing optimization. A valid read-only cache
-    // remains usable even when metadata cannot be written beside it.
+    // Markers are retained for cache compatibility, not integrity validation.
+    // A valid read-only cache remains usable when metadata cannot be written.
   }
 }
 
