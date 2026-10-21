@@ -93,7 +93,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: rust/target/zvec-runtime/
-          key: rust-zvec-v1-0.7.2-${{ inputs.runner }}-${{ hashFiles('rust/scripts/build-zvec-macos.sh') }}
+          key: rust-zvec-v1-0.8.0-${{ inputs.runner }}-${{ hashFiles('rust/scripts/build-zvec-macos.sh') }}
       - name: Build the zvec SDK for Intel macOS
         if: inputs.target == 'darwin-x64' && steps.zvec-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-zvec-macos.sh

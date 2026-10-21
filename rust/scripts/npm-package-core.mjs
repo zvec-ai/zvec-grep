@@ -137,11 +137,7 @@ export async function stageZvecRuntime(sourceDir, binDir, platform) {
   }[platform];
   if (!library)
     throw new Error(`unsupported zvec runtime platform: ${platform}`);
-  const files = [
-    library,
-    "data/jieba_dict/jieba.dict.utf8",
-    "data/jieba_dict/hmm_model.utf8",
-  ];
+  const files = [library];
   for (const file of files) {
     const source = join(sourceDir, file);
     if (!(await stat(source)).isFile())

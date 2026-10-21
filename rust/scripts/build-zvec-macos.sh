@@ -6,8 +6,8 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "x86_64" ]]; then
   exit 1
 fi
 
-# This native revision is recorded by zvec-rust 0.7.2's vendor/zvec submodule.
-readonly ZVEC_REVISION="1ab7975dfc2d2160054bafff614831b7099cd930"
+# This native revision is recorded by zvec-rust 0.8.0's vendor/zvec submodule.
+readonly ZVEC_REVISION="8397071d815cd842be2068339e00a94e69f069d1"
 readonly ZVEC_TEMP_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/zg-zvec-XXXXXX")"
 readonly ZVEC_SOURCE_DIR="$ZVEC_TEMP_DIR/source"
 readonly ZVEC_BUILD_DIR="$ZVEC_TEMP_DIR/build"
@@ -33,11 +33,8 @@ python3 -m venv "$ZVEC_TEMP_DIR/tools"
 "$ZVEC_TEMP_DIR/tools/bin/cmake" --build "$ZVEC_BUILD_DIR" \
   --config Release --parallel 4 --target zvec_c_api
 
-mkdir -p "$ZVEC_RUNTIME_DIR/data/jieba_dict"
+mkdir -p "$ZVEC_RUNTIME_DIR"
 cp -L "$ZVEC_BUILD_DIR/lib/"*.dylib "$ZVEC_RUNTIME_DIR/"
-cp "$ZVEC_SOURCE_DIR/thirdparty/cppjieba/cppjieba-5.6.7/dict/jieba.dict.utf8" \
-  "$ZVEC_SOURCE_DIR/thirdparty/cppjieba/cppjieba-5.6.7/dict/hmm_model.utf8" \
-  "$ZVEC_RUNTIME_DIR/data/jieba_dict/"
 for library in "$ZVEC_RUNTIME_DIR/"*.dylib; do
   install_name_tool -id "@rpath/$(basename "$library")" "$library"
   otool -L "$library"

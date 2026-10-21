@@ -12,14 +12,11 @@ import {
 
 const manifest = loadReleaseManifest();
 
-test("packages the SDK library and dictionaries beside the executable on every platform", async (t) => {
+test("packages the SDK library with its embedded dictionary on every platform", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "zg-zvec-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "sdk");
-  await mkdir(join(source, "data/jieba_dict"), { recursive: true });
-  for (const file of ["jieba.dict.utf8", "hmm_model.utf8"]) {
-    await writeFile(join(source, "data/jieba_dict", file), file);
-  }
+  await mkdir(source);
   for (const [platform, library] of Object.entries({
     darwin: "libzvec_c_api.dylib",
     linux: "libzvec_c_api.so",
@@ -28,7 +25,7 @@ test("packages the SDK library and dictionaries beside the executable on every p
     await writeFile(join(source, library), platform);
     const destination = join(root, platform, "bin");
     const files = await stageZvecRuntime(source, destination, platform);
-    assert.equal(files.length, 3);
+    assert.deepEqual(files, [`bin/${library}`]);
     for (const file of files) {
       assert.deepEqual(
         await readFile(join(root, platform, file)),
@@ -36,7 +33,7 @@ test("packages the SDK library and dictionaries beside the executable on every p
       );
     }
   }
-  await rm(join(source, "data/jieba_dict/hmm_model.utf8"));
+  await rm(join(source, "libzvec_c_api.so"));
   await assert.rejects(
     stageZvecRuntime(source, join(root, "incomplete/bin"), "linux"),
     /ENOENT/,
@@ -47,10 +44,7 @@ test("includes model runtime libraries but excludes build files and other platfo
   const root = await mkdtemp(join(tmpdir(), "zg-model-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "sdk");
-  await mkdir(join(source, "data", "jieba_dict"), { recursive: true });
-  for (const name of ["jieba.dict.utf8", "hmm_model.utf8"]) {
-    await writeFile(join(source, "data", "jieba_dict", name), name);
-  }
+  await mkdir(source);
   const runtimeFiles = {
     darwin: ["libzvec_c_api.dylib", "libonnxruntime.1.dylib"],
     linux: ["libzvec_c_api.so", "libonnxruntime.so.1.24.2"],
@@ -68,7 +62,7 @@ test("includes model runtime libraries but excludes build files and other platfo
     const destination = join(root, platform, "bin");
     const files = await stageZvecRuntime(source, destination, platform);
     assert.deepEqual(
-      files.filter((file) => !file.includes("/data/")).sort(),
+      files.sort(),
       libraries.map((name) => `bin/${name}`).sort(),
     );
     for (const name of libraries) {
