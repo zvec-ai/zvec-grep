@@ -770,8 +770,8 @@ pub struct SearchInput {
     pub file_types: Option<PathListInput>,
     pub excluded_file_types: Option<PathListInput>,
     /// Formats inferred from indexed file names, such as rust or markdown; source contents are not inspected.
-    pub formats: Option<PathListInput>,
-    /// Exclude matching file-name formats, taking precedence over formats.
+    pub included_formats: Option<PathListInput>,
+    /// Exclude matching file-name formats, taking precedence over included formats.
     pub excluded_formats: Option<PathListInput>,
     /// Categories inferred from indexed file names, such as code or document.
     pub categories: Option<PathListInput>,
@@ -836,6 +836,10 @@ pub struct IndexInput {
     /// Clear saved scanning settings before applying this request.
     #[schemars(extend("type" = "boolean"))]
     pub reset_paths: Option<bool>,
+    /// Persist file-name formats to include, such as rust or markdown; omitted keeps the saved list.
+    pub included_formats: Option<PathListInput>,
+    /// Persist file-name formats to exclude; an empty list clears this restriction.
+    pub excluded_formats: Option<PathListInput>,
     #[schemars(length(max = 128))]
     pub globs: Option<GlobListInput>,
     /// Ordered case-insensitive rg glob rules, applied after globs.
@@ -1146,6 +1150,10 @@ struct WorkspaceIndexOutput {
 struct RootSpecOutput {
     absolute_path: String,
     recursive: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    included_formats: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    excluded_formats: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     globs: Vec<String>,
     insensitive_globs: Vec<String>,
@@ -1578,7 +1586,8 @@ impl SearchInput {
                     "excludedFileTypes",
                 )?,
                 globs: normalize_globs(self.globs, self.insensitive_globs)?.unwrap_or_default(),
-                formats: normalize_formats(self.formats, "formats")?.unwrap_or_default(),
+                included_formats: normalize_formats(self.included_formats, "includedFormats")?
+                    .unwrap_or_default(),
                 excluded_formats: normalize_formats(self.excluded_formats, "excludedFormats")?
                     .unwrap_or_default(),
                 categories: normalize_categories(self.categories, "categories")?
@@ -1658,6 +1667,8 @@ impl IndexInput {
 
         let glob_update = normalize_index_globs(self.globs, self.insensitive_globs)?;
         let scan = ScanRulesUpdate {
+            included_formats: normalize_formats(self.included_formats, "includedFormats")?,
+            excluded_formats: normalize_formats(self.excluded_formats, "excludedFormats")?,
             include_hidden: self.include_hidden,
             use_default_ignores: self.use_default_ignores,
             nested_git: self.nested_git,
@@ -1716,6 +1727,8 @@ impl IndexInput {
             || self.embedding.is_some()
             || self.rebuild.is_some()
             || self.reset_paths.is_some()
+            || self.included_formats.is_some()
+            || self.excluded_formats.is_some()
             || self.globs.is_some()
             || self.insensitive_globs.is_some()
             || self.include_hidden.is_some()
@@ -2269,6 +2282,16 @@ impl RootSpecOutput {
         Self {
             absolute_path: root.display().to_string(),
             recursive: true,
+            included_formats: scan
+                .included_formats()
+                .iter()
+                .map(|format| format.as_str().to_owned())
+                .collect(),
+            excluded_formats: scan
+                .excluded_formats()
+                .iter()
+                .map(|format| format.as_str().to_owned())
+                .collect(),
             globs: scan
                 .globs()
                 .iter()
@@ -2403,7 +2426,7 @@ mod tests {
             insensitive_globs: None,
             file_types: None,
             excluded_file_types: None,
-            formats: None,
+            included_formats: None,
             excluded_formats: None,
             categories: None,
             excluded_categories: None,
@@ -2432,7 +2455,7 @@ mod tests {
             assert!(request.filter.globs.last().expect("iglob").case_insensitive);
             assert_eq!(request.filter.file_types, ["h"]);
             assert_eq!(request.filter.excluded_file_types, ["cpp"]);
-            assert!(request.filter.formats.is_empty());
+            assert!(request.filter.included_formats.is_empty());
         }
         let index: IndexInput = serde_json::from_value(
             serde_json::json!({"root":test_root(), "globs":"*.h", "follow":true}),
@@ -2963,7 +2986,7 @@ mod tests {
     #[test]
     fn index_updates_preserve_omitted_empty_false_and_null_values() {
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
-            "root": test_root(), "globs": [],
+            "root": test_root(), "globs": [], "includedFormats": [], "excludedFormats": [],
             "includeHidden": false, "followSymlinks": false, "nestedGit": false, "ignoreFiles": [],
             "maxDepth": null, "maxFileSizeBytes": null
         }))
@@ -2974,6 +2997,8 @@ mod tests {
             panic!("index");
         };
         assert_eq!(options.scan.sensitive_globs, Some(Vec::new()));
+        assert_eq!(options.scan.included_formats, Some(Vec::new()));
+        assert_eq!(options.scan.excluded_formats, Some(Vec::new()));
         assert_eq!(options.scan.include_hidden, Some(false));
         assert_eq!(options.scan.follow_symlinks, Some(false));
         assert_eq!(options.scan.nested_git, Some(false));
@@ -2981,6 +3006,72 @@ mod tests {
         assert_eq!(options.scan.ignore_files, Some(Vec::new()));
         assert_eq!(options.scan.max_depth, Some(None));
         assert_eq!(options.scan.max_file_size_bytes, Some(None));
+    }
+
+    #[test]
+    fn index_formats_use_the_query_catalog_and_preserve_saved_rules() {
+        let input: IndexInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(),
+            "includedFormats": ["rust", "typescript"],
+            "excludedFormats": "json"
+        }))
+        .expect("index formats");
+        let IndexToolRequest::Index { options, .. } = input.into_request().expect("index request")
+        else {
+            panic!("index request expected");
+        };
+        let query: SearchInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(), "query": "needle",
+            "includedFormats": ["rust", "typescript"], "excludedFormats": "json"
+        }))
+        .expect("query formats");
+        let query = query.into_request().expect("query request");
+        assert_eq!(
+            options.scan.included_formats,
+            Some(query.filter.included_formats)
+        );
+        assert_eq!(
+            options.scan.excluded_formats,
+            Some(query.filter.excluded_formats)
+        );
+        let saved = options
+            .scan
+            .apply(&super::ScanRules::default())
+            .expect("saved scan rules");
+        let output = serde_json::to_value(super::RootSpecOutput::new(&test_root(), &saved))
+            .expect("scan status");
+        assert_eq!(
+            output["included_formats"],
+            serde_json::json!(["rust", "typescript"])
+        );
+        assert_eq!(output["excluded_formats"], serde_json::json!(["json"]));
+
+        let IndexToolRequest::Index { options, .. } =
+            index_input().into_request().expect("omitted formats")
+        else {
+            panic!("index request expected");
+        };
+        assert_eq!(options.scan.included_formats, None);
+        assert_eq!(options.scan.excluded_formats, None);
+        let unchanged = options.scan.apply(&saved).expect("unchanged formats");
+        assert_eq!(unchanged.included_formats(), saved.included_formats());
+        assert_eq!(unchanged.excluded_formats(), saved.excluded_formats());
+    }
+
+    #[test]
+    fn index_rejects_unknown_formats_and_formats_combined_with_drop() {
+        for field in ["includedFormats", "excludedFormats"] {
+            for (value, drop) in [
+                (serde_json::json!(["not-a-format"]), false),
+                (serde_json::json!(["rust"]), true),
+                (serde_json::json!([]), true),
+            ] {
+                let mut input = serde_json::json!({"root": test_root(), "drop": drop});
+                input[field] = value;
+                let input: IndexInput = serde_json::from_value(input).expect("index input");
+                assert!(input.into_request().is_err(), "{field}, drop={drop}");
+            }
+        }
     }
 
     #[test]
@@ -3113,7 +3204,7 @@ mod tests {
     }
 
     #[test]
-    fn index_contract_rejects_query_only_format_and_category_filters() {
+    fn index_contract_rejects_native_types_and_query_only_categories() {
         let schema =
             serde_json::to_value(schemars::schema_for!(IndexInput)).expect("index input schema");
         let output_schema = serde_json::to_value(schemars::schema_for!(super::RootSpecOutput))
@@ -3121,8 +3212,6 @@ mod tests {
         for (input_field, output_field) in [
             ("fileTypes", "file_types"),
             ("excludedFileTypes", "excluded_file_types"),
-            ("formats", "formats"),
-            ("excludedFormats", "excluded_formats"),
             ("categories", "categories"),
             ("excludedCategories", "excluded_categories"),
         ] {
@@ -3131,6 +3220,13 @@ mod tests {
             assert!(serde_json::from_value::<IndexInput>(value).is_err());
             assert!(schema["properties"].get(input_field).is_none());
             assert!(output_schema["properties"].get(output_field).is_none());
+        }
+        for (input_field, output_field) in [
+            ("includedFormats", "included_formats"),
+            ("excludedFormats", "excluded_formats"),
+        ] {
+            assert!(schema["properties"].get(input_field).is_some());
+            assert!(output_schema["properties"].get(output_field).is_some());
         }
     }
 
@@ -3193,7 +3289,7 @@ mod tests {
         let parsed: SearchInput = serde_json::from_value(serde_json::json!({
             "root": test_root(), "query": "needle",
             "globs": [{"pattern": "*.RS", "caseInsensitive": true}, {"pattern": "!test.rs"}, {"pattern": " notes/** "}],
-            "formats": ["rust"], "categories": ["code"],
+            "includedFormats": ["rust"], "categories": ["code"],
             "modifiedAfter": 0, "modifiedBefore": 20, "symbolTypes": ["function"]
         }))
         .expect("valid test fixture");
@@ -3202,7 +3298,7 @@ mod tests {
         assert!(request.filter.globs[0].case_insensitive);
         assert!(!request.filter.globs[1].case_insensitive);
         assert_eq!(request.filter.globs[2].pattern, " notes/** ");
-        assert_eq!(request.filter.formats[0].as_str(), "rust");
+        assert_eq!(request.filter.included_formats[0].as_str(), "rust");
         assert_eq!(request.filter.categories[0].as_str(), "code");
         assert_eq!(request.filter.modified_after_epoch_ms, Some(0));
         assert_eq!(request.filter.modified_before_epoch_ms, Some(20));
@@ -3374,6 +3470,8 @@ mod tests {
             embedding: Some("potion-base-8M".to_owned()),
             rebuild: Some(false),
             reset_paths: None,
+            included_formats: None,
+            excluded_formats: None,
             globs: Some(super::GlobListInput::Rules(vec![super::GlobInput {
                 pattern: "*.rs".to_owned(),
                 case_insensitive: false,

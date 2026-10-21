@@ -381,6 +381,146 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
+    reason = "Compare catalog filtering with queries and preserve scan rules across reopen and incremental indexing"
+)]
+async fn filename_format_scan_rules_match_queries_and_persist_for_incremental_indexing()
+-> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    write_sources(
+        root,
+        &[
+            ("src/header.h", "/// orchard\nint orchard(void);\n"),
+            ("src/main.cpp", "/// orchard\nint orchard() { return 1; }\n"),
+            ("src/tsconfig.json", "{\"orchard\": true}\n"),
+            ("src/view.ts", "// orchard\nexport const orchard = 1;\n"),
+            ("src/settings.json", "{\"orchard\": true}\n"),
+            ("outside.cpp", "/// orchard\nint outside() { return 1; }\n"),
+        ],
+    )?;
+    let filter = QueryFilter {
+        globs: vec!["src/**".into()],
+        included_formats: vec![FileFormat::Cpp, FileFormat::TypeScript],
+        ..QueryFilter::default()
+    };
+    let included = paths(&[
+        "src/header.h",
+        "src/main.cpp",
+        "src/tsconfig.json",
+        "src/view.ts",
+    ]);
+    let engine = ZvecGrep::new();
+    engine.index(index_options(root)).await?;
+    for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
+        assert_eq!(
+            search_paths(&engine, root, mode, filter.clone()).await?,
+            included
+        );
+    }
+    engine
+        .index(IndexOptions {
+            scan: ScanRulesUpdate {
+                globs: Some(filter.globs.clone()),
+                included_formats: Some(filter.included_formats.clone()),
+                ..ScanRulesUpdate::default()
+            },
+            ..index_options(root)
+        })
+        .await?;
+    assert_index_and_queries(&engine, root, &filter, &included).await?;
+
+    // A name can belong to several formats: excluding C rejects .h despite Cpp,
+    // and excluding Json rejects tsconfig.json despite its TypeScript filename.
+    let excluded = vec![FileFormat::C, FileFormat::Json];
+    let updated = engine
+        .index(IndexOptions {
+            scan: ScanRulesUpdate {
+                excluded_formats: Some(excluded.clone()),
+                ..ScanRulesUpdate::default()
+            },
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((updated.files_deleted, updated.files_failed), (2, 0));
+    assert_index_and_queries(
+        &engine,
+        root,
+        &filter,
+        &paths(&["src/main.cpp", "src/view.ts"]),
+    )
+    .await?;
+    engine.close();
+
+    let engine = ZvecGrep::new();
+    let info = engine.info(info_options(root)).await?;
+    let saved = info.workspace_index.expect("reopened workspace").scan;
+    assert_eq!(saved.included_formats(), filter.included_formats);
+    assert_eq!(saved.excluded_formats(), excluded);
+    let manifest: Value = serde_json::from_slice(&fs::read(info.home.join("manifest.json"))?)?;
+    assert_eq!(
+        manifest["scan"]["included_formats"],
+        json!(["cpp", "typescript"])
+    );
+    assert_eq!(manifest["scan"]["excluded_formats"], json!(["c", "json"]));
+    write_sources(
+        root,
+        &[
+            ("src/new.cpp", "/// orchard\nint added() { return 2; }\n"),
+            ("src/new.h", "/// orchard\nint added(void);\n"),
+        ],
+    )?;
+    let updated = engine.index(index_options(root)).await?;
+    assert_eq!((updated.files_added, updated.files_failed), (1, 0));
+    assert_index_and_queries(
+        &engine,
+        root,
+        &filter,
+        &paths(&["src/main.cpp", "src/view.ts", "src/new.cpp"]),
+    )
+    .await?;
+    assert_eq!(
+        engine
+            .info(info_options(root))
+            .await?
+            .workspace_index
+            .expect("workspace")
+            .scan,
+        saved
+    );
+    engine
+        .index(IndexOptions {
+            reset_paths: true,
+            ..index_options(root)
+        })
+        .await?;
+    let reset = engine.info(info_options(root)).await?;
+    assert_eq!(
+        reset.workspace_index.expect("reset workspace").scan,
+        ScanRules::default()
+    );
+    assert_eq!(
+        stored_paths(&reset.index_path)?,
+        paths(&[
+            "src/header.h",
+            "src/main.cpp",
+            "src/tsconfig.json",
+            "src/view.ts",
+            "src/settings.json",
+            "outside.cpp",
+            "src/new.cpp",
+            "src/new.h",
+        ])
+    );
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
     reason = "Verify filename filtering remains independent of extraction and source availability"
 )]
 async fn filename_formats_and_categories_filter_queries_without_limiting_indexing() -> TestResult {
@@ -405,7 +545,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
         ],
     )?;
     let filter = QueryFilter {
-        formats: vec![FileFormat::Python, FileFormat::Rust, FileFormat::Json],
+        included_formats: vec![FileFormat::Python, FileFormat::Rust, FileFormat::Json],
         categories: vec![FileCategory::Code, FileCategory::Data],
         ..QueryFilter::default()
     };
@@ -432,7 +572,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
         );
     }
     let python = QueryFilter {
-        formats: vec![FileFormat::Python],
+        included_formats: vec![FileFormat::Python],
         ..QueryFilter::default()
     };
     for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
@@ -510,7 +650,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
                 root,
                 mode,
                 QueryFilter {
-                    formats: vec![FileFormat::Rust],
+                    included_formats: vec![FileFormat::Rust],
                     ..QueryFilter::default()
                 },
             )
@@ -553,28 +693,28 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     let cases = [
         (
             QueryFilter {
-                formats: vec![FileFormat::Rust],
+                included_formats: vec![FileFormat::Rust],
                 ..Default::default()
             },
             vec!["main.rs"],
         ),
         (
             QueryFilter {
-                formats: vec![FileFormat::Text],
+                included_formats: vec![FileFormat::Text],
                 ..Default::default()
             },
             vec!["notes.txt"],
         ),
         (
             QueryFilter {
-                formats: vec![FileFormat::Cmake],
+                included_formats: vec![FileFormat::Cmake],
                 ..Default::default()
             },
             vec!["CMakeLists.txt"],
         ),
         (
             QueryFilter {
-                formats: vec![FileFormat::Json],
+                included_formats: vec![FileFormat::Json],
                 categories: vec![FileCategory::Code],
                 ..Default::default()
             },
@@ -697,6 +837,8 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
         .index(IndexOptions {
             scan: ScanRulesUpdate {
                 globs: Some(vec!["*.txt".into()]),
+                included_formats: Some(vec![FileFormat::Text]),
+                excluded_formats: Some(vec![FileFormat::Markdown]),
                 include_hidden: Some(true),
                 use_default_ignores: Some(false),
                 follow_symlinks: Some(true),
@@ -727,7 +869,8 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
     assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
 
     let scan: ScanRulesUpdate = serde_json::from_value(json!({
-        "globs": [], "include_hidden": false, "use_default_ignores": true, "follow_symlinks": false,
+        "globs": [], "included_formats": [], "excluded_formats": [],
+        "include_hidden": false, "use_default_ignores": true, "follow_symlinks": false,
         "ignore_files": [], "max_depth": null, "max_file_size_bytes": null
     }))?;
     let updated = engine
@@ -831,7 +974,7 @@ async fn query_filters_combine_without_changing_saved_scan_rules() -> TestResult
                 }],
                 filter: QueryFilter {
                     globs: vec!["src/**".into()],
-                    formats: vec![FileFormat::Rust],
+                    included_formats: vec![FileFormat::Rust],
                     modified_after_epoch_ms: Some(INDEXED),
                     modified_before_epoch_ms: Some(INDEXED),
                     symbol_types: vec![SymbolType::Function],

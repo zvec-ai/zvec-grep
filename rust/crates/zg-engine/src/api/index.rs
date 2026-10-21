@@ -75,12 +75,18 @@ pub mod options {
         pub signal: Option<CancellationToken>,
     }
 
-    pub use crate::domain::{ContentKind, GlobRule, ScanRules};
+    pub use crate::domain::{ContentKind, FileFormat, GlobRule, ScanRules};
 
     /// Changes to filesystem scanning. `null` clears an optional limit.
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(default, deny_unknown_fields)]
     pub struct ScanRulesUpdate {
+        /// Replaces included filename formats; empty means no inclusion restriction.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub included_formats: Option<Vec<FileFormat>>,
+        /// Replaces excluded filename formats, which take precedence over inclusions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub excluded_formats: Option<Vec<FileFormat>>,
         /// Replaces the complete ordered list, including both case categories.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub globs: Option<Vec<GlobRule>>,
@@ -142,6 +148,12 @@ pub mod options {
             }
             ScanRules::new(
                 globs,
+                self.included_formats
+                    .clone()
+                    .unwrap_or_else(|| current.included_formats().to_vec()),
+                self.excluded_formats
+                    .clone()
+                    .unwrap_or_else(|| current.excluded_formats().to_vec()),
                 self.include_hidden
                     .unwrap_or_else(|| current.include_hidden()),
                 self.follow_symlinks
@@ -285,10 +297,55 @@ pub mod options {
         }
 
         #[test]
+        fn format_updates_preserve_replace_and_clear_saved_rules() {
+            let update: ScanRulesUpdate = serde_json::from_str(
+                r#"{"included_formats":["cpp","rust"],"excluded_formats":["c"]}"#,
+            )
+            .expect("format update");
+            let initial = update.apply(&ScanRules::default()).expect("format rules");
+            let saved = serde_json::to_value(&initial).expect("saved rules");
+            assert_eq!(
+                saved["included_formats"],
+                serde_json::json!(["cpp", "rust"])
+            );
+            assert_eq!(saved["excluded_formats"], serde_json::json!(["c"]));
+            let restored: ScanRules = serde_json::from_value(saved).expect("restored rules");
+            assert_eq!(restored, initial);
+            assert_eq!(
+                ScanRulesUpdate::default()
+                    .apply(&restored)
+                    .expect("no update"),
+                initial
+            );
+            let replaced = ScanRulesUpdate {
+                included_formats: Some(vec![FileFormat::Python]),
+                ..Default::default()
+            }
+            .apply(&restored)
+            .expect("replacement");
+            assert_eq!(replaced.included_formats(), [FileFormat::Python]);
+            assert_eq!(replaced.excluded_formats(), [FileFormat::C]);
+            let cleared = ScanRulesUpdate {
+                included_formats: Some(Vec::new()),
+                excluded_formats: Some(Vec::new()),
+                ..Default::default()
+            }
+            .apply(&replaced)
+            .expect("clear restrictions");
+            assert_eq!(cleared, ScanRules::default());
+            for field in ["included_formats", "excluded_formats"] {
+                let mut invalid = serde_json::json!({});
+                invalid[field] = serde_json::json!(["unsupported-format"]);
+                assert!(serde_json::from_value::<ScanRulesUpdate>(invalid.clone()).is_err());
+                assert!(serde_json::from_value::<ScanRules>(invalid).is_err());
+            }
+        }
+
+        #[test]
         fn query_constraints_are_not_accepted_as_scan_updates() {
             for field in [
-                "formats",
-                "excluded_formats",
+                "file_types",
+                "excluded_file_types",
                 "categories",
                 "excluded_categories",
                 "modified_after_epoch_ms",

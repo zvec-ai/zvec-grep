@@ -502,6 +502,8 @@ Index embedding concurrency:
 Scan rules:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
+  -t, --type <format>               Include an engine format, e.g. rust or markdown; repeatable
+  -T, --type-not <format>           Exclude an engine format; repeatable
   --hidden[=true|false]              Include hidden paths except .git and .zvec-grep
   --no-ignore[=true|false]           Do not apply default or .gitignore rules
   --nested-git[=true|false]          Scan nested Git repositories and submodules
@@ -510,6 +512,9 @@ Scan rules:
   --max-filesize <size>             Maximum bytes or K/M/G/T size
   -L, --follow[=true|false]          Follow symbolic links safely
   --reset-paths                     Clear inherited scanning settings
+
+Type filters use the same file-name rules as indexed queries and intersect
+with path globs. Scan rules are saved; omitted options keep their saved values.
 
 Interactive remote indexing asks to allow once, allow for this workspace, or
 cancel. Non-interactive indexing requires --allow-remote or a workspace grant.

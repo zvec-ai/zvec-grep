@@ -54,7 +54,7 @@ Workspace indexes and saved settings use a configurable storage location, defaul
 
 ### File selection
 
-Scanning respects ignore rules, excludes hidden files, does not follow symlinks, and traverses nested Git repositories by default. Path patterns, additional ignore files, depth limits, and file size limits let you adjust the scope. These rules are saved with the workspace and reused for future indexing.
+Scanning respects ignore rules, excludes hidden files, does not follow symlinks, and traverses nested Git repositories by default. File formats inferred from names, path patterns, additional ignore files, depth limits, and file size limits let you adjust the scope. These rules are saved with the workspace and reused for future indexing.
 
 ### Index lifecycle
 

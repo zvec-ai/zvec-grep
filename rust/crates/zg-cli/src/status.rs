@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use zg_engine::{
-    api::index::options::ScanRules,
+    api::index::options::{FileFormat, ScanRules},
     api::info::{
         InfoResult,
         result::{
@@ -325,6 +325,22 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
             )
         })
         .collect();
+    for (name, formats) in [
+        ("type", scan.included_formats()),
+        ("type-not", scan.excluded_formats()),
+    ] {
+        if !formats.is_empty() {
+            filters.push(format!(
+                "{name}={}",
+                formats
+                    .iter()
+                    .copied()
+                    .map(FileFormat::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ));
+        }
+    }
     if scan.include_hidden() {
         filters.push("hidden".into());
     }
@@ -562,6 +578,8 @@ mod tests {
         let index = info.workspace_index.as_mut().expect("workspace");
         index.embedding = None;
         index.scan = zg_engine::api::index::options::ScanRulesUpdate {
+            included_formats: Some(vec![FileFormat::Rust, FileFormat::TypeScript]),
+            excluded_formats: Some(vec![FileFormat::Json]),
             globs: Some(vec!["*.rs".into(), "!vendor/**".into()]),
             include_hidden: Some(true),
             max_depth: Some(Some(0)),
@@ -571,9 +589,6 @@ mod tests {
         .expect("updated scan rules");
         let output = render(&info, ColorMode::Never);
         assert!(output.contains("Embedding   Not configured"));
-        assert!(
-            output
-                .contains("Roots       /workspace (glob=*.rs glob=!vendor/** hidden max-depth=0)")
-        );
+        assert!(output.contains("Roots       /workspace (glob=*.rs glob=!vendor/** type=rust|typescript type-not=json hidden max-depth=0)"));
     }
 }

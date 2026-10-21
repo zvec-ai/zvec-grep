@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{EngineError, EngineResult};
 
-use super::{GlobRule, IndexState, SourcePath};
+use super::{FileFormat, GlobRule, IndexState, SourcePath};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Workspace {
@@ -57,8 +57,9 @@ impl Workspace {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ScanRules {
-    /// Ordered path rules relative to the workspace root.
     globs: Vec<GlobRule>,
+    included_formats: Vec<FileFormat>,
+    excluded_formats: Vec<FileFormat>,
     include_hidden: bool,
     follow_symlinks: bool,
     max_depth: Option<usize>,
@@ -75,6 +76,8 @@ impl ScanRules {
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn new(
         globs: Vec<GlobRule>,
+        included_formats: Vec<FileFormat>,
+        excluded_formats: Vec<FileFormat>,
         include_hidden: bool,
         follow_symlinks: bool,
         max_depth: Option<usize>,
@@ -90,6 +93,8 @@ impl ScanRules {
         }
         Ok(Self {
             globs,
+            included_formats,
+            excluded_formats,
             include_hidden,
             follow_symlinks,
             max_depth,
@@ -103,6 +108,16 @@ impl ScanRules {
     #[must_use]
     pub fn globs(&self) -> &[GlobRule] {
         &self.globs
+    }
+
+    #[must_use]
+    pub fn included_formats(&self) -> &[FileFormat] {
+        &self.included_formats
+    }
+
+    #[must_use]
+    pub fn excluded_formats(&self) -> &[FileFormat] {
+        &self.excluded_formats
     }
 
     #[must_use]
@@ -146,6 +161,8 @@ impl Default for ScanRules {
     fn default() -> Self {
         Self {
             globs: Vec::new(),
+            included_formats: Vec::new(),
+            excluded_formats: Vec::new(),
             include_hidden: false,
             follow_symlinks: false,
             max_depth: None,
@@ -164,6 +181,8 @@ impl<'de> Deserialize<'de> for ScanRules {
         #[allow(clippy::struct_excessive_bools)]
         struct Fields {
             globs: Vec<GlobRule>,
+            included_formats: Vec<FileFormat>,
+            excluded_formats: Vec<FileFormat>,
             include_hidden: bool,
             follow_symlinks: bool,
             max_depth: Option<usize>,
@@ -182,6 +201,8 @@ impl<'de> Deserialize<'de> for ScanRules {
         let fields = Fields::deserialize(deserializer)?;
         Self::new(
             fields.globs,
+            fields.included_formats,
+            fields.excluded_formats,
             fields.include_hidden,
             fields.follow_symlinks,
             fields.max_depth,

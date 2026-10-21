@@ -1414,7 +1414,7 @@ mod tests {
             query: "Service".to_owned(),
         }]);
         plan.filter.globs = glob_rules(&["src/**"]);
-        plan.filter.formats = vec![FileFormat::Rust];
+        plan.filter.included_formats = vec![FileFormat::Rust];
         plan.prefer_symbol = true;
 
         let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[])
@@ -1547,11 +1547,11 @@ mod tests {
         let storage = pushdown_storage();
         for query in [
             QueryFilter {
-                formats: vec![FileFormat::Rust],
+                included_formats: vec![FileFormat::Rust],
                 ..Default::default()
             },
             QueryFilter {
-                formats: vec![FileFormat::Jpeg],
+                included_formats: vec![FileFormat::Jpeg],
                 ..Default::default()
             },
             QueryFilter {
@@ -1564,7 +1564,7 @@ mod tests {
                 ..Default::default()
             },
             QueryFilter {
-                formats: vec![FileFormat::Unknown],
+                included_formats: vec![FileFormat::Unknown],
                 ..Default::default()
             },
         ] {
@@ -1608,7 +1608,7 @@ mod tests {
     fn format_pushdown_composes_with_glob_and_time_fallbacks() {
         let mut storage = pushdown_storage();
         let mut plan = plan(Vec::new());
-        plan.filter.formats = vec![FileFormat::Rust];
+        plan.filter.included_formats = vec![FileFormat::Rust];
         plan.filter.globs = glob_rules(&["src/**"]);
         let filter = super::search_plan_to_storage_filter(Path::new("/missing"), &plan, &storage)
             .expect("pushdown")
@@ -1647,7 +1647,7 @@ mod tests {
             file(5, "src/source.RS", 50),
         ];
         let mut plan = plan(Vec::new());
-        plan.filter.formats = vec![
+        plan.filter.included_formats = vec![
             FileFormat::Cpp,
             FileFormat::Html,
             FileFormat::Json,
@@ -1709,7 +1709,7 @@ mod tests {
             (FileFormat::Python, vec![]),
         ] {
             let mut plan = plan(Vec::new());
-            plan.filter.formats = vec![format];
+            plan.filter.included_formats = vec![format];
             let selected = super::search_plan_to_storage_filter(root.path(), &plan, &storage)
                 .expect("name filter")
                 .expect("filter");
@@ -1720,7 +1720,7 @@ mod tests {
             );
         }
         let mut plan = plan(Vec::new());
-        plan.filter.formats = vec![FileFormat::Json];
+        plan.filter.included_formats = vec![FileFormat::Json];
         plan.filter.categories = vec![FileCategory::Code];
         let selected = super::search_plan_to_storage_filter(root.path(), &plan, &storage)
             .expect("overlapping formats")

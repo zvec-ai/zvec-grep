@@ -8,7 +8,7 @@ use zg_host_native::{NativeScanner, PathPolicy, ScanRequest, TaskControl, Worksp
 use super::{GlobMatcher, ScanPolicy};
 use crate::{
     api::index::options::ScanRulesUpdate,
-    domain::{GlobRule, ScanRules},
+    domain::{FileFormat, GlobRule, ScanRules},
 };
 
 fn make_policy(
@@ -66,6 +66,73 @@ async fn scan(
         .collect();
     paths.sort();
     paths
+}
+
+#[tokio::test]
+async fn filename_formats_intersect_globs_and_preserve_scan_boundaries() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    for path in [
+        "src/main.rs",
+        "src/other.py",
+        "src/header.h",
+        "src/header.hpp",
+        "src/ignored.rs",
+        "src/.hidden.rs",
+        "outside.rs",
+        ".hidden/directory.rs",
+        "nested.py/main.rs",
+    ] {
+        write(root, path, "example");
+    }
+    write(root, ".gitignore", "src/ignored.rs\n");
+    let rules = ScanRulesUpdate {
+        included_formats: Some(vec![FileFormat::Rust, FileFormat::Cpp]),
+        excluded_formats: Some(vec![FileFormat::C]),
+        ..Default::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("format rules");
+    assert_eq!(
+        scan(root, &[], &rules, vec![]).await,
+        [
+            "nested.py/main.rs",
+            "outside.rs",
+            "src/header.hpp",
+            "src/main.rs"
+        ]
+        .map(PathBuf::from)
+    );
+    let globs = vec![GlobRule::from("src/**")];
+    let expected = [
+        "src/.hidden.rs",
+        "src/header.hpp",
+        "src/ignored.rs",
+        "src/main.rs",
+    ]
+    .map(PathBuf::from);
+    assert_eq!(scan(root, &globs, &rules, vec![]).await, expected);
+    assert_eq!(
+        scan(root, &globs, &rules, vec![root.join("src")]).await,
+        expected
+    );
+    let policy = make_policy(root, &globs, &rules).expect("watch policy");
+    assert!(policy.can_descend(&root.join("src")).expect("directory"));
+    assert!(
+        policy
+            .includes_file(&root.join("src/new.rs"))
+            .expect("Rust file")
+    );
+    assert!(
+        !policy
+            .includes_file(&root.join("src/new.py"))
+            .expect("Python file")
+    );
+    assert!(
+        !policy
+            .includes_file(&root.join("src/new.h"))
+            .expect("ambiguous header")
+    );
 }
 
 #[tokio::test]

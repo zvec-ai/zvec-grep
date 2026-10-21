@@ -13,7 +13,10 @@ use ignore::{
 use zg_host_native::{HostError, PathPolicy, RootSpec};
 
 use super::GlobMatcher;
-use crate::{EngineError, EngineResult, domain::ScanRules};
+use crate::{
+    EngineError, EngineResult,
+    domain::{FileFormat, ScanRules},
+};
 
 const MAX_IGNORE_BYTES: u64 = 1_048_576;
 const MAX_IGNORE_RULES: usize = 16_384;
@@ -123,6 +126,22 @@ impl ScanPolicy {
 
     fn matches_rules(&self, absolute: &Path, directory: bool) -> Result<bool, HostError> {
         let relative = absolute.strip_prefix(&self.root).unwrap_or(absolute);
+        if !directory
+            && (!self.options.included_formats().is_empty()
+                || !self.options.excluded_formats().is_empty())
+        {
+            let formats = FileFormat::from_file_name(relative.file_name().unwrap_or_default());
+            if formats
+                .iter()
+                .any(|format| self.options.excluded_formats().contains(format))
+                || (!self.options.included_formats().is_empty()
+                    && !formats
+                        .iter()
+                        .any(|format| self.options.included_formats().contains(format)))
+            {
+                return Ok(false);
+            }
+        }
         match self.matcher.path_match(relative, directory) {
             Match::Ignore(()) => return Ok(false),
             Match::Whitelist(()) => return Ok(true),

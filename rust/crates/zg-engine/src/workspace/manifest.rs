@@ -392,6 +392,8 @@ mod tests {
                 name: "fixture".to_owned(),
                 root: home.parent().expect("workspace root").to_path_buf(),
                 scan: crate::api::index::options::ScanRulesUpdate {
+                    included_formats: Some(vec![crate::domain::FileFormat::Rust]),
+                    excluded_formats: Some(vec![crate::domain::FileFormat::Cpp]),
                     globs: Some(vec!["*.rs".into()]),
                     ..crate::api::index::options::ScanRulesUpdate::default()
                 }
@@ -616,6 +618,11 @@ mod tests {
         assert!(json.get("rootPaths").is_none());
         assert_eq!(json["root"], directory.path().to_string_lossy().as_ref());
         assert_eq!(json["scan"]["globs"][0]["pattern"], "*.rs");
+        assert_eq!(
+            json["scan"]["included_formats"],
+            serde_json::json!(["rust"])
+        );
+        assert_eq!(json["scan"]["excluded_formats"], serde_json::json!(["cpp"]));
         assert_eq!(json["embeddingRuntimes"]["local/minilm"]["device"], "cpu");
         assert!(json.get("generation").is_none());
         assert_eq!(
@@ -648,7 +655,7 @@ mod tests {
         split_filter["filter"] = serde_json::json!({"globs": ["*.rs"]});
         assert!(serde_json::from_value::<WorkspaceManifest>(split_filter).is_err());
         let mut query_constraint = value;
-        query_constraint["scan"]["formats"] = serde_json::json!(["rust"]);
+        query_constraint["scan"]["categories"] = serde_json::json!(["code"]);
         assert!(serde_json::from_value::<WorkspaceManifest>(query_constraint).is_err());
     }
 

@@ -414,7 +414,7 @@ impl QueryFileArgs {
                 return Err(CliError::IndexedScanOptions);
             }
             request.filter.globs.clone_from(&scan.glob_rules);
-            request.filter.formats = parse_formats(&self.file_types)?;
+            request.filter.included_formats = parse_formats(&self.file_types)?;
             request.filter.excluded_formats = parse_formats(&self.excluded_file_types)?;
             request.filter.categories = parse_categories(&self.categories)?;
             request.filter.excluded_categories = parse_categories(&self.excluded_categories)?;
@@ -591,6 +591,12 @@ pub struct IndexArgs {
     pub allow_remote: bool,
     #[command(flatten)]
     pub files: ScanArgs,
+    /// Include formats inferred from file names, using the same catalog as indexed queries.
+    #[arg(short = 't', long = "type", value_name = "FORMAT")]
+    pub file_types: Vec<String>,
+    /// Exclude formats inferred from file names, taking precedence over included formats.
+    #[arg(short = 'T', long = "type-not", value_name = "FORMAT")]
+    pub excluded_file_types: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1469,6 +1475,8 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || args.allow_remote
             || args.debug
             || !args.files.is_empty()
+            || !args.file_types.is_empty()
+            || !args.excluded_file_types.is_empty()
         {
             return Err(CliError::DropWithIndexOptions);
         }
@@ -1486,6 +1494,12 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         });
     }
     let mut scan = args.files.update();
+    if !args.file_types.is_empty() {
+        scan.included_formats = Some(parse_formats(&args.file_types)?);
+    }
+    if !args.excluded_file_types.is_empty() {
+        scan.excluded_formats = Some(parse_formats(&args.excluded_file_types)?);
+    }
     scan.ignore_files = scan.ignore_files.map(|paths| {
         paths
             .into_iter()
@@ -1677,7 +1691,9 @@ pub fn parse_modified_time(value: &str) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, CliPlan, IndexOperation, QueryFilter, parse_byte_size, parse_modified_time};
+    use super::{
+        Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, parse_byte_size, parse_modified_time,
+    };
     use std::path::PathBuf;
 
     fn plan(arguments: &[&str], terminal: bool) -> CliPlan {
@@ -2164,25 +2180,107 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("*.RS", true), ("!test.rs", false), (" notes/** ", false)]
         );
-        assert_eq!(request.filter.formats[0].as_str(), "rust");
+        assert_eq!(request.filter.included_formats[0].as_str(), "rust");
         assert_eq!(request.filter.categories[0].as_str(), "code");
         assert!(request.globs.is_empty() && request.file_types.is_empty());
     }
 
     #[test]
-    fn index_rejects_query_format_and_category_options() {
-        for (option, value) in [
-            ("-t", "rust"),
-            ("--type", "rust"),
-            ("-T", "rust"),
-            ("--type-not", "rust"),
-            ("--category", "code"),
-            ("--category-not", "code"),
-        ] {
+    fn index_rejects_query_category_options() {
+        for (option, value) in [("--category", "code"), ("--category-not", "code")] {
             assert!(
                 Cli::try_parse_from(["zg", "--index", option, value]).is_err(),
                 "index must reject query option {option}"
             );
+        }
+    }
+
+    #[test]
+    fn index_type_filters_use_query_formats_in_direct_and_server_requests() {
+        for (mode, expected_mode) in [
+            ("direct", super::ClientMode::Direct),
+            ("server", super::ClientMode::Server),
+        ] {
+            let CliPlan::Index {
+                mode: actual_mode,
+                operation: IndexOperation::Build(request),
+                ..
+            } = Cli::try_parse_from([
+                "zg",
+                "--index",
+                "--mode",
+                mode,
+                "-t",
+                "rust",
+                "--type=typescript",
+                "-T",
+                "json",
+                "--type-not=markdown",
+                "-g",
+                "src/**",
+            ])
+            .expect("index type arguments")
+            .into_plan(std::env::temp_dir())
+            .expect("index plan")
+            else {
+                panic!("index build");
+            };
+            assert_eq!(actual_mode, expected_mode);
+            assert_eq!(
+                request.scan.included_formats,
+                Some(vec![FileFormat::Rust, FileFormat::TypeScript])
+            );
+            assert_eq!(
+                request.scan.excluded_formats,
+                Some(vec![FileFormat::Json, FileFormat::Markdown])
+            );
+            assert_eq!(request.scan.globs, Some(vec!["src/**".into()]));
+            let wire = serde_json::to_value(&request).expect("serialize index request");
+            assert_eq!(
+                wire["scan"]["included_formats"],
+                serde_json::json!(["rust", "typescript"])
+            );
+            assert_eq!(
+                wire["scan"]["excluded_formats"],
+                serde_json::json!(["json", "markdown"])
+            );
+            let restored: zg_engine::api::index::IndexOptions =
+                serde_json::from_value(wire).expect("deserialize index request");
+            assert_eq!(restored.scan, request.scan);
+        }
+    }
+
+    #[test]
+    fn index_type_filters_preserve_omission_and_reject_unknown_formats_and_drop() {
+        let CliPlan::Index {
+            operation: IndexOperation::Build(request),
+            ..
+        } = Cli::try_parse_from(["zg", "--index"])
+            .expect("index arguments")
+            .into_plan(std::env::temp_dir())
+            .expect("index plan")
+        else {
+            panic!("index build");
+        };
+        assert_eq!(request.scan.included_formats, None);
+        assert_eq!(request.scan.excluded_formats, None);
+        let wire = serde_json::to_value(request).expect("serialize index request");
+        assert!(wire["scan"].get("included_formats").is_none());
+        assert!(wire["scan"].get("excluded_formats").is_none());
+
+        for option in ["-t", "--type", "-T", "--type-not"] {
+            assert!(matches!(
+                Cli::try_parse_from(["zg", "--index", option, "not-a-format"])
+                    .expect("index type syntax")
+                    .into_plan(std::env::temp_dir()),
+                Err(super::CliError::InvalidFileFormat(_))
+            ));
+            assert!(matches!(
+                Cli::try_parse_from(["zg", "--index", "--drop", "--yes", option, "rust"])
+                    .expect("index drop syntax")
+                    .into_plan(std::env::temp_dir()),
+                Err(super::CliError::DropWithIndexOptions)
+            ));
         }
     }
 
