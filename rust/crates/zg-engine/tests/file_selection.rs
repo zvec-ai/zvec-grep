@@ -379,10 +379,6 @@ async fn nested_git_scan_option_controls_membership_and_survives_reopen_and_rebu
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Compare catalog filtering with queries and preserve scan rules across reopen and incremental indexing"
-)]
 async fn filename_format_scan_rules_match_queries_and_persist_for_incremental_indexing()
 -> TestResult {
     let temporary = tempfile::tempdir()?;
