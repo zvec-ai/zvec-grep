@@ -348,3 +348,134 @@ test("code chunk boundaries never split Unicode surrogate pairs", async () => {
     assert.doesNotMatch(fragment.content.text, /^[\uDC00-\uDFFF]/u);
   }
 });
+
+test("code extractor preserves symbols for the remaining structured languages", async () => {
+  const extractor = new CodeExtractor();
+  const cpp = await extractor.extract(
+    codeSource(
+      "cpp",
+      [
+        "namespace ns {",
+        "class Widget {",
+        "public:",
+        "  int value() const { return v; }",
+        "};",
+        "enum Color { Red };",
+        "using Alias = int;",
+        "}",
+      ].join("\n"),
+      "fixture.cpp",
+    ),
+  );
+  const java = await extractor.extract(
+    codeSource(
+      "java",
+      [
+        "public interface Greeter { String greet(); }",
+        "public final class Impl implements Greeter {",
+        '  public String greetLoudly() { return "hi"; }',
+        "}",
+        "record Pair(int a, int b) {}",
+      ].join("\n"),
+      "fixture.java",
+    ),
+  );
+  const javascript = await extractor.extract(
+    codeSource(
+      "javascript",
+      [
+        "export class Service {",
+        "  static make() { return new Service(); }",
+        "}",
+        "export async function helper(a) { return a; }",
+      ].join("\n"),
+      "fixture.js",
+    ),
+  );
+  const rust = await extractor.extract(
+    codeSource(
+      "rust",
+      [
+        "pub struct Widget { value: i32 }",
+        "pub trait Draw { fn draw(&self); }",
+        "pub fn helper(a: i32) -> i32 { a }",
+      ].join("\n"),
+      "fixture.rs",
+    ),
+  );
+  const tsx = await extractor.extract(
+    codeSource(
+      "tsx",
+      [
+        "export interface Props { name: string }",
+        "export const View = (p: Props) => <span>{p.name}</span>;",
+      ].join("\n"),
+      "fixture.tsx",
+    ),
+  );
+
+  assert.deepEqual(fragmentNamed(cpp, "value").metadata, {
+    kind: "code",
+    symbolType: "function",
+    symbolName: "value",
+    scope: "ns::Widget",
+    nodeType: "function_definition",
+    signature: "int value() const",
+    doc: null,
+    modifiers: [],
+  });
+  assert.equal(fragmentNamed(cpp, "Color").metadata.symbolType, "class");
+  assert.equal(fragmentNamed(cpp, "Alias").metadata.symbolType, "alias");
+  assert.deepEqual(fragmentNamed(java, "Impl").metadata, {
+    kind: "code",
+    symbolType: "class",
+    symbolName: "Impl",
+    scope: null,
+    nodeType: "class_declaration",
+    signature: "public final class Impl implements Greeter",
+    doc: null,
+    modifiers: ["public"],
+  });
+  assert.equal(fragmentNamed(java, "Greeter").metadata.symbolType, "interface");
+  assert.equal(fragmentNamed(java, "greet").metadata.scope, "Greeter");
+  assert.equal(fragmentNamed(java, "Pair").metadata.symbolType, "class");
+  assert.deepEqual(fragmentNamed(javascript, "make").metadata, {
+    kind: "code",
+    symbolType: "function",
+    symbolName: "make",
+    scope: "Service",
+    nodeType: "method_definition",
+    signature: "static make()",
+    doc: null,
+    modifiers: ["exported", "static"],
+  });
+  assert.deepEqual(fragmentNamed(javascript, "helper").metadata.modifiers, [
+    "exported",
+    "async",
+  ]);
+  assert.deepEqual(fragmentNamed(rust, "Draw").metadata, {
+    kind: "code",
+    symbolType: "interface",
+    symbolName: "Draw",
+    scope: null,
+    nodeType: "trait_item",
+    signature: "pub trait Draw",
+    doc: null,
+    modifiers: ["public"],
+  });
+  assert.equal(fragmentNamed(rust, "draw").metadata.scope, "Draw");
+  assert.deepEqual(fragmentNamed(rust, "Widget").metadata.modifiers, [
+    "public",
+  ]);
+  assert.equal(fragmentNamed(tsx, "Props").metadata.symbolType, "interface");
+  assert.deepEqual(fragmentNamed(tsx, "View").metadata, {
+    kind: "code",
+    symbolType: "function",
+    symbolName: "View",
+    scope: null,
+    nodeType: "variable_declarator",
+    signature: "View = (p: Props) => <span>{p.name}</span>",
+    doc: null,
+    modifiers: ["exported"],
+  });
+});
