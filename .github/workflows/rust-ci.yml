@@ -244,7 +244,9 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
-          mkdir -p rust/target "$HOME/.cargo/registry" "$HOME/.cargo/git" "$ZVEC_GREP_MODEL_CACHE"
+          # Keep the shared log parent runner-owned: the container writes a
+          # subdirectory, then later host-side tee writes sibling CPU logs.
+          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$ZVEC_GREP_MODEL_CACHE"
           docker build --platform linux/amd64 --file rust/scripts/cuda/cuda-builder.Dockerfile \
             --build-arg CUDA_IMAGE=ubuntu:24.04 \
             --build-arg RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust/rust-toolchain.toml)" \

@@ -129,12 +129,17 @@ fn ort_cargo_deployment_is_verified_repeatable_and_repairs_outputs_on_both_platf
 
 const CARGO_CLI_REGRESSION_CHECK: &str = r"
 import json, os, subprocess, sys, tarfile, tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 import runtime, e2e
 
-with tempfile.TemporaryDirectory() as temporary:
+previous_directory = Path.cwd()
+with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
+    # Windows cannot remove the process's current directory. Restore it before
+    # TemporaryDirectory cleans up, including when an assertion fails.
+    cleanup.callback(os.chdir, previous_directory)
     os.chdir(temporary)
     root = Path(temporary).resolve()
     profile = root / 'target/debug'
@@ -229,6 +234,8 @@ with tempfile.TemporaryDirectory() as temporary:
                             env=cleaned, capture_output=True, text=True, check=True)
     child = json.loads(result.stdout)
     assert not set(overrides).intersection(child)
+assert Path.cwd() == previous_directory
+assert not root.exists(), 'temporary fixture was not removed'
 print('Cargo CLI transport and clean-environment regression checks passed')
 ";
 
