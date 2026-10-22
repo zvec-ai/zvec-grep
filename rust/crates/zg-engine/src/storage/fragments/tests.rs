@@ -95,10 +95,10 @@ fn metadata_fragments(
             visibility: None,
             language: None,
             documentation: Some("Produces the seasonal crop.".into()),
-                    arity: None,
+            arity: None,
             is_exported: false,
             is_declaration: false,
-})),
+        })),
         vec![
             EntityFragment {
                 id: FragmentId::new(&id, 0),

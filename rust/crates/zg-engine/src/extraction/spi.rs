@@ -1,9 +1,7 @@
 //! Prepared inputs and indexing options for extraction.
 
 use super::graph::PartitionedGraph;
-use crate::domain::{
-    Content, EntityMetadata, FileFormat, ImageContent, Range, SourcePath,
-};
+use crate::domain::{Content, EntityMetadata, FileFormat, ImageContent, Range, SourcePath};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TextSource {

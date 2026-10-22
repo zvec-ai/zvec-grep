@@ -557,7 +557,6 @@ fn remap_script_block_entities(
         .collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

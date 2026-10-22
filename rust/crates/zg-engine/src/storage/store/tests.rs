@@ -627,10 +627,10 @@ fn fixture(
                 visibility: None,
                 language: None,
                 documentation: None,
-                            arity: None,
+                arity: None,
                 is_exported: false,
                 is_declaration: false,
-})),
+            })),
         ),
         vector,
     };

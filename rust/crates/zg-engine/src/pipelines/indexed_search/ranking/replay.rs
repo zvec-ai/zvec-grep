@@ -147,10 +147,10 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 documentation: None,
                 visibility: None,
                 language: None,
-                            arity: None,
+                arity: None,
                 is_exported: false,
                 is_declaration: false,
-});
+            });
             let mut result = hit(
                 &i.to_string(),
                 file_id,

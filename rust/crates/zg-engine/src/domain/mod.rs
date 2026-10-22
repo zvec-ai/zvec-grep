@@ -63,10 +63,6 @@ pub(crate) use source::ByteRange;
 pub(crate) use source::DirectoryId;
 pub(crate) use source::DirectoryRecord;
 // Consumed by the cross-file reference resolver; dormant until it lands.
-#[allow(unused_imports)]
-pub(crate) use source::formats_for_path;
-#[allow(unused_imports)]
-pub(crate) use source::reference_compatible_with;
 pub use source::FileCategory;
 pub use source::FileFormat;
 pub(crate) use source::FileId;
@@ -76,6 +72,10 @@ pub(crate) use source::FileSnapshot;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
+#[allow(unused_imports)]
+pub(crate) use source::formats_for_path;
+#[allow(unused_imports)]
+pub(crate) use source::reference_compatible_with;
 
 // Workspaces.
 pub use workspace::ScanRules;

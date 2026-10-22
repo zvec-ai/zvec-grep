@@ -1097,10 +1097,10 @@ mod tests {
                         documentation: None,
                         visibility: None,
                         language: None,
-                                            arity: None,
+                        arity: None,
                         is_exported: false,
                         is_declaration: false,
-},
+                    },
                 )),
                 stored.entity.fragments().to_vec(),
             )
