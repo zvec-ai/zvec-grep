@@ -14,7 +14,6 @@ use super::zvec::{
 };
 
 mod codec;
-pub(super) use codec::validate_content;
 
 pub(super) struct Entities {
     collection: Collection,
@@ -33,7 +32,7 @@ impl Entities {
     }
 
     /// Encode the full replacement before any existing records are removed.
-    /// The storage write entry point validates domain content and ownership.
+    /// The storage write entry point validates ownership.
     pub(super) fn prepare(entities: &[Entity]) -> EngineResult<Vec<Doc>> {
         entities.iter().map(encode_doc).collect()
     }
@@ -53,7 +52,7 @@ impl Entities {
             .collect::<Vec<_>>();
         fetch_map(&self.collection, &keys)?
             .into_values()
-            .map(|doc| decode_doc(&doc).map(|entity| (entity.id.clone(), entity)))
+            .map(|doc| decode_doc(&doc).map(|entity| (entity.id().clone(), entity)))
             .collect()
     }
 
@@ -64,7 +63,7 @@ impl Entities {
     ) -> EngineResult<()> {
         let keys = entities
             .iter()
-            .map(|entity| entity.id.as_str().to_owned())
+            .map(|entity| entity.id().as_str().to_owned())
             .collect::<Vec<_>>();
         for doc in fetch_map(&self.collection, &keys)?.into_values() {
             if u32_field(&doc, "file_id")? != file_id.get() {
@@ -104,20 +103,20 @@ fn schema() -> EngineResult<CollectionSchema> {
 
 fn encode_doc(entity: &Entity) -> EngineResult<Doc> {
     let mut doc = native(Doc::new(), "create canonical entity record")?;
-    doc.set_pk(entity.id.as_str());
+    doc.set_pk(entity.id().as_str());
     native(
-        doc.add_u32("file_id", entity.file_id.get()),
+        doc.add_u32("file_id", entity.file_id().get()),
         "encode entity file",
     )?;
     native(
-        doc.add_string("entity_id", entity.id.as_str()),
+        doc.add_string("entity_id", entity.id().as_str()),
         "encode entity identity",
     )?;
     native(
         doc.add_string("payload", &codec::encode_entity(entity)?),
         "encode canonical entity",
     )?;
-    if let Some(metadata) = &entity.metadata {
+    if let Some(metadata) = entity.metadata() {
         let value = serde_json::to_value(metadata)
             .map_err(|error| corrupt(format!("encode entity metadata: {error}")))?;
         let json = serde_json::to_string(&value)
@@ -130,9 +129,9 @@ fn encode_doc(entity: &Entity) -> EngineResult<Doc> {
 fn decode_doc(doc: &Doc) -> EngineResult<Entity> {
     let metadata = decode_metadata(doc)?;
     let entity = codec::decode_entity(&string_field(doc, "payload")?, metadata.as_ref())?;
-    if doc_key(doc)? != entity.id.as_str()
-        || u32_field(doc, "file_id")? != entity.file_id.get()
-        || string_field(doc, "entity_id")? != entity.id.as_str()
+    if doc_key(doc)? != entity.id().as_str()
+        || u32_field(doc, "file_id")? != entity.file_id().get()
+        || string_field(doc, "entity_id")? != entity.id().as_str()
     {
         return Err(corrupt("entity identity differs from its index fields"));
     }

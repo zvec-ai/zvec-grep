@@ -6,63 +6,56 @@ fn text_range() -> Range {
     Range::Text(TextRange::from_coordinates(7, 18, 2, 2, 0, 11).expect("text range"))
 }
 
-fn cell(
-    row: usize,
-    column: usize,
-    row_span: usize,
-    column_span: usize,
-    kind: TableCellRole,
-) -> TableCell {
-    TableCell {
-        row,
-        column,
-        row_span,
-        column_span,
-        contents: vec![Content::Text(format!("{row},{column}"))],
-        kind,
-    }
+fn entity() -> Entity {
+    let content =
+        Content::Image(ImageContent::new(vec![0, 1, 255], FileFormat::Png).expect("image"));
+    make_entity(FileId::new(1), content, text_range(), None, &[Range::Full])
 }
 
-fn entity() -> Entity {
-    let image = Content::Image(ImageContent::new(vec![0, 1, 255], FileFormat::Png).expect("image"));
-    let mut nested = cell(1, 1, 1, 1, TableCellRole::Unknown);
-    nested.contents.push(Content::Table(TableContent {
-        row_count: 1,
-        column_count: 1,
-        cells: vec![cell(0, 0, 1, 1, TableCellRole::Header)],
-    }));
-    let mut mixed = cell(0, 1, 1, 2, TableCellRole::Data);
-    mixed.contents.push(image);
-    let content = Content::Table(TableContent {
-        row_count: 2,
-        column_count: 3,
-        cells: vec![
-            cell(0, 0, 2, 1, TableCellRole::Header),
-            mixed,
-            nested,
-            cell(1, 2, 1, 1, TableCellRole::Data),
-        ],
-    });
-    let id = EntityId::new(FileId::new(1), &content, text_range()).expect("entity id");
-    Entity {
-        id: id.clone(),
-        file_id: FileId::new(1),
-        source_range: text_range(),
-        content,
-        metadata: None,
-        fragments: vec![EntityFragment {
-            id: FragmentId::new(&id, 0),
-            range: Range::Full,
-        }],
-    }
+fn make_entity(
+    file_id: FileId,
+    content: Content,
+    source_range: Range,
+    metadata: Option<EntityMetadata>,
+    ranges: &[Range],
+) -> Entity {
+    let id = EntityId::new(file_id, &content, source_range).expect("entity id");
+    let fragments = ranges
+        .iter()
+        .enumerate()
+        .map(|(ordinal, &range)| EntityFragment {
+            id: FragmentId::new(&id, u32::try_from(ordinal).expect("fragment ordinal")),
+            range,
+        })
+        .collect();
+    Entity::new(id, file_id, source_range, content, metadata, fragments).expect("entity")
 }
 
 fn round_trip(entity: &Entity) {
     let encoded = encode_entity(entity).expect("encode entity");
     assert_eq!(
-        decode_entity(&encoded, entity.metadata.as_ref()).expect("decode entity"),
+        decode_entity(&encoded, entity.metadata()).expect("decode entity"),
         *entity
     );
+}
+
+#[test]
+fn code_records_preserve_content_and_validate_utf8_fragment_ranges() {
+    let content = Content::Code("a中文b".into());
+    let file_id = FileId::new(42);
+    let code = make_entity(
+        file_id,
+        content,
+        Range::Full,
+        None,
+        &[Range::Byte(ByteRange::new(1, 7).expect("UTF-8 range"))],
+    );
+    round_trip(&code);
+    let mut encoded: Value =
+        serde_json::from_str(&encode_entity(&code).expect("write code")).expect("JSON");
+    assert_eq!(encoded["content"], json!({"kind":"code", "value":"a中文b"}));
+    encoded["fragments"][0]["range"]["end_offset"] = json!(6);
+    assert_corrupt_entity(&encoded);
 }
 
 fn assert_corrupt_entity(record: &Value) {
@@ -73,8 +66,13 @@ fn assert_corrupt_entity(record: &Value) {
 #[test]
 fn source_identities_round_trip_the_full_u32_range() {
     for id in [0, u32::MAX] {
-        let mut entity = entity();
-        entity.file_id = FileId::new(id);
+        let entity = make_entity(
+            FileId::new(id),
+            entity().content().clone(),
+            text_range(),
+            None,
+            &[Range::Full],
+        );
         round_trip(&entity);
     }
 }
@@ -90,18 +88,12 @@ fn stored_file_identities_reject_values_outside_u32() {
 }
 
 #[test]
-fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
+fn entity_records_preserve_image_content_ranges_and_external_metadata() {
     round_trip(&entity());
     let record: Value =
         serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
-    assert_eq!(
-        record["content"]["value"]["cells"][1]["contents"][1]["value"]["data"],
-        "AAH/"
-    );
-    assert_eq!(
-        record["content"]["value"]["cells"][1]["contents"][1]["value"]["format"],
-        "png"
-    );
+    assert_eq!(record["content"]["value"]["data"], "AAH/");
+    assert_eq!(record["content"]["value"]["format"], "png");
     assert!(
         record.get("metadata").is_none(),
         "metadata is supplied by its dedicated storage column"
@@ -117,17 +109,22 @@ fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
             json!({"kind":"byte", "start_offset":2, "end_offset":u64::MAX}),
         ),
     ] {
-        let mut entity = entity();
-        entity.source_range = range;
-        entity.metadata = Some(EntityMetadata::Code(CodeMetadata {
+        let metadata = Some(EntityMetadata::Code(CodeMetadata {
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("symbol".into()),
             scope: Some("module".into()),
             signature: Some("pub async fn symbol()".into()),
-            visibility: None,
-            language: None,
             documentation: Some("documentation".into()),
+            language: None,
+            visibility: None,
         }));
+        let entity = make_entity(
+            FileId::new(1),
+            entity().content().clone(),
+            range,
+            metadata,
+            &[Range::Full],
+        );
         round_trip(&entity);
         let record: Value =
             serde_json::from_str(&encode_entity(&entity).expect("encode entity")).expect("JSON");
@@ -137,28 +134,40 @@ fn entity_records_preserve_structured_content_ranges_and_external_metadata() {
 
 #[test]
 fn fragment_selectors_preserve_utf8_slices_without_repeating_content_or_ownership() {
-    let mut entity = entity();
-    entity.content = Content::Text("a中文b".into());
-    entity.source_range =
+    let source_range =
         Range::Text(TextRange::from_coordinates(10, 18, 1, 1, 10, 18).expect("range"));
-    entity.fragments.push(EntityFragment {
-        id: FragmentId::new(&entity.id, 1),
-        range: Range::Byte(ByteRange::new(1, 7).expect("ordered byte offsets")),
-    });
-    entity.metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
+    let metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
         heading: Some("heading".into()),
         level: Some(2),
         scope: Some("parent".into()),
     }));
+    let entity = make_entity(
+        FileId::new(1),
+        Content::Text("a中文b".into()),
+        source_range,
+        metadata,
+        &[
+            Range::Full,
+            Range::Byte(ByteRange::new(1, 7).expect("ordered byte offsets")),
+        ],
+    );
     round_trip(&entity);
     for source_range in [
         Range::Full,
         Range::Byte(ByteRange::new(10, 12).expect("source bytes")),
         Range::Text(TextRange::from_coordinates(10, 12, 1, 1, 10, 12).expect("source text")),
     ] {
-        let mut transformed = entity.clone();
-        transformed.source_range = source_range;
-        transformed.fragments.reverse();
+        let mut fragments = entity.fragments().to_vec();
+        fragments.reverse();
+        let transformed = Entity::new(
+            entity.id().clone(),
+            entity.file_id(),
+            source_range,
+            entity.content().clone(),
+            entity.metadata().cloned(),
+            fragments,
+        )
+        .expect("entity with reversed fragments");
         round_trip(&transformed);
     }
     let encoded = encode_entity(&entity).expect("encode entity");
@@ -166,7 +175,7 @@ fn fragment_selectors_preserve_utf8_slices_without_repeating_content_or_ownershi
     assert_eq!(
         record["fragments"][1],
         json!({
-            "id":entity.fragments[1].id.as_str(), "range":{"kind":"byte", "start_offset":1, "end_offset":7},
+            "id":entity.fragments()[1].id.as_str(), "range":{"kind":"byte", "start_offset":1, "end_offset":7},
         })
     );
     for (start, end) in [(2, 7), (1, 9), (1, 1), (7, 1)] {
@@ -197,54 +206,40 @@ fn fragment_selectors_preserve_utf8_slices_without_repeating_content_or_ownershi
 }
 
 #[test]
-fn rejects_invalid_table_geometry_without_allocating_a_dense_grid() {
-    let original: Value =
-        serde_json::from_str(&encode_entity(&entity()).expect("encode entity")).expect("JSON");
-    for (field, value) in [
-        ("row_span", 0),
-        ("row_span", 3),
-        ("column_span", 2),
-        ("column", usize::MAX),
-    ] {
-        let mut record = original.clone();
-        record["content"]["value"]["cells"][0][field] = json!(value);
-        assert_corrupt_entity(&record);
-    }
-    let mut table = TableContent {
-        row_count: usize::MAX,
-        column_count: usize::MAX,
-        cells: vec![
-            cell(0, 0, 1, 1, TableCellRole::Unknown),
-            cell(usize::MAX - 1, usize::MAX - 1, 1, 1, TableCellRole::Data),
-        ],
-    };
-    validate_table(&table).expect("sparse table");
-    table.cells.reverse();
-    assert!(validate_table(&table).is_err());
-    table.cells = vec![
-        cell(0, 0, 2, 2, TableCellRole::Data),
-        cell(1, 1, 1, 1, TableCellRole::Data),
-    ];
-    assert!(validate_table(&table).is_err());
-    let mut entity = entity();
-    let mut content = Content::Text("nested".into());
-    for depth in 1..=MAX_TABLE_DEPTH + 1 {
-        let mut nested = cell(0, 0, 1, 1, TableCellRole::Data);
-        nested.contents = vec![content];
-        content = Content::Table(TableContent {
-            row_count: 1,
-            column_count: 1,
-            cells: vec![nested],
+fn code_records_preserve_kind_without_metadata_and_validate_text_ranges() {
+    let entity = make_entity(
+        FileId::new(1),
+        Content::Code("a中文b".into()),
+        Range::Full,
+        None,
+        &[Range::Byte(ByteRange::new(1, 7).expect("UTF-8 slice"))],
+    );
+    round_trip(&entity);
+    let record: Value =
+        serde_json::from_str(&encode_entity(&entity).expect("encode code")).expect("JSON");
+    assert_eq!(record["content"], json!({"kind":"code", "value":"a中文b"}));
+    assert!(record.get("metadata").is_none());
+    assert_eq!(entity.content().kind(), crate::domain::ContentKind::Code);
+    assert_ne!(
+        entity.id(),
+        &EntityId::new(
+            entity.file_id(),
+            &Content::Text("a中文b".into()),
+            Range::Full
+        )
+        .expect("text entity id"),
+    );
+    for (start, end) in [(2, 7), (1, 9), (1, 1)] {
+        let mut invalid = record.clone();
+        invalid["fragments"][0]["range"] = json!({
+            "kind":"byte", "start_offset":start, "end_offset":end,
         });
-        entity.content = content.clone();
-        if depth <= MAX_TABLE_DEPTH {
-            round_trip(&entity);
-        } else {
-            assert!(validate_content(&entity.content).is_err());
-            let encoded = encode_entity(&entity).expect("encode invalid fixture");
-            assert!(decode_entity(&encoded, None).is_err());
-        }
+        assert_corrupt_entity(&invalid);
     }
+    let mut invalid = record;
+    invalid["content"]["value"] = json!(" \n\t");
+    invalid["fragments"][0]["range"] = json!({"kind":"full"});
+    assert_corrupt_entity(&invalid);
 }
 
 #[test]
@@ -262,7 +257,7 @@ fn rejects_corrupt_identities_images_and_ranges() {
         ("data", json!("invalid base64!")),
     ] {
         let mut record = original.clone();
-        record["content"]["value"]["cells"][1]["contents"][1]["value"][field] = value;
+        record["content"]["value"][field] = value;
         assert_corrupt_entity(&record);
     }
     for (field, value) in [("start_line", 0), ("end_byte_column", 12)] {

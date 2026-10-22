@@ -44,7 +44,8 @@ Release order:
 
 `.github/workflows/rust-publish.yml` builds and installs every target on its
 native runner, checks CLI startup, managed-rg and actual daemon IPC, and collects
-the candidates into a downloadable artifact. Regular runs do not publish.
+the candidates into a downloadable artifact. The workflow runs only through
+manual dispatch and does not publish unless `publish` is enabled.
 Intel macOS installation and runtime checks must pass before the other four
 platform builds start. Its ONNX Runtime with CoreML and zvec SDK are built from
 pinned sources, cached, and bundled with the native package. The Intel release

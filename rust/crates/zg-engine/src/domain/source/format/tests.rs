@@ -8,16 +8,6 @@ use tempfile::tempdir;
 use super::*;
 use FileFormat::*;
 
-fn name_formats(file_name: &str) -> Vec<FileFormat> {
-    let mut formats = match_longest_extension(OsStr::new(file_name)).to_vec();
-    formats.extend_from_slice(catalog::lookup_name(file_name));
-    normalize_formats(&mut formats);
-    if formats.is_empty() {
-        formats.push(Unknown);
-    }
-    formats
-}
-
 #[test]
 fn formats_have_query_names_and_categories() {
     use FileCategory as Category;
@@ -87,7 +77,11 @@ fn catalog_definitions_round_trip() {
     for (extension, mut candidates) in extensions {
         candidates.sort_unstable();
         let name = format!("sample.{extension}");
-        assert_eq!(name_formats(&name), candidates, "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            candidates,
+            "{name}"
+        );
     }
 
     let mut file_names = HashMap::new();
@@ -103,7 +97,7 @@ fn catalog_definitions_round_trip() {
     }
     for (name, candidates) in file_names {
         assert_eq!(catalog::lookup_name(name), candidates, "{name}");
-        let formats = name_formats(name);
+        let formats = FileFormat::from_file_name(name.as_ref());
         assert!(
             candidates.iter().all(|format| formats.contains(format)),
             "{name}: {formats:?}"
@@ -140,7 +134,11 @@ fn file_names_resolve_registered_formats() {
         ("TSCONFIG.json", &[Json]),
     ];
     for &(name, expected) in cases {
-        assert_eq!(name_formats(name), expected, "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            expected,
+            "{name}"
+        );
     }
     for name in [
         "dockerfile",
@@ -150,7 +148,11 @@ fn file_names_resolve_registered_formats() {
         "dockerfile.dev",
         ".ENV.local",
     ] {
-        assert_eq!(name_formats(name), [Unknown], "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            [Unknown],
+            "{name}"
+        );
     }
 
     let mut formats = vec![TypeScript, Json, Unknown, Json, Text];
@@ -183,7 +185,11 @@ fn extensions_match_longest_registered_suffix() {
     for &(extensions, expected) in aliases {
         for extension in extensions {
             let name = format!("sample.{extension}");
-            assert_eq!(name_formats(&name), [expected], "{name}");
+            assert_eq!(
+                FileFormat::from_file_name(name.as_ref()),
+                [expected],
+                "{name}"
+            );
         }
     }
     let cases: &[(&str, &[FileFormat])] = &[
@@ -212,7 +218,11 @@ fn extensions_match_longest_registered_suffix() {
         ("file.wps", &[MicrosoftWorks, WpsWriter]),
     ];
     for &(name, expected) in cases {
-        assert_eq!(name_formats(name), expected, "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            expected,
+            "{name}"
+        );
     }
     for name in [
         "README",
@@ -236,7 +246,11 @@ fn extensions_match_longest_registered_suffix() {
         ".config.JSON",
         "backup.2026.TAR.GZ",
     ] {
-        assert_eq!(name_formats(name), [Unknown], "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            [Unknown],
+            "{name}"
+        );
     }
 }
 
@@ -289,7 +303,11 @@ fn uppercase_language_suffixes_are_explicit_catalog_entries() {
         ("Makefile.am", Makefile),
         ("GNUmakefile.in", Makefile),
     ] {
-        assert_eq!(name_formats(name), [expected], "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            [expected],
+            "{name}"
+        );
     }
     for name in [
         "main.RS",
@@ -298,7 +316,11 @@ fn uppercase_language_suffixes_are_explicit_catalog_entries() {
         "analysis.RMD",
         "CONFIG.RU",
     ] {
-        assert_eq!(name_formats(name), [Unknown], "{name}");
+        assert_eq!(
+            FileFormat::from_file_name(name.as_ref()),
+            [Unknown],
+            "{name}"
+        );
     }
 }
 

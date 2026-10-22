@@ -331,7 +331,7 @@ mod tests {
 
     use crate::domain::{
         IndexDescriptor, IndexState, Workspace,
-        model::{EmbeddingModelInfo, Metric, ModelConfig},
+        model::{EmbeddingMetric, EmbeddingModelInfo, ModelConfig},
     };
     use crate::workspace::manifest::read_workspace_manifest;
 
@@ -346,18 +346,31 @@ mod tests {
             Workspace {
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "local".into(),
-                        name: "example".into(),
-                        endpoint: None,
-                    },
-                    dimension: 8,
-                    metric: Metric::Cosine,
-                    max_batch_size: 32,
-                    max_input_tokens: None,
-                    max_image_bytes: None,
-                })),
+                index: IndexState::Enabled(Box::new(
+                    IndexDescriptor::new(
+                        EmbeddingModelInfo::new(
+                            crate::domain::model::ModelInfo::new(
+                                "local",
+                                "example",
+                                [
+                                    crate::domain::ContentKind::Text,
+                                    crate::domain::ContentKind::Code,
+                                    crate::domain::ContentKind::Image,
+                                ],
+                                32,
+                            )
+                            .expect("valid model metadata"),
+                            8,
+                            EmbeddingMetric::Cosine,
+                            None,
+                            None,
+                        )
+                        .expect("valid embedding metadata"),
+                        std::collections::BTreeMap::new(),
+                        crate::domain::FTS_CONFIG,
+                    )
+                    .expect("index descriptor"),
+                )),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 2,
             },

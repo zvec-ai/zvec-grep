@@ -95,18 +95,15 @@ impl WorkspaceIndexService {
         // Check the on-disk version before any recovery or storage mutation.
         let existing =
             inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
+        // Validate selection before recovery, storage, or model mutations.
+        let scan = resolve_scan(existing.as_ref(), &options)?;
+        crate::file_selection::ScanPolicy::new(&location.root, &scan)?;
         if options.rebuild {
             recover_build_for_rebuild(&location.home)?;
         } else {
             recover_build(&location.home)?;
         }
-        let rebuilding = options.rebuild
-            || existing
-                .as_ref()
-                .is_none_or(|manifest| !is_indexed(manifest));
-        // Validate before model acquisition; invalid globs must not trigger downloads or inference.
-        let scan = resolve_scan(existing.as_ref(), &options);
-        crate::file_selection::GlobMatcher::new(&location.root, &scan.globs)?;
+        let rebuilding = options.rebuild || !existing.as_ref().is_some_and(is_indexed);
         if options.reset_paths
             || options.scan != crate::api::index::options::ScanRulesUpdate::default()
         {
@@ -128,7 +125,11 @@ impl WorkspaceIndexService {
                 .as_ref()
                 .and_then(|manifest| manifest.workspace.index.descriptor())
         {
-            previous.ensure_index_compatible(&descriptor)?;
+            previous
+                .ensure_index_compatible(&descriptor)
+                .map_err(|error| {
+                    error.with_help("Rebuild the index with `zg --index --rebuild`.")
+                })?;
         }
         let mut manifest = index_manifest(
             &location,
@@ -394,8 +395,8 @@ fn index_manifest(
     let now = epoch_millis();
     let workspace = Workspace {
         root: location.root.clone(),
-        scan: resolve_scan(active, options),
-        index: IndexState::Enabled(descriptor),
+        scan: resolve_scan(active, options)?,
+        index: IndexState::Enabled(Box::new(descriptor)),
         created_epoch_ms: active.map_or(now, |value| value.workspace.created_epoch_ms),
         updated_epoch_ms: now,
     };
@@ -403,7 +404,7 @@ fn index_manifest(
         .iter()
         .map(|model| {
             Ok((
-                model.info().model.reference(),
+                model.info().model().reference(),
                 embedding_runtime(active, options, model)?,
             ))
         })
@@ -457,8 +458,20 @@ fn acquire_index_models(
     options: &IndexOptions,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
-    let descriptor = IndexDescriptor::single(model.info().clone());
-    descriptor.validate()?;
+    let descriptor = IndexDescriptor::new(
+        model.info().clone(),
+        std::collections::BTreeMap::new(),
+        crate::domain::FTS_CONFIG,
+    )?;
+    if !descriptor
+        .content_indexes()
+        .iter()
+        .any(|index| index.kind == crate::domain::ContentKind::Text)
+    {
+        return Err(EngineError::unsupported(
+            "text indexing requires a model that supports text content",
+        ));
+    }
     Ok(IndexModels {
         runtimes: vec![model],
         descriptor,
@@ -576,7 +589,7 @@ pub(crate) fn embedding_reference(
         explicit: requested.map(|embedding| embedding.reference.clone()),
         existing: existing
             .and_then(|manifest| manifest.embedding())
-            .map(|embedding| embedding.model.reference()),
+            .map(|embedding| embedding.model().reference()),
         global_default: crate::config::string(&config, &["defaults", "embedding"]),
         fallback: Some(DEFAULT_LOCAL_EMBEDDING.to_owned()),
         ..ResolveEmbeddingReferenceOptions::default()
@@ -605,29 +618,30 @@ pub(in crate::pipelines) fn assert_embedding_compatible(
     };
     let schema = existing
         .embeddings()
-        .iter()
-        .find(|schema| schema.model.reference() == model.info().model.reference())
+        .into_iter()
+        .find(|schema| schema.model().reference() == model.info().model().reference())
         .ok_or_else(|| {
             EngineError::invalid_argument(
                 "model is not part of the workspace index; rebuild the index",
             )
         })?;
-    schema.ensure_index_compatible(model.info())
+    schema
+        .ensure_index_compatible(model.info())
+        .map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild`."))
 }
 
 fn resolve_scan(
     existing: Option<&WorkspaceManifest>,
     options: &IndexOptions,
-) -> crate::domain::ScanRules {
-    let mut scan = if options.reset_paths {
+) -> Result<crate::domain::ScanRules, EngineError> {
+    let scan = if options.reset_paths {
         crate::domain::ScanRules::default()
     } else {
         existing.map_or_else(crate::domain::ScanRules::default, |manifest| {
             manifest.workspace.scan.clone()
         })
     };
-    options.scan.apply(&mut scan);
-    scan
+    options.scan.apply(&scan)
 }
 
 fn embedding_runtime(
@@ -639,16 +653,16 @@ fn embedding_runtime(
         .and_then(|manifest| {
             manifest
                 .embedding_runtimes
-                .get(&model.info().model.reference())
+                .get(&model.info().model().reference())
                 .cloned()
         })
         .unwrap_or_default();
     let config = crate::config::read()?;
-    if model.info().model.provider == "local" {
+    if model.info().model().provider() == "local" {
         let reference = format!(
             "{}/{}",
-            model.info().model.provider,
-            model.info().model.name
+            model.info().model().provider(),
+            model.info().model().name()
         );
         Ok(ModelConfig {
             cache_dir: crate::config::model_cache(
@@ -676,7 +690,10 @@ fn embedding_runtime(
     } else {
         Ok(ModelConfig {
             api_key: current.api_key,
-            endpoint: model.info().model.endpoint.clone().or(current.endpoint),
+            endpoint: model
+                .configured_endpoint()
+                .map(str::to_owned)
+                .or(current.endpoint),
             device: None,
             cache_dir: None,
         })
@@ -801,13 +818,17 @@ mod tests {
     #[test]
     fn selection_updates_preserve_omitted_settings_and_clear_explicit_values() {
         let directory = tempdir().expect("workspace");
-        let mut manifest = crate::workspace::manifest::WorkspaceManifest::new(
+        let manifest = crate::workspace::manifest::WorkspaceManifest::new(
             Workspace {
                 root: directory.path().to_path_buf(),
-                scan: crate::domain::ScanRules {
-                    globs: vec!["*.rs".into()],
-                    ..crate::domain::ScanRules::default()
-                },
+                scan: ScanRulesUpdate {
+                    globs: Some(vec!["*.rs".into()]),
+                    include_hidden: Some(true),
+                    max_depth: Some(Some(3)),
+                    ..ScanRulesUpdate::default()
+                }
+                .apply(&crate::domain::ScanRules::default())
+                .expect("scan rules"),
                 index: IndexState::Uninitialized,
                 created_epoch_ms: 0,
                 updated_epoch_ms: 0,
@@ -817,26 +838,24 @@ mod tests {
             std::collections::BTreeMap::new(),
         )
         .expect("manifest");
-        manifest.workspace.scan.hidden = true;
-        manifest.workspace.scan.max_depth = Some(3);
         let mut options = IndexOptions::default();
         assert_eq!(
-            super::resolve_scan(Some(&manifest), &options),
+            super::resolve_scan(Some(&manifest), &options).expect("scan rules"),
             manifest.workspace.scan
         );
         options.scan.globs = Some(Vec::new());
-        options.scan.hidden = Some(false);
+        options.scan.include_hidden = Some(false);
         options.scan.max_depth = Some(None);
-        let scan = super::resolve_scan(Some(&manifest), &options);
-        assert!(scan.globs.is_empty());
-        assert!(!scan.hidden);
-        assert_eq!(scan.max_depth, None);
+        let scan = super::resolve_scan(Some(&manifest), &options).expect("scan rules");
+        assert!(scan.globs().is_empty());
+        assert!(!scan.include_hidden());
+        assert_eq!(scan.max_depth(), None);
         options = IndexOptions {
             reset_paths: true,
             ..IndexOptions::default()
         };
         assert_eq!(
-            super::resolve_scan(Some(&manifest), &options),
+            super::resolve_scan(Some(&manifest), &options).expect("scan rules"),
             crate::domain::ScanRules::default()
         );
     }
@@ -952,7 +971,7 @@ mod tests {
         );
         assert_eq!(workspace.path, workspace.root.join(".zvec-grep"));
         assert_eq!(
-            workspace.scan.globs,
+            workspace.scan.globs(),
             vec![crate::domain::GlobRule::from("*.rs")]
         );
         assert_eq!(info.status.expect("status").files_scanned, 0);
@@ -1153,7 +1172,14 @@ mod tests {
             .expect("read")
             .expect("active");
         let mut target = active.clone();
-        target.workspace.scan.globs.push("*.rs".into());
+        let mut globs = target.workspace.scan.globs().to_vec();
+        globs.push("*.rs".into());
+        target.workspace.scan = ScanRulesUpdate {
+            globs: Some(globs),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&target.workspace.scan)
+        .expect("scan rules");
         target
             .embedding_runtimes
             .values_mut()
@@ -1368,11 +1394,15 @@ mod tests {
             .expect("child owns its manifest");
         assert_eq!(indexed.workspace.root, child);
         assert_eq!(
-            indexed.embedding().expect("child model").model.reference(),
+            indexed
+                .embedding()
+                .expect("child model")
+                .model()
+                .reference(),
             model
         );
         assert_eq!(
-            indexed.workspace.scan.globs,
+            indexed.workspace.scan.globs(),
             vec![crate::domain::GlobRule::from("src/**")]
         );
         assert_eq!(
@@ -1535,6 +1565,81 @@ mod tests {
             std::fs::read(original_build).expect("original build unchanged"),
             original_bytes
         );
+        models.close();
+    }
+
+    #[tokio::test]
+    async fn invalid_scan_rules_do_not_create_index_or_acquire_models() {
+        let directory = tempdir().expect("workspace");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        for scan in [
+            ScanRulesUpdate {
+                max_file_size_bytes: Some(Some(0)),
+                ..ScanRulesUpdate::default()
+            },
+            ScanRulesUpdate {
+                globs: Some(vec!["[".into()]),
+                ..ScanRulesUpdate::default()
+            },
+            ScanRulesUpdate {
+                ignore_files: Some(vec!["missing.ignore".into()]),
+                ..ScanRulesUpdate::default()
+            },
+        ] {
+            let error = service
+                .index(
+                    &models,
+                    IndexOptions {
+                        scan,
+                        ..empty_index_options(directory.path())
+                    },
+                )
+                .await
+                .expect_err("invalid scan rules");
+            assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+            let home = directory.path().join(".zvec-grep");
+            assert!(!home.join("manifest.json").exists());
+            assert!(!super::has_build(&home));
+            assert!(!super::has_generation_storage(&home).expect("no index generation"));
+            assert_eq!(models.snapshot().cached_runtimes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_scan_update_preserves_manifest_and_pending_rebuild() {
+        let directory = tempdir().expect("workspace");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("initial index");
+        let home = directory.path().join(".zvec-grep");
+        let active = super::read_workspace_manifest(&home)
+            .expect("read")
+            .expect("active index");
+        let pending = super::prepare_build(active.clone()).expect("pending rebuild");
+        let error = service
+            .index(
+                &models,
+                IndexOptions {
+                    scan: ScanRulesUpdate {
+                        ignore_files: Some(vec!["missing.ignore".into()]),
+                        ..ScanRulesUpdate::default()
+                    },
+                    ..empty_index_options(directory.path())
+                },
+            )
+            .await
+            .expect_err("missing explicit ignore file");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert_eq!(
+            super::read_workspace_manifest(&home).expect("unchanged manifest"),
+            Some(active.clone())
+        );
+        assert!(super::has_build(&home));
+        assert!(pending.target.storage_home().exists());
         models.close();
     }
 

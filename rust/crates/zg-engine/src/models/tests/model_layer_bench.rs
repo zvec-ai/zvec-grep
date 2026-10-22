@@ -59,7 +59,7 @@ async fn model_layer_throughput() {
     let manager = ModelRuntimeManager::new();
     let model = create_benchmark_model(&manager, &model_reference, cache, device, concurrency);
     assert!(
-        batch_size <= model.info().max_batch_size,
+        batch_size <= model.info().model().max_batch_size(),
         "batch size exceeds model limit"
     );
     let batch = benchmark_batch(batch_size);

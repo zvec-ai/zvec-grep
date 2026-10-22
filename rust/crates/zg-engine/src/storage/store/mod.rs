@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     directories::Directories,
-    entities::{self, Entities},
+    entities::Entities,
     files::Files,
     fragments::{self, Fragments},
     types::{
@@ -85,13 +85,12 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
     }
     let mut models = std::collections::HashSet::new();
     for embedding in embeddings {
-        embedding.validate()?;
-        if !(1..=20_000).contains(&embedding.dimension) {
+        if !(1..=20_000).contains(&embedding.dimension()) {
             return Err(EngineError::invalid_argument(
                 "embedding dimension must be in 1..=20,000",
             ));
         }
-        if !models.insert(embedding.model.reference()) {
+        if !models.insert(embedding.model().reference()) {
             return Err(EngineError::invalid_argument(
                 "embedding model references must be unique",
             ));
@@ -317,22 +316,19 @@ impl IndexStore {
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
         let mut file = file.clone();
-        file.index_status = FileIndexStatus::Indexed {
+        file.set_index_status(FileIndexStatus::Indexed {
             indexed_epoch_ms: now_epoch_ms()?,
             entity_count: u64::try_from(entities.len())
                 .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
-        };
-        file.validate()?;
+        })?;
         self.write(|state| replace_file(state, &file, entities, entries))
     }
 
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
-        file.validate()?;
         let mut file = file.clone();
-        file.index_status = FileIndexStatus::Failed {
+        file.set_index_status(FileIndexStatus::Failed {
             error: error.to_owned(),
-        };
-        file.validate()?;
+        })?;
         self.write(|state| replace_file(state, &file, &[], &[]))
     }
 
@@ -402,18 +398,18 @@ fn replace_file(
     entries: &[IndexedFragment],
 ) -> EngineResult<()> {
     state.files.validate(file)?;
-    state.entities.validate_ownership(entities, file.id)?;
-    state.fragments.validate_ownership(entries, file.id)?;
+    state.entities.validate_ownership(entities, file.id())?;
+    state.fragments.validate_ownership(entries, file.id())?;
     state.needs_optimize = true;
-    let directories = state.directories.ensure(&file.relative_path)?;
+    let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
     let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
     let mut unfinished = file.clone();
-    unfinished.index_status = FileIndexStatus::NotIndexed;
+    unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;
-    state.fragments.delete_file(file.id)?;
-    state.entities.delete_file(file.id)?;
+    state.fragments.delete_file(file.id())?;
+    state.entities.delete_file(file.id())?;
     state.entities.write(&entity_docs)?;
     state.fragments.write(&fragment_docs)?;
     state.files.put(file, &directories)
@@ -441,10 +437,10 @@ fn load_search_hits(
     let mut fragments = HashMap::new();
     for entity in stored_entities.into_values() {
         // A replacement or deletion can stop between collection writes.
-        let Some(file) = files.get(&entity.file_id) else {
+        let Some(file) = files.get(&entity.file_id()) else {
             continue;
         };
-        for fragment in &entity.fragments {
+        for fragment in entity.fragments() {
             if fragments
                 .insert(fragment.id.as_str().to_owned(), fragment.clone())
                 .is_some()
@@ -453,7 +449,7 @@ fn load_search_hits(
             }
         }
         entities.insert(
-            entity.id.clone(),
+            entity.id().clone(),
             StoredEntity {
                 entity,
                 file: file.clone(),
@@ -462,7 +458,7 @@ fn load_search_hits(
     }
     for hit in hits {
         if let Some(owner) = entities.get(&hit.entity_id)
-            && owner.file.id != hit.file_id
+            && owner.file.id() != hit.file_id
         {
             return Err(corrupt("search identities differ from their stored entity"));
         }
@@ -493,21 +489,18 @@ fn validate_batch(
     entries: &[IndexedFragment],
     schema: &[EmbeddingModelInfo],
 ) -> EngineResult<()> {
-    file.validate()?;
     let mut entity_ids = HashSet::new();
     let mut fragment_ids = HashSet::new();
     for entity in entities {
-        if entity.file_id != file.id {
+        if entity.file_id() != file.id() {
             return Err(EngineError::invalid_argument(
                 "entity belongs to a different file",
             ));
         }
-        if !entity_ids.insert(&entity.id) {
+        if !entity_ids.insert(entity.id()) {
             return Err(EngineError::invalid_argument("duplicate entity id"));
         }
-        entity.validate()?;
-        entities::validate_content(&entity.content)?;
-        for fragment in &entity.fragments {
+        for fragment in entity.fragments() {
             if !fragment_ids.insert(&fragment.id) {
                 return Err(EngineError::invalid_argument("duplicate fragment id"));
             }
@@ -526,15 +519,15 @@ fn model_schema<'a>(
 ) -> EngineResult<&'a EmbeddingModelInfo> {
     schemas
         .iter()
-        .find(|schema| schema.model.reference() == model)
+        .find(|schema| schema.model().reference() == model)
         .ok_or_else(|| EngineError::invalid_argument(format!("unknown embedding model {model:?}")))
 }
 
 fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<()> {
-    if vector.len() != schema.dimension || vector.iter().any(|value| !value.is_finite()) {
+    if vector.len() != schema.dimension() || vector.iter().any(|value| !value.is_finite()) {
         return Err(EngineError::invalid_argument(format!(
             "expected a finite {}-dimensional vector, got {} values",
-            schema.dimension,
+            schema.dimension(),
             vector.len()
         )));
     }
@@ -556,12 +549,14 @@ fn load_schema(
             }
             for stored in &schema {
                 let current =
-                    model_schema(embeddings, &stored.model.reference()).map_err(|_| {
+                    model_schema(embeddings, &stored.model().reference()).map_err(|_| {
                         EngineError::invalid_argument(
                             "embedding model set changed; rebuild the index",
                         )
                     })?;
-                stored.ensure_index_compatible(current)?;
+                stored.ensure_index_compatible(current).map_err(|error| {
+                    error.with_help("Rebuild the index with `zg --index --rebuild`.")
+                })?;
             }
         }
         return Ok(schema);

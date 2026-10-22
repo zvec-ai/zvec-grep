@@ -137,7 +137,7 @@ pub(super) fn file_membership_doc(
     // Non-Unicode names have no STRING representation. The source-path cache disables name
     // pushdown in this workspace; exact native paths remain in FileRecord.
     let name = file
-        .relative_path
+        .relative_path()
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");

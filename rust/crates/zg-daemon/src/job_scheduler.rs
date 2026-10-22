@@ -588,6 +588,14 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
     }
     current.reset_paths |= incoming.reset_paths;
     current.rebuild |= incoming.rebuild;
+    merge_update(
+        &mut current.scan.included_formats,
+        incoming.scan.included_formats.take(),
+    );
+    merge_update(
+        &mut current.scan.excluded_formats,
+        incoming.scan.excluded_formats.take(),
+    );
     if incoming.scan.globs.is_some() {
         current.scan.sensitive_globs = None;
         current.scan.insensitive_globs = None;
@@ -602,15 +610,13 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
         incoming.scan.insensitive_globs.take(),
     );
     merge_update(
-        &mut current.scan.file_types,
-        incoming.scan.file_types.take(),
+        &mut current.scan.include_hidden,
+        incoming.scan.include_hidden.take(),
     );
     merge_update(
-        &mut current.scan.excluded_file_types,
-        incoming.scan.excluded_file_types.take(),
+        &mut current.scan.use_default_ignores,
+        incoming.scan.use_default_ignores.take(),
     );
-    merge_update(&mut current.scan.hidden, incoming.scan.hidden.take());
-    merge_update(&mut current.scan.no_ignore, incoming.scan.no_ignore.take());
     merge_update(
         &mut current.scan.follow_symlinks,
         incoming.scan.follow_symlinks.take(),
@@ -1060,9 +1066,12 @@ mod tests {
     use tokio::sync::Notify;
     use zg_engine::{
         EngineError,
-        api::index::{
-            IndexOptions, IndexResult,
-            options::{ScanRulesUpdate, WorkspaceChange},
+        api::{
+            context::options::FileFormat,
+            index::{
+                IndexOptions, IndexResult,
+                options::{ScanRulesUpdate, WorkspaceChange},
+            },
         },
     };
 
@@ -1697,8 +1706,11 @@ mod tests {
                     root.clone(),
                     IndexOptions {
                         scan: ScanRulesUpdate {
+                            included_formats: Some(vec![FileFormat::Rust]),
+                            excluded_formats: Some(vec![FileFormat::Json]),
                             globs: Some(vec!["*.rs".into()]),
-                            hidden: Some(true),
+                            include_hidden: Some(true),
+                            use_default_ignores: Some(true),
                             follow_symlinks: Some(true),
                             max_depth: Some(Some(3)),
                             ..Default::default()
@@ -1715,8 +1727,11 @@ mod tests {
                     root.clone(),
                     IndexOptions {
                         scan: ScanRulesUpdate {
+                            included_formats: Some(vec![FileFormat::Python]),
+                            excluded_formats: Some(Vec::new()),
                             globs: Some(Vec::new()),
-                            hidden: Some(false),
+                            include_hidden: Some(false),
+                            use_default_ignores: Some(false),
                             max_depth: Some(None),
                             ..Default::default()
                         },
@@ -1758,8 +1773,14 @@ mod tests {
     }
 
     fn assert_merged_selection(applied: &IndexOptions) {
+        assert_eq!(
+            applied.scan.included_formats,
+            Some(vec![FileFormat::Python])
+        );
+        assert_eq!(applied.scan.excluded_formats, Some(Vec::new()));
         assert_eq!(applied.scan.globs, Some(Vec::new()));
-        assert_eq!(applied.scan.hidden, Some(false));
+        assert_eq!(applied.scan.include_hidden, Some(false));
+        assert_eq!(applied.scan.use_default_ignores, Some(false));
         assert_eq!(applied.scan.follow_symlinks, Some(true));
         assert_eq!(applied.scan.max_depth, Some(None));
         assert!(
@@ -1966,12 +1987,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut scan = zg_engine::api::index::options::ScanRules::default();
-        pending.expect("merged request").scan.apply(&mut scan);
-        assert_eq!(scan.globs.len(), 2);
-        assert_eq!(scan.globs[0].pattern, "*.rs");
-        assert_eq!(scan.globs[1].pattern, "*.MD");
-        assert!(scan.globs[1].case_insensitive);
+        let scan = pending
+            .expect("merged request")
+            .scan
+            .apply(&zg_engine::api::index::options::ScanRules::default())
+            .expect("updated scan rules");
+        assert_eq!(scan.globs().len(), 2);
+        assert_eq!(scan.globs()[0].pattern, "*.rs");
+        assert_eq!(scan.globs()[1].pattern, "*.MD");
+        assert!(scan.globs()[1].case_insensitive);
     }
 
     #[test]
@@ -1997,10 +2021,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut scan = zg_engine::api::index::options::ScanRules::default();
-        pending.expect("merged request").scan.apply(&mut scan);
+        let scan = pending
+            .expect("merged request")
+            .scan
+            .apply(&zg_engine::api::index::options::ScanRules::default())
+            .expect("updated scan rules");
         assert_eq!(
-            scan.globs,
+            scan.globs(),
             vec![zg_engine::api::index::options::GlobRule::from("secret/**")]
         );
     }
@@ -2011,8 +2038,10 @@ mod tests {
 
         let mut pending = Some(IndexOptions {
             scan: ScanRulesUpdate {
+                included_formats: Some(vec![FileFormat::Rust]),
+                excluded_formats: Some(vec![FileFormat::Json]),
                 globs: Some(vec!["old/**".into()]),
-                hidden: Some(true),
+                include_hidden: Some(true),
                 max_depth: Some(Some(3)),
                 ..Default::default()
             },
@@ -2031,8 +2060,10 @@ mod tests {
         );
         let reset = pending.as_ref().expect("pending reset");
         assert!(reset.reset_paths);
+        assert_eq!(reset.scan.included_formats, None);
+        assert_eq!(reset.scan.excluded_formats, None);
         assert_eq!(reset.scan.globs, None);
-        assert_eq!(reset.scan.hidden, None);
+        assert_eq!(reset.scan.include_hidden, None);
         assert_eq!(reset.scan.max_depth, None);
         super::merge_options(
             &mut pending,

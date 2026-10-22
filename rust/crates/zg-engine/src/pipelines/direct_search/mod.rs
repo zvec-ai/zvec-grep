@@ -2,7 +2,10 @@
 
 mod structure;
 
-use std::{path::Path, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use crate::{
     EngineError, EngineResult,
@@ -21,7 +24,8 @@ use crate::{
 };
 
 use self::structure::{
-    EnrichedLexicalMatch, StructureEnrichmentResult, enrich_lexical_matches_with_structure,
+    EnrichedLexicalMatch, RG_STRUCTURE_ENRICH_FILE_LIMIT, StructureEnrichmentResult,
+    enrich_lexical_matches_with_structure,
 };
 
 const DEFAULT_MAX_CONCURRENT_SEARCHES: usize = 2;
@@ -40,6 +44,26 @@ impl DirectSearchService {
     }
 
     pub(crate) async fn context(&self, options: ContextOptions) -> EngineResult<ContextResult> {
+        self.context_with_selected_files(options, None, RG_STRUCTURE_ENRICH_FILE_LIMIT)
+            .await
+    }
+
+    pub(super) async fn context_selected_files(
+        &self,
+        options: ContextOptions,
+        files: Vec<PathBuf>,
+        structure_file_limit: usize,
+    ) -> EngineResult<ContextResult> {
+        self.context_with_selected_files(options, Some(files), structure_file_limit)
+            .await
+    }
+
+    async fn context_with_selected_files(
+        &self,
+        options: ContextOptions,
+        selected_files: Option<Vec<PathBuf>>,
+        structure_file_limit: usize,
+    ) -> EngineResult<ContextResult> {
         let root = std::path::absolute(options.root.as_deref().unwrap_or_else(|| Path::new(".")))
             .map_err(|error| {
             EngineError::from_io("failed to resolve workspace root", &error)
@@ -53,12 +77,15 @@ impl DirectSearchService {
         let structure_max_file_size_bytes = options.max_file_size_bytes;
         let modified_after_epoch_ms = options.rg_options.modified_after_epoch_ms;
         let modified_before_epoch_ms = options.rg_options.modified_before_epoch_ms;
+        // Path lookup groups fragment hits by their complete owning entity.
+        let use_entity_ranges = selected_files.is_some();
         let request = LexicalSearchRequest {
             signal: options.signal.clone(),
             root: Some(root.clone()),
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
-            paths: options.rg_paths,
+            paths_selected: selected_files.is_some(),
+            paths: selected_files.unwrap_or(options.rg_paths),
             limit: options.limit,
             options: LexicalOptions {
                 matching: options.rg_options,
@@ -82,9 +109,15 @@ impl DirectSearchService {
             &root,
             std::mem::take(&mut reply.matches),
             structure_max_file_size_bytes,
+            structure_file_limit,
         );
         let structure_duration = structure_started.elapsed();
-        let mut result = context_from_lexical(normalized.display_query, reply, enrichment);
+        let mut result = context_from_lexical(
+            normalized.display_query,
+            reply,
+            enrichment,
+            use_entity_ranges,
+        );
         result.diagnostics.timings.push(TimingEntry {
             name: "structure_enrichment".to_owned(),
             duration_micros: structure_duration
@@ -161,6 +194,7 @@ fn context_from_lexical(
     query: String,
     reply: LexicalSearchReply,
     enrichment: StructureEnrichmentResult,
+    use_entity_ranges: bool,
 ) -> ContextResult {
     let hits_returned = enrichment.items.len();
     let empty_reason = (hits_returned == 0).then_some({
@@ -212,7 +246,12 @@ fn context_from_lexical(
                     entity_id: None,
                     container: container.map(|value| ContextContainer {
                         entity_id: None,
-                        range: value.range.into(),
+                        range: if use_entity_ranges {
+                            value.entity_range
+                        } else {
+                            value.range
+                        }
+                        .into(),
                         metadata: value.metadata,
                     }),
                     trace: None,

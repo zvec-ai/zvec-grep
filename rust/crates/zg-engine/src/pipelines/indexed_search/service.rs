@@ -288,7 +288,7 @@ fn search_model_request(
     root: &Path,
     authorize: bool,
 ) -> Result<ModelRuntimeRequest, EngineError> {
-    let reference = schema.model.reference();
+    let reference = schema.model().reference();
     if options
         .authorization_model
         .as_ref()
@@ -304,7 +304,7 @@ fn search_model_request(
         .cloned()
         .unwrap_or_default();
     let config = crate::config::read()?;
-    let local = schema.model.provider == "local";
+    let local = schema.model().provider() == "local";
     if !local && options.device.is_some() {
         return Err(EngineError::invalid_argument(
             "--device is only supported for local embedding models",
@@ -340,7 +340,7 @@ fn search_model_request(
                         .or_else(|| {
                             crate::config::string(
                                 &config,
-                                &["providers", &schema.model.provider, "apiKey"],
+                                &["providers", schema.model().provider(), "apiKey"],
                             )
                         })
                         .or_else(environment_api_key)

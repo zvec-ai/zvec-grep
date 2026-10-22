@@ -1,6 +1,6 @@
 //! Opt-in replay of local candidate snapshots through the production scorer.
 use super::{tests::hit, *};
-use crate::domain::{ByteRange, CodeMetadata, Range, SymbolType};
+use crate::domain::{ByteRange, CodeMetadata, Entity, Range, SymbolType};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -108,7 +108,7 @@ fn replay_rule_ablation() {
                 policy,
             );
             let hits = hits.iter().map(|h| {
-                let original = &case.hits[h.entity.id.as_str().parse::<usize>().expect("candidate index")];
+                let original = &case.hits[h.entity.id().as_str().parse::<usize>().expect("candidate index")];
                 serde_json::json!({"path": original.path, "start": original.start, "end": original.end, "trace": h.trace})
             }).collect::<Vec<_>>();
             output.push(serde_json::json!({"repo": case.repo, "query": case.query, "variant": name, "hits": hits}));
@@ -157,9 +157,17 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 metadata,
             );
             // Line intervals are conservative for same-line overlap in CLI snapshots.
-            result.entity.source_range = Range::Byte(
-                ByteRange::new(candidate.start, candidate.end + 1).expect("snapshot range"),
-            );
+            result.entity = Entity::new(
+                result.entity.id().clone(),
+                result.entity.file_id(),
+                Range::Byte(
+                    ByteRange::new(candidate.start, candidate.end + 1).expect("snapshot range"),
+                ),
+                result.entity.content().clone(),
+                result.entity.metadata().cloned(),
+                result.entity.fragments().to_vec(),
+            )
+            .expect("entity");
             result
         })
         .collect::<Vec<_>>()

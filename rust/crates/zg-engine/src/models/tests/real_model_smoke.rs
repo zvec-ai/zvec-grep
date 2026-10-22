@@ -78,7 +78,7 @@ async fn download_load_and_embed(reference: &str, cache_dir: PathBuf, device: De
     assert_eq!(result.vectors.len(), 2);
     assert!(result.truncated.is_empty());
     for vector in &result.vectors {
-        assert_eq!(vector.len(), model.info().dimension);
+        assert_eq!(vector.len(), model.info().dimension());
         assert!(vector.iter().all(|value| value.is_finite()));
         let norm = vector
             .iter()

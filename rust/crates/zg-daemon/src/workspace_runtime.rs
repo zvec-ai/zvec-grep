@@ -2375,7 +2375,7 @@ mod tests {
                     }],
                     scan: ScanRulesUpdate {
                         globs: Some(vec!["*.rs".into()]),
-                        hidden: Some(false),
+                        include_hidden: Some(false),
                         max_depth: Some(None),
                         ..ScanRulesUpdate::default()
                     },
@@ -2463,7 +2463,7 @@ mod tests {
                     root: Some(root.clone()),
                     embedding_concurrency: Some(5),
                     scan: ScanRulesUpdate {
-                        hidden: Some(true),
+                        include_hidden: Some(true),
                         ..ScanRulesUpdate::default()
                     },
                     ..IndexOptions::default()
@@ -2554,7 +2554,7 @@ mod tests {
                     root: Some(root.clone()),
                     embedding_concurrency: Some(99),
                     scan: ScanRulesUpdate {
-                        hidden: Some(true),
+                        include_hidden: Some(true),
                         ..ScanRulesUpdate::default()
                     },
                     ..IndexOptions::default()

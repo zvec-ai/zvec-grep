@@ -201,9 +201,6 @@ impl ModelRuntimeManager {
             // so this guarantees a single instance without blocking on I/O.
             let model =
                 (self.inner.factory)(&reference, options, self.inner.compute_runtime.clone())?;
-            model.info().validate().map_err(|error| {
-                ModelError::internal("Embedding model returned invalid metadata").with_cause(error)
-            })?;
             let entry = Arc::new(ModelRuntimeEntry {
                 runtime: Arc::new(ModelRuntime {
                     model,
@@ -414,6 +411,11 @@ impl fmt::Debug for ModelRuntimeManager {
 }
 
 impl ModelRuntimeLease {
+    /// Endpoint supplied when acquiring this runtime, after caller-side resolution.
+    pub(crate) fn configured_endpoint(&self) -> Option<&str> {
+        self.key.endpoint.as_deref()
+    }
+
     pub(crate) fn matches_query_request(&self, request: &ModelRuntimeRequest) -> bool {
         // Queries may borrow writer storage while using a separate native budget.
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);

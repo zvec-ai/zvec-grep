@@ -1,63 +1,121 @@
-use super::{Metric, ModelInfo};
+use super::ModelInfo;
 use crate::{EngineError, EngineResult};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EmbeddingModelInfo {
-    pub model: ModelInfo,
-    pub dimension: usize,
-    pub metric: Metric,
-    /// Maximum number of inputs accepted by one embedding request.
-    pub max_batch_size: usize,
-    /// Positive token limit when applicable and known.
-    pub max_input_tokens: Option<usize>,
-    /// Positive image size limit in bytes when applicable and known.
-    pub max_image_bytes: Option<usize>,
+    model: ModelInfo,
+    dimension: usize,
+    metric: EmbeddingMetric,
+    max_input_tokens: Option<usize>,
+    max_image_bytes: Option<usize>,
 }
 
 impl EmbeddingModelInfo {
-    pub(crate) fn validate(&self) -> EngineResult<()> {
+    pub(crate) fn new(
+        model: ModelInfo,
+        dimension: usize,
+        metric: EmbeddingMetric,
+        max_input_tokens: Option<usize>,
+        max_image_bytes: Option<usize>,
+    ) -> EngineResult<Self> {
         for (field, value) in [
-            ("provider", self.model.provider.as_str()),
-            ("name", self.model.name.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(EngineError::invalid_argument(format!(
-                    "embedding model {field} must be non-empty",
-                )));
-            }
-        }
-        for (field, value) in [
-            ("dimension", Some(self.dimension)),
-            ("max_batch_size", Some(self.max_batch_size)),
-            ("max_input_tokens", self.max_input_tokens),
-            ("max_image_bytes", self.max_image_bytes),
+            ("dimension", Some(dimension)),
+            ("max_input_tokens", max_input_tokens),
+            ("max_image_bytes", max_image_bytes),
         ] {
             if value == Some(0) {
                 return Err(EngineError::invalid_argument(format!(
-                    "embedding model {field} must be greater than zero",
+                    "embedding model {} {field} must be greater than zero",
+                    model.reference(),
                 )));
             }
         }
-        Ok(())
+        Ok(Self {
+            model,
+            dimension,
+            metric,
+            max_input_tokens,
+            max_image_bytes,
+        })
     }
 
-    /// Check the fields that determine whether an existing index can be reused.
-    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
-        if self.model.provider != other.model.provider
-            || self.model.name != other.model.name
-            || self.dimension != other.dimension
-            || self.metric != other.metric
-            || self.max_input_tokens != other.max_input_tokens
-            || self.max_image_bytes != other.max_image_bytes
-        {
-            return Err(EngineError::invalid_argument(
-                "existing index uses a different embedding model; rebuild the index",
-            ));
-        }
-        Ok(())
+    pub(crate) fn model(&self) -> &ModelInfo {
+        &self.model
     }
+
+    pub(crate) fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    pub(crate) fn metric(&self) -> EmbeddingMetric {
+        self.metric
+    }
+
+    pub(crate) fn max_input_tokens(&self) -> Option<usize> {
+        self.max_input_tokens
+    }
+
+    pub(crate) fn max_image_bytes(&self) -> Option<usize> {
+        self.max_image_bytes
+    }
+
+    /// Check whether two embedding models use compatible embedding spaces.
+    pub(crate) fn ensure_index_compatible(&self, other: &Self) -> EngineResult<()> {
+        let reason = if self.model.provider() != other.model.provider()
+            || self.model.name() != other.model.name()
+        {
+            "model references differ".to_owned()
+        } else if self.dimension != other.dimension {
+            format!(
+                "dimensions differ ({} vs {})",
+                self.dimension, other.dimension
+            )
+        } else if self.metric != other.metric {
+            format!("metrics differ ({:?} vs {:?})", self.metric, other.metric)
+        } else {
+            return Ok(());
+        };
+        Err(EngineError::invalid_argument(format!(
+            "embedding models {} and {} are incompatible: {reason}",
+            self.model.reference(),
+            other.model.reference(),
+        )))
+    }
+}
+
+impl<'de> Deserialize<'de> for EmbeddingModelInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Fields {
+            model: ModelInfo,
+            dimension: usize,
+            metric: EmbeddingMetric,
+            max_input_tokens: Option<usize>,
+            max_image_bytes: Option<usize>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(
+            fields.model,
+            fields.dimension,
+            fields.metric,
+            fields.max_input_tokens,
+            fields.max_image_bytes,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Distance or similarity measure for embedding vectors.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EmbeddingMetric {
+    Cosine,
+    DotProduct,
+    Euclidean,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::domain::{ImageContent, TableContent, model::Metric};
+use crate::domain::{ImageContent, model::EmbeddingMetric};
 
 struct MockHttp {
     response: Mutex<Option<QwenHttpResponse>>,
@@ -32,7 +32,7 @@ fn config(kind: &'static str, model: &'static str, dimension: usize) -> QwenConf
         provider: "qwen",
         model,
         dimension,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         default_endpoint: "https://default.test/embed",
         max_batch_size: 20,
         max_input_tokens: 512,
@@ -77,7 +77,7 @@ async fn text_request_and_index_order_match_main() {
                     Content::Text("one".to_owned()),
                     Content::Text("part".to_owned()),
                 ],
-                vec![Content::Text("two".to_owned())],
+                vec![Content::Code("two".to_owned())],
             ],
             EmbeddingOptions {
                 trace_headers: Some(EmbeddingTraceHeaders {
@@ -157,7 +157,7 @@ async fn multimodal_request_preserves_content_and_rejects_unsupported_inputs() {
     let result = model
         .embed(
             &[
-                vec![Content::Text("query".to_owned())],
+                vec![Content::Code("query".to_owned())],
                 vec![Content::Image(
                     ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image"),
                 )],
@@ -168,6 +168,10 @@ async fn multimodal_request_preserves_content_and_rejects_unsupported_inputs() {
         .expect("embedding");
     assert_eq!(result.vectors, [[1.0, 0.0], [0.0, 1.0]]);
     assert_eq!(
+        http.requests.lock().expect("requests lock")[0].0["input"]["contents"][0]["text"],
+        "query",
+    );
+    assert_eq!(
         http.requests.lock().expect("requests lock")[0].0["input"]["contents"][1]["image"],
         "AQID"
     );
@@ -175,11 +179,6 @@ async fn multimodal_request_preserves_content_and_rejects_unsupported_inputs() {
     for content in [
         Content::Image(ImageContent::new(vec![1], FileFormat::Gif).expect("image")),
         Content::Image(ImageContent::new(vec![1], FileFormat::Svg).expect("image")),
-        Content::Table(TableContent {
-            row_count: 0,
-            column_count: 0,
-            cells: Vec::new(),
-        }),
     ] {
         let error = model
             .embed(

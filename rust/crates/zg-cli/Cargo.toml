@@ -11,6 +11,7 @@ publish.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm = { workspace = true, features = ["bracketed-paste"] }
+grep.workspace = true
 # Configuration objects can contain first-match rules whose order must survive edits.
 serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true

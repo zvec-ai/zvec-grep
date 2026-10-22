@@ -1,12 +1,6 @@
 name: Publish Rust packages
 
 on:
-  push:
-    branches: [main, "release/rust-*"]
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust-publish.yml"
-      - ".github/workflows/rust-package-build.yml"
   workflow_dispatch:
     inputs:
       publish:

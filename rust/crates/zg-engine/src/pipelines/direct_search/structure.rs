@@ -30,11 +30,13 @@ pub(crate) struct EnrichedLexicalMatch {
 
 pub(crate) struct LexicalContainer {
     pub range: Range,
+    pub entity_range: Range,
     pub metadata: Option<EntityMetadata>,
 }
 
 struct StructuralFragment {
     entity_index: usize,
+    entity_range: Range,
     range: Range,
 }
 
@@ -47,11 +49,12 @@ pub(crate) fn enrich_lexical_matches_with_structure(
     root: &Path,
     items: Vec<LexicalMatch>,
     max_file_size_bytes: Option<u64>,
+    file_limit: usize,
 ) -> StructureEnrichmentResult {
     let matched_files = unique_lexical_file_paths(&items);
     let mut sources_by_file = HashMap::new();
     let mut parsed_files = 0;
-    for path in matched_files.iter().take(RG_STRUCTURE_ENRICH_FILE_LIMIT) {
+    for path in matched_files.iter().take(file_limit) {
         let source = parse_structural_source(root, path, max_file_size_bytes);
         if source.is_some() {
             parsed_files += 1;
@@ -79,6 +82,7 @@ pub(crate) fn enrich_lexical_matches_with_structure(
             enriched_files.insert(item.absolute_path.clone());
             Some(LexicalContainer {
                 range: container.range,
+                entity_range: container.entity_range,
                 metadata: source.metadata.get(&container.entity_index).cloned(),
             })
         } else {
@@ -95,13 +99,13 @@ pub(crate) fn enrich_lexical_matches_with_structure(
         items: enriched,
         diagnostics: StructureEnrichmentDiagnostics {
             source: StructureEnrichmentSource::StructuralExtraction,
-            file_limit: RG_STRUCTURE_ENRICH_FILE_LIMIT,
+            file_limit,
             matched_files: matched_count,
             parsed_files,
             enriched_files: enriched_files.len(),
             enriched_items,
             skipped_files: matched_count.saturating_sub(parsed_files),
-            truncated: matched_count > RG_STRUCTURE_ENRICH_FILE_LIMIT,
+            truncated: matched_count > file_limit,
         },
     }
 }
@@ -169,9 +173,12 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
         // several retrieval ranges. It does not create a retrieval fragment.
         fragments.push(StructuralFragment {
             entity_index: entity.index,
+            entity_range: entity.source_range,
             range: entity.source_range,
         });
-        let crate::domain::Content::Text(content) = &entity.content else {
+        let (crate::domain::Content::Text(content) | crate::domain::Content::Code(content)) =
+            &entity.content
+        else {
             continue;
         };
         let line_offsets = line_byte_offsets(content);
@@ -195,6 +202,7 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
             };
             fragments.push(StructuralFragment {
                 entity_index: entity.index,
+                entity_range: entity.source_range,
                 range: Range::Text(range),
             });
         }
@@ -276,7 +284,8 @@ mod tests {
     use crate::lexical::types::LexicalMatch;
 
     use super::{
-        EnrichedLexicalMatch, StructureEnrichmentSource, enrich_lexical_matches_with_structure,
+        EnrichedLexicalMatch, RG_STRUCTURE_ENRICH_FILE_LIMIT, StructureEnrichmentSource,
+        enrich_lexical_matches_with_structure,
     };
 
     #[test]
@@ -304,6 +313,7 @@ mod tests {
                 lexical_item(directory.path(), "structured.ts", 2, "  return \"hello\";"),
             ],
             None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
         );
 
         let unsupported = item_by_relative_path(&result.items, "unsupported.rb");
@@ -344,6 +354,7 @@ mod tests {
                     "  return \"hello\";",
                 )],
                 None,
+                RG_STRUCTURE_ENRICH_FILE_LIMIT,
             );
             assert_eq!(result.diagnostics.enriched_items, 1, "{}", root.display());
             assert_eq!(result.diagnostics.parsed_files, 1, "{}", root.display());
@@ -369,7 +380,12 @@ mod tests {
                 .expect("markdown fixture");
             lexical_item(root, "section.md", 3, "needle")
         });
-        let result = enrich_lexical_matches_with_structure(first.path(), items.into(), None);
+        let result = enrich_lexical_matches_with_structure(
+            first.path(),
+            items.into(),
+            None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
+        );
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.diagnostics.enriched_files, 2);
         for (item, (root, heading)) in result
@@ -409,7 +425,12 @@ mod tests {
             items[0].absolute_path.to_string_lossy(),
             items[1].absolute_path.to_string_lossy()
         );
-        let result = enrich_lexical_matches_with_structure(directory.path(), items, None);
+        let result = enrich_lexical_matches_with_structure(
+            directory.path(),
+            items,
+            None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
+        );
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.diagnostics.matched_files, 2);
         // Preserve native paths even when the host cannot create these filenames.
@@ -432,6 +453,7 @@ mod tests {
             directory.path(),
             vec![lexical_item(directory.path(), "section.md", 150, line)],
             None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
         );
         let container = result.items[0]
             .container
@@ -460,7 +482,12 @@ mod tests {
         fs::write(&path, "# Large section\n\nneedle\n").expect("markdown fixture");
         let items = vec![lexical_item(directory.path(), "section.md", 3, "needle")];
 
-        let enriched = enrich_lexical_matches_with_structure(directory.path(), items.clone(), None);
+        let enriched = enrich_lexical_matches_with_structure(
+            directory.path(),
+            items.clone(),
+            None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
+        );
         assert_eq!(enriched.diagnostics.parsed_files, 1);
         assert!(matches!(
             enriched.items[0]
@@ -470,7 +497,12 @@ mod tests {
             Some(EntityMetadata::Markdown(MarkdownMetadata { heading, .. })) if heading.as_deref() == Some("Large section")
         ));
 
-        let skipped = enrich_lexical_matches_with_structure(directory.path(), items, Some(8));
+        let skipped = enrich_lexical_matches_with_structure(
+            directory.path(),
+            items,
+            Some(8),
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
+        );
         assert_eq!(skipped.diagnostics.parsed_files, 0);
         assert!(skipped.items[0].container.is_none());
     }
@@ -488,7 +520,12 @@ mod tests {
                 TextRange::from_coordinates(start, end, 1, 1, start, end).expect("matched range");
             item
         });
-        let result = enrich_lexical_matches_with_structure(directory.path(), items.into(), None);
+        let result = enrich_lexical_matches_with_structure(
+            directory.path(),
+            items.into(),
+            None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
+        );
         assert_eq!(result.diagnostics.enriched_items, 2);
         for (item, expected) in result.items.iter().zip(["alpha", "beta"]) {
             assert!(matches!(
@@ -510,8 +547,12 @@ mod tests {
         item.excerpt_range = Some(excerpt);
         let visible_range = item.range;
 
-        let result =
-            enrich_lexical_matches_with_structure(directory.path(), vec![item.clone(), item], None);
+        let result = enrich_lexical_matches_with_structure(
+            directory.path(),
+            vec![item.clone(), item],
+            None,
+            RG_STRUCTURE_ENRICH_FILE_LIMIT,
+        );
 
         assert_eq!(result.items.len(), 1);
         let enriched = &result.items[0];

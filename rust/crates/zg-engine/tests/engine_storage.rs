@@ -29,6 +29,94 @@ use zg_engine::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
+async fn text_and_code_share_one_model_and_support_incremental_search() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::write(root.join("note.txt"), "ordinary textual documentation")?;
+    fs::write(
+        root.join("code.rs"),
+        "/// orchardguide\npub fn orchard() -> u32 { 1 }\n",
+    )?;
+    let engine = ZvecGrep::new();
+    let indexed = engine.index(index_options(root)).await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
+    let info = engine.info(info_options(root)).await?;
+    let records = native_documents(&info.index_path.join("entities"))?;
+    let kinds = records
+        .iter()
+        .map(|record| -> Result<String, Box<dyn std::error::Error>> {
+            let payload: Value =
+                serde_json::from_str(&record.get_string("payload")?.expect("payload"))?;
+            Ok(payload["content"]["kind"]
+                .as_str()
+                .expect("content kind")
+                .to_owned())
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    assert_eq!(kinds, BTreeSet::from(["code".into(), "text".into()]));
+    let schema_before = fs::read(info.index_path.join("schema.json"))?;
+    let schema: Value = serde_json::from_slice(&schema_before)?;
+    assert_eq!(schema["embeddings"].as_array().expect("models").len(), 1);
+    assert!(schema.get("tables").is_none());
+    assert_eq!(
+        fs::read_dir(&info.index_path)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("fragments_"))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        fts_paths(&engine, root, "orchardguide").await?,
+        [PathBuf::from("code.rs")]
+    );
+    let vector = engine
+        .context(ContextOptions {
+            root: Some(root.to_path_buf()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Vector,
+                query: "orchardguide".into(),
+            }],
+            auto_update: false,
+            allow_remote: true,
+            api_key: Some("local-test-key".into()),
+            ..ContextOptions::default()
+        })
+        .await?;
+    assert!(vector.items.iter().any(|item| {
+        item.relative_path == Path::new("code.rs") && item.content.contains("fn orchard()")
+    }));
+    let calls = server.inputs.load(Ordering::Acquire);
+    let unchanged = engine.index(index_options(root)).await?;
+    assert_eq!((unchanged.files_unchanged, unchanged.files_failed), (2, 0));
+    assert_eq!(server.inputs.load(Ordering::Acquire), calls);
+
+    fs::write(
+        root.join("code.rs"),
+        "/// replacementguide\npub fn replacement() -> u32 { 42 }\n",
+    )?;
+    let updated = engine.index(index_options(root)).await?;
+    assert_eq!((updated.files_modified, updated.files_failed), (1, 0));
+    assert!(fts_paths(&engine, root, "orchardguide").await?.is_empty());
+    assert_eq!(
+        fts_paths(&engine, root, "replacementguide").await?,
+        [PathBuf::from("code.rs")]
+    );
+    assert_eq!(
+        fs::read(info.index_path.join("schema.json"))?,
+        schema_before
+    );
+    assert_eq!(server.multimodal_inputs.load(Ordering::Acquire), 0);
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -> TestResult {
     use zg_engine::api::index::result::SkippedFileReason;
 
@@ -84,11 +172,11 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
     assert_eq!(manifest["indexVersion"], 2);
-    assert_eq!(manifest["embeddings"].as_array().expect("models").len(), 1);
     assert_eq!(
-        manifest["embeddingRoutes"],
-        json!({"text":"qwen/text-embedding-v4"})
+        manifest["defaultEmbeddingModel"]["model"]["name"],
+        "text-embedding-v4"
     );
+    assert_eq!(manifest["embeddingRoutes"], json!({}));
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
         [PathBuf::from("note.txt")]
@@ -285,7 +373,7 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
         entities[0].get_string("entity_id")?.as_deref(),
         Some(entity_id)
     );
-    assert_eq!(entity["content"], json!({"kind": "text", "value": source}));
+    assert_eq!(entity["content"], json!({"kind": "code", "value": source}));
     assert_eq!(entity["source_range"]["kind"], "text");
     assert!(entity.get("range").is_none());
     let metadata: Value = serde_json::from_str(

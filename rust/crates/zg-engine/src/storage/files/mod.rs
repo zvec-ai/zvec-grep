@@ -56,9 +56,9 @@ impl Files {
             .map(|doc| decode_file_doc(&native(doc, "read source file")?))
             .collect::<EngineResult<Vec<_>>>()?;
         files.sort_by(|left, right| {
-            left.relative_path
-                .cmp(&right.relative_path)
-                .then_with(|| left.id.cmp(&right.id))
+            left.relative_path()
+                .cmp(right.relative_path())
+                .then_with(|| left.id().cmp(&right.id()))
         });
         Ok(files)
     }
@@ -124,7 +124,7 @@ impl Files {
             .into_values()
             .map(|doc| {
                 let file = decode_file_doc(&doc)?;
-                Ok((file.id, file))
+                Ok((file.id(), file))
             })
             .collect()
     }
@@ -145,7 +145,7 @@ impl Files {
         if let Some(mut doc) = fetch_map(&self.collection, std::slice::from_ref(&key))?.remove(&key)
         {
             let mut file = decode_file_doc(&doc)?;
-            file.index_status = FileIndexStatus::Deleting;
+            file.set_index_status(FileIndexStatus::Deleting)?;
             native(
                 doc.add_string("payload", &codec::encode_file(&file)?),
                 "encode deleting source file",
@@ -213,28 +213,28 @@ fn files_schema() -> EngineResult<CollectionSchema> {
 
 fn encode_file_doc(file: &FileRecord, directories: &[DirectoryId]) -> EngineResult<Doc> {
     let mut doc = native(Doc::new(), "create file record")?;
-    let key = file_key(file.id);
+    let key = file_key(file.id());
     doc.set_pk(&key);
     native(
-        doc.add_u32("file_id", file.id.get()),
+        doc.add_u32("file_id", file.id().get()),
         "encode file identity",
     )?;
     native(
-        doc.add_string("path_key", &path_key(&file.relative_path)?),
+        doc.add_string("path_key", &path_key(file.relative_path())?),
         "encode exact path key",
     )?;
     native(
-        doc.add_string("path", &encode_path(&file.relative_path)?),
+        doc.add_string("path", &encode_path(file.relative_path())?),
         "encode native file path",
     )?;
-    if let Some(path) = query_path(&file.relative_path) {
+    if let Some(path) = query_path(file.relative_path()) {
         native(
             doc.add_string("relative_path", &path),
             "encode queryable file path",
         )?;
     }
     file_membership_doc(&mut doc, file, directories)?;
-    if let Some(modified) = file.snapshot.modified_epoch_ms {
+    if let Some(modified) = file.snapshot().modified_epoch_ms {
         native(
             doc.add_u64("modified_epoch_ms", modified),
             "encode file modification time",
@@ -250,10 +250,10 @@ fn encode_file_doc(file: &FileRecord, directories: &[DirectoryId]) -> EngineResu
 fn decode_file_doc(doc: &Doc) -> EngineResult<FileRecord> {
     let file = codec::decode_file(&string_field(doc, "payload")?)?;
     let attributes = decode_file_attributes_doc(doc)?;
-    if attributes.id != file.id
-        || attributes.relative_path != file.relative_path.as_path()
-        || attributes.modified_epoch_ms != file.snapshot.modified_epoch_ms
-        || string_field(doc, "path_key")? != path_key(&file.relative_path)?
+    if attributes.id != file.id()
+        || attributes.relative_path != file.relative_path().as_path()
+        || attributes.modified_epoch_ms != file.snapshot().modified_epoch_ms
+        || string_field(doc, "path_key")? != path_key(file.relative_path())?
     {
         return Err(corrupt("file attributes differ from their stored payload"));
     }

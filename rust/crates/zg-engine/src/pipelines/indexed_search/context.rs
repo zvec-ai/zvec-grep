@@ -283,9 +283,9 @@ fn search_plan_to_context_items(
             Ok(ContextItem {
                 kind: ContextItemKind::IndexedEntity,
                 rank: hit.rank,
-                absolute_path: workspace_root.join(&hit.file.relative_path),
-                relative_path: hit.file.relative_path.to_path_buf(),
-                range: hit.entity.source_range.into(),
+                absolute_path: workspace_root.join(hit.file.relative_path()),
+                relative_path: hit.file.relative_path().to_path_buf(),
+                range: hit.entity.source_range().into(),
                 excerpt_range: target.excerpt_range,
                 content_range: target.content_range,
                 content: target.content,
@@ -294,8 +294,8 @@ fn search_plan_to_context_items(
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),
                 matched_by: hit.matched_by,
-                metadata: hit.entity.metadata.clone(),
-                entity_id: Some(hit.entity.id.as_str().to_owned()),
+                metadata: hit.entity.metadata().cloned(),
+                entity_id: Some(hit.entity.id().as_str().to_owned()),
                 container: None,
                 trace: hit.trace.clone(),
                 query_groups: vec![ContextQueryGroupMatch {
@@ -477,8 +477,8 @@ struct ContextItemTarget {
 fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError> {
     let Some(evidence) = hit.evidence.first() else {
         return Ok(ContextItemTarget {
-            content: content_to_text(&hit.entity.content),
-            content_range: hit.entity.source_range.into(),
+            content: content_to_text(hit.entity.content()),
+            content_range: hit.entity.source_range().into(),
             content_role: ContextContentRole::Source,
             excerpt_range: None,
         });
@@ -490,9 +490,9 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             fragment.id.as_str()
         ))
     };
-    let (content, excerpt_range) = match (fragment.range, &hit.entity.content) {
+    let (content, excerpt_range) = match (fragment.range, hit.entity.content()) {
         (Range::Full, content) => (content_to_text(content), None),
-        (Range::Byte(range), Content::Text(text)) => {
+        (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
                     "fragment start offset exceeds platform limits",
@@ -507,7 +507,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             let lines = crate::utils::line_byte_offsets(text);
             let local = crate::utils::text_range_from_offsets(text, &lines, start, end)
                 .map_err(invalid_fragment)?;
-            let source = match hit.entity.source_range {
+            let source = match hit.entity.source_range() {
                 Range::Full => local,
                 Range::Text(origin) => {
                     crate::utils::map_text_range(local, origin).map_err(invalid_fragment)?
@@ -522,7 +522,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
         }
         _ => {
             return Err(invalid_fragment(EngineError::invalid_argument(
-                "fragments use Full or entity-relative byte ranges for text; images and tables require Full",
+                "fragments use Full or entity-relative byte ranges for text and code; images require Full",
             )));
         }
     };
@@ -530,14 +530,14 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
         content,
         content_range: excerpt_range
             .clone()
-            .unwrap_or_else(|| hit.entity.source_range.into()),
+            .unwrap_or_else(|| hit.entity.source_range().into()),
         content_role: ContextContentRole::Source,
         excerpt_range,
     })
 }
 
 fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextItemStatus {
-    let absolute_path = workspace_root.join(&file.relative_path);
+    let absolute_path = workspace_root.join(file.relative_path());
     let metadata = match fs::metadata(&absolute_path) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -560,13 +560,13 @@ fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextIte
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| duration.as_millis().try_into().ok());
-    if metadata.len() == file.snapshot.size_bytes
+    if metadata.len() == file.snapshot().size_bytes
         && modified.is_some()
-        && modified == file.snapshot.modified_epoch_ms
+        && modified == file.snapshot().modified_epoch_ms
     {
         return ContextItemStatus::Fresh;
     }
-    if let Some(expected) = &file.snapshot.content_hash
+    if let Some(expected) = &file.snapshot().content_hash
         && let Ok(bytes) = fs::read(&absolute_path)
     {
         return if sha256_hex(&bytes) == *expected {
@@ -575,9 +575,9 @@ fn file_freshness_status(workspace_root: &Path, file: &FileRecord) -> ContextIte
             ContextItemStatus::PossiblyStale
         };
     }
-    let metadata_changed = metadata.len() != file.snapshot.size_bytes
+    let metadata_changed = metadata.len() != file.snapshot().size_bytes
         || modified
-            .zip(file.snapshot.modified_epoch_ms)
+            .zip(file.snapshot().modified_epoch_ms)
             .is_some_and(|(current, indexed)| current != indexed);
     if metadata_changed {
         ContextItemStatus::PossiblyStale
@@ -591,36 +591,14 @@ fn rank_as_f64(rank: usize) -> f64 {
     f64::from(u32::try_from(rank).unwrap_or(u32::MAX))
 }
 
-fn contents_to_text(contents: &[Content]) -> String {
-    contents
-        .iter()
-        .map(content_to_text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn content_to_text(content: &Content) -> String {
     match content {
-        Content::Text(text) => text.clone(),
+        Content::Text(text) | Content::Code(text) => text.clone(),
         Content::Image(image) => format!(
             "[image:{} bytes={}]",
             image.format().as_str(),
             image.data().len()
         ),
-        Content::Table(table) => {
-            let mut cells = table.cells.iter().collect::<Vec<_>>();
-            cells.sort_unstable_by_key(|cell| (cell.row, cell.column));
-            let mut output = String::new();
-            let mut previous_row = None;
-            for cell in cells {
-                if let Some(row) = previous_row {
-                    output.push(if row == cell.row { '\t' } else { '\n' });
-                }
-                output.push_str(&contents_to_text(&cell.contents));
-                previous_row = Some(cell.row);
-            }
-            output
-        }
     }
 }
 
@@ -638,50 +616,6 @@ mod tests {
     };
 
     use super::{normalize_context_request, select_and_rank_context_items};
-
-    #[test]
-    fn renders_ordered_content_and_nested_table_cells() {
-        use crate::domain::{
-            Content, FileFormat, ImageContent, TableCell, TableCellRole, TableContent,
-        };
-
-        let image = ImageContent::new(vec![1, 2, 3], FileFormat::Png).expect("image");
-        let cell = |row, column, column_span, contents| TableCell {
-            row,
-            column,
-            row_span: 1,
-            column_span,
-            contents,
-            kind: TableCellRole::Unknown,
-        };
-        let table = Content::Table(TableContent {
-            row_count: 2,
-            column_count: 2,
-            cells: vec![
-                cell(0, 0, 2, vec![Content::Text("Product".to_owned())]),
-                cell(
-                    1,
-                    0,
-                    1,
-                    vec![Content::Text("Keyboard".to_owned()), Content::Image(image)],
-                ),
-                cell(
-                    1,
-                    1,
-                    1,
-                    vec![Content::Table(TableContent {
-                        row_count: 1,
-                        column_count: 1,
-                        cells: vec![cell(0, 0, 1, vec![Content::Text("299".to_owned())])],
-                    })],
-                ),
-            ],
-        });
-        assert_eq!(
-            super::contents_to_text(&[Content::Text("Catalog".to_owned()), table]),
-            "Catalog\nProduct\nKeyboard\n[image:png bytes=3]\t299"
-        );
-    }
 
     #[test]
     fn best_fragment_preserves_original_content_and_source_range() {
@@ -712,31 +646,29 @@ mod tests {
             range: Range::Full,
         };
         let mut hit = SearchHit {
-            entity: Entity {
-                id: entity_id,
+            entity: Entity::new(
+                entity_id,
                 file_id,
                 source_range,
                 content,
-                metadata: None,
-                fragments: vec![fragment.clone(), full.clone()],
-            },
-            file: FileRecord {
-                id: file_id,
-                relative_path: crate::domain::SourcePath::new("file.txt").expect("source path"),
-                snapshot: FileSnapshot {
+                None,
+                vec![fragment.clone(), full.clone()],
+            )
+            .expect("entity"),
+            file: FileRecord::new(
+                file_id,
+                crate::domain::SourcePath::new("file.txt").expect("source path"),
+                FileSnapshot {
                     size_bytes: (9 + source.len()) as u64,
                     modified_epoch_ms: None,
                     content_hash: None,
                 },
-                index_status: FileIndexStatus::NotIndexed,
-            },
+                FileIndexStatus::NotIndexed,
+            )
+            .expect("file"),
             evidence: vec![
-                SearchEvidence {
-                    fragment: fragment.clone(),
-                },
-                SearchEvidence {
-                    fragment: full.clone(),
-                },
+                SearchEvidence { fragment },
+                SearchEvidence { fragment: full },
             ],
             rank: 1,
             score: 1.0,
@@ -748,7 +680,7 @@ mod tests {
         assert_eq!(target.content, "中😀\r\nβ");
         assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
         assert_eq!(target.content_range, fragment_source_range.into());
-        assert_eq!(hit.entity.content, Content::Text(source.into()));
+        assert_eq!(hit.entity.content(), &Content::Text(source.into()));
         let search = SearchPlanResult {
             routes: Vec::new(),
             hits: vec![hit.clone()],
@@ -817,24 +749,26 @@ mod tests {
                 panic!("chunked source")
             };
             let hit = SearchHit {
-                entity: Entity {
+                entity: Entity::new(
                     id,
                     file_id,
-                    source_range: extracted.source_range,
-                    content: extracted.content,
-                    metadata: extracted.metadata,
-                    fragments: vec![fragment.clone()],
-                },
-                file: FileRecord {
-                    id: file_id,
-                    relative_path: input.relative_path,
-                    snapshot: FileSnapshot {
+                    extracted.source_range,
+                    extracted.content,
+                    extracted.metadata,
+                    vec![fragment.clone()],
+                )
+                .expect("entity"),
+                file: FileRecord::new(
+                    file_id,
+                    input.relative_path,
+                    FileSnapshot {
                         size_bytes: source.len() as u64,
                         modified_epoch_ms: None,
                         content_hash: None,
                     },
-                    index_status: FileIndexStatus::NotIndexed,
-                },
+                    FileIndexStatus::NotIndexed,
+                )
+                .expect("file"),
                 evidence: vec![SearchEvidence { fragment }],
                 rank: 1,
                 score: 1.0,
@@ -850,7 +784,7 @@ mod tests {
             assert_eq!(target.content_range.last_line(), Some(2));
             assert_eq!(target.excerpt_range, Some(target.content_range));
             assert_eq!(target.content.ends_with('\n'), !newline.is_empty());
-            assert!(matches!(hit.entity.content, Content::Text(_)));
+            assert!(matches!(hit.entity.content(), Content::Text(_)));
         }
     }
 
@@ -862,9 +796,9 @@ mod tests {
     fn resolves_context_paths_and_freshness_after_workspace_relocation() {
         use crate::{
             domain::{
-                Content, Entity, EntityId, FileId, FileIndexStatus, FileRecord, FileSnapshot,
-                IndexDescriptor, IndexState, Range, TextRange, Workspace,
-                model::{EmbeddingModelInfo, Metric},
+                Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus, FileRecord,
+                FileSnapshot, FragmentId, IndexDescriptor, IndexState, Range, TextRange, Workspace,
+                model::{EmbeddingMetric, EmbeddingModelInfo},
             },
             pipelines::indexed_search::pipeline::{SearchHit, SearchPlanResult},
             utils::sha256_hex,
@@ -876,38 +810,37 @@ mod tests {
         std::fs::create_dir_all(original_root.join("src")).expect("source directory");
         let content = "source contents";
         std::fs::write(original_root.join("src/file.txt"), content).expect("source file");
-        let source = FileRecord {
-            id: FileId::new(1),
-            relative_path: crate::domain::SourcePath::new("src/file.txt").expect("source path"),
-            snapshot: FileSnapshot {
+        let source = FileRecord::new(
+            FileId::new(1),
+            crate::domain::SourcePath::new("src/file.txt").expect("source path"),
+            FileSnapshot {
                 size_bytes: content.len() as u64,
                 modified_epoch_ms: None,
                 content_hash: Some(sha256_hex(content.as_bytes())),
             },
-            index_status: FileIndexStatus::NotIndexed,
-        };
-        let file = FileRecord {
-            index_status: FileIndexStatus::Indexed {
-                indexed_epoch_ms: 0,
-                entity_count: 1,
-            },
-            ..source.clone()
-        };
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file");
+        let mut file = source.clone();
+        file.set_index_status(FileIndexStatus::Indexed {
+            indexed_epoch_ms: 0,
+            entity_count: 1,
+        })
+        .expect("indexed file");
         let source_range = Range::Text(
             TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len()).expect("range"),
         );
         let content = Content::Text(content.to_owned());
+        let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
+        let fragment = EntityFragment {
+            id: FragmentId::new(&id, 0),
+            range: Range::Full,
+        };
         let search = SearchPlanResult {
             routes: Vec::new(),
             hits: vec![SearchHit {
-                entity: Entity {
-                    id: EntityId::new(source.id, &content, source_range).expect("entity id"),
-                    file_id: source.id,
-                    source_range,
-                    content,
-                    metadata: None,
-                    fragments: Vec::new(),
-                },
+                entity: Entity::new(id, source.id(), source_range, content, None, vec![fragment])
+                    .expect("entity"),
                 file: file.clone(),
                 evidence: Vec::new(),
                 rank: 1,
@@ -925,18 +858,31 @@ mod tests {
         let mut workspace = Workspace {
             root: original_root.clone(),
             scan: crate::domain::ScanRules::default(),
-            index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                model: crate::domain::model::ModelInfo {
-                    provider: "local".to_owned(),
-                    name: "fixture".to_owned(),
-                    endpoint: None,
-                },
-                dimension: 2,
-                metric: Metric::Cosine,
-                max_batch_size: 32,
-                max_input_tokens: None,
-                max_image_bytes: None,
-            })),
+            index: IndexState::Enabled(Box::new(
+                IndexDescriptor::new(
+                    EmbeddingModelInfo::new(
+                        crate::domain::model::ModelInfo::new(
+                            "local".to_owned(),
+                            "fixture".to_owned(),
+                            [
+                                crate::domain::ContentKind::Text,
+                                crate::domain::ContentKind::Code,
+                                crate::domain::ContentKind::Image,
+                            ],
+                            32,
+                        )
+                        .expect("valid model metadata"),
+                        2,
+                        EmbeddingMetric::Cosine,
+                        None,
+                        None,
+                    )
+                    .expect("valid embedding metadata"),
+                    std::collections::BTreeMap::new(),
+                    crate::domain::FTS_CONFIG,
+                )
+                .expect("index descriptor"),
+            )),
             created_epoch_ms: 0,
             updated_epoch_ms: 0,
         };
@@ -974,10 +920,12 @@ mod tests {
             ContextItemStatus::PossiblyStale
         );
         let mut future_indexed = file;
-        future_indexed.index_status = FileIndexStatus::Indexed {
-            indexed_epoch_ms: u64::MAX,
-            entity_count: 1,
-        };
+        future_indexed
+            .set_index_status(FileIndexStatus::Indexed {
+                indexed_epoch_ms: u64::MAX,
+                entity_count: 1,
+            })
+            .expect("future indexed file");
         assert_eq!(
             super::file_freshness_status(&moved_root, &future_indexed),
             ContextItemStatus::PossiblyStale,
@@ -992,22 +940,27 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("source.txt");
         std::fs::write(&path, "source contents").expect("source");
-        let mut file = FileRecord {
-            id: FileId::new(1),
-            relative_path: SourcePath::new("source.txt").expect("source path"),
-            snapshot: FileSnapshot {
+        let mut file = FileRecord::new(
+            FileId::new(1),
+            SourcePath::new("source.txt").expect("source path"),
+            FileSnapshot {
                 size_bytes: 15,
                 modified_epoch_ms: None,
                 content_hash: None,
             },
-            index_status: FileIndexStatus::NotIndexed,
-        };
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file");
         assert_eq!(
             super::file_freshness_status(directory.path(), &file),
             ContextItemStatus::Fresh,
             "missing index/mtime/hash proof is not evidence of an updated file"
         );
-        file.snapshot.content_hash = Some(crate::utils::sha256_hex(b"source contents"));
+        file.set_snapshot(FileSnapshot {
+            content_hash: Some(crate::utils::sha256_hex(b"source contents")),
+            ..file.snapshot().clone()
+        })
+        .expect("file snapshot");
         assert_eq!(
             super::file_freshness_status(directory.path(), &file),
             ContextItemStatus::Fresh

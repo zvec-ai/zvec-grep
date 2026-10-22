@@ -234,11 +234,11 @@ impl result::WorkspaceIndexInfo {
             embedding: workspace
                 .index
                 .descriptor()
-                .and_then(|index| index.embeddings.first().map(Into::into)),
+                .map(|index| index.default_embedding_model().into()),
             fts: workspace
                 .index
                 .descriptor()
-                .map(|index| (&index.fts).into()),
+                .map(|index| (&index.fts()).into()),
             index_version,
             created_epoch_ms: workspace.created_epoch_ms,
             updated_epoch_ms: workspace.updated_epoch_ms,
@@ -262,13 +262,13 @@ impl From<&crate::domain::FtsConfig> for result::WorkspaceIndexFts {
 impl From<&crate::domain::EmbeddingModelInfo> for result::WorkspaceIndexEmbedding {
     fn from(value: &crate::domain::EmbeddingModelInfo) -> Self {
         Self {
-            provider: value.model.provider.clone(),
-            model: value.model.name.clone(),
-            dimension: value.dimension,
-            metric: match value.metric {
-                crate::domain::Metric::Cosine => "cosine",
-                crate::domain::Metric::DotProduct => "dot",
-                crate::domain::Metric::Euclidean => "euclidean",
+            provider: value.model().provider().to_owned(),
+            model: value.model().name().to_owned(),
+            dimension: value.dimension(),
+            metric: match value.metric() {
+                crate::domain::EmbeddingMetric::Cosine => "cosine",
+                crate::domain::EmbeddingMetric::DotProduct => "dot",
+                crate::domain::EmbeddingMetric::Euclidean => "euclidean",
             }
             .to_owned(),
         }

@@ -130,18 +130,23 @@ impl TransformersEmbeddingModel {
             .unwrap_or_else(|| default_model_cache(LocalModelBackend::Transformers));
         Self {
             entry,
-            info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: None,
-                },
-                dimension: entry.dimension,
-                metric: entry.metric,
-                max_batch_size: entry.max_batch_size,
-                max_input_tokens: Some(entry.max_input_tokens),
-                max_image_bytes: None,
-            },
+            info: EmbeddingModelInfo::new(
+                ModelInfo::new(
+                    entry.provider.to_owned(),
+                    entry.model.to_owned(),
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                    ],
+                    entry.max_batch_size,
+                )
+                .expect("valid model metadata"),
+                entry.dimension,
+                entry.metric,
+                Some(entry.max_input_tokens),
+                None,
+            )
+            .expect("valid embedding metadata"),
             model_cache_dir,
             device: options.device,
             compute_runtime,
@@ -280,9 +285,7 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let loaded = self
             .ensure_loaded(options.on_progress.clone(), options.signal.as_ref())
             .await
@@ -810,7 +813,7 @@ fn embed_batch(
             );
             if let Some(on_progress) = on_progress {
                 on_progress(ModelProgress::Warning {
-                    model: entry.reference.to_owned(),
+                    model_ref: entry.reference.to_owned(),
                     message: warning,
                 });
             } else {

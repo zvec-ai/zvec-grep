@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use zg_engine::{
-    api::index::options::ScanRules,
+    api::index::options::{FileFormat, ScanRules},
     api::info::{
         InfoResult,
         result::{
@@ -71,7 +71,7 @@ pub fn write_info_with_options(
             &mut writer,
             theme,
             "Nested Git",
-            &[if index.scan.nested_git {
+            &[if index.scan.nested_git() {
                 "included"
             } else {
                 "excluded"
@@ -311,7 +311,7 @@ fn write_diagnostics(
 
 pub(crate) fn scan_filters(scan: &ScanRules) -> String {
     let mut filters: Vec<_> = scan
-        .globs
+        .globs()
         .iter()
         .map(|glob| {
             format!(
@@ -325,38 +325,48 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
             )
         })
         .collect();
-    if !scan.file_types.is_empty() {
-        filters.push(format!("type={}", scan.file_types.join("|")));
+    for (name, formats) in [
+        ("type", scan.included_formats()),
+        ("type-not", scan.excluded_formats()),
+    ] {
+        if !formats.is_empty() {
+            filters.push(format!(
+                "{name}={}",
+                formats
+                    .iter()
+                    .copied()
+                    .map(FileFormat::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ));
+        }
     }
-    if !scan.excluded_file_types.is_empty() {
-        filters.push(format!("type-not={}", scan.excluded_file_types.join("|")));
-    }
-    if scan.hidden {
+    if scan.include_hidden() {
         filters.push("hidden".into());
     }
-    if scan.no_ignore {
+    if !scan.use_default_ignores() {
         filters.push("no-ignore".into());
     }
-    if !scan.ignore_files.is_empty() {
+    if !scan.ignore_files().is_empty() {
         filters.push(format!(
             "ignore-file={}",
-            scan.ignore_files
+            scan.ignore_files()
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join("|")
         ));
     }
-    if let Some(depth) = scan.max_depth {
+    if let Some(depth) = scan.max_depth() {
         filters.push(format!("max-depth={depth}"));
     }
-    if let Some(size) = scan.max_file_size_bytes {
+    if let Some(size) = scan.max_file_size_bytes() {
         filters.push(format!("max-filesize={size}"));
     }
-    if scan.follow_symlinks {
+    if scan.follow_symlinks() {
         filters.push("follow".into());
     }
-    if !scan.nested_git {
+    if !scan.nested_git() {
         filters.push("nested-git=false".into());
     }
     filters.join(" ")
@@ -566,14 +576,18 @@ mod tests {
         let mut info = ready();
         let index = info.workspace_index.as_mut().expect("workspace");
         index.embedding = None;
-        index.scan.globs = vec!["*.rs".into(), "!vendor/**".into()];
-        index.scan.hidden = true;
-        index.scan.max_depth = Some(0);
+        index.scan = zg_engine::api::index::options::ScanRulesUpdate {
+            included_formats: Some(vec![FileFormat::Rust, FileFormat::TypeScript]),
+            excluded_formats: Some(vec![FileFormat::Json]),
+            globs: Some(vec!["*.rs".into(), "!vendor/**".into()]),
+            include_hidden: Some(true),
+            max_depth: Some(Some(0)),
+            ..Default::default()
+        }
+        .apply(&index.scan)
+        .expect("updated scan rules");
         let output = render(&info, ColorMode::Never);
         assert!(output.contains("Embedding   Not configured"));
-        assert!(
-            output
-                .contains("Roots       /workspace (glob=*.rs glob=!vendor/** hidden max-depth=0)")
-        );
+        assert!(output.contains("Roots       /workspace (glob=*.rs glob=!vendor/** type=rust|typescript type-not=json hidden max-depth=0)"));
     }
 }
