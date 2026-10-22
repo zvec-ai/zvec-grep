@@ -563,6 +563,58 @@ test("components publish before the base package that depends on them", async (t
 });
 
 for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
+  test(`manual ${target} packaging rejects mixed Cargo output through every CPU entry point`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "zg-cpu-pack-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const platform = loadReleaseManifest().platforms.find((p) => p.target === target);
+    const cargoTarget = join(root, "target");
+    const profile = join(cargoTarget, "release");
+    const windows = platform.os === "win32";
+    const cpuFiles = windows ? ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll"]
+      : ["libzvec_c_api.so", "libonnxruntime.so.1.27.0"];
+    const staleFiles = windows ? ["ggml-cuda.dll", "onnxruntime_providers_cuda.dll", "llama.dll"]
+      : ["libggml-cuda.so", "libonnxruntime_providers_cuda.so", "libllama.so.0"];
+    await mkdir(profile, { recursive: true });
+    const binary = join(profile, platform.binary);
+    await writeFile(binary, "old CUDA executable fixture, never executed");
+    for (const file of staleFiles) await writeFile(join(profile, file), `old CUDA ${file}`);
+    // CPU rebuild overwrites zg/ORT but leaves old CUDA libraries in the profile.
+    await writeFile(binary, "new CPU executable fixture, never executed");
+    for (const file of cpuFiles) await writeFile(join(profile, file), `current CPU ${file}`);
+    const separateBinary = join(root, platform.binary);
+    await writeFile(separateBinary, "new CPU executable fixture, never executed");
+    const output = join(root, "release");
+    const script = fileURLToPath(new URL("./npm-release.mjs", import.meta.url));
+    const args = [script, "pack-platform", "--target", target, "--no-build", "--output-dir", output];
+    const env = { ...process.env, CARGO_TARGET_DIR: cargoTarget };
+    for (const extra of [[], ["--binary", binary], ["--binary", separateBinary, "--lib-dir", profile]]) {
+      const result = spawnSync(process.execPath, [...args, ...extra], { env, encoding: "utf8", timeout: 60_000 });
+      assert.ifError(result.error);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /refusing CPU-only packaging/);
+      await assert.rejects(readdir(join(output, "tarballs")), { code: "ENOENT" });
+      for (const file of staleFiles) assert.equal(await readFile(join(profile, file), "utf8"), `old CUDA ${file}`);
+      // An explicit --binary/--lib-dir must not borrow the CUDA record's trust.
+      await writeFile(join(cargoTarget, "native-build.json"), JSON.stringify({
+        target, variant: "cuda", profileDir: profile, bundleDir: join(profile, "zg-cuda"),
+      }));
+    }
+    for (const file of staleFiles) await rm(join(profile, file));
+    run(process.execPath, [...args, "--binary", separateBinary, "--lib-dir", profile], { capture: true, env });
+    const staged = join(output, "staging", target);
+    const metadata = JSON.parse(await readFile(join(staged, "package.json"), "utf8"));
+    assert.equal(metadata.zvecGrep.variant, "cpu");
+    const checksums = JSON.parse(await readFile(join(staged, "checksums.json"), "utf8"));
+    const expected = [`bin/${platform.binary}`, ...cpuFiles.map((file) => `lib/${file}`)].sort();
+    assert.deepEqual(Object.keys(checksums.files).sort(), expected);
+    assert.deepEqual((await readdir(join(staged, "lib"))).sort(), [...cpuFiles].sort());
+    const tarballs = await readdir(join(output, "tarballs"));
+    assert.equal(tarballs.length, 1);
+    const packedFiles = run("tar", ["-tzf", join(output, "tarballs", tarballs[0])], { capture: true })
+      .trim().split(/\r?\n/).filter((file) => /^package\/(bin|lib)\/.+/.test(file)).sort();
+    assert.deepEqual(packedFiles, expected.map((file) => `package/${file}`).sort());
+  });
+
   test(`actual npm packing pins plugin bytes and collects an installable ${target} candidate`, async (t) => {
     const root = await mkdtemp(join(tmpdir(), "zg-plugin-pack-"));
     t.after(() => rm(root, { recursive: true, force: true }));

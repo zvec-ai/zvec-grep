@@ -567,3 +567,262 @@ fn replaces_destination_symlinks_without_changing_their_targets_or_hardlinking_s
             .ino()
     );
 }
+
+#[cfg(unix)]
+fn source_fixture(directory: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("source output");
+    fs::create_dir(root.path().join("backends")).expect("backends");
+    let libraries = root.path().join(directory);
+    fs::create_dir(&libraries).expect("libraries");
+    for library in ["llama", "ggml", "ggml-base"] {
+        let name = format!("lib{library}.so");
+        fs::write(libraries.join(format!("{name}.0.0.1")), library).expect("versioned library");
+        std::os::unix::fs::symlink(format!("{name}.0.0.1"), libraries.join(format!("{name}.0")))
+            .expect("SONAME alias");
+        std::os::unix::fs::symlink(format!("{name}.0"), libraries.join(&name))
+            .expect("linker alias");
+    }
+    root
+}
+
+#[cfg(unix)]
+#[test]
+fn source_soname_chains_are_copied_and_dangling_output_links_are_repaired() {
+    for layout in ["lib", "lib64", "bin"] {
+        let source = source_fixture(layout);
+        let target = tempfile::tempdir().expect("target");
+        let profile = target.path().join("triple/custom-profile");
+        fs::create_dir_all(&profile).expect("profile");
+        // Reproduce the wrapper's linker alias without its versioned target.
+        std::os::unix::fs::symlink("libllama.so.0", profile.join("libllama.so"))
+            .expect("dangling link");
+        for name in [
+            "libggml-cuda.so",
+            "libggml-cpu.so",
+            "libunrelated.so",
+            "libllama.a",
+        ] {
+            fs::write(source.path().join(layout).join(name), "not a core").expect("extra file");
+        }
+        let stage = || {
+            llama_runtime::stage_source(
+                &source.path().join("backends"),
+                LINUX,
+                &profile.join("build/zg/out"),
+            )
+        };
+        stage().expect("stage source aliases");
+        for directory in [&profile, &profile.join("deps"), &profile.join("examples")] {
+            for library in ["llama", "ggml", "ggml-base"] {
+                for suffix in ["", ".0", ".0.0.1"] {
+                    let path = directory.join(format!("lib{library}.so{suffix}"));
+                    assert!(fs::symlink_metadata(&path).expect("copy").is_file());
+                    assert_eq!(fs::read(&path).expect("payload"), library.as_bytes());
+                }
+            }
+            assert_eq!(
+                fs::read_dir(directory)
+                    .expect("files")
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.path().is_file())
+                    .count(),
+                9
+            );
+        }
+        let library = profile.join("libllama.so.0");
+        let before = fs::metadata(&library)
+            .expect("library")
+            .modified()
+            .expect("mtime");
+        stage().expect("repeat deployment");
+        assert_eq!(
+            fs::metadata(&library)
+                .expect("library")
+                .modified()
+                .expect("mtime"),
+            before
+        );
+        fs::remove_file(&library).expect("remove deployed file");
+        stage().expect("repair missing deployment");
+        fs::write(&library, "modified copy").expect("edit deployed copy");
+        assert_eq!(
+            fs::read(source.path().join(layout).join("libllama.so.0")).expect("source"),
+            b"llama"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_source_runtimes_fail_before_deploying_any_library() {
+    for fault in [
+        "missing-core",
+        "broken-link",
+        "outside-link",
+        "conflicting-copy",
+        "wrong-root",
+    ] {
+        let source = source_fixture("lib64");
+        let target = tempfile::tempdir().expect("target");
+        let profile = target.path().join("release");
+        let libraries = source.path().join("lib64");
+        match fault {
+            "missing-core" => {
+                for suffix in ["", ".0", ".0.0.1"] {
+                    fs::remove_file(libraries.join(format!("libggml.so{suffix}")))
+                        .expect("remove core");
+                }
+            }
+            "broken-link" => {
+                fs::remove_file(libraries.join("libllama.so.0.0.1")).expect("break chain");
+            }
+            "outside-link" => {
+                let external = target.path().join("external.so");
+                fs::write(&external, "outside this dependency").expect("external library");
+                fs::remove_file(libraries.join("libllama.so.0.0.1")).expect("replace target");
+                std::os::unix::fs::symlink(external, libraries.join("libllama.so.0.0.1"))
+                    .expect("external link");
+            }
+            "conflicting-copy" => {
+                fs::create_dir(source.path().join("lib")).expect("other libdir");
+                fs::write(source.path().join("lib/libllama.so.0"), "different build")
+                    .expect("conflict");
+            }
+            "wrong-root" => {}
+            _ => unreachable!(),
+        }
+        let backends = source.path().join(if fault == "wrong-root" {
+            "lib64"
+        } else {
+            "backends"
+        });
+        assert!(
+            llama_runtime::stage_source(&backends, LINUX, &profile.join("build/zg/out")).is_err(),
+            "{fault}"
+        );
+        assert!(
+            !profile.exists(),
+            "{fault}: invalid input partially deployed"
+        );
+    }
+}
+
+#[test]
+fn source_windows_copies_only_the_three_core_dlls() {
+    let source = tempfile::tempdir().expect("source");
+    fs::create_dir(source.path().join("backends")).expect("backends");
+    let bin = source.path().join("bin");
+    fs::create_dir(&bin).expect("bin");
+    for name in [
+        "llama.dll",
+        "ggml.dll",
+        "ggml-base.dll",
+        "llama.lib",
+        "ggml-cuda.dll",
+        "ggml-cpu.dll",
+    ] {
+        fs::write(bin.join(name), name).expect("DLL fixture");
+    }
+    let target = tempfile::tempdir().expect("target");
+    let profile = target.path().join("debug");
+    llama_runtime::stage_source(
+        &source.path().join("backends"),
+        WINDOWS,
+        &profile.join("build/zg/out"),
+    )
+    .expect("deploy source DLLs");
+    for directory in [&profile, &profile.join("deps"), &profile.join("examples")] {
+        let mut names: Vec<_> = fs::read_dir(directory)
+            .expect("files")
+            .map(|entry| entry.expect("file").file_name())
+            .collect();
+        names.retain(|name| directory.join(name).is_file());
+        names.sort();
+        assert_eq!(names, ["ggml-base.dll", "ggml.dll", "llama.dll"]);
+    }
+}
+
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), ignore = "ELF startup requires Linux")]
+#[test]
+fn source_elf_starts_outside_cargo_without_library_path_overrides() {
+    use std::process::Command;
+    // Three tiny C libraries exercise real ELF SONAME resolution, not a llama
+    // or CUDA compilation. The same deployment helper handles the real build.
+    let source = source_fixture("lib64");
+    let libraries = source.path().join("lib64");
+    for (library, symbol) in [("llama", "llama"), ("ggml", "ggml"), ("ggml-base", "base")] {
+        let input = source.path().join(format!("{library}.c"));
+        fs::write(
+            &input,
+            format!("int {symbol}_fixture(void) {{ return 14; }}\n"),
+        )
+        .expect("C fixture");
+        let output = Command::new("cc")
+            .args(["-shared", "-fPIC"])
+            .arg(format!("-Wl,-soname,lib{library}.so.0"))
+            .arg(&input)
+            .arg("-o")
+            .arg(libraries.join(format!("lib{library}.so.0.0.1")))
+            .output()
+            .expect("C compiler");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let target = tempfile::tempdir().expect("target");
+    let profile = target.path().join("release");
+    fs::create_dir(&profile).expect("profile");
+    let input = target.path().join("main.c");
+    fs::write(&input, "int llama_fixture(void); int ggml_fixture(void); int base_fixture(void);\nint main(void) { return llama_fixture() + ggml_fixture() + base_fixture() != 42; }\n").expect("C program");
+    let binary = profile.join("runtime-probe");
+    let output = Command::new("cc")
+        .arg(&input)
+        .arg("-L")
+        .arg(&libraries)
+        .args([
+            "-Wl,-rpath,$ORIGIN",
+            "-llama",
+            "-lggml",
+            "-lggml-base",
+            "-o",
+        ])
+        .arg(&binary)
+        .output()
+        .expect("link probe");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = || {
+        Command::new(&binary)
+            .current_dir(target.path())
+            .env_remove("LD_LIBRARY_PATH")
+            .env_remove("LD_PRELOAD")
+            .output()
+            .expect("run ELF probe")
+    };
+    let missing = run();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("libllama.so.0"));
+    // The old wrapper leaves only this dangling unversioned alias behind.
+    std::os::unix::fs::symlink("libllama.so.0", profile.join("libllama.so"))
+        .expect("dangling alias");
+    llama_runtime::stage_source(
+        &source.path().join("backends"),
+        LINUX,
+        &profile.join("build/zg/out"),
+    )
+    .expect("deploy actual ELF libraries");
+    // Prove the executable cannot be rescued by the original source location.
+    source.close().expect("remove source fixture");
+    let deployed = run();
+    assert!(
+        deployed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deployed.stderr)
+    );
+}

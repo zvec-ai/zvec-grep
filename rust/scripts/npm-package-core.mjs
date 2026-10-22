@@ -272,8 +272,8 @@ export async function sha256File(path) {
   return hashFile(path);
 }
 
-// Keep every runtime library and its data below lib/. Windows uses the native
-// delay-load hook; Unix binaries use ../lib rpaths.
+// Stage the non-bundle (CPU) runtime below lib/. Windows uses the native
+// delay-load hook; Unix binaries use ../lib rpaths. CUDA uses stageRuntimeBundle.
 export async function stageZvecRuntime(sourceDir, libDir, platform) {
   const library = {
     darwin: "libzvec_c_api.dylib",
@@ -295,12 +295,28 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
     linux: /\.so(?:\.\d+)*$/,
     win32: /\.dll$/i,
   }[platform];
+  // A plain Cargo profile can retain CUDA outputs after a CPU rebuild, even
+  // without native-build.json. CPU llama.cpp is static on these platforms;
+  // only zvec and the CPU/DirectML ORT distribution belong in this path.
+  // Reject, rather than silently filter, an ambiguous directory: the binary
+  // might still require those libraries. Validate before copying any payload.
+  const cpuRuntimePattern = {
+    linux: /^lib(?:zvec_c_api|onnxruntime)\.so(?:\.\d+)*$/,
+    win32: /^(?:zvec_c_api|onnxruntime|DirectML)\.dll$/i,
+  }[platform];
   for (const name of (await readdir(sourceDir)).sort()) {
     if (
       name !== library &&
       runtimePattern.test(name) &&
       (await stat(join(sourceDir, name))).isFile()
     ) {
+      if (cpuRuntimePattern && !cpuRuntimePattern.test(name)) {
+        throw new Error(
+          `refusing CPU-only packaging of unverified runtime library: ${join(sourceDir, name)}; ` +
+          "CUDA-to-CPU rebuilds can leave stale libraries. Rebuild with --cpu-only in a fresh CARGO_TARGET_DIR, " +
+          "or package an audited CUDA bundle with --bundle-dir; do not reuse a mixed Cargo profile",
+        );
+      }
       files.push(name);
     }
   }

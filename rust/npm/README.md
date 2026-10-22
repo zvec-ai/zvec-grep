@@ -108,6 +108,11 @@ CPU/CUDA build trees are isolated under `target/cpu` and `target/cuda` on these
 targets. `--no-build` reuses the last successful recorded build, not a stale
 bundle selected by its existence. Explicit CI bundles use `--bundle-dir`.
 Plain `cargo build --release -p zg` remains a non-CUDA developer build.
+Manual CPU packaging (`--no-build`, including explicit `--binary`/`--lib-dir`)
+rejects Linux/Windows shared libraries outside the known CPU set, rather than
+packaging stale CUDA libraries left by a previous Cargo build. Use `--cpu-only`
+with a fresh `CARGO_TARGET_DIR` to recover; CUDA packaging uses an audited
+`--bundle-dir`. The check does not remove or change the original build outputs.
 
 Published target/backend support is:
 

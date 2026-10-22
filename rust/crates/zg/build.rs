@@ -5,28 +5,34 @@ fn main() {
     zvec_rust_build::configure();
     if std::env::var_os("CARGO_FEATURE_CUDA").is_some() {
         stage_ort_runtime();
-        // Source builds already stage their shared libraries. Prebuilt SDKs
-        // expose their verified runtime metadata; zg owns the executable layout.
-        match (
+        // zg owns the executable layout for both SDK and source builds. The
+        // source wrapper's *.so staging omits versioned SONAME targets.
+        let target = std::env::var("TARGET").expect("Cargo TARGET");
+        let out = std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR");
+        let paths = match (
             std::env::var_os("DEP_LLAMA_RUNTIME_DIR"),
             std::env::var_os("DEP_LLAMA_RUNTIME_MANIFEST"),
         ) {
-            (Some(root), Some(manifest)) => {
-                let target = std::env::var("TARGET").expect("Cargo TARGET");
-                let out = std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR");
-                for path in llama_runtime::stage(
-                    std::path::Path::new(&root),
-                    std::path::Path::new(&manifest),
+            (Some(root), Some(manifest)) => llama_runtime::stage(
+                std::path::Path::new(&root),
+                std::path::Path::new(&manifest),
+                &target,
+                std::path::Path::new(&out),
+            ),
+            (None, None) => {
+                let backends = std::env::var_os("DEP_LLAMA_BACKENDS_DIR")
+                    .expect("source CUDA build must expose DEP_LLAMA_BACKENDS_DIR");
+                llama_runtime::stage_source(
+                    std::path::Path::new(&backends),
                     &target,
                     std::path::Path::new(&out),
                 )
-                .expect("stage zg's llama.cpp runtime libraries")
-                {
-                    println!("cargo:rerun-if-changed={}", path.display());
-                }
             }
-            (None, None) => {}
             _ => panic!("incomplete llama.cpp SDK runtime metadata"),
+        }
+        .expect("stage zg's llama.cpp runtime libraries");
+        for path in paths {
+            println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {

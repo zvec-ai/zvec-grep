@@ -12,8 +12,8 @@ default = []
 cuda = ["zg-engine/cuda", "dep:llama-cpp-sys-2"]
 
 [dependencies]
-# Direct dependency exposes DEP_LLAMA_RUNTIME_* to zg's build script; the
-# engine still owns all model/runtime behavior and enables the native features.
+# Direct dependency exposes DEP_LLAMA_RUNTIME_* (SDK) and DEP_LLAMA_BACKENDS_DIR
+# (source) to zg's build script; the engine owns runtime behavior/native features.
 llama-cpp-sys-2 = { workspace = true, optional = true }
 serde_json.workspace = true
 clap.workspace = true

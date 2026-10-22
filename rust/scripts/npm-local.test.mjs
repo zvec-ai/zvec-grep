@@ -583,6 +583,62 @@ test("no-build uses the last successful variant rather than stale CUDA artifacts
   assert.deepEqual(await existingNativeBuild(entry), cpu);
 });
 
+test("manual no-record CPU staging rejects CUDA leftovers before copying any runtime", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "zg-mixed-cargo-profile-"));
+  const previous = process.env.CARGO_TARGET_DIR;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.CARGO_TARGET_DIR;
+    else process.env.CARGO_TARGET_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  });
+  for (const [target, cpuFiles, staleFiles] of [
+    ["linux-x64-gnu", ["libzvec_c_api.so", "libonnxruntime.so.1.27.0"], [
+      "libllama.so.0", "libggml.so.0", "libggml-base.so.0", "libggml-cpu.so",
+      "libggml-cuda.so", "libonnxruntime_providers_cuda.so", "libonnxruntime_providers_shared.so",
+      "libcudart.so.13", "libcublas.so.13", "libcudnn.so.9", "unknown-runtime.so",
+    ]],
+    ["win32-x64-msvc", ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll"], [
+      "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "GGML-CUDA.DLL",
+      "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll",
+      "cudart64_13.dll", "cublas64_13.dll", "cudnn64_9.dll", "unknown-runtime.dll",
+    ]],
+  ]) {
+    const entry = manifest.platforms.find((entry) => entry.target === target);
+    process.env.CARGO_TARGET_DIR = join(root, target);
+    const profile = join(process.env.CARGO_TARGET_DIR, "release");
+    await mkdir(profile, { recursive: true });
+    for (const file of cpuFiles) await writeFile(join(profile, file), `current CPU ${file}`);
+    await writeFile(join(profile, entry.binary), "old CUDA executable fixture");
+    // Model Cargo replacing the executable without removing sibling libraries.
+    await writeFile(join(profile, entry.binary), "new CPU executable fixture");
+    const build = await existingNativeBuild(entry);
+    assert.deepEqual(build, { variant: "cpu", profileDir: profile });
+    await assert.rejects(lstat(join(process.env.CARGO_TARGET_DIR, "native-build.json")), { code: "ENOENT" });
+    const destination = join(root, target, "package/lib");
+    for (const file of staleFiles) {
+      await writeFile(join(profile, file), `old CUDA ${file}`);
+      await assert.rejects(stageZvecRuntime(build.profileDir, destination, entry.os), (error) => {
+        assert.match(error.message, /refusing CPU-only packaging/);
+        assert.ok(error.message.includes(file));
+        assert.match(error.message, /fresh CARGO_TARGET_DIR/);
+        assert.match(error.message, /--bundle-dir/);
+        return true;
+      });
+      await assert.rejects(lstat(destination), { code: "ENOENT" });
+      assert.equal(await readFile(join(profile, file), "utf8"), `old CUDA ${file}`);
+      await rm(join(profile, file));
+    }
+    // Nested build/bundle outputs are not scanned or copied into CPU packages.
+    await mkdir(join(profile, "cuda12"));
+    await writeFile(join(profile, "cuda12", staleFiles[4]), "old fallback");
+    const files = await stageZvecRuntime(build.profileDir, destination, entry.os);
+    assert.deepEqual(files.sort(), cpuFiles.map((file) => `lib/${file}`).sort());
+    for (const file of cpuFiles) {
+      assert.equal(await readFile(join(destination, file), "utf8"), `current CPU ${file}`);
+    }
+  }
+});
+
 test("a failed CUDA rebuild invalidates reuse until a complete build succeeds", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "zg-failed-build-"));
   const previous = process.env.CARGO_TARGET_DIR;

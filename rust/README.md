@@ -513,11 +513,14 @@ targets keep their existing non-CUDA backends. Plain Cargo builds remain
 non-CUDA unless `--features cuda` is selected. Explicit `prebuilt` mode selects
 the CUDA SDK on x64 without probing or requiring a CUDA compiler.
 
-For direct `cargo build --features cuda` builds using a shared SDK, zg stages
+For direct `cargo build --features cuda` builds using a shared SDK or source, zg stages
 the linked llama/ggml core libraries beside the executable (and in Cargo's
-`deps`/`examples` directories). Run `target/debug/zg` or `target/release/zg`
-without adding the SDK to `LD_LIBRARY_PATH`. Optional backends still use the
-verified SDK cache; this development output is not a portable distribution.
+`deps`/`examples` directories). Source mode, including an `auto` fallback, uses
+only the current dependency's `lib`/`lib64`/`bin` outputs and copies resolved
+SONAME aliases such as `.so.0`, repairing dangling links. Run `target/debug/zg`
+or `target/release/zg` without adding native build directories to `LD_LIBRARY_PATH`.
+Optional backends still use the verified SDK cache or current source backend
+directory; this development output is not a portable distribution.
 Use the npm packaging commands below to assemble a distributable runtime.
 
 CUDA Cargo builds also deploy the pinned official ONNX Runtime CUDA 12 main
@@ -661,6 +664,13 @@ Cargo `target/release/zg` when no build record exists), or pass
 npm run install:local -- --no-build --prefix /tmp/zvec-grep-npm
 ```
 
+On Linux and Windows, manual CPU packaging rejects runtime libraries outside
+the known CPU set (zvec and CPU/DirectML ORT). A CUDA-to-CPU Cargo rebuild can
+leave old shared libraries beside `zg`; it does not clean that directory.
+If packaging rejects such a mixed directory, rebuild with `--cpu-only` in a
+fresh `CARGO_TARGET_DIR`, or use an audited CUDA bundle. Packaging never deletes
+the original libraries or silently includes them in a CPU package.
+
 ## npm release packaging
 
 The registry distribution is prepared as one meta package plus exact-version
@@ -729,6 +739,8 @@ node scripts/npm-release.mjs pack-platform \
 
 The runtime library directory must include zvec's shared library. Without
 `--lib-dir`, runtime libraries are read from the binary's directory.
+This entry point is CPU-only and applies the same mixed-directory check as
+local `pack --no-build`, including when `--binary` or `--lib-dir` is explicit.
 
 For a complete audited CUDA bundle, preserve its `bin/` and `lib/` layout:
 
