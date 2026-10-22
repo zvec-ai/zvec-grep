@@ -1,7 +1,8 @@
 //! Prepared inputs and indexing options for extraction.
 
+use super::graph::PartitionedGraph;
 use crate::domain::{
-    Content, EntityMetadata, FileFormat, FileGraphResult, ImageContent, Range, SourcePath,
+    Content, EntityMetadata, FileFormat, ImageContent, Range, SourcePath,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,11 +67,13 @@ pub(crate) struct ExtractedEntityFragment {
 ///
 /// The graph is produced by the code path once the walk-time edge collection
 /// and file-local partition are implemented; every other source kind returns
-/// `None`.
+/// `None`. The partitioned graph is assembled into the persistence-ready
+/// [`crate::domain::graph::FileGraphResult`] by the indexing pipeline, which
+/// owns entity-ID minting.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ExtractionOutput {
     pub fragments: Vec<ExtractedEntity>,
-    pub graph: Option<FileGraphResult>,
+    pub graph: Option<PartitionedGraph>,
 }
 
 #[cfg(test)]

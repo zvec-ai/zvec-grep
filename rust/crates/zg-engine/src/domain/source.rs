@@ -12,6 +12,8 @@ pub(crate) use file::FileId;
 pub(crate) use file::FileIndexStatus;
 pub(crate) use file::FileRecord;
 pub(crate) use file::FileSnapshot;
+pub(crate) use format::formats_for_path;
+pub(crate) use format::reference_compatible_with;
 pub use format::FileCategory;
 pub use format::FileFormat;
 pub(crate) use path::SourcePath;
