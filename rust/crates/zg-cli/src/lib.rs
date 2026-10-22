@@ -46,6 +46,7 @@ use zg_engine::api::{
         options::{Device, EmbeddingModelSpec, GlobRule, ScanRulesUpdate},
     },
     info::InfoOptions,
+    relationships::RelationshipOptions,
 };
 
 pub use authorization::{
@@ -81,6 +82,10 @@ pub struct Cli {
 pub enum CommandLine {
     /// Search indexed context or run managed ripgrep.
     Query(QueryArgs),
+    /// Show persisted incoming call sites for a symbol.
+    Callers(RelationshipArgs),
+    /// Show persisted outgoing call sites for a symbol.
+    Callees(RelationshipArgs),
     /// Build, rebuild, or drop the workspace index.
     Index(IndexArgs),
     /// Show workspace and index status.
@@ -552,6 +557,25 @@ impl QueryArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RelationshipArgs {
+    /// Exact or scope-qualified symbol name, such as `Class::method`.
+    pub symbol: String,
+    /// Workspace root; defaults to the current directory.
+    pub root: Option<PathBuf>,
+    /// Restrict definitions to a file or directory, relative to the current directory.
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
+    pub mode: ClientMode,
+    #[arg(long, env = "ZVEC_GREP_HOME")]
+    pub home: Option<PathBuf>,
+}
+
+pub use zg_engine::api::relationships::RelationshipDirection;
+
+#[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
     pub root: Option<PathBuf>,
@@ -677,6 +701,12 @@ pub enum CliPlan {
     Files {
         request: Box<FilesOptions>,
         null: bool,
+    },
+    Relationships {
+        direction: RelationshipDirection,
+        mode: ClientMode,
+        home: Option<PathBuf>,
+        request: RelationshipOptions,
     },
     Query {
         mode: ClientMode,
@@ -885,6 +915,12 @@ impl Cli {
             return Ok(CliPlan::Help(None));
         };
         match command {
+            CommandLine::Callers(args) => {
+                relationship_plan(args, &current_dir, RelationshipDirection::Callers)
+            }
+            CommandLine::Callees(args) => {
+                relationship_plan(args, &current_dir, RelationshipDirection::Callees)
+            }
             CommandLine::Query(args) => query_plan(args, current_dir, terminal),
             CommandLine::Index(args) => index_plan(args, &current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
@@ -928,6 +964,8 @@ impl Cli {
 fn action_for_flag(value: &OsStr) -> Option<&'static str> {
     match value.to_str()? {
         "--index" => Some("index"),
+        "--callers" => Some("callers"),
+        "--callees" => Some("callees"),
         "--status" => Some("status"),
         "--install" => Some("install"),
         "--uninstall" => Some("uninstall"),
@@ -1344,6 +1382,39 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+fn relationship_plan(
+    args: RelationshipArgs,
+    current_dir: &Path,
+    direction: RelationshipDirection,
+) -> Result<CliPlan, CliError> {
+    let mut request = RelationshipOptions {
+        root: Some(resolve_from(current_dir, args.root.as_deref())),
+        symbol: args.symbol,
+        limit: args.limit,
+        ..RelationshipOptions::default()
+    };
+    request.validate()?;
+    if let Some(path) = args.path {
+        if path.as_os_str().is_empty() {
+            return Err(zg_engine::EngineError::invalid_argument(
+                "relationship path must not be empty",
+            )
+            .into());
+        }
+        request.path = zg_engine::api::relationships::workspace_relative_path(
+            request.root.as_deref().expect("relationship root"),
+            &resolve_from(current_dir, Some(&path)),
+        )?;
+        request.validate()?;
+    }
+    Ok(CliPlan::Relationships {
+        direction,
+        mode: args.mode,
+        home: args.home,
+        request,
+    })
 }
 
 fn query_plan(
@@ -2103,6 +2174,162 @@ mod tests {
             vec!["zg", "--help=search", "extra"],
         ] {
             assert!(Cli::try_parse_from(arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn relationship_commands_preserve_direction_root_and_edge_limit() {
+        for (command, expected) in [
+            ("--callers", super::RelationshipDirection::Callers),
+            ("--callees", super::RelationshipDirection::Callees),
+        ] {
+            let directory = tempfile::tempdir().expect("workspace parent");
+            let cwd = directory.path().canonicalize().expect("cwd");
+            std::fs::create_dir_all(cwd.join("nested/.zvec-grep")).expect("workspace");
+            std::fs::write(cwd.join("nested/.zvec-grep/manifest.json"), "{}").expect("manifest");
+            let plan = Cli::try_parse_from([
+                "zg",
+                command,
+                " Class::method ",
+                "nested",
+                "--path",
+                "nested/src/main.rs",
+                "--limit",
+                "3",
+                "--mode",
+                "server",
+            ])
+            .expect("parse relationship command")
+            .into_plan(cwd.clone())
+            .expect("relationship plan");
+            let CliPlan::Relationships {
+                direction,
+                mode,
+                request,
+                ..
+            } = plan
+            else {
+                panic!("relationship plan expected");
+            };
+            assert_eq!(direction, expected);
+            assert_eq!(mode, super::ClientMode::Server);
+            assert_eq!(request.root, Some(cwd.join("nested")));
+            assert_eq!(request.symbol, " Class::method ");
+            assert_eq!(request.limit, Some(3));
+            assert_eq!(request.path, Some("src/main.rs".into()));
+            let CliPlan::Relationships { request, .. } =
+                Cli::try_parse_from(["zg", command, "name"])
+                    .expect("default arguments")
+                    .into_plan(cwd.clone())
+                    .expect("default plan")
+            else {
+                panic!("relationship plan expected");
+            };
+            assert_eq!(request.limit, None);
+            assert_eq!(request.root, Some(cwd));
+        }
+    }
+
+    #[test]
+    fn relationship_paths_use_the_calling_directory_and_nearest_workspace() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let root = directory.path().canonicalize().expect("root");
+        std::fs::create_dir_all(root.join(".zvec-grep")).expect("workspace home");
+        std::fs::write(root.join(".zvec-grep/manifest.json"), "{}").expect("manifest");
+        let cwd = root.join("src");
+        std::fs::create_dir(&cwd).expect("subdirectory");
+        std::fs::write(cwd.join("main.rs"), "fn main() {}").expect("file");
+        for (path, expected) in [
+            (std::path::PathBuf::from("main.rs"), Some("src/main.rs")),
+            (cwd.join("main.rs"), Some("src/main.rs")),
+            ("../README.md".into(), Some("README.md")),
+            (".".into(), Some("src")),
+            ("..".into(), None),
+            ("missing/main.rs".into(), Some("src/missing/main.rs")),
+            ("missing/../main.rs".into(), Some("src/main.rs")),
+        ] {
+            let cli = Cli::try_parse_from([
+                std::ffi::OsStr::new("zg"),
+                std::ffi::OsStr::new("--callers"),
+                std::ffi::OsStr::new("run"),
+                std::ffi::OsStr::new("--path"),
+                path.as_os_str(),
+            ])
+            .expect("args");
+            let CliPlan::Relationships { request, .. } =
+                cli.into_plan(cwd.clone()).expect("converted filter")
+            else {
+                panic!("relationship plan")
+            };
+            assert_eq!(
+                request.path.as_deref(),
+                expected.map(std::path::Path::new),
+                "{path:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["zg", "--callers", "run", "--path", ""]).is_err());
+        for path in ["../..", "../../outside.rs"] {
+            let cli =
+                Cli::try_parse_from(["zg", "--callers", "run", "--path", path]).expect("args");
+            let error = cli.into_plan(cwd.clone()).expect_err("invalid path");
+            assert!(error.to_string().contains("outside workspace"), "{error}");
+        }
+        #[cfg(unix)]
+        {
+            let alias = root.join("alias");
+            std::os::unix::fs::symlink(&cwd, &alias).expect("directory alias");
+            let cli =
+                Cli::try_parse_from(["zg", "--callers", "run", "--path", "main.rs"]).expect("args");
+            let CliPlan::Relationships { request, .. } =
+                cli.into_plan(alias).expect("canonical filter")
+            else {
+                panic!("relationship plan")
+            };
+            assert_eq!(request.path, Some("src/main.rs".into()));
+        }
+        std::fs::create_dir(cwd.join(".zvec-grep")).expect("nested workspace");
+        std::fs::write(cwd.join(".zvec-grep/manifest.json"), "{}").expect("nested manifest");
+        let cli =
+            Cli::try_parse_from(["zg", "--callers", "run", "--path", "main.rs"]).expect("args");
+        let CliPlan::Relationships { request, .. } = cli.into_plan(cwd).expect("nearest workspace")
+        else {
+            panic!("relationship plan")
+        };
+        assert_eq!(request.path, Some("main.rs".into()));
+    }
+
+    #[test]
+    fn relationship_commands_reject_invalid_values_before_execution() {
+        for arguments in [
+            vec!["zg", "--callees", "name", "--limit", "-1"],
+            vec!["zg", "--callers", "name", "--refresh", "wait"],
+            vec!["zg", "--callees"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+        for (symbol, limit, message) in [
+            (" ".to_owned(), "1", "symbol must contain"),
+            (
+                "x".repeat(zg_engine::api::relationships::MAX_RELATIONSHIP_SYMBOL_CHARS + 1),
+                "1",
+                "symbol must contain",
+            ),
+            ("::".to_owned(), "1", "symbol name must not be empty"),
+            ("Foo.".to_owned(), "1", "symbol name must not be empty"),
+            (
+                "target".to_owned(),
+                "0",
+                "relationship limit must be positive",
+            ),
+        ] {
+            for command in ["--callers", "--callees"] {
+                let cli = Cli::try_parse_from(["zg", command, &symbol, "--limit", limit])
+                    .expect("parse input shape");
+                let error = cli
+                    .into_plan(std::env::temp_dir())
+                    .expect_err("reject before execution");
+                assert!(error.to_string().contains(message), "{error}");
+            }
         }
     }
 

@@ -12,13 +12,13 @@ use super::{
     },
     types::StoredFileAttributes,
     zvec::{
-        corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-        wildcard_string, write_docs,
+        corrupt, doc_key, fetch_map, native, open_collection, quote, scalar, string_field,
+        u32_field, wildcard_string, write_docs,
     },
 };
 use crate::{
     EngineError, EngineResult,
-    domain::{DirectoryId, FileId, FileIndexStatus, FileRecord},
+    domain::{DirectoryId, FileId, FileIndexStatus, FileRecord, SourcePath},
 };
 
 mod codec;
@@ -116,6 +116,24 @@ impl Files {
         )?;
         native(query.set_include_vector(false), "omit vectors")?;
         Ok(!native(self.collection.query(&query), "query native file names")?.is_empty())
+    }
+
+    /// Resolve one exact native path through its indexed identity key.
+    pub(super) fn find_id(&self, path: &SourcePath) -> EngineResult<Option<FileId>> {
+        let mut query = native(SearchQuery::scalar(1), "resolve file path")?;
+        native(
+            query.set_filter(&format!("path_key = {}", quote(&path_key(path)?))),
+            "filter exact file path",
+        )?;
+        native(
+            query.set_output_fields(&["file_id"]),
+            "project file identity",
+        )?;
+        native(query.set_include_vector(false), "omit vectors")?;
+        native(self.collection.query(&query), "query exact file path")?
+            .first()
+            .map(|doc| u32_field(doc, "file_id").map(FileId::new))
+            .transpose()
     }
 
     pub(super) fn fetch(&self, ids: &[FileId]) -> EngineResult<HashMap<FileId, FileRecord>> {

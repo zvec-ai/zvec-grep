@@ -110,19 +110,44 @@ impl<'a> LockWait<'a> {
     }
 }
 
-/// A nonblocking admission probe lets queries also observe a newly ready writer.
-pub(crate) fn try_home_read(home: &Path, operation: &str) -> Result<Option<FileLock>, EngineError> {
-    check_home_parent(home, operation)?;
-    let intent = open_lock_file(&home.join("locks/write-intent"), operation)?;
-    if !try_file_lock(&intent, LockMode::Write)? {
-        return Ok(None);
+/// Reuse open handles while queries wait for a lock or a newly ready writer.
+pub(crate) struct HomeReadProbe {
+    intent: File,
+    file: Option<File>,
+}
+
+impl HomeReadProbe {
+    pub(crate) fn new(home: &Path, operation: &str) -> Result<Self, EngineError> {
+        check_home_parent(home, operation)?;
+        Ok(Self {
+            intent: open_lock_file(&home.join("locks/write-intent"), operation)?,
+            file: Some(open_lock_file(&home.join("locks/home"), operation)?),
+        })
     }
-    let file = open_lock_file(&home.join("locks/home"), operation)?;
-    Ok(try_file_lock(&file, LockMode::Read)?.then_some(FileLock {
-        _read_cache: None,
-        _file: file,
-        _intent: None,
-    }))
+
+    pub(crate) fn try_acquire(&mut self) -> Result<Option<FileLock>, EngineError> {
+        if !try_file_lock(&self.intent, LockMode::Write)? {
+            return Ok(None);
+        }
+        let acquired = try_file_lock(
+            self.file.as_ref().expect("unconsumed probe"),
+            LockMode::Read,
+        );
+        // Never retain admission intent between retries: writers must be able to queue.
+        self.intent
+            .unlock()
+            .map_err(|error| EngineError::from_io("release workspace admission lock", &error))?;
+        Ok(acquired?.then(|| FileLock {
+            _read_cache: None,
+            _file: self.file.take().expect("unconsumed probe"),
+            _intent: None,
+        }))
+    }
+}
+
+#[cfg(test)]
+fn try_home_read(home: &Path, operation: &str) -> Result<Option<FileLock>, EngineError> {
+    HomeReadProbe::new(home, operation)?.try_acquire()
 }
 
 fn opposite(mode: LockMode) -> LockMode {
@@ -158,6 +183,35 @@ mod tests {
         })
         .await
         .expect("writer reserves admission");
+    }
+
+    #[test]
+    fn reusable_read_probe_releases_admission_between_attempts() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let home = directory.path().join(".zvec-grep");
+        let writer = acquire_read_write_lock(&home.join("locks/home"), LockMode::Write, "writer")
+            .expect("home writer");
+        let mut probe = HomeReadProbe::new(&home, "query").expect("probe");
+        assert!(probe.try_acquire().expect("blocked probe").is_none());
+        let intent = acquire_read_write_lock(
+            &home.join("locks/write-intent"),
+            LockMode::Read,
+            "queued writer",
+        )
+        .expect("probe released intent while waiting");
+        drop(writer);
+        assert!(probe.try_acquire().expect("writer priority").is_none());
+        drop(intent);
+        let reader = probe
+            .try_acquire()
+            .expect("ready probe")
+            .expect("read lock");
+        assert!(
+            acquire_read_write_lock(&home.join("locks/home"), LockMode::Write, "writer").is_err()
+        );
+        drop(reader);
+        acquire_read_write_lock(&home.join("locks/home"), LockMode::Write, "writer")
+            .expect("read lock released");
     }
 
     #[tokio::test]

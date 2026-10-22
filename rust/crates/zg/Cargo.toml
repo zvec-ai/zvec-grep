@@ -23,6 +23,7 @@ zvec-rust.workspace = true
 zvec-rust-build.workspace = true
 
 [dev-dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json.workspace = true
 tempfile.workspace = true
 zg-testkit = { path = "../zg-testkit" }

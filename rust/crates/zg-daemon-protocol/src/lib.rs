@@ -10,9 +10,10 @@ use zg_engine::api::{
     context::{ContextOptions, ContextResult},
     index::{IndexOptions, IndexResult, progress::IndexProgress},
     info::{InfoOptions, InfoResult},
+    relationships::{RelationshipOptions, RelationshipResult},
 };
 
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 16;
+pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 17;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -77,6 +78,8 @@ pub struct ExecuteRequest {
 pub enum DaemonCommand {
     IndexSetup(zg_engine::api::index::setup::IndexSetupOptions),
     Context(ContextOptions),
+    Callers(RelationshipOptions),
+    Callees(RelationshipOptions),
     Index(IndexOptions),
     IndexAuthorization(IndexOptions),
     QueryAuthorization(ContextOptions),
@@ -189,6 +192,8 @@ pub enum IndexStreamEvent {
 pub enum DaemonReply {
     IndexSetup(zg_engine::api::index::setup::IndexSetup),
     Context(Box<ContextResult>),
+    Callers(RelationshipResult),
+    Callees(RelationshipResult),
     Index(Box<IndexResult>),
     IndexAuthorization(Vec<zg_engine::authorization::IndexAuthorization>),
     QueryAuthorization(Vec<zg_engine::authorization::QueryAuthorization>),
@@ -219,6 +224,70 @@ mod tests {
         DaemonResponse, DaemonResponseKind, ErrorReply, ExecuteRequest, ExecutionResult,
         HelloRequest, Principal, RequestEvent, RequestEventKind, RequestId, TraceContext,
     };
+
+    #[test]
+    fn relationship_commands_and_replies_preserve_compact_payloads() {
+        use zg_engine::api::relationships::{
+            RelationshipEdge, RelationshipOptions, RelationshipSymbol, SymbolRelationships,
+        };
+        let options = RelationshipOptions {
+            root: Some("/workspace".into()),
+            symbol: "Module::run".into(),
+            path: Some("src/main.rs".into()),
+            limit: Some(2),
+            ..RelationshipOptions::default()
+        };
+        for command in [
+            DaemonCommand::Callers(options.clone()),
+            DaemonCommand::Callees(options),
+        ] {
+            let encoded = serde_json::to_value(&command).expect("relationship command");
+            assert!(encoded["request"].get("signal").is_none());
+            assert_eq!(encoded["request"]["symbol"], "Module::run");
+            assert_eq!(encoded["request"]["path"], "src/main.rs");
+            assert_eq!(
+                serde_json::from_value::<DaemonCommand>(encoded).expect("decode command"),
+                command
+            );
+        }
+        let matches = vec![SymbolRelationships {
+            symbol: RelationshipSymbol {
+                name: "Module::run".into(),
+                file_path: "src/main.rs".into(),
+                start_line: 3,
+                end_line: 8,
+            },
+            truncated: true,
+            edges: vec![RelationshipEdge {
+                file_path: "src/caller.rs".into(),
+                symbol: None,
+                line: Some(5),
+                column: Some(0),
+            }],
+        }];
+        let result = zg_engine::api::relationships::RelationshipResult {
+            matches,
+            suggestions: Vec::new(),
+        };
+        for reply in [
+            super::DaemonReply::Callers(result.clone()),
+            super::DaemonReply::Callees(result),
+        ] {
+            let encoded = serde_json::to_value(&reply).expect("relationship reply");
+            assert_eq!(encoded["reply"]["matches"][0]["name"], "Module::run");
+            assert_eq!(encoded["reply"]["matches"][0]["filePath"], "src/main.rs");
+            assert_eq!(encoded["reply"]["matches"][0]["truncated"], true);
+            assert!(encoded["reply"]["matches"][0]["edges"][0]["symbol"].is_null());
+            assert_eq!(
+                encoded["reply"]["matches"][0]["edges"][0]["filePath"],
+                "src/caller.rs"
+            );
+            assert_eq!(
+                serde_json::from_value::<super::DaemonReply>(encoded).expect("decode reply"),
+                reply
+            );
+        }
+    }
 
     #[test]
     fn hello_uses_current_protocol_version() {

@@ -19,10 +19,12 @@ use crate::{
     },
     workspace::{
         layout::find_nearest_workspace,
-        lock::{LockWait, try_home_read},
+        lock::LockWait,
         manifest::{WorkspaceManifest, read_workspace_manifest},
     },
 };
+
+use super::super::read_access::{ReadSource, acquire_read_source};
 
 use super::{
     context::{context_from_index, normalize_context_request},
@@ -73,18 +75,27 @@ pub(crate) async fn context(
     let allows_writer = options.refresh.map_or(!options.auto_update, |policy| {
         policy != crate::api::context::options::RefreshPolicy::Wait
     });
-    let _lock = loop {
-        wait.check_cancelled()?;
-        if allows_writer
-            && let Some(result) =
-                try_writer_context(indexing, models, &location, options, &request).await?
-        {
-            return Ok(result);
+    let _lock = match acquire_read_source(
+        &location.home,
+        &wait,
+        "context",
+        allows_writer.then_some(&indexing.writers),
+        |writer| prepare_writer_context(models, &location.root, options, &request, writer),
+    )
+    .await?
+    {
+        ReadSource::Writer { lease, context } => {
+            return query_storage(
+                &context,
+                &location.root,
+                &lease.session.manifest,
+                &lease.session.storage,
+                options,
+                &request,
+            )
+            .await;
         }
-        if let Some(lock) = try_home_read(&location.home, "context")? {
-            break lock;
-        }
-        wait.retry(&location.home, "context").await?;
+        ReadSource::Read(lock) => lock,
     };
     let mut manifest = read_workspace_manifest(&location.home)?.ok_or_else(|| {
         workspace_index_unavailable(&location.root, "workspace manifest disappeared")
@@ -122,38 +133,20 @@ pub(crate) async fn context(
     Ok(result)
 }
 
-async fn try_writer_context(
-    indexing: &WorkspaceIndexService,
+fn prepare_writer_context(
     models: &ModelRuntimeManager,
-    location: &crate::workspace::layout::WorkspaceIndexLocation,
+    root: &Path,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
-) -> Result<Option<ContextResult>, EngineError> {
-    let Some(active) = read_workspace_manifest(&location.home)? else {
-        return Ok(None);
-    };
-    if !is_indexed(&active) {
-        return Ok(None);
-    }
-    let Some(writer) = indexing
-        .writers
-        .borrow(&location.home, &active.storage_home())
-    else {
-        return Ok(None);
-    };
-    let manifest = &writer.session.manifest;
-    let schema = manifest.embedding().ok_or_else(|| {
-        workspace_index_unavailable(&location.root, "writer model information is missing")
-    })?;
-    let model_request = search_model_request(
-        manifest,
-        schema,
-        options,
-        &location.root,
-        uses_vectors(request),
-    )?;
+    writer: &super::writer::WriterSession,
+) -> Result<Option<Vec<ModelRuntimeLease>>, EngineError> {
+    let manifest = &writer.manifest;
+    let schema = manifest
+        .embedding()
+        .ok_or_else(|| workspace_index_unavailable(root, "writer model information is missing"))?;
+    let model_request =
+        search_model_request(manifest, schema, options, root, uses_vectors(request))?;
     if !writer
-        .session
         .models
         .first()
         .is_some_and(|model| model.matches_query_request(&model_request))
@@ -171,16 +164,7 @@ async fn try_writer_context(
     } else {
         Vec::new()
     };
-    query_storage(
-        &acquired,
-        &location.root,
-        manifest,
-        &writer.session.storage,
-        options,
-        request,
-    )
-    .await
-    .map(Some)
+    Ok(Some(acquired))
 }
 
 fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {

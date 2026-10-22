@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -18,8 +18,8 @@ use super::{
         StorageSearchPath,
     },
     zvec::{
-        corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-        write_docs,
+        collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection, quote, scalar,
+        string_field, u32_field, write_docs,
     },
 };
 use crate::{
@@ -227,6 +227,26 @@ impl Fragments {
         });
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// Collect all matching entities across model tables, independent of fragment count.
+    /// The existing hashed symbol-name projection preserves exact case and literals.
+    pub(super) fn find_symbol_entity_ids(
+        &self,
+        name: &str,
+        path_filter: Option<&str>,
+    ) -> EngineResult<Vec<EntityId>> {
+        let mut filter = metadata_in_filter(CodeMetadata::SYMBOL_NAME, std::iter::once(name));
+        if let Some(path_filter) = path_filter {
+            filter.push_str(" AND (");
+            filter.push_str(path_filter);
+            filter.push(')');
+        }
+        let mut ids = BTreeSet::new();
+        for index in self.indexes.values() {
+            ids.extend(collect_entity_ids(index, &filter)?);
+        }
+        Ok(ids.into_iter().map(EntityId::from_string).collect())
     }
 
     pub(super) fn search_vector(
@@ -592,10 +612,6 @@ pub(super) fn empty_filter(filter: Option<&StorageSearchFilter>) -> bool {
             || filter.symbol_names.as_ref().is_some_and(Vec::is_empty)
             || filter.symbol_types.as_ref().is_some_and(Vec::is_empty)
     })
-}
-
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "\\'"))
 }
 
 fn top_k(limit: usize) -> EngineResult<i32> {

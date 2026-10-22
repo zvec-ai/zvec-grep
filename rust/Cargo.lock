@@ -4096,6 +4096,7 @@ name = "zg"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "rusqlite",
  "rustix",
  "serde_json",
  "tempfile",

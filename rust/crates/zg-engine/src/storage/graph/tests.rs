@@ -1059,3 +1059,55 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
         pending
     );
 }
+
+#[test]
+fn paged_relationship_reads_keep_one_sqlite_snapshot() {
+    let directory = tempfile::tempdir().expect("graph directory");
+    let path = directory.path().join("graph.sqlite");
+    let mut writer = open(&path);
+    let first = edge(GraphEdgeKind::Calls, "a", "b", 1);
+    writer
+        .write_file_graph(1, &graph(&["a", "b"], vec![first.clone()], vec![]), &[])
+        .expect("first snapshot");
+    let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("reader");
+    reader
+        .with_read_snapshot(|reader| {
+            let page = reader
+                .neighborhood_page("a", Direction::Out, None, 0, 1)
+                .expect("first page");
+            assert_eq!(page[0].1, first);
+            writer
+                .write_file_graph(
+                    1,
+                    &graph(
+                        &["a", "b"],
+                        vec![edge(GraphEdgeKind::Calls, "a", "b", 2)],
+                        vec![],
+                    ),
+                    &["a".into(), "b".into()],
+                )
+                .expect("concurrent commit");
+            assert!(
+                reader
+                    .neighborhood_page("a", Direction::Out, None, page[0].0, 1)
+                    .expect("same snapshot")
+                    .is_empty()
+            );
+            assert_eq!(
+                reader
+                    .neighborhood_page("a", Direction::Out, None, 0, 1)
+                    .expect("stable first page")[0]
+                    .1,
+                first
+            );
+        })
+        .expect("read transaction");
+    assert_eq!(
+        reader
+            .neighborhood_page("a", Direction::Out, None, 0, 1)
+            .expect("next snapshot")[0]
+            .1
+            .line,
+        Some(2)
+    );
+}

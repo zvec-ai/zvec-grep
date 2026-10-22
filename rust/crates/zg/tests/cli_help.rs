@@ -42,6 +42,8 @@ fn command_help_and_topic_aliases_are_identical() {
 fn every_documented_help_topic_is_available() {
     for topic in [
         "search",
+        "callers",
+        "callees",
         "index",
         "status",
         "config",
@@ -142,5 +144,16 @@ fn unknown_help_topics_including_old_query_alias_are_user_errors() {
             String::from_utf8(output.stderr).expect("error should be UTF-8"),
             format!("Error: Unknown help topic: {topic}\n")
         );
+    }
+}
+
+#[test]
+fn relationship_help_explains_persisted_edges_and_limit() {
+    for command in ["callers", "callees"] {
+        let help = stdout(&[&format!("--{command}"), "--help"]);
+        assert_eq!(help, stdout(&["--help", command]));
+        assert!(help.contains("--limit <N>"));
+        assert!(help.contains("truncated"));
+        assert!(help.contains("does not refresh or build"));
     }
 }

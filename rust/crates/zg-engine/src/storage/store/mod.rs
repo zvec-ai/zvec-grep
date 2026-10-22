@@ -21,6 +21,7 @@ use super::{
     entities::Entities,
     files::Files,
     fragments::{self, Fragments},
+    graph,
     types::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
@@ -28,6 +29,9 @@ use super::{
     zvec::{corrupt, initialize},
 };
 use crate::domain::model::EmbeddingModelInfo;
+
+mod relationships;
+pub(crate) use relationships::RelationshipReadSession;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -45,6 +49,7 @@ struct StoreState {
     directories: Directories,
     entities: Entities,
     fragments: Fragments,
+    graph_path: PathBuf,
     needs_optimize: bool,
     closed: bool,
 }
@@ -167,6 +172,7 @@ impl IndexStore {
                 directories,
                 entities,
                 fragments,
+                graph_path: home.join("graph/graph.sqlite"),
                 needs_optimize: false,
                 closed: false,
             }),
@@ -686,3 +692,26 @@ mod tests;
 
 #[cfg(test)]
 mod tables_tests;
+
+fn graph_error(error: graph::Error) -> EngineError {
+    match error {
+        graph::Error::InvalidInput(message) => EngineError::invalid_argument(message),
+        error => EngineError::storage_failure(format!("workspace graph operation failed: {error}")),
+    }
+}
+
+#[cfg(test)]
+impl IndexStore {
+    pub(crate) fn set_test_file_status(
+        &self,
+        id: FileId,
+        status: FileIndexStatus,
+    ) -> EngineResult<()> {
+        self.write(|state| {
+            let mut file = state.files.fetch(&[id])?.remove(&id).expect("fixture file");
+            file.set_index_status(status)?;
+            let directories = state.directories.ensure(file.relative_path())?;
+            state.files.put(&file, &directories)
+        })
+    }
+}

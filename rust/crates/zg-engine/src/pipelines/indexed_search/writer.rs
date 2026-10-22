@@ -73,16 +73,13 @@ impl WriterContexts {
         }
     }
 
-    pub(crate) fn borrow(&self, home: &Path, storage_home: &Path) -> Option<WriterLease> {
+    /// The caller must validate the published generation before using this lease.
+    pub(crate) fn borrow_candidate(&self, home: &Path) -> Option<WriterLease> {
         let entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session = entries.get(home)?.upgrade()?;
-        // Never expose a rebuild's unpublished generation or a different index.
-        if session.manifest.storage_home() != storage_home {
-            return None;
-        }
         session.active.fetch_add(1, Ordering::AcqRel);
         Some(WriterLease { session })
     }

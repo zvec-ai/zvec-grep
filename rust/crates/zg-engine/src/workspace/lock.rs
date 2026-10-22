@@ -8,7 +8,7 @@ use std::{
 use crate::EngineError;
 
 mod wait;
-pub(crate) use wait::{LockWait, try_home_read};
+pub(crate) use wait::{HomeReadProbe, LockWait};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LockMode {

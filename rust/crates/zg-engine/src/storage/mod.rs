@@ -3,7 +3,7 @@ mod directories;
 mod entities;
 mod files;
 mod fragments;
-// Graph persistence is exercised in tests; indexing integration follows separately.
+// Relationship queries read existing graphs; indexing integration is separate.
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 pub(crate) mod graph;
 mod path;
@@ -13,4 +13,7 @@ mod store;
 pub(crate) mod types;
 mod zvec;
 
-pub(crate) use store::IndexStore;
+pub(crate) use store::{IndexStore, RelationshipReadSession};
+
+#[cfg(test)]
+pub(crate) mod test_support;

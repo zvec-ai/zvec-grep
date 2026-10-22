@@ -212,6 +212,21 @@ handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exa
 `requestState` and unchanged tool arguments with `inputResponses.index_setup`;
 each model selection or remote authorization round issues a new, single-use state.
 
+`zg --callers <symbol> [root]` and `zg --callees <symbol> [root]` query an existing
+workspace graph. CLI `--path` selects a file or directory relative to the current
+working directory (absolute paths within the workspace also work); MCP/API `path`
+remains workspace-relative. Use `--limit N` to cap call sites per matching definition and
+`--mode direct|server|auto` to select execution. Scope-qualified names such as
+`Class::method` are supported. Same-name definitions remain separate, and repeated
+call sites retain their locations; `truncated` indicates additional visible call
+sites beyond the per-symbol limit. Edges are read in pages until enough visible
+call sites are found; queries do not compute an exact total.
+Each edge has a caller `filePath` independently of its optional `symbol` metadata.
+Both MCP toolsets expose `callers` and `callees` with an absolute `root`, `symbol`,
+and optional `limit`. These queries do not load models or refresh the index.
+Graph extraction and resolution must have populated the index for call edges to
+be available; unresolved references are excluded from results.
+
 This version indexes text and code with one embedding model per workspace. Choose
 it with `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use
