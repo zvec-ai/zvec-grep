@@ -238,9 +238,10 @@ mod tests {
         let long_path = format!(r"\\?\C:\{}", "a".repeat(270));
         for (input, expected) in [
             (r"\\?\C:\workspace".to_owned(), r"C:\workspace".to_owned()),
+            // The shared display helper preserves verbatim UNC paths.
             (
                 r"\\?\UNC\server\share\workspace".to_owned(),
-                r"\\server\share\workspace".to_owned(),
+                r"\\?\UNC\server\share\workspace".to_owned(),
             ),
             (
                 r"\\?\C:\workspace.".to_owned(),
