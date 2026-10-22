@@ -59,7 +59,6 @@ impl Fixture {
         let root = self.home.parent().expect("workspace root");
         let mut manifest = WorkspaceManifest::new(
             Workspace {
-                name: "cache-fixture".into(),
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
                 index: IndexState::Enabled(Box::new(
@@ -408,7 +407,7 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
 #[tokio::test]
 async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::with_test_registry();
+    let indexing = WorkspaceIndexService::new();
     let models = ModelRuntimeManager::new();
     let cache = cache();
     let (mut manifest, options) = fixture.publish();
@@ -461,7 +460,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
 async fn benchmark_warm_queries() {
     let fixture = Fixture::new();
     let (_, options) = fixture.publish();
-    let indexing = WorkspaceIndexService::with_test_registry();
+    let indexing = WorkspaceIndexService::new();
     let models = ModelRuntimeManager::new();
     let cache = cache();
     for (name, selected_cache) in [("uncached", None), ("resident", Some(&cache))] {

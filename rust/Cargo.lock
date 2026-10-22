@@ -4166,7 +4166,6 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
- "uuid",
  "zg-engine",
 ]
 
@@ -4282,21 +4281,21 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zvec-rust"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "572509c7f611c4d8c278919273c586028ebb1d718ed2a64cf0f9407026be14e6"
+checksum = "7ec11541f1f506b528060104d7951b0c4341a5edd98d61e67f28165c19ce707c"
 dependencies = [
  "zvec-rust-sys",
 ]
 
 [[package]]
 name = "zvec-rust-build"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02e865fae2b82eb84027fee4fafc750e7d9ebefe785192c409f3951338668b54"
+checksum = "4d46d4af74a8a8b8184734e9bd9d81963ccf37e377ae27e7e3d83f8e3d4d83b5"
 
 [[package]]
 name = "zvec-rust-sys"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5a02fdececf3b1472013909d7aad6045b1b39b9708a12e2662e54dcac3aeacd"
+checksum = "dfd2c31dcadd477a0f6f68865c06f49fd425b26cb04477861abf865461ddb048"

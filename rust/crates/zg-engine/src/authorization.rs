@@ -1078,7 +1078,6 @@ mod tests {
         let home = directory.path().join(".zvec-grep");
         let mut active = WorkspaceManifest::new(
             Workspace {
-                name: "workspace".to_owned(),
                 root: directory.path().to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
                 index: IndexState::Enabled(Box::new(

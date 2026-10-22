@@ -46,11 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Workspaces
 
-A workspace is a directory of files that zg indexes and searches as a unit. Each workspace has its own name, scanning rules, model settings, and index.
+A workspace is a directory of files that zg indexes and searches as a unit. Each workspace is identified by its canonical root path and has its own scanning rules, model settings, and index.
 
 ### Index storage
 
-Workspace indexes and saved settings use a configurable storage location, defaulting to a `.zvec-grep` directory within the workspace. Downloaded models are cached separately and shared across workspaces.
+Workspace indexes and saved settings use a configurable storage location, defaulting to a `.zvec-grep` directory within the workspace. Downloaded models are cached separately and shared across workspaces. Moving or copying the source root together with `.zvec-grep` preserves the index.
 
 ### File selection
 
@@ -78,6 +78,6 @@ Each workspace uses an embedding model for semantic search. Local models run on 
 | [Extraction](src/extraction/mod.rs) and [lexical search](src/lexical/mod.rs) | Source-preserving extraction and direct ripgrep search. |
 | [Pipelines](src/pipelines/README.md) | Indexing, indexed retrieval, and direct search; [ranking](src/pipelines/indexed_search/ranking/README.md) combines retrieval evidence. |
 | [Models](src/models/mod.rs) | Model catalogs, embedding backends, downloads, and reusable runtimes. |
-| [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; manifests, names, locks, and publication. |
+| [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; manifests, root paths, locks, and publication. |
 | [Authorization](src/authorization.rs) and [config](src/config.rs) | Remote-service consent and configuration resolution. |
 | [Errors](src/error.rs) and [utilities](src/utils/mod.rs) | Diagnostics and shared text, encoding, hashing, and filesystem helpers. |

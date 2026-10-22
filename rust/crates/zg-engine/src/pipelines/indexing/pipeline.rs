@@ -2972,7 +2972,6 @@ mod tests {
 
     fn workspace(root: &Path) -> Workspace {
         Workspace {
-            name: "fixture".to_owned(),
             root: root.to_path_buf(),
             scan: crate::domain::ScanRules::default(),
             index: crate::domain::IndexState::Enabled(Box::new(

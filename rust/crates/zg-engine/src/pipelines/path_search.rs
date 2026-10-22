@@ -311,7 +311,6 @@ mod tests {
         let home = root.join(".zvec-grep");
         let manifest = WorkspaceManifest::new(
             Workspace {
-                name: "paths".to_owned(),
                 root,
                 scan,
                 index: IndexState::Uninitialized,

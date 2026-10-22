@@ -749,12 +749,12 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
             .workspace_index
             .as_ref()
             .expect("rebuilt workspace")
-            .name,
+            .root,
         before_rebuild
             .workspace_index
             .as_ref()
             .expect("original workspace")
-            .name,
+            .root,
     );
     assert_ne!(after_rebuild.index_path, before_rebuild.index_path);
     assert!(after_rebuild.index_path.is_dir());

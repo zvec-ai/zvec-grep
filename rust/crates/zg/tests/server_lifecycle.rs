@@ -1,5 +1,7 @@
 #[path = "server_lifecycle/mcp_parity.rs"]
 mod mcp_parity;
+#[path = "server_lifecycle/workspaces.rs"]
+mod workspaces;
 
 #[path = "server_lifecycle/positional_queries.rs"]
 mod positional_queries;
@@ -1097,10 +1099,6 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let indexed = Command::new(&binary)
         .current_dir(workspace.path())
         .env("ZVEC_GREP_HOME", home.path())
-        .env(
-            "ZVEC_GREP_WORKSPACE_REGISTRY",
-            home.path().join("workspaces.json"),
-        )
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
             "--index",
@@ -1135,11 +1133,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let (mut guard, _) = start_server(&binary, &home, toolset, None, |command| {
         command
             .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
-            .env("ZVEC_GREP_API_KEY", "local-test-key")
-            .env(
-                "ZVEC_GREP_WORKSPACE_REGISTRY",
-                home.path().join("workspaces.json"),
-            );
+            .env("ZVEC_GREP_API_KEY", "local-test-key");
     })?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     let response = post_json(
@@ -1312,10 +1306,7 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Exercise update, rebuild and drop in one resident daemon lifecycle"
-)]
+// Exercise update, rebuild and drop in one resident daemon lifecycle.
 fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
@@ -1328,10 +1319,6 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         command
             .current_dir(workspace.path())
             .env("ZVEC_GREP_HOME", home.path())
-            .env(
-                "ZVEC_GREP_WORKSPACE_REGISTRY",
-                home.path().join("workspaces.json"),
-            )
             .env("ZVEC_GREP_API_KEY", "local-test-key")
             .args(["--index", "--mode", "direct"])
             .args(extra);
@@ -1349,12 +1336,7 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
     ])?);
     // CLI writers are separate processes, not children of the native cache owner.
     // This also avoids inheriting the native library's open lock descriptors.
-    let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
-        command.env(
-            "ZVEC_GREP_WORKSPACE_REGISTRY",
-            home.path().join("workspaces.json"),
-        );
-    })?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     let initialize = json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1440,11 +1422,9 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
     // Exceed the configured model's input budget while keeping only two source lines.
     let source = format!("# Heading\n{} linenumberprobe\n", "x".repeat(20_000));
     std::fs::write(workspace.path().join("sample.md"), source)?;
-    let registry = home.path().join("workspaces.json");
     let index = Command::new(&binary)
         .current_dir(workspace.path())
         .env("ZVEC_GREP_HOME", home.path())
-        .env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry)
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
             "--index",
@@ -1458,9 +1438,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         .arg(format!("http://{}/embeddings", embedding.address))
         .output()?;
     assert_command_success(&index);
-    let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
-        command.env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry);
-    })?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
     let mut bridge = StdioBridge::spawn(&binary, home.path(), &guard.listen)?;
     bridge.request(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1476,7 +1454,6 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
             let reply = Command::new(&binary)
                 .current_dir(workspace.path())
                 .env("ZVEC_GREP_HOME", home.path())
-                .env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry)
                 .args([
                     "--mode",
                     mode,
@@ -1635,10 +1612,6 @@ fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn 
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("ZVEC_GREP_HOME", home.path())
-            .env(
-                "ZVEC_GREP_WORKSPACE_REGISTRY",
-                home.path().join("workspaces.json"),
-            )
             .env_remove("DASHSCOPE_API_KEY")
             .env_remove("QWEN_API_KEY");
     };

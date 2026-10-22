@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
-uuid.workspace = true
 zg-engine = { path = "../zg-engine" }
 
 [dev-dependencies]

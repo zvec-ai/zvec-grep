@@ -814,8 +814,6 @@ pub struct IndexInput {
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
-    /// Set or rename the unique workspace name; new workspaces default to the root directory name.
-    pub name: Option<String>,
     /// One-request embedding provider API key override.
     #[schemars(length(min = 1, max = 8192))]
     pub api_key: Option<String>,
@@ -1128,8 +1126,7 @@ struct PersistentIndexStatusOutput {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct WorkspaceIndexOutput {
-    id: String,
-    name: String,
+    root: String,
     path: String,
     root_paths: Vec<RootSpecOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1700,7 +1697,6 @@ impl IndexInput {
         Ok(IndexToolRequest::Index {
             options: Box::new(IndexOptions {
                 root: Some(root),
-                name: self.name,
                 rebuild: self.rebuild.unwrap_or(false),
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
@@ -1717,8 +1713,7 @@ impl IndexInput {
     }
 
     fn has_index_options(&self) -> bool {
-        self.name.is_some()
-            || self.api_key.is_some()
+        self.api_key.is_some()
             || self.device.is_some()
             || self.endpoint.is_some()
             || self.embedding.is_some()
@@ -2127,8 +2122,7 @@ impl From<InfoResult> for IndexStatusOutput {
     fn from(reply: InfoResult) -> Self {
         let status = reply.index_status().as_str().to_owned();
         let workspace_index = reply.workspace_index.map(|info| WorkspaceIndexOutput {
-            id: info.name.clone(),
-            name: info.name,
+            root: output_path(&info.root).display().to_string(),
             path: output_path(&info.path).display().to_string(),
             root_paths: vec![RootSpecOutput::new(&info.root, &info.scan)],
             embedding: info.embedding.map(|embedding| IndexedEmbeddingOutput {
@@ -2573,7 +2567,6 @@ mod tests {
             index_policy: super::WorkspaceIndexPolicy::Enabled,
             source: super::InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
-                name: "search-engine".to_owned(),
                 path: root.join(".zvec-grep"),
                 root,
                 scan: super::ScanRules::default(),
@@ -2603,13 +2596,14 @@ mod tests {
             serde_json::json!({"status": "compatible", "version": 2})
         );
         let workspace = &output["persistent"]["workspace_index"];
-        assert_eq!(workspace["name"], "search-engine");
+        assert!(workspace.get("name").is_none());
+        assert_eq!(workspace["root"], test_root().display().to_string());
         assert_eq!(workspace["fts"]["tokenizer"], "jieba");
         assert_eq!(
             workspace["fts"]["filters"],
             serde_json::json!(["lowercase"])
         );
-        assert_eq!(workspace["id"], "search-engine");
+        assert!(workspace.get("id").is_none());
         assert!(workspace.get("embeddings").is_none());
         assert!(workspace.get("embedding_routes").is_none());
         assert_eq!(files["entities"], count);
@@ -2626,7 +2620,7 @@ mod tests {
         let workspace_schema =
             serde_json::to_value(schemars::schema_for!(super::WorkspaceIndexOutput))
                 .expect("workspace schema");
-        assert_eq!(workspace_schema["properties"]["id"]["type"], "string");
+        assert_eq!(workspace_schema["properties"]["root"]["type"], "string");
     }
 
     #[test]
@@ -2739,6 +2733,8 @@ mod tests {
 
     #[test]
     fn index_paths_match_in_text_and_structured_outputs() {
+        use zg_engine::api::info::result::WorkspaceIndexInfo;
+
         for (input, expected) in [
             (r"\\?\C:\workspace", r"C:\workspace"),
             (r"\\?\C:\workspace.", r"\\?\C:\workspace."),
@@ -2760,14 +2756,24 @@ mod tests {
             );
             let status = super::info_result_to_tool_result(
                 super::InfoResult {
-                    root,
+                    root: root.clone(),
                     index_path: home.join("index"),
-                    home,
-                    indexed: false,
-                    compatibility: super::IndexCompatibility::Unbuilt,
-                    index_policy: super::WorkspaceIndexPolicy::Uninitialized,
-                    source: super::InfoSource::Unindexed,
-                    workspace_index: None,
+                    home: home.clone(),
+                    indexed: true,
+                    compatibility: super::IndexCompatibility::Compatible { version: 2 },
+                    index_policy: super::WorkspaceIndexPolicy::Enabled,
+                    source: super::InfoSource::Index,
+                    workspace_index: Some(WorkspaceIndexInfo {
+                        root,
+                        path: home,
+                        scan: super::ScanRules::default(),
+                        policy: super::WorkspaceIndexPolicy::Enabled,
+                        embedding: None,
+                        fts: None,
+                        index_version: Some(2),
+                        created_epoch_ms: 1,
+                        updated_epoch_ms: 2,
+                    }),
                     status: None,
                     suggestion: None,
                 },
@@ -2798,6 +2804,12 @@ mod tests {
                 status["persistent"]["index_path"],
                 expected_home.join("index").display().to_string(),
             );
+            let workspace = &status["persistent"]["workspace_index"];
+            assert_eq!(workspace["root"], expected);
+            assert_eq!(workspace["path"], expected_home.display().to_string());
+            assert_eq!(workspace["root_paths"][0]["absolute_path"], expected);
+            assert!(workspace.get("id").is_none());
+            assert!(workspace.get("name").is_none());
         }
     }
 
@@ -3406,7 +3418,6 @@ mod tests {
             request.scan.globs.as_ref().expect("valid test fixture")[0].pattern,
             "*.rs"
         );
-        assert_eq!(request.name.as_deref(), Some("search-engine"));
         assert_eq!(
             request
                 .embedding
@@ -3417,34 +3428,22 @@ mod tests {
     }
 
     #[test]
-    fn index_name_is_optional_and_cannot_be_used_with_drop() {
-        let input: IndexInput = serde_json::from_value(serde_json::json!({
-            "root": test_root(),
-        }))
-        .expect("index input allows an omitted name");
+    fn index_is_addressed_by_root_and_rejects_obsolete_names() {
+        let input: IndexInput =
+            serde_json::from_value(serde_json::json!({"root": test_root()})).expect("root input");
         let IndexToolRequest::Index { options, .. } = input.into_request().expect("index input")
         else {
             panic!("index request");
         };
-        assert!(options.name.is_none());
-
-        let input: IndexInput = serde_json::from_value(serde_json::json!({
-            "root": test_root(),
-            "name": "search-engine",
-            "drop": true,
-        }))
-        .expect("drop input");
-        assert!(input.into_request().is_err());
-
-        let schema = serde_json::to_value(schemars::schema_for!(IndexInput)).expect("index schema");
-        assert!(schema["properties"].get("name").is_some());
+        assert_eq!(options.root, Some(test_root()));
         assert!(
-            !schema["required"]
-                .as_array()
-                .expect("required properties")
-                .iter()
-                .any(|field| field == "name")
+            serde_json::from_value::<IndexInput>(serde_json::json!({
+                "root": test_root(), "name": "docs"
+            }))
+            .is_err()
         );
+        let schema = serde_json::to_value(schemars::schema_for!(IndexInput)).expect("index schema");
+        assert!(schema["properties"].get("name").is_none());
     }
 
     #[cfg(windows)]
@@ -3532,7 +3531,6 @@ mod tests {
     fn index_input() -> IndexInput {
         IndexInput {
             root: test_root().display().to_string(),
-            name: Some("search-engine".to_owned()),
             api_key: None,
             device: None,
             endpoint: None,

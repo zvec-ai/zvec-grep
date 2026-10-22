@@ -18,10 +18,6 @@ pub mod options {
     #[serde(deny_unknown_fields)]
     #[allow(clippy::struct_excessive_bools)]
     pub struct IndexOptions {
-        /// Unique workspace name. Defaults to the root directory name on creation;
-        /// supplying a different name explicitly renames an existing workspace.
-        #[serde(default)]
-        pub name: Option<String>,
         /// Workspace whose index is being updated. `None` uses the working directory.
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.

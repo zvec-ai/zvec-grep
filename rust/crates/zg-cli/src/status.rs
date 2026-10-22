@@ -389,7 +389,6 @@ mod tests {
             index_path: "/workspace/.zvec-grep/storage".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
-                name: "workspace".into(),
                 path: "/workspace/.zvec-grep".into(),
                 root: "/workspace".into(),
                 scan: ScanRules::default(),

@@ -24,12 +24,14 @@ pub(crate) struct WorkspaceBuild {
     previous_manifest: Option<Vec<u8>>,
 }
 
-/// Recovery needs ownership and registration only, never an index schema.
+/// Recovery needs the generation and local workspace metadata, never an index schema.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BuildRecord {
     generation: String,
-    name: String,
+    // Old build records may contain a name; only the root identifies the workspace.
+    #[serde(default, rename = "name", skip_serializing)]
+    _legacy_name: serde::de::IgnoredAny,
     root: PathBuf,
 }
 
@@ -40,7 +42,7 @@ impl BuildRecord {
                 "invalid workspace build ownership record",
             ));
         }
-        crate::domain::Workspace::validate_name(&self.name)
+        Ok(())
     }
 }
 
@@ -201,16 +203,6 @@ fn cleanup_generations(
     Ok(())
 }
 
-pub(crate) fn read_build_registration(
-    home: &Path,
-) -> Result<Option<(String, PathBuf)>, EngineError> {
-    read_optional(&home.join(BUILD_FILE))?
-        .as_deref()
-        .map(decode_build)
-        .transpose()
-        .map(|build| build.map(|build| (build.name, build.root)))
-}
-
 fn decode_build(bytes: &[u8]) -> Result<BuildRecord, EngineError> {
     let build: BuildRecord = serde_json::from_slice(bytes).map_err(|error| {
         EngineError::storage_failure(format!("invalid workspace build record: {error}"))
@@ -256,7 +248,7 @@ fn write_build(build: &WorkspaceBuild) -> Result<(), EngineError> {
         .ok_or_else(|| EngineError::storage_failure("workspace build requires a generation"))?;
     let record = BuildRecord {
         generation,
-        name: build.target.workspace.name.clone(),
+        _legacy_name: serde::de::IgnoredAny,
         root: build.target.workspace.root.clone(),
     };
     record.validate()?;
@@ -352,7 +344,6 @@ mod tests {
     fn manifest(root: &Path) -> WorkspaceManifest {
         let mut manifest = WorkspaceManifest::new(
             Workspace {
-                name: "workspace".to_owned(),
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
                 index: IndexState::Enabled(Box::new(
@@ -455,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_cleanup_failure_keeps_new_active_and_recovers_after_rename() {
+    fn publication_cleanup_failure_keeps_new_active_and_recovers_after_metadata_update() {
         let directory = tempdir().expect("workspace");
         let active = manifest(directory.path());
         write_active(&active);
@@ -471,15 +462,15 @@ mod tests {
             build.target.storage_generation
         );
         assert_eq!(committed.workspace.updated_epoch_ms, 3);
-        assert_eq!(committed.workspace.name, active.workspace.name);
         assert_eq!(
             committed.workspace.created_epoch_ms,
             active.workspace.created_epoch_ms
         );
         assert!(active.storage_home().exists());
         assert!(has_build(&active.path));
-        committed.workspace.name = "renamed".to_owned();
-        write_workspace_manifest(&active.path, &committed).expect("rename after publication");
+        committed.workspace.updated_epoch_ms = 4;
+        write_workspace_manifest(&active.path, &committed)
+            .expect("metadata update after publication");
         recover_build(&active.path).expect("complete cleanup");
         assert!(!active.storage_home().exists());
         assert!(committed.storage_home().join("storage").is_dir());
@@ -519,6 +510,16 @@ mod tests {
         let active = manifest(&original);
         write_active(&active);
         let build = prepare_build(active.clone()).expect("stage");
+        let record_path = active.path.join(BUILD_FILE);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("JSON");
+        assert!(record.get("name").is_none());
+        record["name"] = serde_json::json!("legacy-workspace");
+        fs::write(
+            &record_path,
+            serde_json::to_vec(&record).expect("legacy JSON"),
+        )
+        .expect("legacy build");
         let moved = directory.path().join("moved");
         fs::rename(original, &moved).expect("move");
         let home = moved.join(".zvec-grep");
@@ -527,10 +528,6 @@ mod tests {
         assert_eq!(
             Some(&pending.generation),
             build.target.storage_generation.as_ref()
-        );
-        assert_eq!(
-            read_build_registration(&home).expect("registration"),
-            Some((active.workspace.name.clone(), active.workspace.root.clone()))
         );
         let pending_home = home.join("generations").join(&pending.generation);
         assert!(pending_home.is_dir());

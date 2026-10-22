@@ -183,10 +183,6 @@ impl IndexJobScheduler {
         mut options: IndexOptions,
         reason: JobReason,
     ) -> Result<SubmitIndexJobResult, SchedulerError> {
-        // Naming is an explicit caller mutation, never a background refresh setting.
-        if reason == JobReason::Watch {
-            options.name = None;
-        }
         // Changing the saved corpus can affect paths outside a narrow watcher batch.
         if has_selection_update(&options) {
             options.changes.clear();
@@ -205,7 +201,6 @@ impl IndexJobScheduler {
             let needs_followup = reason == JobReason::Watch
                 || active_snapshot.reason == JobReason::Watch
                 || options.rebuild
-                || options.name.is_some()
                 || has_selection_update(&options);
             if needs_followup && active_snapshot.state == JobState::Queued {
                 let queued_full_manual = active_snapshot.reason == JobReason::Manual
@@ -640,8 +635,6 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
         incoming.scan.max_file_size_bytes.take(),
     );
     merge_runtime_options(current, &mut incoming);
-    // An omitted name leaves a pending explicit rename intact.
-    merge_update(&mut current.name, incoming.name.take());
     if full_scan {
         current.changes.clear();
         return;
@@ -1129,7 +1122,12 @@ mod tests {
     #[async_trait]
     impl IndexExecutor for ImmediateExecutor {
         async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError> {
-            match options.name.as_deref() {
+            match options
+                .root
+                .as_deref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+            {
                 Some("failed") => Err(EngineError::internal("fixture failure")),
                 Some("cancelled") => Err(EngineError::cancelled("fixture cancellation")),
                 _ => Ok(IndexResult::default()),
@@ -1172,17 +1170,17 @@ mod tests {
             IndexJobScheduler::new(Arc::new(ImmediateExecutor), SchedulerConfig::default());
         let mut completed = Vec::new();
         for index in 0..300 {
-            let root = PathBuf::from(format!("/workspace-{index}"));
             let (name, expected) = match index % 3 {
                 0 => ("succeeded", JobState::Succeeded),
                 1 => ("failed", JobState::Failed),
                 _ => ("cancelled", JobState::Cancelled),
             };
+            let root = PathBuf::from(format!("/workspace-{index}/{name}"));
             let job = scheduler
                 .submit(
                     root.clone(),
                     IndexOptions {
-                        name: Some(name.into()),
+                        root: Some(root.clone()),
                         ..IndexOptions::default()
                     },
                     JobReason::Manual,
@@ -1628,7 +1626,6 @@ mod tests {
                 root.clone(),
                 IndexOptions {
                     root: Some(root.clone()),
-                    name: Some("stale-workspace-name".into()),
                     changes: vec![zg_engine::api::index::options::WorkspaceChange::Upsert(
                         PathBuf::from("src/lib.rs"),
                     )],
@@ -1642,7 +1639,6 @@ mod tests {
                 root.clone(),
                 IndexOptions {
                     root: Some(root.clone()),
-                    name: Some("another-stale-name".into()),
                     changes: vec![zg_engine::api::index::options::WorkspaceChange::Delete(
                         PathBuf::from("src/lib.rs"),
                     )],
@@ -1665,7 +1661,6 @@ mod tests {
         assert_eq!(completed.job.state, JobState::Succeeded);
         let calls = executor.calls.lock().expect("calls should be readable");
         assert_eq!(calls.len(), 2);
-        assert!(calls[1].name.is_none());
         assert_eq!(
             calls[1].changes,
             [zg_engine::api::index::options::WorkspaceChange::Delete(
@@ -2086,88 +2081,6 @@ mod tests {
         assert_eq!(update.scan.globs, Some(Vec::new()));
         assert_eq!(update.scan.follow_symlinks, Some(false));
         assert_eq!(update.scan.max_depth, Some(None));
-    }
-
-    #[tokio::test]
-    async fn explicit_names_reach_the_executor_after_queued_or_running_manual_jobs() {
-        for (queued, narrow) in [(false, false), (false, true), (true, false), (true, true)] {
-            let executor = Arc::new(RecordingExecutor {
-                calls: Mutex::new(Vec::new()),
-                started: Notify::new(),
-                releases: tokio::sync::Semaphore::new(0),
-            });
-            let scheduler = IndexJobScheduler::new(
-                executor.clone(),
-                SchedulerConfig {
-                    concurrency: 1,
-                    queue_capacity: 8,
-                },
-            );
-            if queued {
-                scheduler
-                    .submit(
-                        PathBuf::from("/blocker"),
-                        IndexOptions::default(),
-                        JobReason::Manual,
-                    )
-                    .expect("occupy the worker");
-                executor.started.notified().await;
-            }
-            let root = PathBuf::from("/workspace");
-            let first = scheduler
-                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
-                .expect("initial manual index");
-            if !queued {
-                executor.started.notified().await;
-            }
-            let renamed = scheduler
-                .submit(
-                    root.clone(),
-                    IndexOptions {
-                        root: Some(root.clone()),
-                        name: Some("renamed-workspace".into()),
-                        changes: if narrow {
-                            vec![WorkspaceChange::Upsert("file.rs".into())]
-                        } else {
-                            Vec::new()
-                        },
-                        ..IndexOptions::default()
-                    },
-                    JobReason::Manual,
-                )
-                .expect("explicit rename");
-            assert_eq!(renamed.job.id == first.job.id, queued);
-            let refresh = scheduler
-                .submit(root, IndexOptions::default(), JobReason::Watch)
-                .expect("full background refresh merges with the pending rename");
-            assert_eq!(refresh.job.id, renamed.job.id);
-
-            executor.releases.add_permits(1);
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                executor.started.notified(),
-            )
-            .await
-            .expect("explicit rename must reach the executor");
-            executor.releases.add_permits(1);
-            let completed = scheduler
-                .wait(renamed.job.id)
-                .await
-                .expect("rename completes");
-            assert_eq!(completed.job.state, JobState::Succeeded);
-            assert_eq!(
-                executor
-                    .calls
-                    .lock()
-                    .expect("recorded requests")
-                    .last()
-                    .expect("rename was executed")
-                    .name
-                    .as_deref(),
-                Some("renamed-workspace")
-            );
-            scheduler.shutdown().await;
-        }
     }
 
     #[tokio::test]

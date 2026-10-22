@@ -31,7 +31,7 @@ use crate::{
         CURRENT_INDEX_VERSION,
         build::{
             WorkspaceBuild, discard_build, has_build, has_generation_storage, prepare_build,
-            publish_build, read_build_registration, recover_build, recover_build_for_rebuild,
+            publish_build, recover_build, recover_build_for_rebuild,
         },
         layout::{
             WorkspaceIndexLocation, find_nearest_workspace, reset_workspace_index,
@@ -42,7 +42,6 @@ use crate::{
             ManifestState, WorkspaceManifest, inspect_workspace_manifest, read_workspace_manifest,
             write_workspace_manifest,
         },
-        registry::WorkspaceRegistry,
     },
 };
 
@@ -56,9 +55,6 @@ const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 pub(crate) struct WorkspaceIndexService {
     pub(crate) writers: crate::pipelines::indexed_search::writer::WriterContexts,
     scanner: NativeScanner,
-    registry: Option<WorkspaceRegistry>,
-    #[cfg(test)]
-    _registry_directory: Option<Arc<tempfile::TempDir>>,
     #[cfg(test)]
     fail_index_completion: bool,
 }
@@ -68,87 +64,9 @@ impl WorkspaceIndexService {
         Self {
             writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
             scanner: NativeScanner::default(),
-            registry: None,
-            #[cfg(test)]
-            _registry_directory: None,
             #[cfg(test)]
             fail_index_completion: false,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_test_registry() -> Self {
-        let directory = Arc::new(tempfile::tempdir().expect("test workspace registry"));
-        Self {
-            writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
-            scanner: NativeScanner::default(),
-            registry: Some(
-                WorkspaceRegistry::at(directory.path().join("workspaces.json"))
-                    .expect("registry path"),
-            ),
-            _registry_directory: Some(directory),
-            fail_index_completion: false,
-        }
-    }
-
-    fn registry(&self) -> Result<WorkspaceRegistry, EngineError> {
-        self.registry
-            .clone()
-            .map_or_else(WorkspaceRegistry::global, Ok)
-    }
-
-    /// A registry rename is authoritative; replay it into metadata after a crash.
-    pub(in crate::pipelines) fn reconcile_name(
-        &self,
-        manifest: &mut WorkspaceManifest,
-    ) -> Result<(), EngineError> {
-        let registry = self.registry()?;
-        if let Some(name) = registry.name_for_root(&manifest.workspace.root)? {
-            manifest.workspace.name = name;
-        } else if let Some((name, _)) = moved_registration(&registry, manifest)? {
-            manifest.workspace.name = name;
-        } else if let Some(previous) = registry.root_for_name(&manifest.workspace.name)? {
-            return Err(EngineError::invalid_argument(format!(
-                "workspace name '{}' is already registered at {}; use zg --index --name to choose another name",
-                manifest.workspace.name,
-                previous.display()
-            )));
-        }
-        Ok(())
-    }
-
-    fn register_name(
-        &self,
-        root: &Path,
-        existing: Option<&WorkspaceManifest>,
-        abandoned: Option<&(String, PathBuf)>,
-        requested: Option<&str>,
-    ) -> Result<String, EngineError> {
-        let registry = self.registry()?;
-        let requested = requested.map(str::to_owned);
-        if let Some(current) = registry.name_for_root(root)? {
-            let name = requested.unwrap_or_else(|| current.clone());
-            registry.rename(&current, &name, root)?;
-            return Ok(name);
-        }
-        let registration = existing
-            .map(|manifest| (&manifest.workspace.name, &manifest.recorded_root))
-            .or_else(|| abandoned.map(|(name, root)| (name, root)));
-        if let Some((name, previous_root)) = registration
-            && let Some((previous_name, previous_root)) =
-                moved_registration_for(&registry, name, previous_root, root)?
-        {
-            registry.relocate(&previous_name, &previous_root, root)?;
-            let name = requested.unwrap_or_else(|| previous_name.clone());
-            registry.rename(&previous_name, &name, root)?;
-            return Ok(name);
-        }
-        let name = requested
-            .or_else(|| existing.map(|manifest| manifest.workspace.name.clone()))
-            .or_else(|| abandoned.map(|(name, _)| name.clone()))
-            .unwrap_or_else(|| workspace_name(root));
-        registry.register(&name, root)?;
-        Ok(name)
     }
 
     pub(crate) async fn index(
@@ -156,9 +74,6 @@ impl WorkspaceIndexService {
         models: &ModelRuntimeManager,
         mut options: IndexOptions,
     ) -> Result<IndexResult, EngineError> {
-        if let Some(name) = options.name.as_deref() {
-            Workspace::validate_name(name)?;
-        }
         normalize_model_paths(&mut options)?;
         let requested_root = resolve_root(options.root.as_deref())?;
         validate_workspace_root(&requested_root)?;
@@ -177,33 +92,16 @@ impl WorkspaceIndexService {
                 )
                 .await?,
         );
-        // Check the on-disk version before any registry, recovery or storage mutation.
-        let mut existing =
+        // Check the on-disk version before any recovery or storage mutation.
+        let existing =
             inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
-        // Validate selection before registry, recovery, storage, or model mutations.
+        // Validate selection before recovery, storage, or model mutations.
         let scan = resolve_scan(existing.as_ref(), &options)?;
         crate::file_selection::ScanPolicy::new(&location.root, &scan)?;
-        let abandoned = match read_build_registration(&location.home) {
-            Ok(registration) => registration,
-            Err(_) if options.rebuild => None,
-            Err(error) => return Err(error),
-        };
-        // Retain only workspace naming/relocation information from a crashed
-        // first build. Its model settings and computed data are never reused.
-        let name = self.register_name(
-            &location.root,
-            existing.as_ref(),
-            abandoned.as_ref(),
-            options.name.as_deref(),
-        )?;
         if options.rebuild {
             recover_build_for_rebuild(&location.home)?;
         } else {
             recover_build(&location.home)?;
-        }
-        options.name = Some(name.clone());
-        if let Some(active) = &mut existing {
-            active.workspace.name = name;
         }
         let rebuilding = options.rebuild || !existing.as_ref().is_some_and(is_indexed);
         if options.reset_paths
@@ -398,7 +296,7 @@ impl WorkspaceIndexService {
         let _lock = LockWait::new(None, None)?
             .acquire(&location.home, LockMode::Read, "info")
             .await?;
-        let mut manifest = match inspect_workspace_manifest(&location.home)? {
+        let manifest = match inspect_workspace_manifest(&location.home)? {
             ManifestState::Current(manifest) => manifest,
             ManifestState::Missing => {
                 return Ok(unindexed_info(
@@ -420,7 +318,6 @@ impl WorkspaceIndexService {
                 return Ok(info);
             }
         };
-        self.reconcile_name(&mut manifest)?;
         let metadata_indexed = is_indexed(&manifest);
         let storage_exists = IndexStore::exists(&manifest.storage_home())?;
         let indexed = metadata_indexed && storage_exists;
@@ -465,45 +362,18 @@ impl WorkspaceIndexService {
 
     pub(crate) async fn drop_index(&self, options: &InfoOptions) -> Result<bool, EngineError> {
         let location = workspace_index_location_from_option(options.root.as_deref())?;
-        let registry = self.registry()?;
-        let name = registry.name_for_root(&location.root)?;
-        if name.is_none() && !workspace_has_index_data(&location)? {
+        if !workspace_has_index_data(&location)? {
             return Ok(false);
-        }
-        if !location.root.try_exists().map_err(|error| {
-            EngineError::from_io(
-                format!("inspect workspace root {}", location.root.display()),
-                &error,
-            )
-        })? {
-            return registry.unregister_missing(&location.root);
         }
         let _lock = LockWait::new(None, None)?
             .acquire(&location.home, LockMode::Write, "index.drop")
             .await?;
-        let registration = if let Some(name) = registry.name_for_root(&location.root)? {
-            Some((name, location.root.clone()))
-        } else {
-            // Corrupt metadata must not prevent explicit cleanup. Valid metadata
-            // also lets a moved workspace release its previous registry location.
-            if let Some(manifest) = read_workspace_manifest(&location.home).ok().flatten() {
-                moved_registration(&registry, &manifest)?
-            } else if let Some((name, root)) =
-                read_build_registration(&location.home).ok().flatten()
-            {
-                moved_registration_for(&registry, &name, &root, &location.root)?
-            } else {
-                None
-            }
-        };
+        // Corrupt metadata must not prevent explicit cleanup.
         let has_data = workspace_has_index_data(&location)?;
         if has_data {
             reset_workspace_index(&location)?;
         }
-        if let Some((name, registered_root)) = &registration {
-            registry.unregister(name, registered_root)?;
-        }
-        Ok(has_data || registration.is_some())
+        Ok(has_data)
     }
 }
 
@@ -524,11 +394,6 @@ fn index_manifest(
 ) -> Result<WorkspaceManifest, EngineError> {
     let now = epoch_millis();
     let workspace = Workspace {
-        name: options
-            .name
-            .clone()
-            .or_else(|| active.map(|value| value.workspace.name.clone()))
-            .unwrap_or_else(|| workspace_name(&location.root)),
         root: location.root.clone(),
         scan: resolve_scan(active, options)?,
         index: IndexState::Enabled(Box::new(descriptor)),
@@ -868,14 +733,6 @@ fn resolve_root(root: Option<&Path>) -> Result<PathBuf, EngineError> {
     }
 }
 
-fn workspace_name(root: &Path) -> String {
-    root.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("workspace")
-        .to_owned()
-}
-
 fn unindexed_info(location: WorkspaceIndexLocation, policy: WorkspaceIndexPolicy) -> InfoResult {
     InfoResult {
         compatibility: IndexCompatibility::Unbuilt,
@@ -911,48 +768,6 @@ fn epoch_millis() -> u64 {
 
 fn workspace_info(manifest: &WorkspaceManifest) -> WorkspaceIndexInfo {
     WorkspaceIndexInfo::from_workspace(&manifest.workspace, &manifest.path, manifest.index_version)
-}
-
-/// Find the old registration of a physically moved workspace. The recorded root
-/// also recovers a registry rename committed before the local manifest update.
-fn moved_registration(
-    registry: &WorkspaceRegistry,
-    manifest: &WorkspaceManifest,
-) -> Result<Option<(String, PathBuf)>, EngineError> {
-    moved_registration_for(
-        registry,
-        &manifest.workspace.name,
-        &manifest.recorded_root,
-        &manifest.workspace.root,
-    )
-}
-
-fn moved_registration_for(
-    registry: &WorkspaceRegistry,
-    name: &str,
-    recorded_root: &Path,
-    current_root: &Path,
-) -> Result<Option<(String, PathBuf)>, EngineError> {
-    let absent = |root: &Path| {
-        root.try_exists().map(|exists| !exists).map_err(|error| {
-            EngineError::from_io(
-                format!("inspect original workspace {}", root.display()),
-                &error,
-            )
-        })
-    };
-    if recorded_root != current_root
-        && absent(recorded_root)?
-        && let Some(name) = registry.name_for_root(recorded_root)?
-    {
-        return Ok(Some((name, recorded_root.to_path_buf())));
-    }
-    if let Some(root) = registry.root_for_name(name)?
-        && absent(&root)?
-    {
-        return Ok(Some((name.to_owned(), root)));
-    }
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -1005,7 +820,6 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let manifest = crate::workspace::manifest::WorkspaceManifest::new(
             Workspace {
-                name: "workspace".into(),
                 root: directory.path().to_path_buf(),
                 scan: ScanRulesUpdate {
                     globs: Some(vec!["*.rs".into()]),
@@ -1051,7 +865,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let file = directory.path().join("file.txt");
         std::fs::write(&file, "text").expect("source file");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let error = service
             .index(
@@ -1072,7 +886,7 @@ mod tests {
         use crate::api::index::progress::{IndexProgressPhase, IndexProgressReporter};
         for fail in [false, true] {
             let directory = tempdir().expect("workspace");
-            let mut service = WorkspaceIndexService::with_test_registry();
+            let mut service = WorkspaceIndexService::new();
             service.fail_index_completion = fail;
             let models = ModelRuntimeManager::new();
             let home = directory.path().join(".zvec-grep");
@@ -1116,7 +930,7 @@ mod tests {
         let original = directory.path().join("original");
         let moved = directory.path().join("moved");
         std::fs::create_dir(&original).expect("workspace root");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1151,7 +965,6 @@ mod tests {
             .await
             .expect("moved workspace info");
         let workspace = info.workspace_index.expect("workspace index");
-        assert_eq!(workspace.name, before.workspace.name.as_str());
         assert_eq!(
             workspace.root,
             std::fs::canonicalize(&moved).expect("moved root")
@@ -1175,17 +988,8 @@ mod tests {
         let after = super::read_workspace_manifest(&moved.join(".zvec-grep"))
             .expect("manifest read")
             .expect("manifest");
-        assert_eq!(after.workspace.name, before.workspace.name);
         assert_eq!(after.workspace.scan, before.workspace.scan);
         assert_eq!(after.workspace.root, moved);
-        assert_eq!(
-            service
-                .registry()
-                .expect("registry")
-                .root_for_name(&before.workspace.name)
-                .expect("registered move"),
-            Some(std::fs::canonicalize(&moved).expect("moved root"))
-        );
         models.close();
     }
 
@@ -1194,7 +998,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
 
         assert!(
-            !WorkspaceIndexService::with_test_registry()
+            !WorkspaceIndexService::new()
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
@@ -1213,7 +1017,7 @@ mod tests {
             .join(uuid::Uuid::new_v4().to_string())
             .join("storage");
         std::fs::create_dir_all(&storage).expect("orphaned generation");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: false,
@@ -1239,7 +1043,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_discards_stage_and_normal_index_keeps_active_storage() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1281,7 +1085,6 @@ mod tests {
             .expect("manifest")
             .expect("active");
         assert_eq!(updated.storage_generation, active.storage_generation);
-        assert_eq!(updated.workspace.name, active.workspace.name);
         assert!(active.storage_home().exists());
         service
             .index(
@@ -1304,7 +1107,7 @@ mod tests {
     #[tokio::test]
     async fn search_device_override_does_not_persist_in_manifest() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(directory.path()))
@@ -1357,7 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn abandoned_rebuild_does_not_change_normal_index_settings_or_storage() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1407,7 +1210,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_rebuild_starts_over_even_after_recovering_a_publication() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1450,7 +1253,7 @@ mod tests {
     #[tokio::test]
     async fn failed_checkpoint_does_not_publish_an_incomplete_rebuild() {
         let directory = tempdir().expect("workspace");
-        let mut service = WorkspaceIndexService::with_test_registry();
+        let mut service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1518,13 +1321,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn unrelated_workspaces_can_share_a_directory_name() {
+        let directory = tempdir().expect("workspaces");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        for parent in ["first", "second"] {
+            let root = directory.path().join(parent).join("docs");
+            std::fs::create_dir_all(&root).expect("workspace directory");
+            service
+                .index(&models, empty_index_options(&root))
+                .await
+                .expect("unrelated docs workspace is addressed by its root");
+            let info = service
+                .info(InfoOptions {
+                    root: Some(root.clone()),
+                    include_status: false,
+                })
+                .await
+                .expect("workspace info");
+            let workspace = info.workspace_index.expect("workspace index");
+            assert_eq!(workspace.root, root.canonicalize().expect("canonical root"));
+        }
+        models.close();
+    }
+
     async fn assert_nested_index_keeps_parent(model: &str, rebuild: bool) {
         let directory = tempdir().expect("nested workspaces");
         let root = std::fs::canonicalize(directory.path()).expect("parent root");
         let child = root.join("sub");
         std::fs::create_dir(root.join("docs")).expect("parent sources");
         std::fs::create_dir_all(child.join("src")).expect("child sources");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let mut parent_options = empty_index_options(&root);
         parent_options.embedding.as_mut().expect("model").reference =
@@ -1624,34 +1452,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_drop_releases_a_deleted_source_directory_without_recreating_it() {
+    async fn dropping_a_deleted_source_directory_is_a_no_op_without_recreating_it() {
         let directory = tempdir().expect("workspace roots");
         let deleted = directory.path().join("deleted");
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&deleted).expect("original root");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("shared".into()),
-                    ..empty_index_options(&deleted)
-                },
-            )
+            .index(&models, empty_index_options(&deleted))
             .await
-            .expect("original workspace owns name");
+            .expect("original workspace index");
         std::fs::remove_dir_all(&deleted).expect("source directory deleted externally");
         let options = InfoOptions {
             root: Some(deleted.clone()),
             include_status: false,
         };
         assert!(
-            service
+            !service
                 .drop_index(&options)
                 .await
-                .expect("drop deleted workspace")
+                .expect("deleted workspace has no index to drop")
         );
         assert!(!deleted.exists());
         assert!(
@@ -1660,46 +1482,27 @@ mod tests {
                 .await
                 .expect("idempotent cleanup")
         );
-        let name = "shared".to_owned();
-        let registry = service.registry().expect("registry");
-        assert_eq!(registry.root_for_name(&name).expect("released name"), None);
         service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some(name.clone()),
-                    ..empty_index_options(&replacement)
-                },
-            )
+            .index(&models, empty_index_options(&replacement))
             .await
-            .expect("replacement workspace can reuse name");
-        assert_eq!(
-            registry.root_for_name(&name).expect("replacement owner"),
-            Some(std::fs::canonicalize(&replacement).expect("replacement root"))
-        );
+            .expect("replacement workspace has its own index");
         models.close();
     }
 
     #[tokio::test]
-    async fn dropping_a_moved_workspace_releases_its_old_registration_before_reindexing() {
+    async fn dropping_a_moved_workspace_removes_its_local_index() {
         let directory = tempdir().expect("workspace roots");
         let original = directory.path().join("original");
         let moved = directory.path().join("moved");
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&original).expect("original root");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("shared".into()),
-                    ..empty_index_options(&original)
-                },
-            )
+            .index(&models, empty_index_options(&original))
             .await
-            .expect("original workspace owns name");
+            .expect("original workspace index");
         std::fs::rename(&original, &moved).expect("move without reopening index");
         assert!(
             service
@@ -1710,45 +1513,26 @@ mod tests {
                 .await
                 .expect("drop moved workspace")
         );
-        let name = "shared".to_owned();
-        let registry = service.registry().expect("registry");
-        assert_eq!(registry.root_for_name(&name).expect("released name"), None);
         assert!(!moved.join(".zvec-grep/manifest.json").exists());
 
         service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("shared".into()),
-                    ..empty_index_options(&replacement)
-                },
-            )
+            .index(&models, empty_index_options(&replacement))
             .await
-            .expect("another root can reuse the dropped name");
-        assert_eq!(
-            registry.root_for_name(&name).expect("new owner"),
-            Some(std::fs::canonicalize(&replacement).expect("replacement root"))
-        );
+            .expect("another root can be indexed");
         models.close();
     }
 
     #[tokio::test]
-    async fn copied_pending_first_build_cannot_steal_the_original_name() {
+    async fn copied_pending_first_build_uses_its_root_without_changing_the_original() {
         let directory = tempdir().expect("workspace roots");
         let original = directory.path().join("original");
         let copy = directory.path().join("copy");
         std::fs::create_dir(&original).expect("original root");
         std::fs::create_dir_all(copy.join(".zvec-grep")).expect("copy home");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("shared".into()),
-                    ..empty_index_options(&original)
-                },
-            )
+            .index(&models, empty_index_options(&original))
             .await
             .expect("create workspace fixture");
         let home = original.join(".zvec-grep");
@@ -1762,68 +1546,33 @@ mod tests {
         assert!(!original.join(".zvec-grep/manifest.json").exists());
         std::fs::copy(&original_build, copy.join(".zvec-grep/build.json"))
             .expect("copy pending metadata");
-        let error = service
-            .index(
-                &models,
-                IndexOptions {
-                    root: Some(copy.clone()),
-                    ..IndexOptions::default()
-                },
-            )
+        service
+            .index(&models, empty_index_options(&copy))
             .await
-            .expect_err("copy cannot claim the original reservation");
-        assert!(error.message().contains("already registered"));
-        let registry = service.registry().expect("registry");
+            .expect("a copy is addressed by its own root");
+        let copied = super::read_workspace_manifest(&copy.join(".zvec-grep"))
+            .expect("copied manifest")
+            .expect("published copy");
         assert_eq!(
-            registry.root_for_name("shared").expect("original owner"),
-            Some(std::fs::canonicalize(&original).expect("original root"))
+            copied
+                .workspace
+                .root
+                .canonicalize()
+                .expect("canonical copy root"),
+            copy.canonicalize().expect("copy root")
         );
         assert_eq!(
             std::fs::read(original_build).expect("original build unchanged"),
             original_bytes
         );
-        assert_eq!(
-            registry.name_for_root(&copy).expect("copy registration"),
-            None
-        );
-        assert!(!copy.join(".zvec-grep/manifest.json").exists());
         models.close();
     }
 
     #[tokio::test]
-    async fn invalid_names_are_rejected_before_workspace_mutation() {
+    async fn invalid_scan_rules_do_not_create_index_or_acquire_models() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
-        let registry = service.registry().expect("registry");
-        for name in ["", " project", "project/child", "project\nchild"] {
-            let error = service
-                .index(
-                    &models,
-                    IndexOptions {
-                        name: Some(name.to_owned()),
-                        ..empty_index_options(directory.path())
-                    },
-                )
-                .await
-                .expect_err("invalid workspace name");
-            assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
-            assert!(error.message().contains("workspace name"));
-            assert!(!directory.path().join(".zvec-grep").exists());
-            assert_eq!(
-                registry.name_for_root(directory.path()).expect("registry"),
-                None
-            );
-        }
-        assert_eq!(models.snapshot().cached_runtimes, 0);
-    }
-
-    #[tokio::test]
-    async fn invalid_scan_rules_do_not_reserve_a_workspace_or_acquire_models() {
-        let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
-        let models = ModelRuntimeManager::new();
-        let registry = service.registry().expect("registry");
         for scan in [
             ScanRulesUpdate {
                 max_file_size_bytes: Some(Some(0)),
@@ -1842,7 +1591,6 @@ mod tests {
                 .index(
                     &models,
                     IndexOptions {
-                        name: Some("reserved".into()),
                         scan,
                         ..empty_index_options(directory.path())
                     },
@@ -1854,18 +1602,14 @@ mod tests {
             assert!(!home.join("manifest.json").exists());
             assert!(!super::has_build(&home));
             assert!(!super::has_generation_storage(&home).expect("no index generation"));
-            assert_eq!(
-                registry.name_for_root(directory.path()).expect("registry"),
-                None
-            );
             assert_eq!(models.snapshot().cached_runtimes, 0);
         }
     }
 
     #[tokio::test]
-    async fn invalid_scan_update_preserves_name_manifest_and_pending_rebuild() {
+    async fn invalid_scan_update_preserves_manifest_and_pending_rebuild() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(directory.path()))
@@ -1880,7 +1624,6 @@ mod tests {
             .index(
                 &models,
                 IndexOptions {
-                    name: Some("renamed".into()),
                     scan: ScanRulesUpdate {
                         ignore_files: Some(vec!["missing.ignore".into()]),
                         ..ScanRulesUpdate::default()
@@ -1895,351 +1638,65 @@ mod tests {
             super::read_workspace_manifest(&home).expect("unchanged manifest"),
             Some(active.clone())
         );
-        assert_eq!(
-            service
-                .registry()
-                .expect("registry")
-                .name_for_root(directory.path())
-                .expect("unchanged name"),
-            Some(active.workspace.name)
-        );
         assert!(super::has_build(&home));
         assert!(pending.target.storage_home().exists());
         models.close();
     }
 
     #[tokio::test]
-    async fn duplicate_names_are_rejected_before_model_acquisition() {
-        let directory = tempdir().expect("workspace roots");
-        let first = directory.path().join("first");
-        let second = directory.path().join("second");
-        std::fs::create_dir(&first).expect("first workspace");
-        std::fs::create_dir(&second).expect("second workspace");
-        let service = WorkspaceIndexService::with_test_registry();
-        let first_models = ModelRuntimeManager::new();
-        service
-            .index(
-                &first_models,
-                IndexOptions {
-                    name: Some("shared".into()),
-                    ..empty_index_options(&first)
-                },
-            )
-            .await
-            .expect("first workspace owns name");
-
-        let second_models = ModelRuntimeManager::new();
-        let error = service
-            .clone()
-            .index(
-                &second_models,
-                IndexOptions {
-                    name: Some("shared".into()),
-                    ..empty_index_options(&second)
-                },
-            )
-            .await
-            .expect_err("second workspace cannot claim name");
-        assert!(error.message().contains("shared"));
-        assert!(error.message().contains("already registered"));
-        assert_eq!(second_models.snapshot().cached_runtimes, 0);
-        assert!(!second.join(".zvec-grep/manifest.json").exists());
-        assert!(!second.join(".zvec-grep/build.json").exists());
-        assert_eq!(
-            service
-                .registry()
-                .expect("registry")
-                .root_for_name("shared")
-                .expect("owner"),
-            Some(std::fs::canonicalize(&first).expect("first root"))
-        );
-        first_models.close();
-        second_models.close();
-    }
-
-    #[tokio::test]
-    async fn explicit_rename_preserves_generation_storage() {
+    async fn legacy_manifest_names_are_ignored_and_removed_without_rebuilding() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("before".into()),
-                    ..empty_index_options(directory.path())
-                },
-            )
+            .index(&models, empty_index_options(directory.path()))
             .await
             .expect("initial index");
         let home = directory.path().join(".zvec-grep");
+        let path = home.join("manifest.json");
         let before = super::read_workspace_manifest(&home)
             .expect("manifest")
-            .expect("active workspace");
-        let marker = before.storage_home().join("storage/checkpoint-marker");
-        std::fs::write(&marker, b"existing generation").expect("generation storage marker");
-        service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("after".into()),
-                    root: Some(directory.path().to_path_buf()),
-                    ..IndexOptions::default()
-                },
-            )
+            .expect("workspace");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("manifest bytes")).expect("JSON");
+        legacy["name"] = serde_json::json!("docs");
+        std::fs::write(&path, serde_json::to_vec(&legacy).expect("legacy JSON"))
+            .expect("legacy manifest");
+        let info = WorkspaceIndexService::new()
+            .info(InfoOptions {
+                root: Some(directory.path().to_path_buf()),
+                include_status: false,
+            })
             .await
-            .expect("rename workspace");
+            .expect("read legacy metadata");
+        assert_eq!(
+            info.workspace_index.expect("workspace").root,
+            directory.path().canonicalize().expect("root")
+        );
+        service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("update legacy index");
         let after = super::read_workspace_manifest(&home)
             .expect("manifest")
-            .expect("renamed workspace");
-        assert_eq!(after.workspace.name.as_str(), "after");
+            .expect("updated workspace");
         assert_eq!(after.storage_generation, before.storage_generation);
         assert_eq!(
             after.workspace.created_epoch_ms,
             before.workspace.created_epoch_ms
         );
-        assert_eq!(
-            std::fs::read(&marker).expect("retained generation storage"),
-            b"existing generation"
-        );
-        let info = service
-            .info(InfoOptions {
-                root: Some(directory.path().to_path_buf()),
-                include_status: false,
-            })
-            .await
-            .expect("renamed info");
-        assert_eq!(info.workspace_index.expect("workspace").name, "after");
-        service
-            .index(
-                &models,
-                IndexOptions {
-                    root: Some(directory.path().to_path_buf()),
-                    ..IndexOptions::default()
-                },
-            )
-            .await
-            .expect("update keeps new name");
-        let updated = super::read_workspace_manifest(&home)
-            .expect("manifest")
-            .expect("updated workspace");
-        assert_eq!(updated.workspace.name, after.workspace.name);
-        assert_eq!(updated.storage_generation, before.storage_generation);
-        assert_eq!(
-            std::fs::read(&marker).expect("retained generation storage"),
-            b"existing generation"
-        );
-        assert_eq!(
-            service
-                .registry()
-                .expect("registry")
-                .root_for_name("before")
-                .expect("released name"),
-            None
-        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("manifest bytes")).expect("JSON");
+        assert!(saved.get("name").is_none());
         models.close();
     }
 
     #[tokio::test]
-    async fn registry_rename_is_replayed_after_manifest_update_is_interrupted() {
+    async fn initial_model_failure_leaves_no_workspace_metadata() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
-        let models = ModelRuntimeManager::new();
-        service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some("before".into()),
-                    ..empty_index_options(directory.path())
-                },
-            )
-            .await
-            .expect("initial index");
-        let home = directory.path().join(".zvec-grep");
-        let before = super::read_workspace_manifest(&home)
-            .expect("manifest")
-            .expect("active workspace");
-        service
-            .registry()
-            .expect("registry")
-            .rename(&before.workspace.name, "replayed", directory.path())
-            .expect("commit registry rename before crash");
-        let info = service
-            .info(InfoOptions {
-                root: Some(directory.path().to_path_buf()),
-                include_status: false,
-            })
-            .await
-            .expect("info reconciles name");
-        assert_eq!(info.workspace_index.expect("workspace").name, "replayed");
-        assert_eq!(
-            super::read_workspace_manifest(&home).expect("read-only info retained manifest"),
-            Some(before.clone())
-        );
-        service
-            .index(
-                &models,
-                IndexOptions {
-                    root: Some(directory.path().to_path_buf()),
-                    ..IndexOptions::default()
-                },
-            )
-            .await
-            .expect("index replays rename");
-        let after = super::read_workspace_manifest(&home)
-            .expect("manifest")
-            .expect("reconciled workspace");
-        assert_eq!(after.workspace.name.as_str(), "replayed");
-        assert_eq!(after.storage_generation, before.storage_generation);
-        models.close();
-    }
-
-    #[tokio::test]
-    async fn moved_workspace_recovers_a_rename_committed_only_to_the_registry() {
-        let directory = tempdir().expect("workspace roots");
-        let original = directory.path().join("original");
-        let moved = directory.path().join("moved");
-        let service = WorkspaceIndexService::with_test_registry();
-        let models = ModelRuntimeManager::new();
-        let before = move_after_interrupted_rename(&service, &models, &original, &moved).await;
-        let info = service
-            .info(InfoOptions {
-                root: Some(moved.clone()),
-                include_status: false,
-            })
-            .await
-            .expect("info resolves the authoritative name through the recorded old root");
-        assert_eq!(info.workspace_index.expect("workspace").name, "after");
-        let registry = service.registry().expect("registry");
-        let new_name = "after".to_owned();
-        assert_eq!(
-            registry.root_for_name(&new_name).expect("read-only info"),
-            Some(before.workspace.root.clone())
-        );
-        let home = moved.join(".zvec-grep");
-        assert_eq!(
-            super::read_workspace_manifest(&home)
-                .expect("manifest")
-                .expect("unchanged persisted name")
-                .workspace
-                .name,
-            before.workspace.name
-        );
-        service
-            .index(
-                &models,
-                IndexOptions {
-                    root: Some(moved.clone()),
-                    ..IndexOptions::default()
-                },
-            )
-            .await
-            .expect("index rebinds the renamed workspace after the move");
-        let after = super::read_workspace_manifest(&home)
-            .expect("manifest")
-            .expect("reconciled workspace");
-        assert_eq!(after.workspace.name, new_name);
-        assert_eq!(after.storage_generation, before.storage_generation);
-        assert_eq!(
-            registry
-                .root_for_name(&new_name)
-                .expect("moved registration"),
-            Some(std::fs::canonicalize(&moved).expect("moved root"))
-        );
-        assert_eq!(
-            registry
-                .root_for_name(&before.workspace.name)
-                .expect("old name remains released"),
-            None
-        );
-        models.close();
-    }
-
-    #[tokio::test]
-    async fn drop_after_interrupted_rename_and_move_releases_the_authoritative_name() {
-        let directory = tempdir().expect("workspace roots");
-        let original = directory.path().join("original");
-        let moved = directory.path().join("moved");
-        let replacement = directory.path().join("replacement");
-        std::fs::create_dir(&replacement).expect("replacement root");
-        let service = WorkspaceIndexService::with_test_registry();
-        let models = ModelRuntimeManager::new();
-        move_after_interrupted_rename(&service, &models, &original, &moved).await;
-        assert!(
-            service
-                .drop_index(&InfoOptions {
-                    root: Some(moved),
-                    include_status: false,
-                })
-                .await
-                .expect("drop the moved workspace before rename replay")
-        );
-        let registry = service.registry().expect("registry");
-        let new_name = "after".to_owned();
-        assert_eq!(
-            registry.root_for_name(&new_name).expect("released name"),
-            None
-        );
-        assert_eq!(
-            registry
-                .name_for_root(&original)
-                .expect("released old root"),
-            None
-        );
-        service
-            .index(
-                &models,
-                IndexOptions {
-                    name: Some(new_name.clone()),
-                    ..empty_index_options(&replacement)
-                },
-            )
-            .await
-            .expect("another workspace can reuse the authoritative name");
-        assert_eq!(
-            registry.root_for_name(&new_name).expect("new owner"),
-            Some(std::fs::canonicalize(&replacement).expect("replacement root"))
-        );
-        models.close();
-    }
-
-    async fn move_after_interrupted_rename(
-        service: &WorkspaceIndexService,
-        models: &ModelRuntimeManager,
-        original: &Path,
-        moved: &Path,
-    ) -> crate::workspace::manifest::WorkspaceManifest {
-        std::fs::create_dir(original).expect("original root");
-        let original = std::fs::canonicalize(original).expect("canonical original root");
-        service
-            .index(
-                models,
-                IndexOptions {
-                    name: Some("before".into()),
-                    ..empty_index_options(&original)
-                },
-            )
-            .await
-            .expect("initial index");
-        let before = super::read_workspace_manifest(&original.join(".zvec-grep"))
-            .expect("manifest")
-            .expect("active workspace");
-        service
-            .registry()
-            .expect("registry")
-            .rename(&before.workspace.name, "after", &original)
-            .expect("commit rename before manifest update is interrupted");
-        std::fs::rename(original, moved).expect("move without replaying the rename");
-        before
-    }
-
-    #[tokio::test]
-    async fn drop_releases_name_reserved_before_initial_model_failure() {
-        let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
-        options.name = Some("reserved".into());
         options.embedding.as_mut().expect("model spec").revision = Some("unsupported".into());
         let error = service
             .index(&models, options)
@@ -2250,33 +1707,33 @@ mod tests {
         let home = directory.path().join(".zvec-grep");
         assert!(!home.join("manifest.json").exists());
         assert!(!home.join("build.json").exists());
-        let registry = service.registry().expect("registry");
-        let name = "reserved".to_owned();
-        assert_eq!(
-            registry
-                .name_for_root(directory.path())
-                .expect("reservation"),
-            Some(name.clone())
-        );
-        let info = InfoOptions {
-            root: Some(directory.path().to_path_buf()),
-            include_status: false,
-        };
         assert!(
-            service
-                .drop_index(&info)
+            !service
+                .drop_index(&InfoOptions {
+                    root: Some(directory.path().to_path_buf()),
+                    include_status: false,
+                })
                 .await
-                .expect("drop reservation without manifest")
+                .expect("no index to drop")
         );
-        assert_eq!(registry.root_for_name(&name).expect("released name"), None);
-        assert!(!service.drop_index(&info).await.expect("idempotent drop"));
+        service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("retry");
+        let manifest = super::read_workspace_manifest(&home)
+            .expect("manifest")
+            .expect("index");
+        assert_eq!(
+            manifest.workspace.root.canonicalize().expect("root"),
+            directory.path().canonicalize().expect("root")
+        );
         models.close();
     }
 
     #[tokio::test]
     async fn initial_build_cancellation_leaves_no_published_or_pending_index() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let signal = tokio_util::sync::CancellationToken::new();
         signal.cancel();
@@ -2309,7 +1766,7 @@ mod tests {
     #[tokio::test]
     async fn index_concurrency_is_ephemeral_and_queries_ignore_refresh_overrides() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.embedding.as_mut().expect("model").reference = "local/all-minilm-l6-v2".into();
@@ -2365,7 +1822,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let sources = directory.path().join("sources");
         std::fs::create_dir(&sources).expect("source directory");
-        let service = WorkspaceIndexService::with_test_registry();
+        let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.scan.globs = Some(vec!["sources/**".into()]);
@@ -2445,7 +1902,6 @@ mod tests {
         assert_eq!(rebuilt.workspace.root, manifest.workspace.root);
         assert_eq!(rebuilt.workspace.scan, manifest.workspace.scan);
         assert_eq!(rebuilt.embedding_runtimes, manifest.embedding_runtimes);
-        assert_eq!(rebuilt.workspace.name, manifest.workspace.name);
         assert!(rebuilt.workspace.created_epoch_ms >= manifest.workspace.created_epoch_ms);
         assert_ne!(rebuilt.storage_generation, manifest.storage_generation);
 

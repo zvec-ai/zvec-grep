@@ -216,7 +216,7 @@ fn build_context_result(
         source: ContextSource::Index,
         coverage: ContextCoverage::RankedSample,
         workspace_index: Some(ContextWorkspaceIndex {
-            name: workspace.name.as_str().to_owned(),
+            root: workspace.root.clone(),
             path: workspace_home.to_path_buf(),
         }),
         items,
@@ -856,7 +856,6 @@ mod tests {
         })
         .expect("request");
         let mut workspace = Workspace {
-            name: "workspace".to_owned(),
             root: original_root.clone(),
             scan: crate::domain::ScanRules::default(),
             index: IndexState::Enabled(Box::new(

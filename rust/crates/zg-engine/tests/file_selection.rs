@@ -776,7 +776,7 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         let native_error = collection
             .query(&native_query)
             .err()
-            .expect("zvec 0.7.2 does not parse NOT LIKE");
+            .expect("native filter parser does not support NOT LIKE");
         assert!(native_error.to_string().contains("syntax error"));
         let error = engine
             .context(ContextOptions {

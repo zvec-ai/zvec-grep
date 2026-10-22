@@ -31,7 +31,6 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn explicit_options(root: &Path, address: SocketAddr) -> IndexOptions {
     IndexOptions {
-        name: Some(format!("index-version-{}", uuid::Uuid::new_v4())),
         embedding: Some(EmbeddingModelSpec {
             reference: "qwen/text-embedding-v4".into(),
             revision: None,

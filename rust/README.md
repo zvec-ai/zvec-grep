@@ -510,12 +510,12 @@ smoke test with:
 npm run test:package
 ```
 
-The build uses the published `zvec-rust` and `zvec-rust-build` 0.7.2 crates,
+The build uses the published `zvec-rust` and `zvec-rust-build` 0.8.0 crates,
 without a local wrapper patch. Their bundled native library tracks upstream zvec
-at [`1ab7975`](https://github.com/alibaba/zvec/commit/1ab7975dfc2d2160054bafff614831b7099cd930)
-(53 commits after v0.7.0). The build stages the shared library and
-`data/jieba_dict` resources beside the executable. Both local and release
-packages include these SDK assets; the engine uses the bundled dictionary.
+at [`8397071`](https://github.com/alibaba/zvec/commit/8397071d815cd842be2068339e00a94e69f069d1).
+The build stages the shared library beside the executable. Both local and
+release packages include this SDK library; the engine uses its embedded Jieba
+dictionary without external dictionary files.
 
 Pass `--no-build` after `--` to reuse an existing `target/release/zg`, or pass
 `--prefix <path>` to install or smoke-test under a custom npm prefix:
@@ -557,9 +557,8 @@ node scripts/npm-release.mjs pack-platform \
   --no-build
 ```
 
-The runtime library directory must include zvec's shared library and its
-`data/jieba_dict` directory. Without `--lib-dir`, these assets are read from
-the binary's directory.
+The runtime library directory must include zvec's shared library. Without
+`--lib-dir`, runtime libraries are read from the binary's directory.
 
 The `Publish Rust packages` workflow builds all five published native targets on matching
 GitHub runners. It runs only through manual dispatch. With `publish` left at its
@@ -579,9 +578,10 @@ Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
 Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
 runtime, so older Linux distributions are not covered by this release workflow.
 Intel macOS builds ONNX Runtime 1.28.0 with CoreML and the native zvec SDK from
-pinned source revisions because neither dependency supplies prebuilt Intel
-macOS libraries. Both SDKs are cached and their shared libraries are included
-in the npm payload. The Intel release targets macOS 14 and later.
+pinned source revisions. ONNX Runtime with CoreML still requires a source build;
+the zvec source revision matches the SDK bundled with zvec-rust 0.8.0. Both SDKs
+are cached and their shared libraries are included in the npm payload. The Intel
+release targets macOS 14 and later.
 
 Download the `rust-release-<version>` artifact from the successful workflow run
 and unzip it. It contains all five platform tarballs, the meta tarball,

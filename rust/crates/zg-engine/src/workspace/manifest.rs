@@ -22,8 +22,6 @@ pub(crate) const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
 #[serde(try_from = "ManifestData", into = "ManifestData")]
 pub(crate) struct WorkspaceManifest {
     pub workspace: Workspace,
-    /// Root recorded on disk before resolving a moved workspace.
-    pub recorded_root: PathBuf,
     pub path: PathBuf,
     pub index_version: Option<u32>,
     pub storage_generation: Option<String>,
@@ -42,7 +40,9 @@ enum IndexPolicy {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManifestData {
-    name: String,
+    // Accept the obsolete field without retaining or writing a workspace name.
+    #[serde(default, rename = "name", skip_serializing)]
+    _legacy_name: serde::de::IgnoredAny,
     path: PathBuf,
     root: PathBuf,
     #[serde(default)]
@@ -79,9 +79,7 @@ impl TryFrom<ManifestData> for WorkspaceManifest {
             )),
         };
         let manifest = Self {
-            recorded_root: input.root.clone(),
             workspace: Workspace {
-                name: input.name,
                 root: input.root,
                 scan: input.scan,
                 index,
@@ -104,7 +102,7 @@ impl From<WorkspaceManifest> for ManifestData {
     fn from(manifest: WorkspaceManifest) -> Self {
         let workspace = manifest.workspace;
         Self {
-            name: workspace.name,
+            _legacy_name: serde::de::IgnoredAny,
             path: manifest.path,
             root: workspace.root,
             scan: workspace.scan,
@@ -139,7 +137,6 @@ impl WorkspaceManifest {
     ) -> Result<Self, EngineError> {
         let manifest = Self {
             path: home,
-            recorded_root: workspace.root.clone(),
             workspace,
             index_version,
             storage_generation: None,
@@ -389,7 +386,6 @@ mod tests {
     fn fixture_manifest(home: &Path) -> WorkspaceManifest {
         let mut manifest = WorkspaceManifest::new(
             Workspace {
-                name: "fixture".to_owned(),
                 root: home.parent().expect("workspace root").to_path_buf(),
                 scan: crate::api::index::options::ScanRulesUpdate {
                     included_formats: Some(vec![crate::domain::FileFormat::Rust]),
@@ -677,22 +673,27 @@ mod tests {
     }
 
     #[test]
-    fn string_names_are_validated_on_manifest_read_and_write() {
+    fn legacy_names_are_ignored_and_not_persisted() {
         let directory = tempdir().expect("workspace");
         let home = directory.path().join(".zvec-grep");
-        let mut manifest = fixture_manifest(&home);
-        write_workspace_manifest(&home, &manifest).expect("valid manifest");
-        let original = fs::read(workspace_manifest_path(&home)).expect("original manifest");
-        for name in ["", " ", " project", ".", "..", "a/b", "a\\b", "a\nb"] {
-            manifest.workspace.name = name.to_owned();
-            assert!(write_workspace_manifest(&home, &manifest).is_err());
-            assert_eq!(
-                fs::read(workspace_manifest_path(&home)).expect("preserved"),
-                original
-            );
-            // Raw JSON can bypass in-memory validation; reads must still reject it.
-            let json = serde_json::to_value(&manifest).expect("raw manifest");
-            assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
+        let manifest = fixture_manifest(&home);
+        let mut json = serde_json::to_value(&manifest).expect("manifest JSON");
+        assert!(json.get("name").is_none());
+        for name in [
+            serde_json::json!("docs"),
+            serde_json::json!(""),
+            serde_json::json!({"obsolete": true}),
+        ] {
+            json["name"] = name;
+            let restored: WorkspaceManifest =
+                serde_json::from_value(json.clone()).expect("legacy metadata");
+            assert_eq!(restored, manifest);
+            write_workspace_manifest(&home, &restored).expect("save manifest");
+            let saved: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace_manifest_path(&home)).expect("saved manifest"),
+            )
+            .expect("JSON");
+            assert!(saved.get("name").is_none());
         }
     }
 
