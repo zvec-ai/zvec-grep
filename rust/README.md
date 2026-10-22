@@ -814,6 +814,15 @@ requiring the matching prebuilt SDK, but compilation, workspace tests, all three
 CPU model checks and build-cache uploads still run on ordinary CPU runners.
 Linux uses the Ubuntu 24.04 builder without GPU access or CUDA runtime libraries;
 Windows uses `windows-2022`, matching the GPU image's OS generation.
+Before the test harness copies any libraries, CUDA jobs run `cargo build --features cuda`
+and exercise the original `target/debug/zg` with GGUF/ONNX CPU index and query.
+The regression clears project library lookup overrides and runs outside the output
+directory. A `rust-cargo-cli-<platform>` artifact preserves these exact executable
+and sibling library bytes, plus the SDK backends at their compiled-in cache path.
+GPU jobs verify the snapshot's source SHA and hashes, then repeat CPU/CUDA index
+and query without repairing Cargo output or adding project library paths. The
+Windows CI SDK cache uses a fixed location because CPU/GPU workspaces have different
+drive letters; NVIDIA's host runtime paths are still required and preserved.
 After the CPU gates pass, separate GPU jobs download a `rust-cuda-tests-<platform>`
 artifact containing only two test executables and their runtime libraries.
 The bundle is checked against the resolved source SHA and per-file hashes, then

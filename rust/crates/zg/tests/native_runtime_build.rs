@@ -127,6 +127,130 @@ fn ort_cargo_deployment_is_verified_repeatable_and_repairs_outputs_on_both_platf
     );
 }
 
+const CARGO_CLI_REGRESSION_CHECK: &str = r"
+import json, os, subprocess, sys, tarfile, tempfile
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import runtime, e2e
+
+with tempfile.TemporaryDirectory() as temporary:
+    os.chdir(temporary)
+    root = Path(temporary).resolve()
+    profile = root / 'target/debug'
+    profile.mkdir(parents=True)
+    windows = os.name == 'nt'
+    binary = profile / ('zg.exe' if windows else 'zg')
+    core = 'llama.dll' if windows else 'libllama.so.0'
+    plugin = 'ggml-cuda.dll' if windows else 'libggml-cuda.so'
+    sdk = root / 'sdk'
+    (sdk / 'lib/cuda12').mkdir(parents=True)
+    for name in (core, plugin, 'cuda12/' + plugin):
+        (sdk / 'lib' / name).write_bytes(name.encode())
+    manifest = {'files': {p.relative_to(sdk).as_posix(): runtime.digest(p)
+                          for p in sdk.rglob('*') if p.is_file()}}
+    (sdk / 'manifest.json').write_text(json.dumps(manifest))
+    # Cache leftovers must not make a broken build.rs appear to work.
+    for directory in (profile, profile / 'deps', profile / 'examples', profile / 'cuda12'):
+        directory.mkdir(exist_ok=True)
+        (directory / core).write_bytes(b'stale helper copy')
+        (directory / 'keep.txt').write_bytes(b'unrelated')
+    runtime.reset_cargo_cli(Path('target/debug'))
+    assert not list(profile.rglob(core))
+    assert all(p.read_bytes() == b'unrelated' for p in profile.rglob('keep.txt'))
+    try:
+        runtime.reset_cargo_cli(sdk / 'lib')
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('reset outside target/debug was accepted')
+    binary.write_bytes(b'original Cargo executable')
+    records = [{'reason': 'compiler-artifact', 'target': {'name': 'zg', 'kind': ['bin']},
+                'profile': {'test': False}, 'features': ['cuda'], 'executable': str(binary)}]
+    messages = root / 'messages.json'
+    messages.write_text(json.dumps(records[0]) + '\n')
+    sdk_root = ('C:/zg-ci-runtimes/' if windows else '/work/rust/target/llama-runtimes/') + 'a' * 64 + '/bundle'
+    runtime.checked_cargo_sdk_root(sdk_root, windows)
+    for invalid in ('/tmp/sdk', 'C:/Windows', sdk_root + '/../escape'):
+        try:
+            runtime.checked_cargo_sdk_root(invalid, windows)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('unsafe SDK restore path accepted')
+    os.environ['SOURCE_SHA'] = 'test-source'
+    archive = root / 'cli.tgz'
+    with patch.object(runtime, 'backend_directory', return_value=sdk / 'lib'), \
+         patch.object(runtime, 'checked_cargo_sdk_root', return_value=sdk_root):
+        runtime.archive_cargo_cli(messages, archive)
+    with tarfile.open(archive) as package:
+        # This tiny fixture also runs with macOS's Python 3.9. Production CI
+        # extracts the real artifact with Python 3.12's data filter.
+        for member in package:
+            destination = (root / 'received' / member.name).resolve()
+            assert member.isfile() and destination.is_relative_to(root / 'received')
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(package.extractfile(member).read())
+    bundle = root / 'received/cargo-cli'
+    receipt = runtime.verify_cargo_cli(bundle)
+    assert (bundle / receipt['binary']).read_bytes() == binary.read_bytes()
+    assert not (bundle / 'profile' / core).exists(), 'snapshot silently repaired a missing Cargo library'
+    assert (bundle / 'sdk/lib' / core).is_file()
+    assert not (bundle / 'sdk/lib/cuda12' / plugin).exists(), 'unused fallback bloats GPU transfer'
+    (bundle / receipt['binary']).write_bytes(b'changed')
+    try:
+        runtime.verify_cargo_cli(bundle)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('modified CLI snapshot accepted')
+    (bundle / receipt['binary']).write_bytes(binary.read_bytes())
+    os.environ['SOURCE_SHA'] = 'another-source'
+    try:
+        runtime.verify_cargo_cli(bundle)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('snapshot from another commit accepted')
+    environment = dict(os.environ)
+    overrides = ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'DYLD_LIBRARY_PATH',
+                 'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
+                 'ORT_DYLIB_PATH', 'ZVEC_GREP_NATIVE_LIB_DIR', 'GGML_BACKEND_PATH')
+    environment.update({key: str(sdk / 'lib') for key in overrides})
+    vendor = root / 'cuda/bin'
+    vendor.mkdir(parents=True)
+    environment['PATH'] = os.pathsep.join([str(profile), str(sdk / 'lib'), str(vendor), os.defpath])
+    cleaned = e2e.cargo_environment(binary, environment)
+    assert not set(overrides).intersection(cleaned)
+    assert str(profile) not in cleaned['PATH'] and str(sdk / 'lib') not in cleaned['PATH']
+    assert str(vendor) in cleaned['PATH'], 'host CUDA lookup must survive'
+    # Check the actual child environment, not just the dictionary returned above.
+    result = subprocess.run([sys.executable, '-c', 'import json, os; print(json.dumps(dict(os.environ)))'],
+                            env=cleaned, capture_output=True, text=True, check=True)
+    child = json.loads(result.stdout)
+    assert not set(overrides).intersection(child)
+print('Cargo CLI transport and clean-environment regression checks passed')
+";
+
+#[test]
+fn cargo_cli_regression_preserves_raw_output_and_removes_lookup_overrides() {
+    let python = std::env::var_os("PYTHON")
+        .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
+    let result = std::process::Command::new(python)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg("-c")
+        .arg(CARGO_CLI_REGRESSION_CHECK)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/cuda"))
+        .output()
+        .expect("Python 3 for Cargo CLI regression checks");
+    assert!(
+        result.status.success(),
+        "Cargo CLI regression checks failed:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 const LINUX: &str = "x86_64-unknown-linux-gnu";
 const WINDOWS: &str = "x86_64-pc-windows-msvc";
 

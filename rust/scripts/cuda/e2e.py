@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise a CUDA package on a real GPU or a clean CPU host (Linux and Windows)."""
+"""Exercise packaged or unmodified Cargo CLI output on Linux and Windows."""
 
 import argparse
 import ctypes
@@ -17,6 +17,33 @@ MODELS = (
     ("onnx", "local/all-minilm-l6-v2"),
 )
 MARKER = "cuda_cli_e2e_marker"
+
+
+def cargo_environment(binary, environment):
+    """Do not let test/packaging overrides repair a Cargo executable's lookup.
+
+    Keep host CUDA/cuDNN entries on PATH, but remove project/SDK library entries.
+    The CLI must discover its own load-time libraries and compiled-in backends.
+    """
+    env = dict(environment)
+    for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+                "ORT_DYLIB_PATH", "ZVEC_GREP_NATIVE_LIB_DIR", "GGML_BACKEND_PATH"):
+        env.pop(key, None)
+    project_libraries = ("llama.dll", "ggml*.dll", "zvec_c_api.dll", "onnxruntime*.dll",
+                         "libllama.so*", "libggml*.so*", "libzvec_c_api.so*", "libonnxruntime.so*")
+    profile = Path(binary).resolve().parent
+    paths = []
+    for entry in env.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        directory = Path(entry.strip('"')).resolve()
+        if directory.is_relative_to(profile) or any(
+                path.is_file() for pattern in project_libraries for path in directory.glob(pattern)):
+            continue
+        paths.append(entry)
+    env["PATH"] = os.pathsep.join(paths)
+    return env
 
 
 def configure_windows_cuda_paths(root):
@@ -257,7 +284,10 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bundle", type=Path)
+    source.add_argument("--cargo-binary", type=Path,
+                        help="Run the original Cargo executable without library lookup overrides or repairs")
     parser.add_argument("--model-cache", type=Path, required=True)
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--backend", choices=("all", "gguf", "onnx"), default="all")
@@ -277,21 +307,34 @@ def main():
         parser.error("--auto-only cannot be combined with CPU validation")
     if not args.cpu_only and not args.explicit_cpu and not args.expected_gguf_cuda:
         parser.error("GPU validation requires --expected-gguf-cuda")
-    bundle = args.bundle.resolve()
-    package_json = bundle / "package.json"
-    metadata = json.loads(package_json.read_text(encoding="utf-8")) if package_json.is_file() else {}
-    entry = metadata.get("bin", {})
-    entry = entry if isinstance(entry, str) else entry.get("zg")
-    binary = (bundle / (entry or f"bin/{'zg.exe' if os.name == 'nt' else 'zg'}")).resolve()
-    if not binary.is_relative_to(bundle):
-        parser.error("packaged CLI must be inside the installed package")
-    lib_dir = bundle / "lib"
+    if args.cargo_binary:
+        binary = args.cargo_binary.resolve()
+        # No plugin preloading or extra library copying in this mode. In
+        # particular, do not run the package-oriented Windows DLL probe below.
+        environment = cargo_environment(binary, os.environ)
+        removed = sorted(set(os.environ) - set(environment))
+        os.environ.clear()
+        os.environ.update(environment)
+    else:
+        bundle = args.bundle.resolve()
+        package_json = bundle / "package.json"
+        metadata = json.loads(package_json.read_text(encoding="utf-8")) if package_json.is_file() else {}
+        entry = metadata.get("bin", {})
+        entry = entry if isinstance(entry, str) else entry.get("zg")
+        binary = (bundle / (entry or f"bin/{'zg.exe' if os.name == 'nt' else 'zg'}")).resolve()
+        if not binary.is_relative_to(bundle):
+            parser.error("packaged CLI must be inside the installed package")
+        lib_dir = bundle / "lib"
+        if not lib_dir.is_dir():
+            parser.error(f"packaged libraries are missing: {lib_dir}")
     if not binary.is_file():
-        parser.error(f"packaged CLI is missing: {binary}")
-    if not lib_dir.is_dir():
-        parser.error(f"packaged libraries are missing: {lib_dir}")
+        parser.error(f"CLI is missing: {binary}")
     logs = args.logs.resolve()
     logs.mkdir(parents=True, exist_ok=True)
+    if args.cargo_binary:
+        (logs / "cargo-environment.json").write_text(json.dumps({
+            "binary": str(binary), "removed_overrides": removed, "path": os.environ.get("PATH", ""),
+        }, indent=2), encoding="utf-8")
     args.model_cache.mkdir(parents=True, exist_ok=True)
     if args.cpu_only:
         verify_cpu_host(logs)
@@ -301,7 +344,7 @@ def main():
         ], encoding="utf-8")
         (logs / "gpu.txt").write_text(gpu, encoding="utf-8")
         print(gpu, flush=True)
-        if os.name == "nt":
+        if os.name == "nt" and not args.cargo_binary:
             plugin_dir = lib_dir / "cuda12" if args.expected_gguf_cuda == "12.4" else lib_dir
             verify_windows_cuda_plugin(plugin_dir / "ggml-cuda.dll",
                                        args.expected_gguf_cuda.split(".")[0], logs,
@@ -337,8 +380,9 @@ def main():
     (logs / "results.json").write_text(json.dumps({"passed": results, "failures": failures}, indent=2),
                                       encoding="utf-8")
     if failures:
-        raise SystemExit("Packaged CLI end-to-end validation failed (see retained logs)")
-    print(f"Packaged CLI end-to-end validation passed: {', '.join(results)} index + query", flush=True)
+        raise SystemExit("CLI end-to-end validation failed (see retained logs)")
+    label = "Cargo CLI" if args.cargo_binary else "Packaged CLI"
+    print(f"{label} end-to-end validation passed: {', '.join(results)} index + query", flush=True)
 
 
 if __name__ == "__main__":
