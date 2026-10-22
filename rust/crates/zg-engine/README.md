@@ -46,11 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Workspaces
 
-A workspace is a directory of files that zg indexes and searches as a unit. Each workspace is identified by its canonical root path and has its own scanning rules, model settings, and index. Different roots may have the same basename; there is no separate workspace name or global registration. The engine ignores legacy `~/.zvec-grep/workspaces.json` files.
+A workspace is a directory of files that zg indexes and searches as a unit. Each workspace is identified by its canonical root path and has its own scanning rules, model settings, and index.
 
 ### Index storage
 
-Workspace indexes and saved settings use a configurable storage location, defaulting to a `.zvec-grep` directory within the workspace. Downloaded models are cached separately and shared across workspaces. Moving or copying the source root together with `.zvec-grep` preserves the index. Legacy metadata names are ignored on read and omitted on write.
+Workspace indexes and saved settings use a configurable storage location, defaulting to a `.zvec-grep` directory within the workspace. Downloaded models are cached separately and shared across workspaces. Moving or copying the source root together with `.zvec-grep` preserves the index.
 
 ### File selection
 
