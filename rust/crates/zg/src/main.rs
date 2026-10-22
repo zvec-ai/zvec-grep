@@ -338,7 +338,7 @@ async fn execute_request(
             io::stderr().lock(),
             &result?,
             output,
-            io::stdout().is_terminal(),
+            zg_cli::stdout_supports_ansi(),
         )?;
         return Ok(());
     }

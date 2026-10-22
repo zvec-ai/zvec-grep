@@ -5,6 +5,9 @@ use std::{
     path::Path,
 };
 
+#[cfg(windows)]
+use std::path::{Component, Prefix};
+
 use grep::{matcher::Matcher, regex::RegexMatcherBuilder};
 use zg_engine::api::{
     context::{
@@ -305,6 +308,18 @@ fn range_label(range: &ContentRange) -> String {
 }
 
 fn path_label(path: &Path) -> String {
+    let path = crate::output_path(path);
+    #[cfg(windows)]
+    if matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(
+                prefix.kind(),
+                Prefix::Verbatim(_) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_)
+            )
+    ) {
+        return path.display().to_string();
+    }
     let path = path.to_string_lossy().replace('\\', "/");
     path.strip_prefix("//?/UNC/").map_or_else(
         || path.strip_prefix("//?/").unwrap_or(&path).to_owned(),
@@ -444,6 +459,27 @@ mod tests {
                     "warning: more matching files exist; use --limit to show more\n".into(),
                 )
             );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_labels_simplify_ordinary_paths_and_preserve_required_windows_syntax() {
+        assert_eq!(
+            path_label(Path::new(r"\\?\C:\workspace\src\main.rs")),
+            "C:/workspace/src/main.rs"
+        );
+        let long_path = format!(r"\\?\C:\{}main.rs", "folder\\".repeat(50));
+        for path in [
+            r"\\?\C:\workspace\trailing.",
+            r"\\?\C:\workspace\trailing ",
+            r"\\?\C:\workspace\NUL.txt",
+            r"\\?\UNC\server\share\main.rs",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\main.rs",
+            r"\\.\COM1",
+            long_path.as_str(),
+        ] {
+            assert_eq!(path_label(Path::new(path)), path);
         }
     }
 
