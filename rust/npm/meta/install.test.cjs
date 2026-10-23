@@ -126,15 +126,6 @@ test("selects one published platform and rejects unsupported libc", () => {
   );
 });
 
-test("selects the CPU-only Windows ARM64 optional dependency", () => {
-  const manifest = require("../platforms.json");
-  const selected = selectPlatform(manifest.platforms, "win32", "arm64");
-  assert.equal(selected.package, "@zvec/zvec-grep-win32-arm64-msvc");
-  assert.equal(selected.binary, "zg.exe");
-  assert.equal(selected.defaultVariant ?? "cpu", "cpu");
-  assert.equal(selected.components, undefined);
-});
-
 function componentFixture(target = "linux-x64-gnu") {
   const paths = fixture();
   const platform = require("../platforms.json").platforms.find((candidate) => candidate.target === target);

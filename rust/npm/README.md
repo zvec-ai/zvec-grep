@@ -6,7 +6,7 @@ x64. `platforms.json` is the single source of truth for package
 names and npm `os`, `cpu`, and `libc` selectors.
 
 The current published targets are macOS ARM64/x64, Linux x64/ARM64 with glibc,
-and Windows x64/ARM64.
+and Windows x64.
 
 After installation, the meta package retains the existing runtime paths. CUDA
 files are present only after successful plugin installation:
@@ -27,9 +27,9 @@ than runtime files copied by the installer.
 The Linux x64 base package's `plugins.json` references `-ggml-cuda13`, `-ggml-cuda12`,
 `-ort-cuda-part1` and `-ort-cuda-part2` packages. Windows x64 references
 `-ggml-cuda13`, `-ggml-cuda12` and `-ort-cuda`. These suffixes extend the base
-platform package name. macOS, Linux ARM64, Windows ARM64 and deliberate CPU-only
-builds remain single native packages. A default all-platform release contains 14
-tarballs: six base packages, seven runtime components and the meta package.
+platform package name. macOS, Linux ARM64 and deliberate CPU-only builds remain
+single native packages. A default all-platform release contains 13 tarballs:
+five base packages, seven runtime components and the meta package.
 
 The base package retains the executable and CPU/core libraries, including
 zvec's embedded Jieba dictionary; no external dictionary files are required.
@@ -226,22 +226,19 @@ Release order:
    CUDA targets also force a registry plugin installation and verify its hashes
    and core identity; CPU fallback must not hide a plugin-fetch failure.
 6. Promote native `latest` tags and then the meta `latest` tag in a separate job,
-   only after all six registry install/update/rollback jobs pass.
+   only after all five registry install/update/rollback jobs pass.
 
 `.github/workflows/rust-publish.yml` builds and packs the selected targets once on
 their native runners in parallel, collects the candidates into a downloadable
 artifact, then checks real installation, CLI startup, managed-rg and daemon IPC.
 The workflow runs only through manual dispatch and does not publish unless
 `publish` is enabled. The manual
-`platform` input defaults to `all`; each of the six target names can be selected
+`platform` input defaults to `all`; each of the five target names can be selected
 individually.
 `publish=true` requires `platform=all`; a subset is a validation-only candidate,
 not a complete release. Manual runs with `publish=false, cuda=false` use ordinary CPU runners;
-they do not allocate GPUs or publish packages. The original five package builds
-require the pinned llama-cpp-rs prebuilt SDK. Windows ARM64 uses the upstream
-zvec-rust prebuilt SDK, the locked ORT DirectML archive, and a Clang source build
-of llama.cpp's CPU backend. It has no CUDA components.
-Linux/Windows x64 still produce CUDA-capable
+they do not allocate GPUs or publish packages. All five package builds require
+the pinned llama-cpp-rs prebuilt SDK. Linux/Windows x64 still produce CUDA-capable
 bundles, but neither the 13.1 primary nor 12.4 fallback is compiled in zg CI.
 All packaging builds stay on ordinary CPU runners, including when `cuda=true`
 or `publish=true`. Manual `cuda=true` runs add separate Linux/Windows x64 GPU

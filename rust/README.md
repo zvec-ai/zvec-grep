@@ -559,8 +559,7 @@ Source-mode CUDA 12.4 on Windows requires MSVC 14.38 before running
 `scripts/cuda/build-fallback.py`. Matching SDK builds copy that plugin directly,
 so neither a second CMake build nor the fallback toolchain is needed.
 
-Publish CI requires prebuilt llama SDKs on the original five targets; Windows
-ARM64 builds its CPU backend from source. CUDA Rust CI also requires
+Publish CI requires prebuilt SDKs on all five targets; CUDA Rust CI also requires
 prebuilt mode instead of recompiling only for its T4 GPU. Linux publish builds
 run on Ubuntu 24.04 without a CUDA compiler. Runtime libraries, driver checks,
 link audits and real CPU/GPU inference gates remain required. Runtime staging
@@ -757,7 +756,7 @@ contains exactly the target executable. It cannot be combined with
 `--binary`, `--lib-dir`, or `--cpu-only`. All payload files are checksummed.
 
 The `Publish Rust packages` workflow builds the selected published native targets
-(all six by default) on matching CPU runners. It runs only through manual
+(all five by default) on matching CPU runners. It runs only through manual
 dispatch. With `publish` left at its default `false`, it produces downloadable
 candidates without publishing to npm. Each CPU artifact-verification runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
@@ -774,9 +773,8 @@ requested GPU jobs then verify the exact collected tarballs, including CLI,
 managed-rg, and daemon IPC checks on every selected platform.
 
 The packaging workflow's manual `platform` input defaults to `all`. Select any
-of `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`,
-`win32-x64-msvc`, or `win32-arm64-msvc` for an individual build. For example,
-to validate Linux x64:
+of `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`, or
+`win32-x64-msvc` for an individual build. For example, to validate Linux x64:
 
 ```sh
 gh workflow run rust-publish.yml --ref <branch> \
@@ -869,16 +867,9 @@ the build without falling back to zvec source compilation. Both SDKs are cached
 and their shared libraries are included in the npm payload. The Intel release
 targets macOS 14 and later.
 
-Windows ARM64 uses the native `windows-11-arm` runner with ARM64 Node, Python,
-Rust and MSVC tools. It downloads the SHA-256-pinned zvec-rust 0.8.0
-`aarch64-pc-windows-msvc` SDK without source fallback, and verifies the locked
-ORT DirectML distribution before compiling. Its llama.cpp CPU backend uses
-Clang because the pinned llama SDK has no Windows ARM64 build. This target has
-no CUDA components and uses the same installed CLI/direct/server smoke checks.
-
 For a complete all-platform run, download the `rust-release-<version>` artifact
 from the successful workflow run
-and unzip it. It contains six base platform tarballs, seven CUDA component
+and unzip it. It contains five base platform tarballs, seven CUDA component
 tarballs, the meta tarball,
 `SHA256SUMS`, `release.json` with the source commit, and platform-specific install
 commands. For example, on an ARM64 Mac:
@@ -932,7 +923,7 @@ separate from `dist/npm/release/`.
 package last. `release:collect -- --targets linux-x64-gnu,win32-x64-msvc` collects
 only the explicitly selected platform tarballs and their components as a validation-only partial
 candidate; missing or extra tarballs are rejected. The meta package still locks
-all six platform versions, so its installation behavior is unchanged.
+all five platform versions, so its installation behavior is unchanged.
 `release:artifact-smoke` installs the current platform's exact collected native
 component and meta tarballs from `dist/npm/release/tarballs`, verifies the installation and
 CLI/daemon operation, and does not compile, repack or publish anything.

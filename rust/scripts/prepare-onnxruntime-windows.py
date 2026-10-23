@@ -15,20 +15,19 @@ import tempfile
 
 
 TARGET = "x86_64-pc-windows-msvc"
-TARGETS = (TARGET, "aarch64-pc-windows-msvc")
 
 
-def distribution(workspace, target=TARGET):
+def distribution(workspace):
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1",
-         "--filter-platform", target],
+         "--filter-platform", TARGET],
         cwd=workspace, encoding="utf-8",
     ))
     package = next(p for p in metadata["packages"] if p["name"] == "ort-sys")
     manifest = Path(package["manifest_path"]).parent / "build/download/dist.tsv"
     with manifest.open(newline="", encoding="utf-8") as source:
         matches = [row for row in csv.DictReader(source, delimiter="\t")
-                   if row["target"] == target and row["feature_set"] == "directml"]
+                   if row["target"] == TARGET and row["feature_set"] == "directml"]
     if len(matches) != 1:
         raise RuntimeError("locked ort-sys must provide one Windows DirectML distribution")
     return matches[0]
@@ -59,8 +58,8 @@ def extract_verified(archive, destination, expected):
         Path(temporary).rename(destination)
 
 
-def prepare(workspace, cache, target=TARGET):
-    dist = distribution(workspace, target)
+def prepare(workspace, cache):
+    dist = distribution(workspace)
     expected = dist["sha256_hash"]
     if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
         raise RuntimeError("locked ort-sys has an invalid distribution checksum")
@@ -78,7 +77,7 @@ def prepare(workspace, cache, target=TARGET):
         ], check=True)
     if digest(archive) != expected:
         raise RuntimeError("ONNX Runtime archive SHA-256 differs from locked ort-sys")
-    destination = cache / "dfbin" / target / expected
+    destination = cache / "dfbin" / TARGET / expected
     marker = destination / ".verified-sha256"
     if (not marker.is_file() or marker.read_text(encoding="ascii") != expected
             or not all((destination / name).is_file()
@@ -93,6 +92,5 @@ def prepare(workspace, cache, target=TARGET):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", type=Path, default=Path("target/ort-prebuilt"))
-    parser.add_argument("--target", choices=TARGETS, default=TARGET)
     args = parser.parse_args()
-    prepare(Path(__file__).resolve().parent.parent, args.cache_dir.resolve(), args.target)
+    prepare(Path(__file__).resolve().parent.parent, args.cache_dir.resolve())

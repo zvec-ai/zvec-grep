@@ -266,13 +266,6 @@ test("maps supported native npm targets", () => {
     target: "win32-x64-msvc",
     components: manifest.platforms.find((entry) => entry.target === "win32-x64-msvc").components,
   });
-  assert.deepEqual(selectPlatform(manifest, "win32", "arm64"), {
-    package: "@zvec/zvec-grep-win32-arm64-msvc",
-    os: "win32",
-    cpu: "arm64",
-    binary: "zg.exe",
-    target: "win32-arm64-msvc",
-  });
 });
 
 test("splits the Linux ORT provider into ordered bounded-memory component payloads", async (t) => {
@@ -676,7 +669,7 @@ test("rejects platforms without a local release target", () => {
     /unsupported npm platform/,
   );
   assert.throws(
-    () => selectPlatform(manifest, "win32", "ia32"),
+    () => selectPlatform(manifest, "win32", "arm64"),
     /unsupported npm platform/,
   );
   assert.throws(
