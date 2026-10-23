@@ -859,11 +859,13 @@ The same limits are passed into the Linux builder. This is a resource
 heuristic, not a guarantee against OOM. The existing 180-minute limits remain
 upper bounds, not expected build durations. CUDA 13.1 and 12.4 native compilation
 now belongs to the fork's versioned SDK release, not every zg CI run.
-Intel macOS builds ONNX Runtime 1.28.0 with CoreML and the native zvec SDK from
-pinned source revisions. ONNX Runtime with CoreML still requires a source build;
-the zvec source revision matches the SDK bundled with zvec-rust 0.8.0. Both SDKs
-are cached and their shared libraries are included in the npm payload. The Intel
-release targets macOS 14 and later.
+Intel macOS builds ONNX Runtime 1.28.0 with CoreML from a pinned source revision
+and downloads the upstream zvec-rust 0.8.0 prebuilt SDK for
+`x86_64-apple-darwin`. The zvec archive is pinned by SHA-256 and checked for the
+expected target and library architecture; download or validation failures stop
+the build without falling back to zvec source compilation. Both SDKs are cached
+and their shared libraries are included in the npm payload. The Intel release
+targets macOS 14 and later.
 
 For a complete all-platform run, download the `rust-release-<version>` artifact
 from the successful workflow run
