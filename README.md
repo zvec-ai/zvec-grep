@@ -41,6 +41,9 @@ This README and the [documentation](./docs/README.md) describe the TypeScript /
 Node.js implementation. The Rust implementation is developed separately in
 [`rust/`](./rust/README.md).
 
+**Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
+`brew install zvec-grep`
+
 <a id="tour"></a>
 
 ## 🎬 See it in action
