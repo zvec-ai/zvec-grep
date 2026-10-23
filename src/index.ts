@@ -1,4 +1,7 @@
-export { createZvecGrep } from "./engine/service/index.js";
+export {
+  createZvecGrep,
+  openWorkspaceReadSession,
+} from "./engine/service/index.js";
 export type {
   CreateZvecGrepOptions,
   ZvecGrep,
@@ -22,6 +25,7 @@ export type {
   ZvecGrepIndexOptions,
   ZvecGrepRgDiagnostics,
   ZvecGrepSearchOptions,
+  WorkspaceReadSession,
 } from "./engine/service/index.js";
 export {
   createEmbeddingModel,
