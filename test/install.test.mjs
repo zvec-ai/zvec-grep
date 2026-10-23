@@ -769,11 +769,16 @@ test("Claude Code installer configures MCP trust and guidance", async (t) => {
   });
   assert.ok(settings.permissions.allow.includes("mcp__zvec_grep__*"));
   assert.match(guidance, /zvec_grep_search/);
-  assert.match(guidance, /`zvec_grep_rg` when it is listed/);
   assert.match(
     guidance,
-    /when an exact word, phrase, name, date,[^\n]+use `zvec_grep_rg` when it is listed by the current host; otherwise native Grep or `rg`/i,
+    /MCP server instructions and the zvec_grep_search tool description/,
   );
+  assert.doesNotMatch(
+    guidance,
+    /Choose the evidence source before the retrieval mode/,
+  );
+  assert.doesNotMatch(guidance, /### Workspace evidence/);
+  assert.doesNotMatch(guidance, /### Retrieval routing/);
   assert.doesNotMatch(guidance, /managed-rg/);
   assert.doesNotMatch(guidance, /Indexing and status/);
   assert.doesNotMatch(guidance, /Remote data authorization/);
