@@ -128,29 +128,11 @@ jobs:
         with:
           path: rust/target/ort-runtime/
           key: ${{ steps.ort-cache.outputs.cache-primary-key }}
-      - name: Restore the prebuilt Intel macOS zvec SDK
-        if: inputs.target == 'darwin-x64'
-        id: zvec-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: rust/target/zvec-runtime/
-          key: rust-zvec-prebuilt-v1-0.8.0-${{ inputs.runner }}-${{ hashFiles('rust/scripts/download-zvec-macos.sh') }}
-      - name: Download the prebuilt zvec SDK for Intel macOS
-        if: inputs.target == 'darwin-x64' && steps.zvec-cache.outputs.cache-hit != 'true'
-        run: bash scripts/download-zvec-macos.sh
-      - name: Save the prebuilt Intel macOS zvec SDK
-        if: inputs.target == 'darwin-x64' && steps.zvec-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: rust/target/zvec-runtime/
-          key: ${{ steps.zvec-cache.outputs.cache-primary-key }}
-      - name: Use the Intel macOS runtime libraries
+      - name: Use the Intel macOS ONNX Runtime libraries
         if: inputs.target == 'darwin-x64'
         run: |
           echo "ORT_LIB_PATH=$GITHUB_WORKSPACE/rust/target/ort-runtime" >> "$GITHUB_ENV"
           echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
-          echo "ZVEC_LIB_DIR=$GITHUB_WORKSPACE/rust/target/zvec-runtime" >> "$GITHUB_ENV"
-          echo "ZVEC_AUTO_BUILD=0" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
       - name: Build the Linux Rust builder without a CUDA compiler
         if: inputs.target == 'linux-x64-gnu'
