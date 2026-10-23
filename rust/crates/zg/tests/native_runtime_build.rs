@@ -784,9 +784,12 @@ fn source_elf_starts_outside_cargo_without_library_path_overrides() {
         .arg(&libraries)
         .args([
             "-Wl,-rpath,$ORIGIN",
-            "-llama",
-            "-lggml",
-            "-lggml-base",
+            "-l",
+            "llama",
+            "-l",
+            "ggml",
+            "-l",
+            "ggml-base",
             "-o",
         ])
         .arg(&binary)

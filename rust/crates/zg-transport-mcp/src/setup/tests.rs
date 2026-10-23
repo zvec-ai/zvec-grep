@@ -204,6 +204,49 @@ fn setup_value(response: CallToolResponse, root: &Path) -> Value {
     result
 }
 
+fn in_isolated_model_cache(test_name: &str) -> bool {
+    const FIXTURE_ENV: &str = "ZG_MCP_SETUP_TEST_MODEL_CACHE";
+    if let Some(cache) = std::env::var_os(FIXTURE_ENV) {
+        assert_eq!(
+            std::env::var_os("ZVEC_GREP_MODEL_CACHE"),
+            Some(cache.clone())
+        );
+        assert!(
+            std::fs::read_dir(cache)
+                .expect("isolated model cache")
+                .next()
+                .is_none(),
+            "setup protocol tests must start with an empty model cache"
+        );
+        return true;
+    }
+    // The MCP request has no model-cache override. Set it only in a child
+    // process so parallel tests never mutate or scan the real CI model cache.
+    let cache = tempfile::tempdir().expect("isolated model cache");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(FIXTURE_ENV, cache.path())
+        .env("ZVEC_GREP_MODEL_CACHE", cache.path())
+        .output()
+        .expect("isolated setup test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed;"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        cache
+            .path()
+            .read_dir()
+            .expect("model cache")
+            .next()
+            .is_none(),
+        "setup protocol tests must not download models"
+    );
+    false
+}
+
 #[test]
 fn model_and_authorization_forms_follow_the_negotiated_protocol() {
     let root = PathBuf::from("/workspace");
@@ -299,6 +342,11 @@ fn model_and_authorization_forms_follow_the_negotiated_protocol() {
 
 #[tokio::test]
 async fn an_existing_index_preserves_the_original_model_not_found_error() {
+    if !in_isolated_model_cache(
+        "setup::tests::an_existing_index_preserves_the_original_model_not_found_error",
+    ) {
+        return;
+    }
     let root = tempfile::tempdir().expect("workspace");
     let server = ZvecGrepMcpServer::build_with_index_operations(
         Arc::new(ZvecGrep::new()),
@@ -343,6 +391,11 @@ async fn an_existing_index_preserves_the_original_model_not_found_error() {
 
 #[tokio::test]
 async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay() {
+    if !in_isolated_model_cache(
+        "setup::tests::modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay",
+    ) {
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(15), async {
         let root = tempfile::tempdir().expect("workspace");
         let jobs = Arc::new(Jobs::default());
@@ -474,6 +527,9 @@ async fn modern_setup_accepts_key_reordering_binds_arguments_and_rejects_replay(
 
 #[tokio::test]
 async fn cancelled_or_expired_setup_never_submits_an_index() {
+    if !in_isolated_model_cache("setup::tests::cancelled_or_expired_setup_never_submits_an_index") {
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(15), async {
         let root = tempfile::tempdir().expect("workspace");
         let jobs = Arc::new(Jobs::default());
@@ -561,6 +617,11 @@ async fn cancelled_or_expired_setup_never_submits_an_index() {
 
 #[tokio::test]
 async fn legacy_forms_can_select_models_and_unsupported_clients_receive_instructions() {
+    if !in_isolated_model_cache(
+        "setup::tests::legacy_forms_can_select_models_and_unsupported_clients_receive_instructions",
+    ) {
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(15), async {
         for (version, forms) in [
             (ProtocolVersion::V_2025_06_18, true),
