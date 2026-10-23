@@ -15,14 +15,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Every release target has a pinned SDK. Drift must fail, not rebuild CUDA.
+  # Every release target has a pinned SDK. Drift must fail, not rebuild llama.cpp.
   LLAMA_CPP_BUILD_MODE: prebuilt
 
 jobs:
   native:
     name: Build ${{ inputs.target }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && 180 || 90 }}
+    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc' || inputs.target == 'win32-arm64-msvc') && 180 || 90 }}
     defaults:
       run:
         working-directory: rust
@@ -33,6 +33,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Configure native build parallelism
         shell: node {0}
         run: |
@@ -49,6 +50,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           python-version: "3.12"
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Use a short Windows Cargo home
         if: runner.os == 'Windows'
         shell: python
@@ -66,8 +68,9 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
-          vsversion: "2022"
+          arch: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
+          # ARM64 follows the runner image's installed Visual Studio version.
+          vsversion: ${{ inputs.target == 'win32-x64-msvc' && '2022' || '' }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux' && inputs.target != 'linux-x64-gnu'
         run: |
@@ -77,11 +80,24 @@ jobs:
         id: rust-version
         shell: bash
         run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - name: Select the native Windows ARM64 Rust host
+        if: inputs.target == 'win32-arm64-msvc'
+        run: rustup set default-host aarch64-pc-windows-msvc
       - name: Install the pinned Rust toolchain, including rustup if missing
         # Linux x64 compiles in Docker, but host packaging still uses cargo metadata.
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: ${{ steps.rust-version.outputs.channel }}
+      - name: Verify native Windows toolchains
+        if: runner.os == 'Windows'
+        env:
+          EXPECTED_ARCH: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
+          EXPECTED_HOST: ${{ inputs.target == 'win32-arm64-msvc' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+        run: |
+          node -e "if (process.arch !== process.env.EXPECTED_ARCH) throw new Error('unexpected Node architecture: ' + process.arch)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostLine = rustc -vV | Select-String '^host: '
+          if ($hostLine.ToString() -ne "host: $env:EXPECTED_HOST") { throw "Unexpected Rust host: $hostLine" }
       - name: Restore Cargo build state
         id: cargo-cache
         uses: actions/cache/restore@v5
@@ -112,6 +128,18 @@ jobs:
         with:
           path: rust/target/ort-cuda12/
           key: rust-ort-cuda12-v1-${{ inputs.target }}-${{ hashFiles('rust/scripts/cuda/prepare-onnxruntime.py') }}
+      - name: Restore the Windows ARM64 ONNX Runtime
+        if: inputs.target == 'win32-arm64-msvc'
+        uses: actions/cache@v5
+        with:
+          path: rust/target/ort-prebuilt/
+          key: rust-ort-windows-v2-${{ inputs.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
+      - name: Prepare the verified Windows ARM64 ONNX Runtime
+        if: inputs.target == 'win32-arm64-msvc'
+        run: |
+          python scripts/test-prepare-onnxruntime-windows.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/prepare-onnxruntime-windows.py --target aarch64-pc-windows-msvc
       - name: Restore the Intel macOS ONNX Runtime
         if: inputs.target == 'darwin-x64'
         id: ort-cache

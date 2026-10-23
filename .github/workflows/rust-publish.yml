@@ -19,6 +19,7 @@ on:
           - all
           - linux-x64-gnu
           - win32-x64-msvc
+          - win32-arm64-msvc
           - linux-arm64-gnu
           - darwin-arm64
           - darwin-x64
@@ -76,6 +77,7 @@ jobs:
             { target: 'linux-x64-gnu', runner: 'ubuntu-24.04', gpu_runner: 'gpu-linux-t4' },
             { target: 'linux-arm64-gnu', runner: 'ubuntu-24.04-arm', gpu_runner: '' },
             { target: 'win32-x64-msvc', runner: 'windows-2022', gpu_runner: 'gpu-windows-t4' },
+            { target: 'win32-arm64-msvc', runner: 'windows-11-arm', gpu_runner: '' },
           ];
           if (!['all', ...platforms.map(p => p.target)].includes(platform)) {
             throw new Error(`Unknown build platform: ${platform}`);
@@ -252,10 +254,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - uses: actions/setup-python@v6
         if: runner.os == 'Windows'
         with:
           python-version: "3.12"
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Install the release npm version
         run: npm install --global npm@11.21.0
       - uses: actions/download-artifact@v8
@@ -295,7 +299,7 @@ jobs:
                 --model-cache /model-cache --logs /work/cpu-logs
             '
       - name: Install and exercise the downloaded artifacts without Windows CUDA libraries
-        if: runner.os == 'Windows'
+        if: matrix.target == 'win32-x64-msvc'
         shell: pwsh
         run: |
           # Hosted CPU images may include toolkit paths; do not let them satisfy DLL dependencies.
@@ -313,7 +317,7 @@ jobs:
         run: |
           mkdir -p cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
           sudo chown -R "$(id -u):$(id -g)" cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
-      - name: Install and exercise the macOS and Linux ARM64 artifacts
+      - name: Install and exercise the non-CUDA platform artifacts
         if: ${{ !matrix.cuda_package }}
         run: npm run release:artifact-smoke -- --expect-cpu
       - name: Retain CPU artifact execution evidence
@@ -389,6 +393,8 @@ jobs:
             runner: ubuntu-24.04-arm
           - target: win32-x64-msvc
             runner: windows-2022
+          - target: win32-arm64-msvc
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@v6
         with:
@@ -396,6 +402,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Install the release npm version
         run: npm install --global npm@11.21.0
       - uses: actions/download-artifact@v8

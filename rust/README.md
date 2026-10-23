@@ -481,11 +481,13 @@ bash scripts/check.sh
 ## Native and CUDA builds
 
 The safe llama API and the C5 FFI boundary share the same pinned
-`zvec-ai/llama-cpp-rs` revision (`0e2d4b520af769de221c1bf98bbbf1b2accf4ddc`).
+`zvec-ai/llama-cpp-rs` revision (`660cb4008b36aaefe9f98a590ba3b712b3a95087`),
+from branch `prebuilt/0.1.154-cpu-r2`.
 Its sys crate automatically selects a SHA256-pinned SDK when target, features
-and native options match: `zvec-0.1.154-cpu-r1` for CPU-only Linux/Windows x64,
-and `zvec-0.1.154-r1` for the existing five release configurations, including
-CUDA-enabled Linux/Windows x64. Matching builds reuse native
+and native options match: `zvec-0.1.154-cpu-r2` for CPU-only Linux x64 and
+Windows x64/ARM64, and `zvec-0.1.154-r1` for the existing five release configurations,
+including CUDA-enabled Linux/Windows x64. This pin adds Windows ARM64 CPU support
+without introducing the CUDA r2 architecture upgrade. Matching builds reuse native
 libraries and bindings without executing bindgen, CMake, C++ or CUDA compilation;
 Rust application code still compiles normally. CPU-only x64 builds download only
 the static CPU SDK, not the CUDA SDK; CUDA builds retain the shared core, CPU
@@ -559,7 +561,8 @@ Source-mode CUDA 12.4 on Windows requires MSVC 14.38 before running
 `scripts/cuda/build-fallback.py`. Matching SDK builds copy that plugin directly,
 so neither a second CMake build nor the fallback toolchain is needed.
 
-Publish CI requires prebuilt SDKs on all five targets; CUDA Rust CI also requires
+Publish CI requires prebuilt llama SDKs on all six targets, including the
+Windows ARM64 static CPU SDK. CUDA Rust CI also requires
 prebuilt mode instead of recompiling only for its T4 GPU. Linux publish builds
 run on Ubuntu 24.04 without a CUDA compiler. Runtime libraries, driver checks,
 link audits and real CPU/GPU inference gates remain required. Runtime staging
@@ -756,7 +759,7 @@ contains exactly the target executable. It cannot be combined with
 `--binary`, `--lib-dir`, or `--cpu-only`. All payload files are checksummed.
 
 The `Publish Rust packages` workflow builds the selected published native targets
-(all five by default) on matching CPU runners. It runs only through manual
+(all six by default) on matching CPU runners. It runs only through manual
 dispatch. With `publish` left at its default `false`, it produces downloadable
 candidates without publishing to npm. Each CPU artifact-verification runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
@@ -773,8 +776,8 @@ requested GPU jobs then verify the exact collected tarballs, including CLI,
 managed-rg, and daemon IPC checks on every selected platform.
 
 The packaging workflow's manual `platform` input defaults to `all`. Select any
-of `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`, or
-`win32-x64-msvc` for an individual build. For example, to validate Linux x64:
+of `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`,
+`win32-x64-msvc`, or `win32-arm64-msvc` for an individual build. For example, to validate Linux x64:
 
 ```sh
 gh workflow run rust-publish.yml --ref <branch> \
@@ -867,9 +870,18 @@ and is covered by the existing `rust/target/release` cache. ONNX Runtime is
 cached separately; both shared libraries are included in the npm payload.
 The Intel release targets macOS 14 and later.
 
+Windows ARM64 builds and tests natively on `windows-11-arm` with ARM64 Node,
+Rust, and MSVC. zvec-rust 0.8.0 automatically downloads its Windows ARM64
+prebuilt SDK and stages `zvec_c_api.dll` for packaging; no local zvec source
+build is needed. ONNX Runtime uses the SHA-256-verified ARM64 DirectML archive
+from the locked dependency's distribution manifest. llama-cpp-rs selects the
+SHA-256-pinned Windows ARM64 static CPU SDK from `zvec-0.1.154-cpu-r2`, without
+running bindgen, CMake or a C++ compiler. No Clang/Ninja overrides are needed. npm selects
+`@zvec/zvec-grep-win32-arm64-msvc` for ARM64 Node on Windows.
+
 For a complete all-platform run, download the `rust-release-<version>` artifact
 from the successful workflow run
-and unzip it. It contains five base platform tarballs, seven CUDA component
+and unzip it. It contains six base platform tarballs, seven CUDA component
 tarballs, the meta tarball,
 `SHA256SUMS`, `release.json` with the source commit, and platform-specific install
 commands. For example, on an ARM64 Mac:
@@ -899,7 +911,7 @@ Failure blocks npm publication; the candidate artifact is kept for diagnosis.
 
 To publish, update the Rust workspace version, tag the release commit on `main`
 as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured for all 13
+publishing repository must have an npm trusted publisher configured for all 14
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
@@ -923,7 +935,7 @@ separate from `dist/npm/release/`.
 package last. `release:collect -- --targets linux-x64-gnu,win32-x64-msvc` collects
 only the explicitly selected platform tarballs and their components as a validation-only partial
 candidate; missing or extra tarballs are rejected. The meta package still locks
-all five platform versions, so its installation behavior is unchanged.
+all six platform versions, so its installation behavior is unchanged.
 `release:artifact-smoke` installs the current platform's exact collected native
 component and meta tarballs from `dist/npm/release/tarballs`, verifies the installation and
 CLI/daemon operation, and does not compile, repack or publish anything.

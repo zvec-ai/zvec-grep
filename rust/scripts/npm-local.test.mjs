@@ -266,6 +266,13 @@ test("maps supported native npm targets", () => {
     target: "win32-x64-msvc",
     components: manifest.platforms.find((entry) => entry.target === "win32-x64-msvc").components,
   });
+  assert.deepEqual(selectPlatform(manifest, "win32", "arm64"), {
+    package: "@zvec/zvec-grep-win32-arm64-msvc",
+    os: "win32",
+    cpu: "arm64",
+    binary: "zg.exe",
+    target: "win32-arm64-msvc",
+  });
 });
 
 test("splits the Linux ORT provider into ordered bounded-memory component payloads", async (t) => {
@@ -328,6 +335,16 @@ test("explicit prebuilt mode selects CUDA without probing nvcc and still honors 
     assert.equal(resolveBuildVariant(entry, false, noCompiler, "prebuilt"), defaultReleaseVariant(entry));
     assert.equal(resolveBuildVariant(entry, true, noCompiler, "prebuilt"), "cpu");
   }
+});
+
+test("Windows ARM64 publishing requires its CPU SDK without source compiler overrides", async () => {
+  const entry = selectPlatform(manifest, "win32", "arm64");
+  assert.equal(resolveBuildVariant(entry, false,
+    () => { throw new Error("Windows ARM64 must not probe nvcc"); }, "prebuilt"), "cpu");
+  const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
+  assert.match(workflow, /^  LLAMA_CPP_BUILD_MODE: prebuilt$/m);
+  assert.doesNotMatch(workflow,
+    /["'](?:CC|CXX|CXXFLAGS|CMAKE_GENERATOR|CMAKE_C_COMPILER_TARGET|CMAKE_CXX_COMPILER_TARGET)=/);
 });
 
 test("CUDA fallback uses the primary Cargo source record, including cached builds and overrides", async (t) => {
@@ -669,7 +686,7 @@ test("rejects platforms without a local release target", () => {
     /unsupported npm platform/,
   );
   assert.throws(
-    () => selectPlatform(manifest, "win32", "arm64"),
+    () => selectPlatform(manifest, "win32", "ia32"),
     /unsupported npm platform/,
   );
   assert.throws(
