@@ -70,7 +70,8 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
-          vsversion: "2022"
+          # The ARM image tracks the latest Visual Studio; x64 keeps VS 2022.
+          vsversion: ${{ inputs.target != 'win32-arm64-msvc' && '2022' || '' }}
       - name: Select the native Windows ARM64 Rust host
         if: inputs.target == 'win32-arm64-msvc'
         run: rustup set default-host aarch64-pc-windows-msvc
