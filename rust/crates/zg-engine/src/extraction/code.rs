@@ -3,7 +3,7 @@ mod outline;
 
 pub(crate) use outline::code_outline;
 
-use tree_sitter::{Language, Node, Parser, Point};
+use tree_sitter::{Language, Node, Parser};
 
 use crate::{
     EngineError,
@@ -202,11 +202,6 @@ struct CodeEntity<'tree> {
     /// Drives the language-specific scope separator; queries spell Java
     /// scopes with dots (`CallHierarchy.Base::bar`) and the rest with `::`.
     format: FileFormat,
-    /// LSP-style definition start: the name token when the grammar exposes
-    /// one, so leading annotations (`@Deprecated` above `main`) stay outside
-    /// the reported range. Falls back to the node start.
-    span_start_byte: usize,
-    span_start: Point,
     /// Pure declaration without a body (C/C++ prototypes); definitions
     /// shadow them in name-based binding.
     is_declaration: bool,
@@ -239,10 +234,6 @@ fn walk_code_node<'tree>(
                 scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
-                let (span_start_byte, span_start) = entity.child_by_field_name("name").map_or(
-                    (entity.start_byte(), entity.start_position()),
-                    |name_node| (name_node.start_byte(), name_node.start_position()),
-                );
                 // Declarations stay out of the in-file symbol table: an
                 // in-file call must not bind to a bodyless prototype when a
                 // definition exists anywhere in the workspace, and the
@@ -267,8 +258,6 @@ fn walk_code_node<'tree>(
                     arity: adapter.extract_arity(entity, source),
                     is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
                     format,
-                    span_start_byte,
-                    span_start,
                     is_declaration: adapter.is_declaration(entity),
                 });
             }
@@ -369,11 +358,11 @@ fn append_entity(
     let (content_max, content_overlap) =
         chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
     let range = TextRange::from_coordinates(
-        entity.span_start_byte,
+        entity.node.start_byte(),
         entity.node.end_byte(),
-        entity.span_start.row + 1,
+        entity.node.start_position().row + 1,
         entity.node.end_position().row + 1,
-        entity.span_start.column,
+        entity.node.start_position().column,
         entity.node.end_position().column,
     )
     .expect("parser coordinates refer to source text");
@@ -1818,7 +1807,7 @@ public class Service {
         assert_eq!(range.start_line(), 1);
         assert_eq!(
             range.start_byte_column(),
-            "<p>你好 😀</p><script>export function ".len()
+            "<p>你好 😀</p><script>export ".len()
         );
 
         let plain_script = test_source(
@@ -1936,11 +1925,11 @@ public class Service {
         assert_eq!(
             range,
             TextRange::from_coordinates(
-                "const prefix = \"你好 😀\";\r\nexport function ".len(),
+                "const prefix = \"你好 😀\";\r\nexport ".len(),
                 source.text.len(),
                 2,
                 2,
-                "export function ".len(),
+                "export ".len(),
                 "export function afterEmoji() { return true; }".len(),
             )
             .expect("function coordinates")
