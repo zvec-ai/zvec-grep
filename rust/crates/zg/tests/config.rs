@@ -331,7 +331,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddings"][0]["model"]["name"],
+        manifest["defaultEmbeddingModel"]["model"]["name"],
         "potion-code-16m-v2"
     );
     assert_eq!(

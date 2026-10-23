@@ -5,16 +5,12 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
     let file_id = FileId::new(file_id);
     let content = Content::Text("canonical content".into());
     let id = EntityId::new(file_id, &content, Range::Full).expect("entity ID");
-    Entity {
-        fragments: vec![EntityFragment {
-            id: FragmentId::new(&id, 0),
-            range: Range::Full,
-        }],
-        id,
+    Entity::new(
+        id.clone(),
         file_id,
-        source_range: Range::Full,
+        Range::Full,
         content,
-        metadata: metadata.then(|| {
+        metadata.then(|| {
             EntityMetadata::Code(CodeMetadata {
                 symbol_name: Some("symbol".into()),
                 symbol_type: Some(SymbolType::Function),
@@ -25,7 +21,12 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
                 documentation: Some("documentation".into()),
             })
         }),
-    }
+        vec![EntityFragment {
+            id: FragmentId::new(&id, 0),
+            range: Range::Full,
+        }],
+    )
+    .expect("entity")
 }
 
 #[test]
@@ -36,16 +37,23 @@ fn table_preserves_entities_metadata_and_ownership_across_reopen() {
     let entities = [entity(1, true), entity(2, false)];
     let ids = entities
         .iter()
-        .map(|entity| entity.id.clone())
+        .map(|entity| entity.id().clone())
         .collect::<Vec<_>>();
     table
         .write(&Entities::prepare(&entities).expect("encode entities"))
         .expect("write entities");
     table
-        .validate_ownership(&entities[..1], entities[0].file_id)
+        .validate_ownership(&entities[..1], entities[0].file_id())
         .expect("same owner");
-    let mut foreign = entities[0].clone();
-    foreign.file_id = FileId::new(99);
+    let foreign = Entity::new(
+        entities[0].id().clone(),
+        FileId::new(99),
+        entities[0].source_range(),
+        entities[0].content().clone(),
+        entities[0].metadata().cloned(),
+        entities[0].fragments().to_vec(),
+    )
+    .expect("foreign entity");
     assert_eq!(
         table
             .validate_ownership(&[foreign], FileId::new(99))
@@ -60,17 +68,17 @@ fn table_preserves_entities_metadata_and_ownership_across_reopen() {
     let loaded = table.fetch(&ids).expect("load canonical entities");
     assert_eq!(loaded.len(), 2);
     for entity in &entities {
-        assert_eq!(&loaded[&entity.id], entity);
+        assert_eq!(&loaded[entity.id()], entity);
     }
     table
-        .delete_file(entities[0].file_id)
+        .delete_file(entities[0].file_id())
         .expect("delete one file");
     table
-        .delete_file(entities[0].file_id)
+        .delete_file(entities[0].file_id())
         .expect("idempotent deletion");
     assert_eq!(
         table.fetch(&ids).expect("remaining entity"),
-        HashMap::from([(entities[1].id.clone(), entities[1].clone()),])
+        HashMap::from([(entities[1].id().clone(), entities[1].clone()),])
     );
 }
 

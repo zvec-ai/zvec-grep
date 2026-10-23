@@ -1,6 +1,9 @@
 //! Compile catalog format rules into predicates over stored basenames.
 
-use std::{collections::BTreeMap, ffi::OsStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
+};
 
 use crate::{
     api::context::options::QueryFilter, domain::FileFormat, storage::types::StoragePathFilter,
@@ -8,8 +11,10 @@ use crate::{
 
 use super::path_filter::{all, any, negate};
 
-pub(super) fn compile_format_filter(filter: &QueryFilter) -> Option<StoragePathFilter> {
-    if filter.formats.is_empty()
+pub(in crate::pipelines) fn compile_format_filter(
+    filter: &QueryFilter,
+) -> Option<StoragePathFilter> {
+    if filter.included_formats.is_empty()
         && filter.excluded_formats.is_empty()
         && filter.categories.is_empty()
         && filter.excluded_categories.is_empty()
@@ -18,8 +23,8 @@ pub(super) fn compile_format_filter(filter: &QueryFilter) -> Option<StoragePathF
     }
     let rules = CatalogRules::new();
     let mut predicates = Vec::new();
-    if !filter.formats.is_empty() {
-        predicates.push(rules.matching(&filter.formats));
+    if !filter.included_formats.is_empty() {
+        predicates.push(rules.matching(&filter.included_formats));
     }
     if !filter.categories.is_empty() {
         let formats = FileFormat::ALL
@@ -53,21 +58,21 @@ pub(super) fn compile_format_filter(filter: &QueryFilter) -> Option<StoragePathF
 
 struct CatalogRules {
     extensions: BTreeMap<&'static str, Vec<FileFormat>>,
-    names: BTreeMap<&'static str, Vec<FileFormat>>,
+    names: BTreeSet<&'static str>,
 }
 
 impl CatalogRules {
     fn new() -> Self {
         let mut rules = Self {
             extensions: BTreeMap::new(),
-            names: BTreeMap::new(),
+            names: BTreeSet::new(),
         };
         for &format in FileFormat::ALL {
             for &extension in format.extensions() {
                 rules.extensions.entry(extension).or_default().push(format);
             }
             for &name in format.file_names() {
-                rules.names.entry(name).or_default().push(format);
+                rules.names.insert(name);
             }
         }
         rules
@@ -84,16 +89,13 @@ impl CatalogRules {
         let names = self
             .names
             .iter()
-            .map(|(&name, formats)| {
-                let suffix_formats = self
-                    .extensions
-                    .iter()
-                    .filter(|(extension, _)| has_extension(name, extension))
-                    .max_by_key(|(extension, _)| extension.len())
-                    .map_or(&[][..], |(_, formats)| formats.as_slice());
+            .map(|&name| {
                 (
                     name,
-                    selected_match(formats.iter().chain(suffix_formats), selected),
+                    selected_match(
+                        FileFormat::from_file_name(OsStr::new(name)).iter(),
+                        selected,
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -131,7 +133,7 @@ impl CatalogRules {
                 .map(|extension| extension_predicate(extension))
                 .chain(
                     self.names
-                        .keys()
+                        .iter()
                         .map(|name| StoragePathFilter::FileNameExact((*name).to_owned())),
                 )
                 .collect());
@@ -170,7 +172,7 @@ fn extension_predicate(extension: &str) -> StoragePathFilter {
 
 /// Fallback for backends without path predicates or native non-Unicode basenames.
 /// Evaluate the compiled rules directly without constructing per-file formats.
-pub(super) fn matches_file_name(predicate: &StoragePathFilter, name: &OsStr) -> bool {
+pub(in crate::pipelines) fn matches_file_name(predicate: &StoragePathFilter, name: &OsStr) -> bool {
     let bytes = name.as_encoded_bytes();
     match predicate {
         StoragePathFilter::All => true,
@@ -200,6 +202,42 @@ mod tests {
             &compile_format_filter(filter).expect("format condition"),
             name.as_ref(),
         )
+    }
+
+    #[test]
+    fn compiled_formats_agree_with_shared_filename_detection() {
+        let mut names = vec![
+            "script".to_owned(),
+            "main.RS".to_owned(),
+            "unknown.ext".to_owned(),
+        ];
+        for &format in FileFormat::ALL {
+            for extension in format.extensions() {
+                names.push(format!("sample.{extension}"));
+                names.push(format!(".{extension}"));
+            }
+            names.extend(format.file_names().iter().map(|name| (*name).to_owned()));
+        }
+        names.sort();
+        names.dedup();
+        let cases = names
+            .iter()
+            .map(|name| (name, FileFormat::from_file_name(name.as_ref())))
+            .collect::<Vec<_>>();
+        for &format in FileFormat::ALL {
+            let predicate = compile_format_filter(&QueryFilter {
+                included_formats: vec![format],
+                ..Default::default()
+            })
+            .expect("format predicate");
+            for (name, detected) in &cases {
+                assert_eq!(
+                    matches_file_name(&predicate, name.as_ref()),
+                    detected.contains(&format),
+                    "{format:?}: {name}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -259,7 +297,7 @@ mod tests {
             ),
         ] {
             let filter = QueryFilter {
-                formats: vec![format],
+                included_formats: vec![format],
                 ..Default::default()
             };
             for (name, expected) in names.into_iter().zip(expected) {
@@ -271,7 +309,7 @@ mod tests {
     #[test]
     fn multiple_formats_categories_and_exclusions_keep_their_independent_meanings() {
         let mut filter = QueryFilter {
-            formats: vec![FileFormat::Json],
+            included_formats: vec![FileFormat::Json],
             categories: vec![FileCategory::Code],
             ..Default::default()
         };
@@ -281,7 +319,7 @@ mod tests {
         assert!(!matches(&filter, "tsconfig.json"));
 
         filter = QueryFilter {
-            formats: vec![FileFormat::Cpp],
+            included_formats: vec![FileFormat::Cpp],
             excluded_formats: vec![FileFormat::C],
             ..Default::default()
         };
@@ -302,13 +340,13 @@ mod tests {
         assert!(matches(&filter, "script"));
         assert!(!matches(&filter, "main.rs"));
         filter = QueryFilter {
-            formats: vec![FileFormat::Gzip, FileFormat::Tar],
+            included_formats: vec![FileFormat::Gzip, FileFormat::Tar],
             ..Default::default()
         };
         assert!(matches(&filter, "archive.tar.gz"));
         assert!(matches(&filter, ".tar.gz"));
         filter = QueryFilter {
-            formats: vec![FileFormat::Text, FileFormat::Cmake],
+            included_formats: vec![FileFormat::Text, FileFormat::Cmake],
             ..Default::default()
         };
         assert!(matches(&filter, "CMakeLists.txt"));
@@ -320,7 +358,7 @@ mod tests {
     fn fallback_matches_registered_suffixes_on_native_names() {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
         let predicate = compile_format_filter(&QueryFilter {
-            formats: vec![FileFormat::Rust],
+            included_formats: vec![FileFormat::Rust],
             ..Default::default()
         })
         .expect("filter");

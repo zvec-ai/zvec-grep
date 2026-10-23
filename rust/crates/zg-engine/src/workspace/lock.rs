@@ -139,28 +139,6 @@ pub(crate) fn home_allows_cached_reads(home: &Path) -> bool {
     file.try_lock_shared().is_ok()
 }
 
-/// Serialize short metadata updates shared by otherwise independent workspaces.
-pub(crate) fn acquire_exclusive_lock(
-    lock_path: &Path,
-    operation: &str,
-) -> Result<FileLock, EngineError> {
-    let file = open_lock_file(lock_path, operation)?;
-    file.lock().map_err(|error| {
-        EngineError::from_io(
-            format!(
-                "acquire workspace lock {} operation={operation}",
-                lock_path.display()
-            ),
-            &error,
-        )
-    })?;
-    Ok(FileLock {
-        _file: file,
-        _read_cache: None,
-        _intent: None,
-    })
-}
-
 fn open_lock_file(lock_path: &Path, operation: &str) -> Result<File, EngineError> {
     let parent = lock_path.parent().unwrap_or_else(|| Path::new("."));
     let mut builder = DirBuilder::new();

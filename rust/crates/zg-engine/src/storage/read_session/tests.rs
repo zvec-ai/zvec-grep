@@ -8,7 +8,7 @@ use crate::{
     domain::{
         Content, Entity, EntityFragment, EntityId, FileIndexStatus, FileRecord, FileSnapshot,
         FragmentId, IndexDescriptor, IndexState, Range, SourcePath, Workspace,
-        model::{EmbeddingModelInfo, Metric, ModelInfo},
+        model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
     },
     models::ModelRuntimeManager,
     pipelines::{indexed_search::service::context, indexing::service::WorkspaceIndexService},
@@ -59,10 +59,16 @@ impl Fixture {
         let root = self.home.parent().expect("workspace root");
         let mut manifest = WorkspaceManifest::new(
             Workspace {
-                name: "cache-fixture".into(),
                 root: root.to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(schema())),
+                index: IndexState::Enabled(Box::new(
+                    IndexDescriptor::new(
+                        schema(),
+                        std::collections::BTreeMap::new(),
+                        crate::domain::FTS_CONFIG,
+                    )
+                    .expect("index descriptor"),
+                )),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 1,
             },
@@ -93,18 +99,24 @@ impl Fixture {
 }
 
 fn schema() -> EmbeddingModelInfo {
-    EmbeddingModelInfo {
-        model: ModelInfo {
-            provider: "fixture".into(),
-            name: "read-cache".into(),
-            endpoint: None,
-        },
-        dimension: 3,
-        metric: Metric::Cosine,
-        max_batch_size: 32,
-        max_input_tokens: None,
-        max_image_bytes: None,
-    }
+    EmbeddingModelInfo::new(
+        ModelInfo::new(
+            "fixture",
+            "read-cache",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+                crate::domain::ContentKind::Image,
+            ],
+            32,
+        )
+        .expect("valid model metadata"),
+        3,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("valid embedding metadata")
 }
 
 fn write_text(home: &Path, storage_home: &Path, text: &str) {
@@ -120,30 +132,32 @@ fn write_text(home: &Path, storage_home: &Path, text: &str) {
         .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("file ID")[0];
     fs::write(home.parent().expect("root").join("source.txt"), text).expect("source file");
-    let file = FileRecord {
+    let file = FileRecord::new(
         id,
         relative_path,
-        snapshot: FileSnapshot {
+        FileSnapshot {
             size_bytes: text.len() as u64,
             modified_epoch_ms: None,
             content_hash: Some(crate::utils::sha256_hex(text.as_bytes())),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    };
+        FileIndexStatus::NotIndexed,
+    )
+    .expect("file record");
     let content = Content::Text(text.into());
     let entity_id = EntityId::new(id, &content, Range::Full).expect("entity ID");
     let fragment_id = FragmentId::new(&entity_id, 0);
-    let entity = Entity {
-        id: entity_id.clone(),
-        file_id: id,
+    let entity = Entity::new(
+        entity_id.clone(),
+        id,
+        Range::Full,
         content,
-        source_range: Range::Full,
-        metadata: None,
-        fragments: vec![EntityFragment {
+        None,
+        vec![EntityFragment {
             id: fragment_id.clone(),
             range: Range::Full,
         }],
-    };
+    )
+    .expect("valid entity");
     storage
         .replace_file(
             &file,
@@ -151,7 +165,7 @@ fn write_text(home: &Path, storage_home: &Path, text: &str) {
             &[IndexedFragment {
                 entity_id,
                 fragment_id,
-                model: schema().model.reference(),
+                model: schema().model().reference(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: text.into(),
             }],
@@ -393,7 +407,7 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
 #[tokio::test]
 async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::with_test_registry();
+    let indexing = WorkspaceIndexService::new();
     let models = ModelRuntimeManager::new();
     let cache = cache();
     let (mut manifest, options) = fixture.publish();
@@ -446,7 +460,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
 async fn benchmark_warm_queries() {
     let fixture = Fixture::new();
     let (_, options) = fixture.publish();
-    let indexing = WorkspaceIndexService::with_test_registry();
+    let indexing = WorkspaceIndexService::new();
     let models = ModelRuntimeManager::new();
     let cache = cache();
     for (name, selected_cache) in [("uncached", None), ("resident", Some(&cache))] {

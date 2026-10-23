@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::{
-    domain::model::Metric,
+    domain::model::EmbeddingMetric,
     models::{
         artifacts::ArtifactDownloadConfig,
         catalog::{
@@ -230,10 +230,10 @@ fn artifact_value(download: &ArtifactDownloadConfig) -> Value {
     )
 }
 
-const fn metric_name(metric: Metric) -> &'static str {
+const fn metric_name(metric: EmbeddingMetric) -> &'static str {
     match metric {
-        Metric::Cosine => "cosine",
-        Metric::DotProduct => "dot",
-        Metric::Euclidean => "euclidean",
+        EmbeddingMetric::Cosine => "cosine",
+        EmbeddingMetric::DotProduct => "dot",
+        EmbeddingMetric::Euclidean => "euclidean",
     }
 }

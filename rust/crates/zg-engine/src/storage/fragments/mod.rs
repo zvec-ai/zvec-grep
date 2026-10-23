@@ -27,7 +27,7 @@ use crate::{
     domain::{
         CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
         FileId, FileRecord, FragmentId, IndexField, SourcePath,
-        model::{EmbeddingModelInfo, Metric},
+        model::{EmbeddingMetric, EmbeddingModelInfo},
     },
     utils::sha256_hex_parts,
 };
@@ -46,7 +46,7 @@ impl Fragments {
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
         for embedding in embeddings {
-            let dimension = u32::try_from(embedding.dimension)
+            let dimension = u32::try_from(embedding.dimension())
                 .ok()
                 .filter(|value| (1..=20_000).contains(value))
                 .ok_or_else(|| {
@@ -54,10 +54,10 @@ impl Fragments {
                         "storage embedding dimension must be between 1 and 20,000",
                     )
                 })?;
-            let metric = match embedding.metric {
-                Metric::Cosine => MetricType::Cosine,
-                Metric::DotProduct => MetricType::Ip,
-                Metric::Euclidean => MetricType::L2,
+            let metric = match embedding.metric() {
+                EmbeddingMetric::Cosine => MetricType::Cosine,
+                EmbeddingMetric::DotProduct => MetricType::Ip,
+                EmbeddingMetric::Euclidean => MetricType::L2,
             };
             let name = fragment_collection_name(embedding);
             let collection = open_collection(
@@ -66,7 +66,7 @@ impl Fragments {
                 read_only,
             )?;
             if indexes
-                .insert(embedding.model.reference(), collection)
+                .insert(embedding.model().reference(), collection)
                 .is_some()
             {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
@@ -86,8 +86,7 @@ impl Fragments {
             .iter()
             .map(|entity| {
                 let fields = entity
-                    .metadata
-                    .as_ref()
+                    .metadata()
                     .map(|metadata| {
                         let value = serde_json::to_value(metadata)
                             .map_err(|error| corrupt(format!("encode entity metadata: {error}")))?;
@@ -95,12 +94,12 @@ impl Fragments {
                     })
                     .transpose()?
                     .unwrap_or_default();
-                Ok((&entity.id, (entity, fields)))
+                Ok((entity.id(), (entity, fields)))
             })
             .collect::<EngineResult<HashMap<_, _>>>()?;
         let fragments = entities
             .iter()
-            .flat_map(|entity| &entity.fragments)
+            .flat_map(Entity::fragments)
             .map(|fragment| (&fragment.id, fragment))
             .collect::<HashMap<_, _>>();
         let mut projections: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
@@ -279,10 +278,10 @@ pub(super) fn fragment_collection_name(embedding: &EmbeddingModelInfo) -> String
             "space",
             &format!(
                 "{}\0{}\0{}\0{:?}",
-                embedding.model.provider,
-                embedding.model.name,
-                embedding.dimension,
-                embedding.metric
+                embedding.model().provider(),
+                embedding.model().name(),
+                embedding.dimension(),
+                embedding.metric()
             )
         )
     )
@@ -343,11 +342,11 @@ fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc>
     let mut doc = native(Doc::new(), "create fragment record")?;
     doc.set_pk(fragment.id.as_str());
     native(
-        doc.add_u32("file_id", entity.file_id.get()),
+        doc.add_u32("file_id", entity.file_id().get()),
         "encode source identity",
     )?;
     native(
-        doc.add_string("entity_id", entity.id.as_str()),
+        doc.add_string("entity_id", entity.id().as_str()),
         "encode entity identity",
     )?;
     native(
@@ -642,9 +641,9 @@ pub(super) fn validate_projections(
         .iter()
         .flat_map(|entity| {
             entity
-                .fragments
+                .fragments()
                 .iter()
-                .map(move |fragment| (&fragment.id, &entity.id))
+                .map(move |fragment| (&fragment.id, entity.id()))
         })
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();

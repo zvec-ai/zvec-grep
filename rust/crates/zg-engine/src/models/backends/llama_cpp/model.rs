@@ -131,18 +131,23 @@ impl LlamaCppEmbeddingModel {
             .unwrap_or_else(|| default_model_cache(LocalModelBackend::LlamaCpp));
         Self {
             entry,
-            info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: None,
-                },
-                dimension: entry.dimension,
-                metric: entry.metric,
-                max_batch_size: entry.max_batch_size,
-                max_input_tokens: Some(entry.context_size),
-                max_image_bytes: None,
-            },
+            info: EmbeddingModelInfo::new(
+                ModelInfo::new(
+                    entry.provider.to_owned(),
+                    entry.model.to_owned(),
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                    ],
+                    entry.max_batch_size,
+                )
+                .expect("valid model metadata"),
+                entry.dimension,
+                entry.metric,
+                Some(entry.context_size),
+                None,
+            )
+            .expect("valid embedding metadata"),
             model_cache_dir,
             device: options.device,
             compute_runtime,
@@ -267,9 +272,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let on_progress = options.on_progress.clone();
         let model = self
             .ensure_loaded(options.on_progress, options.signal.as_ref())
@@ -431,7 +434,7 @@ fn report_warning(
 ) {
     if let Some(on_progress) = on_progress {
         on_progress(ModelProgress::Warning {
-            model: model.to_owned(),
+            model_ref: model.to_owned(),
             message,
         });
     } else {

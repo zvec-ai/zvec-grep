@@ -6,7 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use tokio::sync::{Barrier, Semaphore as TokioSemaphore};
 
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 
 use super::*;
 use crate::domain::model::EmbeddingPurpose;
@@ -21,18 +21,24 @@ struct ConcurrentFixtureModel {
 impl ConcurrentFixtureModel {
     fn new() -> Self {
         Self {
-            info: EmbeddingModelInfo {
-                model: crate::domain::model::ModelInfo {
-                    provider: "local".to_owned(),
-                    name: "fixture".to_owned(),
-                    endpoint: None,
-                },
-                dimension: 1,
-                metric: Metric::Cosine,
-                max_batch_size: 8,
-                max_input_tokens: Some(32),
-                max_image_bytes: None,
-            },
+            info: EmbeddingModelInfo::new(
+                crate::domain::model::ModelInfo::new(
+                    "local".to_owned(),
+                    "fixture".to_owned(),
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                        crate::domain::ContentKind::Image,
+                    ],
+                    8,
+                )
+                .expect("valid model metadata"),
+                1,
+                EmbeddingMetric::Cosine,
+                Some(32),
+                None,
+            )
+            .expect("valid embedding metadata"),
             barrier: Barrier::new(2),
             active: AtomicUsize::new(0),
             maximum_active: AtomicUsize::new(0),
@@ -138,19 +144,19 @@ impl EmbeddingModel for ProgressFixtureModel {
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
         if let Some(on_progress) = options.on_progress {
             on_progress(crate::domain::model::ModelProgress::Preparing {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
             });
             on_progress(crate::domain::model::ModelProgress::Downloading {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             });
             on_progress(crate::domain::model::ModelProgress::Warning {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
                 message: "fixture warning".to_owned(),
             });
             on_progress(crate::domain::model::ModelProgress::Ready {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
             });
         }
         Ok(())
@@ -489,19 +495,20 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
         let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
             let mut model = ConcurrentFixtureModel::new();
             if observed_creations.fetch_add(1, Ordering::AcqRel) == 0 {
+                let mut data = serde_json::to_value(&model.info).expect("metadata");
                 match field {
-                    "provider" => model.info.model.provider = " ".to_owned(),
-                    "name" => model.info.model.name.clear(),
-                    "dimension" => model.info.dimension = 0,
-                    "max_batch_size" => model.info.max_batch_size = 0,
-                    "max_input_tokens" => model.info.max_input_tokens = Some(0),
-                    "max_image_bytes" => model.info.max_image_bytes = Some(0),
+                    "provider" => data["model"]["provider"] = serde_json::json!(" "),
+                    "name" => data["model"]["name"] = serde_json::json!(""),
+                    "dimension" => data["dimension"] = serde_json::json!(0),
+                    "max_batch_size" => data["model"]["maxBatchSize"] = serde_json::json!(0),
+                    "max_input_tokens" => data["maxInputTokens"] = serde_json::json!(0),
+                    "max_image_bytes" => data["maxImageBytes"] = serde_json::json!(0),
                     _ => unreachable!(),
                 }
-            } else {
-                // Optional limits may be absent; this does not invalidate the model.
-                model.info.max_input_tokens = None;
-                model.info.max_image_bytes = None;
+                model.info = serde_json::from_value(data).map_err(|error| {
+                    ModelError::internal("Embedding model returned invalid metadata")
+                        .with_cause(error)
+                })?;
             }
             Ok(Arc::new(model))
         });
@@ -515,7 +522,7 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
             .expect("retry constructs a valid model");
         assert_eq!(creations.load(Ordering::Acquire), 2);
         assert_eq!(manager.snapshot().active_leases, 1);
-        assert_eq!(lease.info().model.reference(), "local/fixture");
+        assert_eq!(lease.info().model().reference(), "local/fixture");
     }
 }
 
@@ -559,7 +566,7 @@ async fn reuses_one_runtime_and_allows_shared_concurrent_embeddings() {
 
     assert_eq!(creations.load(Ordering::Acquire), 1);
     assert!(Arc::ptr_eq(&first.entry.runtime, &second.entry.runtime));
-    assert_eq!(first.info().model.reference(), "local/fixture");
+    assert_eq!(first.info().model().reference(), "local/fixture");
     assert_eq!(
         manager.snapshot(),
         ModelRuntimeSnapshot {
@@ -664,19 +671,19 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
         *model_events,
         [
             ModelProgress::Preparing {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Warning {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
                 message: "fixture warning".to_owned(),
             },
             ModelProgress::Ready {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
             },
         ]
     );

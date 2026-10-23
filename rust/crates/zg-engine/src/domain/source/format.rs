@@ -80,6 +80,20 @@ impl<'de> serde::Deserialize<'de> for FileFormat {
 }
 
 impl FileFormat {
+    /// Matches only catalog filename rules, without inspecting the filesystem.
+    pub(crate) fn from_file_name(file_name: &OsStr) -> Vec<Self> {
+        let file_name_formats = file_name.to_str().map_or(&[][..], catalog::lookup_name);
+        let extension_formats = match_longest_extension(file_name);
+        let mut formats = Vec::with_capacity(file_name_formats.len() + extension_formats.len());
+        formats.extend_from_slice(extension_formats);
+        formats.extend_from_slice(file_name_formats);
+        normalize_formats(&mut formats);
+        if formats.is_empty() {
+            formats.push(Self::Unknown);
+        }
+        formats
+    }
+
     /// Trusts catalog matches; probes only unmatched files without a suffix.
     pub(crate) fn from_path(path: &Path) -> EngineResult<Vec<Self>> {
         let file_name = path.file_name().ok_or_else(|| {
@@ -88,14 +102,8 @@ impl FileFormat {
                 path.display()
             ))
         })?;
-        let file_name_formats = file_name.to_str().map_or(&[][..], catalog::lookup_name);
-        let extension_formats = match_longest_extension(file_name);
-
-        let mut formats = Vec::with_capacity(file_name_formats.len() + extension_formats.len());
-        formats.extend_from_slice(extension_formats);
-        formats.extend_from_slice(file_name_formats);
-        normalize_formats(&mut formats);
-        if !formats.is_empty() {
+        let formats = Self::from_file_name(file_name);
+        if formats != [Self::Unknown] {
             return Ok(formats);
         }
         if path.extension().is_some() {

@@ -67,7 +67,6 @@ The regular `cargo test --workspace --all-targets` entry point also runs:
   refresh and direct/server source-coordinate regressions.
 
 These tests are part of the existing Linux/Windows/macOS Rust CI matrix. They use
-local HTTP fixtures, temporary roots and mock embedding responses. Standalone test
-runs in a restricted filesystem should set `ZVEC_GREP_WORKSPACE_REGISTRY` to a
-writable temporary file. Deferred MCP-01 remains separate: these focused cases do
+local HTTP fixtures, temporary roots and mock embedding responses; no global
+workspace registration is needed. Deferred MCP-01 remains separate: these focused cases do
 not claim to be a complete snapshot of every public Node schema and response.

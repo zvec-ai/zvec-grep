@@ -12,6 +12,8 @@ use zg_engine::api::context::{
     },
 };
 
+use crate::output_path;
+
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
 /// # Errors
@@ -50,7 +52,7 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             if previous_path.is_some() {
                 writeln!(writer)?;
             }
-            writeln!(writer, "{}", item.relative_path.display())?;
+            writeln!(writer, "{}", output_path(&item.relative_path).display())?;
             previous_path = Some(item.relative_path.as_path());
         }
         if let Some(first) = item.content_range.start_line() {
@@ -155,13 +157,18 @@ pub fn write_context_with_options(
         let range = range_label(&item.range);
         let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
         let label = if options.human {
-            format!("{}. {}:{}", item.rank, item.relative_path.display(), range)
+            format!(
+                "{}. {}:{}",
+                item.rank,
+                output_path(&item.relative_path).display(),
+                range
+            )
         } else {
             format!(
                 "#{} matchedBy={} {}:{}",
                 item.rank,
                 matched_by.as_str().unwrap_or_default(),
-                item.relative_path.display(),
+                output_path(&item.relative_path).display(),
                 range
             )
         };
@@ -388,7 +395,7 @@ const SEARCH_HELP: &str = r#"Usage:
   zg --rg --files [discovery-options] [path...]
 
 Search routes:
-  positional words                  Joined into one hybrid FTS and vector query
+  positional words                  File paths use current files and literal text; other words form one hybrid query
   --hybrid <query>                  Add an explicit hybrid query
   --fts <query>                     Add an exact/lexical query
   --vector <query>                  Add a semantic/vector query
@@ -405,6 +412,11 @@ The warning is written to stderr when multiple nonempty positional arguments
 include one with internal whitespace. Shell quote characters are not available.
 --hybrid, --fts, and --vector remain separate, repeatable queries.
 Managed --rg keeps its pattern and path arguments separate.
+An ordinary single path-shaped query such as auth.ts first matches current file
+names without reading contents. If no name matches, current source is searched
+literally. A complete miss returns No matches., including with a warm index.
+Automatic path lookup prints a warning on stderr; use --hybrid to force
+hybrid search. Explicit query routes, trace, refresh and symbol options bypass it.
 With --files, every positional argument is an input file or directory; no pattern
 is required. Use -g 'auth.ts' to select files by name.
 
@@ -468,7 +480,6 @@ const INDEX_HELP: &str = r"Usage:
   zg --index [root] --drop [--yes]
 
 Index options:
-  --name <NAME>                     Set or rename the unique workspace name
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
   --yes                             Confirm --drop without prompting
@@ -503,8 +514,8 @@ Index embedding concurrency:
 Scan rules:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
-  -t, --type <type>                 Include a ripgrep file type; repeatable
-  -T, --type-not <type>             Exclude a ripgrep file type; repeatable
+  -t, --type <format>               Include an engine format, e.g. rust or markdown; repeatable
+  -T, --type-not <format>           Exclude an engine format; repeatable
   --hidden[=true|false]              Include hidden paths except .git and .zvec-grep
   --no-ignore[=true|false]           Do not apply default or .gitignore rules
   --nested-git[=true|false]          Scan nested Git repositories and submodules
@@ -514,12 +525,13 @@ Scan rules:
   -L, --follow[=true|false]          Follow symbolic links safely
   --reset-paths                     Clear inherited scanning settings
 
+Type filters use the same file-name rules as indexed queries and intersect
+with path globs. Scan rules are saved; omitted options keep their saved values.
+
 Interactive remote indexing asks to allow once, allow for this workspace, or
 cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
 
-A new workspace name defaults to root directory name; use --name if it is taken.
-Names are case-sensitive and unique within the per-user registry. Naming an
-existing workspace renames it while preserving file IDs and active storage.
+Workspaces are identified by their root paths; different roots may share a directory name.
 
 This version indexes text only with one embedding model per workspace.
 Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured
@@ -959,6 +971,39 @@ mod output_tests {
             diagnostics: ContextDiagnostics::default(),
             items: vec![indexed_item()],
         }
+    }
+
+    #[test]
+    fn context_formats_paths_without_rewriting_source_content() {
+        let path = r"\\?\D:\workspace\sample.rs";
+        let expected = if cfg!(windows) {
+            r"D:\workspace\sample.rs"
+        } else {
+            path
+        };
+        let mut result = indexed_result();
+        result.items[0].relative_path = path.into();
+        result.items[0].content = path.into();
+        let original = result.clone();
+        for source in [ContextSource::Index, ContextSource::Rg] {
+            result.source = source;
+            let mut bytes = Vec::new();
+            write_context_with_options(
+                &mut bytes,
+                &result,
+                OutputOptions {
+                    preview: PreviewMode::Full,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("context output");
+            let text = String::from_utf8(bytes).expect("UTF-8");
+            assert!(text.contains(expected));
+            assert!(text.contains(&format!("1: {path}")));
+        }
+        result.source = original.source;
+        assert_eq!(result, original);
     }
 
     #[test]

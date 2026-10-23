@@ -1,3 +1,4 @@
+pub(crate) mod base64_bytes;
 mod encoding;
 mod filesystem;
 mod hash;
@@ -17,4 +18,4 @@ pub(crate) use text::{
 pub(crate) use filesystem::{atomic_write, sync_directory};
 
 // Hashes.
-pub(crate) use hash::{sha256_hex, sha256_hex_parts};
+pub(crate) use hash::{sha256_hex, sha256_hex_parts, sha256_parts};

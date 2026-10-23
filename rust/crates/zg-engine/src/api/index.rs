@@ -18,10 +18,6 @@ pub mod options {
     #[serde(deny_unknown_fields)]
     #[allow(clippy::struct_excessive_bools)]
     pub struct IndexOptions {
-        /// Unique workspace name. Defaults to the root directory name on creation;
-        /// supplying a different name explicitly renames an existing workspace.
-        #[serde(default)]
-        pub name: Option<String>,
         /// Workspace whose index is being updated. `None` uses the working directory.
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.
@@ -75,16 +71,18 @@ pub mod options {
         pub signal: Option<CancellationToken>,
     }
 
-    pub use crate::domain::{ContentKind, GlobRule, ScanRules};
+    pub use crate::domain::{ContentKind, FileFormat, GlobRule, ScanRules};
 
     /// Changes to filesystem scanning. `null` clears an optional limit.
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     #[serde(default, deny_unknown_fields)]
     pub struct ScanRulesUpdate {
+        /// Replaces included filename formats; empty means no inclusion restriction.
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub file_types: Option<Vec<String>>,
+        pub included_formats: Option<Vec<FileFormat>>,
+        /// Replaces excluded filename formats, which take precedence over inclusions.
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub excluded_file_types: Option<Vec<String>>,
+        pub excluded_formats: Option<Vec<FileFormat>>,
         /// Replaces the complete ordered list, including both case categories.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub globs: Option<Vec<GlobRule>>,
@@ -95,9 +93,9 @@ pub mod options {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub insensitive_globs: Option<Vec<GlobRule>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub hidden: Option<bool>,
+        pub include_hidden: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub no_ignore: Option<bool>,
+        pub use_default_ignores: Option<bool>,
         /// Whether indexing may descend into nested Git repositories and submodules.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub nested_git: Option<bool>,
@@ -118,57 +116,54 @@ pub mod options {
     }
 
     impl ScanRulesUpdate {
-        /// Applies only the fields supplied by this request.
-        pub fn apply(&self, target: &mut ScanRules) {
-            if let Some(value) = &self.file_types {
-                target.file_types.clone_from(value);
-            }
-            if let Some(value) = &self.excluded_file_types {
-                target.excluded_file_types.clone_from(value);
-            }
-            if let Some(rules) = &self.globs {
-                target.globs.clone_from(rules);
-            }
+        /// Returns new rules with only the supplied fields changed.
+        ///
+        /// # Errors
+        /// Returns an error if the resulting maximum file size is zero.
+        pub fn apply(&self, current: &ScanRules) -> crate::EngineResult<ScanRules> {
+            let mut globs = self
+                .globs
+                .clone()
+                .unwrap_or_else(|| current.globs().to_vec());
             if self.sensitive_globs.is_some() || self.insensitive_globs.is_some() {
                 let mut rules = self.sensitive_globs.clone().unwrap_or_else(|| {
-                    target
-                        .globs
+                    globs
                         .iter()
                         .filter(|rule| !rule.case_insensitive)
                         .cloned()
                         .collect()
                 });
                 rules.extend(self.insensitive_globs.clone().unwrap_or_else(|| {
-                    target
-                        .globs
+                    globs
                         .iter()
                         .filter(|rule| rule.case_insensitive)
                         .cloned()
                         .collect()
                 }));
-                target.globs = rules;
+                globs = rules;
             }
-            if let Some(value) = self.hidden {
-                target.hidden = value;
-            }
-            if let Some(value) = self.no_ignore {
-                target.no_ignore = value;
-            }
-            if let Some(value) = self.nested_git {
-                target.nested_git = value;
-            }
-            if let Some(value) = &self.ignore_files {
-                target.ignore_files.clone_from(value);
-            }
-            if let Some(value) = self.max_depth {
-                target.max_depth = value;
-            }
-            if let Some(value) = self.max_file_size_bytes {
-                target.max_file_size_bytes = value;
-            }
-            if let Some(value) = self.follow_symlinks {
-                target.follow_symlinks = value;
-            }
+            ScanRules::new(
+                globs,
+                self.included_formats
+                    .clone()
+                    .unwrap_or_else(|| current.included_formats().to_vec()),
+                self.excluded_formats
+                    .clone()
+                    .unwrap_or_else(|| current.excluded_formats().to_vec()),
+                self.include_hidden
+                    .unwrap_or_else(|| current.include_hidden()),
+                self.follow_symlinks
+                    .unwrap_or_else(|| current.follow_symlinks()),
+                self.max_depth.unwrap_or_else(|| current.max_depth()),
+                self.max_file_size_bytes
+                    .unwrap_or_else(|| current.max_file_size_bytes()),
+                self.use_default_ignores
+                    .unwrap_or_else(|| current.use_default_ignores()),
+                self.ignore_files
+                    .clone()
+                    .unwrap_or_else(|| current.ignore_files().to_vec()),
+                self.nested_git.unwrap_or_else(|| current.nested_git()),
+            )
         }
     }
 
@@ -215,49 +210,62 @@ pub mod options {
 
         #[test]
         fn complete_glob_updates_replace_old_rules_and_preserve_order() {
-            let mut scan = ScanRules {
-                globs: vec![GlobRule {
+            let scan = ScanRulesUpdate {
+                globs: Some(vec![GlobRule {
                     pattern: "!secret/**".to_owned(),
                     case_insensitive: true,
-                }],
+                }]),
                 ..Default::default()
-            };
+            }
+            .apply(&ScanRules::default())
+            .expect("initial rules");
             let replacement = vec![GlobRule::from("secret/**")];
-            ScanRulesUpdate {
+            let scan = ScanRulesUpdate {
                 globs: Some(replacement.clone()),
                 ..Default::default()
             }
-            .apply(&mut scan);
-            assert_eq!(scan.globs, replacement);
-            ScanRulesUpdate {
+            .apply(&scan)
+            .expect("replacement rules");
+            assert_eq!(scan.globs(), replacement);
+            let scan = ScanRulesUpdate {
                 globs: Some(Vec::new()),
                 ..Default::default()
             }
-            .apply(&mut scan);
-            assert!(scan.globs.is_empty());
+            .apply(&scan)
+            .expect("clear rules");
+            assert!(scan.globs().is_empty());
         }
 
         #[test]
         fn updates_preserve_omission_and_apply_false_empty_and_null() {
-            let mut scan = ScanRules {
-                globs: vec!["*.rs".into()],
-                hidden: true,
-                nested_git: true,
-                max_depth: Some(3),
+            let defaults: ScanRules = serde_json::from_str("{}").expect("default rules");
+            assert_eq!(defaults, ScanRules::default());
+            let initial = ScanRulesUpdate {
+                globs: Some(vec!["*.rs".into()]),
+                include_hidden: Some(true),
+                max_depth: Some(Some(3)),
                 ..Default::default()
-            };
-            let update: ScanRulesUpdate =
-                serde_json::from_str(r#"{"hidden":false,"nested_git":false,"max_depth":null}"#)
-                    .expect("valid test fixture");
+            }
+            .apply(&defaults)
+            .expect("initial rules");
+            let update: ScanRulesUpdate = serde_json::from_str(
+                r#"{"include_hidden":false,"nested_git":false,"use_default_ignores":false,"max_depth":null}"#,
+            ).expect("valid test fixture");
             assert_eq!(update.max_depth, Some(None));
             assert_eq!(update.follow_symlinks, None);
-            update.apply(&mut scan);
-            assert!(!scan.hidden);
-            assert!(!scan.nested_git);
-            assert_eq!(scan.max_depth, None);
-            ScanRulesUpdate::default().apply(&mut scan);
-            assert!(!scan.nested_git, "omission preserves the configured value");
-            assert_eq!(scan.globs, vec![GlobRule::from("*.rs")]);
+            let scan = update.apply(&initial).expect("updated rules");
+            assert!(!scan.include_hidden());
+            assert!(!scan.nested_git());
+            assert!(!scan.use_default_ignores());
+            assert_eq!(scan.max_depth(), None);
+            assert!(initial.include_hidden());
+            assert!(initial.use_default_ignores());
+            assert_eq!(initial.max_depth(), Some(3));
+            let unchanged = ScanRulesUpdate::default()
+                .apply(&scan)
+                .expect("unchanged rules");
+            assert_eq!(unchanged, scan, "omission preserves configured values");
+            assert_eq!(scan.globs(), [GlobRule::from("*.rs")]);
             assert_eq!(
                 serde_json::to_value(&update).expect("valid test fixture")["max_depth"],
                 serde_json::Value::Null
@@ -268,17 +276,72 @@ pub mod options {
                     .get("max_depth")
                     .is_none()
             );
+            let invalid = ScanRulesUpdate {
+                globs: Some(Vec::new()),
+                max_file_size_bytes: Some(Some(0)),
+                ..Default::default()
+            };
+            assert!(invalid.apply(&scan).is_err());
+            assert_eq!(
+                scan, unchanged,
+                "failed updates preserve the original rules"
+            );
             let update: ScanRulesUpdate =
                 serde_json::from_str(r#"{"globs":[]}"#).expect("valid test fixture");
-            update.apply(&mut scan);
-            assert!(scan.globs.is_empty());
+            let scan = update.apply(&scan).expect("clear rules");
+            assert!(scan.globs().is_empty());
+        }
+
+        #[test]
+        fn format_updates_preserve_replace_and_clear_saved_rules() {
+            let update: ScanRulesUpdate = serde_json::from_str(
+                r#"{"included_formats":["cpp","rust"],"excluded_formats":["c"]}"#,
+            )
+            .expect("format update");
+            let initial = update.apply(&ScanRules::default()).expect("format rules");
+            let saved = serde_json::to_value(&initial).expect("saved rules");
+            assert_eq!(
+                saved["included_formats"],
+                serde_json::json!(["cpp", "rust"])
+            );
+            assert_eq!(saved["excluded_formats"], serde_json::json!(["c"]));
+            let restored: ScanRules = serde_json::from_value(saved).expect("restored rules");
+            assert_eq!(restored, initial);
+            assert_eq!(
+                ScanRulesUpdate::default()
+                    .apply(&restored)
+                    .expect("no update"),
+                initial
+            );
+            let replaced = ScanRulesUpdate {
+                included_formats: Some(vec![FileFormat::Python]),
+                ..Default::default()
+            }
+            .apply(&restored)
+            .expect("replacement");
+            assert_eq!(replaced.included_formats(), [FileFormat::Python]);
+            assert_eq!(replaced.excluded_formats(), [FileFormat::C]);
+            let cleared = ScanRulesUpdate {
+                included_formats: Some(Vec::new()),
+                excluded_formats: Some(Vec::new()),
+                ..Default::default()
+            }
+            .apply(&replaced)
+            .expect("clear restrictions");
+            assert_eq!(cleared, ScanRules::default());
+            for field in ["included_formats", "excluded_formats"] {
+                let mut invalid = serde_json::json!({});
+                invalid[field] = serde_json::json!(["unsupported-format"]);
+                assert!(serde_json::from_value::<ScanRulesUpdate>(invalid.clone()).is_err());
+                assert!(serde_json::from_value::<ScanRules>(invalid).is_err());
+            }
         }
 
         #[test]
         fn query_constraints_are_not_accepted_as_scan_updates() {
             for field in [
-                "formats",
-                "excluded_formats",
+                "file_types",
+                "excluded_file_types",
                 "categories",
                 "excluded_categories",
                 "modified_after_epoch_ms",

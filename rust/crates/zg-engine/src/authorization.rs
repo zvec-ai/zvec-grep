@@ -406,7 +406,7 @@ pub fn grant(
             manifest
                 .as_ref()
                 .and_then(|m| m.embedding())
-                .map(|e| e.model.reference())
+                .map(|e| e.model().reference())
         })
         .or_else(|| {
             env::var("ZVEC_GREP_EMBEDDING")
@@ -1070,7 +1070,7 @@ mod tests {
             api::context::{ContextOptions, options::RefreshPolicy},
             domain::{
                 IndexDescriptor, IndexState, Workspace,
-                model::{EmbeddingModelInfo, Metric, ModelConfig},
+                model::{EmbeddingMetric, EmbeddingModelInfo, ModelConfig},
             },
             workspace::{build::prepare_build, manifest::write_workspace_manifest},
         };
@@ -1078,21 +1078,33 @@ mod tests {
         let home = directory.path().join(".zvec-grep");
         let mut active = WorkspaceManifest::new(
             Workspace {
-                name: "workspace".to_owned(),
                 root: directory.path().to_path_buf(),
                 scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "qwen".into(),
-                        name: "text-embedding-v4".into(),
-                        endpoint: None,
-                    },
-                    dimension: 1024,
-                    metric: Metric::Cosine,
-                    max_batch_size: 32,
-                    max_input_tokens: None,
-                    max_image_bytes: None,
-                })),
+                index: IndexState::Enabled(Box::new(
+                    IndexDescriptor::new(
+                        EmbeddingModelInfo::new(
+                            crate::domain::model::ModelInfo::new(
+                                "qwen",
+                                "text-embedding-v4",
+                                [
+                                    crate::domain::ContentKind::Text,
+                                    crate::domain::ContentKind::Code,
+                                    crate::domain::ContentKind::Image,
+                                ],
+                                32,
+                            )
+                            .expect("valid model metadata"),
+                            1024,
+                            EmbeddingMetric::Cosine,
+                            None,
+                            None,
+                        )
+                        .expect("valid embedding metadata"),
+                        std::collections::BTreeMap::new(),
+                        crate::domain::FTS_CONFIG,
+                    )
+                    .expect("index descriptor"),
+                )),
                 created_epoch_ms: 1,
                 updated_epoch_ms: 1,
             },

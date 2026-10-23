@@ -27,7 +27,14 @@ pub(super) fn extract_for_indexing(
         .relative_path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
-    extract_code(source, options, jsx)
+    extract_code(source, options, jsx).map(|mut output| {
+        for entity in &mut output.fragments {
+            if let Content::Text(text) = &mut entity.content {
+                entity.content = Content::Code(std::mem::take(text));
+            }
+        }
+        output
+    })
 }
 
 fn extract_code(
@@ -435,7 +442,7 @@ mod tests {
     }
 
     fn assert_source_backed(source: &super::TextSource, entity: &super::ExtractedEntity) {
-        let Content::Text(content) = &entity.content else {
+        let Content::Code(content) = &entity.content else {
             panic!("text entity expected");
         };
         let Range::Text(range) = entity.source_range else {
@@ -1459,7 +1466,7 @@ public class Service {
             }))
         ));
         assert_source_backed(&source, owner);
-        assert_eq!(owner.content, Content::Text(source.text.clone()));
+        assert_eq!(owner.content, Content::Code(source.text.clone()));
         assert!(matches!(
             test_metadata(named(&fragments, "name")),
             Some(EntityMetadata::Code(CodeMetadata {
@@ -1574,7 +1581,7 @@ public class Service {
             let entity = &entities[0];
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(text) = &entity.content else {
+                let Content::Code(text) = &entity.content else {
                     panic!("text entity expected");
                 };
                 let Range::Byte(range) = fragment.range else {
@@ -1582,10 +1589,10 @@ public class Service {
                 };
                 let start = usize::try_from(range.start_offset()).expect("fragment start");
                 let end = usize::try_from(range.end_offset()).expect("fragment end");
-                let content = Content::Text(text[start..end].to_owned());
+                let content = Content::Code(text[start..end].to_owned());
                 let vector =
                     vector_content_for_fragment(&content, entity.metadata.as_ref(), Some(120));
-                let [Content::Text(vector)] = vector.as_slice() else {
+                let [Content::Code(vector)] = vector.as_slice() else {
                     panic!("text embedding");
                 };
                 assert!(crate::utils::utf16_len(vector) <= 120);
@@ -1653,7 +1660,7 @@ public class Service {
         assert_source_backed(&plain_script, &fallback[0]);
         assert_eq!(
             test_content(&fallback[0]),
-            Content::Text("\r\n// 没有声明\r\n".to_owned())
+            Content::Code("\r\n// 没有声明\r\n".to_owned())
         );
         assert!(test_metadata(&fallback[0]).is_none());
         assert!(matches!(
@@ -1666,7 +1673,7 @@ public class Service {
         assert_eq!(fallback.len(), 1);
         assert_eq!(
             test_content(&fallback[0]),
-            Content::Text(no_script.text.clone())
+            Content::Code(no_script.text.clone())
         );
         assert!(test_metadata(&fallback[0]).is_none());
     }
@@ -1729,7 +1736,7 @@ public class Service {
             assert!(entity.fragments.len() > 2);
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(text) = &entity.content else {
+                let Content::Code(text) = &entity.content else {
                     panic!("text entity expected");
                 };
                 let Range::Byte(range) = fragment.range else {
@@ -1779,7 +1786,7 @@ public class Service {
             assert_eq!(fragments.len(), 1);
             assert_eq!(
                 test_content(&fragments[0]),
-                Content::Text(source.text.clone())
+                Content::Code(source.text.clone())
             );
             assert!(test_metadata(&fragments[0]).is_none());
         }

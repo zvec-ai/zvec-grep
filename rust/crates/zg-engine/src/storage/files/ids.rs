@@ -91,8 +91,7 @@ impl FileIds {
     }
 
     pub(super) fn validate(&self, file: &FileRecord) -> EngineResult<()> {
-        file.validate()?;
-        if self.by_path.get(&file.relative_path) != Some(&file.id) {
+        if self.by_path.get(file.relative_path()) != Some(&file.id()) {
             return Err(EngineError::invalid_argument(
                 "file ID does not match its index-local path",
             ));

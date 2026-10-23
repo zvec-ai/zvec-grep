@@ -66,19 +66,14 @@ mod tests {
                     ..super::ModelConfig::default()
                 }
             });
-            let expected_endpoint = options
-                .as_ref()
-                .and_then(|options| options.endpoint.clone());
             let model = create_embedding_model(
                 entry.reference(),
                 options,
                 crate::models::runtime::ModelComputeRuntime::shared(),
             )
             .expect("catalog backend should construct without loading model assets");
-            model.info().validate().expect("valid catalog model info");
-            assert_eq!(model.info().model.reference(), entry.reference());
-            assert_eq!(model.info().dimension, entry.dimension());
-            assert_eq!(model.info().model.endpoint, expected_endpoint);
+            assert_eq!(model.info().model().reference(), entry.reference());
+            assert_eq!(model.info().dimension(), entry.dimension());
         }
 
         let unknown = create_embedding_model(

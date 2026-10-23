@@ -33,9 +33,10 @@ pub mod options {
         pub excluded_file_types: Vec<String>,
         /// Ordered path rules relative to the workspace root.
         pub globs: Vec<GlobRule>,
-        /// Formats matched by the catalog's explicit, case-sensitive filename rules.
-        pub formats: Vec<FileFormat>,
-        /// Excluded file-name formats; any match takes precedence over included formats.
+        /// Included formats matched by the catalog's case-sensitive filename rules;
+        /// empty means no inclusion restriction.
+        pub included_formats: Vec<FileFormat>,
+        /// Excluded filename formats; exclusions take precedence.
         pub excluded_formats: Vec<FileFormat>,
         /// Categories selected through the catalog's filename rules.
         pub categories: Vec<FileCategory>,
@@ -282,10 +283,11 @@ pub mod options {
 
         #[test]
         fn query_filter_accepts_partial_fields_and_rejects_nested_or_scan_fields() {
-            let filter: QueryFilter =
-                serde_json::from_str(r#"{"formats":["rust"],"modified_after_epoch_ms":0}"#)
-                    .expect("partial query filter");
-            assert_eq!(filter.formats, vec![FileFormat::Rust]);
+            let filter: QueryFilter = serde_json::from_str(
+                r#"{"included_formats":["rust"],"modified_after_epoch_ms":0}"#,
+            )
+            .expect("partial query filter");
+            assert_eq!(filter.included_formats, vec![FileFormat::Rust]);
             assert_eq!(filter.modified_after_epoch_ms, Some(0));
             assert!(filter.globs.is_empty());
             for value in [r#"{"files":{}}"#, r#"{"hidden":true}"#] {
@@ -476,7 +478,7 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextWorkspaceIndex {
-        pub name: String,
+        pub root: PathBuf,
         pub path: PathBuf,
     }
 

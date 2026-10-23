@@ -212,12 +212,13 @@ handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exa
 `requestState` and unchanged tool arguments with `inputResponses.index_setup`;
 each model selection or remote authorization round issues a new, single-use state.
 
-This version indexes text with one embedding model per workspace. Choose it with
-`zg --index --embedding <model>` or set a default with
+This version indexes text and code with one embedding model per workspace. Choose
+it with `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use
-that same model. Images and other unsupported sources are reported as skipped;
-multimodal content and per-content model routing are not supported. Changing the
-model requires `zg --index --rebuild --embedding <model>`.
+that same model and retrieval collection. Code has its own content payload kind.
+Images and other unsupported sources are reported as skipped; multimodal content
+and per-content model routing are not supported. Changing the model requires
+`zg --index --rebuild --embedding <model>`.
 
 Each entity stores one complete source content object, its location in the source
 file, metadata, and its fragments. Each text fragment has a unique ID and selects
@@ -229,6 +230,33 @@ metadata included in search projections. Index format 5 uses this layout.
 
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
+
+A single file name or path, such as `zg auth.ts` or `zg src/auth.ts`, first
+looks up current file paths. Matches use `#1 matchedBy=path src/auth.ts`, with
+forward slashes on every platform and exact workspace-relative paths before suffix
+matches. Ties use deterministic native path ordering; `--limit` bounds the list
+(default: 10). Lookup uses the nearest workspace's saved scan rules and query
+file filters, and includes empty files. It runs locally in direct, server, and
+auto modes without loading a model, creating an index, or requiring a daemon.
+File discovery does not apply index-only default exclusions for build directories,
+lock files, or images; saved scanning rules and ignore files still apply.
+File matches do not read or embed contents. If no file matches, lookup searches
+the selected current source text literally using the same scan rules and filters.
+A path mentioned only in source text returns those text matches. No match prints
+`No matches.` instead of unrelated vector neighbors, even with an existing index.
+Text results deduplicate complete structural entities before applying `--limit`;
+multiple retrieval fragments of one function or Markdown section count once.
+Literal matching and highlighting use the same smart-case rules: queries with
+uppercase letters are case-sensitive; lowercase queries ignore case.
+Results show line numbers, match/context markers, and structural headings. Terminal output also
+shows coverage and per-file/per-hit metadata. Truncated file or text results warn
+on stderr. Unlike the Node.js CLI, truncated text remains local instead of starting
+indexed retrieval; direct, server, and auto modes share this behavior and never
+require model loading or indexing. Native glob ordering, format aliases, ignore
+handling, and path normalization retain the Rust CLI's existing semantics.
+Explicit `--hybrid`, `--fts`, `--vector`, `--fuse`, symbol options, `--trace`, and
+`--refresh` retain their indexed behavior. Text questions, URLs, and glob patterns
+do not trigger automatic path lookup.
 
 Managed `zg --rg` preserves literal pattern whitespace and supports empty
 patterns with `-e ''`. Matching options include fixed strings (`-F`), case
@@ -245,6 +273,17 @@ internal directories. The full MCP toolset uses the same argument parser and
 engine. PCRE2, compressed-file search, explicit encoding selection, and native
 ripgrep output-format switches other than file listing are rejected; Unicode
 BOM decoding is automatic.
+
+Automatic path lookup emits
+`warning: automatically performing path lookup; use --hybrid to force hybrid search.`
+on stderr only when the default query actually enters that branch. `--hybrid`
+overrides the inference, including ambiguous inputs such as `config.timeout` and
+`v1.2`.
+
+When no file path matches and lookup falls back to literal source search, it also
+prints `warning: no matching file paths; searching current file contents literally (rg).`
+on stderr. This appears for both text matches and `No matches.`; stdout contains
+only the search results.
 
 Use `zg --rg --files` for explicit file discovery:
 
@@ -358,9 +397,10 @@ The engine provides `content_range` for the exact source coordinates of returned
 content, independently of the entity `range` and matched `excerpt_range`. CLI and
 MCP use these coordinates for source numbering; preview never infers a range from
 the number of content lines. The engine also interprets half-open line bounds.
-The required field changes the internal daemon reply contract. Version 13 also
-adds native ripgrep type filters to query and persisted scan rules. Version 14
-separates case-sensitive and case-insensitive glob updates on the daemon wire.
+The required field changes the internal daemon reply contract. Native ripgrep
+type filters apply to queries; persisted scan rules support path globs and file
+formats using the same filename rules as indexed queries. Version 14 separates
+case-sensitive and case-insensitive glob updates on the daemon wire.
 Version 15 distinguishes complete ordered glob replacement from category updates.
 Restart older resident daemons when updating the CLI; replies without
 `content_range` are rejected during deserialization. Direct and server rendering
@@ -375,16 +415,21 @@ index provenance without verified freshness is conservatively shown as
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string
 parameters update only the supplied case category. Typed glob lists and CLI glob
-arguments replace the complete ordered list. `fileTypes` and
+arguments replace the complete ordered list. Search `fileTypes` and
 `excludedFileTypes` use the embedded ripgrep catalog, including `h`, `cpp`, `ts`
-and `py`, independently of extractor `formats`. Index also accepts `follow`.
-Search never changes persisted scan policy: `hidden`, `noIgnore`, `ignoreFiles`,
+and `py`, independently of the engine filename format catalog. Search and index
+accept `includedFormats` and `excludedFormats` from that catalog; index saves
+these restrictions for subsequent scans. Index also accepts `follow`.
+Search never changes persisted scan policy: `includeHidden`, `useDefaultIgnores`, `ignoreFiles`,
 `maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
-indexed-search path ignores these options; Rust rejects them explicitly.
+indexed-search path ignores its scanning options; Rust rejects them explicitly.
+`useDefaultIgnores` controls built-in exclusions and discovered ignore files;
+explicit `ignoreFiles` always apply and must exist. Scan rules are validated
+before index mutations, and `maxFileSizeBytes` must be positive when set.
 Unknown search/index fields and public nulls are rejected, except index
 `maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
-Existing typed globs, `formats/categories`, `enum`, `name`, `nestedGit`, diagnostic
-extensions and their compatibility boundaries are recorded in
+Existing typed globs, `includedFormats`/`excludedFormats`, categories, `enum`,
+`name`, `nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
 [`allowed-differences.toml`](compat/allowed-differences.toml).
 
 Managed rg uses a file/line/context presentation and preserves all requested
@@ -465,12 +510,12 @@ smoke test with:
 npm run test:package
 ```
 
-The build uses the published `zvec-rust` and `zvec-rust-build` 0.7.2 crates,
+The build uses the published `zvec-rust` and `zvec-rust-build` 0.8.0 crates,
 without a local wrapper patch. Their bundled native library tracks upstream zvec
-at [`1ab7975`](https://github.com/alibaba/zvec/commit/1ab7975dfc2d2160054bafff614831b7099cd930)
-(53 commits after v0.7.0). The build stages the shared library and
-`data/jieba_dict` resources beside the executable. Both local and release
-packages include these SDK assets; the engine uses the bundled dictionary.
+at [`8397071`](https://github.com/alibaba/zvec/commit/8397071d815cd842be2068339e00a94e69f069d1).
+The build stages the shared library beside the executable. Both local and
+release packages include this SDK library; the engine uses its embedded Jieba
+dictionary without external dictionary files.
 
 Pass `--no-build` after `--` to reuse an existing `target/release/zg`, or pass
 `--prefix <path>` to install or smoke-test under a custom npm prefix:
@@ -512,13 +557,12 @@ node scripts/npm-release.mjs pack-platform \
   --no-build
 ```
 
-The runtime library directory must include zvec's shared library and its
-`data/jieba_dict` directory. Without `--lib-dir`, these assets are read from
-the binary's directory.
+The runtime library directory must include zvec's shared library. Without
+`--lib-dir`, runtime libraries are read from the binary's directory.
 
 The `Publish Rust packages` workflow builds all five published native targets on matching
-GitHub runners. Pushes to `main` or `release/rust-*` branches and manual runs
-produce downloadable candidates without publishing to npm. Each runner installs
+GitHub runners. It runs only through manual dispatch. With `publish` left at its
+default `false`, it produces downloadable candidates without publishing to npm. Each runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
 starts the packaged daemon, compares workspace status in direct and server
 modes, and stops the daemon. The server status request crosses the IPC boundary;
@@ -534,9 +578,10 @@ Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
 Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
 runtime, so older Linux distributions are not covered by this release workflow.
 Intel macOS builds ONNX Runtime 1.28.0 with CoreML and the native zvec SDK from
-pinned source revisions because neither dependency supplies prebuilt Intel
-macOS libraries. Both SDKs are cached and their shared libraries are included
-in the npm payload. The Intel release targets macOS 14 and later.
+pinned source revisions. ONNX Runtime with CoreML still requires a source build;
+the zvec source revision matches the SDK bundled with zvec-rust 0.8.0. Both SDKs
+are cached and their shared libraries are included in the npm payload. The Intel
+release targets macOS 14 and later.
 
 Download the `rust-release-<version>` artifact from the successful workflow run
 and unzip it. It contains all five platform tarballs, the meta tarball,

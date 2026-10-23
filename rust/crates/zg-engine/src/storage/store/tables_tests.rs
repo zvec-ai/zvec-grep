@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 use crate::domain::{
     ByteRange, CodeMetadata, Content, EntityFragment, EntityId, EntityMetadata, FileSnapshot,
     FragmentId, Range, SourcePath, SymbolType, TextRange,
@@ -12,18 +12,24 @@ use crate::storage::{
 use zvec_rust::{Doc, SearchQuery};
 
 fn model() -> EmbeddingModelInfo {
-    EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
-        dimension: 3,
-        metric: Metric::Cosine,
-        max_batch_size: 32,
-        max_input_tokens: None,
-        max_image_bytes: None,
-    }
+    EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+                crate::domain::ContentKind::Image,
+            ],
+            32,
+        )
+        .expect("valid model metadata"),
+        3,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("valid embedding metadata")
 }
 
 fn metadata_store(path: &Path) -> IndexStore {
@@ -42,8 +48,8 @@ impl IndexStore {
         entries: &[IndexedFragment],
     ) -> EngineResult<()> {
         assert_eq!(
-            self.resolve_file_ids(&[file.relative_path.to_path_buf()])?,
-            [file.id]
+            self.resolve_file_ids(&[file.relative_path().to_path_buf()])?,
+            [file.id()]
         );
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
@@ -74,29 +80,27 @@ fn fragment_document(store: &IndexStore, model: &str, id: &str) -> Doc {
 }
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
-    FileRecord {
-        id: FileId::new(id),
-        relative_path: crate::domain::SourcePath::new(path).expect("source path"),
-        snapshot: FileSnapshot {
-            size_bytes: 0,
+    FileRecord::new(
+        FileId::new(id),
+        crate::domain::SourcePath::new(path).expect("source path"),
+        FileSnapshot {
+            size_bytes: 100,
             modified_epoch_ms: None,
-            content_hash: None,
+            content_hash: Some("fixture-hash".into()),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    }
+        FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: 1,
+        },
+    )
+    .expect("file record")
 }
 
 fn metadata_fragments(
     file_id: u32,
     label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
-    let mut source = file(file_id, "harvest.rs");
-    source.snapshot.size_bytes = 100;
-    source.snapshot.content_hash = Some("fixture-hash".into());
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 1,
-    };
+    let source = file(file_id, "harvest.rs");
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
     text.push_str("orchard fruit");
@@ -106,13 +110,13 @@ fn metadata_fragments(
     let content = Content::Text(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
-    let id = EntityId::new(source.id, &content, source_range).expect("entity id");
-    let owner = Entity {
-        id: id.clone(),
-        file_id: source.id,
+    let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
+    let owner = Entity::new(
+        id.clone(),
+        source.id(),
         source_range,
         content,
-        metadata: Some(EntityMetadata::Code(CodeMetadata {
+        Some(EntityMetadata::Code(CodeMetadata {
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("harvest 春'\\crop".into()),
             scope: Some("Garden".into()),
@@ -121,7 +125,7 @@ fn metadata_fragments(
             language: None,
             documentation: Some("Produces the seasonal crop.".into()),
         })),
-        fragments: vec![
+        vec![
             EntityFragment {
                 id: FragmentId::new(&id, 0),
                 range: Range::Byte(ByteRange::new(0, 15).expect("ordered byte offsets")),
@@ -131,9 +135,10 @@ fn metadata_fragments(
                 range: Range::Byte(ByteRange::new(20, 40).expect("ordered byte offsets")),
             },
         ],
-    };
+    )
+    .expect("valid entity");
     let entries = owner
-        .fragments
+        .fragments()
         .iter()
         .zip([
             (vec![0.0, 1.0, 0.0], "Harvest outline\n"),
@@ -142,7 +147,7 @@ fn metadata_fragments(
         .map(|(fragment, (vector, text))| IndexedFragment {
             fts_text: format!("harvest 春'\\crop\nGarden\npub async fn harvest() -> Crop\nProduces the seasonal crop.\n{text}"),
             model: "fixture/fixture".into(),
-            entity_id: owner.id.clone(),
+            entity_id: owner.id().clone(),
             fragment_id: fragment.id.clone(),
             vector,
         })
@@ -189,7 +194,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
         .expect("write file");
     store.checkpoint().expect("flush storage");
     let owner = &entities[0];
-    let entity_doc = entity_document(&store, owner.id.as_str());
+    let entity_doc = entity_document(&store, owner.id().as_str());
     assert_eq!(
         Some(
             serde_json::from_str::<EntityMetadata>(
@@ -197,13 +202,13 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
             )
             .expect("metadata JSON")
         ),
-        owner.metadata
+        owner.metadata().cloned()
     );
     assert_eq!(
         store
             .read(|state| fetch_map(
                 state.entities.collection(),
-                &[entities[0].fragments[1].id.as_str().to_owned()]
+                &[entities[0].fragments()[1].id.as_str().to_owned()]
             ))
             .expect("window entity lookup")
             .len(),
@@ -222,7 +227,7 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
         .search_fts("orchard", 10, Some(&filter))
         .expect("filtered FTS");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].document_id, entities[0].fragments[1].id.as_str());
+    assert_eq!(hits[0].document_id, entities[0].fragments()[1].id.as_str());
     let vectors = store
         .search_vector("fixture/fixture", &entries[1].vector, 10, Some(&filter))
         .expect("filtered vector retrieval");
@@ -230,17 +235,17 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     assert!(
         vectors
             .iter()
-            .any(|hit| hit.document_id == entities[0].fragments[1].id.as_str())
+            .any(|hit| hit.document_id == entities[0].fragments()[1].id.as_str())
     );
     let loaded = store
         .load_search_hits(&hits)
         .expect("selected window details");
     assert_eq!(loaded.entities.len(), 1);
-    assert_eq!(loaded.entities[&owner.id].entity, *owner);
-    assert_eq!(loaded.entities[&owner.id].file, source);
+    assert_eq!(loaded.entities[owner.id()].entity, *owner);
+    assert_eq!(loaded.entities[owner.id()].file, source);
     assert_eq!(
-        loaded.fragments[entities[0].fragments[1].id.as_str()],
-        entities[0].fragments[1]
+        loaded.fragments[entities[0].fragments()[1].id.as_str()],
+        entities[0].fragments()[1]
     );
 
     for rejected in [
@@ -276,7 +281,7 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("write file");
-    let mut doc = entity_document(&store, entities[0].id.as_str());
+    let mut doc = entity_document(&store, entities[0].id().as_str());
     doc.add_string("metadata", "invalid metadata JSON")
         .expect("corrupt metadata");
     store
@@ -294,9 +299,9 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
     ] {
         let window = hits
             .iter()
-            .find(|hit| hit.document_id == entities[0].fragments[1].id.as_str())
+            .find(|hit| hit.document_id == entities[0].fragments()[1].id.as_str())
             .expect("window recalled without decoding metadata");
-        assert_eq!(window.entity_id, entities[0].id);
+        assert_eq!(window.entity_id, *entities[0].id());
         let error = store
             .load_search_hits(std::slice::from_ref(window))
             .err()
@@ -310,8 +315,8 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());
     let (source, entities, entries) = metadata_fragments(0, "owner");
-    let entity_id = &entities[0].id;
-    let window_id = entities[0].fragments[1].id.as_str();
+    let entity_id = entities[0].id();
+    let window_id = entities[0].fragments()[1].id.as_str();
     assert_eq!(entity_id.as_str().len(), 32);
     assert_eq!(window_id.len(), 40);
     assert!(entity_id.as_str().starts_with("00000000"));
@@ -341,8 +346,8 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
             .load_search_hits(std::slice::from_ref(window))
             .expect("load compact IDs");
         let owner = &entities[0];
-        assert_eq!(loaded.entities[&owner.id].entity, *owner);
-        assert_eq!(loaded.fragments[window_id], owner.fragments[1]);
+        assert_eq!(loaded.entities[owner.id()].entity, *owner);
+        assert_eq!(loaded.fragments[window_id], owner.fragments()[1]);
     }
     let entity_doc = entity_document(&store, entity_id.as_str());
     assert_eq!(
@@ -368,20 +373,30 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
 #[test]
 fn entity_content_is_canonical_and_fragments_have_one_model() {
     let home = tempfile::tempdir().expect("storage");
-    let text = EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
-        dimension: 3,
-        metric: Metric::Cosine,
-        max_batch_size: 32,
-        max_input_tokens: None,
-        max_image_bytes: None,
-    };
+    let text = EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+                crate::domain::ContentKind::Image,
+            ],
+            32,
+        )
+        .expect("valid model metadata"),
+        3,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("valid embedding metadata");
     let mut other = text.clone();
-    other.model.name = "other".into();
+    {
+        let mut metadata = serde_json::to_value(&other).expect("model metadata");
+        metadata["model"]["name"] = serde_json::json!("other");
+        other = serde_json::from_value(metadata).expect("valid model metadata");
+    }
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
         embeddings: vec![text, other],
@@ -407,12 +422,12 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
         "one owner read loads all its fragments"
     );
     assert_eq!(
-        loaded.fragments[entities[0].fragments[0].id.as_str()],
-        entities[0].fragments[0]
+        loaded.fragments[entities[0].fragments()[0].id.as_str()],
+        entities[0].fragments()[0]
     );
     assert_eq!(
-        loaded.fragments[entities[0].fragments[1].id.as_str()],
-        entities[0].fragments[1]
+        loaded.fragments[entities[0].fragments()[1].id.as_str()],
+        entities[0].fragments()[1]
     );
     store
         .read(|state| {
@@ -427,7 +442,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
         .expect("search schemas");
     // Removing a derived projection does not remove or redefine the canonical fragment.
     store
-        .write(|state| state.fragments.delete_file(source.id))
+        .write(|state| state.fragments.delete_file(source.id()))
         .expect("remove projection");
     assert_eq!(
         store
@@ -441,20 +456,30 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
 #[test]
 fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     let home = tempfile::tempdir().expect("storage");
-    let first = EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
-        dimension: 3,
-        metric: Metric::Cosine,
-        max_batch_size: 32,
-        max_input_tokens: None,
-        max_image_bytes: None,
-    };
+    let first = EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+                crate::domain::ContentKind::Image,
+            ],
+            32,
+        )
+        .expect("valid model metadata"),
+        3,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("valid embedding metadata");
     let mut second = first.clone();
-    second.model.name = "other".into();
+    {
+        let mut metadata = serde_json::to_value(&second).expect("model metadata");
+        metadata["model"]["name"] = serde_json::json!("other");
+        second = serde_json::from_value(metadata).expect("valid model metadata");
+    }
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
         embeddings: vec![first, second],
@@ -464,21 +489,31 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("original owner");
-    let mut foreign_source = source.clone();
-    foreign_source.id = FileId::new(1);
-    foreign_source.relative_path = SourcePath::new("other.rs").expect("path");
-    let mut foreign_entities = entities.clone();
-    foreign_entities[0].file_id = foreign_source.id;
-    foreign_entities[0].id = EntityId::new(
-        foreign_source.id,
-        &foreign_entities[0].content,
-        foreign_entities[0].source_range,
+    let foreign_source = FileRecord::new(
+        FileId::new(1),
+        SourcePath::new("other.rs").expect("path"),
+        source.snapshot().clone(),
+        source.index_status().clone(),
     )
-    .expect("entity id");
+    .expect("file record");
+    let owner = &entities[0];
+    let foreign_id = EntityId::new(foreign_source.id(), owner.content(), owner.source_range())
+        .expect("entity id");
+    let foreign_entities = vec![
+        Entity::new(
+            foreign_id,
+            foreign_source.id(),
+            owner.source_range(),
+            owner.content().clone(),
+            owner.metadata().cloned(),
+            owner.fragments().to_vec(),
+        )
+        .expect("valid entity with foreign fragments"),
+    ];
     let mut foreign = entries.clone();
     for entry in &mut foreign {
         entry.model = "fixture/other".into();
-        entry.entity_id = foreign_entities[0].id.clone();
+        entry.entity_id = foreign_entities[0].id().clone();
     }
     assert!(
         store
@@ -505,8 +540,14 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
 fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() {
     let home = tempfile::tempdir().expect("storage");
     let store = metadata_store(home.path());
-    let (mut source, entities, entries) = metadata_fragments(0, "old-owner");
-    source.relative_path = SourcePath::new("src/nested/harvest.rs").expect("path");
+    let (source, entities, entries) = metadata_fragments(0, "old-owner");
+    let source = FileRecord::new(
+        source.id(),
+        SourcePath::new("src/nested/harvest.rs").expect("path"),
+        source.snapshot().clone(),
+        source.index_status().clone(),
+    )
+    .expect("file record");
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
@@ -514,10 +555,12 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
 
     // Simulate interruption after the retry marker but before replacing old rows.
     let mut unfinished = source.clone();
-    unfinished.index_status = FileIndexStatus::NotIndexed;
+    unfinished
+        .set_index_status(FileIndexStatus::NotIndexed)
+        .expect("file status");
     store
         .write(|state| {
-            let directories = state.directories.ensure(&unfinished.relative_path)?;
+            let directories = state.directories.ensure(unfinished.relative_path())?;
             state.files.put(&unfinished, &directories)
         })
         .expect("retry state");
@@ -533,12 +576,20 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
         store
             .load_search_hits(&old_hits)
             .expect("partial data remains readable")
-            .entities[&entities[0].id]
-            .entity,
+            .entities[entities[0].id()]
+        .entity,
         entities[0],
     );
     let (_, mut replacement, mut projections) = metadata_fragments(0, "new-owner");
-    replacement[0].fragments.truncate(1);
+    replacement[0] = Entity::new(
+        replacement[0].id().clone(),
+        replacement[0].file_id(),
+        replacement[0].source_range(),
+        replacement[0].content().clone(),
+        replacement[0].metadata().cloned(),
+        replacement[0].fragments()[..1].to_vec(),
+    )
+    .expect("valid replacement");
     projections.truncate(1);
     store
         .apply_fixture_records(&source, &replacement, &projections)
@@ -562,7 +613,7 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
     );
     let new_hits = store.search_fts("Harvest", 10, None).expect("new results");
     assert_eq!(new_hits.len(), 1);
-    assert_eq!(new_hits[0].entity_id, replacement[0].id);
+    assert_eq!(new_hits[0].entity_id, *replacement[0].id());
 }
 
 #[test]
@@ -574,13 +625,15 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
     let mut deleting = source.clone();
-    deleting.index_status = FileIndexStatus::Deleting;
+    deleting
+        .set_index_status(FileIndexStatus::Deleting)
+        .expect("file status");
     store
-        .write(|state| state.files.mark_deleting(source.id))
+        .write(|state| state.files.mark_deleting(source.id()))
         .expect("delete intent");
     // One collection can be cleared while another still contains old results.
     store
-        .write(|state| state.entities.delete_file(source.id))
+        .write(|state| state.entities.delete_file(source.id()))
         .expect("delete entities");
     store.checkpoint().expect("persist interruption");
     drop(store);
@@ -599,8 +652,8 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
             .entities
             .is_empty()
     );
-    store.delete_file(source.id).expect("finish deleting");
-    store.delete_file(source.id).expect("repeat deletion");
+    store.delete_file(source.id()).expect("finish deleting");
+    store.delete_file(source.id()).expect("repeat deletion");
     assert!(store.list_files().expect("no files").is_empty());
     assert!(
         store
@@ -619,7 +672,15 @@ fn result_loading_skips_missing_files_and_canonical_fragments() {
         .apply_fixture_records(&source, &entities, &entries)
         .expect("initial file");
     let hits = store.search_fts("orchard", 10, None).expect("window hit");
-    entities[0].fragments.pop();
+    entities[0] = Entity::new(
+        entities[0].id().clone(),
+        entities[0].file_id(),
+        entities[0].source_range(),
+        entities[0].content().clone(),
+        entities[0].metadata().cloned(),
+        entities[0].fragments()[..1].to_vec(),
+    )
+    .expect("valid entity with one remaining fragment");
     store
         .write(|state| state.entities.write(&Entities::prepare(&entities)?))
         .expect("partial replacement");
@@ -629,7 +690,7 @@ fn result_loading_skips_missing_files_and_canonical_fragments() {
     assert!(!loaded.fragments.contains_key(&hits[0].document_id));
 
     store
-        .write(|state| state.files.delete(source.id))
+        .write(|state| state.files.delete(source.id()))
         .expect("missing file");
     let loaded = store
         .load_search_hits(&hits)
@@ -664,8 +725,14 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     drop(directory_table);
 
     let store = metadata_store(temporary.path());
-    let (mut source, entities, entries) = metadata_fragments(0, "owner");
-    source.relative_path = SourcePath::new("edge/harvest.rs").expect("path");
+    let (source, entities, entries) = metadata_fragments(0, "owner");
+    let source = FileRecord::new(
+        source.id(),
+        SourcePath::new("edge/harvest.rs").expect("path"),
+        source.snapshot().clone(),
+        source.index_status().clone(),
+    )
+    .expect("file record");
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("maximum membership");
@@ -721,7 +788,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
         .expect("source records");
     assert_eq!(
         docs[0].get_u32("file_id").expect("u32 file ID"),
-        Some(source.id.get())
+        Some(source.id().get())
     );
     assert_eq!(
         docs[0]

@@ -94,13 +94,14 @@ fn models_help_uses_the_rust_transformers_backend_name() {
 }
 
 #[test]
-fn index_help_describes_the_optional_workspace_name() {
+fn index_help_uses_root_paths_without_workspace_names() {
     let help = stdout(&["--index", "--help"]);
-    assert!(help.contains("--name <NAME>"));
-    assert!(help.contains("defaults to root directory name"));
+    assert!(!help.contains("--name"));
+    assert!(help.contains("identified by their root paths"));
     assert!(help.contains("Scan rules:"));
-    assert!(help.contains("-t, --type <type>"));
-    assert!(help.contains("-T, --type-not <type>"));
+    assert!(help.contains("-t, --type <format>"));
+    assert!(help.contains("-T, --type-not <format>"));
+    assert!(help.contains("same file-name rules as indexed queries"));
     assert!(!help.contains("--category"));
 }
 

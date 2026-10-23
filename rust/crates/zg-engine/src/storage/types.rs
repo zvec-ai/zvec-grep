@@ -52,9 +52,9 @@ pub(crate) struct StoredFileAttributes {
 impl From<&FileRecord> for StoredFileAttributes {
     fn from(file: &FileRecord) -> Self {
         Self {
-            id: file.id,
-            relative_path: file.relative_path.to_path_buf(),
-            modified_epoch_ms: file.snapshot.modified_epoch_ms,
+            id: file.id(),
+            relative_path: file.relative_path().to_path_buf(),
+            modified_epoch_ms: file.snapshot().modified_epoch_ms,
         }
     }
 }

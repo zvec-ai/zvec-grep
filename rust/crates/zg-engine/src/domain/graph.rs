@@ -17,17 +17,6 @@ pub(crate) enum GraphEdgeKind {
     Implements,
 }
 
-/// Kinds of buffered name references. Each pending ref is resolved into the
-/// [`GraphEdgeKind`] with the same name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum GraphRefKind {
-    Calls,
-    Imports,
-    Extends,
-    Implements,
-}
-
 /// Evidence provenance recorded on persisted edges.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +54,7 @@ pub(crate) struct PendingRef {
     pub owner_id: String,
     pub ref_name: String,
     pub receiver_name: Option<String>,
-    pub ref_kind: GraphRefKind,
+    pub ref_kind: GraphEdgeKind,
     pub arity: Option<usize>,
     pub line: usize,
     pub column: usize,
@@ -101,4 +90,27 @@ pub(crate) struct FileGraphResult {
     pub nodes: Vec<FileGraphNode>,
     pub edges: Vec<FileEdge>,
     pub pending_refs: Vec<PendingRef>,
+}
+
+impl GraphEdgeKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Contains => "contains",
+            Self::Calls => "calls",
+            Self::Imports => "imports",
+            Self::Extends => "extends",
+            Self::Implements => "implements",
+        }
+    }
+}
+
+impl EdgeProvenance {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileLocal => "file_local",
+            Self::ImportScoped => "import_scoped",
+            Self::PreferredFile => "preferred_file",
+            Self::WorkspaceUnique => "workspace_unique",
+        }
+    }
 }

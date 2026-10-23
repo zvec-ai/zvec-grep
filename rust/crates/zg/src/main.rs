@@ -125,8 +125,18 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
             mode,
             home,
             request,
+            path_lookup,
             output,
-        } => Box::pin(execute_request(mode, home.as_deref(), *request, output)).await,
+        } => {
+            Box::pin(execute_request(
+                mode,
+                home.as_deref(),
+                *request,
+                path_lookup,
+                output,
+            ))
+            .await
+        }
         CliPlan::Index {
             mode,
             home,
@@ -197,7 +207,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
                 } else {
                     args.color.unwrap_or_default()
                 },
-                io::stdout().is_terminal(),
+                zg_cli::stdout_supports_ansi(),
             )?;
             Ok(())
         }
@@ -318,8 +328,34 @@ async fn execute_request(
     mode: ClientMode,
     home: Option<&Path>,
     mut request: ContextOptions,
+    path_lookup: bool,
     output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
+    if path_lookup {
+        // Current-file lookup is local in every client mode, before index or model admission.
+        eprintln!(
+            "warning: automatically performing path lookup; use --hybrid to force hybrid search."
+        );
+        let engine = ZvecGrep::new();
+        let result = engine
+            .lookup_path(zg_engine::api::paths::PathsOptions {
+                query: request.queries[0].clone(),
+                root: request.root.clone(),
+                limit: request.limit,
+                filter: request.filter.clone(),
+                signal: request.signal.clone(),
+            })
+            .await;
+        engine.close();
+        zg_cli::write_path_lookup_result(
+            zg_cli::stdout(),
+            io::stderr().lock(),
+            &result?,
+            output,
+            zg_cli::stdout_supports_ansi(),
+        )?;
+        return Ok(());
+    }
     if request.rg {
         if mode == ClientMode::Server {
             debug!("managed --rg remains local in server mode");
@@ -371,7 +407,7 @@ async fn execute_context(
             zg_cli::stdout(),
             &result,
             output,
-            io::stdout().is_terminal(),
+            zg_cli::stdout_supports_ansi(),
         )?;
         zg_cli::write_context_status(io::stderr().lock(), &result)?;
         if output.debug {
@@ -419,7 +455,7 @@ async fn ensure_query_index(
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err(EngineError::not_found(format!(
             "No index found in {}. Run `zg --index --embedding <model>` to build it, then retry the query. Run `zg --help models` to list supported models.",
-            info.root.display()
+            zg_cli::output_path(&info.root).display()
         )).into());
     }
     let options = zg_engine::api::index::setup::IndexSetupOptions {
@@ -454,7 +490,7 @@ async fn ensure_query_index(
     .await?;
     eprintln!(
         "\nBuilding index · {}\nEmbedding      · {}\nEsc Cancel · Ctrl+C Cancel",
-        info.root.display(),
+        zg_cli::output_path(&info.root).display(),
         index_request
             .embedding
             .as_ref()
@@ -462,8 +498,8 @@ async fn ensure_query_index(
     );
     let cancellation = zg_cli::IndexCancellation::new()?;
     index_request.signal = Some(cancellation.signal());
-    let progress =
-        zg_cli::IndexProgressDisplay::new(io::stderr(), io::stderr().is_terminal(), output.color);
+    let ansi = zg_cli::stderr_supports_ansi();
+    let progress = zg_cli::IndexProgressDisplay::new(io::stderr(), ansi, output.color);
     let reporter = progress.reporter();
     let result: Result<_, Box<dyn Error>> = if let Some(home) = &server_home {
         zg_daemon::index_with_progress(home, index_request, &reporter)
@@ -735,7 +771,7 @@ async fn execute_direct_context(
         zg_cli::stdout(),
         &result,
         output,
-        io::stdout().is_terminal(),
+        zg_cli::stdout_supports_ansi(),
     )?;
     zg_cli::write_context_status(io::stderr().lock(), &result)?;
     if output.debug {
@@ -764,7 +800,7 @@ async fn execute_index(
             authorize_index(&mut request, server, home).await?;
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
-                io::stderr().is_terminal(),
+                zg_cli::stderr_supports_ansi(),
                 output.color,
             );
             let reporter = progress.reporter();
@@ -796,7 +832,7 @@ async fn execute_index(
                 &result,
                 info.workspace_index.as_ref().map(|index| &index.scan),
                 output,
-                io::stdout().is_terminal(),
+                zg_cli::stdout_supports_ansi(),
             )?;
             if output.debug {
                 eprintln!("Index diagnostics: {}", serde_json::to_string(&result)?);
@@ -909,7 +945,7 @@ async fn execute_status(
         zg_cli::stdout(),
         &result,
         output,
-        io::stdout().is_terminal(),
+        zg_cli::stdout_supports_ansi(),
     )?;
     if output.debug {
         eprintln!("Status diagnostics: indexed={}", result.indexed);

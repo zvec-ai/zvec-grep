@@ -8,8 +8,8 @@ use crate::{
         result::{MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace},
     },
     domain::{
-        CodeMetadata, Content, Entity, EntityId, FileIndexStatus, FileRecord, FileSnapshot, Range,
-        SourcePath, SymbolType,
+        CodeMetadata, Content, Entity, EntityFragment, EntityId, FileIndexStatus, FileRecord,
+        FileSnapshot, FragmentId, Range, SourcePath, SymbolType,
     },
 };
 
@@ -33,28 +33,35 @@ pub(super) fn hit(
     rank: usize,
     metadata: Option<CodeMetadata>,
 ) -> SearchHit {
+    let id = EntityId::from_string(id.to_owned());
+    let fragment = EntityFragment {
+        id: FragmentId::new(&id, 0),
+        range: Range::Full,
+    };
     SearchHit {
-        entity: Entity {
-            id: EntityId::from_string(id.to_owned()),
-            file_id: FileId::new(file_id),
-            source_range: Range::Full,
-            content: Content::Text("source".into()),
-            metadata: metadata.map(EntityMetadata::Code),
-            fragments: vec![],
-        },
-        file: FileRecord {
-            id: FileId::new(file_id),
-            relative_path: SourcePath::new(path).expect("path"),
-            snapshot: FileSnapshot {
+        entity: Entity::new(
+            id,
+            FileId::new(file_id),
+            Range::Full,
+            Content::Text("source".into()),
+            metadata.map(EntityMetadata::Code),
+            vec![fragment],
+        )
+        .expect("entity"),
+        file: FileRecord::new(
+            FileId::new(file_id),
+            SourcePath::new(path).expect("path"),
+            FileSnapshot {
                 size_bytes: 6,
                 modified_epoch_ms: Some(0),
-                content_hash: None,
+                content_hash: Some(crate::utils::sha256_hex(b"source")),
             },
-            index_status: FileIndexStatus::Indexed {
+            FileIndexStatus::Indexed {
                 indexed_epoch_ms: 0,
                 entity_count: 1,
             },
-        },
+        )
+        .expect("file"),
         evidence: vec![],
         rank,
         score,
@@ -114,7 +121,7 @@ fn exact_names_and_qualified_scopes_outweigh_references() {
         &QueryFilter::default(),
         1,
     );
-    assert_eq!(out[0].entity.id.as_str(), "definition");
+    assert_eq!(out[0].entity.id().as_str(), "definition");
     let trace = out[0].trace.as_ref().expect("trace");
     assert_eq!(trace.fusion.rank, 2);
     assert_eq!(trace.ranking.as_ref().expect("ranking").rank, 1);
@@ -157,7 +164,7 @@ fn constants_aliases_and_unicode_definitions_are_not_short_fragment_noise() {
             &QueryFilter::default(),
             1,
         );
-        assert_eq!(out[0].entity.id.as_str(), "target", "{query}");
+        assert_eq!(out[0].entity.id().as_str(), "target", "{query}");
     }
     assert!(
         QueryFeatures::new("constant MAX_CONNECTIONS")
@@ -293,7 +300,7 @@ fn dependency_only_scope_has_no_common_penalty() {
         &QueryFilter::default(),
         1,
     );
-    assert_eq!(out[0].entity.id.as_str(), "a");
+    assert_eq!(out[0].entity.id().as_str(), "a");
 }
 
 #[test]
@@ -305,7 +312,9 @@ fn diversity_uses_selected_files_and_keeps_complementary_results() {
     ];
     let out = run("behavior", candidates.clone(), &QueryFilter::default(), 3);
     assert_eq!(
-        out.iter().map(|h| h.entity.id.as_str()).collect::<Vec<_>>(),
+        out.iter()
+            .map(|h| h.entity.id().as_str())
+            .collect::<Vec<_>>(),
         ["a", "c", "b"]
     );
     let second = out[1]
@@ -336,7 +345,7 @@ fn ties_and_missing_metadata_are_stable_and_trace_is_optional() {
     }
     for _ in 0..2 {
         let out = run("behavior", candidates.clone(), &QueryFilter::default(), 2);
-        assert_eq!(out[0].entity.id.as_str(), "a");
+        assert_eq!(out[0].entity.id().as_str(), "a");
         assert!(out.iter().all(|h| h.trace.is_none()));
         candidates.reverse();
     }
@@ -368,7 +377,7 @@ fn natural_language_paths_outweigh_an_incidental_property() {
         &QueryFilter::default(),
         1,
     );
-    assert_eq!(out[0].entity.id.as_str(), "implementation");
+    assert_eq!(out[0].entity.id().as_str(), "implementation");
 }
 
 #[test]
@@ -396,7 +405,7 @@ fn weak_property_match_does_not_beat_a_more_specific_function() {
         &QueryFilter::default(),
         1,
     );
-    assert_eq!(out[0].entity.id.as_str(), "implementation");
+    assert_eq!(out[0].entity.id().as_str(), "implementation");
 }
 
 #[test]
@@ -424,7 +433,7 @@ fn pure_symbol_definition_can_recover_from_a_low_fusion_rank() {
         &QueryFilter::default(),
         1,
     );
-    assert_eq!(out[0].entity.id.as_str(), "definition");
+    assert_eq!(out[0].entity.id().as_str(), "definition");
 }
 
 #[test]
@@ -482,8 +491,15 @@ fn file_support_requires_independent_definitions_and_is_bounded() {
     ];
     for (index, candidate) in candidates.iter_mut().enumerate() {
         let offset = u64::try_from(index * 100).expect("offset");
-        candidate.entity.source_range =
-            Range::Byte(crate::domain::ByteRange::new(offset, offset + 50).expect("source range"));
+        candidate.entity = Entity::new(
+            candidate.entity.id().clone(),
+            candidate.entity.file_id(),
+            Range::Byte(crate::domain::ByteRange::new(offset, offset + 50).expect("source range")),
+            candidate.entity.content().clone(),
+            candidate.entity.metadata().cloned(),
+            candidate.entity.fragments().to_vec(),
+        )
+        .expect("entity");
     }
     let routes = [ResolvedSearchRoute {
         id: "fts".into(),
@@ -502,7 +518,7 @@ fn file_support_requires_independent_definitions_and_is_bounded() {
         3,
         policy,
     );
-    assert_eq!(out[0].entity.id.as_str(), "definition");
+    assert_eq!(out[0].entity.id().as_str(), "definition");
     let ranking = out[0]
         .trace
         .as_ref()
@@ -512,7 +528,15 @@ fn file_support_requires_independent_definitions_and_is_bounded() {
         .expect("ranking");
     assert_eq!(ranking.file_support_count, 1);
     assert!(ranking.file_support_bonus > 0.0 && ranking.file_support_bonus <= 0.15);
-    candidates[2].entity.source_range = candidates[1].entity.source_range;
+    candidates[2].entity = Entity::new(
+        candidates[2].entity.id().clone(),
+        candidates[2].entity.file_id(),
+        candidates[1].entity.source_range(),
+        candidates[2].entity.content().clone(),
+        candidates[2].entity.metadata().cloned(),
+        candidates[2].entity.fragments().to_vec(),
+    )
+    .expect("entity");
     let out = rank_with_policy(candidates, &routes, &QueryFilter::default(), 1.0, 3, policy);
     assert!(out.iter().all(|hit| {
         hit.trace

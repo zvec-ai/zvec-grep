@@ -195,10 +195,18 @@ fn prompt(
         choices.push(json!({"const": "use_local_search", "title": "Use FTS only"}));
     }
     choices.push(json!({"const": "cancel", "title": "Cancel"}));
+    // Keep canonical authorization targets intact; simplify only the prompt's copy.
+    let mut display_targets = targets.to_vec();
+    for required in &mut display_targets {
+        required.target.root = zg_cli::output_path(&required.target.root).to_path_buf();
+        for root in &mut required.target.workspace_roots {
+            *root = zg_cli::output_path(root).to_path_buf();
+        }
+    }
     let requests = serde_json::from_value(json!({"remote_embedding_authorization": {
             "method": "elicitation/create", "params": {
                 "mode": "form",
-                "message": format!("Allow remote embedding? Disclosed workspace roots, models, endpoints and data categories: {}. Only explicit acceptance permits transmission. Do not enter credentials.", serde_json::to_string(targets).map_err(parse_error)?),
+                "message": format!("Allow remote embedding? Disclosed workspace roots, models, endpoints and data categories: {}. Only explicit acceptance permits transmission. Do not enter credentials.", serde_json::to_string(&display_targets).map_err(parse_error)?),
                 "requestedSchema": {"type": "object", "properties": {"decision": {
                     "type": "string", "title": "Remote Embedding permission", "oneOf": choices, "default": "cancel"
                 }}, "required": ["decision"]}
@@ -212,6 +220,75 @@ mod tests {
     use super::*;
     use rmcp::{ServerHandler, ServiceExt, model::*};
     use std::sync::Arc;
+
+    fn disclosed_targets(required: &InputRequiredResult) -> serde_json::Value {
+        let wire = serde_json::to_value(required).expect("input-required response");
+        let message = wire["inputRequests"]["remote_embedding_authorization"]["params"]["message"]
+            .as_str()
+            .expect("consent message");
+        let targets = message
+            .strip_prefix("Allow remote embedding? Disclosed workspace roots, models, endpoints and data categories: ")
+            .and_then(|message| message.strip_suffix(". Only explicit acceptance permits transmission. Do not enter credentials."))
+            .expect("disclosed targets in consent message");
+        serde_json::from_str(targets).expect("disclosed target JSON")
+    }
+
+    #[test]
+    fn modern_consent_prompt_formats_only_display_paths() {
+        let long_path = format!(r"\\?\C:\{}", "a".repeat(270));
+        for (input, expected) in [
+            (r"\\?\C:\workspace".to_owned(), r"C:\workspace".to_owned()),
+            // The shared display helper preserves verbatim UNC paths.
+            (
+                r"\\?\UNC\server\share\workspace".to_owned(),
+                r"\\?\UNC\server\share\workspace".to_owned(),
+            ),
+            (
+                r"\\?\C:\workspace.".to_owned(),
+                r"\\?\C:\workspace.".to_owned(),
+            ),
+            (long_path.clone(), long_path),
+        ] {
+            let expected = if cfg!(windows) { &expected } else { &input };
+            let source = r"\\?\C:\source";
+            let expected_source = if cfg!(windows) { r"C:\source" } else { source };
+            for allow_fts in [false, true] {
+                let targets = vec![authorization::QueryAuthorization {
+                    target: authorization::IndexAuthorization {
+                        root: input.clone().into(),
+                        workspace_roots: vec![source.into(), input.clone().into()],
+                        model: "remote/test-model".into(),
+                        endpoint: "https://embedding.example.test/v1".into(),
+                        endpoint_host: "embedding.example.test".into(),
+                    },
+                    query_text: allow_fts,
+                    workspace_content: true,
+                }];
+                let original = targets.clone();
+                let CallToolResponse::InputRequired(required) =
+                    prompt(&targets, allow_fts, "opaque-state".into()).expect("consent prompt")
+                else {
+                    panic!("consent must require input");
+                };
+                assert_eq!(
+                    disclosed_targets(&required),
+                    serde_json::json!([{
+                        "target": {
+                            "root": expected,
+                            "workspace_roots": [expected_source, expected],
+                            "model": "remote/test-model",
+                            "endpoint": "https://embedding.example.test/v1",
+                            "endpoint_host": "embedding.example.test",
+                        },
+                        "query_text": allow_fts,
+                        "workspace_content": true,
+                    }]),
+                );
+                assert_eq!(required.request_state.as_deref(), Some("opaque-state"));
+                assert_eq!(targets, original, "authorization targets must not change");
+            }
+        }
+    }
 
     struct Server(Arc<ContinuationState>);
     impl ServerHandler for Server {
@@ -363,8 +440,12 @@ mod tests {
                 "root": root.path(), "embedding": "qwen/text-embedding-v4", "endpoint": "https://embedding.example.test/v1"
             }).as_object().expect("valid consent test fixture").clone());
             let CallToolResponse::InputRequired(required) = client.call_tool_once(request.clone()).await.expect("valid consent test fixture") else { panic!("consent required"); };
-            let wire = serde_json::to_value(&required).expect("valid consent test fixture");
-            assert!(wire["inputRequests"]["remote_embedding_authorization"]["params"]["message"].as_str().expect("valid consent test fixture").contains("embedding.example.test"));
+            let disclosed = disclosed_targets(&required);
+            let canonical_root = root.path().canonicalize().expect("canonical workspace root");
+            let display_root = zg_cli::output_path(&canonical_root);
+            assert_eq!(disclosed[0]["target"]["root"], serde_json::json!(display_root));
+            assert_eq!(disclosed[0]["target"]["workspace_roots"], serde_json::json!([display_root]));
+            assert_eq!(disclosed[0]["target"]["endpoint_host"], "embedding.example.test");
             assert!(!root.path().join(".zvec-grep").exists(), "authorization must not create an index");
             let state_token = required.request_state.expect("valid consent test fixture");
             let responses = serde_json::from_value(serde_json::json!({"remote_embedding_authorization": {"action": "accept", "content": {"decision": "allow_once"}}})).expect("valid consent test fixture");
@@ -379,6 +460,11 @@ mod tests {
             assert!(client.call_tool_once(forged).await.is_err(), "tampering rejected");
             let (first, second) = tokio::join!(client.call_tool_once(retry.clone()), client.call_tool_once(retry.clone()));
             assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1, "only one concurrent redemption succeeds");
+            let CallToolResponse::Complete(result) = first.or(second).expect("authorized request") else { panic!("authorization must complete"); };
+            let ContentBlock::Text(text) = &result.content[0] else { panic!("authorized target JSON"); };
+            let authorized: Vec<authorization::IndexAuthorization> = serde_json::from_str(&text.text).expect("authorized targets");
+            assert_eq!(authorized[0].root, canonical_root);
+            assert_eq!(authorized[0].workspace_roots, vec![canonical_root]);
             assert!(client.call_tool_once(retry).await.is_err(), "replay rejected");
             let CallToolResponse::InputRequired(required) = client.call_tool_once(request.clone()).await.expect("valid consent test fixture") else { panic!("new consent"); };
             let token = required.request_state.expect("valid consent test fixture");

@@ -32,7 +32,11 @@ pub(crate) fn format(reply: &ContextResult) -> String {
         );
     }
     for file in files {
-        lines.push(file[0].relative_path.display().to_string());
+        lines.push(
+            zg_cli::output_path(&file[0].relative_path)
+                .display()
+                .to_string(),
+        );
         let mut blocks: Vec<(Option<String>, Vec<&ContextItem>)> = Vec::new();
         for item in file {
             let label = symbol(item);

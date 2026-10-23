@@ -1,4 +1,4 @@
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 use crate::models::artifacts::ArtifactDownloadConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,7 +76,7 @@ pub(crate) struct LlamaCppConfig {
     pub(crate) cache_file: &'static str,
     pub(crate) download: &'static ArtifactDownloadConfig,
     pub(crate) dimension: usize,
-    pub(crate) metric: Metric,
+    pub(crate) metric: EmbeddingMetric,
     pub(crate) format: &'static str,
     pub(crate) context_size: usize,
     pub(crate) max_batch_size: usize,
@@ -89,7 +89,7 @@ pub(crate) struct QwenConfig {
     pub(crate) provider: &'static str,
     pub(crate) model: &'static str,
     pub(crate) dimension: usize,
-    pub(crate) metric: Metric,
+    pub(crate) metric: EmbeddingMetric,
     pub(crate) default_endpoint: &'static str,
     pub(crate) max_batch_size: usize,
     pub(crate) max_input_tokens: usize,
@@ -106,7 +106,7 @@ pub(crate) struct TransformersConfig {
     pub(crate) download: &'static ArtifactDownloadConfig,
     pub(crate) dtype: &'static str,
     pub(crate) dimension: usize,
-    pub(crate) metric: Metric,
+    pub(crate) metric: EmbeddingMetric,
     pub(crate) pooling: &'static str,
     pub(crate) normalize: bool,
     pub(crate) query_prefix: Option<&'static str>,
@@ -127,7 +127,7 @@ pub(crate) struct Model2VecConfig {
     pub(crate) embedding_tensor: &'static str,
     pub(crate) tokenizer_file: &'static str,
     pub(crate) dimension: usize,
-    pub(crate) metric: Metric,
+    pub(crate) metric: EmbeddingMetric,
     pub(crate) normalize: bool,
     pub(crate) max_input_tokens: usize,
     pub(crate) max_batch_size: usize,

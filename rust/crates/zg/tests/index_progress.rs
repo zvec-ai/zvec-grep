@@ -218,7 +218,7 @@ fn explicit_nested_index_owns_its_scope_in_direct_and_server_modes() {
         let child_root = std::fs::canonicalize(&nested).expect("child root");
         assert_eq!(
             roots_line(&child),
-            format!("roots\t{}", child_root.display()),
+            format!("roots\t{}", zg_cli::output_path(&child_root).display()),
             "{mode}: child uses its own root and scan scope"
         );
         assert!(nested.join(".zvec-grep/manifest.json").exists());

@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use tempfile::TempDir;
 
-use crate::domain::{Content, model::Metric};
+use crate::domain::{Content, model::EmbeddingMetric};
 use crate::{
     domain::model::{EmbeddingPurpose, ModelConfig, ModelProgress},
     models::{
@@ -59,7 +59,7 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
             &[
                 vec![Content::Text("both tokens".to_owned())],
                 vec![Content::Text("unknown-only".to_owned())],
-                vec![Content::Text("third token".to_owned())],
+                vec![Content::Code("third token".to_owned())],
             ],
             EmbeddingOptions {
                 purpose: EmbeddingPurpose::Query,
@@ -94,20 +94,20 @@ async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {
             .expect("progress lock should not be poisoned"),
         [
             ModelProgress::Preparing {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(16),
             },
             ModelProgress::Downloading {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
                 downloaded_bytes: Some(8),
                 total_bytes: Some(16),
             },
             ModelProgress::Ready {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
         ]
     );
@@ -283,15 +283,15 @@ async fn excludes_cached_artifacts_from_download_progress_like_typescript() {
             .expect("progress lock should not be poisoned"),
         [
             ModelProgress::Preparing {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Ready {
-                model: "local/test-potion".to_owned(),
+                model_ref: "local/test-potion".to_owned(),
             },
         ]
     );
@@ -345,7 +345,7 @@ async fn rejects_cancelled_embeddings_without_corrupting_the_loaded_runtime() {
 
     let error = model
         .embed(
-            &[vec![Content::Text("cancelled".to_owned())]],
+            &[vec![Content::Code("cancelled".to_owned())]],
             EmbeddingOptions {
                 signal: Some(signal),
                 ..EmbeddingOptions::default()
@@ -363,7 +363,7 @@ async fn rejects_cancelled_embeddings_without_corrupting_the_loaded_runtime() {
     );
     model
         .embed(
-            &[vec![Content::Text("after cancellation".to_owned())]],
+            &[vec![Content::Code("after cancellation".to_owned())]],
             EmbeddingOptions::default(),
         )
         .await
@@ -390,7 +390,7 @@ fn fixture_entry() -> Model2VecConfig {
         embedding_tensor: "embeddings",
         tokenizer_file: "tokenizer.json",
         dimension: 3,
-        metric: Metric::Cosine,
+        metric: EmbeddingMetric::Cosine,
         normalize: true,
         max_input_tokens: 512,
         max_batch_size: 32,

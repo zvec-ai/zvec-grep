@@ -1,6 +1,6 @@
 use crate::domain::model::ModelConfig;
 #[cfg(test)]
-use crate::domain::model::{Device, Metric};
+use crate::domain::model::{Device, EmbeddingMetric};
 use crate::{
     EngineError,
     domain::{
@@ -22,8 +22,6 @@ pub(crate) const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
 #[serde(try_from = "ManifestData", into = "ManifestData")]
 pub(crate) struct WorkspaceManifest {
     pub workspace: Workspace,
-    /// Root recorded on disk before resolving a moved workspace.
-    pub recorded_root: PathBuf,
     pub path: PathBuf,
     pub index_version: Option<u32>,
     pub storage_generation: Option<String>,
@@ -42,16 +40,18 @@ enum IndexPolicy {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManifestData {
-    name: String,
+    // Accept the obsolete field without retaining or writing a workspace name.
+    #[serde(default, rename = "name", skip_serializing)]
+    _legacy_name: serde::de::IgnoredAny,
     path: PathBuf,
     root: PathBuf,
     #[serde(default)]
     scan: ScanRules,
     index_policy: IndexPolicy,
     #[serde(default)]
-    embeddings: Vec<EmbeddingModelInfo>,
+    default_embedding_model: Option<EmbeddingModelInfo>,
     #[serde(default)]
-    embedding_routes: BTreeMap<ContentKind, String>,
+    embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
     index_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_generation: Option<String>,
@@ -67,16 +67,19 @@ impl TryFrom<ManifestData> for WorkspaceManifest {
         let index = match input.index_policy {
             IndexPolicy::Disabled => IndexState::Disabled,
             IndexPolicy::Uninitialized => IndexState::Uninitialized,
-            IndexPolicy::Enabled => IndexState::Enabled(IndexDescriptor {
-                embeddings: input.embeddings,
-                routes: input.embedding_routes,
-                fts: crate::domain::FTS_CONFIG,
-            }),
+            IndexPolicy::Enabled => IndexState::Enabled(Box::new(
+                IndexDescriptor::new(
+                    input.default_embedding_model.ok_or_else(|| {
+                        "enabled workspace requires defaultEmbeddingModel".to_owned()
+                    })?,
+                    input.embedding_routes,
+                    crate::domain::FTS_CONFIG,
+                )
+                .map_err(|error| error.to_string())?,
+            )),
         };
         let manifest = Self {
-            recorded_root: input.root.clone(),
             workspace: Workspace {
-                name: input.name,
                 root: input.root,
                 scan: input.scan,
                 index,
@@ -99,7 +102,7 @@ impl From<WorkspaceManifest> for ManifestData {
     fn from(manifest: WorkspaceManifest) -> Self {
         let workspace = manifest.workspace;
         Self {
-            name: workspace.name,
+            _legacy_name: serde::de::IgnoredAny,
             path: manifest.path,
             root: workspace.root,
             scan: workspace.scan,
@@ -108,14 +111,14 @@ impl From<WorkspaceManifest> for ManifestData {
                 IndexState::Disabled => IndexPolicy::Disabled,
                 IndexState::Enabled(_) => IndexPolicy::Enabled,
             },
-            embeddings: workspace
+            default_embedding_model: workspace
                 .index
                 .descriptor()
-                .map_or_else(Vec::new, |index| index.embeddings.clone()),
+                .map(|index| index.default_embedding_model().clone()),
             embedding_routes: workspace
                 .index
                 .descriptor()
-                .map_or_else(BTreeMap::new, |index| index.routes.clone()),
+                .map_or_else(BTreeMap::new, |index| index.embedding_routes().clone()),
             index_version: manifest.index_version,
             storage_generation: manifest.storage_generation,
             created_time: workspace.created_epoch_ms,
@@ -134,7 +137,6 @@ impl WorkspaceManifest {
     ) -> Result<Self, EngineError> {
         let manifest = Self {
             path: home,
-            recorded_root: workspace.root.clone(),
             workspace,
             index_version,
             storage_generation: None,
@@ -155,14 +157,14 @@ impl WorkspaceManifest {
         self.workspace
             .index
             .descriptor()
-            .and_then(|index| index.embeddings.first())
+            .map(IndexDescriptor::default_embedding_model)
     }
 
-    pub(crate) fn embeddings(&self) -> &[EmbeddingModelInfo] {
+    pub(crate) fn embeddings(&self) -> Vec<&EmbeddingModelInfo> {
         self.workspace
             .index
             .descriptor()
-            .map_or(&[], |index| index.embeddings.as_slice())
+            .map_or_else(Vec::new, IndexDescriptor::embeddings)
     }
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
@@ -384,24 +386,40 @@ mod tests {
     fn fixture_manifest(home: &Path) -> WorkspaceManifest {
         let mut manifest = WorkspaceManifest::new(
             Workspace {
-                name: "fixture".to_owned(),
                 root: home.parent().expect("workspace root").to_path_buf(),
-                scan: crate::domain::ScanRules {
-                    globs: vec!["*.rs".into()],
-                    ..crate::domain::ScanRules::default()
-                },
-                index: IndexState::Enabled(IndexDescriptor::single(EmbeddingModelInfo {
-                    model: crate::domain::model::ModelInfo {
-                        provider: "local".into(),
-                        name: "minilm".into(),
-                        endpoint: Some("https://models.example.test/embeddings".into()),
-                    },
-                    dimension: 384,
-                    metric: Metric::Cosine,
-                    max_batch_size: 32,
-                    max_input_tokens: Some(8192),
-                    max_image_bytes: Some(1_048_576),
-                })),
+                scan: crate::api::index::options::ScanRulesUpdate {
+                    included_formats: Some(vec![crate::domain::FileFormat::Rust]),
+                    excluded_formats: Some(vec![crate::domain::FileFormat::Cpp]),
+                    globs: Some(vec!["*.rs".into()]),
+                    ..crate::api::index::options::ScanRulesUpdate::default()
+                }
+                .apply(&ScanRules::default())
+                .expect("scan rules"),
+                index: IndexState::Enabled(Box::new(
+                    IndexDescriptor::new(
+                        EmbeddingModelInfo::new(
+                            crate::domain::model::ModelInfo::new(
+                                "local",
+                                "minilm",
+                                [
+                                    crate::domain::ContentKind::Text,
+                                    crate::domain::ContentKind::Code,
+                                    crate::domain::ContentKind::Image,
+                                ],
+                                32,
+                            )
+                            .expect("valid model metadata"),
+                            384,
+                            EmbeddingMetric::Cosine,
+                            Some(8192),
+                            Some(1_048_576),
+                        )
+                        .expect("valid embedding metadata"),
+                        std::collections::BTreeMap::new(),
+                        crate::domain::FTS_CONFIG,
+                    )
+                    .expect("index descriptor"),
+                )),
                 created_epoch_ms: 10,
                 updated_epoch_ms: 20,
             },
@@ -467,7 +485,7 @@ mod tests {
                 "rootPaths",
                 serde_json::json!([{"absolutePath": directory.path(), "recursive": true}]),
             ),
-            ("embedding", value["embeddings"][0].clone()),
+            ("embedding", value["defaultEmbeddingModel"].clone()),
             (
                 "embeddingRuntime",
                 value["embeddingRuntimes"]["local/minilm"].clone(),
@@ -490,23 +508,40 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_multiple_models_and_nontext_routes() {
+    fn manifest_validates_content_routes_and_shared_model_definitions() {
         let directory = tempdir().expect("workspace");
         let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         let value = serde_json::to_value(&manifest).expect("manifest");
-        let mut multiple = value.clone();
-        let mut second = multiple["embeddings"][0].clone();
+        let mut routed = value.clone();
+        let mut second = value["defaultEmbeddingModel"].clone();
         second["model"]["name"] = serde_json::json!("second-model");
-        multiple["embeddings"]
-            .as_array_mut()
-            .expect("embeddings")
-            .push(second);
-        assert!(serde_json::from_value::<WorkspaceManifest>(multiple).is_err());
-        for kind in ["image", "table"] {
-            let mut nontext = value.clone();
-            nontext["embeddingRoutes"][kind] = serde_json::json!("local/minilm");
-            assert!(serde_json::from_value::<WorkspaceManifest>(nontext).is_err());
+        routed["embeddingRoutes"]["image"] = second;
+        let routed: WorkspaceManifest = serde_json::from_value(routed).expect("typed image route");
+        assert_eq!(routed.embeddings().len(), 2);
+        assert_eq!(
+            routed
+                .workspace
+                .index
+                .descriptor()
+                .expect("index")
+                .model_for(ContentKind::Image)
+                .expect("image route")
+                .model()
+                .reference(),
+            "local/second-model",
+        );
+        for kind in ["code", "image"] {
+            let mut unsupported = value.clone();
+            let mut embedding = value["defaultEmbeddingModel"].clone();
+            embedding["model"]["contentKinds"] = serde_json::json!(["text"]);
+            unsupported["embeddingRoutes"][kind] = embedding;
+            assert!(serde_json::from_value::<WorkspaceManifest>(unsupported).is_err());
         }
+        let mut conflicting = value.clone();
+        let mut embedding = value["defaultEmbeddingModel"].clone();
+        embedding["dimension"] = serde_json::json!(32);
+        conflicting["embeddingRoutes"]["code"] = embedding;
+        assert!(serde_json::from_value::<WorkspaceManifest>(conflicting).is_err());
     }
 
     #[test]
@@ -514,7 +549,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         let mut json = serde_json::to_value(&manifest).expect("serialize");
-        json["embeddings"] = serde_json::json!([]);
+        json["defaultEmbeddingModel"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
         for index in [
             IndexState::Uninitialized,
@@ -579,6 +614,11 @@ mod tests {
         assert!(json.get("rootPaths").is_none());
         assert_eq!(json["root"], directory.path().to_string_lossy().as_ref());
         assert_eq!(json["scan"]["globs"][0]["pattern"], "*.rs");
+        assert_eq!(
+            json["scan"]["included_formats"],
+            serde_json::json!(["rust"])
+        );
+        assert_eq!(json["scan"]["excluded_formats"], serde_json::json!(["cpp"]));
         assert_eq!(json["embeddingRuntimes"]["local/minilm"]["device"], "cpu");
         assert!(json.get("generation").is_none());
         assert_eq!(
@@ -611,7 +651,7 @@ mod tests {
         split_filter["filter"] = serde_json::json!({"globs": ["*.rs"]});
         assert!(serde_json::from_value::<WorkspaceManifest>(split_filter).is_err());
         let mut query_constraint = value;
-        query_constraint["scan"]["formats"] = serde_json::json!(["rust"]);
+        query_constraint["scan"]["categories"] = serde_json::json!(["code"]);
         assert!(serde_json::from_value::<WorkspaceManifest>(query_constraint).is_err());
     }
 
@@ -633,22 +673,27 @@ mod tests {
     }
 
     #[test]
-    fn string_names_are_validated_on_manifest_read_and_write() {
+    fn legacy_names_are_ignored_and_not_persisted() {
         let directory = tempdir().expect("workspace");
         let home = directory.path().join(".zvec-grep");
-        let mut manifest = fixture_manifest(&home);
-        write_workspace_manifest(&home, &manifest).expect("valid manifest");
-        let original = fs::read(workspace_manifest_path(&home)).expect("original manifest");
-        for name in ["", " ", " project", ".", "..", "a/b", "a\\b", "a\nb"] {
-            manifest.workspace.name = name.to_owned();
-            assert!(write_workspace_manifest(&home, &manifest).is_err());
-            assert_eq!(
-                fs::read(workspace_manifest_path(&home)).expect("preserved"),
-                original
-            );
-            // Raw JSON can bypass in-memory validation; reads must still reject it.
-            let json = serde_json::to_value(&manifest).expect("raw manifest");
-            assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
+        let manifest = fixture_manifest(&home);
+        let mut json = serde_json::to_value(&manifest).expect("manifest JSON");
+        assert!(json.get("name").is_none());
+        for name in [
+            serde_json::json!("docs"),
+            serde_json::json!(""),
+            serde_json::json!({"obsolete": true}),
+        ] {
+            json["name"] = name;
+            let restored: WorkspaceManifest =
+                serde_json::from_value(json.clone()).expect("legacy metadata");
+            assert_eq!(restored, manifest);
+            write_workspace_manifest(&home, &restored).expect("save manifest");
+            let saved: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace_manifest_path(&home)).expect("saved manifest"),
+            )
+            .expect("JSON");
+            assert!(saved.get("name").is_none());
         }
     }
 
@@ -744,7 +789,11 @@ mod tests {
         let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
         for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
             let mut json = serde_json::to_value(&manifest).expect("manifest JSON");
-            json["embeddings"][0][field] = serde_json::json!(0);
+            if field == "maxBatchSize" {
+                json["defaultEmbeddingModel"]["model"][field] = serde_json::json!(0);
+            } else {
+                json["defaultEmbeddingModel"][field] = serde_json::json!(0);
+            }
             assert!(
                 serde_json::from_value::<WorkspaceManifest>(json).is_err(),
                 "{field}"

@@ -31,7 +31,6 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn explicit_options(root: &Path, address: SocketAddr) -> IndexOptions {
     IndexOptions {
-        name: Some(format!("index-version-{}", uuid::Uuid::new_v4())),
         embedding: Some(EmbeddingModelSpec {
             reference: "qwen/text-embedding-v4".into(),
             revision: None,
@@ -298,9 +297,12 @@ async fn rebuilding_node_index_preserves_old_data_until_successful_publication()
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (1, 0));
     assert_eq!(server.inputs.load(Ordering::Acquire), 1);
     let current = assert_current_index(&engine, root).await?;
-    assert_eq!(current["embeddings"][0]["model"]["provider"], "qwen");
     assert_eq!(
-        current["embeddings"][0]["model"]["name"],
+        current["defaultEmbeddingModel"]["model"]["provider"],
+        "qwen"
+    );
+    assert_eq!(
+        current["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
     );
     assert!(current.get("rootPaths").is_none());

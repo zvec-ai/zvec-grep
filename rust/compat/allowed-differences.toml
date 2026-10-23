@@ -52,13 +52,13 @@ removal_condition = "The TypeScript CLI also skips option values during action a
 [[difference]]
 id = "mcp-indexed-scan-options-explicit-rejection"
 owner = "MCP/file-selection"
-reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递 hidden/noIgnore/ignoreFiles/maxDepth/maxFileSizeBytes/follow；Rust 不复制接受后静默忽略的行为，而返回 invalid params 并指向 index 工具。查询不修改持久扫描配置。客户端应在 index 请求设置这些参数。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验。"
+reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递扫描选项；Rust 对搜索请求中的扫描选项返回 invalid params 并指向 index 工具。Rust index 使用 includeHidden/useDefaultIgnores/ignoreFiles/maxDepth/maxFileSizeBytes/follow；useDefaultIgnores 控制默认与自动发现的忽略规则，显式 ignoreFiles 始终生效且必须存在，maxFileSizeBytes 非空时必须大于零。查询不修改持久扫描配置。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验及 file_selection 测试。"
 removal_condition = "Node.js 为这些 indexed-search 参数提供实际语义后重新对照；不得仅为 schema 相同而忽略参数。"
 
 [[difference]]
 id = "mcp-typed-filter-and-index-extensions"
 owner = "MCP/engine"
-reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力；均为可选扩展，不代替 Node 的 fileTypes、follow、scan_diagnostics 和 status 字段。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
+reason = "保留 typed glob、includedFormats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力。Rust fileTypes/excludedFileTypes 仅用于查询；index 与普通索引查询通过 includedFormats/excludedFormats 使用同一文件名格式目录，持久扫描规则保存格式限制和 globs。follow、scan_diagnostics 和 status 保留，status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
 removal_condition = "Node.js 提供同等能力或这些扩展不再有客户端时，按字段评估统一；不能删除引擎能力来简化协议。"
 
 [[difference]]
@@ -84,3 +84,15 @@ id = "mcp-workspace-status-storage-metadata"
 owner = "MCP/storage"
 reason = "Rust workspace_index.id 使用持久工作区名称而非 Node 的内部标识格式；调用方应将其视为不透明标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
 removal_condition = "底层存储支持截断统计或统一工作区标识后补齐字段，并添加真实索引回归。"
+
+[[difference]]
+id = "cli-path-lookup-local-admission"
+owner = "CLI/current-source"
+reason = "路径查找在 direct/server/auto 均先读取本地当前文件，显式 server 不跳过。文本覆盖被结果或候选上限截断时输出不完整警告，保持本地检索，不启动索引或补入无关向量近邻。验证：path_lookup_reports_file_and_text_truncation_without_indexing_in_all_modes、warm_index_path_lookups_return_current_text_or_no_matches_without_vector_neighbors。"
+removal_condition = "Node.js 采用相同本地查找边界，或产品明确要求不完整路径文本查找继续使用索引后重新评估。"
+
+[[difference]]
+id = "cli-path-lookup-native-selection"
+owner = "CLI/file-selection"
+reason = "文件命中同级排序保留跨运行确定的原生路径顺序，不依赖系统 locale；保留 Rust 已有混合 glob 输入顺序、引擎格式别名、非 Git 目录中的 ignore 处理，以及重复 ./、目录别名、Windows 扩展路径规范化。输出路径统一为正斜杠。结构预览使用引擎实际提供的元数据字段和明确内容坐标。"
+removal_condition = "两端统一文件选择、结构元数据和排序契约后更新对照；不得为复制旧行为而破坏 Rust 已有扫描规则。"

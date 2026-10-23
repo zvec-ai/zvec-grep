@@ -1335,7 +1335,6 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     let mut template = options.clone();
     // Saved workspace settings are authoritative for subsequent watch jobs.
     // Configuration patches and one-operation controls must never be replayed.
-    template.name = None;
     template.signal = None;
     template.lock_timeout_ms = None;
     template.on_progress = None;
@@ -2025,7 +2024,6 @@ mod tests {
             .submit_index(
                 IndexOptions {
                     root: Some(workspace.path().to_path_buf()),
-                    name: Some("explicit-workspace-name".into()),
                     embedding_concurrency: Some(8),
                     ..IndexOptions::default()
                 },
@@ -2039,7 +2037,6 @@ mod tests {
         let runtime = manager
             .runtime(canonical_root.clone(), &IndexOptions::default())
             .expect("runtime");
-        assert!(super::lock(&runtime.index_template).name.is_none());
         assert_eq!(
             watchers
                 .watches
@@ -2074,9 +2071,7 @@ mod tests {
         assert!(super::lock(&runtime.index_status).snapshot.is_none());
         {
             let calls = executor.calls.lock().expect("calls should be readable");
-            assert_eq!(calls[0].name.as_deref(), Some("explicit-workspace-name"));
             assert_eq!(calls[0].embedding_concurrency, Some(8));
-            assert!(calls[1].name.is_none());
             assert_eq!(calls[1].embedding_concurrency, None);
             assert_eq!(
                 calls[1].changes,
@@ -2131,7 +2126,6 @@ mod tests {
         let engine = Arc::new(ZvecGrep::new());
         let mut options = IndexOptions {
             root: Some(root.clone()),
-            name: Some(format!("nested-parent-{}", uuid::Uuid::new_v4())),
             embedding: Some(EmbeddingModelSpec {
                 reference: "local/potion-retrieval-32m".into(),
                 revision: None,
@@ -2182,7 +2176,6 @@ mod tests {
         let before = std::fs::read(&parent_manifest).expect("parent manifest");
 
         options.root = Some(child.clone());
-        options.name = Some(format!("nested-child-{}", uuid::Uuid::new_v4()));
         options.embedding.as_mut().expect("child model").reference =
             "local/potion-code-16m-v2".into();
         options.scan.globs = Some(vec!["src/**".into()]);
@@ -2382,7 +2375,7 @@ mod tests {
                     }],
                     scan: ScanRulesUpdate {
                         globs: Some(vec!["*.rs".into()]),
-                        hidden: Some(false),
+                        include_hidden: Some(false),
                         max_depth: Some(None),
                         ..ScanRulesUpdate::default()
                     },
@@ -2470,7 +2463,7 @@ mod tests {
                     root: Some(root.clone()),
                     embedding_concurrency: Some(5),
                     scan: ScanRulesUpdate {
-                        hidden: Some(true),
+                        include_hidden: Some(true),
                         ..ScanRulesUpdate::default()
                     },
                     ..IndexOptions::default()
@@ -2561,7 +2554,7 @@ mod tests {
                     root: Some(root.clone()),
                     embedding_concurrency: Some(99),
                     scan: ScanRulesUpdate {
-                        hidden: Some(true),
+                        include_hidden: Some(true),
                         ..ScanRulesUpdate::default()
                     },
                     ..IndexOptions::default()

@@ -190,7 +190,10 @@ impl ModelSelection {
 
     fn lines(&self, root: &Path, height: u16) -> Vec<String> {
         let mut lines = vec![
-            format!("No index found in {}.", clean(&root.display().to_string())),
+            format!(
+                "No index found in {}.",
+                clean(&crate::output_path(root).display().to_string())
+            ),
             String::new(),
             "Select an embedding model:".into(),
             String::new(),
@@ -303,7 +306,10 @@ pub fn prompt_setup_authorization(
         let mut lines = vec![
             "Remote embedding authorization".into(),
             String::new(),
-            format!("  Workspace  {}", target.root.display()),
+            format!(
+                "  Workspace  {}",
+                crate::output_path(&target.root).display()
+            ),
             format!("  Model      {}", target.model),
             format!("  Endpoint   {}", target.endpoint),
             format!(

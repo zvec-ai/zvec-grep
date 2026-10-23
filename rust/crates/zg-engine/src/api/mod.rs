@@ -4,3 +4,4 @@ pub mod context;
 pub mod files;
 pub mod index;
 pub mod info;
+pub mod paths;

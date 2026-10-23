@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "cli.path-lookup.truncated-files",
+  "description": "Current file names use ranked path labels and warn when the requested limit omits matches.",
+  "input": {
+    "argv": [
+      "auth.ts",
+      "--mode",
+      "direct",
+      "--limit",
+      "1"
+    ],
+    "cwd_fixture": "path-lookup-two-files",
+    "env": {
+      "NO_COLOR": "1"
+    }
+  },
+  "expected": {
+    "exit_code": 0,
+    "stdout": "#1 matchedBy=path a/auth.ts\n",
+    "stderr": "warning: automatically performing path lookup; use --hybrid to force hybrid search.\nwarning: more matching files exist; use --limit to show more\n"
+  }
+}
