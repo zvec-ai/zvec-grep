@@ -706,12 +706,10 @@ mod tests {
                     ..ContextOptions::default()
                 })
                 .await
-                .expect("ordinary rg retains its enrichment budget");
-            let structure = direct.diagnostics.structure.expect("structure diagnostics");
-            assert_eq!(structure.file_limit, 100);
-            assert_eq!(structure.enriched_files, 100);
-            assert!(structure.truncated);
-            assert!(direct.items.last().expect("last match").container.is_none());
+                .expect("ordinary rg returns plain matches");
+            assert_eq!(direct.items.len(), 102);
+            assert!(direct.diagnostics.structure.is_none());
+            assert!(direct.items.iter().all(|item| item.container.is_none()));
 
             for limit in [101, 100, 102, 0, 1, usize::MAX] {
                 let mut request = options(root.path(), "auth.ts");
@@ -719,7 +717,7 @@ mod tests {
                 let PathLookupResult::Text(result) = engine
                     .lookup_path(request)
                     .await
-                    .expect("lookup beyond the ordinary rg enrichment budget")
+                    .expect("lookup with structural grouping beyond 100 files")
                 else {
                     panic!("no file has the queried name");
                 };
@@ -799,18 +797,10 @@ mod tests {
                 .expect("ordinary rg keeps individual matches");
             assert_eq!(direct.items.len(), 3, "{file}");
             assert_ne!(
-                direct.items[0]
-                    .container
-                    .as_ref()
-                    .expect("first fragment")
-                    .range,
-                direct.items[1]
-                    .container
-                    .as_ref()
-                    .expect("second fragment")
-                    .range,
-                "{file}: ordinary rg retains fragment containers"
+                direct.items[0].range, direct.items[1].range,
+                "{file}: ordinary rg keeps distinct source matches"
             );
+            assert!(direct.items.iter().all(|item| item.container.is_none()));
             let mut request = options(root.path(), "src/auth.ts");
             request.limit = Some(2);
             let PathLookupResult::Text(result) =

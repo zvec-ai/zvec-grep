@@ -2,6 +2,12 @@
 # reason and removal condition.
 
 [[difference]]
+id = "managed-rg-plain-text"
+owner = "CLI/engine/MCP"
+reason = "Rust CLI, API and MCP rg searches return plain source matches without code or Markdown extraction, structural containers or symbol headings. This removes parsing work from exhaustive text search. File grouping, source coordinates, matching/context markers, output bounds and Direct/Server semantics remain shared. Current-file path lookup retains structural entity grouping. Validation: direct_search, lexical_modes and rg_format regression tests."
+removal_condition = "TypeScript adopts plain rg results or its compatibility surface is retired."
+
+[[difference]]
 id = "cli-managed-rg-files"
 owner = "CLI/engine"
 reason = "Rust supports explicit metadata-only file discovery with zg --rg --files, native input-path semantics, glob/type/ignore filters, plain paths, NUL delimiters and file-discovery exit codes. TypeScript and the MCP rg tool retain their content-search contracts. Direct, Server and Auto modes all run discovery locally; recursive walks skip internal directories like managed content search. Validation: rg_files integration tests and CLI parsing tests."

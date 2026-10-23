@@ -162,6 +162,8 @@ requesting bounded output:
 Scope broad searches with command paths, `-g/--glob`, or `-t/--type`. Managed rg
 supports common ripgrep matching, context, type, glob, ignore, encoding, and
 regex-engine options while preserving zvec-grep's compact result format.
+Results contain plain source lines with file paths, line numbers and match/context
+markers. Code and Markdown files are not parsed for symbol or heading metadata.
 
 ## Full compatibility toolset
 

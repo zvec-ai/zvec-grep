@@ -43,6 +43,10 @@ let reply = zg.context(ContextOptions {
 zg.close();
 ```
 
+Rg requests return plain text matches and requested context without parsing code
+or Markdown structure. CLI and MCP rg searches share this behavior; current-file
+path lookup keeps its structural entity grouping.
+
 Index embedding concurrency is configured with
 `zg --index --index-embedding-concurrency <n>`; the old
 `--embedding-concurrency` spelling is rejected. For automatic indexing and
