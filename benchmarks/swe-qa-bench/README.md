@@ -54,7 +54,8 @@ profiles.
 ## Metrics and reporting
 
 Job Summary cells use `baseline / zvec-grep / change`. Each task's baseline and
-zvec-grep values are profile means across its configured trials (five in CI).
+zvec-grep values are profile means across its configured trials (ten in CI,
+eight after trimming one minimum and one maximum score).
 
 | Metric | Change | Interpretation |
 | --- | --- | --- |
@@ -92,39 +93,66 @@ breakdown, so resource deltas must not be compared across these scopes as if
 their accounting were identical. Failed attempts remain archived separately
 under `.retry-history/` and are not included in final-success trial means.
 
-The Aggregate summary appears first, before the task details. Each workflow
-run independently filters tasks using each profile's trial means:
+The summary shows three stages: **Raw**, **After score trim, before task
+screening**, and **After MAD task screening**. Each stage reports score, time,
+input tokens and tool calls together, with per-profile sample counts and final
+task coverage. All completed tasks remain in the per-task table; exclusions
+include their source profile, metric, dispersion, median, MAD and modified Z.
 
-- Judge difference: `zvec-grep - baseline`, measured in score points. A
-  difference strictly outside `[-10, +10]` excludes the task; exactly `-10` or
-  `+10` remains included. This threshold is a score difference, not a percentage.
-- Input-token change: `(zvec-grep - baseline) / baseline * 100`. A change
-  strictly outside `[-100%, +100%]` excludes the task; exactly `-100%` or
-  `+100%` remains included. With nonnegative token counts, only an increase
-  above `100%` can cross this threshold. A zero baseline with positive
-  zvec-grep input is excluded because its percentage change is undefined;
-  two zero inputs remain included.
+- Within each model × task × profile, sort the original successful trials by
+  `(judge.total, trial_index)` and remove the first and last entries **once**.
+  Missing trial indices fall back to the original one-based position. Ties use
+  trial order rather than resource usage: the minimum tied index is removed
+  from the low tail, and the maximum tied index from the high tail.
+- Ten trials retain eight. This is a fixed count, not a percentage or an
+  outlier threshold; even identical scores lose two distinct trials. For
+  example, `[90, 87, 87, 56, 88]` retains `[87, 87, 88]` after removing 56 and 90.
+  Groups with fewer than three trials retain all samples and are marked
+  `unavailable_insufficient_trials`, with their sample counts still reported.
+- An excluded trial's score, time, input/output tokens, tool calls, cost and
+  session usage leave the statistical averages together. Do not independently
+  drop trials for time or tokens. The previous between-profile ±10-point/±100% task
+  filter remains removed.
+- On the score-trimmed trials, compute each task/profile's score sample standard
+  deviation and the time/input-token coefficient of variation (sample standard
+  deviation divided by mean). For each metric, take the **maximum across all
+  profiles in this report**. Across tasks, calculate the median of these maxima
+  and `MAD = median(abs(maximum - median))`.
+- In one pass, exclude a task when any available metric has
+  `modified Z = 0.6745 × (maximum - median) / MAD > 3.5`. Exclude that entire task
+  from **every profile and every final metric**, preserving a common task set.
+  Do not refit after exclusion. The reference uses the current report only:
+  ordinary CI has baseline and zvec-grep; a historical six-group replay requires
+  explicit combined input and is not silently mixed into CI.
+- Fewer than five tasks disable task screening; this is an engineering safeguard,
+  not an official statistical sample threshold. A metric is also disabled if any
+  task/profile lacks valid dispersion (including missing trial evidence,
+  insufficient samples or a zero resource mean), or its across-task MAD is zero.
+  Other available metrics can still screen tasks. The report records each
+  unavailable reference and affected task; it never substitutes zero dispersion.
+- Average trials within each task/profile, then average **task means with equal
+  weight within each stage**. The first two stages cover every completed task;
+  the final stage covers the common retained task set. Resource values are means,
+  not sums. Changes use displayed aggregate values, not averages of task percentages.
+- Report schema 4 preserves original cases/trials and raw profile means.
+  `aggregate.raw` is the first stage; `aggregate.trimmed` is the second;
+  `aggregate.profiles` / `comparison` are the final stage. `aggregate.filter`
+  records score trimming, `aggregate.task_filter` records task decisions,
+  reference statistics and three-stage sample counts, and
+  `aggregate.task_statistics` retains every task's means and dispersion.
+  Older reports are recalculated from their original trials. Summary-only legacy
+  evidence remains unscreened with `N/A` sample counts.
 
-A task that meets either exclusion condition is removed from every Aggregate
-metric and the main results table. Tasks meeting both conditions are counted
-once. Judge exclusions appear in a separate table with baseline and zvec-grep
-mean scores, the score difference, and the exclusion reason; the report also
-identifies tasks excluded by the input-token condition.
-
-- Judge values are equal-weight means across the included tasks.
-- Baseline and zvec-grep efficiency values are sums of the included per-task
-  profile means. Their displayed change is calculated directly from those two
-  aggregate values, not by averaging task-level percentage changes.
-- A zero aggregate baseline denominator produces `N/A` for that efficiency
-  comparison. If no tasks remain, the Aggregate values are `N/A`.
-- JSON `cases` and raw artifacts retain every task, including excluded tasks
-  and child usage.
-
-This is a sensitivity filter, not evidence that excluded data is invalid. All
-selected tasks still execute and must complete their required trials and judge
-calls; filtering cannot turn an incomplete benchmark into a successful one.
-For `all-full`, each round still runs 20 tasks × 2 profiles × 5 trials. An
-otherwise complete run with no tasks left after filtering may still succeed.
+The [NIST modified-Z guidance](https://www.itl.nist.gov/div898/handbook/eda/section3/eda35h.htm)
+uses an absolute threshold above 3.5 to label potential outliers. Applying its
+upper tail to task dispersion is this benchmark's reporting policy, not a
+p-value or evidence that excluded executions are invalid. The final means
+describe the retained task subset; raw and score-trimmed results remain visible.
+Actual judge usage/cost and the completion gate still count every original
+trial and task. Failures, exhausted retries and missing tasks cannot be hidden
+by either screening stage.
+`all-full` runs 20 tasks × 2 profiles × 10 trials = 400 independent trials per
+model/embedding configuration; filtering does not trigger replacement runs.
 
 ## GitHub Actions
 
@@ -157,7 +185,7 @@ model is used for both execution and judging. The independent `embedding` input
 defaults to `local`, using `local/potion-code-16m-v2`; select `remote` to use
 `qwen/qwen3.7-text-embedding`, matching the Retrieval-only workflow.
 
-The `repro-3` scope runs 3 tasks × 2 profiles × 5 trials = 30 trials. Its fixed
+The `repro-3` scope runs 3 tasks × 2 profiles × 10 trials = 60 trials. Its fixed
 tasks were selected from [run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943)
 for small reproduction and iteration runs. Each range below covers the five
 final successful trials in that historical run:
@@ -176,7 +204,7 @@ trials against the same three historical tasks, and account for failed-attempt
 overhead separately.
 
 CI uses OpenCode `1.18.4` with `custom-openai/glm-5.2` and local embedding by
-default, with five trials per task and profile. Configure the repository's
+default, with ten trials per task and profile. Configure the repository's
 `GLM_API_KEY` Actions secret for agent
 execution and judging. The existing secret name is retained for both models;
 its Bailian business-space API key must have access to the selected model.
@@ -196,11 +224,11 @@ UTF-16/32 data. The ignore-file digest is part of the local index-seed identity;
 any other indexing failure remains fatal and visible in the task result. This
 setting belongs to the suite and is not inherited by other runner suites.
 
-The full run contains 20 tasks × 2 profiles × 5 trials = 200 independent
+The full run contains 20 tasks × 2 profiles × 10 trials = 400 independent
 trials. CI passes `--max-retries 2`: an exception, including an agent timeout,
 can trigger at most two additional attempts of the same trial. API usage-limit
 errors are not retried. Successful trials and low scores are not retried, and
-retry attempts do not increase the five-trial sample count. Local runs default
+retry attempts do not increase the ten-trial sample count. Local runs default
 to no retries unless `--max-retries` is supplied.
 
 Failed attempts are preserved under each Harbor job's `.retry-history/` and
