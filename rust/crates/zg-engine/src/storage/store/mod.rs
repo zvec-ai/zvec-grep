@@ -21,13 +21,17 @@ use super::{
     entities::Entities,
     files::Files,
     fragments::{self, Fragments},
+    graph::{self, OpenMode, SqliteGraphStorage},
     types::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
     },
     zvec::{corrupt, initialize},
 };
+use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
+
+mod resolution;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -45,6 +49,7 @@ struct StoreState {
     directories: Directories,
     entities: Entities,
     fragments: Fragments,
+    graph: Option<SqliteGraphStorage>,
     needs_optimize: bool,
     closed: bool,
 }
@@ -150,6 +155,18 @@ impl IndexStore {
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
         let fragments = Fragments::open(&path, &schema, read_only)?;
+        // Ordinary readers do not depend on the graph's availability.
+        let graph = if read_only {
+            None
+        } else {
+            let graph_path = home.join("graph").join("graph.sqlite");
+            // Current extractors produce no graph, so pre-graph indexes can
+            // initialize an empty database without rebuilding canonical data.
+            let graph =
+                SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
+            sync_directory(&home.join("graph"))?;
+            Some(graph)
+        };
         if !read_only {
             directories.load()?;
         }
@@ -167,6 +184,7 @@ impl IndexStore {
                 directories,
                 entities,
                 fragments,
+                graph,
                 needs_optimize: false,
                 closed: false,
             }),
@@ -203,6 +221,12 @@ impl IndexStore {
             ));
         }
         let _lock = acquire_storage_lock(&home, false)?;
+        let graph_path = home.join("graph");
+        match fs::remove_dir_all(&graph_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("delete workspace graph", &graph_path, &error)),
+        }
         fs::remove_dir_all(&path)
             .map_err(|error| io_error("delete workspace storage", &path, &error))?;
         sync_directory(&home)?;
@@ -307,21 +331,44 @@ impl IndexStore {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_file(
         &self,
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
     ) -> EngineResult<()> {
+        self.replace_file_with_graph(file, entities, entries, &FileGraphResult::default())
+    }
+
+    /// Replace canonical content and relationships under the same store lock.
+    pub(crate) fn replace_file_with_graph(
+        &self,
+        file: &FileRecord,
+        entities: &[Entity],
+        entries: &[IndexedFragment],
+        graph: &FileGraphResult,
+    ) -> EngineResult<()> {
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
+        SqliteGraphStorage::validate_snapshot(file.id().get(), graph).map_err(graph_error)?;
+        let ids: HashSet<_> = entities.iter().map(|entity| entity.id().as_str()).collect();
+        if graph
+            .nodes
+            .iter()
+            .any(|node| !ids.contains(node.id.as_str()))
+        {
+            return Err(EngineError::invalid_argument(
+                "graph entity is absent from canonical file entities",
+            ));
+        }
         let mut file = file.clone();
         file.set_index_status(FileIndexStatus::Indexed {
             indexed_epoch_ms: now_epoch_ms()?,
             entity_count: u64::try_from(entities.len())
                 .map_err(|_| EngineError::invalid_argument("entity count exceeds u64"))?,
         })?;
-        self.write(|state| replace_file(state, &file, entities, entries))
+        self.write(|state| replace_file(state, &file, entities, entries, graph))
     }
 
     pub(crate) fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
@@ -329,13 +376,20 @@ impl IndexStore {
         file.set_index_status(FileIndexStatus::Failed {
             error: error.to_owned(),
         })?;
-        self.write(|state| replace_file(state, &file, &[], &[]))
+        self.write(|state| replace_file(state, &file, &[], &[], &FileGraphResult::default()))
     }
 
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
             state.needs_optimize = true;
+            let old_ids = invalidation_entity_ids(state, file_id)?;
             state.files.mark_deleting(file_id)?;
+            state
+                .graph
+                .as_mut()
+                .expect("writable graph")
+                .delete_file_graph(file_id.get(), &old_ids)
+                .map_err(graph_error)?;
             state.fragments.delete_file(file_id)?;
             state.entities.delete_file(file_id)?;
             state.files.delete(file_id)
@@ -386,7 +440,12 @@ impl IndexStore {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
-        flush(&state)
+        let checkpoint = flush(&state);
+        let graph_close = state
+            .graph
+            .take()
+            .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
+        checkpoint.and(graph_close)
     }
 }
 
@@ -396,6 +455,7 @@ fn replace_file(
     file: &FileRecord,
     entities: &[Entity],
     entries: &[IndexedFragment],
+    graph: &FileGraphResult,
 ) -> EngineResult<()> {
     state.files.validate(file)?;
     state.entities.validate_ownership(entities, file.id())?;
@@ -405,14 +465,45 @@ fn replace_file(
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
     let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
+    let old_ids = invalidation_entity_ids(state, file.id())?;
     let mut unfinished = file.clone();
     unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;
+    // zvec writes are durable on success: record retry intent before advancing SQLite.
+    state
+        .graph
+        .as_mut()
+        .expect("writable graph")
+        .write_file_graph(file.id().get(), graph, &old_ids)
+        .map_err(graph_error)?;
     state.fragments.delete_file(file.id())?;
     state.entities.delete_file(file.id())?;
     state.entities.write(&entity_docs)?;
     state.fragments.write(&fragment_docs)?;
+    // Indexed is the publication marker: all content must already be durable.
     state.files.put(file, &directories)
+}
+
+fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<Vec<String>> {
+    // An empty graph has no incoming relationships to invalidate. Avoid a
+    // canonical entity scan on every file while extractors produce no graph.
+    if state
+        .graph
+        .as_ref()
+        .expect("writable graph")
+        .is_empty()
+        .map_err(graph_error)?
+    {
+        return Ok(Vec::new());
+    }
+    state.entities.list_ids_for_file(file_id)
+}
+
+fn graph_error(error: graph::Error) -> EngineError {
+    match error {
+        graph::Error::InvalidInput(message) => EngineError::invalid_argument(message),
+        error => EngineError::storage_failure(format!("workspace graph operation failed: {error}")),
+    }
 }
 
 fn load_search_hits(
@@ -686,3 +777,6 @@ mod tests;
 
 #[cfg(test)]
 mod tables_tests;
+
+#[cfg(test)]
+mod graph_tests;

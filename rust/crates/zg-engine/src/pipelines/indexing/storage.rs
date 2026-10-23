@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::{
     EngineResult,
-    domain::{Entity, FileId, FileRecord},
+    domain::{Entity, FileGraphResult, FileId, FileRecord},
     storage::{IndexStore, types::IndexedFragment},
 };
 
@@ -17,6 +17,7 @@ pub(crate) trait IndexStorage: Send + Sync {
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
+        graph: &FileGraphResult,
     ) -> EngineResult<()>;
     fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()>;
     fn delete_file(&self, file_id: FileId) -> EngineResult<()>;
@@ -41,8 +42,9 @@ impl IndexStorage for IndexStore {
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
+        graph: &FileGraphResult,
     ) -> EngineResult<()> {
-        self.replace_file(file, entities, entries)
+        self.replace_file_with_graph(file, entities, entries, graph)
     }
 
     fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {

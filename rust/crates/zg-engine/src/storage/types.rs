@@ -41,6 +41,14 @@ pub(crate) struct StoredEntity {
     pub file: FileRecord,
 }
 
+/// Canonical definition metadata for resolution, without source bodies or fragments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolutionCandidate {
+    pub entity_id: EntityId,
+    pub file: FileRecord,
+    pub metadata: crate::domain::CodeMetadata,
+}
+
 /// File attributes needed by query filters, without content hashes or index status.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoredFileAttributes {

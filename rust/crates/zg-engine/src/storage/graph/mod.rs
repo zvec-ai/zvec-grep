@@ -1,12 +1,14 @@
 //! SQLite persistence for directed code relationships and pending references.
 //!
-//! Nodes and file metadata remain in the entity store. Each file replacement is
-//! atomic within SQLite; the indexing coordinator owns consistency with zvec.
+//! Canonical nodes and file metadata remain in zvec; SQLite holds relationships,
+//! including pending references. Each file replacement is atomic within SQLite;
+//! the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! Indexing integration is pending; this storage is not yet opened by `IndexStore`.
+//! `IndexStore` owns the writable connection and coordinates file replacement.
 
 mod pending;
+#[cfg(test)]
 mod reader;
 mod schema;
 mod types;
@@ -41,6 +43,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Read-only opening never creates a database or modifies its schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenMode {
+    #[cfg(test)]
     ReadOnly,
     ReadWrite,
 }
@@ -53,6 +56,21 @@ pub(crate) struct SqliteGraphStorage {
 }
 
 impl SqliteGraphStorage {
+    pub(crate) fn is_empty(&self) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row("SELECT NOT EXISTS (SELECT 1 FROM edges)", [], |row| {
+                row.get(0)
+            })?)
+    }
+
+    pub(crate) fn validate_snapshot(
+        file_id: u32,
+        graph: &crate::domain::FileGraphResult,
+    ) -> Result<()> {
+        writer::validate(&format!("f{file_id}"), graph, &[])
+    }
+
     /// Opens an existing reader, or initializes a writer and its parent directory.
     ///
     /// # Errors
@@ -62,6 +80,7 @@ impl SqliteGraphStorage {
             return Err(Error::InvalidInput("database path is empty"));
         }
         let flags = match mode {
+            #[cfg(test)]
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
             OpenMode::ReadWrite => {
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -77,6 +96,7 @@ impl SqliteGraphStorage {
     ///
     /// # Errors
     /// Returns SQLite initialization errors.
+    #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self> {
         Self::configure(Connection::open_in_memory()?, OpenMode::ReadWrite)
     }
@@ -85,10 +105,12 @@ impl SqliteGraphStorage {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
         match mode {
+            #[cfg(test)]
             OpenMode::ReadOnly => schema::validate(&connection)?,
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;
                 connection.pragma_update(None, "journal_mode", "WAL")?;
+                connection.pragma_update(None, "synchronous", "FULL")?;
             }
         }
         Ok(Self { connection })

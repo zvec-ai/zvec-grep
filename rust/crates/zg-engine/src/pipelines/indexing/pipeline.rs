@@ -34,8 +34,8 @@ use crate::{
     },
     domain::{
         Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata, FileCategory,
-        FileFormat, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, Range,
-        SourcePath, Workspace,
+        FileFormat, FileGraphResult, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId,
+        Range, SourcePath, Workspace,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
@@ -615,6 +615,7 @@ struct PreparedFile {
     file: FileRecord,
     entities: Vec<Entity>,
     fragments: Vec<PreparedFragment>,
+    graph: FileGraphResult,
 }
 
 enum PreparedCandidate {
@@ -703,9 +704,9 @@ async fn index_candidates(
 
         if prepared.fragments.is_empty() {
             let commit_started = Instant::now();
-            commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
+            let detail = commit_file(context.storage, prepared, Vec::new(), &mut stats)?;
             timings.record("index_commit", commit_started.elapsed(), 1);
-            report_indexing(context, &stats, diff, progress_base, None, None);
+            report_indexing(context, &stats, diff, progress_base, Some(detail), None);
             continue;
         }
 
@@ -862,18 +863,10 @@ fn apply_embedding_files(
         throw_if_cancelled(context.signal.as_ref())?;
         match outcome {
             EmbeddedFileOutcome::Success { file, vectors } => {
-                let path = file.file.relative_path().clone();
                 let commit_started = Instant::now();
-                commit_file(context.storage, file, vectors, stats)?;
+                let detail = commit_file(context.storage, file, vectors, stats)?;
                 timings.record("index_commit", commit_started.elapsed(), 1);
-                report_indexing(
-                    context,
-                    stats,
-                    diff,
-                    progress_base,
-                    Some(format!("indexed {}", path.display())),
-                    None,
-                );
+                report_indexing(context, stats, diff, progress_base, Some(detail), None);
             }
             EmbeddedFileOutcome::Failed { file, reason } => {
                 let reason = mark_file_failed(
@@ -902,7 +895,7 @@ fn commit_file(
     file: PreparedFile,
     vectors: Vec<Vec<f32>>,
     stats: &mut IndexWriteStats,
-) -> Result<(), EngineError> {
+) -> Result<String, EngineError> {
     if file.fragments.len() != vectors.len() {
         return Err(EngineError::internal(format!(
             "entity/vector count mismatch: fragments={} vectors={}",
@@ -923,10 +916,22 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage.replace_file(&file.file, &file.entities, &entries)?;
+    if let Err(error) = storage.replace_file(&file.file, &file.entities, &entries, &file.graph) {
+        // Invalid file content or graph data is local to this file. Native write
+        // failures must still abort the pass, including failure to record Failed.
+        if error.code() == EngineError::INVALID_ARGUMENT {
+            let reason = mark_file_failed(storage, &file.file, "validate", &error)?;
+            record_file_failed(stats, &file.file, &reason);
+            return Ok(format!("failed {}", file.file.relative_path().display()));
+        }
+        return Err(EngineError::storage_failure(format!(
+            "replace file {}: {error}",
+            file.file.relative_path().display()
+        )));
+    }
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
-    Ok(())
+    Ok(format!("indexed {}", file.file.relative_path().display()))
 }
 
 async fn prepare_candidate(
@@ -998,6 +1003,7 @@ async fn prepare_candidate(
         file,
         entities,
         fragments,
+        graph: extracted.graph.unwrap_or_default(),
     })))
 }
 
@@ -2440,6 +2446,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryStorage {
         files: Mutex<Vec<FileRecord>>,
+        graphs: Mutex<HashMap<FileId, FileGraphResult>>,
         entries: Mutex<HashMap<FileId, Vec<IndexedFragment>>>,
         identities: Mutex<HashMap<PathBuf, FileId>>,
         resolved_paths: Mutex<Vec<Vec<PathBuf>>>,
@@ -2490,6 +2497,20 @@ mod tests {
             fragment.model = "fixture/model".into();
         }
         let storage = MemoryStorage::default();
+        let graph = FileGraphResult {
+            pending_refs: vec![crate::domain::PendingRef {
+                owner_id: format!("f{}", file_id.get()),
+                ref_name: "target".into(),
+                receiver_name: None,
+                ref_kind: crate::domain::GraphEdgeKind::Calls,
+                arity: None,
+                line: 1,
+                column: 0,
+                status: crate::domain::PendingRefStatus::Pending,
+                metadata: std::collections::BTreeMap::new(),
+            }],
+            ..FileGraphResult::default()
+        };
         let prepared = PreparedFile {
             file: FileRecord::new(
                 file_id,
@@ -2504,6 +2525,7 @@ mod tests {
             .expect("file record"),
             entities,
             fragments,
+            graph: graph.clone(),
         };
         let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         commit_file(
@@ -2513,6 +2535,10 @@ mod tests {
             &mut IndexWriteStats::default(),
         )
         .expect("commit prepared fragments");
+        assert_eq!(
+            storage.graphs.lock().expect("stored graph")[&file_id],
+            graph
+        );
         let entries = storage.entries.lock().expect("stored entries");
         for (((entry, body), vector), ordinal) in entries[&file_id]
             .iter()
@@ -2568,6 +2594,7 @@ mod tests {
             file: &FileRecord,
             entities: &[Entity],
             entries: &[IndexedFragment],
+            graph: &FileGraphResult,
         ) -> EngineResult<()> {
             if self
                 .fail_replacements_once
@@ -2577,6 +2604,10 @@ mod tests {
             {
                 return Err(EngineError::storage_failure("injected replacement failure"));
             }
+            self.graphs
+                .lock()
+                .expect("stored graphs")
+                .insert(file.id(), graph.clone());
             let mut stored = file.clone();
             stored.set_index_status(FileIndexStatus::Indexed {
                 indexed_epoch_ms: 1,
@@ -2600,6 +2631,10 @@ mod tests {
 
         fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
             self.failed_markers.fetch_add(1, Ordering::AcqRel);
+            self.graphs
+                .lock()
+                .expect("stored graphs")
+                .remove(&file.id());
             self.entries
                 .lock()
                 .expect("stored entries")
@@ -2621,6 +2656,7 @@ mod tests {
         }
 
         fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
+            self.graphs.lock().expect("stored graphs").remove(&file_id);
             self.entries
                 .lock()
                 .expect("stored entries")
