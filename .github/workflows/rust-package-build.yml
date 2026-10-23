@@ -15,14 +15,15 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Every release target has a pinned SDK. Drift must fail, not rebuild CUDA.
-  LLAMA_CPP_BUILD_MODE: prebuilt
+  # Windows ARM64 has no pinned llama SDK yet and builds only its CPU backend.
+  # Existing targets must match their pinned SDK instead of rebuilding CUDA.
+  LLAMA_CPP_BUILD_MODE: ${{ inputs.target == 'win32-arm64-msvc' && 'source' || 'prebuilt' }}
 
 jobs:
   native:
     name: Build ${{ inputs.target }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && 180 || 90 }}
+    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc' || inputs.target == 'win32-arm64-msvc') && 180 || 90 }}
     defaults:
       run:
         working-directory: rust
@@ -33,6 +34,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Configure native build parallelism
         shell: node {0}
         run: |
@@ -49,6 +51,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           python-version: "3.12"
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Use a short Windows Cargo home
         if: runner.os == 'Windows'
         shell: python
@@ -66,8 +69,11 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
           vsversion: "2022"
+      - name: Select the native Windows ARM64 Rust host
+        if: inputs.target == 'win32-arm64-msvc'
+        run: rustup set default-host aarch64-pc-windows-msvc
       - name: Install Linux build dependencies
         if: runner.os == 'Linux' && inputs.target != 'linux-x64-gnu'
         run: |
@@ -82,6 +88,13 @@ jobs:
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: ${{ steps.rust-version.outputs.channel }}
+      - name: Verify native Windows ARM64 toolchains
+        if: inputs.target == 'win32-arm64-msvc'
+        run: |
+          node -e "if (process.arch !== 'arm64') throw new Error('unexpected Node architecture: ' + process.arch)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostLine = rustc -vV | Select-String '^host: '
+          if ($hostLine.ToString() -ne 'host: aarch64-pc-windows-msvc') { throw "Unexpected Rust host: $hostLine" }
       - name: Restore Cargo build state
         id: cargo-cache
         uses: actions/cache/restore@v5
@@ -112,6 +125,47 @@ jobs:
         with:
           path: rust/target/ort-cuda12/
           key: rust-ort-cuda12-v1-${{ inputs.target }}-${{ hashFiles('rust/scripts/cuda/prepare-onnxruntime.py') }}
+      - name: Restore the Windows ARM64 ONNX Runtime
+        if: inputs.target == 'win32-arm64-msvc'
+        uses: actions/cache@v5
+        with:
+          path: rust/target/ort-prebuilt/
+          key: rust-ort-windows-arm64-v1-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
+      - name: Prepare the verified Windows ARM64 ONNX Runtime
+        if: inputs.target == 'win32-arm64-msvc'
+        run: python scripts/prepare-onnxruntime-windows.py --target aarch64-pc-windows-msvc
+      - name: Restore the prebuilt Windows ARM64 zvec SDK
+        if: inputs.target == 'win32-arm64-msvc'
+        id: zvec-arm64-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: rust/target/zvec-runtime/
+          key: rust-zvec-prebuilt-windows-arm64-v1-0.8.0-${{ hashFiles('rust/scripts/download-zvec-windows-arm64.py') }}
+      - name: Download the prebuilt zvec SDK for Windows ARM64
+        if: inputs.target == 'win32-arm64-msvc' && steps.zvec-arm64-cache.outputs.cache-hit != 'true'
+        run: python scripts/download-zvec-windows-arm64.py
+      - name: Save the prebuilt Windows ARM64 zvec SDK
+        if: inputs.target == 'win32-arm64-msvc' && steps.zvec-arm64-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: rust/target/zvec-runtime/
+          key: ${{ steps.zvec-arm64-cache.outputs.cache-primary-key }}
+      - name: Use the Windows ARM64 zvec SDK and CPU compiler
+        if: inputs.target == 'win32-arm64-msvc'
+        run: |
+          "ZVEC_LIB_DIR=$env:GITHUB_WORKSPACE/rust/target/zvec-runtime" >> $env:GITHUB_ENV
+          "ZVEC_AUTO_BUILD=0" >> $env:GITHUB_ENV
+          # ggml's ARM CPU backend requires Clang for inline assembly.
+          # The Rust wrapper also passes MSVC-style compiler flags.
+          $clang = (Get-Command clang-cl).Source
+          & $clang --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CC=$clang" >> $env:GITHUB_ENV
+          "CXX=$clang" >> $env:GITHUB_ENV
+          "CXXFLAGS=/EHsc" >> $env:GITHUB_ENV
+          "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
+          "CMAKE_C_COMPILER_TARGET=aarch64-pc-windows-msvc" >> $env:GITHUB_ENV
+          "CMAKE_CXX_COMPILER_TARGET=aarch64-pc-windows-msvc" >> $env:GITHUB_ENV
       - name: Restore the Intel macOS ONNX Runtime
         if: inputs.target == 'darwin-x64'
         id: ort-cache

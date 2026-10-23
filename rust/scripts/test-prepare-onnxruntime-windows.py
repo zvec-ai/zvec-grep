@@ -1,11 +1,13 @@
 import hashlib
 import importlib.util
 import io
+import json
 import lzma
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location(
@@ -16,6 +18,26 @@ spec.loader.exec_module(prepare_ort)
 
 
 class VerifiedRuntimeTests(unittest.TestCase):
+    def test_distribution_selects_the_matching_windows_architecture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "build/download/dist.tsv"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                "target\tfeature_set\turl\tsha256_hash\n"
+                + "".join(f"{target}\tdirectml\t{target}.tar\t{'a' * 64}\n"
+                          for target in prepare_ort.TARGETS),
+                encoding="utf-8",
+            )
+            metadata = json.dumps({"packages": [
+                {"name": "ort-sys", "manifest_path": str(root / "Cargo.toml")}
+            ]})
+            with patch.object(prepare_ort.subprocess, "check_output", return_value=metadata) as cargo:
+                for target in prepare_ort.TARGETS:
+                    with self.subTest(target=target):
+                        self.assertEqual(prepare_ort.distribution(root, target)["target"], target)
+                        self.assertEqual(cargo.call_args.args[0][-1], target)
+
     def test_raw_lzma2_runtime_is_extracted_into_the_cache(self):
         tar_bytes = io.BytesIO()
         with tarfile.open(fileobj=tar_bytes, mode="w") as tar:
