@@ -36,6 +36,38 @@ export const EMBEDDING_MODEL_CATALOG = {
     maxBatchSize: 16,
   },
 
+  "local/embeddinggemma-2": {
+    backend: "llama-cpp",
+    reference: "local/embeddinggemma-2",
+    provider: "local",
+    model: "embeddinggemma-2",
+    uri: "hf:ggml-org/embeddinggemma-2-GGUF/embeddinggemma-2-Q8_0.gguf#bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+    cacheFile: "hf_ggml-org_embeddinggemma-2-Q8_0.gguf",
+    sources: {
+      huggingFace: {
+        repo: "ggml-org/embeddinggemma-2-GGUF",
+        revision: "bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+      },
+      modelScope: {
+        repo: "ggml-org/embeddinggemma-2-GGUF",
+        revision: "5ad9578640eeb5229d2b761af891a977c92e88ae",
+      },
+    },
+    artifacts: [
+      {
+        path: "embeddinggemma-2-Q8_0.gguf",
+        size: 309855456,
+        sha256:
+          "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
+      },
+    ],
+    dimension: 768,
+    metric: "cosine",
+    format: "embeddinggemma2",
+    contextSize: 8192,
+    maxBatchSize: 16,
+  },
+
   "local/qwen3-embedding-0.6b": {
     backend: "llama-cpp",
     reference: "local/qwen3-embedding-0.6b",
