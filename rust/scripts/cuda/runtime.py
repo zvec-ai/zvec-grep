@@ -10,7 +10,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -286,6 +286,24 @@ def verify_cargo_cli(bundle):
     if actual != manifest["files"]:
         raise RuntimeError("Cargo CLI snapshot file inventory or SHA-256 mismatch")
     return manifest
+
+
+def cargo_cli_linux_mounts(workspace, bundle, manifest):
+    """Create only empty mountpoints before making the workspace read-only.
+
+    Docker cannot create nested mountpoints under an already read-only /work.
+    Keep the original profile and SDK snapshots separate and read-only; do not
+    copy libraries or change the SDK's compiled-in location.
+    """
+    if manifest["platform"] != "linux":
+        raise RuntimeError("Linux Cargo CLI mounts require a Linux snapshot")
+    sdk_root = checked_cargo_sdk_root(manifest["sdk_root"], False)
+    workspace = Path(workspace).resolve()
+    mounts = [(bundle / "profile", PurePosixPath("/work/rust/target/debug")),
+              (bundle / "sdk", PurePosixPath(sdk_root))]
+    for _, destination in mounts:
+        (workspace / destination.relative_to("/work")).mkdir(parents=True, exist_ok=True)
+    return [f"{workspace}:/work:ro", *[f"{source}:{destination}:ro" for source, destination in mounts]]
 
 
 def restore_cargo_sdk(bundle):

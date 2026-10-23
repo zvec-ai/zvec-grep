@@ -130,7 +130,7 @@ fn ort_cargo_deployment_is_verified_repeatable_and_repairs_outputs_on_both_platf
 const CARGO_CLI_REGRESSION_CHECK: &str = r"
 import json, os, subprocess, sys, tarfile, tempfile
 from contextlib import ExitStack
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 import runtime, e2e
@@ -202,6 +202,35 @@ with tempfile.TemporaryDirectory() as temporary, ExitStack() as cleanup:
     assert not (bundle / 'profile' / core).exists(), 'snapshot silently repaired a missing Cargo library'
     assert (bundle / 'sdk/lib' / core).is_file()
     assert not (bundle / 'sdk/lib/cuda12' / plugin).exists(), 'unused fallback bloats GPU transfer'
+    # A fresh GPU checkout has neither nested mountpoint. Prepare empty host
+    # directories before mounting /work read-only, never repair the payload.
+    workspace = root / 'gpu workspace'
+    linux_sdk = '/work/rust/target/llama-runtimes/' + 'a' * 64 + '/bundle'
+    linux_receipt = {**receipt, 'platform': 'linux', 'sdk_root': linux_sdk}
+    mountpoints = [workspace / 'rust/target/debug',
+                   workspace / PurePosixPath(linux_sdk).relative_to('/work')]
+    assert not any(path.exists() for path in mountpoints)
+    before = {p.relative_to(bundle): runtime.digest(p) for p in bundle.rglob('*') if p.is_file()}
+    inherited_environment = dict(os.environ)
+    mounts = runtime.cargo_cli_linux_mounts(workspace, bundle, linux_receipt)
+    assert mounts == [f'{workspace}:/work:ro',
+                      str(bundle / 'profile') + ':/work/rust/target/debug:ro',
+                      str(bundle / 'sdk') + f':{linux_sdk}:ro']
+    assert all(path.is_dir() and not list(path.iterdir()) for path in mountpoints)
+    assert runtime.cargo_cli_linux_mounts(workspace, bundle, linux_receipt) == mounts
+    assert before == {p.relative_to(bundle): runtime.digest(p) for p in bundle.rglob('*') if p.is_file()}
+    assert dict(os.environ) == inherited_environment, 'mount preparation changed library lookup'
+    runtime.verify_cargo_cli(bundle)
+    for invalid in ({**linux_receipt, 'platform': 'windows'},
+                    {**linux_receipt, 'sdk_root': '/tmp/untrusted-sdk'}):
+        rejected_workspace = root / 'rejected workspace'
+        try:
+            runtime.cargo_cli_linux_mounts(rejected_workspace, bundle, invalid)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('invalid Linux mount receipt accepted')
+        assert not rejected_workspace.exists(), 'invalid receipt created mountpoints'
     (bundle / receipt['binary']).write_bytes(b'changed')
     try:
         runtime.verify_cargo_cli(bundle)

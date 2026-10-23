@@ -406,7 +406,7 @@ jobs:
         env:
           MODEL_TEST_BINARY: ${{ steps.model-test.outputs.path }}
         run: |
-          import os, pathlib, subprocess
+          import os, pathlib, re, subprocess
           cases = [("cpu", "model2vec", "local/potion-code-16m-v2"),
                    ("cpu", "onnx", "local/all-minilm-l6-v2"),
                    ("cpu", "gguf", "local/embeddinggemma-300m")]
@@ -424,7 +424,10 @@ jobs:
                           "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds",
                           "--ignored", "--exact", "--nocapture"], env=environment,
                           stdout=log, stderr=subprocess.STDOUT, timeout=900, check=True)
-              except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                  output = log_path.read_text(encoding="utf-8", errors="replace")
+                  if not re.search(r"test result: ok\. 1 passed; 0 failed;", output):
+                      raise RuntimeError("Expected exactly one passing test, not an empty or skipped selection")
+              except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as error:
                   failures.append(f"{device}-{backend}: {error}")
               finally:
                   print(f"=== {device}-{backend} ===", flush=True)
@@ -458,6 +461,9 @@ jobs:
                 timeout 900 "$MODEL_TEST_BINARY" models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds \
                   --ignored --exact --nocapture
               ' 2>&1 | tee "rust/model-logs/${device}-${backend}.log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. 1 passed; 0 failed;' "rust/model-logs/${device}-${backend}.log"; then
+              echo "${device}-${backend}: Expected exactly one passing test, not an empty or skipped selection" >&2
               failed=1
             fi
           done
@@ -609,7 +615,7 @@ jobs:
         run: |
           import os, pathlib, subprocess, sys, tarfile
           sys.path.insert(0, "scripts/cuda")
-          from runtime import restore_cargo_sdk, verify_cargo_cli
+          from runtime import cargo_cli_linux_mounts, restore_cargo_sdk, verify_cargo_cli
           with tarfile.open("target/cargo-cli.tgz") as archive:
               archive.extractall("target", filter="data")
           bundle = pathlib.Path("target/cargo-cli").resolve()
@@ -626,15 +632,14 @@ jobs:
                               str(bundle / manifest["binary"]), "--model-cache", str(models),
                               "--logs", str(logs / "cargo-cli-gpu"), "--expected-gguf-cuda", "13.1"], check=True)
           else:
+              mounts = cargo_cli_linux_mounts(os.environ["GITHUB_WORKSPACE"], bundle, manifest)
               failures = []
               for backend, image in (
                   ("onnx", "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc"),
                   ("gguf", "nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34"),
               ):
                   command = ["docker", "run", "--rm", "--gpus", "all", "--platform", "linux/amd64",
-                      "--volume", f"{os.environ['GITHUB_WORKSPACE']}:/work:ro",
-                      "--volume", f"{bundle / 'profile'}:/work/rust/target/debug:ro",
-                      "--volume", f"{bundle / 'sdk'}:{manifest['sdk_root']}:ro",
+                      *[argument for mount in mounts for argument in ("--volume", mount)],
                       "--volume", f"{models}:/model-cache", "--volume", f"{logs}:/logs",
                       "--env", "DEBIAN_FRONTEND=noninteractive", image, "bash", "-euo", "pipefail", "-c",
                       'apt_options=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3); '
