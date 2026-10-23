@@ -217,6 +217,9 @@ impl WalkContext {
     }
 
     /// Convenience wrapper for buffered call references.
+    // Mirrors the NameEdge fields callers already have in hand; folding them
+    // into a struct would only relocate the verbosity to every call site.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_call_edge(
         &mut self,
         owner_index: usize,

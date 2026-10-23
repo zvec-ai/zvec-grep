@@ -395,10 +395,11 @@ fn python_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
     }
     // An arrow annotation is authoritative; otherwise the `return`
     // constructions spell the factory type.
-    if let Some(annotation) = node.child_by_field_name("return_type") {
-        if let Some(type_name) = type_name_of(annotation, source) {
-            return Some((node_text(name, source).to_owned(), type_name));
-        }
+    if let Some(type_name) = node
+        .child_by_field_name("return_type")
+        .and_then(|annotation| type_name_of(annotation, source))
+    {
+        return Some((node_text(name, source).to_owned(), type_name));
     }
     let type_name = body_return_type_of(node, source)?;
     Some((node_text(name, source).to_owned(), type_name))
@@ -443,16 +444,11 @@ fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
     // declarator itself, optionally wrapped in pointer/reference/array
     // declarators.
     let mut declarator = node.child_by_field_name("declarator")?;
-    loop {
-        match declarator.kind() {
-            "function_declarator"
-            | "pointer_declarator"
-            | "reference_declarator"
-            | "array_declarator" => {
-                declarator = declarator.child_by_field_name("declarator")?;
-            }
-            _ => break,
-        }
+    while matches!(
+        declarator.kind(),
+        "function_declarator" | "pointer_declarator" | "reference_declarator" | "array_declarator"
+    ) {
+        declarator = declarator.child_by_field_name("declarator")?;
     }
     if declarator.kind() != "identifier" {
         return None;
@@ -893,10 +889,10 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
     if let Some(vocabulary) = import_vocabulary_for(format) {
         for field in vocabulary.module_fields {
             if let Some(target) = node.child_by_field_name(field) {
-                if matches!(format, FileFormat::C | FileFormat::Cpp) {
-                    if let Some(path) = c_include_module_path(target, source) {
-                        return Some(path);
-                    }
+                if matches!(format, FileFormat::C | FileFormat::Cpp)
+                    && let Some(path) = c_include_module_path(target, source)
+                {
+                    return Some(path);
                 }
                 let path = normalize_module_path(node_text(target, source));
                 if !path.is_empty() {
@@ -905,12 +901,12 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
                     // wrapper's inner `name` field. Unaliased imports and
                     // `from` modules carry no inner `name` and keep the
                     // outer path.
-                    if format == FileFormat::Python {
-                        if let Some(inner) = target.child_by_field_name("name") {
-                            let inner_path = normalize_module_path(node_text(inner, source));
-                            if !inner_path.is_empty() {
-                                return Some(inner_path);
-                            }
+                    if format == FileFormat::Python
+                        && let Some(inner) = target.child_by_field_name("name")
+                    {
+                        let inner_path = normalize_module_path(node_text(inner, source));
+                        if !inner_path.is_empty() {
+                            return Some(inner_path);
                         }
                     }
                     return Some(path);
@@ -1286,6 +1282,15 @@ mod tests {
 
     #[test]
     fn java_member_calls_keep_their_receiver() {
+        fn collect<'t>(node: tree_sitter::Node<'t>, out: &mut Vec<tree_sitter::Node<'t>>) {
+            if node.kind() == "method_invocation" {
+                out.push(node);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect(child, out);
+            }
+        }
         // Java spells member calls as separate `object`/`name` fields; the
         // callee text must rejoin them or the resolver loses the receiver.
         // Call-shaped receivers keep the bare member: their rejoined text
@@ -1297,15 +1302,6 @@ mod tests {
         let source =
             "class A { void m() { this.foo(); super.foo(); util.run(); plain(); new A().run(); } }";
         let tree = parser.parse(source, None).expect("java source parses");
-        fn collect<'t>(node: tree_sitter::Node<'t>, out: &mut Vec<tree_sitter::Node<'t>>) {
-            if node.kind() == "method_invocation" {
-                out.push(node);
-            }
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                collect(child, out);
-            }
-        }
         let mut calls = Vec::new();
         collect(tree.root_node(), &mut calls);
         let bytes = source.as_bytes();
@@ -1326,14 +1322,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn collects_creation_and_parameter_bindings() {
         fn bindings(
             format: FileFormat,
-            lang: tree_sitter::Language,
+            lang: &tree_sitter::Language,
             source: &str,
         ) -> Vec<(String, String, usize)> {
             let mut parser = tree_sitter::Parser::new();
-            parser.set_language(&lang).expect("grammar loads");
+            parser.set_language(lang).expect("grammar loads");
             let tree = parser.parse(source, None).expect("parses");
             let mut context = WalkContext::new();
             let owner = context.next_entity_index();
@@ -1362,7 +1359,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Java,
-                tree_sitter_java::LANGUAGE.into(),
+                &tree_sitter_java::LANGUAGE.into(),
                 "class A { void m() { var x = new X(); x.foo(); } }",
             ),
             vec![("x".to_owned(), "X".to_owned(), 1)]
@@ -1370,7 +1367,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Python,
-                tree_sitter_python::LANGUAGE.into(),
+                &tree_sitter_python::LANGUAGE.into(),
                 "def m():\n    x = X()\n    x.foo()\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 2)]
@@ -1378,7 +1375,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Rust,
-                tree_sitter_rust::LANGUAGE.into(),
+                &tree_sitter_rust::LANGUAGE.into(),
                 "fn m() { let x = X {}; x.foo(); }",
             ),
             vec![("x".to_owned(), "X".to_owned(), 1)]
@@ -1386,7 +1383,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Go,
-                tree_sitter_go::LANGUAGE.into(),
+                &tree_sitter_go::LANGUAGE.into(),
                 "func m() {\n\tx := new(X)\n\tx.foo()\n}",
             ),
             vec![("x".to_owned(), "X".to_owned(), 2)]
@@ -1394,7 +1391,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Cpp,
-                tree_sitter_cpp::LANGUAGE.into(),
+                &tree_sitter_cpp::LANGUAGE.into(),
                 "void m() { auto x = X{}; x.foo(); }",
             ),
             vec![("x".to_owned(), "X".to_owned(), 1)]
@@ -1402,7 +1399,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Cpp,
-                tree_sitter_cpp::LANGUAGE.into(),
+                &tree_sitter_cpp::LANGUAGE.into(),
                 "void m() { auto x = new X(); x->foo(); }",
             ),
             vec![("x".to_owned(), "X".to_owned(), 1)]
@@ -1410,7 +1407,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::TypeScript,
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
             vec![("x".to_owned(), "X".to_owned(), 1)]
@@ -1418,7 +1415,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::JavaScript,
-                tree_sitter_javascript::LANGUAGE.into(),
+                &tree_sitter_javascript::LANGUAGE.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
             vec![("x".to_owned(), "X".to_owned(), 1)]
@@ -1428,7 +1425,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Java,
-                tree_sitter_java::LANGUAGE.into(),
+                &tree_sitter_java::LANGUAGE.into(),
                 "class A { void m(Left a, Right b) { a.run(); } }",
             ),
             vec![
@@ -1439,7 +1436,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Cpp,
-                tree_sitter_cpp::LANGUAGE.into(),
+                &tree_sitter_cpp::LANGUAGE.into(),
                 "void m(Left &a, Right &b) { a.run(); }",
             ),
             vec![
@@ -1450,7 +1447,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::Go,
-                tree_sitter_go::LANGUAGE.into(),
+                &tree_sitter_go::LANGUAGE.into(),
                 "func m(a Left, b *Right) { a.run() }",
             ),
             vec![
@@ -1461,7 +1458,7 @@ mod tests {
         assert_eq!(
             bindings(
                 FileFormat::TypeScript,
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function m(a: Left, b: Right) { a.run(); }",
             ),
             vec![
@@ -1472,14 +1469,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn collects_factory_return_bindings() {
         fn factory_bindings(
             format: FileFormat,
-            lang: tree_sitter::Language,
+            lang: &tree_sitter::Language,
             source: &str,
         ) -> Vec<(String, String, usize)> {
             let mut parser = tree_sitter::Parser::new();
-            parser.set_language(&lang).expect("grammar loads");
+            parser.set_language(lang).expect("grammar loads");
             let tree = parser.parse(source, None).expect("parses");
             let mut context = WalkContext::new();
             scan_return_types(tree.root_node(), source.as_bytes(), format, &mut context);
@@ -1509,7 +1507,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Rust,
-                tree_sitter_rust::LANGUAGE.into(),
+                &tree_sitter_rust::LANGUAGE.into(),
                 "fn make_x() -> X {\n    X {}\n}\nfn caller() {\n    let x = make_x();\n}\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1517,7 +1515,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Go,
-                tree_sitter_go::LANGUAGE.into(),
+                &tree_sitter_go::LANGUAGE.into(),
                 "func makeX() *X {\n\treturn new(X)\n}\nfunc caller() {\n\tx := makeX()\n}\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1525,7 +1523,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::TypeScript,
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function makeX(): X {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1533,7 +1531,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Java,
-                tree_sitter_java::LANGUAGE.into(),
+                &tree_sitter_java::LANGUAGE.into(),
                 "class Use {\n    static X makeX() {\n        return new X();\n    }\n    static void caller() {\n        var x = makeX();\n    }\n}\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 6)]
@@ -1541,7 +1539,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Cpp,
-                tree_sitter_cpp::LANGUAGE.into(),
+                &tree_sitter_cpp::LANGUAGE.into(),
                 "X makeX() {\n    return X{};\n}\nvoid caller() {\n    auto x = makeX();\n}\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1551,7 +1549,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Python,
-                tree_sitter_python::LANGUAGE.into(),
+                &tree_sitter_python::LANGUAGE.into(),
                 "def make_x():\n    return X()\n\ndef caller():\n    x = make_x()\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1559,7 +1557,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::JavaScript,
-                tree_sitter_javascript::LANGUAGE.into(),
+                &tree_sitter_javascript::LANGUAGE.into(),
                 "function makeX() {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1569,7 +1567,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Python,
-                tree_sitter_python::LANGUAGE.into(),
+                &tree_sitter_python::LANGUAGE.into(),
                 "def make_x() -> X:\n    return Y()\n\ndef caller():\n    x = make_x()\n",
             ),
             vec![("x".to_owned(), "X".to_owned(), 5)]
@@ -1580,7 +1578,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Rust,
-                tree_sitter_rust::LANGUAGE.into(),
+                &tree_sitter_rust::LANGUAGE.into(),
                 "fn make() -> X {\n    todo!()\n}\nfn make() -> Y {\n    todo!()\n}\nfn caller() {\n    let m = make();\n}\n",
             ),
             vec![]
@@ -1590,7 +1588,7 @@ mod tests {
         assert_eq!(
             factory_bindings(
                 FileFormat::Rust,
-                tree_sitter_rust::LANGUAGE.into(),
+                &tree_sitter_rust::LANGUAGE.into(),
                 "fn make_x() -> X {\n    todo!()\n}\nfn caller(v: V) {\n    let m = v.make_x();\n}\n",
             ),
             vec![]

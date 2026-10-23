@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::domain::{EdgeProvenance, GraphRefKind};
 
-use super::{WalkContext, WalkEdge};
+use super::{NameEdge, WalkContext, WalkEdge};
 
 /// A name reference resolved against this file's own symbol table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +67,47 @@ pub(crate) struct PartitionedGraph {
     pub head_fragment_indices: Vec<usize>,
 }
 
+/// Function-pointer initializers (`void (*work)(void) = target;`) alias
+/// one name to a same-file function per owner: a call spelled through the
+/// alias reaches that function rather than a same-named declaration the
+/// local hides.
+fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
+    name_edges
+        .iter()
+        .filter(|edge| edge.ref_kind == GraphRefKind::Declares)
+        .filter_map(|edge| {
+            edge.bound_type
+                .clone()
+                .map(|bound| ((edge.owner_index, edge.ref_name.clone()), bound))
+        })
+        .collect()
+}
+
+/// Receivers whose owner binds them to more than one type (`x = new X()`
+/// ... later `x = new Y()`) keep their call sites apart: only per-site
+/// evidence lets the resolver pick the binding in force at each call.
+/// Every other receiver resolves identically from any of its sites, so
+/// repeated spellings of one call shape collapse to the first.
+fn rebinding_receivers(name_edges: &[NameEdge]) -> HashSet<(usize, String)> {
+    let mut binding_types: HashMap<(usize, String), HashSet<&str>> = HashMap::new();
+    for edge in name_edges
+        .iter()
+        .filter(|edge| edge.ref_kind == GraphRefKind::Declares)
+    {
+        if let Some(bound) = edge.bound_type.as_deref() {
+            binding_types
+                .entry((edge.owner_index, edge.ref_name.clone()))
+                .or_default()
+                .insert(bound);
+        }
+    }
+    binding_types
+        .into_iter()
+        .filter(|(_, types)| types.len() > 1)
+        .map(|(key, _)| key)
+        .collect()
+}
+
 /// Partitions the walk buffers against the completed symbol table.
 ///
 /// Resolution policy, mirroring the TypeScript original: a bare `ref_name` hit
@@ -93,41 +134,8 @@ pub(crate) fn partition_walk(
         pending: Vec::new(),
         head_fragment_indices,
     };
-    // Function-pointer initializers (`void (*work)(void) = target;`) alias
-    // one name to a same-file function per owner: a call spelled through the
-    // alias reaches that function rather than a same-named declaration the
-    // local hides.
-    let aliases: HashMap<(usize, String), String> = name_edges
-        .iter()
-        .filter(|edge| edge.ref_kind == GraphRefKind::Declares)
-        .filter_map(|edge| {
-            edge.bound_type
-                .clone()
-                .map(|bound| ((edge.owner_index, edge.ref_name.clone()), bound))
-        })
-        .collect();
-    // Receivers whose owner binds them to more than one type (`x = new X()`
-    // ... later `x = new Y()`) keep their call sites apart: only per-site
-    // evidence lets the resolver pick the binding in force at each call.
-    // Every other receiver resolves identically from any of its sites, so
-    // repeated spellings of one call shape collapse to the first.
-    let mut binding_types: HashMap<(usize, String), HashSet<&str>> = HashMap::new();
-    for edge in name_edges
-        .iter()
-        .filter(|edge| edge.ref_kind == GraphRefKind::Declares)
-    {
-        if let Some(bound) = edge.bound_type.as_deref() {
-            binding_types
-                .entry((edge.owner_index, edge.ref_name.clone()))
-                .or_default()
-                .insert(bound);
-        }
-    }
-    let rebinding_receivers: HashSet<(usize, String)> = binding_types
-        .into_iter()
-        .filter(|(_, types)| types.len() > 1)
-        .map(|(key, _)| key)
-        .collect();
+    let aliases = alias_table(&name_edges);
+    let rebinding_receivers = rebinding_receivers(&name_edges);
     let mut collapsed: HashSet<(GraphRefKind, usize, Option<String>, String)> = HashSet::new();
     for edge in name_edges {
         let rebinding_call = edge.ref_kind == GraphRefKind::Calls
@@ -149,11 +157,11 @@ pub(crate) fn partition_walk(
             }
         }
         let resolved_target = match edge.ref_kind {
-            GraphRefKind::Imports => None,
-            // Declares edges bind a variable to its type name; the name is
-            // not an entity in this file's symbol table, and the type entity
-            // may live elsewhere — the cross-file resolver consumes them.
-            GraphRefKind::Declares => None,
+            // Imports stay pending for the resolver. Declares edges bind a
+            // variable to its type name; the name is not an entity in this
+            // file's symbol table, and the type entity may live elsewhere —
+            // the cross-file resolver consumes them.
+            GraphRefKind::Imports | GraphRefKind::Declares => None,
             GraphRefKind::Calls if edge.receiver_name.is_some() => None,
             // A bare call resolves through, in order: its owner's alias
             // initializers, its owner's local name table (the nested

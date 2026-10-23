@@ -212,6 +212,10 @@ struct CodeEntity<'tree> {
     is_declaration: bool,
 }
 
+// The entity branch shares first/scope entity indices and the scope boundary
+// with the call, binding and inheritance scans below it; extracting it would
+// force an eight-argument helper, trading one lint for another.
+#[allow(clippy::too_many_lines)]
 fn walk_code_node<'tree>(
     node: Node<'tree>,
     adapter: &LanguageAdapter,
@@ -235,10 +239,10 @@ fn walk_code_node<'tree>(
                 scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
-                let (span_start_byte, span_start) = entity
-                    .child_by_field_name("name")
-                    .map(|name_node| (name_node.start_byte(), name_node.start_position()))
-                    .unwrap_or((entity.start_byte(), entity.start_position()));
+                let (span_start_byte, span_start) = entity.child_by_field_name("name").map_or(
+                    (entity.start_byte(), entity.start_position()),
+                    |name_node| (name_node.start_byte(), name_node.start_position()),
+                );
                 // Declarations stay out of the in-file symbol table: an
                 // in-file call must not bind to a bodyless prototype when a
                 // definition exists anywhere in the workspace, and the
@@ -281,7 +285,7 @@ fn walk_code_node<'tree>(
                 let member_owned =
                     |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
                 let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
-                    is_scope.then(|| &member_owned as &dyn Fn(Node<'_>) -> bool);
+                    is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
                 scan_call_edges(
                     first_entity.node,
                     first_entity_index,
