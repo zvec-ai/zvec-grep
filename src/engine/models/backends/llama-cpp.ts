@@ -324,6 +324,12 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
         gpu,
         cmakeOptions: defaultLlamaCppCmakeOptions(),
         progressLogs: false,
+        // node-llama-cpp also disables Metal residency by default. Preserve
+        // our opt-out without changing an explicit GGML_METAL_NO_RESIDENCY.
+        ...(process.platform === "darwin" &&
+        process.env.ZVEC_GREP_METAL_KEEP_RESIDENCY === "1"
+          ? { experimental: { metalSkipDisablingResidencySets: true } }
+          : {}),
       });
 
     if (requestedGpu === false) {

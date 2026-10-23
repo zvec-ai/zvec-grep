@@ -35,7 +35,10 @@ def build_opencode_config(model: OpenCodeModel, *, profile: str) -> dict[str, An
     # Without this capability OpenCode 1.18.4 silently omits temperature.
     model_config["temperature"] = True
     if model.interleaved:
-        # Preserve previous thinking through the API's assistant field.
+        # Make the same assistant-field mapping explicit for GLM and Qwen.
+        # Absence of this config in historical runs does not mean reasoning
+        # was dropped: the pinned compatible SDK also serializes reasoning parts.
+        # This is separate from Bailian's preserve_thinking / clear_thinking.
         model_config["interleaved"] = {"field": "reasoning_content"}
     if model.output_limit is not None:
         # Preserve the unknown context limit; pin only the output allowance.

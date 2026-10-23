@@ -148,17 +148,32 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
             runner.OPENCODE_VERSION,
         )
         suite = runner.load_suite("swe-qa-bench", tier="smoke")
+        reasoning_chunks = ("fixture-", "reasoning")
         cases = (
-            ("custom-openai/glm-5.2", True),
-            ("custom-openai/qwen3.8-max", True),
-            ("aliyun-glm-5.2", True),
+            ("custom-openai/glm-5.2", True, reasoning_chunks, True),
+            ("custom-openai/qwen3.8-max", True, reasoning_chunks, True),
+            ("aliyun-glm-5.2", True, reasoning_chunks, True),
             # Prove that neither provider defaults nor the fixture itself hide
             # web tools: removing the benchmark denies must expose both tools.
-            ("custom-openai/glm-5.2", False),
+            ("custom-openai/glm-5.2", False, reasoning_chunks, True),
+            # Historical configs can omit the explicit mapping and still replay
+            # nonempty reasoning through the pinned compatible SDK's default path.
+            ("custom-openai/glm-5.2", True, reasoning_chunks, False),
+            ("custom-openai/qwen3.8-max", True, reasoning_chunks, False),
+            # An empty reasoning delta and no reasoning delta must both produce
+            # the explicit empty field on continuation, without inventing text.
+            *(
+                (model, True, chunks, True)
+                for model in ("custom-openai/glm-5.2", "custom-openai/qwen3.8-max")
+                for chunks in (("",), ())
+            ),
         )
-        for model, disable_web_tools in cases:
+        for model, disable_web_tools, chunks, explicit_mapping in cases:
             with (
-                self.subTest(model=model, disable_web_tools=disable_web_tools),
+                self.subTest(
+                    model=model, disable_web_tools=disable_web_tools,
+                    reasoning_chunks=chunks, explicit_mapping=explicit_mapping,
+                ),
                 tempfile.TemporaryDirectory() as temp_dir,
             ):
                 # macOS /var is a symlink to /private/var. Match the runtime's
@@ -247,21 +262,20 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                             "created": 1,
                             "model": body["model"],
                         }
-                        chunks = [
-                            # This synthetic value verifies that Qwen reasoning
-                            # survives a tool round-trip without real model data.
-                            *(
-                                [{
+                        response_chunks = [
+                            # Both models must preserve all streamed reasoning
+                            # fragments through root and subagent tool continuations.
+                            *[
+                                {
                                     **envelope,
                                     "choices": [{
                                         "index": 0,
-                                        "delta": {"role": "assistant", "reasoning_content": "fixture-reasoning"},
+                                        "delta": {"role": "assistant", "reasoning_content": chunk},
                                         "finish_reason": None,
                                     }],
-                                }]
-                                if body["model"] == "qwen3.8-max"
-                                else []
-                            ),
+                                }
+                                for chunk in chunks
+                            ],
                             {
                                 **envelope,
                                 "choices": [
@@ -285,7 +299,7 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                         payload = (
                             "".join(
                                 "data: " + json.dumps(chunk) + "\n\n"
-                                for chunk in chunks
+                                for chunk in response_chunks
                             )
                             + "data: [DONE]\n\n"
                         ).encode()
@@ -315,6 +329,8 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                         )
                     )
                     provider = next(iter(config["provider"].values()))
+                    if not explicit_mapping:
+                        next(iter(provider["models"].values())).pop("interleaved")
                     provider["options"]["baseURL"] = (
                         f"http://127.0.0.1:{server.server_port}/v1"
                     )
@@ -447,16 +463,16 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                         self.assertEqual(request.get("max_tokens"), 32000)
                         self.assertNotIn("response_format", request)
                         self.assertNotIn("reasoningEffort", request)
-                    if model == "custom-openai/qwen3.8-max":
-                        replayed_assistants = [
-                            message
-                            for request in task_requests
-                            for message in request["messages"]
-                            if message.get("role") == "assistant" and message.get("tool_calls")
-                        ]
-                        self.assertEqual(len(replayed_assistants), 3)
-                        for message in replayed_assistants:
-                            self.assertEqual(message.get("reasoning_content"), "fixture-reasoning")
+                    replayed_assistants = [
+                        message
+                        for request in task_requests
+                        for message in request["messages"]
+                        if message.get("role") == "assistant" and message.get("tool_calls")
+                    ]
+                    self.assertEqual(len(replayed_assistants), 3)
+                    for message in replayed_assistants:
+                        self.assertEqual(message.get("reasoning_content"), "".join(chunks))
+                        self.assertFalse(message.get("content"), "Reasoning must not enter answer content")
                     for request in task_requests:
                         tool_names = {
                             tool["function"]["name"] for tool in request["tools"]
