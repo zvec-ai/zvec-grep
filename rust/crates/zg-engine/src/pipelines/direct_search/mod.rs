@@ -327,15 +327,18 @@ mod tests {
             Some(EntityMetadata::Code(metadata))
                 if metadata.symbol_name.as_deref() == Some("orchard")
         ));
+        // The reported range covers the full declaration, `pub` modifier
+        // included, so slices of it stay valid source text.
         assert!(matches!(
             container.range,
             ContentRange::Text {
                 start_line: 1,
                 end_line: 3,
-                start_byte_offset: 0,
+                start_byte_offset,
                 end_byte_offset,
                 ..
-            } if end_byte_offset == source.trim_end().len()
+            } if start_byte_offset == 0
+                && end_byte_offset == source.trim_end().len()
         ));
         let serialized = serde_json::to_value(container).expect("serialize container");
         assert_eq!(serialized.get("entity_id"), Some(&serde_json::Value::Null));

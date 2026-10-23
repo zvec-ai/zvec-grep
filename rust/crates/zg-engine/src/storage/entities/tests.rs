@@ -19,6 +19,9 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
                 visibility: None,
                 language: None,
                 documentation: Some("documentation".into()),
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
             })
         }),
         vec![EntityFragment {

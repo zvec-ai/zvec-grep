@@ -15,6 +15,31 @@ pub(crate) enum GraphEdgeKind {
     Imports,
     Extends,
     Implements,
+    Declares,
+}
+
+/// Kinds of buffered name references. Each pending ref is resolved into the
+/// [`GraphEdgeKind`] with the same name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GraphRefKind {
+    Calls,
+    Imports,
+    Extends,
+    Implements,
+    Declares,
+}
+
+impl From<GraphRefKind> for GraphEdgeKind {
+    fn from(kind: GraphRefKind) -> Self {
+        match kind {
+            GraphRefKind::Calls => Self::Calls,
+            GraphRefKind::Imports => Self::Imports,
+            GraphRefKind::Extends => Self::Extends,
+            GraphRefKind::Implements => Self::Implements,
+            GraphRefKind::Declares => Self::Declares,
+        }
+    }
 }
 
 /// Evidence provenance recorded on persisted edges.
@@ -82,6 +107,9 @@ pub(crate) struct FileGraphNode {
     pub arity: Option<usize>,
     pub visibility: Option<String>,
     pub is_exported: bool,
+    /// Pure declaration without a body (C/C++ prototypes, in-class member
+    /// declarations); definitions shadow them in name-based binding.
+    pub is_declaration: bool,
 }
 
 /// Per-file graph extraction output, assembled after the walk and partition.
@@ -93,6 +121,7 @@ pub(crate) struct FileGraphResult {
 }
 
 impl GraphEdgeKind {
+    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
@@ -100,11 +129,13 @@ impl GraphEdgeKind {
             Self::Imports => "imports",
             Self::Extends => "extends",
             Self::Implements => "implements",
+            Self::Declares => "declares",
         }
     }
 }
 
 impl EdgeProvenance {
+    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::FileLocal => "file_local",

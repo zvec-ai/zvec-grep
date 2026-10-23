@@ -87,7 +87,7 @@ const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
         "pair",
         "variable_declarator",
     ],
-    scope_types: &["class_declaration"],
+    scope_types: &["class_declaration", "function_declaration"],
 };
 const PYTHON: LanguageAdapter = LanguageAdapter {
     kind: Language::Python,
@@ -96,7 +96,11 @@ const PYTHON: LanguageAdapter = LanguageAdapter {
         "decorated_definition",
         "function_definition",
     ],
-    scope_types: &["class_definition", "decorated_definition"],
+    scope_types: &[
+        "class_definition",
+        "decorated_definition",
+        "function_definition",
+    ],
 };
 const RUST: LanguageAdapter = LanguageAdapter {
     kind: Language::Rust,
@@ -113,7 +117,9 @@ const RUST: LanguageAdapter = LanguageAdapter {
         "type_item",
         "union_item",
     ],
-    scope_types: &["impl_item", "mod_item", "trait_item"],
+    // Functions scope their bodies too: a nested function spells its own
+    // entity (`outer::work`), shadowing the file-level name inside it.
+    scope_types: &["function_item", "impl_item", "mod_item", "trait_item"],
 };
 const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
     kind: Language::TypeScript,
@@ -337,16 +343,12 @@ impl LanguageAdapter {
 
     fn should_index_entity(self, node: Node<'_>) -> bool {
         match self.kind {
+            // Only function-shaped declarations (`void f(int);`, in-class
+            // member declarations, function-pointer variables) become
+            // entities; plain variable declarations stay unindexed.
             Language::C | Language::Cpp => {
-                if matches!(node.kind(), "declaration" | "field_declaration") {
-                    find_descendant_by_kind(node, "function_declarator").is_some()
-                } else if node.kind() == "macro_type_specifier" {
-                    // The text check is repeated by name extraction; keeping the node here
-                    // lets malformed macro function types fall out when no name is found.
-                    true
-                } else {
-                    true
-                }
+                !matches!(node.kind(), "declaration" | "field_declaration")
+                    || find_descendant_by_kind(node, "function_declarator").is_some()
             }
             Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
@@ -362,6 +364,84 @@ impl LanguageAdapter {
                     && find_descendant_by_kind(node, "class_body").is_none()
             }
             _ => true,
+        }
+    }
+
+    /// True for pure C/C++ declarations that never carry a body; definitions
+    /// shadow them in name-based binding, but a lone declaration is the only
+    /// known location of its symbol and stays bindable.
+    pub(super) fn is_declaration(self, node: Node<'_>) -> bool {
+        matches!(self.kind, Language::C | Language::Cpp)
+            && matches!(node.kind(), "declaration" | "field_declaration")
+    }
+
+    /// Counts a function-shaped entity's declared parameters, excluding the
+    /// implicit receiver (Rust's `self_parameter`, Python's leading
+    /// `self`/`cls`, Go's separate receiver field). Non-function entities
+    /// yield `None`.
+    pub(super) fn extract_arity(self, node: Node<'_>, source: &[u8]) -> Option<usize> {
+        if matches!(self.kind, Language::C | Language::Cpp) && !is_c_function_type(node.kind()) {
+            // C aggregates nest function declarators for their pointer fields;
+            // the aggregate itself declares no parameters.
+            return None;
+        }
+        let target = match self.kind {
+            Language::Python => inner_python_definition(node).unwrap_or(node),
+            Language::JavaScript | Language::TypeScript => node
+                .child_by_field_name("value")
+                .filter(|value| {
+                    matches!(
+                        value.kind(),
+                        "arrow_function"
+                            | "function_expression"
+                            | "generator_function"
+                            | "method_definition"
+                    )
+                })
+                .unwrap_or(node),
+            _ => node,
+        };
+        let parameters = match target.child_by_field_name("parameters") {
+            Some(parameters) => parameters,
+            // C/C++ nest the parameter list inside their function declarator.
+            None => find_descendant_by_kind(target, "function_declarator")?
+                .child_by_field_name("parameters")?,
+        };
+        Some(
+            named_children(parameters)
+                .into_iter()
+                .filter(|parameter| !is_receiver_parameter(self.kind, *parameter, source))
+                .count(),
+        )
+    }
+
+    /// Reports whether the symbol is importable from outside its module:
+    /// TS/JS follow the `export` wrapper chain, Rust follows a `pub`
+    /// modifier, and Python's top-level definitions are importable while
+    /// members nested in a scope are not. Other languages stay unreported.
+    pub(super) fn is_exported(self, node: Node<'_>, nested: bool) -> bool {
+        match self.kind {
+            Language::JavaScript | Language::TypeScript => {
+                let mut declaration = node;
+                while let Some(parent) = declaration.parent() {
+                    match parent.kind() {
+                        "lexical_declaration" | "variable_declaration" | "ambient_declaration" => {
+                            declaration = parent;
+                        }
+                        "export_statement" => return true,
+                        // Class and object bodies scope their members; the
+                        // member is reached through the container, not the
+                        // export.
+                        _ => return false,
+                    }
+                }
+                false
+            }
+            Language::Rust => named_children(node)
+                .into_iter()
+                .any(|child| child.kind() == "visibility_modifier"),
+            Language::Python => !nested,
+            _ => false,
         }
     }
 
@@ -386,6 +466,20 @@ pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
 
 pub(super) fn text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
     node.utf8_text(source).unwrap_or_default()
+}
+
+/// Python spells the implicit receiver as a named leading parameter; typed
+/// receivers (`self: &Self`) stay counted and keep such candidates out of
+/// arity matches rather than mis-shaping the count.
+fn is_receiver_parameter(kind: Language, parameter: Node<'_>, source: &[u8]) -> bool {
+    match kind {
+        Language::Rust => parameter.kind() == "self_parameter",
+        Language::Python => {
+            parameter.prev_named_sibling().is_none()
+                && matches!(text(parameter, source), "self" | "cls")
+        }
+        _ => false,
+    }
 }
 
 fn field_text(node: Node<'_>, field: &str, source: &[u8]) -> Option<String> {
@@ -564,12 +658,31 @@ fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
     if !has_function_value(node) && find_descendant_by_kind(node, "class_body").is_some() {
         return false;
     }
+    if node.kind() == "variable_declarator" && inside_function_declaration(node) {
+        // A declaration inside a function body stays unindexed: the
+        // initializer's call sites belong to the enclosing function's flow,
+        // and the local itself is no workspace-level symbol.
+        return false;
+    }
     if node.kind() == "variable_declarator" {
         return node
             .child_by_field_name("name")
             .is_some_and(|name| name.kind() == "identifier");
     }
     true
+}
+
+/// True when every ancestor run from `node` reaches a function declaration
+/// before the program root — the scope recursion only opens those bodies.
+fn inside_function_declaration(node: Node<'_>) -> bool {
+    let mut parent = node.parent();
+    while let Some(current) = parent {
+        if current.kind() == "function_declaration" {
+            return true;
+        }
+        parent = current.parent();
+    }
+    false
 }
 
 fn has_function_value(node: Node<'_>) -> bool {

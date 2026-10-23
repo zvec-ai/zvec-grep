@@ -53,7 +53,9 @@ impl IndexStore {
         );
         let shared = self.shared()?;
         validate_batch(file, entities, entries, &shared.schema)?;
-        self.write(|state| super::replace_file(state, file, entities, entries))
+        self.write(|state| {
+            super::replace_file(state, file, entities, entries, &FileGraph::default())
+        })
     }
 }
 
@@ -124,6 +126,9 @@ fn metadata_fragments(
             visibility: None,
             language: None,
             documentation: Some("Produces the seasonal crop.".into()),
+            arity: None,
+            is_exported: false,
+            is_declaration: false,
         })),
         vec![
             EntityFragment {

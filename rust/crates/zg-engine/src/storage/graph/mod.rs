@@ -4,7 +4,8 @@
 //! atomic within SQLite; the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! Indexing integration is pending; this storage is not yet opened by `IndexStore`.
+//! `IndexStore` lazily opens existing graphs read-only under its storage lock.
+//! The indexing coordinator owns graph extraction and writes.
 
 mod pending;
 mod reader;
@@ -73,6 +74,7 @@ impl SqliteGraphStorage {
         Self::configure(Connection::open_with_flags(path, flags)?, mode)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     /// Creates an isolated writable graph, primarily for tests.
     ///
     /// # Errors
@@ -89,6 +91,7 @@ impl SqliteGraphStorage {
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;
                 connection.pragma_update(None, "journal_mode", "WAL")?;
+                connection.pragma_update(None, "synchronous", "FULL")?;
             }
         }
         Ok(Self { connection })
@@ -125,3 +128,9 @@ fn decode_metadata(value: &str) -> rusqlite::Result<Metadata> {
 
 #[cfg(test)]
 mod tests;
+
+impl FileGraph {
+    pub(crate) fn validate(&self, file_id: u32) -> Result<()> {
+        writer::validate(&format!("f{file_id}"), self, &[])
+    }
+}

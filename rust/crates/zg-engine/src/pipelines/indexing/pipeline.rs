@@ -51,7 +51,10 @@ use crate::{
     utils::{collapse_whitespace, decode_index_text, sha256_hex},
 };
 
-use super::{input_budget::index_chunk_options, model_progress, storage::IndexStorage};
+use super::{
+    graph_assembly, graph_sink, input_budget::index_chunk_options, model_progress,
+    storage::IndexStorage,
+};
 
 const MAX_SKIPPED_FILE_SAMPLES: usize = 20;
 // All default file-size limits are at least this large.
@@ -615,6 +618,9 @@ struct PreparedFile {
     file: FileRecord,
     entities: Vec<Entity>,
     fragments: Vec<PreparedFragment>,
+    /// Persistence-ready per-file graph, when the extraction produced one.
+    /// Consumed by `commit_file` alongside the zvec replacement.
+    graph: Option<crate::storage::graph::FileGraph>,
 }
 
 enum PreparedCandidate {
@@ -923,10 +929,35 @@ fn commit_file(
             vector,
         })
         .collect::<Vec<_>>();
-    storage.replace_file(&file.file, &file.entities, &entries)?;
+    storage.replace_file(
+        &file.file,
+        &file.entities,
+        &entries,
+        &file.graph.unwrap_or_default(),
+    )?;
     stats.files_indexed += 1;
     stats.entities_created += public_entities;
     Ok(())
+}
+
+fn graph_language(formats: &[FileFormat]) -> FileFormat {
+    formats
+        .iter()
+        .copied()
+        .find(|format| {
+            matches!(
+                format,
+                FileFormat::Rust
+                    | FileFormat::TypeScript
+                    | FileFormat::JavaScript
+                    | FileFormat::Python
+                    | FileFormat::Go
+                    | FileFormat::Java
+                    | FileFormat::C
+                    | FileFormat::Cpp
+            )
+        })
+        .unwrap_or(FileFormat::Unknown)
 }
 
 async fn prepare_candidate(
@@ -977,6 +1008,7 @@ async fn prepare_candidate(
         text: source_text.into_owned(),
     };
     let extracted = extract_for_indexing(&text, chunk_options)?;
+    let graph_source = extracted.graph;
     let entities = bind_entities(file.id(), extracted.fragments)?;
     let owners = entities
         .iter()
@@ -994,10 +1026,29 @@ async fn prepare_candidate(
     for fragment in &mut fragments {
         fragment.model = owners[&fragment.entity_id].clone();
     }
+    let graph = graph_source
+        .map(|graph| {
+            let language = graph_language(formats);
+            let assembled = graph_assembly::assemble_file_graph(
+                &file.id().get().to_string(),
+                language,
+                &graph,
+                &entities,
+            );
+            graph_sink::file_graph(file.id(), language, &assembled)
+        })
+        .transpose()
+        .map_err(|error| {
+            EngineError::storage_failure(format!(
+                "prepare graph snapshot for {}: {error}",
+                file.relative_path().display()
+            ))
+        })?;
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
         entities,
         fragments,
+        graph,
     })))
 }
 
@@ -2376,15 +2427,16 @@ mod tests {
             max_chunk_chars: Some(64),
             chunk_overlap_chars: Some(0),
         };
-        let extracted = extract_for_indexing(&source, options).expect("extract markdown");
+        let mut extracted = extract_for_indexing(&source, options)
+            .expect("extract markdown")
+            .fragments;
         let file_id = FileId::new(42);
-        let entities = bind_entities(file_id, extracted.fragments.clone()).expect("bind entities");
-        let mut reordered = extracted.fragments;
-        reordered.reverse();
-        for (index, entity) in reordered.iter_mut().enumerate() {
+        let entities = bind_entities(file_id, extracted.clone()).expect("bind entities");
+        extracted.reverse();
+        for (index, entity) in extracted.iter_mut().enumerate() {
             entity.index = index + 100;
         }
-        let mut rebound = bind_entities(file_id, reordered).expect("bind reordered entities");
+        let mut rebound = bind_entities(file_id, extracted).expect("bind reordered entities");
         rebound.reverse();
         assert_eq!(entities, rebound);
         let mut ids = HashSet::new();
@@ -2491,6 +2543,7 @@ mod tests {
         }
         let storage = MemoryStorage::default();
         let prepared = PreparedFile {
+            graph: None,
             file: FileRecord::new(
                 file_id,
                 SourcePath::new("file.md").expect("path"),
@@ -2568,6 +2621,7 @@ mod tests {
             file: &FileRecord,
             entities: &[Entity],
             entries: &[IndexedFragment],
+            _graph: &crate::storage::graph::FileGraph,
         ) -> EngineResult<()> {
             if self
                 .fail_replacements_once
