@@ -12,7 +12,7 @@ use zg_engine::api::context::{
     },
 };
 
-use crate::output_path;
+use crate::{highlight::QueryHighlighter, output_path};
 
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
@@ -41,9 +41,18 @@ pub fn write_file_paths(
 /// # Errors
 ///
 /// Returns the underlying writer error.
-pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> io::Result<()> {
+pub fn write_context_result(writer: impl Write, result: &ContextResult) -> io::Result<()> {
+    write_rg_context_result(writer, result, &QueryHighlighter::default(), |value| value)
+}
+
+fn write_rg_context_result(
+    mut writer: impl Write,
+    result: &ContextResult,
+    highlighter: &QueryHighlighter,
+    heading: impl Fn(String) -> String,
+) -> io::Result<()> {
     if result.items.is_empty() {
-        writeln!(writer, "No matches.")?;
+        writeln!(writer, "{}", heading("No matches.".into()))?;
         return Ok(());
     }
     let mut previous_path: Option<&Path> = None;
@@ -52,13 +61,18 @@ pub fn write_context_result(mut writer: impl Write, result: &ContextResult) -> i
             if previous_path.is_some() {
                 writeln!(writer)?;
             }
-            writeln!(writer, "{}", output_path(&item.relative_path).display())?;
+            writeln!(
+                writer,
+                "{}",
+                heading(output_path(&item.relative_path).display().to_string())
+            )?;
             previous_path = Some(item.relative_path.as_path());
         }
+        let content = highlighter.highlight(item.content.trim_end());
         if let Some(first) = item.content_range.start_line() {
-            writeln!(writer, "  {first}: {}", item.content.trim_end())?;
+            writeln!(writer, "  {first}: {content}")?;
         } else {
-            writeln!(writer, "  {}", item.content.trim_end())?;
+            writeln!(writer, "  {content}")?;
         }
     }
     Ok(())
@@ -116,6 +130,7 @@ pub fn write_context_with_options(
     use zg_engine::api::context::result::ContextSource;
     let color = options.color == ColorMode::Always
         || (options.color == ColorMode::Auto && terminal && std::env::var_os("NO_COLOR").is_none());
+    let highlighter = QueryHighlighter::new(&result.query, color);
     let heading = |value: String| {
         if color {
             format!("\x1b[1;36m{value}\x1b[0m")
@@ -125,27 +140,11 @@ pub fn write_context_with_options(
     };
     if options.human {
         writeln!(writer, "{}: {:?}", heading("Context".into()), result.source)?;
-        writeln!(writer, "Query: {}", result.query)?;
+        writeln!(writer, "Query: {}", highlighter.highlight(&result.query))?;
         writeln!(writer, "Hits: {}", result.items.len())?;
     }
     if result.source == ContextSource::Rg {
-        if color {
-            let mut buffer = Vec::new();
-            write_context_result(&mut buffer, result)?;
-            for line in String::from_utf8_lossy(&buffer).lines() {
-                writeln!(
-                    writer,
-                    "{}",
-                    if line.starts_with("  ") {
-                        line.to_owned()
-                    } else {
-                        heading(line.to_owned())
-                    }
-                )?;
-            }
-            return Ok(());
-        }
-        return write_context_result(writer, result);
+        return write_rg_context_result(writer, result, &highlighter, heading);
     }
     if result.items.is_empty() {
         return writeln!(writer, "No matches.");
@@ -173,7 +172,7 @@ pub fn write_context_with_options(
             )
         };
         writeln!(writer, "{}", heading(label))?;
-        write_item_preview(&mut writer, item, options)?;
+        write_item_preview(&mut writer, item, options, &highlighter)?;
         if options.trace {
             if let Some(score) = item.score {
                 writeln!(writer, "score: {score:.4}")?;
@@ -194,6 +193,7 @@ fn write_item_preview(
     mut writer: impl Write,
     item: &ContextItem,
     options: crate::OutputOptions,
+    highlighter: &QueryHighlighter,
 ) -> io::Result<()> {
     use crate::PreviewMode;
     if item.status == ContextItemStatus::PossiblyStale {
@@ -266,6 +266,7 @@ fn write_item_preview(
                 .take(if options.human { 120 } else { 160 })
                 .collect()
         };
+        let line = highlighter.highlight(&line);
         if let Some(first) = first {
             writeln!(writer, "  {}: {line}", first + offset)?;
         } else {
@@ -974,6 +975,100 @@ mod output_tests {
     }
 
     #[test]
+    fn context_output_highlights_query_terms_in_source() {
+        let mut result = indexed_result();
+        result.query = "find ImportantSymbol".into();
+        result.items[0].relative_path = "ImportantSymbol.rs".into();
+        result.items[0].content = "İ 中文 ImportantSymbol here".into();
+        for source in [ContextSource::Index, ContextSource::Rg] {
+            result.source = source;
+            let original = result.clone();
+            for human in [false, true] {
+                for preview in [PreviewMode::None, PreviewMode::Short, PreviewMode::Full] {
+                    for (color, terminal, styled) in [
+                        (crate::ColorMode::Always, false, true),
+                        (crate::ColorMode::Never, true, false),
+                        (crate::ColorMode::Auto, false, false),
+                        (
+                            crate::ColorMode::Auto,
+                            true,
+                            std::env::var_os("NO_COLOR").is_none(),
+                        ),
+                    ] {
+                        let mut output = Vec::new();
+                        write_context_with_options(
+                            &mut output,
+                            &result,
+                            OutputOptions {
+                                human,
+                                preview,
+                                color,
+                                ..OutputOptions::default()
+                            },
+                            terminal,
+                        )
+                        .expect("context output");
+                        let output = String::from_utf8(output).expect("UTF-8");
+                        let expected = if styled {
+                            "  1: İ 中文 \x1b[1;33mImportantSymbol\x1b[0m here"
+                        } else {
+                            "  1: İ 中文 ImportantSymbol here"
+                        };
+                        assert!(
+                            output.contains(expected),
+                            "{source:?} {color:?}: {output:?}"
+                        );
+                        assert_eq!(output.contains('\x1b'), styled);
+                        assert!(output.contains("ImportantSymbol.rs"));
+                        if human && styled {
+                            assert!(
+                                output.contains("Query: \x1b[1;33mfind ImportantSymbol\x1b[0m")
+                            );
+                        }
+                        assert_eq!(result, original);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_highlighting_follows_visible_preview_without_coloring_metadata() {
+        let mut result = indexed_result();
+        result.query = "needle".into();
+        result.items[0].content = format!("{}needle\nneedle", "x".repeat(160));
+        result.items[0].metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
+            heading: Some("needle".into()),
+            level: Some(1),
+            scope: None,
+        }));
+        for (preview, expected_matches) in [
+            (PreviewMode::None, 0),
+            (PreviewMode::Short, 1),
+            (PreviewMode::Full, 2),
+        ] {
+            let mut output = Vec::new();
+            write_context_with_options(
+                &mut output,
+                &result,
+                OutputOptions {
+                    preview,
+                    color: crate::ColorMode::Always,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("context preview output");
+            let output = String::from_utf8(output).expect("UTF-8");
+            assert_eq!(
+                output.matches("\x1b[1;33mneedle\x1b[0m").count(),
+                expected_matches
+            );
+            assert!(output.contains("heading: needle\n"));
+        }
+    }
+
+    #[test]
     fn context_formats_paths_without_rewriting_source_content() {
         let path = r"\\?\D:\workspace\sample.rs";
         let expected = if cfg!(windows) {
@@ -1055,6 +1150,7 @@ mod output_tests {
                             preview,
                             ..OutputOptions::default()
                         },
+                        &QueryHighlighter::default(),
                     )
                     .expect("source preview");
                     let expected = if whole_entity {
@@ -1180,8 +1276,13 @@ mod output_tests {
                 documentation: None,
             }));
             let mut buffer = Vec::new();
-            write_item_preview(&mut buffer, &item, OutputOptions::default())
-                .expect("render symbol metadata");
+            write_item_preview(
+                &mut buffer,
+                &item,
+                OutputOptions::default(),
+                &QueryHighlighter::default(),
+            )
+            .expect("render symbol metadata");
             let rendered = String::from_utf8(buffer).expect("UTF-8");
             assert_eq!(rendered.lines().next(), Some(expected));
         }

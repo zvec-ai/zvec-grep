@@ -80,6 +80,49 @@ fn direct_and_server_modes_share_embedded_lexical_behavior() -> Result<(), Box<d
 }
 
 #[test]
+fn direct_and_server_modes_share_query_highlighting_and_color_policy() -> Result<(), Box<dyn Error>>
+{
+    let root = TempDir::new()?;
+    fs::write(root.path().join("needle.txt"), "İ 中文 🦀 Needle needle\n")?;
+    for color in ["always", "never", "auto"] {
+        let mut outputs = Vec::new();
+        for mode in ["direct", "server"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_zg"))
+                .current_dir(root.path())
+                .args([
+                    "--mode",
+                    mode,
+                    "--color",
+                    color,
+                    "--rg",
+                    "-i",
+                    "needle",
+                    "needle.txt",
+                ])
+                .env("NO_COLOR", "1")
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{mode}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let output = String::from_utf8(output.stdout)?;
+            assert_eq!(
+                output,
+                if color == "always" {
+                    "\x1b[1;36mneedle.txt\x1b[0m\n  1: İ 中文 🦀 \x1b[1;33mNeedle\x1b[0m \x1b[1;33mneedle\x1b[0m\n"
+                } else {
+                    "needle.txt\n  1: İ 中文 🦀 Needle needle\n"
+                }
+            );
+            outputs.push(output);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+    Ok(())
+}
+
+#[test]
 fn managed_rg_preserves_mixed_glob_order_before_and_across_rg() -> Result<(), Box<dyn Error>> {
     let root = TempDir::new()?;
     fs::write(root.path().join("sample.rs"), "needle\n")?;

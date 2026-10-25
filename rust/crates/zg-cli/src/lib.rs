@@ -1,6 +1,7 @@
 //! Command-line parsing, validation, request construction, and terminal rendering.
 
 mod authorization;
+mod highlight;
 mod install;
 mod jsonc;
 mod managed_rg;
