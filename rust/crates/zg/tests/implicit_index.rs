@@ -665,7 +665,10 @@ fn configured_local_models_follow_environment_then_global_default_precedence() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Select an embedding model:"), "{stderr}");
+        assert!(
+            stderr.contains("Select an embedding model to build zg index:"),
+            "{stderr}"
+        );
         fixture.assert_model("direct", expected);
     }
 }
@@ -691,7 +694,10 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Select an embedding model:"), "{stderr}");
+        assert!(
+            stderr.contains("Select an embedding model to build zg index:"),
+            "{stderr}"
+        );
         assert!(stderr.contains("Index ready"), "{stderr}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
         let status = success(
@@ -875,16 +881,42 @@ fn implicit_build_preserves_local_overrides_without_persisting_remote_credential
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn escaping_model_selection_leaves_no_index_or_downloads() {
-    let fixture = Fixture::new();
-    let output = terminal::run(
-        fixture.command(&["--mode", "direct", "--fts", "needle", "--no-color"]),
-        &[("Esc Exit", b"\x1b")],
-    );
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(!fixture.root.path().join(".zvec-grep").exists());
-    assert!(!fixture.user.path().join("models").exists());
+fn cancelling_model_selection_exits_without_error_or_index() {
+    for (mode, server) in [
+        ("direct", false),
+        ("server", true),
+        ("auto", false),
+        ("auto", true),
+    ] {
+        for cancellation in [b"\x1b".as_slice(), b"\x03".as_slice()] {
+            let mut fixture = Fixture::new();
+            if server {
+                fixture.start_server();
+            }
+            let output = terminal::run(
+                fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
+                &[("Esc Exit", cancellation)],
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(130), "{mode}: {stderr}");
+            assert!(output.stdout.is_empty());
+            assert!(
+                !stderr.contains("Index creation cancelled"),
+                "{mode}: {stderr}"
+            );
+            assert!(!stderr.contains("error["), "{mode}: {stderr}");
+            assert!(
+                !stderr.to_ascii_lowercase().contains("error:"),
+                "{mode}: {stderr}"
+            );
+            assert!(
+                stderr.contains("Select an embedding model to build zg index:"),
+                "{mode}: {stderr}"
+            );
+            assert!(!fixture.root.path().join(".zvec-grep").exists());
+            assert!(!fixture.user.path().join("models").exists());
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

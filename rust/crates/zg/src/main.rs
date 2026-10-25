@@ -28,6 +28,9 @@ static DAEMON_LOGGING: AtomicBool = AtomicBool::new(false);
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
+        Err(error) if is_engine_error(error.as_ref(), EngineError::CANCELLED) => {
+            ExitCode::from(130)
+        }
         Err(error) => {
             if let Some(error) = error.downcast_ref::<EngineError>() {
                 eprintln!("{}", error.report());
@@ -366,7 +369,7 @@ async fn execute_request(
     zg_cli::finalize_refresh(&mut request, server);
     authorize_query(&mut request, server, home).await?;
     match execute_context(request.clone(), server, home, output).await {
-        Err(error) if is_not_found(error.as_ref()) => {
+        Err(error) if is_engine_error(error.as_ref(), EngineError::NOT_FOUND) => {
             // Probing first would block searches that can borrow an active writer.
             if !ensure_query_index(&mut request, server, home, output).await? {
                 return Err(error);
@@ -378,15 +381,13 @@ async fn execute_request(
     }
 }
 
-fn is_not_found(error: &(dyn Error + 'static)) -> bool {
+fn is_engine_error(error: &(dyn Error + 'static), code: &str) -> bool {
     if let Some(error) = error.downcast_ref::<EngineError>() {
-        return error.code() == EngineError::NOT_FOUND;
+        return error.code() == code;
     }
     match error.downcast_ref::<zg_daemon::DaemonError>() {
-        Some(zg_daemon::DaemonError::Remote { report, .. }) => {
-            report.code == EngineError::NOT_FOUND
-        }
-        Some(zg_daemon::DaemonError::Engine(error)) => error.code() == EngineError::NOT_FOUND,
+        Some(zg_daemon::DaemonError::Remote { report, .. }) => report.code == code,
+        Some(zg_daemon::DaemonError::Engine(error)) => error.code() == code,
         _ => false,
     }
 }
@@ -1103,6 +1104,55 @@ fn init_daemon_tracing(log: zg_daemon::rolling_log::RollingLog, debug: bool) {
         .with_writer(move || log.writer())
         .with_env_filter(filter)
         .try_init();
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_is_recognized_in_direct_and_daemon_errors() {
+        let error = EngineError::cancelled("Index creation cancelled");
+        let report = error.report();
+        let errors: [Box<dyn Error>; 3] = [
+            Box::new(error),
+            Box::new(zg_daemon::DaemonError::Engine(EngineError::from_report(
+                report.clone(),
+            ))),
+            Box::new(zg_daemon::DaemonError::Remote {
+                report: Box::new(report),
+                retryable: false,
+            }),
+        ];
+        for error in errors {
+            assert!(is_engine_error(error.as_ref(), EngineError::CANCELLED));
+            assert!(!is_engine_error(error.as_ref(), EngineError::NOT_FOUND));
+        }
+    }
+
+    #[test]
+    fn failures_are_not_treated_as_cancellation() {
+        let error = EngineError::not_found("No index found");
+        let report = error.report();
+        let errors: [Box<dyn Error>; 4] = [
+            Box::new(error),
+            Box::new(zg_daemon::DaemonError::Engine(EngineError::from_report(
+                report.clone(),
+            ))),
+            Box::new(zg_daemon::DaemonError::Remote {
+                report: Box::new(report),
+                retryable: false,
+            }),
+            Box::new(io::Error::other("Index creation failed")),
+        ];
+        for (index, error) in errors.iter().enumerate() {
+            assert!(!is_engine_error(error.as_ref(), EngineError::CANCELLED));
+            assert_eq!(
+                is_engine_error(error.as_ref(), EngineError::NOT_FOUND),
+                index < 3
+            );
+        }
+    }
 }
 
 #[cfg(test)]
