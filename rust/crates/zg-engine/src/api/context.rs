@@ -492,6 +492,9 @@ pub mod result {
         pub excerpt_range: Option<ContentRange>,
         /// Exact source coordinates of `content`, independent of the entity and matched ranges.
         pub content_range: ContentRange,
+        /// Individual lexical matches in decoded source coordinates, independent of context lines.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub match_ranges: Vec<ContentRange>,
         pub content: String,
         /// Optional structural context supplied with the retrieved source.
         #[serde(default, skip_serializing_if = "Option::is_none")]

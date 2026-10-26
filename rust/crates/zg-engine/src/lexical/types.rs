@@ -46,6 +46,7 @@ pub(crate) struct LexicalMatch {
     pub excerpt_range: Option<TextRange>,
     /// Source coordinates of the returned lines, which may extend beyond the match.
     pub content_range: TextRange,
+    pub match_ranges: Vec<TextRange>,
     pub content: String,
 }
 

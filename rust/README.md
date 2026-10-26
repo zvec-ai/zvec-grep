@@ -406,6 +406,11 @@ Restart older resident daemons when updating the CLI; replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
 
+Managed rg results also provide optional `match_ranges` in decoded UTF-8 source
+coordinates. Terminal highlighting uses these actual matches, preserving regex,
+case, whole-word, and pattern-file semantics. Empty ranges are omitted; older
+replies without this field remain readable.
+
 Public search reports `freshness: fresh` or `freshness: possibly_stale`.
 `results: served_from_current_index` describes where results came from, with
 `background_refresh` reported separately. A provider that only reports current

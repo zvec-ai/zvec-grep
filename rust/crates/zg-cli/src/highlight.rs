@@ -61,32 +61,46 @@ impl QueryHighlighter {
                 return Cow::Borrowed(value);
             }
         }
-        if ranges.is_empty() {
-            return Cow::Borrowed(value);
-        }
-        ranges.sort_unstable();
-        let mut merged: Vec<(usize, usize)> = Vec::new();
-        for (start, end) in ranges {
-            if let Some(previous) = merged.last_mut()
-                && start <= previous.1
-            {
-                previous.1 = previous.1.max(end);
-            } else {
-                merged.push((start, end));
-            }
-        }
-        let mut output = String::new();
-        let mut cursor = 0;
-        for (start, end) in merged {
-            output.push_str(&value[cursor..start]);
-            output.push_str("\x1b[1;33m");
-            output.push_str(&value[start..end]);
-            output.push_str("\x1b[0m");
-            cursor = end;
-        }
-        output.push_str(&value[cursor..]);
-        Cow::Owned(output)
+        highlight_ranges(value, ranges)
     }
+}
+
+pub(crate) fn highlight_ranges(
+    value: &str,
+    ranges: impl IntoIterator<Item = (usize, usize)>,
+) -> Cow<'_, str> {
+    let mut ranges: Vec<_> = ranges
+        .into_iter()
+        .map(|(start, end)| (start, end.min(value.len())))
+        .filter(|&(start, end)| {
+            start < end && value.is_char_boundary(start) && value.is_char_boundary(end)
+        })
+        .collect();
+    if ranges.is_empty() {
+        return Cow::Borrowed(value);
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(previous) = merged.last_mut()
+            && start <= previous.1
+        {
+            previous.1 = previous.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    let mut output = String::new();
+    let mut cursor = 0;
+    for (start, end) in merged {
+        output.push_str(&value[cursor..start]);
+        output.push_str("\x1b[1;33m");
+        output.push_str(&value[start..end]);
+        output.push_str("\x1b[0m");
+        cursor = end;
+    }
+    output.push_str(&value[cursor..]);
+    Cow::Owned(output)
 }
 
 fn is_ignored_term(term: &str) -> bool {
@@ -123,6 +137,18 @@ fn is_ignored_term(term: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_ranges_merge_and_clip_without_splitting_utf8() {
+        assert_eq!(
+            highlight_ranges("前needle后", [(6, 9), (3, 8), (0, 1), (9, usize::MAX)]),
+            "前\x1b[1;33mneedle后\x1b[0m"
+        );
+        assert_eq!(
+            highlight_ranges("前", [(0, 1), (1, 2), (3, 3), (usize::MAX, usize::MAX)]),
+            "前"
+        );
+    }
 
     #[test]
     fn query_terms_follow_phrase_token_and_overlap_rules() {

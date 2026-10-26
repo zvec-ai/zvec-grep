@@ -598,6 +598,7 @@ mod tests {
             range,
             excerpt_range: None,
             content_range: range,
+            match_ranges: Vec::new(),
             content: content.to_owned(),
         }
     }

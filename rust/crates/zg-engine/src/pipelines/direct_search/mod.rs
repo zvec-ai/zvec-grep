@@ -233,6 +233,7 @@ fn context_from_lexical(
                     range: item.range.into(),
                     excerpt_range: item.excerpt_range.map(Into::into),
                     content_range: item.content_range.into(),
+                    match_ranges: item.match_ranges.into_iter().map(Into::into).collect(),
                     content: item.content,
                     outline: None,
                     content_role: Some(ContextContentRole::Source),

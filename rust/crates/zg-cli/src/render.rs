@@ -12,7 +12,10 @@ use zg_engine::api::context::{
     },
 };
 
-use crate::{highlight::QueryHighlighter, output_path};
+use crate::{
+    highlight::{QueryHighlighter, highlight_ranges},
+    output_path,
+};
 
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
@@ -42,13 +45,13 @@ pub fn write_file_paths(
 ///
 /// Returns the underlying writer error.
 pub fn write_context_result(writer: impl Write, result: &ContextResult) -> io::Result<()> {
-    write_rg_context_result(writer, result, &QueryHighlighter::default(), |value| value)
+    write_rg_context_result(writer, result, false, |value| value)
 }
 
 fn write_rg_context_result(
     mut writer: impl Write,
     result: &ContextResult,
-    highlighter: &QueryHighlighter,
+    color: bool,
     heading: impl Fn(String) -> String,
 ) -> io::Result<()> {
     if result.items.is_empty() {
@@ -68,7 +71,12 @@ fn write_rg_context_result(
             )?;
             previous_path = Some(item.relative_path.as_path());
         }
-        let content = highlighter.highlight(item.content.trim_end());
+        let content = item.content.trim_end();
+        let content = if color {
+            highlight_ranges(content, lexical_content_ranges(item))
+        } else {
+            content.into()
+        };
         if let Some(first) = item.content_range.start_line() {
             writeln!(writer, "  {first}: {content}")?;
         } else {
@@ -76,6 +84,30 @@ fn write_rg_context_result(
         }
     }
     Ok(())
+}
+
+fn lexical_content_ranges(item: &ContextItem) -> impl Iterator<Item = (usize, usize)> + '_ {
+    item.match_ranges.iter().filter_map(|range| {
+        let ContentRange::Text {
+            start_byte_offset: content_start,
+            ..
+        } = item.content_range
+        else {
+            return None;
+        };
+        let ContentRange::Text {
+            start_byte_offset,
+            end_byte_offset,
+            ..
+        } = range
+        else {
+            return None;
+        };
+        Some((
+            start_byte_offset.checked_sub(content_start)?,
+            end_byte_offset.checked_sub(content_start)?,
+        ))
+    })
 }
 
 /// Writes Node-compatible indexed-search status to the caller's diagnostic stream.
@@ -144,7 +176,7 @@ pub fn write_context_with_options(
         writeln!(writer, "Hits: {}", result.items.len())?;
     }
     if result.source == ContextSource::Rg {
-        return write_rg_context_result(writer, result, &highlighter, heading);
+        return write_rg_context_result(writer, result, color, heading);
     }
     if result.items.is_empty() {
         return writeln!(writer, "No matches.");
@@ -939,6 +971,7 @@ mod output_tests {
                 end_byte_column: 6,
             },
             excerpt_range: None,
+            match_ranges: Vec::new(),
             outline: None,
             content: (1..=20)
                 .map(|n| format!("line{n}"))
@@ -982,6 +1015,20 @@ mod output_tests {
         result.items[0].content = "İ 中文 ImportantSymbol here".into();
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
+            result.items[0].match_ranges = if source == ContextSource::Rg {
+                let start = "İ 中文 ".len();
+                let end = start + "ImportantSymbol".len();
+                vec![ContentRange::Text {
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte_offset: start,
+                    end_byte_offset: end,
+                    start_byte_column: start,
+                    end_byte_column: end,
+                }]
+            } else {
+                Vec::new()
+            };
             let original = result.clone();
             for human in [false, true] {
                 for preview in [PreviewMode::None, PreviewMode::Short, PreviewMode::Full] {

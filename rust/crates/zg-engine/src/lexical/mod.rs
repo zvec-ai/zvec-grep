@@ -797,6 +797,11 @@ impl MatchSink<'_> {
             crate::utils::text_range_from_offsets(text, line_starts, content_start, content_end)
                 .map_err(io::Error::other)?,
         )?;
+        let match_ranges = self
+            .match_ranges(text, line_starts, content_start, content_end)?
+            .into_iter()
+            .map(map_range)
+            .collect::<io::Result<Vec<_>>>()?;
         self.count += 1;
         self.results.push(LexicalMatch {
             rank: 0,
@@ -805,9 +810,45 @@ impl MatchSink<'_> {
             range,
             excerpt_range: None,
             content_range,
+            match_ranges,
             content: text[content_start..content_end].to_owned(),
         });
         Ok(true)
+    }
+
+    fn match_ranges(
+        &self,
+        text: &str,
+        line_starts: &[usize],
+        start: usize,
+        end: usize,
+    ) -> io::Result<Vec<TextRange>> {
+        if self.options.invert_match {
+            return Ok(Vec::new());
+        }
+        let mut matches = Vec::new();
+        // Keep the original haystack so anchors and word boundaries retain their search meaning.
+        self.matcher
+            .find_iter_at(text.as_bytes(), start, |found| {
+                if found.start() >= end {
+                    return false;
+                }
+                if found.start() < found.end()
+                    && text.is_char_boundary(found.start())
+                    && text.is_char_boundary(found.end())
+                {
+                    matches.push(found);
+                }
+                found.end() <= end
+            })
+            .map_err(io::Error::other)?;
+        matches
+            .into_iter()
+            .map(|found| {
+                crate::utils::text_range_from_offsets(text, line_starts, found.start(), found.end())
+                    .map_err(io::Error::other)
+            })
+            .collect()
     }
 }
 
@@ -1388,6 +1429,7 @@ mod tests {
                 start + text[start..end].trim_end_matches("\r\n").len(),
             )
             .expect("visible source range"),
+            match_ranges: Vec::new(),
             content: text[start..end].trim_end_matches("\r\n").to_owned(),
         }];
         request.options.matching.after_context = 0;
