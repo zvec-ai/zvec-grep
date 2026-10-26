@@ -409,19 +409,25 @@ jobs:
           import os, pathlib, re, subprocess
           cases = [("cpu", "model2vec", "local/potion-code-16m-v2"),
                    ("cpu", "onnx", "local/all-minilm-l6-v2"),
-                   ("cpu", "gguf", "local/embeddinggemma-300m")]
+                   ("cpu", "gguf", "local/embeddinggemma-300m"),
+                   ("cpu", "gguf-long-input", "local/embeddinggemma-300m")]
           logs = pathlib.Path("model-logs")
           logs.mkdir(exist_ok=True)
           failures = []
           for device, backend, model in cases:
               environment = dict(os.environ)
-              environment.update(ZVEC_GREP_SMOKE_MODEL=model, ORT_LOG="verbose")
+              environment.update(ZVEC_GREP_SMOKE_MODEL=model, ORT_LOG="verbose",
+                                 ZVEC_GREP_TEST_MODEL_CACHE=environment["ZVEC_GREP_MODEL_CACHE"])
               environment.pop("ZVEC_GREP_SMOKE_DEVICE", None)
+              # Reuse the model downloaded by the preceding GGUF smoke and the
+              # same test binary; long-input coverage adds no compilation.
+              test = ("models::backends::llama_cpp::model::tests::cached_embeddinggemma_cpu_handles_long_inputs_and_reuse"
+                      if backend == "gguf-long-input" else
+                      "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds")
               log_path = logs / f"{device}-{backend}.log"
               try:
                   with log_path.open("w", encoding="utf-8") as log:
-                      subprocess.run([environment["MODEL_TEST_BINARY"],
-                          "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds",
+                      subprocess.run([environment["MODEL_TEST_BINARY"], test,
                           "--ignored", "--exact", "--nocapture"], env=environment,
                           stdout=log, stderr=subprocess.STDOUT, timeout=900, check=True)
                   output = log_path.read_text(encoding="utf-8", errors="replace")
@@ -446,19 +452,25 @@ jobs:
           for spec in \
             'cpu|model2vec|local/potion-code-16m-v2|zvec-grep-cuda-ci' \
             'cpu|onnx|local/all-minilm-l6-v2|zvec-grep-cuda-ci' \
-            'cpu|gguf|local/embeddinggemma-300m|zvec-grep-cuda-ci'; do
+            'cpu|gguf|local/embeddinggemma-300m|zvec-grep-cuda-ci' \
+            'cpu|gguf-long-input|local/embeddinggemma-300m|zvec-grep-cuda-ci'; do
             IFS='|' read -r device backend model runtime_image <<< "$spec"
+            test_name=models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds
+            if [[ "$backend" == gguf-long-input ]]; then
+              test_name=models::backends::llama_cpp::model::tests::cached_embeddinggemma_cpu_handles_long_inputs_and_reuse
+            fi
             if ! docker run --rm --platform linux/amd64 \
               --volume "${GITHUB_WORKSPACE}:/work:ro" \
               --volume "$ZVEC_GREP_MODEL_CACHE:/model-cache" \
               --workdir /work/rust --env DEBIAN_FRONTEND=noninteractive \
               --env ZVEC_GREP_MODEL_CACHE=/model-cache --env ZVEC_GREP_SMOKE_MODEL="$model" \
+              --env ZVEC_GREP_TEST_MODEL_CACHE=/model-cache --env MODEL_TEST_NAME="$test_name" \
               --env ORT_LOG=verbose --env RUST_BACKTRACE --env MODEL_TEST_BINARY \
               --env ZVEC_GREP_NATIVE_LIB_DIR=/work/rust/target/cuda-tests/lib \
               --env ORT_DYLIB_PATH=/work/rust/target/cuda-tests/lib/libonnxruntime.so.1 \
               "$runtime_image" bash -euo pipefail -c '
                 export LD_LIBRARY_PATH="/work/rust/target/cuda-tests/lib:${LD_LIBRARY_PATH:-}"
-                timeout 900 "$MODEL_TEST_BINARY" models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds \
+                timeout 900 "$MODEL_TEST_BINARY" "$MODEL_TEST_NAME" \
                   --ignored --exact --nocapture
               ' 2>&1 | tee "rust/model-logs/${device}-${backend}.log"; then
               failed=1
@@ -662,7 +674,7 @@ jobs:
           from e2e import verify_windows_cuda_plugin
           verify_windows_cuda_plugin(pathlib.Path("target/cuda-tests/lib/ggml-cuda.dll").resolve(),
                                      13, pathlib.Path("model-logs/windows-loader"))
-      - name: Verify CUDA models and C5 using CPU-built tests without Cargo
+      - name: Verify CUDA models, long inputs and C5 using CPU-built tests without Cargo
         shell: python
         run: |
           import os, pathlib, re, subprocess, sys
@@ -675,17 +687,22 @@ jobs:
           models = os.environ["ZVEC_GREP_MODEL_CACHE"] if windows else "/model-cache"
           smoke = "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds"
           cases = [
-              ("cuda-onnx", "zg_engine", smoke, "local/all-minilm-l6-v2"),
-              ("cuda-gguf", "zg_engine", smoke, "local/embeddinggemma-300m"),
-              ("c5-cpu-override", "zg_llama_native", "tests::real_cpu_plugin_ignores_gpu_override", None),
+              ("cuda-onnx", "zg_engine", smoke, "local/all-minilm-l6-v2", "onnx"),
+              ("cuda-gguf", "zg_engine", smoke, "local/embeddinggemma-300m", "gguf"),
+              # The preceding smoke prepares the cache. Run the regression in a
+              # fresh process, with CUDA/offload evidence and no extra download.
+              ("cuda-gguf-long-input", "zg_engine",
+               "models::backends::llama_cpp::model::tests::cached_embeddinggemma_cuda_handles_long_inputs_and_reuse",
+               None, "gguf"),
+              ("c5-cpu-override", "zg_llama_native", "tests::real_cpu_plugin_ignores_gpu_override", None, None),
               ("c5-cpu-then-cuda", "zg_engine",
-               "models::backends::llama_cpp::model::tests::cached_embeddinggemma_uses_cuda", None),
+               "models::backends::llama_cpp::model::tests::cached_embeddinggemma_uses_cuda", None, None),
           ]
           logs = pathlib.Path("model-logs")
           logs.mkdir(exist_ok=True)
           pathlib.Path(os.environ["ZVEC_GREP_MODEL_CACHE"]).mkdir(parents=True, exist_ok=True)
           failures = []
-          for name, binary, test, model in cases:
+          for name, binary, test, model, backend in cases:
               variables = {
                   "ZVEC_GREP_NATIVE_LIB_DIR": native, "ZVEC_GREP_MODEL_CACHE": models,
                   "ZVEC_GREP_TEST_MODEL_CACHE": models, "RUST_BACKTRACE": "1", "ORT_LOG": "verbose",
@@ -729,8 +746,8 @@ jobs:
                   output = log_path.read_text(encoding="utf-8", errors="replace")
                   if not re.search(r"test result: ok\. 1 passed; 0 failed;", output):
                       raise RuntimeError("Expected exactly one passing test, not an empty or skipped selection")
-                  if model:
-                      for line in cuda_evidence(output, name.removeprefix("cuda-"), "13.1"):
+                  if backend:
+                      for line in cuda_evidence(output, backend, "13.1"):
                           print(line)
               except (OSError, subprocess.SubprocessError, RuntimeError) as error:
                   failures.append(f"{name}: {error}")
@@ -739,7 +756,7 @@ jobs:
                   print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
           if failures:
               raise RuntimeError("\n".join(failures))
-      - name: Retain CUDA model and C5 evidence
+      - name: Retain CUDA model, long-input and C5 evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:

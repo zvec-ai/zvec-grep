@@ -818,10 +818,18 @@ fn create_llama_context(
     profile: LlamaContextProfile,
 ) -> Result<LlamaContext<'_>, ModelError> {
     let registry = lock_backend_registry();
+    let architecture = model
+        .meta_val_str("general.architecture")
+        .map_err(|error| {
+            ModelError::internal("Unable to read llama.cpp model architecture").with_cause(error)
+        })?;
     let params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(profile.context_size))
         .with_n_batch(profile.batch_capacity)
-        .with_n_ubatch(profile.batch_capacity.clamp(1, 256))
+        .with_n_ubatch(llama_micro_batch_capacity(
+            &architecture,
+            profile.batch_capacity,
+        ))
         .with_n_threads(profile.threads)
         .with_n_threads_batch(profile.threads)
         .with_embeddings(true);
@@ -830,6 +838,16 @@ fn create_llama_context(
         .map_err(|error| {
             ModelError::internal("Unable to create llama.cpp embedding context").with_cause(error)
         })
+}
+
+fn llama_micro_batch_capacity(architecture: &str, batch_capacity: u32) -> u32 {
+    if architecture == "gemma-embedding" {
+        // The non-causal encoder must process the whole input in one physical
+        // batch. Splitting at 256 tokens triggers a native assertion.
+        batch_capacity.max(1)
+    } else {
+        batch_capacity.clamp(1, 256)
+    }
 }
 
 fn run_llama_worker_job(
