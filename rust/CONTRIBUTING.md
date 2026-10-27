@@ -263,11 +263,11 @@ validation.
 
 ### ONNX Runtime distributions
 
-`zg-engine` pins the upstream `ort` revision `02b13133` with API 21 and dynamic
-loading. This includes the manual-environment fix from
-[ort#610](https://github.com/pykeio/ort/pull/610): the published rc.13 can crash
-after successful inference with ORT 1.21. The engine keeps one environment across
-model reloads and registers its cleanup after library initialization so it runs
+`zg-engine` pins the published `ort` 2.0.0-rc.15 crate with API 21 and dynamic
+loading, including the manual-environment fix and subsequent memory-safety fixes.
+The native runtime remains independently pinned to ORT 1.21.0; upgrading the Rust
+binding does not change its archive URLs or hashes. The engine keeps one
+environment across model reloads and registers its cleanup after library initialization so it runs
 before ORT's C++ destructors. A subprocess regression test verifies failed model
 loads, successful inference, reload and the final process exit status.
 
