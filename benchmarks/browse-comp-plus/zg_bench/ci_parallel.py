@@ -365,7 +365,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     plan = sub.add_parser("plan")
-    plan.add_argument("--suite", choices=("ci", "smoke"), required=True)
+    plan.add_argument("--suite", choices=("iteration", "ci", "smoke"), required=True)
     plan.add_argument("--output", type=Path, required=True)
     restore = sub.add_parser("restore-queries")
     restore.add_argument("--plan", type=Path, required=True)

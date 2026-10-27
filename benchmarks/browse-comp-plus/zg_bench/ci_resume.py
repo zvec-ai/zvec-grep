@@ -137,13 +137,11 @@ def restore_case(
         if (
             identity.get("workflow_run_id") != workflow_id
             or identity.get("case_id") != case
-            or identity.get("plan_sha256") != sha256_file(plan_path)
             or any(
                 identity.get(key) != plan[key]
                 for key in ("candidate_commit", "harness_commit")
             )
             or not 1 <= attempt < current_attempt
-            or sha256_file(evidence / "plan.json") != sha256_file(plan_path)
             or sha256_file(evidence / "benchmark.toml") != plan["configuration_sha256"]
         ):
             raise ValueError(
@@ -152,6 +150,27 @@ def restore_case(
         if attempt in attempts:
             raise ValueError("duplicate raw CI artifact for the same attempt")
         attempts.add(attempt)
+        prior_plan = evidence / "plan.json"
+        prior_runs = evidence / "runs"
+        # A cancelled download can export diagnostics before plan-download.
+        # Only diagnostics with no execution may start under the current plan.
+        if (
+            identity.get("plan_sha256") in (None, "")
+            and not prior_plan.exists()
+            and (
+                not prior_runs.exists()
+                or (prior_runs.is_dir() and not any(prior_runs.iterdir()))
+            )
+        ):
+            continue
+        if (
+            identity.get("plan_sha256") != sha256_file(plan_path)
+            or not prior_plan.is_file()
+            or sha256_file(prior_plan) != sha256_file(plan_path)
+        ):
+            raise ValueError(
+                "previous case evidence does not match the current CI plan"
+            )
         runs = list((evidence / "runs").glob("*/run.json"))
         if len(runs) > 1:
             raise ValueError("expected at most one run per raw case artifact")

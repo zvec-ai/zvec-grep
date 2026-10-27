@@ -280,6 +280,25 @@ class RawCaseResumeTests(unittest.TestCase):
         seal_evidence(self.evidence)
         self.assertIsNone(self.restore())
 
+    def test_cancelled_download_before_plan_starts_fresh_without_importing(self):
+        shutil.rmtree(self.evidence / "runs")
+        (self.evidence / "plan.json").unlink()
+        identity = read_json(self.evidence / "ci.json")
+        del identity["plan_sha256"]
+        write_json(self.evidence / "ci.json", identity)
+        seal_evidence(self.evidence)
+        self.assertIsNone(self.restore())
+        self.assertFalse((self.artifacts / "runs").exists())
+
+    def test_missing_plan_with_existing_execution_still_fails_closed(self):
+        (self.evidence / "plan.json").unlink()
+        identity = read_json(self.evidence / "ci.json")
+        del identity["plan_sha256"]
+        write_json(self.evidence / "ci.json", identity)
+        seal_evidence(self.evidence)
+        with self.assertRaisesRegex(ValueError, "CI plan"):
+            self.restore()
+
     def test_mutated_raw_and_missing_checksum_fail_closed(self):
         (self.run / "run.json").write_text("{}")
         with self.assertRaisesRegex(ValueError, "integrity"):

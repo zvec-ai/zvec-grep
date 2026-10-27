@@ -311,7 +311,25 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                     validate_plan(self.plan_path, self.artifacts)
 
     def test_iteration_requires_both_fixed_pairs_and_all_four_judgements(self):
-        plan = self.plan("iteration")
+        output = self.root / "plan"
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "ci_parallel",
+                    "plan",
+                    "--suite",
+                    "iteration",
+                    "--output",
+                    str(output),
+                ],
+            ),
+            patch("zg_bench.ci_parallel.DEFAULT_ARTIFACTS_DIR", self.artifacts),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(), 0)
+        self.plan_path = output / "plan.json"
+        self.plan_data = plan = read_json(self.plan_path)
         self.assertEqual(validate_plan(self.plan_path, self.artifacts), plan)
         self.assertEqual(plan["query_ids"], ["628", "241"])
         self.assertEqual(
