@@ -135,7 +135,7 @@ struct AgentOptions {
 /// Returns an error when target selection, configuration validation, or an
 /// atomic file update fails.
 pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallError> {
-    print_header();
+    print_header()?;
     let detected = detect_agents();
     let agents = resolve_agents(
         args.targets.iter().chain(&args.positional_targets),
@@ -144,7 +144,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         "install",
     )?;
     if agents.is_empty() {
-        println!("\nNo agent integrations selected.");
+        writeln!(crate::stdout(), "\nNo agent integrations selected.")?;
         return Ok(InstallOutcome {
             agent_labels: Vec::new(),
             transport: args.transport.unwrap_or_default(),
@@ -160,18 +160,18 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         token_env: args.mcp_token_env.clone(),
     };
 
-    println!("\nInstalling integrations\n");
+    writeln!(crate::stdout(), "\nInstalling integrations\n")?;
     for agent in &agents {
         let result = install_agent(*agent, &options)?;
-        println!("  ✓ {}", agent.label());
-        println!("    MCP       configured");
+        writeln!(crate::stdout(), "  ✓ {}", agent.label())?;
+        writeln!(crate::stdout(), "    MCP       configured")?;
         if let Some(path) = result.config_path {
-            println!("    Config    {}", path.display());
+            writeln!(crate::stdout(), "    Config    {}", path.display())?;
         }
         if let Some(note) = result.config_note {
-            println!("    Note      {note}");
+            writeln!(crate::stdout(), "    Note      {note}")?;
         }
-        println!();
+        writeln!(crate::stdout())?;
     }
 
     Ok(InstallOutcome {
@@ -188,7 +188,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
 /// Returns an error when an existing configuration is invalid or a file update
 /// fails.
 pub fn execute_uninstall(args: &UninstallArgs) -> Result<(), InstallError> {
-    print_header();
+    print_header()?;
     let detected = detect_agents();
     let agents = resolve_agents(
         args.targets.iter().chain(&args.positional_targets),
@@ -197,23 +197,27 @@ pub fn execute_uninstall(args: &UninstallArgs) -> Result<(), InstallError> {
         "uninstall",
     )?;
     if agents.is_empty() {
-        println!("\nNo agent integrations selected.");
+        writeln!(crate::stdout(), "\nNo agent integrations selected.")?;
         return Ok(());
     }
 
-    println!("\nRemoving integrations\n");
+    writeln!(crate::stdout(), "\nRemoving integrations\n")?;
     for agent in agents {
         uninstall_agent(agent)?;
-        println!("  ✓ {}", agent.label());
-        println!("    integration removed");
+        writeln!(crate::stdout(), "  ✓ {}", agent.label())?;
+        writeln!(crate::stdout(), "    integration removed")?;
     }
-    println!("\nRestart the selected agents or start a new session to apply the change.");
+    writeln!(
+        crate::stdout(),
+        "\nRestart the selected agents or start a new session to apply the change."
+    )?;
     Ok(())
 }
 
-fn print_header() {
-    println!("zvec-grep setup");
-    println!("{}", "─".repeat(40));
+fn print_header() -> io::Result<()> {
+    let mut output = crate::stdout();
+    writeln!(output, "zvec-grep setup")?;
+    writeln!(output, "{}", "─".repeat(40))
 }
 
 fn resolve_transport(
@@ -226,8 +230,8 @@ fn resolve_transport(
     if yes || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Ok(McpInstallTransport::Stdio);
     }
-    print!("MCP transport [stdio] (stdio/http): ");
-    io::stdout().flush()?;
+    write!(crate::stdout(), "MCP transport [stdio] (stdio/http): ")?;
+    crate::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     match answer.trim().to_ascii_lowercase().as_str() {
@@ -262,14 +266,15 @@ fn resolve_agents<'a>(
             .collect());
     }
 
-    println!(
+    writeln!(
+        crate::stdout(),
         "\n{}\n",
         if action == "install" {
             "Choose agent integrations"
         } else {
             "Choose integrations to remove"
         }
-    );
+    )?;
     prompt_agent_selection(detected)
 }
 
@@ -304,7 +309,7 @@ fn prompt_agent_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, Inst
         .iter()
         .position(|agent| detected.contains(agent))
         .unwrap_or(0);
-    let mut output = io::stdout().lock();
+    let mut output = crate::stdout();
     render_agent_selection(&mut output, active_index, detected, false)?;
     loop {
         let Event::Key(key) = event::read()? else {
@@ -379,7 +384,8 @@ fn render_agent_selection(
 
 fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, InstallError> {
     for (index, agent) in Agent::ALL.iter().enumerate() {
-        println!(
+        writeln!(
+            crate::stdout(),
             "  {}. {} ({})",
             index + 1,
             agent.label(),
@@ -388,7 +394,7 @@ fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>,
             } else {
                 "not found"
             }
-        );
+        )?;
     }
     let defaults = if detected.is_empty() {
         "none".to_owned()
@@ -399,8 +405,8 @@ fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>,
             .collect::<Vec<_>>()
             .join(",")
     };
-    print!("Agents [{defaults}]: ");
-    io::stdout().flush()?;
+    write!(crate::stdout(), "Agents [{defaults}]: ")?;
+    crate::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     let answer = if answer.trim().is_empty() {

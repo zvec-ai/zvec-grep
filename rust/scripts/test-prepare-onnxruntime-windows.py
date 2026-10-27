@@ -1,11 +1,13 @@
 import hashlib
 import importlib.util
 import io
+import json
 import lzma
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 spec = importlib.util.spec_from_file_location(
@@ -16,6 +18,25 @@ spec.loader.exec_module(prepare_ort)
 
 
 class VerifiedRuntimeTests(unittest.TestCase):
+    def test_selects_the_locked_directml_distribution_for_each_windows_architecture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifests = root / "build/download"
+            manifests.mkdir(parents=True)
+            rows = ["target\tfeature_set\turl\tsha256_hash"]
+            for index, target in enumerate(prepare_ort.TARGETS):
+                rows.append(f"{target}\tdirectml\thttps://example.invalid/{target}\t{str(index) * 64}")
+                rows.append(f"{target}\twebgpu\thttps://example.invalid/wrong-feature\t{'f' * 64}")
+            (manifests / "dist.tsv").write_text("\n".join(rows), encoding="utf-8")
+            metadata = {"packages": [{"name": "ort-sys", "manifest_path": str(root / "Cargo.toml")}]}
+            with mock.patch.object(prepare_ort.subprocess, "check_output", return_value=json.dumps(metadata)) as cargo:
+                for index, target in enumerate(prepare_ort.TARGETS):
+                    with self.subTest(target=target):
+                        dist = prepare_ort.distribution(root, target)
+                        self.assertEqual(dist["url"], f"https://example.invalid/{target}")
+                        self.assertEqual(dist["sha256_hash"], str(index) * 64)
+                        self.assertEqual(cargo.call_args.args[0][-2:], ["--filter-platform", target])
+
     def test_raw_lzma2_runtime_is_extracted_into_the_cache(self):
         tar_bytes = io.BytesIO()
         with tarfile.open(fileobj=tar_bytes, mode="w") as tar:

@@ -45,6 +45,9 @@ test("packaging copies complete compliance inputs and rejects an empty license",
   const destination = join(root, "candidate");
   await stageCompliance(source, destination);
   await verifyComplianceDirectory(destination);
+  await assert.rejects(verifyPublicationInputs({ platforms: [{
+    target: "source", package: "@zvec/base", components: [{ package: "@zvec/base-cuda" }],
+  }] }, root), /incomplete compliance files.*source[\\/]cuda/);
   assert.equal(
     await readFile(join(destination, "LICENSES", "project.txt"), "utf8"),
     "Example license text",

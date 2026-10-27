@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/zvec-ai/zvec-grep/compat/schema/server-option-precedence.schema.json",
+  "title": "Server option precedence oracle cases",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_revision", "cases"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source_revision": { "type": "string" },
+    "cases": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "result": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": { "kind": { "const": "selected" }, "value": { "type": "string" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "unset" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "message"],
+          "properties": { "kind": { "const": "parse_error" }, "message": { "type": "string" } }
+        }
+      ]
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action", "option", "form", "condition", "argv", "env", "node_result"],
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "type": "string" },
+        "option": { "type": "string" },
+        "form": { "type": "string" },
+        "condition": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } },
+        "node_result": { "$ref": "#/$defs/result" },
+        "allowed_differences": { "type": "array", "items": { "type": "string" } },
+        "expected_rust": { "$ref": "#/$defs/result" }
+      },
+      "if": {
+        "required": ["allowed_differences"],
+        "properties": { "allowed_differences": { "minItems": 1 } }
+      },
+      "then": { "required": ["expected_rust"] },
+      "else": { "not": { "required": ["expected_rust"] } }
+    }
+  }
+}

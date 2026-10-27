@@ -1,6 +1,7 @@
 //! Command-line parsing, validation, request construction, and terminal rendering.
 
 mod authorization;
+mod highlight;
 mod install;
 mod jsonc;
 mod managed_rg;
@@ -11,6 +12,7 @@ mod progress;
 mod render;
 mod setup;
 mod status;
+mod stdio;
 mod terminal;
 mod theme;
 pub use management::{
@@ -24,6 +26,7 @@ pub use setup::{
     prompt_setup_credential,
 };
 pub use status::{write_info_result, write_info_with_options};
+pub use stdio::stdout;
 pub use terminal::{stderr_supports_ansi, stdout_supports_ansi};
 
 use std::{
@@ -649,25 +652,25 @@ pub enum ServerAction {
 pub struct ServerStartArgs {
     #[arg(long)]
     pub listen: Option<String>,
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long, env = "ZVEC_GREP_MCP_TOOLSET", value_enum)]
     pub mcp_toolset: Option<McpToolset>,
-    #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
+    #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStopArgs {
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
-    #[arg(long = "token-file", env = "ZVEC_GREP_SERVER_TOKEN_FILE")]
+    #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ServerStatusArgs {
-    #[arg(long, env = "ZVEC_GREP_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long = "check-ready")]
     pub check_ready: bool,
@@ -2102,6 +2105,158 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(arguments).is_err());
         }
+    }
+
+    fn server_option_expected(case: &zg_testkit::ServerOptionCase) -> Option<PathBuf> {
+        match case.expected_rust.as_ref().unwrap_or(&case.node_result) {
+            zg_testkit::ServerOptionResult::Selected { value } => Some(value.into()),
+            zg_testkit::ServerOptionResult::Unset => None,
+            zg_testkit::ServerOptionResult::ParseError { message } => {
+                panic!("case {} needs a difference entry: {message}", case.id)
+            }
+        }
+    }
+
+    fn server_option_actual(
+        case: &zg_testkit::ServerOptionCase,
+    ) -> Result<Option<PathBuf>, String> {
+        Cli::try_parse_from(&case.argv)
+            .map_err(|error| error.to_string())
+            .and_then(|cli| {
+                cli.into_plan(std::env::temp_dir())
+                    .map_err(|error| error.to_string())
+            })
+            .and_then(|plan| match plan {
+                CliPlan::Server(super::ServerPlan::On(args) | super::ServerPlan::Run(args)) => {
+                    Ok(if case.option == "--home" {
+                        args.home
+                    } else {
+                        args.token_file
+                    })
+                }
+                CliPlan::Server(super::ServerPlan::Off(args)) => Ok(if case.option == "--home" {
+                    args.home
+                } else {
+                    args.token_file
+                }),
+                CliPlan::Server(super::ServerPlan::Status(args)) => Ok(args.home),
+                _ => Err("unexpected plan".to_owned()),
+            })
+    }
+
+    fn check_server_option_child(
+        output: &std::process::Output,
+        cases: &[&zg_testkit::ServerOptionCase],
+    ) -> Vec<String> {
+        let mut failures = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((_, json)) = line.split_once("SERVER_OPTION_CASE ") else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(json) else {
+                failures.push("invalid case record".to_owned());
+                continue;
+            };
+            let Some(id) = record["case"].as_str() else {
+                failures.push("missing case ID".to_owned());
+                continue;
+            };
+            let Some(case) = cases.iter().find(|case| case.id == id) else {
+                failures.push(format!("unexpected case: {id}"));
+                continue;
+            };
+            if !seen.insert(id.to_owned()) {
+                failures.push(format!("duplicate case: {id}"));
+            }
+            let expected = server_option_expected(case);
+            if record["expected"] != serde_json::json!(expected)
+                || record["actual"] != serde_json::json!({"Ok": expected})
+                || record["passed"] != true
+            {
+                failures.push(format!("case failed: {id}"));
+            }
+        }
+        for case in cases {
+            if !seen.contains(&case.id) {
+                failures.push(format!("missing case: {}", case.id));
+            }
+        }
+        if !output.status.success() {
+            failures.push(format!("child status: {}", output.status));
+        }
+        failures
+    }
+
+    fn run_server_option_children(child: &str, fixture: &zg_testkit::ServerOptionCases) {
+        let executable = std::env::current_exe().expect("test executable");
+        let mut failures = Vec::new();
+        for condition in ["both", "home", "absent"] {
+            let cases: Vec<_> = fixture
+                .cases
+                .iter()
+                .filter(|case| case.condition == condition)
+                .collect();
+            assert!(!cases.is_empty(), "empty child condition: {condition}");
+            assert!(cases.iter().all(|case| case.env == cases[0].env));
+            let output = std::process::Command::new(&executable)
+                .args([
+                    "--exact",
+                    "tests::server_option_precedence_is_independent_of_environment",
+                    "--nocapture",
+                ])
+                .env(child, condition)
+                .env_remove("ZVEC_GREP_HOME")
+                .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE")
+                .envs(&cases[0].env)
+                .output();
+            match output {
+                Ok(output) => {
+                    print!("{}", String::from_utf8_lossy(&output.stdout));
+                    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+                    failures.extend(check_server_option_child(&output, &cases));
+                }
+                Err(error) => failures.push(format!("{condition}: {error}")),
+            }
+        }
+        assert!(failures.is_empty(), "child failures: {failures:?}");
+    }
+
+    #[test]
+    fn server_option_precedence_is_independent_of_environment() {
+        const CHILD: &str = "ZG_TEST_SERVER_OPTION_PRECEDENCE_CHILD";
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../compat/cli/server-option-precedence.json");
+        let fixture = zg_testkit::load_server_option_cases(&path).expect("server option fixture");
+        assert_eq!(fixture.cases.len(), 56);
+        let ids: std::collections::BTreeSet<_> =
+            fixture.cases.iter().map(|case| &case.id).collect();
+        assert_eq!(ids.len(), fixture.cases.len());
+        let Ok(condition) = std::env::var(CHILD) else {
+            run_server_option_children(CHILD, &fixture);
+            return;
+        };
+        assert!(matches!(condition.as_str(), "both" | "home" | "absent"));
+        let mut failures = Vec::new();
+        for case in fixture
+            .cases
+            .iter()
+            .filter(|case| case.condition == condition)
+        {
+            let expected = server_option_expected(case);
+            let actual = server_option_actual(case);
+            let passed = actual.as_ref() == Ok(&expected);
+            println!(
+                "SERVER_OPTION_CASE {}",
+                serde_json::json!({
+                    "case": case.id, "expected": expected, "actual": actual, "passed": passed,
+                })
+            );
+            if !passed {
+                failures.push(&case.id);
+            }
+        }
+        assert!(failures.is_empty(), "case failures: {failures:?}");
     }
 
     #[test]

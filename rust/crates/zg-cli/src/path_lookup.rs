@@ -405,6 +405,7 @@ mod tests {
                     end_byte_column: 18,
                 }),
                 content_range: range,
+                match_ranges: Vec::new(),
                 content: content.into(),
                 outline: None,
                 content_role: Some(ContextContentRole::Source),

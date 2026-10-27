@@ -1,0 +1,28 @@
+[package]
+name = "zg-llama-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+libloading = "0.8.9"
+llama-cpp-sys-2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The engine retains the workspace's unsafe-code prohibition. This small FFI
+# boundary uses the exact same sys revision and registry as llama-cpp-2.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

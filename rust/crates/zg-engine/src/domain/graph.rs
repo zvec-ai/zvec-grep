@@ -23,7 +23,8 @@ pub(crate) enum GraphEdgeKind {
 pub(crate) enum EdgeProvenance {
     FileLocal,
     ImportScoped,
-    PreferredFile,
+    /// The target was selected by a unique qualified-name match.
+    QualifiedNameMatch,
     WorkspaceUnique,
 }
 
@@ -109,7 +110,7 @@ impl EdgeProvenance {
         match self {
             Self::FileLocal => "file_local",
             Self::ImportScoped => "import_scoped",
-            Self::PreferredFile => "preferred_file",
+            Self::QualifiedNameMatch => "qualified_name_match",
             Self::WorkspaceUnique => "workspace_unique",
         }
     }

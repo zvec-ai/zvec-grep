@@ -109,3 +109,118 @@ fn canonical_columns_reject_mismatched_identity_and_corrupt_metadata() {
     assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
     assert!(error.message().contains("invalid entity metadata"));
 }
+
+fn indexed_entity(id: &str, file_id: u32) -> Doc {
+    let mut entity = entity(file_id, false);
+    let id = EntityId::from_string(id.to_owned());
+    let fragments = vec![EntityFragment {
+        id: FragmentId::new(&id, 0),
+        range: entity.fragments()[0].range,
+    }];
+    entity = Entity::new(
+        id,
+        entity.file_id(),
+        entity.source_range(),
+        entity.content().clone(),
+        entity.metadata().cloned(),
+        fragments,
+    )
+    .expect("fixture identity");
+    encode_doc(&entity).expect("canonical entity")
+}
+
+#[test]
+fn file_ids_are_complete_isolated_and_preserved_across_reopen() {
+    super::super::zvec::initialize().expect("native runtime");
+    let root = tempfile::tempdir().expect("storage");
+    let table = Entities::open(root.path(), false).expect("entities");
+    let ids: Vec<_> = (0..2301)
+        .map(|ordinal| format!("00000001{ordinal:024x}"))
+        .collect();
+    table
+        .write(
+            &ids.iter()
+                .map(|id| indexed_entity(id.as_str(), 1))
+                .collect::<Vec<_>>(),
+        )
+        .expect("write several query batches");
+    table
+        .write(&[indexed_entity("other-file", 2)])
+        .expect("write another file");
+
+    assert_eq!(
+        table.list_ids_for_file(FileId::new(1)).expect("all IDs"),
+        ids
+    );
+    assert!(
+        table
+            .list_ids_for_file(FileId::new(99))
+            .expect("missing file")
+            .is_empty()
+    );
+    table.flush().expect("persist entities");
+    drop(table);
+
+    let table = Entities::open(root.path(), false).expect("reopen entities");
+    assert_eq!(
+        table
+            .list_ids_for_file(FileId::new(1))
+            .expect("persisted IDs"),
+        ids
+    );
+    table.delete_file(FileId::new(1)).expect("delete file");
+    assert!(
+        table
+            .list_ids_for_file(FileId::new(1))
+            .expect("deleted file")
+            .is_empty()
+    );
+    assert_eq!(
+        table
+            .list_ids_for_file(FileId::new(2))
+            .expect("other file retained"),
+        vec!["other-file".to_owned()]
+    );
+}
+
+#[test]
+fn full_file_id_batch_handles_escaped_range_bounds() {
+    super::super::zvec::initialize().expect("native runtime");
+    let root = tempfile::tempdir().expect("storage");
+    let table = Entities::open(root.path(), false).expect("entities");
+    let ids: Vec<_> = (0..1024)
+        .map(|ordinal| format!("quoted'\\id-{ordinal:04}"))
+        .collect();
+    table
+        .write(
+            &ids.iter()
+                .map(|id| indexed_entity(id.as_str(), 7))
+                .collect::<Vec<_>>(),
+        )
+        .expect("write a full query batch");
+    assert_eq!(
+        table
+            .list_ids_for_file(FileId::new(7))
+            .expect("escaped filter bounds"),
+        ids
+    );
+}
+
+#[test]
+fn file_id_listing_rejects_inconsistent_indexed_identity() {
+    super::super::zvec::initialize().expect("native runtime");
+    let root = tempfile::tempdir().expect("storage");
+    let table = Entities::open(root.path(), false).expect("entities");
+    let mut doc = indexed_entity("entity", 1);
+    doc.add_string("entity_id", "different")
+        .expect("corrupt indexed identity");
+    table.write(&[doc]).expect("write corrupt record");
+    let error = table
+        .list_ids_for_file(FileId::new(1))
+        .expect_err("corruption must not silently drop an old ID");
+    assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+    assert_eq!(
+        error.message(),
+        "entity identity differs from its index fields"
+    );
+}

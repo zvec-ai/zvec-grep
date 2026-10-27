@@ -20,6 +20,7 @@ pub(crate) struct LexicalMatch {
     pub excerpt_range: Option<TextRange>,
     /// Source coordinates of the returned lines, which may extend beyond the match.
     pub content_range: TextRange,
+    pub match_ranges: Vec<TextRange>,
     file: Arc<LexicalFile>,
     // Keep the String allocation movable for the common single-hit file.
     text: Arc<String>,
@@ -71,6 +72,7 @@ impl LexicalMatch {
             range,
             excerpt_range: None,
             content_range,
+            match_ranges: Vec::new(),
             file: Arc::new(LexicalFile {
                 absolute_path,
                 relative_path,
@@ -89,6 +91,7 @@ impl PartialEq for LexicalMatch {
             && self.range == other.range
             && self.excerpt_range == other.excerpt_range
             && self.content_range == other.content_range
+            && self.match_ranges == other.match_ranges
             && self.content() == other.content()
     }
 }
@@ -105,6 +108,7 @@ impl fmt::Debug for LexicalMatch {
             .field("range", &self.range)
             .field("excerpt_range", &self.excerpt_range)
             .field("content_range", &self.content_range)
+            .field("match_ranges", &self.match_ranges)
             .field("content", &self.content())
             .finish_non_exhaustive()
     }
@@ -113,6 +117,7 @@ impl fmt::Debug for LexicalMatch {
 struct PendingMatch {
     range: TextRange,
     content_range: TextRange,
+    match_ranges: Vec<TextRange>,
     content_span: Range<usize>,
 }
 
@@ -123,12 +128,19 @@ pub(super) struct LexicalMatchBuilder {
 }
 
 impl LexicalMatchBuilder {
-    pub(super) fn push(&mut self, range: TextRange, content_range: TextRange, content: &str) {
+    pub(super) fn push(
+        &mut self,
+        range: TextRange,
+        content_range: TextRange,
+        match_ranges: Vec<TextRange>,
+        content: &str,
+    ) {
         let start = self.text.len();
         self.text.push_str(content);
         self.matches.push(PendingMatch {
             range,
             content_range,
+            match_ranges,
             content_span: start..self.text.len(),
         });
     }
@@ -153,6 +165,7 @@ impl LexicalMatchBuilder {
             range: matched.range,
             excerpt_range: None,
             content_range: matched.content_range,
+            match_ranges: matched.match_ranges,
             text: Arc::clone(&text),
             content_span: matched.content_span,
         }));

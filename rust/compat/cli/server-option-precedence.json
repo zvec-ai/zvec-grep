@@ -1,0 +1,1339 @@
+{
+  "schema_version": 1,
+  "source_revision": "72067296b8b4acf3fba876df1656c8defd60867b",
+  "cases": [
+    {
+      "id": "on/--home/before/both",
+      "action": "on",
+      "option": "--home",
+      "form": "before",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "on"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "on/--home/after/both",
+      "action": "on",
+      "option": "--home",
+      "form": "after",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "on",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--home/both/both",
+      "action": "on",
+      "option": "--home",
+      "form": "both",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "on",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--home/none/both",
+      "action": "on",
+      "option": "--home",
+      "form": "none",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "on"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-home"
+      }
+    },
+    {
+      "id": "run/--home/before/both",
+      "action": "run",
+      "option": "--home",
+      "form": "before",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "run"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "run/--home/after/both",
+      "action": "run",
+      "option": "--home",
+      "form": "after",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "run",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--home/both/both",
+      "action": "run",
+      "option": "--home",
+      "form": "both",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "run",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--home/none/both",
+      "action": "run",
+      "option": "--home",
+      "form": "none",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "run"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-home"
+      }
+    },
+    {
+      "id": "off/--home/before/both",
+      "action": "off",
+      "option": "--home",
+      "form": "before",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "off"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "off/--home/after/both",
+      "action": "off",
+      "option": "--home",
+      "form": "after",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "off",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--home/both/both",
+      "action": "off",
+      "option": "--home",
+      "form": "both",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "off",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--home/none/both",
+      "action": "off",
+      "option": "--home",
+      "form": "none",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "off"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-home"
+      }
+    },
+    {
+      "id": "on/--token-file/before/both",
+      "action": "on",
+      "option": "--token-file",
+      "form": "before",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "on"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "on/--token-file/after/both",
+      "action": "on",
+      "option": "--token-file",
+      "form": "after",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "on",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--token-file/both/both",
+      "action": "on",
+      "option": "--token-file",
+      "form": "both",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "on",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--token-file/none/both",
+      "action": "on",
+      "option": "--token-file",
+      "form": "none",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "on"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-token"
+      }
+    },
+    {
+      "id": "run/--token-file/before/both",
+      "action": "run",
+      "option": "--token-file",
+      "form": "before",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "run"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "run/--token-file/after/both",
+      "action": "run",
+      "option": "--token-file",
+      "form": "after",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "run",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--token-file/both/both",
+      "action": "run",
+      "option": "--token-file",
+      "form": "both",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "run",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--token-file/none/both",
+      "action": "run",
+      "option": "--token-file",
+      "form": "none",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "run"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-token"
+      }
+    },
+    {
+      "id": "off/--token-file/before/both",
+      "action": "off",
+      "option": "--token-file",
+      "form": "before",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "off"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "off/--token-file/after/both",
+      "action": "off",
+      "option": "--token-file",
+      "form": "after",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "off",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--token-file/both/both",
+      "action": "off",
+      "option": "--token-file",
+      "form": "both",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "off",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--token-file/none/both",
+      "action": "off",
+      "option": "--token-file",
+      "form": "none",
+      "condition": "both",
+      "argv": [
+        "zg",
+        "--server",
+        "off"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home",
+        "ZVEC_GREP_SERVER_TOKEN_FILE": "environment-token"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-token"
+      }
+    },
+    {
+      "id": "status/--home/before/home",
+      "action": "status",
+      "option": "--home",
+      "form": "before",
+      "condition": "home",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "status"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "status/--home/after/home",
+      "action": "status",
+      "option": "--home",
+      "form": "after",
+      "condition": "home",
+      "argv": [
+        "zg",
+        "--server",
+        "status",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "status/--home/both/home",
+      "action": "status",
+      "option": "--home",
+      "form": "both",
+      "condition": "home",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "status",
+        "--home",
+        "after-action"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home"
+      },
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "status/--home/none/home",
+      "action": "status",
+      "option": "--home",
+      "form": "none",
+      "condition": "home",
+      "argv": [
+        "zg",
+        "--server",
+        "status"
+      ],
+      "env": {
+        "ZVEC_GREP_HOME": "environment-home"
+      },
+      "node_result": {
+        "kind": "selected",
+        "value": "environment-home"
+      }
+    },
+    {
+      "id": "on/--home/before/absent",
+      "action": "on",
+      "option": "--home",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "on"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "on/--home/after/absent",
+      "action": "on",
+      "option": "--home",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "on",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--home/both/absent",
+      "action": "on",
+      "option": "--home",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "on",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--home/none/absent",
+      "action": "on",
+      "option": "--home",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "on"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    },
+    {
+      "id": "run/--home/before/absent",
+      "action": "run",
+      "option": "--home",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "run"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "run/--home/after/absent",
+      "action": "run",
+      "option": "--home",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "run",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--home/both/absent",
+      "action": "run",
+      "option": "--home",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "run",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--home/none/absent",
+      "action": "run",
+      "option": "--home",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "run"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    },
+    {
+      "id": "off/--home/before/absent",
+      "action": "off",
+      "option": "--home",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "off"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "off/--home/after/absent",
+      "action": "off",
+      "option": "--home",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "off",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--home/both/absent",
+      "action": "off",
+      "option": "--home",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "off",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--home/none/absent",
+      "action": "off",
+      "option": "--home",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "off"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    },
+    {
+      "id": "status/--home/before/absent",
+      "action": "status",
+      "option": "--home",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "status"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "status/--home/after/absent",
+      "action": "status",
+      "option": "--home",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "status",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "status/--home/both/absent",
+      "action": "status",
+      "option": "--home",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--home",
+        "before-action",
+        "status",
+        "--home",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "status/--home/none/absent",
+      "action": "status",
+      "option": "--home",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "status"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    },
+    {
+      "id": "on/--token-file/before/absent",
+      "action": "on",
+      "option": "--token-file",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "on"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "on/--token-file/after/absent",
+      "action": "on",
+      "option": "--token-file",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "on",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--token-file/both/absent",
+      "action": "on",
+      "option": "--token-file",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "on",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "on/--token-file/none/absent",
+      "action": "on",
+      "option": "--token-file",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "on"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    },
+    {
+      "id": "run/--token-file/before/absent",
+      "action": "run",
+      "option": "--token-file",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "run"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "run/--token-file/after/absent",
+      "action": "run",
+      "option": "--token-file",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "run",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--token-file/both/absent",
+      "action": "run",
+      "option": "--token-file",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "run",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "run/--token-file/none/absent",
+      "action": "run",
+      "option": "--token-file",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "run"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    },
+    {
+      "id": "off/--token-file/before/absent",
+      "action": "off",
+      "option": "--token-file",
+      "form": "before",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "off"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "before-action"
+      }
+    },
+    {
+      "id": "off/--token-file/after/absent",
+      "action": "off",
+      "option": "--token-file",
+      "form": "after",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "off",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--token-file/both/absent",
+      "action": "off",
+      "option": "--token-file",
+      "form": "both",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "--token-file",
+        "before-action",
+        "off",
+        "--token-file",
+        "after-action"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "parse_error",
+        "message": "zg --server requires on, off, status, run, or --stdio"
+      },
+      "allowed_differences": [
+        "cli-server-options-before-action"
+      ],
+      "expected_rust": {
+        "kind": "selected",
+        "value": "after-action"
+      }
+    },
+    {
+      "id": "off/--token-file/none/absent",
+      "action": "off",
+      "option": "--token-file",
+      "form": "none",
+      "condition": "absent",
+      "argv": [
+        "zg",
+        "--server",
+        "off"
+      ],
+      "env": {},
+      "node_result": {
+        "kind": "unset"
+      }
+    }
+  ]
+}

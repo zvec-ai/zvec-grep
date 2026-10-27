@@ -410,6 +410,11 @@ Restart older resident daemons when updating the CLI; replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
 
+Managed rg results also provide optional `match_ranges` in decoded UTF-8 source
+coordinates. Terminal highlighting uses these actual matches, preserving regex,
+case, whole-word, and pattern-file semantics. Empty ranges are omitted; older
+replies without this field remain readable.
+
 Public search reports `freshness: fresh` or `freshness: possibly_stale`.
 `results: served_from_current_index` describes where results came from, with
 `background_refresh` reported separately. A provider that only reports current
@@ -482,6 +487,147 @@ Run the complete local gate with:
 bash scripts/check.sh
 ```
 
+## Native and CUDA builds
+
+The safe llama API and the C5 FFI boundary share the same pinned
+`zvec-ai/llama-cpp-rs` revision (`660cb4008b36aaefe9f98a590ba3b712b3a95087`),
+from branch `prebuilt/0.1.154-cpu-r2`.
+Its sys crate automatically selects a SHA256-pinned SDK when target, features
+and native options match: `zvec-0.1.154-cpu-r2` for CPU-only Linux x64 and
+Windows x64/ARM64, and `zvec-0.1.154-r1` for the existing five release configurations,
+including CUDA-enabled Linux/Windows x64. This pin adds Windows ARM64 CPU support
+without introducing the CUDA r2 architecture upgrade. Matching builds reuse native
+libraries and bindings without executing bindgen, CMake, C++ or CUDA compilation;
+Rust application code still compiles normally. CPU-only x64 builds download only
+the static CPU SDK, not the CUDA SDK; CUDA builds retain the shared core, CPU
+backends and both CUDA plugins. Custom native configurations use source builds
+in default `auto` mode. A download or integrity failure is an error, not a silent
+source fallback.
+
+The fork no longer registers llama.cpp as a Git submodule. Cargo fetches only
+the Rust bindings; matching SDK builds never fetch native source. Only explicit
+`source` builds or a configuration mismatch in `auto` acquire the hash-verified,
+fixed-revision source archive, cached under `$CARGO_HOME/llama-cpp-sources`
+(override with `LLAMA_CPP_SOURCE_CACHE`). The native revision, SDK and ABI are
+unchanged by this source-acquisition optimization.
+
+`LLAMA_CPP_BUILD_MODE=prebuilt` requires a matching SDK; `source` explicitly
+rebuilds llama.cpp. `LLAMA_CPP_RUNTIME_CACHE` controls the verified SDK cache
+(default `$CARGO_HOME/llama-cpp-runtimes`); `LLAMA_CPP_OFFLINE=1` requires it to
+be populated. These are **build-time** controls, unrelated to npm's runtime
+plugin installation. No local path patch or extra Cargo wrapper is required.
+
+Run commands below from `rust/`. The shared npm build/pack/install entry points
+prefer CUDA on Linux x64 and Windows x64. In default `auto` mode, with no `nvcc` on PATH they build a
+CPU-only package; `--cpu-only` selects that behavior explicitly. Other release
+targets keep their existing non-CUDA backends. Plain Cargo builds remain
+non-CUDA unless `--features cuda` is selected. Explicit `prebuilt` mode selects
+the CUDA SDK on x64 without probing or requiring a CUDA compiler.
+
+For direct `cargo build --features cuda` builds using a shared SDK or source, zg stages
+the linked llama/ggml core libraries beside the executable (and in Cargo's
+`deps`/`examples` directories). Source mode, including an `auto` fallback, uses
+only the current dependency's `lib`/`lib64`/`bin` outputs and copies resolved
+SONAME aliases such as `.so.0`, repairing dangling links. Run `target/debug/zg`
+or `target/release/zg` without adding native build directories to `LD_LIBRARY_PATH`.
+Optional backends still use the verified SDK cache or current source backend
+directory; this development output is not a portable distribution.
+Use the npm packaging commands below to assemble a distributable runtime.
+
+CUDA Cargo builds also deploy the pinned official ONNX Runtime CUDA 12 main
+library and its shared/CUDA providers beside the executable, using the same
+SHA-256-verified preparation script as npm packaging (requires Python 3 and
+curl; `PYTHON` can select the interpreter). The archive is reused from
+`target/ort-cuda12` (under the target triple for cross-target builds).
+`CARGO_NET_OFFLINE=true` requires that archive to be cached already. Both
+`--device cpu` and `--device cuda` can then load ORT without `ORT_DYLIB_PATH`
+or `LD_LIBRARY_PATH`; CUDA execution still requires a compatible NVIDIA driver,
+CUDA 12 runtime and cuDNN 9 installed on the host. Non-CUDA Cargo builds retain
+their existing ORT linking behavior and do not download this CUDA runtime.
+
+```sh
+npm run build
+npm run build -- --cpu-only
+npm run release:pack
+npm run release:pack -- --cpu-only
+# CUDA-capable x64 package without nvcc (PowerShell: set $env:LLAMA_CPP_BUILD_MODE):
+LLAMA_CPP_BUILD_MODE=prebuilt npm run build
+```
+
+CUDA **source** builds require Toolkit 13.1 on PATH and Toolkit 12.4 at `CUDA12_ROOT`
+(default `/usr/local/cuda-12.4` on Linux, or `CUDA_PATH_V12_4` on Windows).
+An installed but unsupported primary toolkit, missing fallback toolkit, or
+failed CUDA compilation is an error, not a silent CPU fallback. Building does
+not require a GPU. Both variants need the normal Rust/C++ build prerequisites;
+CUDA additionally uses CMake, Ninja, Python 3 and libclang, plus patchelf/readelf
+on Linux or Visual Studio 2022 Build Tools on Windows.
+
+The direct CUDA entry points are `scripts/cuda/build.sh` and
+`scripts/cuda/build.ps1`. They create `target/release/zg-cuda/{bin,lib}` by
+default; the npm entry point isolates them under `target/cuda/` and CPU builds
+under `target/cpu/`. `CARGO_TARGET_DIR` changes the parent output directory.
+Source-mode CUDA 12.4 on Windows requires MSVC 14.38 before running
+`scripts/cuda/build-fallback.py`. Matching SDK builds copy that plugin directly,
+so neither a second CMake build nor the fallback toolchain is needed.
+
+Publish CI requires prebuilt llama SDKs on all six targets, including the
+Windows ARM64 static CPU SDK. CUDA Rust CI also requires
+prebuilt mode instead of recompiling only for its T4 GPU. Linux publish builds
+run on Ubuntu 24.04 without a CUDA compiler. Runtime libraries, driver checks,
+link audits and real CPU/GPU inference gates remain required. Runtime staging
+reads the current Cargo invocation's `GGML_BACKENDS_DIR`, not the newest directory
+under `target/build`; only runtime libraries, not SDK import archives or bindings,
+are packaged. CUDA 13.1 distribution builds use
+`75-real;80-real;86-real;89-real;90-real;90-virtual`. The CUDA 12.4 fallback uses
+`50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real` to reduce its
+size, retaining PTX for driver JIT compilation where compatible native code is
+unavailable. Override `CMAKE_CUDA_ARCHITECTURES` for the primary backend or
+`CUDA12_ARCHITECTURES` for the fallback only when deliberately customizing a
+source build (`LLAMA_CPP_BUILD_MODE=source`). The fallback does not inherit the
+primary backend's architecture list; a custom fallback list cannot be mixed
+silently with a prebuilt SDK.
+
+The package contains `bin/zg[.exe]`, with all shared libraries, plugins and
+dictionaries under `lib/`. GGUF loads the CUDA 13.1 plugin first, then the
+CUDA 12.4 fallback from `lib/cuda12/`; both use the same locked llama.cpp core.
+ONNX uses the hash-verified official ORT 1.28.0 CUDA 12 core/providers.
+NVIDIA driver, CUDA runtime, cuBLAS and cuDNN 9 remain host dependencies.
+CUDA-enabled x64 builds default to automatic device selection and fall back
+to CPU when a GPU/backend is unavailable. `--device cpu` or
+`ZVEC_GREP_DEVICE=cpu` explicitly selects CPU. In CUDA-enabled GGUF builds,
+explicit CPU execution loads only CPU plugins, ignores `GGML_BACKEND_PATH`,
+and supplies an empty GPU device list. Optional GPU registration is separate:
+a later GPU request in the same process can still use preinstalled plugins.
+Before opening either CUDA plugin, GGUF checks the active CUDA Driver API
+capability, not the installed Toolkit version. The CUDA 13.1 primary requires
+at least `13000`. With the distribution targets, every visible GPU must be able
+to use native SM75/80/86/89/90 code, or compute90 PTX with capability `>= 13010`.
+For example, SM100 on a driver reporting `13000` skips the primary before it is
+registered and tries CUDA 12.4 instead. Forced PTX requires `13010` and a
+compute90-compatible GPU; it cannot use the primary on older GPU architectures.
+Failed queries or missing compatible code likewise skip the primary.
+Before opening the CUDA 12.4 fallback, its separate check still applies.
+PTX 8.4 paths require a reported
+capability of at least `12040` (CUDA 12.4). Older CUDA 12 drivers remain eligible
+when every visible GPU can use the distribution's native SM86 code (SM86/89)
+and PTX JIT is not forced. On those older drivers, any visible PTX-only device
+rejects the whole fallback. Failed probes or insufficient capability likewise
+skip it with a diagnostic and retain CPU execution.
+Explicit CPU requests do not run this probe; ORT selection is independent.
+GPU requests retain the upstream `GGML_BACKEND_PATH` override behavior, but an
+override requires `13010` before either GPU plugin scan: its architecture list
+is unknown, so it cannot use native-code exceptions or bypass either guard.
+Build-time custom architecture lists or an external `LLAMA_CPP_RUNTIME_DIR`
+also disable the corresponding exception. The primary exception requires
+explicit distribution targets or pinned `prebuilt` mode; `auto`/`source` builds
+without explicit targets conservatively require `13010`. Replacing plugins
+after a build is outside this distribution contract.
+This is a compatibility preflight, not subprocess isolation or a guarantee that
+every driver/runtime failure can be caught and retried on CPU.
+
+See [npm distribution](npm/README.md) for the complete layout, OS/backend
+support matrix, runtime dependencies, and publication policy.
+
 ## Local npm installation
 
 Build the release binary with the same script name used by the TypeScript
@@ -517,16 +663,25 @@ npm run test:package
 The build uses the published `zvec-rust` and `zvec-rust-build` 0.8.0 crates,
 without a local wrapper patch. Their bundled native library tracks upstream zvec
 at [`8397071`](https://github.com/alibaba/zvec/commit/8397071d815cd842be2068339e00a94e69f069d1).
-The build stages the shared library beside the executable. Both local and
-release packages include this SDK library; the engine uses its embedded Jieba
-dictionary without external dictionary files.
+The Cargo build stages the shared library beside the executable. Local and
+release npm packages place the executable in `bin/` and runtime libraries in
+`lib/`. The engine uses zvec's embedded Jieba dictionary without external
+dictionary files.
 
-Pass `--no-build` after `--` to reuse an existing `target/release/zg`, or pass
+Pass `--no-build` after `--` to reuse the last successful npm build (or a plain
+Cargo `target/release/zg` when no build record exists), or pass
 `--prefix <path>` to install or smoke-test under a custom npm prefix:
 
 ```sh
 npm run install:local -- --no-build --prefix /tmp/zvec-grep-npm
 ```
+
+On Linux and Windows, manual CPU packaging rejects runtime libraries outside
+the known CPU set (zvec and CPU/DirectML ORT). A CUDA-to-CPU Cargo rebuild can
+leave old shared libraries beside `zg`; it does not clean that directory.
+If packaging rejects such a mixed directory, rebuild with `--cpu-only` in a
+fresh `CARGO_TARGET_DIR`, or use an audited CUDA bundle. Packaging never deletes
+the original libraries or silently includes them in a CPU package.
 
 ## npm release packaging
 
@@ -543,13 +698,46 @@ npm run release:verify
 npm run release:pack
 ```
 
-The release tarballs are written under `dist/npm/release/tarballs/`. Run a real
-two-tarball install in an isolated npm prefix and verify the materialized binary
-with:
+The default published Linux x64 and Windows x64 bases contain a complete CPU
+runtime and retain dynamic CUDA support. Optional exact-version CUDA components
+are pinned in `plugins.json`, not mandatory npm dependencies. Postinstall installs
+CPU first and, by default, fetches the complete CUDA component set when NVIDIA
+detection succeeds. `ZG_INSTALL_ACCELERATOR=cpu` skips detection/downloads;
+`cuda` forces installation, including on GPU-free builders. Installation requires
+no CUDA compiler. Linux ORT is transported as two
+fragments and reconstructed with a full-library SHA256 check. The installed
+`bin/`, `lib/` and `lib/cuda12/` layout is unchanged. Local packaging follows the
+build policy above: no toolkit produces a CPU-only package. Use
+`npm run release:cpu` to explicitly produce a CPU-only package; CI supplies and
+audits a complete CUDA bundle before packaging the default x64 releases.
+
+Later add CUDA with `ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep`
+(omit `-g` for project-local installs). `ZG_PLUGIN_DIR` selects an absolute local
+artifact directory; `ZG_INSTALL_OFFLINE=1` prevents network access. Stop zg before
+adding plugins and restart any daemon afterwards. There is no `zg-setup` command
+or download during indexing/query execution. Auto plugin failures retain CPU;
+forced failures return an error. See [npm installation details](npm/meta/README.md),
+including recovery when installation scripts were skipped.
+
+The release tarballs are written under `dist/npm/release/tarballs/`.
+For release validation, produce the native packages once with `release:platform`,
+then run `release:collect -- --targets <target>` to pack the meta package and
+record the exact tarball hashes in `release.json`. Install those collected bytes
+in an isolated npm prefix and verify the materialized binary with:
 
 ```sh
 npm run release:smoke
 ```
+
+`release:smoke` (also named `release:artifact-smoke`) only verifies existing
+collected artifacts; it never builds or packs packages. CUDA release targets
+require their complete collected tarball set, but default `auto` installation
+may produce a verified CPU-only or CUDA installation depending on the host.
+Use `-- --accelerator auto --expect-cuda` when smoke must reject missing CUDA
+plugins (as GPU CI does); `--expect-cpu` instead requires zero CUDA requests on
+a CPU host. These expectations do not change the installer's Auto policy.
+A failed local rebuild invalidates
+`native-build.json`, so `--no-build` refuses reuse until a build completes.
 
 CI can package a previously built target artifact without rebuilding it:
 
@@ -563,10 +751,26 @@ node scripts/npm-release.mjs pack-platform \
 
 The runtime library directory must include zvec's shared library. Without
 `--lib-dir`, runtime libraries are read from the binary's directory.
+This entry point is CPU-only and applies the same mixed-directory check as
+local `pack --no-build`, including when `--binary` or `--lib-dir` is explicit.
 
-The `Publish Rust packages` workflow builds all five published native targets on matching
-GitHub runners. It runs only through manual dispatch. With `publish` left at its
-default `false`, it produces downloadable candidates without publishing to npm. Each runner installs
+For a complete audited CUDA bundle, preserve its `bin/` and `lib/` layout:
+
+```sh
+node scripts/npm-release.mjs pack-platform \
+  --target linux-x64-gnu \
+  --bundle-dir target/release/zg-cuda \
+  --no-build
+```
+
+Bundle mode accepts only regular files under `bin/` and `lib/`; `bin/`
+contains exactly the target executable. It cannot be combined with
+`--binary`, `--lib-dir`, or `--cpu-only`. All payload files are checksummed.
+
+The `Publish Rust packages` workflow builds the selected published native targets
+(all six by default) on matching CPU runners. It runs only through manual
+dispatch. With `publish` left at its default `false`, it produces downloadable
+candidates without publishing to npm. Each CPU artifact-verification runner installs
 its platform and meta tarballs, then runs `zg --version`, checks managed-rg,
 starts the packaged daemon, compares workspace status in direct and server
 modes, and stops the daemon. The server status request crosses the IPC boundary;
@@ -574,21 +778,120 @@ managed-rg intentionally stays local. macOS binaries receive ad hoc signatures;
 Developer ID, notarization, and Windows certificate signing are not required for
 candidate builds.
 
-Intel macOS is built and verified first. Only after its tarball installation,
-CLI startup, managed-rg, and daemon IPC checks pass do the other four native
-builds start. The final artifact is collected after all five targets pass.
+The selected platforms build in parallel after source validation; Intel macOS
+does not gate Linux or Windows. After all selected build jobs upload their
+native artifacts, collection creates the candidate once. Independent CPU and
+requested GPU jobs then verify the exact collected tarballs, including CLI,
+managed-rg, and daemon IPC checks on every selected platform.
 
-Linux candidates are built and smoke-tested on Ubuntu 24.04. The current ONNX
-Runtime prebuilt libraries cannot link against Ubuntu 22.04's glibc and C++
-runtime, so older Linux distributions are not covered by this release workflow.
-Intel macOS builds ONNX Runtime 1.28.0 with CoreML and the native zvec SDK from
-pinned source revisions. ONNX Runtime with CoreML still requires a source build;
-the zvec source revision matches the SDK bundled with zvec-rust 0.8.0. Both SDKs
-are cached and their shared libraries are included in the npm payload. The Intel
-release targets macOS 14 and later.
+The packaging workflow's manual `platform` input defaults to `all`. Select any
+of `darwin-arm64`, `darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`,
+`win32-x64-msvc`, or `win32-arm64-msvc` for an individual build. For example, to validate Linux x64:
 
-Download the `rust-release-<version>` artifact from the successful workflow run
-and unzip it. It contains all five platform tarballs, the meta tarball,
+```sh
+gh workflow run rust-publish.yml --ref <branch> \
+  -f publish=false -f cuda=false -f platform=linux-x64-gnu
+```
+
+Partial selections produce validation-only candidates and cannot be published;
+`publish=true` requires `platform=all`. Runs use branch-plus-platform concurrency
+groups: different platform selections can run concurrently, while an in-progress
+run in the same group is not cancelled by a newer run.
+
+Pushes do not trigger this packaging workflow. Manual runs with both
+`publish=false` and `cuda=false` use only CPU runners and do not publish to npm.
+Packaging always compiles on CPU runners, including when `cuda=true` or
+`publish=true`. Set `cuda=true, publish=false` to add GPU validation without
+publishing. Separate jobs on `gpu-linux-t4` and `gpu-windows-t4` download the
+selected Linux/Windows x64 native packages from the same run, verify their
+payload checksums, and run the packaged GGUF/ONNX GPU tests without compiling or
+repacking. These jobs install the required runtime libraries, not build
+toolchains, and exercise the CUDA 12 fallback and CUDA 13 primary paths.
+Both Windows GPU workflows share `scripts/cuda/prepare-windows.ps1`: on the
+ephemeral runner it upgrades older drivers to the pinned NVIDIA Data Center
+591.59 driver, authenticates the installer signature, and verifies the active
+driver version plus CUDA Driver API initialization and device enumeration.
+A driver installer reboot requirement, an inactive upgrade, or failed CUDA
+initialization stops the job; the helper never reboots the runner.
+Windows CUDA library lookup includes both toolkit `bin` and CUDA 13 `bin/x64`
+directories. Workspace and package GPU checks independently load the selected
+GGUF plugin and its dependencies before inference; this CI setup does not change
+the package's host CUDA runtime requirements.
+Publishing always requires GPU validation regardless of `cuda`. Candidate
+collection happens first, followed by parallel CPU and requested GPU validation.
+All selected platforms get the installed CLI/daemon checks; Linux/Windows x64
+also get the CPU model/fallback checks. A GPU failure does not block CPU checks
+or candidate retention, but all required CPU/GPU checks must pass before npm
+publication. A downloadable candidate is not proof of runtime validation.
+CPU runners compile Rust and assemble the default CUDA-capable bundles using
+the pinned native SDK. Linux x64 uses an Ubuntu 24.04 builder without nvcc;
+Linux ARM64 uses its native runner. Windows needs the Rust/MSVC linker but
+does not install CUDA compilers for packaging. Ordinary PR CI
+does not compile CUDA packages. `rust-ci.yml` is the single entry point for
+workspace and real-model verification. Push/PR runs use ordinary runners on
+Linux, macOS and Windows. Each test job compiles the workspace tests once, runs
+them with pinned cargo-nextest, and reuses the CLI and test binary for smoke
+checks and all three real models (Model2Vec, ORT and llama.cpp), without a separate
+build per model.
+For manual runs, `cuda_verify=true` enables `zg/cuda` from the first compilation,
+requiring the matching prebuilt SDK, but compilation, workspace tests, all three
+CPU model checks and build-cache uploads still run on ordinary CPU runners.
+Linux uses the Ubuntu 24.04 builder without GPU access or CUDA runtime libraries;
+Windows uses `windows-2022`, matching the GPU image's OS generation.
+Before the test harness copies any libraries, CUDA jobs run `cargo build --features cuda`
+and exercise the original `target/debug/zg` with GGUF/ONNX CPU index and query.
+The regression clears project library lookup overrides and runs outside the output
+directory. A `rust-cargo-cli-<platform>` artifact preserves these exact executable
+and sibling library bytes, plus the SDK backends at their compiled-in cache path.
+GPU jobs verify the snapshot's source SHA and hashes, then repeat CPU/CUDA index
+and query without repairing Cargo output or adding project library paths. The
+Windows CI SDK cache uses a fixed location because CPU/GPU workspaces have different
+drive letters; NVIDIA's host runtime paths are still required and preserved.
+After the CPU gates pass, separate GPU jobs download a `rust-cuda-tests-<platform>`
+artifact containing only two test executables and their runtime libraries.
+The bundle is checked against the resolved source SHA and per-file hashes, then
+run from a new path with explicit native-library lookup. GPU jobs install no Rust
+toolchain/MSVC, compile nothing and neither restore nor save Cargo build caches.
+They retain DLL loading checks, real ORT/llama.cpp CUDA inference with actual GPU
+evidence and no CPU fallback, plus the C5 CPU-to-CUDA same-process and CPU-plugin
+override isolation tests (`c5-*.log`). CUDA 12 GGUF fallback coverage remains in
+publish CI; Rust CUDA CI tests the CUDA 13 GGUF primary and CUDA 12 ORT.
+Model2Vec stays on CPU; macOS and the separate non-CUDA quality job remain
+unchanged. Quality, default tests and CUDA builds have separate build caches.
+`platform` defaults to `all`;
+select `linux` or `windows` to limit test platforms. Optional `ref` selects the
+reviewed source; otherwise the workflow's selected commit is used. All jobs
+check out the same resolved SHA. This workflow does no npm packaging or publishing.
+The current ONNX Runtime prebuilt libraries cannot link against
+Ubuntu 22.04's glibc and C++ runtime, so older Linux distributions are not
+covered by this release workflow.
+Packaging selects Cargo/CMake parallelism from available CPUs and total memory
+with a conservative 3 GiB per-job budget, a minimum of 1 and a maximum of 8.
+The same limits are passed into the Linux builder. This is a resource
+heuristic, not a guarantee against OOM. The existing 180-minute limits remain
+upper bounds, not expected build durations. CUDA 13.1 and 12.4 native compilation
+now belongs to the fork's versioned SDK release, not every zg CI run.
+Intel macOS builds ONNX Runtime 1.28.0 with CoreML from a pinned source revision.
+Like the other targets, it lets `zvec-rust-sys` select the prebuilt zvec SDK from
+its locked crate version and Cargo `TARGET`, retaining the upstream source-build
+fallback if SDK acquisition fails. The SDK cache lives under Cargo `OUT_DIR`
+and is covered by the existing `rust/target/release` cache. ONNX Runtime is
+cached separately; both shared libraries are included in the npm payload.
+The Intel release targets macOS 14 and later.
+
+Windows ARM64 builds and tests natively on `windows-11-arm` with ARM64 Node,
+Rust, and MSVC. zvec-rust 0.8.0 automatically downloads its Windows ARM64
+prebuilt SDK and stages `zvec_c_api.dll` for packaging; no local zvec source
+build is needed. ONNX Runtime uses the SHA-256-verified ARM64 DirectML archive
+from the locked dependency's distribution manifest. llama-cpp-rs selects the
+SHA-256-pinned Windows ARM64 static CPU SDK from `zvec-0.1.154-cpu-r2`, without
+running bindgen, CMake or a C++ compiler. No Clang/Ninja overrides are needed. npm selects
+`@zvec/zvec-grep-win32-arm64-msvc` for ARM64 Node on Windows.
+
+For a complete all-platform run, download the `rust-release-<version>` artifact
+from the successful workflow run
+and unzip it. It contains six base platform tarballs, seven CUDA component
+tarballs, the meta tarball,
 `SHA256SUMS`, `release.json` with the source commit, and platform-specific install
 commands. For example, on an ARM64 Mac:
 
@@ -602,15 +905,28 @@ Use the filenames from the downloaded artifact when the version changes. On
 Windows, use `zg.cmd` if PowerShell blocks the generated `zg.ps1` shim. Artifacts
 are retained for 14 days.
 
+Subset runs instead upload `rust-candidate-<version>`, containing the selected
+native tarballs and all required components, the unchanged exact-version meta tarball, checksums and install
+instructions. Its `release.json` records the selected targets and `partial: true`;
+it cannot be published or promoted as a complete release.
+
+Selected Linux/Windows x64 candidates also go through separate CPU artifact jobs.
+These download the collected `.tgz` files, verify their hashes and default CUDA
+capabilities, install only base/meta offline without rebuilding, and exercise CLI/daemon IPC.
+With CUDA host libraries unavailable, the installed meta package must also pass
+real GGUF/ONNX indexing and vector queries using both explicit CPU selection and
+default automatic CPU fallback. Logs are retained as `cpu-artifact-evidence-*`.
+Failure blocks npm publication; the candidate artifact is kept for diagnosis.
+
 To publish, update the Rust workspace version, tag the release commit on `main`
 as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured for all six
+publishing repository must have an npm trusted publisher configured for all 14
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
 
 Registry publication is currently blocked until reviewed license texts and
-SPDX SBOMs are supplied for every target in [`npm/compliance/`](npm/compliance/README.md).
+SPDX SBOMs are supplied for every target and CUDA component in [`npm/compliance/`](npm/compliance/README.md).
 Candidate downloads remain available while these inputs are prepared.
 Every publication uses `rust-canary`, letting users opt into Rust with
 `npm install --global @zvec/zvec-grep@rust-canary`. Five native runners then
@@ -619,7 +935,30 @@ exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default
 installation only after all registry checks pass.
 
-`release:collect` requires all platform tarballs and packs the meta package last.
+Each compressed tarball must be at most 350 MiB. Packing, collection and
+publication preflight all enforce this budget before any npm publication.
+Use `--output-dir <path>` with release commands to keep inspection artifacts
+separate from `dist/npm/release/`.
+
+`release:collect` requires all platform/component tarballs by default and packs the meta
+package last. `release:collect -- --targets linux-x64-gnu,win32-x64-msvc` collects
+only the explicitly selected platform tarballs and their components as a validation-only partial
+candidate; missing or extra tarballs are rejected. The meta package still locks
+all six platform versions, so its installation behavior is unchanged.
+`release:artifact-smoke` installs the current platform's exact collected native
+component and meta tarballs from `dist/npm/release/tarballs`, verifies the installation and
+CLI/daemon operation, and does not compile, repack or publish anything.
+CPU and GPU jobs share `install-artifacts`, the real npm installation entry point, and retain its
+`artifact-smoke/installation.json` report. They download only their platform
+artifact plus `rust-verification-<version>` (the collected meta tarball and
+inventory), so full-platform CUDA payloads are not repeatedly downloaded.
+`install-artifacts` verifies identity and payloads without executing zg; GPU jobs
+then execute in the designated runtime environment. `smoke-artifacts` adds the
+CLI/daemon probe on the matching CPU runner.
+Registry install/update/rollback runs on ordinary CPU runners and explicitly
+checks exact component versions, payload hashes and the assembled runtime in
+addition to registry tarball integrity; a CPU-only CLI success cannot hide a
+missing CUDA component. Real GPU execution is validated before publication.
 `release:publish` validates the collected files before publishing native packages
 and then the meta package under `rust-canary` with npm provenance. An already published version is
 reused only when its tarball integrity matches, allowing a partial publication

@@ -16,11 +16,14 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   cargoPackageVersion,
+  buildNative,
+  existingNativeBuild,
   loadReleaseManifest,
   npmEnvironment as sharedNpmEnvironment,
   run,
   selectPlatform,
   sha256File,
+  stageRuntimeBundle,
   stageZvecRuntime,
   workspaceDir,
 } from "./npm-package-core.mjs";
@@ -43,6 +46,7 @@ function currentPlatform() {
     report?.header ?? {},
   );
   return {
+    ...entry,
     platform: entry.os,
     arch: entry.cpu,
     libc: entry.libc,
@@ -52,9 +56,13 @@ function currentPlatform() {
 }
 
 function parseOptions(args) {
-  const options = { build: true, prefix: undefined };
+  const options = { build: true, cpuOnly: false, prefix: undefined };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === "--cpu-only") {
+      options.cpuOnly = true;
+      continue;
+    }
     if (argument === "--no-build") {
       options.build = false;
       continue;
@@ -74,17 +82,19 @@ function parseOptions(args) {
 }
 
 async function stagePackage(
-  { build },
+  options,
   { destination = packedPackageDir, linkToBuild = false } = {},
 ) {
   const descriptor = currentPlatform();
   const version = cargoPackageVersion();
-  if (build) {
-    run("cargo", ["build", "--locked", "--release", "--package", "zg"]);
-  }
+  const build = options.build
+    ? await buildNative(descriptor, options)
+    : await existingNativeBuild(descriptor, options);
 
   const sourceName = descriptor.binary;
-  const sourceBinary = join(workspaceDir, "target", "release", sourceName);
+  const sourceBinary = build.bundleDir
+    ? join(build.bundleDir, "bin", sourceName)
+    : join(build.profileDir, sourceName);
   try {
     await stat(sourceBinary);
   } catch {
@@ -97,8 +107,14 @@ async function stagePackage(
   await mkdir(outputDir, { recursive: true });
   await rm(temporaryDir, { recursive: true, force: true });
   await mkdir(join(temporaryDir, "bin"), { recursive: true });
+  await mkdir(join(temporaryDir, "lib"), { recursive: true });
+
+  const runtimeFiles = build.bundleDir
+    ? await stageRuntimeBundle(build.bundleDir, temporaryDir, descriptor.platform, sourceName)
+    : await stageZvecRuntime(build.profileDir, join(temporaryDir, "lib"), descriptor.platform);
 
   const packagedBinary = join(temporaryDir, "bin", sourceName);
+  await rm(packagedBinary, { force: true });
   if (linkToBuild && process.platform !== "win32") {
     await symlink(sourceBinary, packagedBinary);
   } else if (linkToBuild) {
@@ -110,12 +126,6 @@ async function stagePackage(
     await chmod(packagedBinary, 0o755);
   }
 
-  const runtimeFiles = await stageZvecRuntime(
-    join(workspaceDir, "target", "release"),
-    join(temporaryDir, "bin"),
-    descriptor.platform,
-  );
-
   const binaryStat = await stat(packagedBinary);
   const packageJson = {
     name: "@zvec/zvec-grep",
@@ -126,7 +136,8 @@ async function stagePackage(
     os: [descriptor.platform],
     cpu: [descriptor.arch],
     bin: { zg: `bin/${sourceName}` },
-    files: ["bin", "checksums.json", "README.md"],
+    files: ["bin", "lib", "checksums.json", "README.md"],
+    zvecGrep: { variant: build.variant },
   };
   if (descriptor.libc) {
     packageJson.libc = [descriptor.libc];
@@ -284,7 +295,7 @@ async function main() {
     await smoke(options);
     return;
   }
-  throw new Error("usage: npm-local.mjs <pack|install|smoke> [--no-build] [--prefix PATH]");
+  throw new Error("usage: npm-local.mjs <pack|install|smoke> [--cpu-only] [--no-build] [--prefix PATH]");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {

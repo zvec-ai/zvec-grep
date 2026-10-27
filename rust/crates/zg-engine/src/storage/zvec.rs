@@ -1,7 +1,13 @@
 //! Shared zvec initialization and collection operations.
-use std::{collections::HashMap, path::Path, sync::OnceLock};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt::Write,
+    path::Path,
+    sync::OnceLock,
+};
 use zvec_rust::{
     Collection, CollectionOptions, CollectionSchema, DataType, Doc, FieldSchema, IndexParams,
+    SearchQuery,
 };
 
 use crate::{EngineError, EngineResult};
@@ -174,4 +180,66 @@ pub(super) fn corrupt(message: impl std::fmt::Display) -> EngineError {
 #[track_caller]
 pub(super) fn native<T>(result: zvec_rust::Result<T>, operation: &str) -> EngineResult<T> {
     result.map_err(|error| EngineError::storage_failure(format!("zvec {operation}: {error}")))
+}
+
+/// Read every distinct entity ID matching a scalar filter without a result cap.
+/// Full batches split into open ranges around an already-collected pivot. This
+/// also progresses when one entity has enough fragment rows to fill a batch.
+pub(super) fn collect_entity_ids(
+    collection: &Collection,
+    filter: &str,
+    validate: impl Fn(&Doc) -> EngineResult<()>,
+) -> EngineResult<Vec<String>> {
+    const BATCH_SIZE: usize = 1024;
+    let mut ids = BTreeSet::new();
+    let mut ranges: Vec<(Option<String>, Option<String>)> = vec![(None, None)];
+    while let Some((lower, upper)) = ranges.pop() {
+        let mut filter = filter.to_owned();
+        if let Some(lower) = &lower {
+            let _ = write!(filter, " AND entity_id > {}", quote(lower));
+        }
+        if let Some(upper) = &upper {
+            let _ = write!(filter, " AND entity_id < {}", quote(upper));
+        }
+        let mut query = native(
+            SearchQuery::scalar(i32::try_from(BATCH_SIZE).expect("batch size fits i32")),
+            "create entity ID query",
+        )?;
+        native(query.set_filter(&filter), "filter entity IDs")?;
+        native(
+            query.set_output_fields(&["file_id", "entity_id"]),
+            "project entity IDs",
+        )?;
+        native(query.set_include_vector(false), "omit entity vectors")?;
+        let docs = native(collection.query(&query), "query entity IDs")?;
+        let full = docs.len() == BATCH_SIZE;
+        let mut batch = BTreeSet::new();
+        for doc in docs {
+            validate(&doc)?;
+            let id = string_field(&doc, "entity_id")?;
+            if lower.as_ref().is_some_and(|bound| id <= *bound)
+                || upper.as_ref().is_some_and(|bound| id >= *bound)
+            {
+                return Err(corrupt(
+                    "entity query returned an ID outside its requested range",
+                ));
+            }
+            batch.insert(id);
+        }
+        if full {
+            let pivot = batch
+                .iter()
+                .nth(batch.len() / 2)
+                .expect("full batch")
+                .clone();
+            ranges.push((Some(pivot.clone()), upper));
+            ranges.push((lower, Some(pivot)));
+        }
+        ids.extend(batch);
+    }
+    Ok(ids.into_iter().collect())
+}
+
+pub(super) fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "\\'"))
 }

@@ -49,6 +49,10 @@ export async function verifyComplianceDirectory(directory) {
 export async function verifyPublicationInputs(manifest, root) {
   for (const platform of manifest.platforms) {
     await verifyComplianceDirectory(join(root, platform.target));
+    for (const component of platform.components ?? []) {
+      await verifyComplianceDirectory(join(root, platform.target,
+        component.package.slice(platform.package.length + 1)));
+    }
   }
 }
 

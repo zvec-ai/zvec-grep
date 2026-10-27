@@ -1,6 +1,36 @@
 use super::*;
 use crate::models::catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry};
 
+#[test]
+fn cpu_model_parameters_exclude_gpu_devices_and_layers() {
+    let _registry = lock_backend_registry();
+    let params = cpu_model_params().expect("CPU model parameters");
+    assert_eq!(params.n_gpu_layers(), 0);
+    assert!(params.devices().is_empty());
+}
+
+#[test]
+fn cancelled_model_preparation_is_rejected() {
+    let signal = CancellationToken::new();
+    signal.cancel();
+    assert!(check_cancelled(Some(&signal)).is_err());
+}
+
+#[test]
+fn cuda_release_defaults_to_automatic_device_selection() {
+    let expected = if cfg!(all(
+        feature = "cuda",
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    )) {
+        Some(Device::Auto)
+    } else {
+        None
+    };
+    assert_eq!(resolve_device(None), expected);
+    assert_eq!(resolve_device(Some(Device::Cpu)), Some(Device::Cpu));
+}
+
 fn entry(reference: &str) -> LlamaCppConfig {
     get_embedding_model_catalog_entry(reference)
         .and_then(EmbeddingCatalogEntry::llama_cpp_config)
@@ -163,6 +193,65 @@ async fn cached_embeddinggemma_runs_real_llama_cpp_inference() {
         }
     }
     assert!(result.truncated.is_empty());
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires installed CUDA plugins, a working NVIDIA GPU and cached embeddinggemma GGUF; run in a fresh process"]
+async fn cached_embeddinggemma_uses_cuda() {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
+    // CPU initialization must not consume the one-time optional GPU registration.
+    // Keep the CPU model alive while loading the GPU model: no plugin unloading.
+    let cpu = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache.clone()),
+            device: Some(Device::Cpu),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    let result = cpu
+        .embed(
+            &[vec![Content::Text("find relevant code".to_owned())]],
+            EmbeddingOptions::default(),
+        )
+        .await
+        .expect("CPU inference before CUDA registration");
+    assert_eq!(result.vectors[0].len(), 768);
+    assert!(
+        cpu.state
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|loaded| !loaded.gpu)
+    );
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(Device::Cuda),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    let result = model
+        .embed(
+            &[vec![Content::Text("find relevant code".to_owned())]],
+            EmbeddingOptions::default(),
+        )
+        .await
+        .expect("CUDA llama.cpp inference");
+
+    assert_eq!(result.vectors[0].len(), 768);
+    assert!(result.vectors[0].iter().all(|value| value.is_finite()));
+    let loaded = model.state.lock().await;
+    assert!(
+        loaded.as_ref().is_some_and(|loaded| loaded.gpu),
+        "CUDA request unexpectedly fell back to CPU"
+    );
 }
 
 #[cfg(target_os = "macos")]

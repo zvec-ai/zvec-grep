@@ -6,7 +6,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "cargo build --locked --release --package zg",
+    "build": "node scripts/npm-release.mjs build",
     "check": "bash scripts/check.sh && npm run test:package",
     "install:local": "node scripts/npm-local.mjs install",
     "pack:local": "node scripts/npm-local.mjs pack",
@@ -14,7 +14,9 @@
     "release:platform": "node scripts/npm-release.mjs pack-platform",
     "release:meta": "node scripts/npm-release.mjs pack-meta",
     "release:pack": "node scripts/npm-release.mjs pack-current",
-    "release:smoke": "node scripts/npm-release.mjs smoke-current",
+    "release:cpu": "node scripts/npm-release.mjs pack-current --cpu-only",
+    "release:smoke": "node scripts/npm-release.mjs smoke-artifacts",
+    "release:artifact-smoke": "node scripts/npm-release.mjs smoke-artifacts",
     "release:collect": "node scripts/npm-release.mjs collect",
     "release:publish": "node scripts/npm-release.mjs publish",
     "release:promote": "node scripts/npm-release.mjs promote",

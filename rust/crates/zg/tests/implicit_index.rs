@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     net::TcpListener,
     process::{Command, Output, Stdio},
     sync::{
@@ -198,6 +199,91 @@ fn status_check_ready_keeps_direct_and_server_exit_semantics() {
     check("✓ Workspace index is ready", true);
     fs::write(fixture.root.path().join("added.rs"), "fn added() {}\n").expect("new source file");
     check("! Workspace index needs an update", false);
+}
+
+fn with_closed_stdout(mut command: Command) -> Output {
+    let (reader, writer) = std::io::pipe().expect("stdout pipe");
+    drop(reader);
+    command
+        .stdout(Stdio::from(writer))
+        .output()
+        .expect("run with closed stdout")
+}
+
+#[test]
+fn closed_stdout_preserves_success_and_readiness_errors() {
+    let mut fixture = Fixture::new();
+    fixture.start_server();
+    for args in [
+        vec!["--version"],
+        vec!["--help"],
+        vec!["--server", "status"],
+        vec!["--status", "--mode", "direct"],
+        vec!["--status", "--mode", "server"],
+    ] {
+        let output = with_closed_stdout(fixture.command(&args));
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+    }
+    for mode in ["direct", "server"] {
+        let output =
+            with_closed_stdout(fixture.command(&["--status", "--mode", mode, "--check-ready"]));
+        assert_eq!(output.status.code(), Some(1), "{mode}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "Error: workspace index is not ready\n",
+            "{mode}: {output:?}"
+        );
+    }
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--embedding",
+        "local/potion-code-16m-v2",
+    ]);
+    for mode in ["direct", "server"] {
+        for args in [
+            vec!["--status", "--mode", mode, "--check-ready"],
+            vec!["--fts", "needle", "--mode", mode, "--refresh", "off"],
+        ] {
+            let output = with_closed_stdout(fixture.command(&args));
+            assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+            assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        }
+    }
+    fixture.success(&["--server", "off"]);
+    fixture.server_started = false;
+    let output = with_closed_stdout(fixture.command(&["--server", "status", "--check-ready"]));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Error: server is not ready\n"
+    );
+}
+
+#[test]
+fn partial_stdout_consumption_keeps_query_successful() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.path().join("source.txt"),
+        format!("needle {}\n", "x".repeat(400)).repeat(10_000),
+    )
+    .expect("large search fixture");
+    let mut child = fixture
+        .command(&["--rg", "needle", "source.txt", "--mode", "direct"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("query producer");
+    let mut stdout = child.stdout.take().expect("query stdout");
+    let mut prefix = [0; 100];
+    stdout.read_exact(&mut prefix).expect("consume first chunk");
+    assert!(String::from_utf8_lossy(&prefix).contains("source.txt"));
+    drop(stdout);
+    let output = child.wait_with_output().expect("query completion");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 struct GatedEmbedding {
@@ -579,7 +665,10 @@ fn configured_local_models_follow_environment_then_global_default_precedence() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Select an embedding model:"), "{stderr}");
+        assert!(
+            stderr.contains("Select an embedding model to build zg index:"),
+            "{stderr}"
+        );
         fixture.assert_model("direct", expected);
     }
 }
@@ -605,7 +694,10 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Select an embedding model:"), "{stderr}");
+        assert!(
+            stderr.contains("Select an embedding model to build zg index:"),
+            "{stderr}"
+        );
         assert!(stderr.contains("Index ready"), "{stderr}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
         let status = success(
@@ -789,16 +881,42 @@ fn implicit_build_preserves_local_overrides_without_persisting_remote_credential
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn escaping_model_selection_leaves_no_index_or_downloads() {
-    let fixture = Fixture::new();
-    let output = terminal::run(
-        fixture.command(&["--mode", "direct", "--fts", "needle", "--no-color"]),
-        &[("Esc Exit", b"\x1b")],
-    );
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(!fixture.root.path().join(".zvec-grep").exists());
-    assert!(!fixture.user.path().join("models").exists());
+fn cancelling_model_selection_exits_without_error_or_index() {
+    for (mode, server) in [
+        ("direct", false),
+        ("server", true),
+        ("auto", false),
+        ("auto", true),
+    ] {
+        for cancellation in [b"\x1b".as_slice(), b"\x03".as_slice()] {
+            let mut fixture = Fixture::new();
+            if server {
+                fixture.start_server();
+            }
+            let output = terminal::run(
+                fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
+                &[("Esc Exit", cancellation)],
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(130), "{mode}: {stderr}");
+            assert!(output.stdout.is_empty());
+            assert!(
+                !stderr.contains("Index creation cancelled"),
+                "{mode}: {stderr}"
+            );
+            assert!(!stderr.contains("error["), "{mode}: {stderr}");
+            assert!(
+                !stderr.to_ascii_lowercase().contains("error:"),
+                "{mode}: {stderr}"
+            );
+            assert!(
+                stderr.contains("Select an embedding model to build zg index:"),
+                "{mode}: {stderr}"
+            );
+            assert!(!fixture.root.path().join(".zvec-grep").exists());
+            assert!(!fixture.user.path().join("models").exists());
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

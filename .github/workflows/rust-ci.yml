@@ -6,6 +6,7 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/rust-package-build.yml"
       - ".github/actions/**"
       - ".gitignore"
       - "!**/*.md"
@@ -14,16 +15,31 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/rust-package-build.yml"
       - ".github/actions/**"
       - ".gitignore"
       - "!**/*.md"
   workflow_dispatch:
+    inputs:
+      cuda_verify:
+        description: Build CUDA-enabled tests and verify real GPU inference on trusted Linux/Windows GPU runners
+        type: boolean
+        default: false
+      platform:
+        description: Test platforms (all includes macOS, which remains non-CUDA)
+        type: choice
+        default: all
+        options: [all, linux, windows]
+      ref:
+        description: Optional reviewed source ref; empty uses the commit selected for this run
+        type: string
+        default: ""
 
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}-${{ inputs.platform || 'all' }}-${{ inputs.cuda_verify && 'cuda' || 'default' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 defaults:
   run:
@@ -37,8 +53,55 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  source:
+    name: Resolve source and test platforms
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      matrix: ${{ steps.source.outputs.matrix }}
+      gpu_matrix: ${{ steps.source.outputs.gpu_matrix }}
+      run_cuda: ${{ steps.source.outputs.run_cuda }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - id: source
+        shell: python
+        working-directory: ${{ github.workspace }}
+        env:
+          MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          TEST_PLATFORM: ${{ inputs.platform || 'all' }}
+          CUDA_VERIFY: ${{ inputs.cuda_verify || false }}
+        run: |
+          import json, os, subprocess
+          selected = os.environ["TEST_PLATFORM"] if os.environ["MANUAL_RUN"] == "true" else "all"
+          cuda = os.environ["MANUAL_RUN"] == "true" and os.environ["CUDA_VERIFY"] == "true"
+          assert selected in ("all", "linux", "windows"), f"Invalid test platform: {selected}"
+          platforms = [
+              {"platform": "linux", "os": "ubuntu-latest", "gpu_runner": "gpu-linux-t4"},
+              {"platform": "macos", "os": "macos-latest", "gpu_runner": ""},
+              {"platform": "windows", "os": "windows-latest", "gpu_runner": "gpu-windows-t4"},
+          ]
+          matrix = [{**entry, "cuda": cuda and bool(entry["gpu_runner"])} for entry in platforms
+                    if selected == "all" or entry["platform"] == selected]
+          # Match the Windows GPU image's OS generation while compiling on CPU.
+          for entry in matrix:
+              if entry["cuda"] and entry["platform"] == "windows":
+                  entry["os"] = "windows-2022"
+          gpu = [entry for entry in matrix if entry["cuda"]]
+          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"sha={sha}\n")
+              output.write("matrix=" + json.dumps({"include": matrix}) + "\n")
+              output.write("gpu_matrix=" + json.dumps({"include": gpu}) + "\n")
+              output.write(f"run_cuda={str(bool(gpu)).lower()}\n")
+
   quality:
     name: rust quality
+    needs: source
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -46,14 +109,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.source.outputs.sha }}
           persist-credentials: false
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          prefix-key: rust-ci-v2
+          prefix-key: rust-ci-v3-quality
           workspaces: rust -> target
+          cache-directories: |
+            ~/.cargo/llama-cpp-sources/
+            ~/.cargo/llama-cpp-runtimes/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check formatting
         run: cargo fmt --all --check
@@ -67,42 +134,616 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Validate Cargo metadata
         run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+      - name: Test npm packaging
+        run: node --test scripts/npm-local.test.mjs scripts/npm-release-*.test.mjs npm/meta/install.test.cjs
 
   test:
-    name: rust test (${{ matrix.os }})
+    name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
+    needs: source
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 30 }}
+    # Compile on CPU; GPU jobs only run the selected tests and original Cargo CLI.
+    timeout-minutes: ${{ matrix.cuda && 180 || 90 }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+      matrix: ${{ fromJSON(needs.source.outputs.matrix) }}
+    env:
+      CUDA_VERIFY: ${{ matrix.cuda }}
+      SOURCE_SHA: ${{ needs.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.source.outputs.sha }}
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Use a short Windows Cargo home
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import os, pathlib
+          # Keep dependency/cache paths short, including on-demand source builds.
+          cargo_home = pathlib.Path(pathlib.Path(os.environ["GITHUB_WORKSPACE"]).anchor) / "zg-cargo"
+          (cargo_home / "bin").mkdir(parents=True, exist_ok=True)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"CARGO_HOME={cargo_home}\n")
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path:
+              path.write(f"{cargo_home / 'bin'}\n")
+          print(f"CARGO_HOME={cargo_home}")
+      - name: Configure the model cache and prebuilt CUDA build limits
+        shell: python
+        run: |
+          import os
+          cache = os.path.join(os.environ["RUNNER_TEMP"], "zvec-grep-model-cache")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"ZVEC_GREP_MODEL_CACHE={cache}\n")
+              if os.environ["CUDA_VERIFY"] == "true":
+                  environment.write("CARGO_BUILD_JOBS=2\nCMAKE_BUILD_PARALLEL_LEVEL=2\nLLAMA_CPP_BUILD_MODE=prebuilt\n")
+                  # CPU/GPU Windows workspaces use different drive letters. Keep
+                  # the compiled-in SDK cache address identical, without adding
+                  # it to PATH or overriding backend lookup at runtime.
+                  sdk = "C:/zg-ci-runtimes" if os.name == "nt" else os.path.abspath("target/llama-runtimes")
+                  environment.write(f"LLAMA_CPP_RUNTIME_CACHE={sdk}\n")
+      - name: Set up MSVC for CUDA
+        if: matrix.cuda && runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: "2022"
       - name: Install the pinned Rust toolchain
+        if: ${{ !matrix.cuda || runner.os != 'Linux' }}
         run: rustup show active-toolchain
       - name: Cache Rust dependencies
+        if: ${{ !matrix.cuda }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          prefix-key: rust-ci-v2
+          prefix-key: rust-ci-v3-test
           workspaces: rust -> target
+          cache-directories: |
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-sources/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/llama-cpp-runtimes/
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.148
-      # The default Windows temp directory is on C:, which is much slower than the D: workspace drive.
+      # Keep Windows tests on the fast workspace drive, including GPU runners.
       - name: Keep test temp files on the workspace drive
         if: runner.os == 'Windows'
         shell: bash
         run: |
           echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - name: Run workspace tests
-        run: cargo nextest run --locked --workspace --all-targets --no-fail-fast
-      - name: Smoke test the CLI
+      - name: Cache CUDA test dependencies and build output
+        if: matrix.cuda
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/
+            ${{ env.LLAMA_CPP_RUNTIME_CACHE }}/
+            rust/target/
+            !rust/target/cuda-tests.tgz
+            !rust/target/cuda-tests/
+            !rust/target/cargo-cli.tgz
+            !rust/target/cargo-cli/
+          key: rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-${{ needs.source.outputs.sha }}
+          restore-keys: |
+            rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-
+      - name: Restore the three real models
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/zvec-grep-model-cache
+          key: rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          restore-keys: |
+            rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-
+      - name: Compile and run Linux CUDA workspace tests
+        if: matrix.cuda && runner.os == 'Linux'
         shell: bash
-        run: ./target/debug/zg${{ runner.os == 'Windows' && '.exe' || '' }} --rg "zvec-grep Rust rewrite" README.md
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Keep the shared log parent runner-owned: the container writes a
+          # subdirectory, then later host-side tee writes sibling CPU logs.
+          mkdir -p rust/target rust/model-logs "$HOME/.cargo/registry" "$HOME/.cargo/git" "$ZVEC_GREP_MODEL_CACHE"
+          docker build --platform linux/amd64 --file rust/scripts/cuda/cuda-builder.Dockerfile \
+            --build-arg CUDA_IMAGE=ubuntu:24.04 \
+            --build-arg RUST_VERSION="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust/rust-toolchain.toml)" \
+            --tag zvec-grep-cuda-ci .
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
+            --volume "$HOME/.cargo/git:/root/.cargo/git" \
+            --volume "$ZVEC_GREP_MODEL_CACHE:/model-cache" \
+            --volume "$(command -v cargo-nextest):/usr/local/bin/cargo-nextest:ro" \
+            --env CARGO_INCREMENTAL --env CARGO_PROFILE_DEV_DEBUG --env CARGO_PROFILE_TEST_DEBUG \
+            --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
+            --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work/rust/target/llama-runtimes \
+            --env RUST_BACKTRACE --env CARGO_TERM_COLOR --env SOURCE_SHA \
+            zvec-grep-cuda-ci bash -euo pipefail -c '
+              cargo nextest --version
+              python3 scripts/cuda/runtime.py --reset-cargo-cli target/debug
+              cargo build --locked --features cuda --message-format=json > target/cargo-cli.json
+              python3 scripts/cuda/e2e.py --cargo-binary target/debug/zg --explicit-cpu \
+                --model-cache /model-cache --logs model-logs/cargo-cli-cpu
+              python3 scripts/cuda/runtime.py --cargo-messages target/cargo-cli.json \
+                --cargo-cli-archive target/cargo-cli.tgz
+              # Only after testing/snapshotting raw Cargo output may the test
+              # harness prepare runtime directories for non-zg executables.
+              cargo test --locked --workspace --all-targets --features zg/cuda --no-run \
+                --message-format=json > target/ci-tests.json
+              python3 scripts/cuda/runtime.py --cargo-messages target/ci-tests.json --destination target/debug
+              python3 scripts/cuda/prepare-onnxruntime.py --platform linux \
+                --cache-dir target/ort-cuda12 --destination target/debug
+              native_dirs="$(find /work/rust/target/debug -name "*.so*" -printf "%h\n" | sort -u | paste -sd :)"
+              export LD_LIBRARY_PATH="${native_dirs}:${LD_LIBRARY_PATH:-}"
+              export ORT_DYLIB_PATH=/work/rust/target/debug/libonnxruntime.so.1
+              cargo nextest run --locked --workspace --all-targets --features zg/cuda --no-fail-fast
+              ./target/debug/zg --rg "zvec-grep Rust rewrite" README.md
+            '
+      - name: Build and exercise the original Windows Cargo CLI without library overrides
+        if: matrix.cuda && runner.os == 'Windows'
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys
+          pathlib.Path("target").mkdir(exist_ok=True)
+          subprocess.run([sys.executable, "scripts/cuda/runtime.py", "--reset-cargo-cli", "target/debug"], check=True)
+          with pathlib.Path("target/cargo-cli.json").open("w", encoding="utf-8") as output:
+              subprocess.run(["cargo", "build", "--locked", "--features", "cuda", "--message-format=json"],
+                             stdout=output, check=True)
+          subprocess.run([sys.executable, "scripts/cuda/e2e.py", "--cargo-binary", "target/debug/zg.exe",
+                          "--explicit-cpu", "--model-cache", os.environ["ZVEC_GREP_MODEL_CACHE"],
+                          "--logs", "model-logs/cargo-cli-cpu"], check=True)
+          subprocess.run([sys.executable, "scripts/cuda/runtime.py", "--cargo-messages", "target/cargo-cli.json",
+                          "--cargo-cli-archive", "target/cargo-cli.tgz"], check=True)
+      - name: Compile workspace tests once
+        if: ${{ !matrix.cuda || runner.os != 'Linux' }}
+        shell: python
+        run: |
+          import os, pathlib, subprocess
+          pathlib.Path("target").mkdir(exist_ok=True)
+          # Keep targets/features/profile identical to nextest; this JSON also
+          # identifies the active model tests and plugins for no-build GPU checks.
+          command = ["cargo", "test", "--locked", "--workspace", "--all-targets", "--no-run", "--message-format=json"]
+          if os.environ["CUDA_VERIFY"] == "true":
+              command += ["--features", "zg/cuda"]
+          # Direct file output also avoids PowerShell 5's UTF-16 redirection.
+          with pathlib.Path("target/ci-tests.json").open("w", encoding="utf-8") as output:
+              subprocess.run(command, stdout=output, check=True)
+      - name: Prepare native library lookup for the compiled executables
+        if: ${{ !matrix.cuda || runner.os != 'Linux' }}
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys
+          if os.environ["CUDA_VERIFY"] == "true":
+              subprocess.run([sys.executable, "scripts/cuda/runtime.py", "--cargo-messages",
+                              "target/ci-tests.json", "--destination", "target/debug"], check=True)
+              subprocess.run([sys.executable, "scripts/cuda/prepare-onnxruntime.py", "--platform", "win32",
+                              "--cache-dir", "target/ort-cuda12", "--destination", "target/debug"], check=True)
+          suffix = "*.dll" if os.name == "nt" else "*.dylib" if sys.platform == "darwin" else "*.so*"
+          directories = sorted({str(path.parent.resolve()) for path in pathlib.Path("target/debug").rglob(suffix)})
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              if os.environ["CUDA_VERIFY"] == "true":
+                  environment.write(f"ORT_DYLIB_PATH={pathlib.Path('target/debug/onnxruntime.dll').resolve()}\n")
+              if os.name != "nt":
+                  variable = "DYLD_FALLBACK_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+                  environment.write(f"{variable}={os.pathsep.join([*directories, os.environ.get(variable, '')])}\n")
+          if os.name == "nt":
+              with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as search_path:
+                  search_path.write("\n".join(directories) + "\n")
+      - name: Run workspace tests
+        if: ${{ !matrix.cuda || runner.os != 'Linux' }}
+        shell: python
+        run: |
+          import os, subprocess
+          command = ["cargo", "nextest", "run", "--locked", "--workspace", "--all-targets", "--no-fail-fast"]
+          if os.environ["CUDA_VERIFY"] == "true":
+              command += ["--features", "zg/cuda"]
+          subprocess.run(command, check=True)
+      - name: Smoke test the compiled CLI
+        if: ${{ !matrix.cuda || runner.os != 'Linux' }}
+        shell: python
+        run: |
+          import os, pathlib, subprocess
+          binary = pathlib.Path("target/debug") / ("zg.exe" if os.name == "nt" else "zg")
+          subprocess.run([str(binary.resolve()), "--rg", "zvec-grep Rust rewrite", "README.md"], check=True)
+      - name: Bundle Windows CUDA tests without compiler or build cache
+        if: matrix.cuda && runner.os == 'Windows'
+        shell: python
+        run: |
+          import subprocess, sys
+          subprocess.run([sys.executable, "scripts/cuda/runtime.py", "--cargo-messages",
+                          "target/ci-tests.json", "--test-archive", "target/cuda-tests.tgz"], check=True)
+      - name: Bundle Linux CUDA tests without compiler or build cache
+        if: matrix.cuda && runner.os == 'Linux'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            --env SOURCE_SHA --env LLAMA_CPP_BUILD_MODE zvec-grep-cuda-ci \
+            python3 scripts/cuda/runtime.py --cargo-messages target/ci-tests.json \
+              --test-archive target/cuda-tests.tgz
+      - name: Exercise the relocated CUDA test bundle on CPU before uploading it
+        if: matrix.cuda
+        shell: python
+        run: |
+          import os, pathlib, sys, tarfile
+          sys.path.insert(0, "scripts/cuda")
+          from runtime import verify_test_bundle
+          with tarfile.open("target/cuda-tests.tgz") as archive:
+              archive.extractall("target", filter="data")
+          bundle = pathlib.Path("target/cuda-tests").resolve()
+          verify_test_bundle(bundle)
+          if os.name == "nt":
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+                  environment.write(f"ZVEC_GREP_NATIVE_LIB_DIR={bundle / 'lib'}\n")
+                  environment.write(f"ORT_DYLIB_PATH={bundle / 'lib/onnxruntime.dll'}\n")
+              with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path:
+                  path.write(f"{bundle / 'lib'}\n")
+      - name: Locate the compiled workspace model test binary
+        id: model-test
+        shell: python
+        run: |
+          import json, os, pathlib
+          records = [json.loads(line) for line in pathlib.Path("target/ci-tests.json").read_text(encoding="utf-8").splitlines()]
+          if os.environ["CUDA_VERIFY"] == "true":
+              # Run the exact transferable test payload, not the original OUT_DIR.
+              binaries = ([str(pathlib.Path("target/cuda-tests/bin/zg_engine.exe").resolve())]
+                          if os.name == "nt" else ["/work/rust/target/cuda-tests/bin/zg_engine"])
+          else:
+              binaries = [record["executable"] for record in records
+                          if record.get("reason") == "compiler-artifact"
+                          and record["target"]["name"] == "zg_engine"
+                          and record["profile"]["test"] and record.get("executable")]
+          assert len(binaries) == 1, f"Expected one zg-engine test executable: {binaries}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"path={binaries[0]}\n")
+      - name: Verify real models using the existing test binary
+        if: ${{ !matrix.cuda || runner.os != 'Linux' }}
+        shell: python
+        env:
+          MODEL_TEST_BINARY: ${{ steps.model-test.outputs.path }}
+        run: |
+          import os, pathlib, re, subprocess
+          cases = [("cpu", "model2vec", "local/potion-code-16m-v2"),
+                   ("cpu", "onnx", "local/all-minilm-l6-v2"),
+                   ("cpu", "gguf", "local/embeddinggemma-300m")]
+          logs = pathlib.Path("model-logs")
+          logs.mkdir(exist_ok=True)
+          failures = []
+          for device, backend, model in cases:
+              environment = dict(os.environ)
+              environment.update(ZVEC_GREP_SMOKE_MODEL=model, ORT_LOG="verbose")
+              environment.pop("ZVEC_GREP_SMOKE_DEVICE", None)
+              log_path = logs / f"{device}-{backend}.log"
+              try:
+                  with log_path.open("w", encoding="utf-8") as log:
+                      subprocess.run([environment["MODEL_TEST_BINARY"],
+                          "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds",
+                          "--ignored", "--exact", "--nocapture"], env=environment,
+                          stdout=log, stderr=subprocess.STDOUT, timeout=900, check=True)
+                  output = log_path.read_text(encoding="utf-8", errors="replace")
+                  if not re.search(r"test result: ok\. 1 passed; 0 failed;", output):
+                      raise RuntimeError("Expected exactly one passing test, not an empty or skipped selection")
+              except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as error:
+                  failures.append(f"{device}-{backend}: {error}")
+              finally:
+                  print(f"=== {device}-{backend} ===", flush=True)
+                  print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
+          if failures:
+              raise RuntimeError("\n".join(failures))
+      - name: Verify Linux CPU models without rebuilding or GPU libraries
+        if: matrix.cuda && runner.os == 'Linux'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          MODEL_TEST_BINARY: ${{ steps.model-test.outputs.path }}
+        run: |
+          mkdir -p rust/model-logs "$ZVEC_GREP_MODEL_CACHE"
+          failed=0
+          for spec in \
+            'cpu|model2vec|local/potion-code-16m-v2|zvec-grep-cuda-ci' \
+            'cpu|onnx|local/all-minilm-l6-v2|zvec-grep-cuda-ci' \
+            'cpu|gguf|local/embeddinggemma-300m|zvec-grep-cuda-ci'; do
+            IFS='|' read -r device backend model runtime_image <<< "$spec"
+            if ! docker run --rm --platform linux/amd64 \
+              --volume "${GITHUB_WORKSPACE}:/work:ro" \
+              --volume "$ZVEC_GREP_MODEL_CACHE:/model-cache" \
+              --workdir /work/rust --env DEBIAN_FRONTEND=noninteractive \
+              --env ZVEC_GREP_MODEL_CACHE=/model-cache --env ZVEC_GREP_SMOKE_MODEL="$model" \
+              --env ORT_LOG=verbose --env RUST_BACKTRACE --env MODEL_TEST_BINARY \
+              --env ZVEC_GREP_NATIVE_LIB_DIR=/work/rust/target/cuda-tests/lib \
+              --env ORT_DYLIB_PATH=/work/rust/target/cuda-tests/lib/libonnxruntime.so.1 \
+              "$runtime_image" bash -euo pipefail -c '
+                export LD_LIBRARY_PATH="/work/rust/target/cuda-tests/lib:${LD_LIBRARY_PATH:-}"
+                timeout 900 "$MODEL_TEST_BINARY" models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds \
+                  --ignored --exact --nocapture
+              ' 2>&1 | tee "rust/model-logs/${device}-${backend}.log"; then
+              failed=1
+            elif ! grep -Eq 'test result: ok\. 1 passed; 0 failed;' "rust/model-logs/${device}-${backend}.log"; then
+              echo "${device}-${backend}: Expected exactly one passing test, not an empty or skipped selection" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Upload only the GPU test runtime bundle
+        if: matrix.cuda
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-cuda-tests-${{ matrix.platform }}
+          path: rust/target/cuda-tests.tgz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload the unmodified Cargo CLI and its original SDK cache
+        if: matrix.cuda
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-cargo-cli-${{ matrix.platform }}
+          path: rust/target/cargo-cli.tgz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+      - name: Restore Linux CUDA cache ownership
+        if: ${{ always() && matrix.cuda && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          mkdir -p target "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          if [ -n "${ZVEC_GREP_MODEL_CACHE:-}" ]; then
+            mkdir -p "$ZVEC_GREP_MODEL_CACHE"
+            sudo chown -R "$(id -u):$(id -g)" "$ZVEC_GREP_MODEL_CACHE"
+          fi
+      - name: Retain real model logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-model-evidence-${{ matrix.platform }}-${{ matrix.cuda && 'cuda' || 'default' }}
+          path: rust/model-logs/
+          if-no-files-found: warn
+          retention-days: 7
+
+  cuda:
+    name: rust CUDA models (${{ matrix.platform }}, no compilation)
+    if: needs.source.outputs.run_cuda == 'true'
+    needs: [source, quality, test]
+    runs-on:
+      group: gpu-runners
+      labels: ${{ matrix.gpu_runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.source.outputs.gpu_matrix) }}
+    env:
+      SOURCE_SHA: ${{ needs.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Prepare and verify the Windows GPU driver without compiler tools
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & scripts/cuda/prepare-windows.ps1 -DriverOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify the Linux GPU
+        if: runner.os == 'Linux'
+        run: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+      - name: Install Windows ONNX CUDA 12 runtime libraries
+        if: runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.8.1"
+          method: network
+          sub-packages: '["cudart", "cublas", "curand", "cufft", "nvrtc"]'
+          use-local-cache: true
+      - name: Configure Windows CUDA 12 runtime lookup
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import os, pathlib, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import configure_windows_cuda_paths
+          configure_windows_cuda_paths(pathlib.Path(os.environ["CUDA_PATH"]))
+      - name: Install pinned Windows cuDNN
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          python -m pip install --no-deps --require-hashes -r scripts/cuda/windows-runtime-requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $site = python -c "import sysconfig; print(sysconfig.get_path('purelib'))"
+          Get-ChildItem "$site/nvidia" -Filter *.dll -Recurse |
+            ForEach-Object { $_.DirectoryName } | Sort-Object -Unique |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Install the Windows CUDA 13 runtime
+        if: runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "13.1.1"
+          method: network
+          sub-packages: '["cudart", "cublas"]'
+          use-local-cache: true
+      - name: Configure Windows CUDA 13 runtime lookup
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import os, pathlib, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import configure_windows_cuda_paths
+          configure_windows_cuda_paths(pathlib.Path(os.environ["CUDA_PATH"]))
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-cuda-tests-${{ matrix.platform }}
+          path: rust/target
+      - name: Extract and verify the CPU-built test bundle at its new path
+        shell: python
+        run: |
+          import os, pathlib, sys, tarfile
+          sys.path.insert(0, "scripts/cuda")
+          from runtime import verify_test_bundle
+          with tarfile.open("target/cuda-tests.tgz") as archive:
+              archive.extractall("target", filter="data")
+          bundle = pathlib.Path("target/cuda-tests").resolve()
+          verify_test_bundle(bundle)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"ZVEC_GREP_MODEL_CACHE={pathlib.Path(os.environ['RUNNER_TEMP']) / 'zvec-grep-model-cache'}\n")
+          if os.name == "nt":
+              with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path:
+                  path.write(f"{bundle / 'lib'}\n")
+      - name: Restore models downloaded by the CPU tests
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/zvec-grep-model-cache
+          key: rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          restore-keys: |
+            rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-
+      - name: Download the original Cargo CLI output
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-cargo-cli-${{ matrix.platform }}
+          path: rust/target
+      - name: Verify original Cargo CLI CPU and CUDA index/query without library overrides
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys, tarfile
+          sys.path.insert(0, "scripts/cuda")
+          from runtime import cargo_cli_linux_mounts, restore_cargo_sdk, verify_cargo_cli
+          with tarfile.open("target/cargo-cli.tgz") as archive:
+              archive.extractall("target", filter="data")
+          bundle = pathlib.Path("target/cargo-cli").resolve()
+          manifest = verify_cargo_cli(bundle)
+          models = pathlib.Path(os.environ["ZVEC_GREP_MODEL_CACHE"])
+          models.mkdir(parents=True, exist_ok=True)
+          logs = pathlib.Path("model-logs").resolve()
+          logs.mkdir(exist_ok=True)
+          if os.name == "nt":
+              # Restore the SDK where Cargo originally downloaded it. Do not
+              # copy anything into profile/ or add project directories to PATH.
+              restore_cargo_sdk(bundle)
+              subprocess.run([sys.executable, "scripts/cuda/e2e.py", "--cargo-binary",
+                              str(bundle / manifest["binary"]), "--model-cache", str(models),
+                              "--logs", str(logs / "cargo-cli-gpu"), "--expected-gguf-cuda", "13.1"], check=True)
+          else:
+              mounts = cargo_cli_linux_mounts(os.environ["GITHUB_WORKSPACE"], bundle, manifest)
+              failures = []
+              for backend, image in (
+                  ("onnx", "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc"),
+                  ("gguf", "nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34"),
+              ):
+                  command = ["docker", "run", "--rm", "--gpus", "all", "--platform", "linux/amd64",
+                      *[argument for mount in mounts for argument in ("--volume", mount)],
+                      "--volume", f"{models}:/model-cache", "--volume", f"{logs}:/logs",
+                      "--env", "DEBIAN_FRONTEND=noninteractive", image, "bash", "-euo", "pipefail", "-c",
+                      'apt_options=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3); '
+                      'apt-get "${apt_options[@]}" update -qq; '
+                      'apt-get "${apt_options[@]}" install --yes --no-install-recommends python3 ca-certificates >/dev/null; '
+                      'exec python3 /work/rust/scripts/cuda/e2e.py --cargo-binary /work/rust/target/debug/zg '
+                      '--model-cache /model-cache --logs "/logs/cargo-cli-gpu-$1" --backend "$1" --expected-gguf-cuda 13.1',
+                      "cargo-cli", backend]
+                  result = subprocess.run(command, check=False)
+                  if result.returncode:
+                      failures.append(f"{backend}: exit {result.returncode}")
+              if failures:
+                  raise RuntimeError("Original Cargo CLI validation failed: " + ", ".join(failures))
+      - name: Load the relocated Windows CUDA plugin and its dependencies
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import pathlib, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import verify_windows_cuda_plugin
+          verify_windows_cuda_plugin(pathlib.Path("target/cuda-tests/lib/ggml-cuda.dll").resolve(),
+                                     13, pathlib.Path("model-logs/windows-loader"))
+      - name: Verify CUDA models and C5 using CPU-built tests without Cargo
+        shell: python
+        run: |
+          import os, pathlib, re, subprocess, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import cuda_evidence
+          windows = os.name == "nt"
+          bundle = pathlib.Path("target/cuda-tests").resolve()
+          runtime_root = str(bundle) if windows else "/gpu-tests"
+          native = f"{runtime_root}/lib"
+          models = os.environ["ZVEC_GREP_MODEL_CACHE"] if windows else "/model-cache"
+          smoke = "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds"
+          cases = [
+              ("cuda-onnx", "zg_engine", smoke, "local/all-minilm-l6-v2"),
+              ("cuda-gguf", "zg_engine", smoke, "local/embeddinggemma-300m"),
+              ("c5-cpu-override", "zg_llama_native", "tests::real_cpu_plugin_ignores_gpu_override", None),
+              ("c5-cpu-then-cuda", "zg_engine",
+               "models::backends::llama_cpp::model::tests::cached_embeddinggemma_uses_cuda", None),
+          ]
+          logs = pathlib.Path("model-logs")
+          logs.mkdir(exist_ok=True)
+          pathlib.Path(os.environ["ZVEC_GREP_MODEL_CACHE"]).mkdir(parents=True, exist_ok=True)
+          failures = []
+          for name, binary, test, model in cases:
+              variables = {
+                  "ZVEC_GREP_NATIVE_LIB_DIR": native, "ZVEC_GREP_MODEL_CACHE": models,
+                  "ZVEC_GREP_TEST_MODEL_CACHE": models, "RUST_BACKTRACE": "1", "ORT_LOG": "verbose",
+                  "ORT_DYLIB_PATH": f"{native}/" + ("onnxruntime.dll" if windows else "libonnxruntime.so.1"),
+              }
+              if model:
+                  variables.update(ZVEC_GREP_SMOKE_DEVICE="cuda", ZVEC_GREP_SMOKE_MODEL=model)
+              if name == "c5-cpu-override":
+                  variables["GGML_BACKEND_PATH"] = f"{native}/" + ("ggml-cuda.dll" if windows else "libggml-cuda.so")
+              environment = dict(os.environ)
+              for key in ("GGML_BACKEND_PATH", "ZVEC_GREP_SMOKE_DEVICE", "ZVEC_GREP_SMOKE_MODEL"):
+                  environment.pop(key, None)
+              environment.update(variables)
+              command = [f"{runtime_root}/bin/{binary}" + (".exe" if windows else ""),
+                         test, "--ignored", "--exact", "--nocapture"]
+              if not windows:
+                  image = ("nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc"
+                           if name == "cuda-onnx" else
+                           "nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34")
+                  command = [
+                      "docker", "run", "--rm", "--gpus", "all", "--platform", "linux/amd64",
+                      "--volume", f"{bundle}:/gpu-tests:ro",
+                      "--volume", f"{os.environ['ZVEC_GREP_MODEL_CACHE']}:/model-cache",
+                      "--env", "DEBIAN_FRONTEND=noninteractive",
+                      *[argument for key, value in variables.items() for argument in ("--env", f"{key}={value}")],
+                      image, "bash", "-euo", "pipefail", "-c",
+                      'export LD_LIBRARY_PATH="/gpu-tests/lib:${LD_LIBRARY_PATH:-}"; '
+                      # The pinned image supplies CUDA. Restrict apt to Ubuntu
+                      # sources so NVIDIA mirror syncs cannot block certificates.
+                      'if [ "$1" = model ]; then '
+                      'apt_options=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3); '
+                      'apt-get "${apt_options[@]}" update -qq; '
+                      'apt-get "${apt_options[@]}" install --yes --no-install-recommends ca-certificates >/dev/null; fi; '
+                      'shift; exec timeout 900 "$@"', "gpu-test", "model" if model else "c5", *command,
+                  ]
+              log_path = logs / f"{name}.log"
+              try:
+                  with log_path.open("w", encoding="utf-8") as log:
+                      subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT,
+                                     timeout=960, check=True)
+                  output = log_path.read_text(encoding="utf-8", errors="replace")
+                  if not re.search(r"test result: ok\. 1 passed; 0 failed;", output):
+                      raise RuntimeError("Expected exactly one passing test, not an empty or skipped selection")
+                  if model:
+                      for line in cuda_evidence(output, name.removeprefix("cuda-"), "13.1"):
+                          print(line)
+              except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+                  failures.append(f"{name}: {error}")
+              finally:
+                  print(f"=== {name} ===", flush=True)
+                  print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
+          if failures:
+              raise RuntimeError("\n".join(failures))
+      - name: Retain CUDA model and C5 evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-model-evidence-${{ matrix.platform }}-gpu
+          path: rust/model-logs/
+          if-no-files-found: warn
+          retention-days: 7

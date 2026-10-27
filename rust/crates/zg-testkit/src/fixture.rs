@@ -43,6 +43,10 @@ pub enum FixtureError {
         path: String,
         source: serde_json::Error,
     },
+    #[error(
+        "invalid fixture {path}, case {case_id}: expected_rust is required exactly when allowed_differences is not empty"
+    )]
+    InvalidCase { path: String, case_id: String },
     #[error("unsupported fixture schema version {actual}; expected {expected}")]
     UnsupportedVersion { actual: u32, expected: u32 },
 }

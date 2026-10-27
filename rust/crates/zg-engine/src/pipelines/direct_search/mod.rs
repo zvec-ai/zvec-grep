@@ -256,11 +256,18 @@ fn context_from_lexical(
 }
 
 fn context_item(enriched: EnrichedLexicalMatch, use_entity_ranges: bool) -> ContextItem {
-    let EnrichedLexicalMatch { matched, container } = enriched;
+    let EnrichedLexicalMatch {
+        mut matched,
+        container,
+    } = enriched;
     let rank = matched.rank;
     let range = matched.range.into();
     let excerpt_range = matched.excerpt_range.map(Into::into);
     let content_range = matched.content_range.into();
+    let match_ranges = std::mem::take(&mut matched.match_ranges)
+        .into_iter()
+        .map(Into::into)
+        .collect();
     let (absolute_path, relative_path, content) = matched.into_paths_and_content();
     ContextItem {
         kind: ContextItemKind::LexicalMatch,
@@ -270,6 +277,7 @@ fn context_item(enriched: EnrichedLexicalMatch, use_entity_ranges: bool) -> Cont
         range,
         excerpt_range,
         content_range,
+        match_ranges,
         content,
         outline: None,
         content_role: Some(ContextContentRole::Source),

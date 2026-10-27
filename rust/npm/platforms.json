@@ -23,7 +23,30 @@
       "os": "linux",
       "cpu": "x64",
       "libc": "glibc",
-      "binary": "zg"
+      "binary": "zg",
+      "defaultVariant": "cuda",
+      "components": [
+        {
+          "package": "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda13",
+          "file": "lib/libggml-cuda.so",
+          "payload": "lib/libggml-cuda.so"
+        },
+        {
+          "package": "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda12",
+          "file": "lib/cuda12/libggml-cuda.so",
+          "payload": "lib/cuda12/libggml-cuda.so"
+        },
+        {
+          "package": "@zvec/zvec-grep-linux-x64-gnu-ort-cuda-part1",
+          "file": "lib/libonnxruntime_providers_cuda.so",
+          "payload": "parts/ort-cuda.part1"
+        },
+        {
+          "package": "@zvec/zvec-grep-linux-x64-gnu-ort-cuda-part2",
+          "file": "lib/libonnxruntime_providers_cuda.so",
+          "payload": "parts/ort-cuda.part2"
+        }
+      ]
     },
     {
       "target": "linux-arm64-gnu",
@@ -38,6 +61,31 @@
       "package": "@zvec/zvec-grep-win32-x64-msvc",
       "os": "win32",
       "cpu": "x64",
+      "binary": "zg.exe",
+      "defaultVariant": "cuda",
+      "components": [
+        {
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ggml-cuda13",
+          "file": "lib/ggml-cuda.dll",
+          "payload": "lib/ggml-cuda.dll"
+        },
+        {
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ggml-cuda12",
+          "file": "lib/cuda12/ggml-cuda.dll",
+          "payload": "lib/cuda12/ggml-cuda.dll"
+        },
+        {
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ort-cuda",
+          "file": "lib/onnxruntime_providers_cuda.dll",
+          "payload": "lib/onnxruntime_providers_cuda.dll"
+        }
+      ]
+    },
+    {
+      "target": "win32-arm64-msvc",
+      "package": "@zvec/zvec-grep-win32-arm64-msvc",
+      "os": "win32",
+      "cpu": "arm64",
       "binary": "zg.exe"
     }
   ]

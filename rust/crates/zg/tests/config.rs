@@ -395,7 +395,7 @@ fn binary_consumes_compact_color_and_debug_options() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("Context"));
     assert!(stdout.contains("sample.txt"));
-    assert!(stdout.contains("1: needle"));
+    assert!(stdout.contains("1: \x1b[1;33mneedle\x1b[0m"));
     assert!(stdout.contains("\x1b["));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Diagnostics:"));
     let output = fixture.success(&["--rg", "--color", "never", "needle"]);

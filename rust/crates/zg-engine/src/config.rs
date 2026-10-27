@@ -379,11 +379,23 @@ pub(crate) fn runtime_device(
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
-        return Ok(None);
+        return Ok(default_runtime_device());
     };
     serde_json::from_value(json!(value.trim().to_lowercase()))
         .map(Some)
         .map_err(|_| EngineError::invalid_argument("Invalid ZVEC_GREP_DEVICE"))
+}
+
+pub(crate) const fn default_runtime_device() -> Option<Device> {
+    if cfg!(all(
+        feature = "cuda",
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    )) {
+        Some(Device::Auto)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn model_cache(
@@ -520,6 +532,20 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_release_defaults_to_automatic_device_selection() {
+        let expected = if cfg!(all(
+            feature = "cuda",
+            any(target_os = "linux", target_os = "windows"),
+            target_arch = "x86_64"
+        )) {
+            Some(Device::Auto)
+        } else {
+            None
+        };
+        assert_eq!(default_runtime_device(), expected);
+    }
 
     #[test]
     fn defaults_accept_only_current_single_model_settings() {

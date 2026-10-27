@@ -9,10 +9,15 @@ publish.workspace = true
 
 [features]
 default = []
-# CUDA and Vulkan require their native toolchains at build time. Platform
-# release builds enable the matching feature, while unsupported requests keep
-# the same warning-and-CPU-fallback behavior as main.
-cuda = ["llama-cpp-2/cuda", "ort/cuda"]
+# Matching CUDA builds reuse the pinned native SDK; custom CUDA/Vulkan
+# configurations require source toolchains. Runtime CPU fallback is unchanged.
+cuda = [
+    "dep:zg-llama-native",
+    "llama-cpp-2/cuda",
+    "llama-cpp-2/dynamic-backends",
+    "ort/load-dynamic",
+    "ort/cuda",
+]
 vulkan = ["llama-cpp-2/vulkan", "ort/webgpu"]
 
 [dependencies]
@@ -27,7 +32,9 @@ hex = "0.4.3"
 ignore.workspace = true
 hmac-sha256 = "1.1.14"
 httpdate = "1.0.3"
-llama-cpp-2 = { version = "0.1.154", default-features = false }
+llama-cpp-2.workspace = true
+# Stage ORT runtime sidecars beside Cargo outputs for npm packaging, including
+# dynamically linked Intel macOS ORT and Windows DirectML's DLL.
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-27", "copy-dylibs", "download-binaries", "std", "tls-rustls"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -54,6 +61,7 @@ tree-sitter-typescript.workspace = true
 uuid.workspace = true
 zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
+zg-llama-native = { path = "../zg-llama-native", optional = true }
 zvec-rust.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -70,6 +78,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directm
 # Count SQLite VM instructions in graph query performance regression tests.
 rusqlite = { version = "0.37", features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

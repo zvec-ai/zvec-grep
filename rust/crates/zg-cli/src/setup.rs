@@ -195,7 +195,7 @@ impl ModelSelection {
                 clean(&crate::output_path(root).display().to_string())
             ),
             String::new(),
-            "Select an embedding model:".into(),
+            "Select an embedding model to build zg index:".into(),
             String::new(),
             if self.tab == 0 {
                 "  [ Local models ]    Remote models"
@@ -527,6 +527,7 @@ mod tests {
         picker.key(key(KeyCode::Down));
         let lines = picker.lines(Path::new("/workspace"), 12).join("\n");
         assert!(lines.contains("› local/two"));
+        assert!(lines.contains("Select an embedding model to build zg index:"));
         assert!(!lines.contains("local/one"));
         assert!(lines.contains("Esc Exit"));
     }

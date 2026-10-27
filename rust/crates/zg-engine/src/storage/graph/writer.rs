@@ -10,9 +10,9 @@ const TARGET_ID_BATCH_SIZE: usize = 512;
 impl SqliteGraphStorage {
     /// Atomically replaces one file's local graph and invalidates inbound edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
-    /// an empty slice for a new file. Snapshot node IDs validate ownership;
-    /// node metadata is not persisted here. The implicit file endpoint is `f{file_id}`, matching
-    /// the zvec file document key. Cross-file edges must use `apply_resolutions`.
+    /// an empty slice for a new file. Snapshot node IDs validate ownership.
+    /// The implicit file endpoint is `f{file_id}`, matching
+    /// the zvec file document key. Cross-file edges are written by the resolver.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
     ///
@@ -107,7 +107,11 @@ impl SqliteGraphStorage {
     }
 }
 
-fn validate(file_id: &str, graph: &FileGraphResult, old_entity_ids: &[String]) -> Result<()> {
+pub(super) fn validate(
+    file_id: &str,
+    graph: &FileGraphResult,
+    old_entity_ids: &[String],
+) -> Result<()> {
     for id in old_entity_ids {
         nonempty(id)?;
     }
@@ -128,7 +132,7 @@ fn validate(file_id: &str, graph: &FileGraphResult, old_entity_ids: &[String]) -
             || !owns(&edge.target)
         {
             return Err(Error::InvalidInput(
-                "file snapshots require local edges; use apply_resolutions for cross-file edges",
+                "file snapshots require local edges; cross-file edges must be resolved separately",
             ));
         }
         if edge.line == Some(0) {
