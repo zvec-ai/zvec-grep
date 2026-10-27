@@ -71,11 +71,6 @@ jobs:
           arch: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
           # ARM64 follows the runner image's installed Visual Studio version.
           vsversion: ${{ inputs.target == 'win32-x64-msvc' && '2022' || '' }}
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux' && inputs.target != 'linux-x64-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
       - name: Read the pinned Rust toolchain
         id: rust-version
         shell: bash
@@ -84,7 +79,7 @@ jobs:
         if: inputs.target == 'win32-arm64-msvc'
         run: rustup set default-host aarch64-pc-windows-msvc
       - name: Install the pinned Rust toolchain, including rustup if missing
-        # Linux x64 compiles in Docker, but host packaging still uses cargo metadata.
+        # Linux compiles in Docker, but host packaging still uses cargo metadata.
         uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           toolchain: ${{ steps.rust-version.outputs.channel }}
@@ -109,8 +104,8 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/db/
             rust/target/release/
           # Per-commit keys would exhaust the 10 GB repository cache quota and evict Rust CI caches.
-          # Refresh Linux x64 once so its immutable cache includes container downloads.
-          key: rust-release-${{ inputs.target == 'linux-x64-gnu' && 'v4' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+          # Isolate Ubuntu 20.04 output from older host/container build caches.
+          key: rust-release-${{ runner.os == 'Linux' && 'v5-ubuntu20.04' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
       - name: Cache the pinned llama native SDK
         uses: actions/cache@v5
         with:
@@ -130,20 +125,21 @@ jobs:
       - name: Preserve the Intel macOS deployment target
         if: inputs.target == 'darwin-x64'
         run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
-      - name: Build the Linux Rust builder without a CUDA compiler
-        if: inputs.target == 'linux-x64-gnu'
+      - name: Build the Ubuntu 20.04 Rust builder without a CUDA compiler
+        if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
         run: >-
-          docker build --platform linux/amd64
+          docker build --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }}
           --file rust/scripts/cuda/cuda-builder.Dockerfile
-          --build-arg CUDA_IMAGE=ubuntu:24.04
+          --build-arg CUDA_IMAGE=ubuntu:20.04
+          --build-arg RUST_VERSION=${{ steps.rust-version.outputs.channel }}
           --tag zvec-grep-cuda-builder .
-      - name: Build the Linux CPU/CUDA bundle
-        if: inputs.target == 'linux-x64-gnu'
+      - name: Build the Linux release on glibc 2.31
+        if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
-          docker run --rm --platform linux/amd64 \
+          docker run --rm --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
             --volume "${GITHUB_WORKSPACE}:/work:ro" \
             --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
             --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
@@ -151,8 +147,15 @@ jobs:
             --env CARGO_TARGET_DIR=/work-target \
             --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work-target/llama-runtimes \
-            zvec-grep-cuda-builder \
-            bash scripts/cuda/build.sh --primary-only
+            --env RELEASE_TARGET=${{ inputs.target }} \
+            zvec-grep-cuda-builder bash -euo pipefail -c '
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+              if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
+                bash scripts/cuda/build.sh --primary-only
+              else
+                cargo build --locked --release --package zg
+              fi
+            '
       - name: Audit the Linux prebuilt CUDA 13 and CUDA 12 bundle
         if: inputs.target == 'linux-x64-gnu'
         working-directory: ${{ github.workspace }}
@@ -160,9 +163,12 @@ jobs:
           docker run --rm --platform linux/amd64 \
             --volume "${GITHUB_WORKSPACE}:/work:ro" \
             --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
-            zvec-grep-cuda-builder bash scripts/cuda/check.sh /work-target/release/zg-cuda-staging
+            zvec-grep-cuda-builder bash -euo pipefail -c '
+              bash scripts/cuda/check.sh /work-target/release/zg-cuda-staging
+              python3 scripts/check-glibc.py /work-target/release/zg-cuda-staging --max 2.31
+            '
       - name: Restore ownership of Linux build output
-        if: ${{ always() && inputs.target == 'linux-x64-gnu' }}
+        if: ${{ always() && runner.os == 'Linux' }}
         run: |
           # Docker writes as root. Host packaging/cache save must retain access.
           for directory in target "$HOME/.cargo/registry" "$HOME/.cargo/git"; do
@@ -177,7 +183,7 @@ jobs:
           docker run --rm --platform linux/amd64 \
             --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
             --volume "${GITHUB_WORKSPACE}/rust/target/release/zg-cuda-staging:/opt/zg:ro" \
-            ubuntu:24.04 bash -euo pipefail -c '
+            ubuntu:20.04 bash -euo pipefail -c '
               apt-get update >/dev/null
               apt-get install --yes --no-install-recommends libstdc++6 >/dev/null
               ldd /opt/zg/lib/libggml-cuda.so | grep -Eq "lib(cuda|cudart|cublas).*not found"
@@ -190,7 +196,7 @@ jobs:
           powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass
           -File scripts/cuda/build.ps1 -PrimaryOnly
       - name: Build the native target
-        if: inputs.target != 'linux-x64-gnu' && inputs.target != 'win32-x64-msvc'
+        if: runner.os != 'Linux' && inputs.target != 'win32-x64-msvc'
         run: npm run build
       - name: Save Cargo build state
         if: ${{ always() && steps.cargo-cache.outputs.cache-primary-key != '' && steps.cargo-cache.outputs.cache-hit != 'true' }}
@@ -220,6 +226,9 @@ jobs:
           done
       - name: Package the native target
         run: npm run release:platform -- --no-build --target ${{ inputs.target }} ${{ (inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && '--bundle-dir target/release/zg-cuda-staging' || '' }}
+      - name: Audit the Linux ARM64 package against glibc 2.31
+        if: inputs.target == 'linux-arm64-gnu'
+        run: python3 scripts/check-glibc.py dist/npm/release/staging/${{ inputs.target }} --max 2.31
       - name: Upload the platform package
         uses: actions/upload-artifact@v7
         with:

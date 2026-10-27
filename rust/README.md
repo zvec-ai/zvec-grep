@@ -861,11 +861,14 @@ unchanged. Quality, default tests and CUDA builds have separate build caches.
 select `linux` or `windows` to limit test platforms. Optional `ref` selects the
 reviewed source; otherwise the workflow's selected commit is used. All jobs
 check out the same resolved SHA. This workflow does no npm packaging or publishing.
-Official ORT 1.21 Linux x64/ARM64 runtimes are audited against glibc 2.31,
-including loading the CPU core in Ubuntu 20.04 containers. This is an ORT
-compatibility gate, not a claim that the full CLI or unrelated native SDKs
-already support glibc 2.31; the existing full-package build baseline remains
-Ubuntu 24.04 until those dependencies and the executable are rebuilt and audited.
+Linux x64/ARM64 npm releases compile the CLI in Ubuntu 20.04 containers,
+reuse the pinned native SDKs, and audit the executable and bundled libraries
+against glibc 2.31. Downloaded npm artifacts are installed and exercised on
+Ubuntu 20.04, including CPU GGUF/ONNX inference for the x64 bundle without
+CUDA installed. Host runners may use newer Ubuntu images; they do not set the
+release binary's glibc baseline. CUDA acceleration still requires compatible
+NVIDIA drivers and CUDA/cuDNN host libraries. The separate ORT CI gate also
+audits official ORT 1.21 x64/ARM64 runtimes and loads them on Ubuntu 20.04.
 Packaging selects Cargo/CMake parallelism from available CPUs and total memory
 with a conservative 3 GiB per-job budget, a minimum of 1 and a maximum of 8.
 The same limits are passed into the Linux builder. This is a resource

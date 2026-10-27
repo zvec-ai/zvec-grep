@@ -195,7 +195,7 @@ export async function collectRelease({ manifest, version, tarballRoot, targets }
     "ZG_INSTALL_ACCELERATOR=auto (default) installs CPU first and requests CUDA plugins only when NVIDIA detection succeeds; cpu skips detection/downloads; cuda forces plugin installation and fails if unsuccessful. Later use npm rebuild -g @zvec/zvec-grep with the same settings; no compilation is performed. Stop zg/daemon first and restart it afterwards.",
     "CPU installs do not require CUDA component tarballs. CUDA plugins are exact-version, core-bound and integrity-checked; Linux ORT fragments are concatenated and checked before activation. ZG_INSTALL_OFFLINE=1 disables network downloads; ZG_PLUGIN_DIR selects local archives. --ignore-scripts skips even CPU bootstrap: explicitly permit the package's scripts and run npm rebuild to initialize it.",
     "Every compressed npm tarball must be at most 350 MiB; this is checked at pack, collect, and publication preflight.",
-    "Linux candidates target Ubuntu 24.04; older glibc and C++ runtimes are not covered.",
+    "Linux x64 and ARM64 candidates are built and CPU-tested on Ubuntu 20.04 (glibc 2.31), with a glibc audit of the executable and bundled libraries. CUDA acceleration additionally requires compatible NVIDIA drivers and CUDA/cuDNN host libraries.",
     "SHA256SUMS and release.json identify the exact files and source commit.",
     "These artifacts use the regular npm package layout; no registry publication is needed to install them.",
     "macOS packages use the toolchain's local code signatures; Windows packages do not require a signing certificate.",

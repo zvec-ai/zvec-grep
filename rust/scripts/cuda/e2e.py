@@ -38,7 +38,7 @@ def cargo_environment(binary, environment):
         if not entry:
             continue
         directory = Path(entry.strip('"')).resolve()
-        if directory.is_relative_to(profile) or any(
+        if (directory == profile or profile in directory.parents) or any(
                 path.is_file() for pattern in project_libraries for path in directory.glob(pattern)):
             continue
         paths.append(entry)
@@ -322,7 +322,7 @@ def main():
         entry = metadata.get("bin", {})
         entry = entry if isinstance(entry, str) else entry.get("zg")
         binary = (bundle / (entry or f"bin/{'zg.exe' if os.name == 'nt' else 'zg'}")).resolve()
-        if not binary.is_relative_to(bundle):
+        if binary != bundle and bundle not in binary.parents:
             parser.error("packaged CLI must be inside the installed package")
         lib_dir = bundle / "lib"
         if not lib_dir.is_dir():
