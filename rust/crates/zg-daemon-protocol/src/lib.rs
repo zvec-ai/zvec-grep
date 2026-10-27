@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn relationship_commands_and_replies_preserve_compact_payloads() {
         use zg_engine::api::relationships::{
-            RelationshipEdge, RelationshipOptions, RelationshipSymbol, SymbolRelationships,
+            CallSite, RelationshipOptions, SymbolDefinition, SymbolRelationships,
         };
         let options = RelationshipOptions {
             root: Some("/workspace".into()),
@@ -102,14 +102,14 @@ mod tests {
             );
         }
         let matches = vec![SymbolRelationships {
-            symbol: RelationshipSymbol {
+            symbol: SymbolDefinition {
                 name: "Module::run".into(),
                 file_path: "src/main.rs".into(),
                 start_line: 3,
                 end_line: 8,
             },
             truncated: true,
-            edges: vec![RelationshipEdge {
+            edges: vec![CallSite {
                 file_path: "src/caller.rs".into(),
                 symbol: None,
                 line: Some(5),

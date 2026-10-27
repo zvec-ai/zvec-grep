@@ -58,7 +58,7 @@ use zg_engine::{
         },
         relationships::{
             MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES, RelationshipDirection,
-            RelationshipOptions, RelationshipResult, RelationshipSymbol,
+            RelationshipOptions, RelationshipResult, SymbolDefinition,
         },
     },
 };
@@ -895,8 +895,8 @@ struct RelationshipEdgeOutput {
     column: Option<usize>,
 }
 
-impl From<&RelationshipSymbol> for RelationshipSymbolOutput {
-    fn from(symbol: &RelationshipSymbol) -> Self {
+impl From<&SymbolDefinition> for RelationshipSymbolOutput {
+    fn from(symbol: &SymbolDefinition) -> Self {
         Self {
             name: symbol.name.clone(),
             file_path: symbol.file_path.to_string_lossy().into_owned(),

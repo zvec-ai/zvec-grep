@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::{ServiceExt, model::CallToolRequestParams};
 use serde_json::json;
-use zg_engine::api::relationships::{RelationshipEdge, RelationshipSymbol, SymbolRelationships};
+use zg_engine::api::relationships::{CallSite, SymbolDefinition, SymbolRelationships};
 
 use super::*;
 
@@ -116,7 +116,7 @@ impl RelationshipsOnly {
                 .is_some_and(|signal| !signal.is_cancelled())
         );
         let matches = vec![SymbolRelationships {
-            symbol: RelationshipSymbol {
+            symbol: SymbolDefinition {
                 name: request.symbol.clone(),
                 file_path: "src/subject.rs".into(),
                 start_line: 3,
@@ -124,14 +124,14 @@ impl RelationshipsOnly {
             },
             truncated: true,
             edges: vec![
-                RelationshipEdge {
+                CallSite {
                     file_path: if incoming {
                         "src/edge.rs"
                     } else {
                         "src/subject.rs"
                     }
                     .into(),
-                    symbol: Some(RelationshipSymbol {
+                    symbol: Some(SymbolDefinition {
                         name: if incoming { "Caller" } else { "Callee" }.into(),
                         file_path: "src/edge.rs".into(),
                         start_line: 10,
@@ -140,7 +140,7 @@ impl RelationshipsOnly {
                     line: Some(12),
                     column: Some(0),
                 },
-                RelationshipEdge {
+                CallSite {
                     file_path: "src/top_level.rs".into(),
                     symbol: None,
                     line: None,
