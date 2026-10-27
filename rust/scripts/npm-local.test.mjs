@@ -81,6 +81,26 @@ test("includes model runtime libraries but excludes build files and other platfo
   }
 });
 
+test("CPU packages retain ORT and DirectML licenses without copying unrelated build files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "zg-ort-notices-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "profile");
+  await mkdir(join(source, "licenses"), { recursive: true });
+  for (const name of ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll"]) {
+    await writeFile(join(source, name), name);
+  }
+  for (const name of ["onnxruntime-LICENSE", "onnxruntime-ThirdPartyNotices.txt",
+    "directml-LICENSE", "directml-LICENSE-CODE", "directml-ThirdPartyNotices.txt", "unrelated.txt"]) {
+    await writeFile(join(source, "licenses", name), name);
+  }
+  const destination = join(root, "package/lib");
+  const files = await stageZvecRuntime(source, destination, "win32");
+  assert.ok(files.includes("lib/licenses/onnxruntime-LICENSE"));
+  assert.ok(files.includes("lib/licenses/directml-LICENSE"));
+  assert.equal(await readFile(join(destination, "licenses/directml-LICENSE-CODE"), "utf8"), "directml-LICENSE-CODE");
+  await assert.rejects(readFile(join(destination, "licenses/unrelated.txt")), /ENOENT/);
+});
+
 test("materializes cached model runtime symlinks and rejects broken runtime links", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "zg-model-runtime-links-"));
   t.after(() => rm(root, { recursive: true, force: true }));

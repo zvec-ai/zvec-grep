@@ -6,116 +6,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fmt::Write as _, fs, path::Path};
 
-// Exercise the exact shared preparer, using tiny local archives, not a second
-// Rust implementation of the Python extraction/download contract.
-const ORT_DEPLOYMENT_CHECK: &str = r"
-import importlib.util, io, os, subprocess, sys, tarfile, tempfile, zipfile
-from pathlib import Path
-from unittest.mock import patch
-spec = importlib.util.spec_from_file_location('prepare_ort', sys.argv[1])
-ort = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ort)
-
-def archive_at(path, platform, files):
-    if platform == 'linux':
-        with tarfile.open(path, 'w:gz') as archive:
-            for name in files:
-                data = name.encode()
-                entry = tarfile.TarInfo('bundle/' + name)
-                entry.size = len(data)
-                entry.mtime = 1700000000
-                archive.addfile(entry, io.BytesIO(data))
-    else:
-        with zipfile.ZipFile(path, 'w') as archive:
-            for name in files:
-                entry = zipfile.ZipInfo('bundle/' + name, (2023, 11, 14, 0, 0, 0))
-                archive.writestr(entry, name.encode())
-
-with tempfile.TemporaryDirectory() as temporary:
-    root = Path(temporary)
-    for platform in ('linux', 'win32'):
-        cache = root / platform / 'ort-cuda12'
-        cache.mkdir(parents=True)
-        archive = cache / ('fixture.tgz' if platform == 'linux' else 'fixture.zip')
-        wanted = {**ort.required_files(platform), 'LICENSE': 'licenses/onnxruntime-LICENSE',
-                  'ThirdPartyNotices.txt': 'licenses/onnxruntime-ThirdPartyNotices.txt'}
-        names = [*wanted, '../../unwanted-file']
-        archive_at(archive, platform, names)
-        checksum = ort.digest(archive)
-        ort.DISTRIBUTIONS[platform] = (archive.name, checksum)
-        with patch.object(ort.subprocess, 'run', side_effect=AssertionError('unexpected download')):
-            bundle = root / platform / 'npm-bundle/lib'
-            ort.prepare(cache, bundle, platform, offline=True)
-            assert {p.relative_to(bundle).as_posix() for p in bundle.rglob('*') if p.is_file()} == set(wanted.values())
-            for profile_name in ('debug', 'release', 'target-triple/custom-profile'):
-                profile = root / platform / profile_name
-                def stage():
-                    ort.prepare(cache, profile, platform, cargo=True, offline=True)
-                stage()
-                for directory in (profile, profile / 'deps', profile / 'examples'):
-                    for source, name in wanted.items():
-                        assert (directory / name).read_bytes() == source.encode()
-                        assert not (directory / name).is_symlink()
-                    assert not (directory / 'unwanted-file').exists()
-                files = [profile / name for name in wanted.values()]
-                mtimes = [p.stat().st_mtime_ns for p in files]
-                stage()
-                assert mtimes == [p.stat().st_mtime_ns for p in files]
-                files[0].unlink()
-                files[1].write_bytes(b'corrupt copy')
-                unrelated = profile / 'user-file'
-                unrelated.write_bytes(b'keep')
-                stage()
-                assert mtimes == [p.stat().st_mtime_ns for p in files]
-                assert unrelated.read_bytes() == b'keep'
-                assert ort.digest(archive) == checksum
-                if os.name != 'nt':
-                    files[0].unlink()
-                    files[0].symlink_to(unrelated)
-                    stage()
-                    assert not files[0].is_symlink()
-                    assert unrelated.read_bytes() == b'keep'
-            # Integrity errors must not touch already-deployed files or fetch
-            # in offline mode. This includes incomplete and duplicate payloads.
-            bad = cache / archive.name.replace('fixture', 'invalid')
-            for entries in (names[:-2], [*names, names[0]]):
-                archive_at(bad, platform, entries)
-                before = [p.read_bytes() for p in files]
-                try:
-                    ort.extract_runtime(bad, profile, platform, ort.digest(bad), cargo=True)
-                except RuntimeError:
-                    pass
-                else:
-                    raise AssertionError('invalid archive accepted')
-                assert before == [p.read_bytes() for p in files]
-            archive.write_bytes(b'corrupt cache')
-            try:
-                stage()
-            except RuntimeError as error:
-                assert 'Offline build requires' in str(error)
-            else:
-                raise AssertionError('corrupt archive accepted')
-        # CLI routing must honor the current (possibly cross-target) OUT_DIR,
-        # never fall back to downloading when an explicit offline cache misses.
-        out = root / platform / 'isolated/triple/debug/build/zg-hash/out'
-        result = subprocess.run([sys.executable, sys.argv[1], '--platform', platform,
-                                 '--cargo-out-dir', str(out)], capture_output=True, text=True,
-                                env={**os.environ, 'CARGO_NET_OFFLINE': 'true'})
-        assert result.returncode != 0
-        assert 'Offline build requires' in result.stderr
-        assert str(out.parents[3] / 'ort-cuda12') in result.stderr
-";
-
+// Exercise the same offline deployment suite used by CI and all six platforms.
 #[test]
-fn ort_cargo_deployment_is_verified_repeatable_and_repairs_outputs_on_both_platforms() {
+fn ort_cargo_deployment_is_verified_and_relocatable_on_all_platforms() {
     let python = std::env::var_os("PYTHON")
         .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
     let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/cuda/prepare-onnxruntime.py");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/test-prepare-onnxruntime.py");
     let result = std::process::Command::new(python)
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg("-c")
-        .arg(ORT_DEPLOYMENT_CHECK)
         .arg(script)
         .output()
         .expect("Python 3 for the shared ORT preparer tests");

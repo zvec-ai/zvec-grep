@@ -15,7 +15,6 @@ cuda = [
     "dep:zg-llama-native",
     "llama-cpp-2/cuda",
     "llama-cpp-2/dynamic-backends",
-    "ort/load-dynamic",
     "ort/cuda",
 ]
 vulkan = ["llama-cpp-2/vulkan", "ort/webgpu"]
@@ -33,9 +32,9 @@ ignore.workspace = true
 hmac-sha256 = "1.1.14"
 httpdate = "1.0.3"
 llama-cpp-2.workspace = true
-# Stage ORT runtime sidecars beside Cargo outputs for npm packaging, including
-# dynamically linked Intel macOS ORT and Windows DirectML's DLL.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-27", "copy-dylibs", "download-binaries", "std", "tls-rustls"] }
+# Use the same pinned official runtime in Cargo tests and every native package.
+# API selection does not select the download version; build.rs owns that pin.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-21", "load-dynamic", "std"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"

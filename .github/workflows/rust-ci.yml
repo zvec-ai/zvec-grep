@@ -134,8 +134,56 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Validate Cargo metadata
         run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+      - name: Test official ORT deployment
+        run: |
+          python3 scripts/test-prepare-onnxruntime.py
+          python3 scripts/test-check-glibc.py
       - name: Test npm packaging
         run: node --test scripts/npm-local.test.mjs scripts/npm-release-*.test.mjs npm/meta/install.test.cjs
+
+  ort-glibc:
+    name: ORT on glibc 2.31 (${{ matrix.target }})
+    needs: source
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            cuda: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            cuda: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: rust/target/ort-prebuilt
+          key: ort-1.21-${{ matrix.target }}-${{ hashFiles('rust/scripts/onnxruntime-distributions.json') }}
+      - name: Prepare and audit official CPU runtime
+        run: |
+          python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cache-dir target/ort-prebuilt --destination target/ort-cpu
+          python3 scripts/check-glibc.py target/ort-cpu --max 2.31
+      - name: Load CPU runtime on glibc 2.31
+        run: |
+          docker run --rm --volume "$PWD:/work:ro" --workdir /work ubuntu:20.04 bash -euc '
+            apt-get update -qq
+            apt-get install -y --no-install-recommends python3 libstdc++6 >/dev/null
+            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+            python3 scripts/check-onnxruntime.py target/ort-cpu/libonnxruntime.so.1
+          '
+      - name: Audit the CUDA 12 provider without requiring a GPU
+        if: matrix.cuda
+        run: |
+          python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cuda --cache-dir target/ort-prebuilt --destination target/ort-cuda
+          python3 scripts/check-glibc.py target/ort-cuda --max 2.31
 
   test:
     name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
@@ -274,8 +322,8 @@ jobs:
               cargo test --locked --workspace --all-targets --features zg/cuda --no-run \
                 --message-format=json > target/ci-tests.json
               python3 scripts/cuda/runtime.py --cargo-messages target/ci-tests.json --destination target/debug
-              python3 scripts/cuda/prepare-onnxruntime.py --platform linux \
-                --cache-dir target/ort-cuda12 --destination target/debug
+              python3 scripts/prepare-onnxruntime.py --target x86_64-unknown-linux-gnu --cuda \
+                --cache-dir target/ort-prebuilt --destination target/debug
               native_dirs="$(find /work/rust/target/debug -name "*.so*" -printf "%h\n" | sort -u | paste -sd :)"
               export LD_LIBRARY_PATH="${native_dirs}:${LD_LIBRARY_PATH:-}"
               export ORT_DYLIB_PATH=/work/rust/target/debug/libonnxruntime.so.1
@@ -319,8 +367,8 @@ jobs:
           if os.environ["CUDA_VERIFY"] == "true":
               subprocess.run([sys.executable, "scripts/cuda/runtime.py", "--cargo-messages",
                               "target/ci-tests.json", "--destination", "target/debug"], check=True)
-              subprocess.run([sys.executable, "scripts/cuda/prepare-onnxruntime.py", "--platform", "win32",
-                              "--cache-dir", "target/ort-cuda12", "--destination", "target/debug"], check=True)
+              subprocess.run([sys.executable, "scripts/prepare-onnxruntime.py", "--target", "x86_64-pc-windows-msvc", "--cuda",
+                              "--cache-dir", "target/ort-prebuilt", "--destination", "target/debug"], check=True)
           suffix = "*.dll" if os.name == "nt" else "*.dylib" if sys.platform == "darwin" else "*.so*"
           directories = sorted({str(path.parent.resolve()) for path in pathlib.Path("target/debug").rglob(suffix)})
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
@@ -434,6 +482,33 @@ jobs:
                   print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
           if failures:
               raise RuntimeError("\n".join(failures))
+      - name: Verify CPU ONNX lookup in a relocated package
+        if: ${{ !matrix.cuda }}
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, "scripts/cuda")
+          from e2e import cargo_environment
+          # Use the production packager, including DirectML and its notices.
+          # Windows must find DirectML before a delayed zvec import occurs.
+          subprocess.run(["node", "--input-type=module", "-e", '''
+          import { mkdir, copyFile } from 'node:fs/promises';
+          import { stageZvecRuntime } from './scripts/npm-package-core.mjs';
+          const bundle = 'target/ort-package-smoke';
+          const binary = process.platform === 'win32' ? 'zg.exe' : 'zg';
+          await mkdir(`${bundle}/bin`, { recursive: true });
+          await copyFile(`target/debug/${binary}`, `${bundle}/bin/${binary}`);
+          await stageZvecRuntime('target/debug', `${bundle}/lib`, process.platform);
+          '''], check=True)
+          if sys.platform == "darwin":
+              bundle = pathlib.Path("target/ort-package-smoke")
+              for payload in [bundle / "bin/zg", *bundle.glob("lib/*.dylib")]:
+                  subprocess.run(["codesign", "--force", "--sign", "-", str(payload)], check=True)
+          binary = pathlib.Path("target/debug") / ("zg.exe" if os.name == "nt" else "zg")
+          environment = cargo_environment(binary, os.environ)
+          subprocess.run([sys.executable, "scripts/cuda/e2e.py", "--bundle", "target/ort-package-smoke",
+                          "--backend", "onnx", "--explicit-cpu", "--model-cache", os.environ["ZVEC_GREP_MODEL_CACHE"],
+                          "--logs", "model-logs/ort-package"], env=environment, check=True)
       - name: Verify Linux CPU models without rebuilding or GPU libraries
         if: matrix.cuda && runner.os == 'Linux'
         shell: bash

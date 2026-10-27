@@ -325,6 +325,20 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(join(sourceDir, file), destination);
   }
+  // Official ORT/DirectML notices travel with the native libraries on CPU
+  // targets too. Use a flat allowlist; never recursively copy a build directory.
+  const notices = join(sourceDir, "licenses");
+  if ((await stat(notices).catch((error) => {
+    if (error.code !== "ENOENT") throw error;
+  }))?.isDirectory()) {
+    for (const name of (await readdir(notices)).sort()) {
+      if (!/^(?:onnxruntime|directml)-(?:LICENSE(?:-CODE)?|ThirdPartyNotices\.txt)$/.test(name)) continue;
+      if (!(await stat(join(notices, name))).isFile()) continue;
+      await mkdir(join(libDir, "licenses"), { recursive: true });
+      await copyFile(join(notices, name), join(libDir, "licenses", name));
+      files.push(`licenses/${name}`);
+    }
+  }
   return files.map((file) => `lib/${file}`);
 }
 

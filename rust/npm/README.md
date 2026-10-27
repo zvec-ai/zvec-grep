@@ -82,12 +82,12 @@ executable's sibling `lib/`. The binary runs directly, without a JavaScript
 launcher or custom loader environment variables for bundled libraries. Host
 NVIDIA libraries must still be discoverable by the system loader.
 
-Non-CUDA builds enable ORT's upstream `copy-dylibs` feature to stage runtime
-sidecars beside the Cargo executable. npm packaging copies them into `lib/`
-as regular files, including any symlinked libraries. This includes Intel macOS's
-dynamically linked ORT and Windows DirectML's DLL; it does not change the static
-ORT linkage used by the default macOS ARM64 and Linux CPU builds. CUDA bundles
-load ORT dynamically and continue to stage their pinned core/providers explicitly.
+All six targets dynamically load official ORT 1.21.0. The engine build script
+stages verified libraries beside Cargo executables, tests and examples; npm
+copies them and their upstream notices into `lib/`. No target downloads Pyke
+static ORT archives or compiles ORT from source. CPU-only Windows uses the
+DirectML NuGet runtime and its pinned DirectML DLL; CUDA x64 bundles use the
+matching official CPU core/shared provider/CUDA provider from one distribution.
 
 The default `linux-x64-gnu` and `win32-x64-msvc` native packages are CPU/CUDA
 bundles. CUDA libraries remain runtime plugins: compatible NVIDIA libraries
@@ -126,7 +126,7 @@ Published target/backend support is:
 | Windows ARM64 | CPU | CPU + DirectML |
 
 A deliberate CPU-only Windows build retains DirectML. The published Windows
-CUDA bundle uses the official ONNX Runtime 1.28.0 CUDA 12 provider and does not
+CUDA bundle uses the official ONNX Runtime 1.21.0 CUDA 12 provider and does not
 claim DirectML support. ORT requires CUDA 12 runtime/cuBLAS and cuDNN 9 even
 when GGUF uses CUDA 13; the two runtime families can coexist. NVIDIA driver,
 CUDA runtime, cuBLAS and cuDNN remain host dependencies, not bundled libraries.
@@ -253,16 +253,15 @@ CPU checks or remove the candidate, but blocks npm publication.
 Runs use branch-plus-platform concurrency groups, allowing different platform
 selections on the same branch to run concurrently without cancelling an
 in-progress run in the same group.
-Intel macOS no longer gates the other platform builds. Its ONNX Runtime with
-CoreML and zvec SDK are built from
-pinned sources, cached, and bundled with the native package. The Intel release
-targets macOS 14 and later.
+Intel macOS uses the official precompiled ORT 1.21.0 dylib. ORT is not built
+from source on any published target. The Intel release targets macOS 14 and later.
 
 Windows ARM64 uses `windows-11-arm` with ARM64 Node, Rust, and MSVC. It uses
 zvec-rust 0.8.0's automatically selected Windows ARM64 prebuilt SDK instead of
 building zvec from source. The shared DLL is staged by zvec-rust-build and
-bundled in `@zvec/zvec-grep-win32-arm64-msvc`. ONNX Runtime uses the locked
-ARM64 DirectML distribution with SHA-256 verification and a separate cache.
+bundled in `@zvec/zvec-grep-win32-arm64-msvc`. ONNX Runtime uses the official
+ARM64 DirectML 1.21.0 NuGet runtime and Microsoft.AI.DirectML 1.15.4, with
+SHA-256 verification and a separate archive cache.
 llama-cpp-rs selects the SHA-256-pinned Windows ARM64 static CPU SDK from
 `zvec-0.1.154-cpu-r2`, without running bindgen, CMake, or a C++ compiler.
 No Clang/Ninja overrides are needed during packaging. The installed artifacts
@@ -277,7 +276,7 @@ both CUDA plugins; no Windows CUDA compiler/MSVC 14.38 fallback setup or second
 Linux CUDA builder is needed. Rust linking and dependency audits remain. The SDK
 cache is keyed separately from Cargo build output and checked by the fork's
 embedded archive/manifest hashes. Native configuration drift fails release CI
-instead of silently rebuilding. ORT and zvec build/download behavior is unchanged.
+instead of silently rebuilding. ORT uses the common pinned-runtime preparer; zvec SDK selection is unchanged.
 Linux x64 mounts the restored Cargo registry and Git caches into its Docker
 builder and returns ownership to the runner before saving them. The host skips
 compiler-library/CMake installation; pinned Rust remains for packaging's

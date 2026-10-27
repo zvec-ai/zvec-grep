@@ -120,7 +120,7 @@ $provider = Join-Path $libDirectory "onnxruntime_providers_cuda.dll"
 $providerImports = @(Get-Imports $provider)
 Require-Import $providerImports "^cublas64_12\.dll$" $provider
 Require-Import $providerImports "^cudart64_12\.dll$" $provider
-# ORT 1.28 loads cuDNN/cuFFT on demand rather than importing them at startup.
+# ORT 1.21 directly imports CUDA 12/cuDNN 9; these remain host dependencies.
 if (-not ($providerImports | Where-Object { $_ -match $hostCudaPattern })) {
     throw "ONNX Runtime CUDA provider has no CUDA runtime dependency"
 }

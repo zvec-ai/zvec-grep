@@ -67,8 +67,8 @@ install -m 0755 "${profile_dir}/zg" "${staging_dir}/bin/zg"
 python3 scripts/cuda/runtime.py --cargo-messages "${target_dir}/cuda-build.json" \
   --destination "${staging_dir}/lib"
 
-python3 scripts/cuda/prepare-onnxruntime.py --platform linux \
-  --cache-dir "${target_dir}/ort-cuda12" --destination "${staging_dir}/lib"
+python3 scripts/prepare-onnxruntime.py --target x86_64-unknown-linux-gnu --cuda \
+  --cache-dir "${target_dir}/ort-prebuilt" --destination "${staging_dir}/lib"
 
 if [[ ! -f "${profile_dir}/libzvec_c_api.so" ]]; then
   echo "unable to locate libzvec_c_api.so" >&2

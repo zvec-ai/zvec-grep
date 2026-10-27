@@ -122,46 +122,14 @@ jobs:
           import os, pathlib
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
               environment.write(f"LLAMA_CPP_RUNTIME_CACHE={pathlib.Path('target/llama-runtimes').resolve()}\n")
-      - name: Restore the CUDA 12 ONNX Runtime archives
-        if: inputs.target == 'win32-x64-msvc' || inputs.target == 'linux-x64-gnu'
-        uses: actions/cache@v5
-        with:
-          path: rust/target/ort-cuda12/
-          key: rust-ort-cuda12-v1-${{ inputs.target }}-${{ hashFiles('rust/scripts/cuda/prepare-onnxruntime.py') }}
-      - name: Restore the Windows ARM64 ONNX Runtime
-        if: inputs.target == 'win32-arm64-msvc'
+      - name: Cache official ONNX Runtime archives
         uses: actions/cache@v5
         with:
           path: rust/target/ort-prebuilt/
-          key: rust-ort-windows-v2-${{ inputs.target }}-${{ hashFiles('rust/Cargo.lock', 'rust/scripts/prepare-onnxruntime-windows.py') }}
-      - name: Prepare the verified Windows ARM64 ONNX Runtime
-        if: inputs.target == 'win32-arm64-msvc'
-        run: |
-          python scripts/test-prepare-onnxruntime-windows.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/prepare-onnxruntime-windows.py --target aarch64-pc-windows-msvc
-      - name: Restore the Intel macOS ONNX Runtime
+          key: rust-ort-1.21-${{ inputs.target }}-${{ hashFiles('rust/scripts/onnxruntime-distributions.json') }}
+      - name: Preserve the Intel macOS deployment target
         if: inputs.target == 'darwin-x64'
-        id: ort-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: rust/target/ort-runtime/
-          key: rust-ort-v2-1.28.0-${{ inputs.runner }}-${{ hashFiles('rust/scripts/build-onnxruntime-macos.sh') }}
-      - name: Build ONNX Runtime for Intel macOS
-        if: inputs.target == 'darwin-x64' && steps.ort-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-onnxruntime-macos.sh
-      - name: Save the compiled Intel macOS ONNX Runtime
-        if: inputs.target == 'darwin-x64' && steps.ort-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: rust/target/ort-runtime/
-          key: ${{ steps.ort-cache.outputs.cache-primary-key }}
-      - name: Use the Intel macOS ONNX Runtime libraries
-        if: inputs.target == 'darwin-x64'
-        run: |
-          echo "ORT_LIB_PATH=$GITHUB_WORKSPACE/rust/target/ort-runtime" >> "$GITHUB_ENV"
-          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
-          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+        run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
       - name: Build the Linux Rust builder without a CUDA compiler
         if: inputs.target == 'linux-x64-gnu'
         working-directory: ${{ github.workspace }}

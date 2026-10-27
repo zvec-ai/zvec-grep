@@ -118,7 +118,7 @@ fi
 provider_needed="$(needed "${lib_dir}/libonnxruntime_providers_cuda.so")"
 require_needed "${provider_needed}" libcublas.so.12
 require_needed "${provider_needed}" libcudart.so.12
-# ORT 1.28 loads cuDNN/cuFFT on demand; they need not appear in DT_NEEDED.
+# ORT 1.21 directly imports CUDA 12/cuDNN 9; these remain host dependencies.
 if ! grep -Eq '^lib(cuda|cudart|cublas|cudnn)' <<<"${provider_needed}"; then
   echo "ONNX Runtime CUDA provider has no CUDA runtime dependency" >&2
   exit 1

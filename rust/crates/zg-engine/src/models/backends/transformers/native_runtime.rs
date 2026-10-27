@@ -1,14 +1,10 @@
 use std::path::PathBuf;
-#[cfg(feature = "cuda")]
 use std::{env, sync::OnceLock};
 
-#[cfg(feature = "cuda")]
 use crate::models::spi::ModelError;
 
-#[cfg(feature = "cuda")]
 static RUNTIME: OnceLock<Result<(), String>> = OnceLock::new();
 
-#[cfg(feature = "cuda")]
 pub(super) fn initialize() -> Result<(), ModelError> {
     RUNTIME.get_or_init(|| {
         let path = runtime_path(
@@ -19,7 +15,7 @@ pub(super) fn initialize() -> Result<(), ModelError> {
         ort::init_from(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?
             .commit();
-        tracing::debug!(path = %path.display(), cuda_version = "12", "Packaged ONNX Runtime initialized");
+        tracing::debug!(path = %path.display(), "Packaged ONNX Runtime initialized");
         Ok(())
     }).as_ref().map_err(|error| {
         ModelError::internal("Unable to load packaged ONNX Runtime; keep it under ../lib relative to zg or set ORT_DYLIB_PATH")

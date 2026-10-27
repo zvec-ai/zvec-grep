@@ -92,8 +92,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Staging the selected llama runtime failed" }
     Copy-RequiredFile (Join-Path $profileDirectory "zvec_c_api.dll") (Join-Path $libDirectory "zvec_c_api.dll")
 
-    & python scripts/cuda/prepare-onnxruntime.py --platform win32 `
-        --cache-dir (Join-Path $targetDirectory "ort-cuda12") --destination $libDirectory
+    & python scripts/prepare-onnxruntime.py --target x86_64-pc-windows-msvc --cuda `
+        --cache-dir (Join-Path $targetDirectory "ort-prebuilt") --destination $libDirectory
     if ($LASTEXITCODE -ne 0) { throw "Preparing the ORT CUDA 12 runtime failed" }
 
     if ($PrimaryOnly) {

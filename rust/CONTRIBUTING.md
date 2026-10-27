@@ -78,7 +78,8 @@ from the successful primary build to locate that build's verified source
 directory and revision. This supports the fork's source cache and
 `LLAMA_CPP_SOURCE_DIR` override without assuming a submodule directory or
 selecting a stale build tree. Prebuilt bundles copy the SDK's fallback instead.
-`prepare-onnxruntime.py` verifies and stages official ORT archives, and
+`scripts/prepare-onnxruntime.py` verifies and stages official ORT 1.21 archives for
+CPU builds on all six targets and CUDA builds on Linux/Windows x64, and
 `check.sh`/`check.ps1` audit the resulting runtime linkage. `prepare-windows.ps1`
 with `-DriverOnly` and the pinned runtime requirements prepare Windows GPU
 drivers/runtime libraries; compiler tools stay on CPU runners.
@@ -259,3 +260,28 @@ uses a short `RUNNER_TEMP` workspace; it does not alter zg/zvec long-path handli
 Linux GPU runners must supply a compatible driver and NVIDIA container support.
 CPU fallback after a driver/runtime failure does not count as successful GPU
 validation.
+
+### ONNX Runtime distributions
+
+`zg-engine` uses `ort` rc.13 with API 21 and dynamic loading. Its build script
+runs `scripts/prepare-onnxruntime.py`, whose target/variant selection, archive
+SHA-256 pins and exact payload paths live in `scripts/onnxruntime-distributions.json`.
+This also prepares independent engine tests; building the CLI first is unnecessary.
+Python 3 and curl are required (override Python with `PYTHON`).
+
+`ZG_ORT_CACHE_DIR` overrides the archive cache; otherwise it is `ort-prebuilt/`
+under the Cargo target directory (under the target triple for cross builds).
+`CARGO_NET_OFFLINE=true` requires valid cached archives and never downloads.
+`ORT_DYLIB_PATH` explicitly supplies an external runtime and skips automatic
+preparation; that runtime must support API 21. Custom WebGPU/Vulkan builds must
+provide a runtime containing WebGPU through this override. Default release
+runtimes preserve CPU, macOS CoreML, Windows DirectML and x64 CUDA 12 choices;
+macOS model routing continues to select CPU.
+
+Run `python3 scripts/test-prepare-onnxruntime.py` for offline deployment checks
+and `python3 scripts/test-check-glibc.py` for the compatibility checker tests.
+The ORT CI gate loads Linux x64/ARM64 CPU cores on glibc 2.31 and audits their
+ELF imports, including the x64 CUDA provider. `scripts/check-glibc.py <payload>`
+can audit a complete ELF package too. Full CLI glibc 2.31 certification still
+requires compatible builds of the executable and every other native dependency;
+the ORT-only gate does not certify those separately maintained SDKs.

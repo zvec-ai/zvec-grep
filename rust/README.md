@@ -530,16 +530,17 @@ Optional backends still use the verified SDK cache or current source backend
 directory; this development output is not a portable distribution.
 Use the npm packaging commands below to assemble a distributable runtime.
 
-CUDA Cargo builds also deploy the pinned official ONNX Runtime CUDA 12 main
-library and its shared/CUDA providers beside the executable, using the same
-SHA-256-verified preparation script as npm packaging (requires Python 3 and
-curl; `PYTHON` can select the interpreter). The archive is reused from
-`target/ort-cuda12` (under the target triple for cross-target builds).
-`CARGO_NET_OFFLINE=true` requires that archive to be cached already. Both
-`--device cpu` and `--device cuda` can then load ORT without `ORT_DYLIB_PATH`
-or `LD_LIBRARY_PATH`; CUDA execution still requires a compatible NVIDIA driver,
-CUDA 12 runtime and cuDNN 9 installed on the host. Non-CUDA Cargo builds retain
-their existing ORT linking behavior and do not download this CUDA runtime.
+All Cargo builds deploy official ONNX Runtime 1.21.0 shared libraries beside
+executables, tests and examples. The engine build script uses the same
+SHA-256-pinned preparation script as npm packaging (Python 3 and curl are
+required; `PYTHON` selects the interpreter). Archives are cached under
+`target/ort-prebuilt` (under the target triple for cross-target builds), or
+`ZG_ORT_CACHE_DIR`. `CARGO_NET_OFFLINE=true` requires verified cached archives.
+CPU builds select CPU/CoreML/DirectML runtimes; x64 CUDA builds select matching
+CUDA 12 core/providers. Both `--device cpu` and `--device cuda` locate packaged
+ORT without loader environment overrides. CUDA execution still requires the
+host NVIDIA driver, CUDA 12 libraries and cuDNN 9. An explicit `ORT_DYLIB_PATH`
+skips automatic preparation and supplies a custom runtime, required for WebGPU.
 
 ```sh
 npm run build
@@ -586,7 +587,7 @@ silently with a prebuilt SDK.
 The package contains `bin/zg[.exe]`, with all shared libraries, plugins and
 dictionaries under `lib/`. GGUF loads the CUDA 13.1 plugin first, then the
 CUDA 12.4 fallback from `lib/cuda12/`; both use the same locked llama.cpp core.
-ONNX uses the hash-verified official ORT 1.28.0 CUDA 12 core/providers.
+ONNX uses the hash-verified official ORT 1.21.0 CUDA 12 core/providers.
 NVIDIA driver, CUDA runtime, cuBLAS and cuDNN 9 remain host dependencies.
 CUDA-enabled x64 builds default to automatic device selection and fall back
 to CPU when a GPU/backend is unavailable. `--device cpu` or
@@ -858,16 +859,19 @@ unchanged. Quality, default tests and CUDA builds have separate build caches.
 select `linux` or `windows` to limit test platforms. Optional `ref` selects the
 reviewed source; otherwise the workflow's selected commit is used. All jobs
 check out the same resolved SHA. This workflow does no npm packaging or publishing.
-The current ONNX Runtime prebuilt libraries cannot link against
-Ubuntu 22.04's glibc and C++ runtime, so older Linux distributions are not
-covered by this release workflow.
+Official ORT 1.21 Linux x64/ARM64 runtimes are audited against glibc 2.31,
+including loading the CPU core in Ubuntu 20.04 containers. This is an ORT
+compatibility gate, not a claim that the full CLI or unrelated native SDKs
+already support glibc 2.31; the existing full-package build baseline remains
+Ubuntu 24.04 until those dependencies and the executable are rebuilt and audited.
 Packaging selects Cargo/CMake parallelism from available CPUs and total memory
 with a conservative 3 GiB per-job budget, a minimum of 1 and a maximum of 8.
 The same limits are passed into the Linux builder. This is a resource
 heuristic, not a guarantee against OOM. The existing 180-minute limits remain
 upper bounds, not expected build durations. CUDA 13.1 and 12.4 native compilation
 now belongs to the fork's versioned SDK release, not every zg CI run.
-Intel macOS builds ONNX Runtime 1.28.0 with CoreML from a pinned source revision.
+Intel macOS downloads the official ORT 1.21.0 precompiled dylib, just like
+Apple Silicon; no ORT source checkout, CMake build or dedicated build cache is needed.
 Like the other targets, it lets `zvec-rust-sys` select the prebuilt zvec SDK from
 its locked crate version and Cargo `TARGET`, retaining the upstream source-build
 fallback if SDK acquisition fails. The SDK cache lives under Cargo `OUT_DIR`
@@ -878,8 +882,8 @@ The Intel release targets macOS 14 and later.
 Windows ARM64 builds and tests natively on `windows-11-arm` with ARM64 Node,
 Rust, and MSVC. zvec-rust 0.8.0 automatically downloads its Windows ARM64
 prebuilt SDK and stages `zvec_c_api.dll` for packaging; no local zvec source
-build is needed. ONNX Runtime uses the SHA-256-verified ARM64 DirectML archive
-from the locked dependency's distribution manifest. llama-cpp-rs selects the
+build is needed. ONNX Runtime uses the SHA-256-pinned official 1.21.0 DirectML NuGet runtime
+and the matching Microsoft.AI.DirectML 1.15.4 DLL, selected for ARM64. llama-cpp-rs selects the
 SHA-256-pinned Windows ARM64 static CPU SDK from `zvec-0.1.154-cpu-r2`, without
 running bindgen, CMake or a C++ compiler. No Clang/Ninja overrides are needed. npm selects
 `@zvec/zvec-grep-win32-arm64-msvc` for ARM64 Node on Windows.

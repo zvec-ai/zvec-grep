@@ -42,6 +42,15 @@ static BOOL CALLBACK configure_runtime(PINIT_ONCE once, PVOID parameter, PVOID *
     return TRUE;
 }
 
+// ORT now loads dynamically on every target. Configure sibling dependencies
+// (notably DirectML.dll) before Rust can load ORT, even if no delayed zvec import
+// has run yet. Cargo tests keep DLLs next to their own executable as before.
+static void __cdecl initialize_runtime_directory(void) {
+    InitOnceExecuteOnce(&runtime_once, configure_runtime, NULL, NULL);
+}
+#pragma section(".CRT$XCU", read)
+__declspec(allocate(".CRT$XCU")) void (__cdecl *zg_runtime_initializer)(void) = initialize_runtime_directory;
+
 static FARPROC WINAPI load_runtime(unsigned notification, PDelayLoadInfo info) {
     if (notification != dliNotePreLoadLibrary) {
         return NULL;
