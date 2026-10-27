@@ -345,7 +345,7 @@ call sites retain their locations; `truncated` indicates additional visible call
 sites beyond the per-symbol limit. Edges are read in pages until enough visible
 call sites are found; queries do not compute an exact total.
 Each edge has a caller `filePath` independently of its optional `symbol` metadata.
-Both MCP toolsets expose `callers` and `callees` with an absolute `root`, `symbol`,
+Both MCP toolsets expose `zvec_grep_callers` and `zvec_grep_callees` with an absolute `root`, `symbol`,
 and optional `limit`. These queries do not load models or refresh the index.
 Graph extraction and resolution must have populated the index for call edges to
 be available; unresolved references are excluded from results.

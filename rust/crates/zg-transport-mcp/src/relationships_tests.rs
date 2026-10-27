@@ -43,7 +43,7 @@ fn relationship_tools_advertise_read_only_schemas_in_both_toolsets() {
         ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new())),
         ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(Status)),
     ] {
-        for name in ["callers", "callees"] {
+        for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             let tool = server
                 .listed_tools()
                 .into_iter()
@@ -181,7 +181,7 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
                 .await
         });
         let client = ().serve(client_io).await.expect("client");
-        for name in ["callers", "callees"] {
+        for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             for arguments in [
                 json!({"root": "relative", "symbol": "run"}),
                 json!({"root": format!("{}/../other", root()), "symbol": "run"}),
@@ -203,7 +203,7 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
             }
         }
         assert!(provider.calls.lock().expect("recorded calls").is_empty(), "invalid input must not reach the provider/daemon");
-        for (name, endpoint) in [("callers", "Caller"), ("callees", "Callee")] {
+        for (name, endpoint) in [("zvec_grep_callers", "Caller"), ("zvec_grep_callees", "Callee")] {
             let response = client
                 .call_tool(
                     CallToolRequestParams::new(name).with_arguments(
@@ -228,7 +228,7 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
             assert_eq!(matches[0]["edges"][1]["filePath"], "src/top_level.rs");
             assert_eq!(
                 matches[0]["edges"][0]["filePath"],
-                if name == "callers" {
+                if name == "zvec_grep_callers" {
                     "src/edge.rs"
                 } else {
                     "src/subject.rs"

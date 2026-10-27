@@ -104,7 +104,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         assert_eq!(replies[0], replies[1]);
         let mcp = bridge.request(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": tool, "arguments": {"root": workspace.path(), "symbol": format!(" {symbol} ")}}
+            "params": {"name": format!("zvec_grep_{tool}"), "arguments": {"root": workspace.path(), "symbol": format!(" {symbol} ")}}
         }))?;
         assert_eq!(mcp["result"]["structuredContent"], replies[0]);
     }
@@ -141,7 +141,7 @@ fn assert_path_filters(
         }
         let mcp = bridge.request(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": "callers", "arguments": {"root": workspace, "symbol": "target", "path": path}}
+            "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "target", "path": path}}
         }))?;
         assert_eq!(
             mcp["result"]["structuredContent"]["matches"]
@@ -210,7 +210,7 @@ fn assert_suggestions(
     assert_eq!(reply["suggestions"][0]["name"], "target");
     let mcp = bridge.request(&json!({
         "jsonrpc": "2.0", "id": 20, "method": "tools/call",
-        "params": {"name": "callers", "arguments": {"root": workspace, "symbol": "WrongScope::TARGET"}}
+        "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "WrongScope::TARGET"}}
     }))?;
     assert_eq!(mcp["result"]["structuredContent"], reply);
     let text = mcp["result"]["content"][0]["text"].as_str().ok_or("text")?;

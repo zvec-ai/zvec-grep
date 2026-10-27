@@ -64,10 +64,10 @@ use zg_engine::{
 };
 
 pub const AGENT_TOOL_NAME: &str = "zvec_grep_search";
-pub const AGENT_TOOL_NAMES: [&str; 3] = ["callees", "callers", AGENT_TOOL_NAME];
+pub const AGENT_TOOL_NAMES: [&str; 3] = ["zvec_grep_callees", "zvec_grep_callers", AGENT_TOOL_NAME];
 pub const FULL_TOOL_NAMES: [&str; 8] = [
-    "callees",
-    "callers",
+    "zvec_grep_callees",
+    "zvec_grep_callers",
     "zvec_grep_index",
     "zvec_grep_index_drop",
     "zvec_grep_index_status",
@@ -104,7 +104,7 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
-    "- For known symbol names, use callers or callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.\n",
+    "- For known symbol names, use zvec_grep_callers or zvec_grep_callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use returned search evidence without a status preflight.\n",
@@ -116,7 +116,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval and lifecycle rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
-    "- For known symbol names, use callers or callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.\n",
+    "- For known symbol names, use zvec_grep_callers or zvec_grep_callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
@@ -337,7 +337,7 @@ impl ZvecGrepMcpServer {
         index_operations: Arc<dyn IndexOperationProvider>,
     ) -> Self {
         let mut router = Self::tool_router();
-        for name in ["callers", "callees"] {
+        for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             let route = router.map.get_mut(name).expect("relationship route");
             route.attr.description = route.attr.description.as_ref().map(|description| {
                 format!("{description} Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or pass path to select a workspace-relative file or directory.").into()
@@ -400,7 +400,7 @@ impl ZvecGrepMcpServer {
 #[tool_router]
 impl ZvecGrepMcpServer {
     #[tool(
-        name = "callers",
+        name = "zvec_grep_callers",
         description = "Incoming persisted call sites for an exact or scope-qualified symbol name (Class::method or Class.method, as shown by rg). ::name selects only top-level definitions; plain name matches any scope, and ::ns::name is equivalent to ns::name. Returns matches for exact definitions. When none match, matches is empty and suggestions contains up to 5 similarly named definitions without edges; retry with a suggestion's exact name. Suggestions are best-effort, not an exhaustive symbol search. Same-name definitions remain separate matches. Each edge describes the caller symbol or null if unavailable; filePath, line, and column locate the call in the caller file even when symbol is null. limit caps edges per match (default 20), and truncated indicates additional visible call sites beyond the limit. All matches and their relationships are read from one consistent index snapshot. Unresolved references are excluded, so empty results do not prove absence. Requires an existing graph index; does not refresh or build it.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<RelationshipOutput>(),
         annotations(
@@ -421,7 +421,7 @@ impl ZvecGrepMcpServer {
     }
 
     #[tool(
-        name = "callees",
+        name = "zvec_grep_callees",
         description = "Outgoing persisted call sites for an exact or scope-qualified symbol name (Class::method or Class.method, as shown by rg). ::name selects only top-level definitions; plain name matches any scope, and ::ns::name is equivalent to ns::name. Returns matches for exact definitions. When none match, matches is empty and suggestions contains up to 5 similarly named definitions without edges; retry with a suggestion's exact name. Suggestions are best-effort, not an exhaustive symbol search. Same-name definitions remain separate matches. Each edge describes the callee symbol or null if unavailable; filePath, line, and column locate the call in the caller file even when symbol is null. limit caps edges per match (default 20), and truncated indicates additional visible call sites beyond the limit. All matches and their relationships are read from one consistent index snapshot. Unresolved references are excluded, so empty results do not prove absence. Requires an existing graph index; does not refresh or build it.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<RelationshipOutput>(),
         annotations(
@@ -3268,7 +3268,9 @@ mod tests {
             let legacy_instructions = instructions
                 .lines()
                 .filter(|line| {
-                    !line.starts_with("- For known symbol names, use callers or callees")
+                    !line.starts_with(
+                        "- For known symbol names, use zvec_grep_callers or zvec_grep_callees",
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");

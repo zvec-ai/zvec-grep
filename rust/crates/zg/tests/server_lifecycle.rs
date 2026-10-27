@@ -633,8 +633,8 @@ fn server_on_exposes_agent_search_and_relationships_and_off_stops_it() -> Result
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     assert!(response.contains("zvec_grep_search"));
-    assert!(response.contains("\"name\":\"callers\""));
-    assert!(response.contains("\"name\":\"callees\""));
+    assert!(response.contains("\"name\":\"zvec_grep_callers\""));
+    assert!(response.contains("\"name\":\"zvec_grep_callees\""));
     assert!(!response.contains("zvec_grep_index"));
     assert!(!response.contains("zvec_grep_rg"));
     assert!(response.contains("\"maximum\":50"));
@@ -663,7 +663,7 @@ fn server_on_exposes_agent_search_and_relationships_and_off_stops_it() -> Result
     for (id, name) in [(10, "callers"), (11, "callees")] {
         let call = json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": name, "arguments": {"root": home.path(), "symbol": "run"}}
+            "params": {"name": format!("zvec_grep_{name}"), "arguments": {"root": home.path(), "symbol": "run"}}
         });
         let response = post_json(port, Some(&session), &call.to_string())?;
         assert!(
@@ -780,8 +780,8 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     for name in [
-        "callers",
-        "callees",
+        "zvec_grep_callers",
+        "zvec_grep_callees",
         "zvec_grep_search",
         "zvec_grep_index",
         "zvec_grep_index_drop",
