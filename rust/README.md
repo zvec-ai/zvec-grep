@@ -486,13 +486,14 @@ bash scripts/check.sh
 ## Native and CUDA builds
 
 The safe llama API and the C5 FFI boundary share the same pinned
-`zvec-ai/llama-cpp-rs` revision (`660cb4008b36aaefe9f98a590ba3b712b3a95087`),
-from branch `prebuilt/0.1.154-cpu-r2`.
+`zvec-ai/llama-cpp-rs` revision (`b55399ac6c2035f2301120547c4c967e741d25d3`),
+from branch `prebuilt/0.1.154-cpu-r2-glibc-2.31`.
 Its sys crate automatically selects a SHA256-pinned SDK when target, features
-and native options match: `zvec-0.1.154-cpu-r2` for CPU-only Linux x64 and
-Windows x64/ARM64, and `zvec-0.1.154-r1` for the existing five release configurations,
-including CUDA-enabled Linux/Windows x64. This pin adds Windows ARM64 CPU support
-without introducing the CUDA r2 architecture upgrade. Matching builds reuse native
+and native options match. Linux x64 CPU, Linux ARM64 CPU and Linux x64 CUDA use
+`zvec-0.1.154-glibc-2.31-r1`, built on Ubuntu 20.04 and verified against a glibc
+2.31 baseline. Windows x64/ARM64 CPU use `zvec-0.1.154-cpu-r2`; macOS and
+CUDA-enabled Windows x64 use `zvec-0.1.154-r1`. CUDA architecture coverage is
+unchanged. Matching builds reuse native
 libraries and bindings without executing bindgen, CMake, C++ or CUDA compilation;
 Rust application code still compiles normally. CPU-only x64 builds download only
 the static CPU SDK, not the CUDA SDK; CUDA builds retain the shared core, CPU
