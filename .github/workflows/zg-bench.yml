@@ -25,12 +25,12 @@ on:
         type: string
       suite:
         description: BrowseComp-Plus paired suite
-        default: ci
+        default: iteration
         type: choice
-        options: [ci, smoke]
+        options: [iteration, ci, smoke]
       parallel_cases:
         description: BrowseComp-Plus maximum concurrent cases
-        default: "5"
+        default: "2"
         type: choice
         options: ["1", "2", "5"]
       prepared_run_id:

@@ -310,6 +310,29 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_plan(self.plan_path, self.artifacts)
 
+    def test_iteration_requires_both_fixed_pairs_and_all_four_judgements(self):
+        plan = self.plan("iteration")
+        self.assertEqual(validate_plan(self.plan_path, self.artifacts), plan)
+        self.assertEqual(plan["query_ids"], ["628", "241"])
+        self.assertEqual(
+            sum(
+                plan["profile_orders"][case]["1"][0] == "baseline"
+                for case in plan["query_ids"]
+            ),
+            1,
+        )
+        for case in plan["query_ids"]:
+            self.shard(case)
+        report = self.aggregate()
+        summary = read_json(report / "summary.json")
+        evaluation = read_json(report.parent / "evaluation/summary.json")
+        self.assertTrue(read_json(report / "ci-completeness.json")["complete"])
+        self.assertEqual(summary["cases"]["completed"], 2)
+        self.assertEqual(summary["trials"]["planned"], 2)
+        self.assertEqual(evaluation["expected_answers"], 4)
+        self.assertEqual(evaluation["evaluated_answers"], 4)
+        self.assertEqual(evaluation["zvec_grep_usage"]["expected_trials"], 0)
+
     def test_all_ci_raw_trials_aggregate_without_models_or_worker_paths(self):
         plan = self.plan()
         for case in plan["query_ids"]:

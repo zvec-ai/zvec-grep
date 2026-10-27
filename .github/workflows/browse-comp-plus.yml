@@ -8,10 +8,10 @@ on:
         required: true
         type: string
       suite:
-        default: ci
+        default: iteration
         type: string
       parallel_cases:
-        default: "5"
+        default: "2"
         type: string
       prepared_run_id:
         default: ""
@@ -33,12 +33,12 @@ on:
       suite:
         description: Paired suite (complete corpus; repetitions configured in benchmark.toml)
         required: true
-        default: ci
+        default: iteration
         type: choice
-        options: [ci, smoke]
+        options: [iteration, ci, smoke]
       parallel_cases:
         description: Maximum concurrent case runners (lower this for provider rate limits)
-        default: "5"
+        default: "2"
         type: choice
         options: ["1", "2", "5"]
       prepared_run_id:

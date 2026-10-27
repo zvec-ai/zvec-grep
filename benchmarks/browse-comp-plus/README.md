@@ -162,9 +162,20 @@ subagents are disabled so all trial usage belongs to the recorded session.
 
 The current configuration uses `trials_per_case = 1` and
 `infrastructure_retries = 0`: one baseline/zvec-grep pair per query, with no
-automatic infrastructure-failure retries by the harness. Thus `smoke` runs one
-pair / two agent runs and `ci` runs five pairs / ten agent runs. These iteration
+automatic infrastructure-failure retries by the harness. Thus `iteration` runs
+two pairs / four agent runs, `smoke` runs one pair / two agent runs, and `ci`
+runs five pairs / ten agent runs. These iteration
 settings differ from the historical three-trial study above.
+
+Stabilize the workflow on the fixed `628` and `241` cases first:
+
+```sh
+zg-bench run --suite iteration
+```
+
+This small set validates CI execution, not benchmark quality. Require both
+paired answers, all four judgements, and successful raw-evidence aggregation
+before moving to a larger suite.
 
 Run the fixed random 5-query CI subset:
 
@@ -234,9 +245,10 @@ run on pushes, PRs, comments, or a schedule.
    BrowseComp-Plus → Run workflow** directly. Select a trusted workflow branch
    and set `candidate_ref` to the trusted branch, tag, or commit to benchmark
    in this repository.
-3. Choose `ci` (default: 5 cases, 5 paired trials / 10 agent runs) or `smoke`
+3. Choose `iteration` (default: 2 fixed cases / 4 agent runs / 4 judgements),
+   `ci` (5 cases / 10 agent runs), or `smoke`
    (1 case, 1 paired trial / 2 agent runs, plus the usage audit). Set
-   `parallel_cases` to 1, 2, or 5 (default) to fit provider rate limits.
+   `parallel_cases` to 1, 2 (default), or 5 to fit provider rate limits.
 
 Run the branch version without merging:
 
@@ -244,7 +256,7 @@ Run the branch version without merging:
 gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
   --ref dev/browse-comp-plus-ci \
   -f benchmark=browse-comp-plus \
-  -f candidate_ref=main -f suite=ci -f parallel_cases=5
+  -f candidate_ref=main -f suite=iteration -f parallel_cases=2
 ```
 
 The BrowseComp-Plus route does not require `pr_number`; the existing retrieval
@@ -288,13 +300,16 @@ the original metadata for every case is retained under `shards/`.
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
 | Partial rerun | “Re-run failed jobs” reuses completed trials and matching judgements within the same workflow run and plan, then runs only failed or missing work. Successful case artifacts remain available to aggregation. |
 
-**Cold-run cost:** both suites prepare all 100,195 documents. A new preparation
+**Cold-run cost:** all suites prepare all 100,195 documents. A new preparation
 identity without a compatible snapshot, or an expired artifact, requires a local
 Potion index build. The historical
 [measured run](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
 indexed all documents with no failures in 112 minutes 32 seconds and produced
-a 15.9 GiB compressed **full** preparation snapshot. These are not v3 runtime
-snapshot measurements; its size and end-to-end speedup have not yet been measured.
+a 15.9 GiB compressed **full** preparation snapshot. The
+[runtime conversion](https://github.com/zvec-ai/zvec-grep/actions/runs/40501615950)
+reused that index: the runtime snapshot is 11.47 GiB, 27.68% smaller than
+the 15.86 GiB full archive. One-time conversion/preparation took 12m40s;
+end-to-end validation is still pending. Later exact v3 matches skip conversion.
 Preparation and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
 the run ID and attempt, so separately requested runs do not block or cancel
 one another. Each hosted runner frees SDK space and requires 50 GiB free.

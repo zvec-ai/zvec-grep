@@ -98,7 +98,13 @@ zg-bench run --suite smoke
 
 模型与请求参数在 `benchmark.toml` 中配置：开启思考，reasoning effort 为 `high`，请求温度 `0`、seed `42`，输出上限 20,000 Token，上下文上限 1,000,000 Token。`max_output_tokens` 作为每次模型响应的 `max_tokens` 发送；在 Qwen 上限制答案输出，不是整个多轮 trial 的思考或累计 Token 预算。服务端对参数的实际处理依模型而定。关闭自动压缩与子代理委派，确保 trial 用量属于所记录的会话。
 
-当前配置为 `trials_per_case = 1`、`infrastructure_retries = 0`：每题一组 baseline/zvec-grep 配对，harness 不自动重试基础设施失败。因此 `smoke` 共 1 组配对、2 次 Agent 运行，`ci` 共 5 组配对、10 次 Agent 运行。这组迭代参数与上文历史 study 的每题 3 次试验不同。
+当前配置为 `trials_per_case = 1`、`infrastructure_retries = 0`：每题一组 baseline/zvec-grep 配对，harness 不自动重试基础设施失败。因此 `iteration` 共 2 组配对、4 次 Agent 运行，`smoke` 共 1 组配对、2 次 Agent 运行，`ci` 共 5 组配对、10 次 Agent 运行。这组迭代参数与上文历史 study 的每题 3 次试验不同。
+
+先使用固定的 628、241 两题迭代 CI；两组配对、4 次判分与原始证据汇总完整成功后，再跑 5 题 CI 集合：
+
+```sh
+zg-bench run --suite iteration
+```
 
 运行固定随机选取的 5 个问题组成的 CI 子集：
 
@@ -161,9 +167,11 @@ zg-bench clean
 2. 合并前可从当前分支手动触发已注册的 **ZG Bench**，由其路由到 BrowseComp-Plus。
    BrowseComp-Plus 在默认分支注册后，可直接打开 **Actions → BrowseComp-Plus → Run workflow**。
    选择可信的 workflow 分支，将 `candidate_ref` 设为本仓库待评测的可信分支、tag 或 commit。
-3. 选择 `ci`（默认：5 题、5 次配对试验，共 10 次 Agent 运行）或 `smoke`
+3. 先选择默认的 `iteration`（固定 628、241 两题，共 4 次 Agent 答题、4 次判分）。
+   两组配对、全部判分和原始证据汇总完整成功后，再使用较大的集合；小样本只验证 CI，不能代表整体质量。
+   另保留 `ci`（5 题、10 次 Agent 运行）和 `smoke`
    （1 题、1 次配对试验，共 2 次 Agent 运行，另含工具使用审计）。
-   `parallel_cases` 可选 1、2、5（默认），按服务端限流调整。
+   `parallel_cases` 可选 1、2（默认）、5，按服务端限流调整。
 
 无需合并即可运行分支版本：
 
@@ -171,7 +179,7 @@ zg-bench clean
 gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
   --ref dev/browse-comp-plus-ci \
   -f benchmark=browse-comp-plus \
-  -f candidate_ref=main -f suite=ci -f parallel_cases=5
+  -f candidate_ref=main -f suite=iteration -f parallel_cases=2
 ```
 
 BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该参数。
@@ -205,10 +213,12 @@ zvec-grep 仍在同一 runner 内顺序执行；全套题目的随机 A/B 顺序
 | 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
 | 失败重跑 | “Re-run failed jobs” 在同一次 workflow 运行、同一计划内复用已完成 trial 及匹配的评审，只补失败或缺失项；成功题目的产物继续参与汇总。 |
 
-**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。准备标识变化且无兼容快照，或产物过期后，
+**冷启动成本：** 所有 suite 都准备完整的 100,195 篇语料。准备标识变化且无兼容快照，或产物过期后，
 需在本地构建 Potion 索引。[历史实测运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
 索引全部文档耗时 112 分 32 秒、无失败，压缩的**完整准备快照**为 15.9 GiB。
-这不是 v3 runtime 快照的实测值；其大小与端到端提速尚未测得。
+[runtime 转换实测](https://github.com/zvec-ai/zvec-grep/actions/runs/40501615950)
+直接复用该索引：新快照为 11.47 GiB，相比旧包的 15.86 GiB 缩减 27.68%。
+一次性转换及准备共 12 分 40 秒；完整端到端验证仍待完成，后续精确命中 v3 时跳过转换。
 准备阶段和各题均限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
 独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 50 GiB
 可用磁盘。runtime 快照使用 artifact，与仓库的 10 GB Actions cache 配额分开；仅源数据和
