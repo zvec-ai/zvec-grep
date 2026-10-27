@@ -472,6 +472,9 @@ Embedding runtime:
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --allow-remote                    Allow Remote Embedding for this command only
 
+Device and model-cache overrides apply to this query and its refresh only;
+they do not change saved workspace settings.
+
 File filters:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
@@ -527,6 +530,10 @@ Embedding options:
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --index-embedding-concurrency <n>  Positive index embedding concurrency
   --allow-remote                    Allow Remote Embedding for this command only
+
+Explicit --device and --model-cache values are saved after successful indexing;
+omitted options keep their saved values. Changes do not require --rebuild.
+Precedence: CLI > Environment > Workspace > Global config > Backend default.
 
 Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
@@ -916,7 +923,8 @@ Agent integration paths:
   VSCODE_APPDATA        Base directory for VS Code release channels
 
 Precedence:
-  Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  Remote credentials               CLI > Workspace snapshot > Global config > Environment
+  Device/model cache               CLI > Environment > Workspace > Global config > Backend default
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY

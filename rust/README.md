@@ -181,10 +181,13 @@ Incomplete scans do not apply deletions, cancelled file preparation preserves
 existing content, and content-identical updates refresh timestamps without
 embedding again.
 
-Device and model-cache settings are resolved for each operation from explicit
-options, environment, global configuration, and defaults; they are not saved in
-the workspace. Query credentials and endpoint overrides remain temporary and
-are not written back by automatic refresh or retained by watchers.
+Explicit index device and model-cache options are saved as workspace defaults;
+omitted options preserve them. Each operation resolves these settings from
+explicit options, environment, workspace defaults, global configuration, then
+backend defaults. After moving a workspace, override incompatible preferences
+with `zg --index --device cpu --model-cache <path>`; no rebuild is required.
+Query overrides remain temporary and are not written back by automatic refresh
+or retained by watchers.
 
 Search directly with `zg "where authentication is validated"`, `zg --fts
 "AuthService"`, or `zg --rg -F "AuthService" src`. Management uses flags:

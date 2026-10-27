@@ -1272,7 +1272,7 @@ mod tests {
             layout,
             crate::domain::ScanRules::default(),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
-            None,
+            Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
             IndexState::Enabled(Box::new(
@@ -1319,14 +1319,11 @@ mod tests {
         };
         let directory = tempfile::tempdir().expect("workspace");
         let layout = WorkspaceLayout::new(directory.path().to_path_buf()).expect("layout");
-        let mut active = remote_workspace(layout.clone(), "https://active.test/embeddings");
-        active
-            .set_storage_generation(uuid::Uuid::new_v4().to_string())
-            .expect("generation");
+        let active = remote_workspace(layout.clone(), "https://active.test/embeddings");
         fs::create_dir_all(active.layout().index_dir()).expect("active generation");
         write_workspace_manifest(active.layout().manifest_path(), &active).expect("write active");
         let target = remote_workspace(layout, "https://staging.test/embeddings");
-        prepare_build(target).expect("staged build");
+        prepare_build(&target).expect("staged build");
         let index = index_authorization(&IndexOptions {
             root: Some(directory.path().into()),
             ..IndexOptions::default()

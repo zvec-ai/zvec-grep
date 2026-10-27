@@ -584,8 +584,8 @@ async fn select_query_index(
                 request.api_key.clone()
             },
             allow_remote: request.allow_remote,
-            device: if model.local { request.device } else { None },
-            model_cache: request.model_cache.clone(),
+            runtime_device: if model.local { request.device } else { None },
+            runtime_model_cache: request.model_cache.clone(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             ..IndexOptions::default()
@@ -625,7 +625,7 @@ async fn select_query_index(
             )
             .into());
         }
-        request.device = index_request.device;
+        request.device = index_request.runtime_device;
         request
             .authorized_remote
             .extend(index_request.authorized_remote.clone());

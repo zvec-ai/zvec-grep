@@ -242,7 +242,7 @@ pub(in crate::pipelines) fn refresh_options(
         embedding_concurrency: options.embedding_concurrency,
         lock_timeout_ms: options.lock_timeout_ms,
         runtime_device: options.device,
-        model_cache: options.model_cache.clone(),
+        runtime_model_cache: options.model_cache.clone(),
         ..IndexOptions::default()
     }
 }
@@ -352,11 +352,15 @@ fn search_model_request(
                 .flatten(),
             endpoint,
             device: if local {
-                crate::config::runtime_device(&config, &reference, options.device)?
+                crate::config::runtime_device(&config, &reference, options.device, runtime.device)?
             } else {
                 None
             },
-            cache_dir: crate::config::model_cache(&config, options.model_cache.clone()),
+            cache_dir: crate::config::model_cache(
+                &config,
+                options.model_cache.clone(),
+                runtime.cache_dir,
+            ),
         },
         None,
     ))

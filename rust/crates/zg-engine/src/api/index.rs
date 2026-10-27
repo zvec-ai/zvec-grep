@@ -50,13 +50,18 @@ pub mod options {
         pub api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
+        /// Updates the workspace's saved device preference when supplied.
         #[serde(default)]
         pub device: Option<crate::api::index::options::Device>,
         /// Device override for this operation only; never written to workspace settings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub runtime_device: Option<crate::api::index::options::Device>,
+        /// Updates the workspace's saved model cache directory when supplied.
         #[serde(default)]
         pub model_cache: Option<PathBuf>,
+        /// Model cache override for this operation only; never saved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub runtime_model_cache: Option<PathBuf>,
         /// Receives in-process indexing and model download progress.
         ///
         /// Reporters are runtime-only and are deliberately omitted from serialized

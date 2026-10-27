@@ -3043,7 +3043,7 @@ mod tests {
             crate::domain::WorkspaceLayout::new(root.to_path_buf()).expect("layout"),
             crate::domain::ScanRules::default(),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
-            None,
+            Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
             crate::domain::IndexState::Enabled(Box::new(

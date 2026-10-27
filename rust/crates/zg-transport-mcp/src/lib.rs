@@ -817,7 +817,7 @@ pub struct IndexInput {
     /// One-request embedding provider API key override.
     #[schemars(length(min = 1, max = 8192))]
     pub api_key: Option<String>,
-    /// One-request local embedding device override.
+    /// Saves the local embedding device preference for this workspace.
     pub device: Option<DeviceInput>,
     /// Remote embedding endpoint override.
     #[schemars(length(max = 2048))]

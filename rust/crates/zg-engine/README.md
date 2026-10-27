@@ -74,7 +74,7 @@ Each workspace uses an embedding model for semantic search. Local models run on 
 
 ### Runtime settings
 
-Device and model-cache choices are resolved on the current machine for each operation, rather than saved with the workspace. Query overrides are temporary and are not persisted by automatic refreshes or watchers.
+Explicit device and model-cache choices made when indexing become workspace defaults; omitted options retain their saved values. Each operation resolves these settings from request options, environment variables, workspace defaults, global configuration, then backend defaults. Query overrides remain temporary, and moving a workspace may require overriding its saved device or cache path.
 
 ### Credentials and authorization
 

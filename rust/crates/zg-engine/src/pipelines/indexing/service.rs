@@ -29,7 +29,7 @@ use crate::{
     utils::{directory_exists, resolve_directory},
     workspace::{
         CURRENT_INDEX_VERSION,
-        credentials::{decrypt_api_key, delete_workspace_key, encrypt_api_key},
+        credentials::{decrypt_api_key, delete_credentials_key, encrypt_api_key},
         find_nearest_workspace,
         index::{
             discard_build, drop_index_storage, prepare_build, publish_build, recover_build,
@@ -135,6 +135,15 @@ impl WorkspaceIndexService {
                     error.with_help("Rebuild the index with `zg --index --rebuild`.")
                 })?;
         }
+        let generation = if rebuilding {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            existing
+                .as_ref()
+                .and_then(Workspace::storage_generation)
+                .expect("existing index generation")
+                .to_owned()
+        };
         let mut workspace = index_workspace_state(
             &layout,
             existing.as_ref(),
@@ -142,10 +151,11 @@ impl WorkspaceIndexService {
             &acquired,
             &descriptor,
             scan,
+            generation,
         )?;
         if rebuilding {
             options.changes.clear();
-            workspace = prepare_build(workspace)?;
+            prepare_build(&workspace)?;
         }
         let result = self
             .run_index(
@@ -375,7 +385,7 @@ impl WorkspaceIndexService {
         if has_data {
             drop_index_storage(&layout)?;
             delete_workspace_manifest(&layout)?;
-            delete_workspace_key(&layout)?;
+            delete_credentials_key(&layout)?;
         }
         Ok(has_data)
     }
@@ -388,6 +398,7 @@ fn index_workspace_state(
     models: &[ModelRuntimeLease],
     descriptor: &IndexDescriptor,
     scan: crate::domain::ScanRules,
+    generation: String,
 ) -> Result<Workspace, EngineError> {
     let now = epoch_millis();
     let configs = models
@@ -409,7 +420,7 @@ fn index_workspace_state(
         layout.clone(),
         scan,
         Some(CURRENT_INDEX_VERSION),
-        active.and_then(|workspace| workspace.storage_generation().map(str::to_owned)),
+        Some(generation),
         active.map_or(now, Workspace::created_epoch_ms),
         now,
         IndexState::Enabled(Box::new(descriptor)),
@@ -555,6 +566,7 @@ fn acquire_model(
                     .map(|e| e.device)
                     .filter(|device| *device != Device::Auto)
             }),
+            existing_runtime.and_then(|runtime| runtime.device),
         )?
     } else {
         None
@@ -568,9 +580,11 @@ fn acquire_model(
                 cache_dir: crate::config::model_cache(
                     &config,
                     options
-                        .model_cache
+                        .runtime_model_cache
                         .clone()
+                        .or_else(|| options.model_cache.clone())
                         .or_else(|| options.embedding.as_ref().and_then(|e| e.cache_dir.clone())),
+                    existing_runtime.and_then(|runtime| runtime.cache_dir.clone()),
                 ),
                 device,
             },
@@ -652,9 +666,6 @@ fn saved_embedding_config(
     options: &IndexOptions,
     model: &ModelRuntimeLease,
 ) -> Result<ModelConfig<EncryptedApiKey>, EngineError> {
-    if model.info().model().provider() == "local" {
-        return Ok(ModelConfig::default());
-    }
     let reference = model.info().model().reference();
     let mut stored = existing
         .and_then(|workspace| {
@@ -665,6 +676,29 @@ fn saved_embedding_config(
                 .cloned()
         })
         .unwrap_or_default();
+    if model.info().model().provider() == "local" {
+        stored.device = options
+            .device
+            .or_else(|| {
+                options
+                    .embedding
+                    .as_ref()
+                    .map(|embedding| embedding.device)
+                    .filter(|device| *device != Device::Auto)
+            })
+            .or(stored.device);
+        stored.cache_dir = options
+            .model_cache
+            .clone()
+            .or_else(|| {
+                options
+                    .embedding
+                    .as_ref()
+                    .and_then(|embedding| embedding.cache_dir.clone())
+            })
+            .or(stored.cache_dir);
+        return Ok(stored);
+    }
     stored.endpoint = model
         .configured_endpoint()
         .map(str::to_owned)
@@ -727,6 +761,19 @@ mod tests {
 
     use super::{ModelRuntimeManager, WorkspaceIndexService};
 
+    fn build_target(active: &Workspace) -> Workspace {
+        Workspace::new(
+            active.layout().clone(),
+            active.scan().clone(),
+            active.index_version(),
+            Some(uuid::Uuid::new_v4().to_string()),
+            active.created_epoch_ms(),
+            active.updated_epoch_ms(),
+            active.index().clone(),
+        )
+        .expect("build target")
+    }
+
     fn write_previous_index_version(home: &std::path::Path, manifest: &crate::domain::Workspace) {
         let mut previous = manifest.clone();
         previous = crate::domain::Workspace::new(
@@ -768,18 +815,16 @@ mod tests {
         };
         let acquired =
             super::acquire_index_models(&models, None, &options).expect("model metadata");
-        let mut workspace = super::index_workspace_state(
+        let workspace = super::index_workspace_state(
             &layout,
             None,
             &options,
             &acquired.runtimes,
             &acquired.descriptor,
             crate::domain::ScanRules::default(),
+            uuid::Uuid::new_v4().to_string(),
         )
         .expect("workspace");
-        workspace
-            .set_storage_generation(uuid::Uuid::new_v4().to_string())
-            .expect("generation");
         super::write_workspace_manifest(layout.manifest_path(), &workspace).expect("save");
         let bytes = std::fs::read_to_string(layout.manifest_path()).expect("manifest");
         assert!(!bytes.contains("saved-private-token"));
@@ -1140,7 +1185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_device_override_does_not_persist_in_manifest() {
+    async fn model_preferences_save_index_changes_but_not_query_overrides() {
         let directory = tempdir().expect("workspace");
         let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
@@ -1153,7 +1198,8 @@ mod tests {
             .expect("read")
             .expect("manifest");
         let request = crate::api::context::ContextOptions {
-            device: Some(Device::Cpu),
+            device: Some(Device::Auto),
+            model_cache: Some(directory.path().join("temporary-models")),
             ..Default::default()
         };
         let options = crate::pipelines::indexed_search::service::refresh_options(
@@ -1181,7 +1227,8 @@ mod tests {
                 &models,
                 IndexOptions {
                     root: Some(directory.path().to_path_buf()),
-                    device: Some(Device::Cpu),
+                    device: Some(Device::Auto),
+                    model_cache: Some(directory.path().join("saved-models")),
                     ..Default::default()
                 },
             )
@@ -1191,16 +1238,8 @@ mod tests {
             .expect("read")
             .expect("manifest");
         assert_eq!(
-            configured
-                .index()
-                .descriptor()
-                .expect("indexed workspace")
-                .embedding_configs(),
-            manifest
-                .index()
-                .descriptor()
-                .expect("indexed workspace")
-                .embedding_configs()
+            configured.storage_generation(),
+            manifest.storage_generation()
         );
         let saved = serde_json::to_value(&configured).expect("manifest serialization");
         for runtime in saved["embeddingRuntimes"]
@@ -1208,8 +1247,11 @@ mod tests {
             .expect("runtimes")
             .values()
         {
-            assert!(runtime.get("device").is_none());
-            assert!(runtime.get("cacheDir").is_none());
+            assert_eq!(runtime["device"], "auto");
+            assert_eq!(
+                runtime["cacheDir"],
+                serde_json::json!(directory.path().join("saved-models"))
+            );
         }
         models.close();
     }
@@ -1228,7 +1270,7 @@ mod tests {
         let active = super::read_workspace_manifest(&layout)
             .expect("read")
             .expect("active");
-        let mut target = active.clone();
+        let mut target = build_target(&active);
         let mut globs = target.scan().globs().to_vec();
         globs.push("*.rs".into());
         target = crate::domain::Workspace::new(
@@ -1269,7 +1311,8 @@ mod tests {
             )
             .expect("workspace")
         };
-        let abandoned = super::prepare_build(target).expect("crashed build");
+        let abandoned = target;
+        super::prepare_build(&abandoned).expect("crashed build");
         std::fs::write(
             abandoned.layout().staged_index_dir().join("checkpoint"),
             "discard me",
@@ -1315,7 +1358,8 @@ mod tests {
         let active = super::read_workspace_manifest(&layout)
             .expect("read")
             .expect("active");
-        let published = super::prepare_build(active.clone()).expect("build");
+        let published = build_target(&active);
+        super::prepare_build(&published).expect("build");
         super::publish_build(published.clone(), super::epoch_millis())
             .expect("publish completed build");
         service
@@ -1627,7 +1671,7 @@ mod tests {
         let manifest = super::read_workspace_manifest(&layout)
             .expect("read")
             .expect("manifest");
-        super::prepare_build(manifest).expect("simulate crashed first build");
+        super::prepare_build(&build_target(&manifest)).expect("simulate crashed first build");
         std::fs::remove_file(home.join("manifest.json")).expect("unpublished fixture");
         let original_build = original.join(".zvec-grep/temp/build.json");
         let original_bytes = std::fs::read(&original_build).expect("original pending build");
@@ -1709,7 +1753,8 @@ mod tests {
         let active = super::read_workspace_manifest(&layout)
             .expect("read")
             .expect("active index");
-        let pending = super::prepare_build(active.clone()).expect("pending rebuild");
+        let pending = build_target(&active);
+        super::prepare_build(&pending).expect("pending rebuild");
         let error = service
             .index(
                 &models,
@@ -1896,16 +1941,15 @@ mod tests {
         let manifest = super::read_workspace_manifest(&layout)
             .expect("manifest read")
             .expect("manifest");
-        let serialized = serde_json::to_string(&manifest).expect("manifest serialization");
-        assert!(!serialized.contains("cacheDir"));
-        assert!(!serialized.contains("model-cache"));
+        let serialized = serde_json::to_value(&manifest).expect("manifest serialization");
+        assert_eq!(
+            serialized["embeddingRuntimes"]["local/potion-code-16m-v2"]["cacheDir"],
+            serde_json::json!(directory.path().join("model-cache"))
+        );
         let lease = crate::pipelines::indexed_search::service::acquire_search_model(
             &models,
             &manifest,
-            &crate::api::context::ContextOptions {
-                model_cache: Some(directory.path().join("model-cache")),
-                ..Default::default()
-            },
+            &crate::api::context::ContextOptions::default(),
         )
         .expect("search model");
         assert_eq!(

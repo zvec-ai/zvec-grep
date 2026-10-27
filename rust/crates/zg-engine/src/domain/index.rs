@@ -66,18 +66,13 @@ impl IndexDescriptor {
                 }
             }
         }
-        for (reference, config) in &embedding_configs {
+        for reference in embedding_configs.keys() {
             if !std::iter::once(&default_embedding_model)
                 .chain(embedding_routes.values())
                 .any(|model| model.model().reference() == *reference)
             {
                 return Err(EngineError::invalid_argument(format!(
-                    "embedding configuration refers to model {reference}, which is not used by the index"
-                )));
-            }
-            if config.device.is_some() || config.cache_dir.is_some() {
-                return Err(EngineError::invalid_argument(format!(
-                    "saved configuration for {reference} must not contain a device or model cache directory"
+                    "inconsistent index metadata: configuration exists for model {reference}, but the model is not referenced by defaultEmbeddingModel or embeddingRoutes"
                 )));
             }
         }

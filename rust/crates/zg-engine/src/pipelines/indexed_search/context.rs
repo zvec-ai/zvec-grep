@@ -884,6 +884,7 @@ mod tests {
             .expect("index descriptor"),
         ));
 
+        let generation = uuid::Uuid::new_v4().to_string();
         for root in [&original_root, &moved_root] {
             if root == &moved_root {
                 std::fs::rename(&original_root, &moved_root).expect("move workspace");
@@ -892,7 +893,7 @@ mod tests {
                 WorkspaceLayout::new(root.clone()).expect("layout"),
                 crate::domain::ScanRules::default(),
                 Some(crate::workspace::CURRENT_INDEX_VERSION),
-                None,
+                Some(generation.clone()),
                 0,
                 0,
                 index.clone(),

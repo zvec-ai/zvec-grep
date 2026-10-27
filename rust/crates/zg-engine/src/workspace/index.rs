@@ -94,7 +94,13 @@ fn recover_build_with(
 }
 
 /// Start a new attempt only after recovering the previous one.
-pub(crate) fn prepare_build(mut target: Workspace) -> Result<Workspace, EngineError> {
+pub(crate) fn prepare_build(target: &Workspace) -> Result<(), EngineError> {
+    let generation = target.storage_generation().ok_or_else(|| {
+        EngineError::invalid_argument(format!(
+            "workspace {}: preparing an index build requires an enabled index",
+            target.layout().source_root().display(),
+        ))
+    })?;
     ensure_directory(target.layout().storage_dir())?;
     if target.layout().has_build_record()?
         || directory_exists(target.layout().backup_index_dir())?
@@ -104,12 +110,8 @@ pub(crate) fn prepare_build(mut target: Workspace) -> Result<Workspace, EngineEr
             "recover the unfinished workspace build before starting another",
         ));
     }
-    target.set_storage_generation(Uuid::new_v4().to_string())?;
     let record = BuildRecord {
-        generation: target
-            .storage_generation()
-            .expect("new generation")
-            .to_owned(),
+        generation: generation.to_owned(),
         previous_manifest: read_optional(target.layout().manifest_path())?
             .as_deref()
             .map(sha256_hex),
@@ -122,10 +124,10 @@ pub(crate) fn prepare_build(mut target: Workspace) -> Result<Workspace, EngineEr
     if let Err(error) = ensure_directory(target.layout().staged_index_dir())
         .and_then(|()| sync_directory(target.layout().temp_dir()))
     {
-        let _ = discard_build(&target);
+        let _ = discard_build(target);
         return Err(error);
     }
-    Ok(target)
+    Ok(())
 }
 
 /// A stale completion must never discard a newer attempt or a published index.
@@ -324,7 +326,7 @@ mod tests {
         fs::write(&marker, b"external data").expect("external marker");
 
         assert!(needs_recovery(target.layout()).is_err());
-        assert!(prepare_build(target.clone()).is_err());
+        assert!(prepare_build(&target).is_err());
         assert!(recover_build(target.layout()).is_err());
         assert!(drop_index_storage(target.layout()).is_err());
         assert_eq!(
@@ -341,11 +343,11 @@ mod tests {
 
     fn manifest(root: &Path) -> Workspace {
         let root = fs::canonicalize(root).expect("canonical fixture root");
-        let mut manifest = Workspace::new(
+        Workspace::new(
             WorkspaceLayout::new(root).expect("layout"),
             crate::domain::ScanRules::default(),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
-            None,
+            Some(Uuid::new_v4().to_string()),
             1,
             2,
             IndexState::Enabled(Box::new(
@@ -377,11 +379,7 @@ mod tests {
                 .expect("index descriptor"),
             )),
         )
-        .expect("manifest");
-        manifest
-            .set_storage_generation(Uuid::new_v4().to_string())
-            .expect("generation");
-        manifest
+        .expect("manifest")
     }
 
     fn write_active(manifest: &Workspace) {
@@ -391,8 +389,22 @@ mod tests {
             .expect("active manifest");
     }
 
+    fn build_target(active: &Workspace) -> Workspace {
+        Workspace::new(
+            active.layout().clone(),
+            active.scan().clone(),
+            active.index_version(),
+            Some(Uuid::new_v4().to_string()),
+            active.created_epoch_ms(),
+            active.updated_epoch_ms(),
+            active.index().clone(),
+        )
+        .expect("build target")
+    }
+
     fn stage(active: &Workspace) -> Workspace {
-        let build = prepare_build(active.clone()).expect("stage");
+        let build = build_target(active);
+        prepare_build(&build).expect("stage");
         fs::write(build.layout().staged_index_dir().join("new"), "new data").expect("new data");
         build
     }
@@ -410,7 +422,8 @@ mod tests {
         recover_build(active.layout()).expect("idempotent");
         assert!(!active.layout().temp_dir().exists());
         assert!(active.layout().index_dir().join("old").exists());
-        let fresh = prepare_build(active.clone()).expect("fresh attempt");
+        let fresh = build_target(&active);
+        prepare_build(&fresh).expect("fresh attempt");
         assert_ne!(fresh.storage_generation(), build.storage_generation());
         assert!(!fresh.layout().staged_index_dir().join("new").exists());
         discard_build(&build).expect("stale completion does not discard fresh attempt");
@@ -774,7 +787,7 @@ mod tests {
         let orphan = active.layout().staged_index_dir();
         fs::create_dir_all(orphan).expect("orphaned stage");
         fs::write(orphan.join("stale"), "stale data").expect("stale data");
-        assert!(prepare_build(active.clone()).is_err());
+        assert!(prepare_build(&active).is_err());
         recover_build(active.layout()).expect("discard orphaned stage");
         assert!(!orphan.exists());
         assert!(active.layout().index_dir().join("old").is_file());

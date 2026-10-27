@@ -691,6 +691,10 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     merge_update(&mut current.runtime_device, incoming.runtime_device.take());
     merge_update(&mut current.model_cache, incoming.model_cache.take());
     merge_update(
+        &mut current.runtime_model_cache,
+        incoming.runtime_model_cache.take(),
+    );
+    merge_update(
         &mut current.lock_timeout_ms,
         incoming.lock_timeout_ms.take(),
     );
@@ -1846,6 +1850,7 @@ mod tests {
             IndexOptions {
                 authorized_remote: vec![target.clone()],
                 runtime_device: Some(zg_engine::api::index::options::Device::Cpu),
+                runtime_model_cache: Some("temporary-cache".into()),
                 ..IndexOptions::default()
             },
         );
@@ -1853,6 +1858,11 @@ mod tests {
         assert_eq!(merged.authorized_remote, [target]);
         assert!(!merged.allow_remote);
         assert!(merged.device.is_none());
+        assert!(merged.model_cache.is_none());
+        assert_eq!(
+            merged.runtime_model_cache.as_deref(),
+            Some(std::path::Path::new("temporary-cache"))
+        );
         assert_eq!(
             merged.runtime_device,
             Some(zg_engine::api::index::options::Device::Cpu)

@@ -53,11 +53,11 @@ impl Fixture {
 
     fn publish(&self) -> (Workspace, ContextOptions) {
         let root = self.layout.source_root();
-        let mut manifest = Workspace::new(
+        let manifest = Workspace::new(
             self.layout.clone(),
             crate::domain::ScanRules::default(),
             Some(CURRENT_INDEX_VERSION),
-            None,
+            Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
             IndexState::Enabled(Box::new(
@@ -71,9 +71,6 @@ impl Fixture {
             )),
         )
         .expect("manifest");
-        manifest
-            .set_storage_generation(uuid::Uuid::new_v4().to_string())
-            .expect("generation");
         write_workspace_manifest(self.layout.manifest_path(), &manifest).expect("publish manifest");
         let options = ContextOptions {
             root: Some(root.to_path_buf()),

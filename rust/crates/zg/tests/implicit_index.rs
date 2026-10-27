@@ -877,6 +877,61 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
     }
 }
 
+#[test]
+fn query_refresh_keeps_saved_model_preferences() {
+    for mode in ["direct", "server"] {
+        let mut fixture = Fixture::new();
+        fixture.success(&[
+            "--index",
+            "--mode",
+            "direct",
+            "--embedding",
+            "local/potion-code-16m-v2",
+            "--device",
+            "cpu",
+            "--model-cache",
+            "saved-models",
+        ]);
+        let manifest_path = fixture.root.path().join(".zvec-grep/manifest.json");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("saved manifest"))
+                .expect("manifest JSON");
+        assert_eq!(
+            saved["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
+            "cpu"
+        );
+        if mode == "server" {
+            fixture.start_server();
+        }
+        fs::write(fixture.root.path().join("empty.txt"), "").expect("trigger refresh");
+        let output = fixture
+            .command(&[
+                "--mode",
+                mode,
+                "--fts",
+                "needle",
+                "--refresh",
+                "wait",
+                "--device",
+                "auto",
+                "--model-cache",
+                "temporary-models",
+            ])
+            .output()
+            .expect("query refresh");
+        assert!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let updated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("updated manifest"))
+                .expect("manifest JSON");
+        assert_eq!(updated["embeddingRuntimes"], saved["embeddingRuntimes"]);
+        assert_eq!(updated["storageGeneration"], saved["storageGeneration"]);
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn cancelling_model_selection_exits_without_error_or_index() {

@@ -43,17 +43,25 @@ impl Workspace {
         };
         if workspace.index_enabled() {
             if workspace.index_version.is_none() {
-                return Err(EngineError::invalid_argument(
-                    "enabled workspace requires an index version",
-                ));
+                return Err(EngineError::invalid_argument(format!(
+                    "workspace {}: index is enabled but indexVersion is missing",
+                    workspace.layout.source_root().display(),
+                )));
+            }
+            if workspace.storage_generation.is_none() {
+                return Err(EngineError::invalid_argument(format!(
+                    "workspace {}: index is enabled but storageGeneration is missing",
+                    workspace.layout.source_root().display(),
+                )));
             }
         } else if workspace.index_version.is_some() || workspace.storage_generation.is_some() {
-            return Err(EngineError::invalid_argument(
-                "an unbuilt workspace cannot select an index version or storage generation",
-            ));
+            return Err(EngineError::invalid_argument(format!(
+                "workspace {}: an unbuilt index cannot have indexVersion or storageGeneration",
+                workspace.layout.source_root().display(),
+            )));
         }
         if let Some(generation) = &workspace.storage_generation {
-            validate_generation(generation)?;
+            validate_generation(workspace.layout.source_root(), generation)?;
         }
         Ok(workspace)
     }
@@ -86,30 +94,6 @@ impl Workspace {
         &self.index
     }
 
-    pub(crate) fn set_storage_generation(&mut self, generation: String) -> EngineResult<()> {
-        if !self.index_enabled() {
-            return Err(EngineError::invalid_argument(
-                "an unbuilt workspace cannot select a storage generation",
-            ));
-        }
-        validate_generation(&generation)?;
-        self.storage_generation = Some(generation);
-        Ok(())
-    }
-
-    pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
-        self.updated_epoch_ms = updated_epoch_ms;
-    }
-
-    pub(crate) fn validate_published(&self) -> EngineResult<()> {
-        if self.index_enabled() && self.storage_generation.is_none() {
-            return Err(EngineError::invalid_argument(
-                "enabled workspace requires storageGeneration",
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn source_path(&self, relative: &SourcePath) -> PathBuf {
         self.layout.source_root().join(relative)
     }
@@ -117,12 +101,19 @@ impl Workspace {
     pub(crate) fn index_enabled(&self) -> bool {
         matches!(self.index, IndexState::Enabled(_))
     }
+
+    pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
+        self.updated_epoch_ms = updated_epoch_ms;
+    }
 }
 
-fn validate_generation(generation: &str) -> EngineResult<()> {
-    uuid::Uuid::parse_str(generation)
-        .map(|_| ())
-        .map_err(|_| EngineError::invalid_argument("storageGeneration must be a UUID"))
+fn validate_generation(source_root: &Path, generation: &str) -> EngineResult<()> {
+    uuid::Uuid::parse_str(generation).map(|_| ()).map_err(|_| {
+        EngineError::invalid_argument(format!(
+            "workspace {}: storageGeneration must be a UUID, got {generation:?}",
+            source_root.display(),
+        ))
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -78,7 +78,7 @@ impl ManifestData {
                 .map_err(|error| error.to_string())?,
             )),
         };
-        let workspace = Workspace::new(
+        Workspace::new(
             layout.clone(),
             self.scan
                 .into_rules(ignore_files)
@@ -89,11 +89,7 @@ impl ManifestData {
             self.updated_time,
             index,
         )
-        .map_err(|error| error.to_string())?;
-        workspace
-            .validate_published()
-            .map_err(|error| error.to_string())?;
-        Ok(workspace)
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -410,7 +406,6 @@ pub(crate) fn write_workspace_manifest(
     path: &Path,
     manifest: &Workspace,
 ) -> Result<(), EngineError> {
-    manifest.validate_published()?;
     if manifest.index_enabled() {
         require_current_index_version(manifest.index_version())?;
     }
@@ -474,7 +469,7 @@ mod tests {
     }
 
     fn fixture_manifest(layout: &WorkspaceLayout) -> Workspace {
-        let mut manifest = Workspace::new(
+        Workspace::new(
             layout.clone(),
             crate::api::index::options::ScanRulesUpdate {
                 included_formats: Some(vec![crate::domain::FileFormat::Rust]),
@@ -485,7 +480,7 @@ mod tests {
             .apply(&ScanRules::default())
             .expect("scan rules"),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
-            None,
+            Some(uuid::Uuid::new_v4().to_string()),
             10,
             20,
             IndexState::Enabled(Box::new(
@@ -515,11 +510,7 @@ mod tests {
                 .expect("index descriptor"),
             )),
         )
-        .expect("fixture manifest");
-        manifest
-            .set_storage_generation(uuid::Uuid::new_v4().to_string())
-            .expect("generation");
-        manifest
+        .expect("fixture manifest")
     }
 
     #[test]
@@ -541,7 +532,7 @@ mod tests {
         assert!(
             decode_manifest(value.clone(), &layout)
                 .expect_err("unknown model configuration")
-                .contains("not used by the index")
+                .contains("not referenced by defaultEmbeddingModel or embeddingRoutes")
         );
         value["indexPolicy"] = serde_json::json!("uninitialized");
         value["indexVersion"] = serde_json::Value::Null;
@@ -669,46 +660,53 @@ mod tests {
     }
 
     #[test]
-    fn enabled_manifests_require_a_generation_at_persistence_boundaries() {
+    fn enabled_workspaces_require_a_valid_generation() {
         let directory = tempdir().expect("workspace");
         let layout = WorkspaceLayout::new(directory.path().to_path_buf()).expect("layout");
-        let storage_dir = layout.storage_dir().to_path_buf();
-        let mut draft = fixture_manifest(&layout);
-        draft = crate::domain::Workspace::new(
-            draft.layout().clone(),
-            draft.scan().clone(),
-            draft.index_version(),
-            None,
-            draft.created_epoch_ms(),
-            draft.updated_epoch_ms(),
-            draft.index().clone(),
-        )
-        .expect("workspace");
-
-        let error = write_workspace_manifest(layout.manifest_path(), &draft)
-            .expect_err("draft must not be published without a generation");
-        assert!(error.message().contains("storageGeneration"));
-        assert!(!layout.manifest_path().exists());
-        let value = serde_json::to_value(&draft).expect("draft JSON");
-        assert!(value.get("storageGeneration").is_none());
-        for null_generation in [false, true] {
-            let mut missing_generation = value.clone();
-            if null_generation {
-                missing_generation["storageGeneration"] = serde_json::Value::Null;
-            }
-            let error = decode_manifest(missing_generation, draft.layout())
-                .expect_err("enabled manifest requires a generation");
-            assert!(error.contains("storageGeneration"));
+        let manifest = fixture_manifest(&layout);
+        for generation in [None, Some("invalid".to_owned())] {
+            let error = Workspace::new(
+                layout.clone(),
+                manifest.scan().clone(),
+                manifest.index_version(),
+                generation,
+                manifest.created_epoch_ms(),
+                manifest.updated_epoch_ms(),
+                manifest.index().clone(),
+            )
+            .expect_err("enabled workspace requires a valid generation");
+            assert!(error.message().contains("storageGeneration"));
         }
-        fs::create_dir(&storage_dir).expect("workspace home");
-        let build = crate::workspace::index::prepare_build(draft).expect("allocate generation");
-        assert!(build.storage_generation().is_some());
-        assert!(build.layout().staged_index_dir().is_dir());
-        write_workspace_manifest(layout.manifest_path(), &build)
-            .expect("publish allocated generation");
+        assert!(!layout.manifest_path().exists());
+
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
+        for generation in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("invalid")),
+        ] {
+            let mut value = serde_json::to_value(&manifest).expect("manifest JSON");
+            if let Some(generation) = generation {
+                value["storageGeneration"] = generation;
+            } else {
+                value
+                    .as_object_mut()
+                    .expect("manifest object")
+                    .remove("storageGeneration");
+            }
+            fs::write(
+                layout.manifest_path(),
+                serde_json::to_vec(&value).expect("JSON"),
+            )
+            .expect("write invalid manifest");
+            let error = read_workspace_manifest(&layout)
+                .expect_err("enabled manifest requires a valid generation");
+            assert!(error.message().contains("storageGeneration"));
+        }
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write valid manifest");
         assert_eq!(
             read_workspace_manifest(&layout).expect("read manifest"),
-            Some(build)
+            Some(manifest)
         );
     }
 
@@ -1048,20 +1046,25 @@ mod tests {
     }
 
     #[test]
-    fn local_runtime_fields_and_plaintext_keys_are_not_accepted() {
+    fn model_preferences_round_trip_without_changing_index_compatibility() {
         let directory = tempdir().expect("directory");
         let manifest = fixture_manifest(
             &WorkspaceLayout::new(directory.path().to_path_buf()).expect("layout"),
         );
-        for (field, value) in [
-            ("device", serde_json::json!("cpu")),
-            ("cacheDir", serde_json::json!("/old/models")),
-            ("apiKey", serde_json::json!("plaintext-secret")),
-        ] {
-            let mut json = serde_json::to_value(&manifest).expect("JSON");
-            json["embeddingRuntimes"]["local/minilm"][field] = value;
-            assert!(decode_manifest(json, manifest.layout()).is_err(), "{field}");
-        }
+        let mut json = serde_json::to_value(&manifest).expect("JSON");
+        json["embeddingRuntimes"]["local/minilm"]["device"] = serde_json::json!("cpu");
+        json["embeddingRuntimes"]["local/minilm"]["cacheDir"] =
+            serde_json::json!(directory.path().join("models"));
+        let restored = decode_manifest(json.clone(), manifest.layout()).expect("saved preferences");
+        assert_eq!(serde_json::to_value(&restored).expect("JSON"), json);
+        manifest
+            .index()
+            .descriptor()
+            .expect("index")
+            .ensure_index_compatible(restored.index().descriptor().expect("index"))
+            .expect("runtime preferences do not require rebuilding");
+        json["embeddingRuntimes"]["local/minilm"]["apiKey"] = serde_json::json!("plaintext-secret");
+        assert!(decode_manifest(json, manifest.layout()).is_err());
     }
 
     #[test]

@@ -325,7 +325,14 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
             0o600
         );
     }
-    fixture.success(&["--index", "--mode", "direct", "--model-cache", "cache"]);
+    let cache = fixture.user.path().join("index-models");
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--model-cache",
+        cache.to_str().expect("cache path"),
+    ]);
     let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
     )
@@ -336,7 +343,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     );
     let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
     assert!(runtime.get("device").is_none());
-    assert!(runtime.get("cacheDir").is_none());
+    assert_eq!(runtime["cacheDir"], json!(cache));
     assert!(
         !fixture
             .root
@@ -551,7 +558,7 @@ fn environment_and_global_api_keys_are_not_copied_into_the_workspace() {
 }
 
 #[test]
-fn device_resolution_uses_explicit_then_environment_then_global_configuration() {
+fn explicit_device_overrides_environment_and_saved_preferences_do_not() {
     let fixture = Fixture::new();
     fixture.write_config(&json!({
         "version": 1,
@@ -582,4 +589,92 @@ fn device_resolution_uses_explicit_then_environment_then_global_configuration() 
         "{}",
         String::from_utf8_lossy(&explicit.stderr)
     );
+    let invalid = fixture
+        .command(&["--index", "--mode", "direct"])
+        .env("ZVEC_GREP_DEVICE", "invalid")
+        .output()
+        .expect("environment takes precedence over saved device");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Invalid ZVEC_GREP_DEVICE"));
+}
+
+#[test]
+fn local_model_preferences_save_only_explicit_index_options() {
+    let fixture = Fixture::new();
+    fixture.write_config(&json!({
+        "version": 1,
+        "defaults": {
+            "embedding": "local/potion-code-16m-v2",
+            "modelCacheDir": fixture.user.path().join("global-models")
+        },
+        "models": {"local/potion-code-16m-v2": {"device": "cpu"}}
+    }));
+    let manifest = || -> serde_json::Value {
+        serde_json::from_slice(
+            &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+        )
+        .expect("manifest JSON")
+    };
+    fixture.success(&["--index", "--mode", "direct"]);
+    let original = manifest();
+    assert_eq!(
+        original["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        json!({})
+    );
+    let saved_cache = fixture.user.path().join("saved-models");
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--device",
+        "cpu",
+        "--model-cache",
+        saved_cache.to_str().expect("cache path"),
+    ]);
+    let saved = manifest();
+    assert_eq!(
+        saved["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        json!({
+            "device": "cpu", "cacheDir": saved_cache
+        })
+    );
+    let inherited = fixture
+        .command(&["--index", "--mode", "direct"])
+        .env("ZVEC_GREP_DEVICE", "auto")
+        .env(
+            "ZVEC_GREP_MODEL_CACHE",
+            fixture.user.path().join("environment-models"),
+        )
+        .output()
+        .expect("temporary environment preferences");
+    assert!(
+        inherited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inherited.stderr)
+    );
+    assert_eq!(manifest()["embeddingRuntimes"], saved["embeddingRuntimes"]);
+
+    fixture.success(&["--index", "--mode", "direct", "--device", "auto"]);
+    assert_eq!(
+        manifest()["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        json!({
+            "device": "auto", "cacheDir": saved_cache
+        })
+    );
+    let replacement_cache = fixture.user.path().join("replacement-models");
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--model-cache",
+        replacement_cache.to_str().expect("replacement cache path"),
+    ]);
+    let updated = manifest();
+    assert_eq!(
+        updated["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        json!({
+            "device": "auto", "cacheDir": replacement_cache
+        })
+    );
+    assert_eq!(updated["storageGeneration"], original["storageGeneration"]);
 }

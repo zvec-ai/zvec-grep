@@ -995,7 +995,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             runtime_device: request.device,
-            model_cache: request.model_cache.clone(),
+            runtime_model_cache: request.model_cache.clone(),
             ..IndexOptions::default()
         };
         if matches!(policy, RefreshPolicy::Off | RefreshPolicy::Background) {
@@ -1338,19 +1338,9 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
-    template.runtime_device = options.runtime_device.or(options.device).or_else(|| {
-        options
-            .embedding
-            .as_ref()
-            .map(|model| model.device)
-            .filter(|device| *device != zg_engine::api::index::options::Device::Auto)
-    });
-    template.model_cache = options.model_cache.clone().or_else(|| {
-        options
-            .embedding
-            .as_ref()
-            .and_then(|model| model.cache_dir.clone())
-    });
+    template.runtime_device = None;
+    template.runtime_model_cache = None;
+    template.model_cache = None;
     template.api_key = None;
     template.endpoint = None;
     template.device = None;
@@ -1454,12 +1444,16 @@ mod tests {
     use super::WorkspaceRuntimeManager;
 
     #[test]
-    fn watch_template_keeps_machine_options_without_replaying_saved_configuration() {
+    fn watch_template_does_not_replay_model_configuration() {
         use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
 
         let template = super::index_template(&IndexOptions {
             api_key: Some("one-operation-key".into()),
             endpoint: Some("https://example.test/embeddings".into()),
+            device: Some(Device::Cpu),
+            model_cache: Some("saved-cache".into()),
+            runtime_device: Some(Device::Auto),
+            runtime_model_cache: Some("temporary-cache".into()),
             embedding: Some(EmbeddingModelSpec {
                 reference: "local/potion-code-16m-v2".into(),
                 revision: None,
@@ -1469,8 +1463,9 @@ mod tests {
             }),
             ..IndexOptions::default()
         });
-        assert_eq!(template.runtime_device, Some(Device::Cpu));
-        assert_eq!(template.model_cache, Some("local-model-cache".into()));
+        assert!(template.runtime_device.is_none());
+        assert!(template.runtime_model_cache.is_none());
+        assert!(template.model_cache.is_none());
         assert!(template.api_key.is_none());
         assert!(template.endpoint.is_none());
         assert!(template.embedding.is_none());
