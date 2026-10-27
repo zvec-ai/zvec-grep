@@ -28,7 +28,12 @@ def evidence_roots(directory: Path) -> list[Path]:
         raise ValueError("raw evidence must be a regular directory")
     if (directory / "ci.json").exists() or (directory / MANIFEST).exists():
         return [directory]
-    return sorted(directory.iterdir())
+    roots = []
+    for child in sorted(directory.iterdir()):
+        if child.is_symlink() or not child.is_dir():
+            raise ValueError("raw evidence containers must contain regular directories")
+        roots.extend(evidence_roots(child))
+    return roots
 
 
 def evidence_files(root: Path) -> dict[str, str]:

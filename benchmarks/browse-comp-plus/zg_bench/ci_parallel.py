@@ -85,7 +85,9 @@ def restore_queries(artifacts: Path, plan_path: Path) -> Path:
     return destination
 
 
-def create_plan(artifacts: Path, suite: str, output: Path) -> Path:
+def create_plan(
+    artifacts: Path, suite: str, output: Path, *, execution: str = "parallel_cases"
+) -> Path:
     config = load_config()
     query_path = artifacts / "source" / "browsecomp_plus_decrypted.jsonl"
     selection = load_suite(suite, load_queries(query_path))
@@ -101,6 +103,7 @@ def create_plan(artifacts: Path, suite: str, output: Path) -> Path:
         "candidate_commit": os.environ["BROWSE_CANDIDATE_COMMIT"],
         "harness_commit": os.environ["BROWSE_HARNESS_COMMIT"],
         "model_base_url": model_base_url(),
+        "execution": execution,
     }
     write_json(output / "plan.json", plan)
     (output / "source").mkdir(exist_ok=True)
@@ -139,14 +142,19 @@ def validate_plan(path: Path, artifacts: Path) -> dict:
 
 
 def run_case(
-    artifacts: Path, plan_path: Path, case: str, previous_evidence: Path | None = None
+    artifacts: Path,
+    plan_path: Path,
+    case: str,
+    previous_evidence: Path | None = None,
+    *,
+    shared_runtime: dict | None = None,
 ) -> int:
     plan = validate_plan(plan_path, artifacts)
     if case not in plan["query_ids"]:
         raise ValueError("case is not part of the CI plan")
     config = load_config()
     zg = resolve_executable("zg")
-    if zg is None or not index_is_ready(config, artifacts):
+    if zg is None or (shared_runtime is None and not index_is_ready(config, artifacts)):
         raise ValueError("prepared index is unavailable; workers never rebuild it")
     # Authorization belongs to this VM's fresh runtime, never to the cached snapshot.
     from .corpus import workspace_root
@@ -176,6 +184,7 @@ def run_case(
         planned_orders=orders,
         run_id=run_id,
         fresh_profiles=run_id is not None,
+        **({"shared_runtime": shared_runtime} if shared_runtime is not None else {}),
     )
     return 0 if read_json(root / "run.json")["status"] == "completed" else 1
 
@@ -213,10 +222,10 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
     # Only the small query set is needed here, not the multi-GB index snapshot.
     source = artifacts / "source"
     source.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(
-        plan_path.parent / "source" / "browsecomp_plus_decrypted.jsonl",
-        source / "browsecomp_plus_decrypted.jsonl",
-    )
+    query_source = plan_path.parent / "source" / "browsecomp_plus_decrypted.jsonl"
+    query_target = source / "browsecomp_plus_decrypted.jsonl"
+    if query_source.resolve() != query_target.resolve():
+        shutil.copyfile(query_source, query_target)
     plan = validate_plan(plan_path, artifacts)
     config = load_config()
     selection = load_suite(
@@ -272,7 +281,23 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
             raise ValueError(
                 "shards used different executable versions or architectures"
             )
-        runtime_setups.extend(current["runtime_setups"])
+        for setup in current["runtime_setups"]:
+            shared_id = setup.get("shared_runtime_id")
+            previous = next(
+                (
+                    item
+                    for item in runtime_setups
+                    if shared_id and item.get("shared_runtime_id") == shared_id
+                ),
+                None,
+            )
+            if previous is not None:
+                if setup != previous:
+                    raise ValueError(
+                        "shared runtime measurements changed between cases"
+                    )
+            else:
+                runtime_setups.append(setup)
         case_root = run / "cases" / case
         if case_root.exists():
             shutil.copytree(case_root, root / "cases" / case)
@@ -302,7 +327,7 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
         generated_at=utc_now(),
         created_at=utc_now(),
         finished_at=utc_now(),
-        execution="parallel_cases",
+        execution=plan.get("execution", "parallel_cases"),
         aggregate_only=True,
         shard_errors=errors,
         runtime_setups=runtime_setups,
@@ -338,7 +363,7 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
     from .ci_resume import execution_costs
 
     summary["ci"] = {
-        "execution": "parallel_cases",
+        "execution": plan.get("execution", "parallel_cases"),
         **completeness,
         "agent_attempt_costs": execution_costs(root),
     }
@@ -346,7 +371,7 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
     markdown = report / "summary.md"
     status = "COMPLETE" if not errors else "INCOMPLETE"
     notes = (
-        f"**CI result: {status}.** Cases ran on separate runners; paired trials "
+        f"**CI result: {status}.** Execution: {metadata['execution']}; paired trials "
         f"per case: {config.run.trials_per_case}, executed in the planned A/B order. "
         "Runtime preparation totals sum worker "
         "time, not elapsed workflow time. Index build time describes the original "
@@ -367,6 +392,11 @@ def main() -> int:
     plan = sub.add_parser("plan")
     plan.add_argument("--suite", choices=("iteration", "ci", "smoke"), required=True)
     plan.add_argument("--output", type=Path, required=True)
+    plan.add_argument(
+        "--execution",
+        choices=("parallel_cases", "shared_job"),
+        default="parallel_cases",
+    )
     restore = sub.add_parser("restore-queries")
     restore.add_argument("--plan", type=Path, required=True)
     run = sub.add_parser("run")
@@ -378,7 +408,9 @@ def main() -> int:
     collect.add_argument("--shards", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "plan":
-        create_plan(DEFAULT_ARTIFACTS_DIR, args.suite, args.output)
+        create_plan(
+            DEFAULT_ARTIFACTS_DIR, args.suite, args.output, execution=args.execution
+        )
         return 0
     if args.command == "restore-queries":
         restore_queries(DEFAULT_ARTIFACTS_DIR, args.plan)

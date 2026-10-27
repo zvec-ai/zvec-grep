@@ -137,7 +137,13 @@ def _copy_evidence(source: Path, destination: Path, secrets: set[bytes]) -> None
 
 
 def export_evidence(
-    artifacts: Path, output: Path, home: Path, manifest: Path, plan: Path | None = None
+    artifacts: Path,
+    output: Path,
+    home: Path,
+    manifest: Path,
+    plan: Path | None = None,
+    *,
+    case_id: str | None = None,
 ) -> None:
     if output.exists():
         raise ValueError("evidence output must be a new directory")
@@ -159,6 +165,12 @@ def export_evidence(
                 raise ValueError("refusing to export a symlink in benchmark evidence")
             if not run.is_dir():
                 continue
+            if case_id is not None:
+                metadata = run / "run.json"
+                if not metadata.is_file() or json.loads(metadata.read_text()).get(
+                    "query_ids"
+                ) != [case_id]:
+                    continue
             # Never traverse profile homes, runtime, or the corpus.
             for name in (
                 "run.json",
@@ -174,7 +186,9 @@ def export_evidence(
             "harness_commit": os.environ.get("BROWSE_HARNESS_COMMIT", ""),
             "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
             "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
-            "case_id": os.environ.get("BROWSE_CASE", ""),
+            "case_id": case_id
+            if case_id is not None
+            else os.environ.get("BROWSE_CASE", ""),
         }
         if plan:
             from .artifacts import sha256_file

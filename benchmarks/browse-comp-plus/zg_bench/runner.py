@@ -99,9 +99,7 @@ def _cpu_model() -> str:
                 ):
                     return value.strip()
     if platform.system() == "Darwin":
-        result = run_command(
-            ["sysctl", "-n", "machdep.cpu.brand_string"], timeout=5
-        )
+        result = run_command(["sysctl", "-n", "machdep.cpu.brand_string"], timeout=5)
         if result.ok and result.stdout.strip():
             return result.stdout.strip()
     return platform.processor().strip() or platform.machine()
@@ -254,9 +252,7 @@ def _select_suite(
     if selector is None:
         missing = sorted(set(explicit_ids) - known_ids)
         if missing:
-            raise ValueError(
-                f"suite contains unknown query IDs: {', '.join(missing)}"
-            )
+            raise ValueError(f"suite contains unknown query IDs: {', '.join(missing)}")
         if len(set(explicit_ids)) != len(explicit_ids):
             raise ValueError("suite contains duplicate query IDs")
         selected_ids = explicit_ids
@@ -340,18 +336,10 @@ def _randomized_profile_orders(
         query_id: {} for query_id in query_ids
     }
     for trial_index in range(1, trials_per_case + 1):
-        orders: list[tuple[Profile, Profile]] = [PROFILES] * (
-            len(query_ids) // 2
-        )
-        orders.extend(
-            [("zvec-grep", "baseline")] * (len(query_ids) // 2)
-        )
+        orders: list[tuple[Profile, Profile]] = [PROFILES] * (len(query_ids) // 2)
+        orders.extend([("zvec-grep", "baseline")] * (len(query_ids) // 2))
         if len(query_ids) % 2:
-            orders.append(
-                PROFILES
-                if trial_index % 2
-                else ("zvec-grep", "baseline")
-            )
+            orders.append(PROFILES if trial_index % 2 else ("zvec-grep", "baseline"))
         rng.shuffle(orders)
         for query_id, order in zip(query_ids, orders, strict=True):
             output[query_id][trial_index] = order
@@ -381,8 +369,7 @@ def _result_path(
 def _attempt_results(selected_path: Path) -> list[dict[str, Any]]:
     attempts_root = selected_path.parent / "attempts"
     results = [
-        read_json(path)
-        for path in sorted(attempts_root.glob("attempt-*/result.json"))
+        read_json(path) for path in sorted(attempts_root.glob("attempt-*/result.json"))
     ]
     return sorted(results, key=lambda result: int(result["attempt"]))
 
@@ -394,7 +381,8 @@ def _remaining_attempts(config: BenchmarkConfig, selected_path: Path) -> int:
     interrupted = sum(
         not (attempt / "result.json").is_file()
         for attempt in (selected_path.parent / "attempts").glob("attempt-*")
-        if attempt.is_dir() and int(attempt.name.removeprefix("attempt-")) >= first_attempt
+        if attempt.is_dir()
+        and int(attempt.name.removeprefix("attempt-")) >= first_attempt
     )
     failures = interrupted + sum(
         result.get("infrastructure_failure") is True
@@ -452,6 +440,8 @@ def _run_profile(
     reasoning_effort: str,
     profiles_root: Path,
     opencode_bin: str,
+    *,
+    shared_runtime: bool = False,
 ) -> AttemptResult:
     query_id = str(query["query_id"])
     selected_path = _result_path(run_root, query_id, profile, trial_index)
@@ -517,9 +507,7 @@ def _run_profile(
                 artifacts,
                 query_id=query_id,
                 trial_index=trial_index,
-                prompt=_prompt(
-                    str(query["query"]), workspace_root(artifacts, profile)
-                ),
+                prompt=_prompt(str(query["query"]), workspace_root(artifacts, profile)),
                 profile=profile,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -528,6 +516,7 @@ def _run_profile(
                 profiles_root=profiles_root,
                 opencode_bin=opencode_bin,
                 idle_timeout_seconds=config.run.idle_timeout_seconds,
+                **({"shared_runtime": True} if shared_runtime else {}),
             )
         finally:
             # Validate corpus metadata and remove all non-whitelisted files,
@@ -536,7 +525,9 @@ def _run_profile(
         if final.status == "completed" or not final.infrastructure_failure:
             break
     if final is None:
-        raise RuntimeError("trial retry budget exhausted by an interrupted attempt; rerun the CI job explicitly")
+        raise RuntimeError(
+            "trial retry budget exhausted by an interrupted attempt; rerun the CI job explicitly"
+        )
     write_json(selected_path, final.to_dict())
     return final
 
@@ -556,6 +547,8 @@ def _execution_source_fingerprint() -> str:
             "profiles.py",
             "runner.py",
             "ci_resume.py",
+            "ci_shared.py",
+            "ci_parallel.py",
             "runtime_snapshot.py",
             "trace.py",
         )
@@ -812,9 +805,7 @@ class _RunTokenCounter:
     def add_run(self, run_root: Path) -> None:
         for profile in PROFILES:
             for attempts_root in sorted(
-                run_root.glob(
-                    f"cases/*/{profile}/trials/trial-*/attempts"
-                )
+                run_root.glob(f"cases/*/{profile}/trials/trial-*/attempts")
             ):
                 self.add_attempts(attempts_root, profile)
 
@@ -829,6 +820,7 @@ def run_benchmark(
     case_id: str | None = None,
     planned_orders: dict[str, dict[int, tuple[Profile, Profile]]] | None = None,
     fresh_profiles: bool = False,
+    shared_runtime: dict[str, Any] | None = None,
 ) -> Path:
     model = config.run.model
     reasoning_effort = config.run.reasoning_effort
@@ -864,6 +856,8 @@ def run_benchmark(
         )
     if run_id is None:
         run_id = new_run_id()
+        if shared_runtime is not None:
+            run_id += f"-case-{case_id}"
         run_root = artifacts / "runs" / run_id
         if run_root.exists():
             raise RuntimeError(f"benchmark run already exists: {run_id}")
@@ -897,8 +891,7 @@ def run_benchmark(
             )
         profile_orders = {
             str(query_id): {
-                int(trial_index): tuple(order)
-                for trial_index, order in trials.items()
+                int(trial_index): tuple(order) for trial_index, order in trials.items()
             }
             for query_id, trials in metadata["profile_orders"].items()
         }
@@ -942,15 +935,12 @@ def run_benchmark(
             opencode_version=opencode_version.stdout.strip(),
             profiles_fingerprint=profile_manifest["fingerprint"],
         )
-        if metadata["protocol_fingerprint"] != _protocol_fingerprint(
-            recorded_protocol
-        ):
+        if metadata["protocol_fingerprint"] != _protocol_fingerprint(recorded_protocol):
             raise RuntimeError("recorded run protocol fingerprint is invalid")
         _validate_run_protocol(recorded_protocol, actual_protocol)
     else:
         required_states = {
-            name: artifacts / "state" / f"{name}.json"
-            for name in ("corpus", "index")
+            name: artifacts / "state" / f"{name}.json" for name in ("corpus", "index")
         }
         full_selection = load_suite(suite, queries)
         suite_selection = select_case(full_selection, case_id)
@@ -962,7 +952,8 @@ def run_benchmark(
         profile_orders = {query_id: all_orders[query_id] for query_id in query_ids}
         for orders in profile_orders.values():
             if set(orders) != set(range(1, config.run.trials_per_case + 1)) or any(
-                len(order) != 2 or set(order) != set(PROFILES) for order in orders.values()
+                len(order) != 2 or set(order) != set(PROFILES)
+                for order in orders.values()
             ):
                 raise ValueError("invalid planned profile order")
         corpus_state = read_json(required_states["corpus"])
@@ -989,12 +980,8 @@ def run_benchmark(
                     pending += 1
             pending_profiles[(query_id, trial_index)] = pending
     total_paired_trials = len(query_ids) * config.run.trials_per_case
-    finished_paired_trials = sum(
-        pending == 0 for pending in pending_profiles.values()
-    )
-    server_required = new_run or any(
-        profile == "zvec-grep" for _, _, profile in tasks
-    )
+    finished_paired_trials = sum(pending == 0 for pending in pending_profiles.values())
+    server_required = new_run or any(profile == "zvec-grep" for _, _, profile in tasks)
     benchmark_error: BaseException | None = None
     with _cleanup_on_termination():
         preparation_started_at = utc_now()
@@ -1003,7 +990,7 @@ def run_benchmark(
         profile_preparation_wall_seconds = 0.0
         profile_install_wall_seconds = 0.0
         try:
-            if server_required:
+            if server_required and shared_runtime is None:
                 print(
                     "Preparing the zvec-grep daemon, profiles, and existing index...",
                     flush=True,
@@ -1080,7 +1067,22 @@ def run_benchmark(
                 }
                 write_json(metadata_path, metadata)
 
-            if server_required:
+            if shared_runtime is not None:
+                metadata["execution"] = "shared_job"
+                metadata["runtime_setups"].append(dict(shared_runtime))
+                metadata["runtime_setups"].append(
+                    {
+                        "role": "case_profiles",
+                        "case_id": case_id,
+                        "total_wall_seconds": profile_preparation_wall_seconds,
+                        "server_start_wall_seconds": 0.0,
+                        "profile_preparation_wall_seconds": profile_preparation_wall_seconds,
+                        "profile_install_wall_seconds": profile_install_wall_seconds,
+                        "warmup_wall_seconds": 0.0,
+                    }
+                )
+                write_json(metadata_path, metadata)
+            elif server_required:
                 runtime_setup = prepare_search_runtime(
                     config,
                     artifacts,
@@ -1096,9 +1098,7 @@ def run_benchmark(
                         "profile_preparation_wall_seconds": (
                             profile_preparation_wall_seconds
                         ),
-                        "profile_install_wall_seconds": (
-                            profile_install_wall_seconds
-                        ),
+                        "profile_install_wall_seconds": (profile_install_wall_seconds),
                     }
                 )
                 metadata["runtime_setups"].append(runtime_setup)
@@ -1123,28 +1123,21 @@ def run_benchmark(
                     reasoning_effort,
                     profiles_root,
                     str(opencode),
+                    **({"shared_runtime": True} if shared_runtime is not None else {}),
                 )
-                _write_pair(
-                    run_root, query_id, config.run.trials_per_case
-                )
+                _write_pair(run_root, query_id, config.run.trials_per_case)
                 pair_key = (query_id, trial_index)
                 pending_profiles[pair_key] -= 1
                 if pending_profiles[pair_key] == 0:
                     finished_paired_trials += 1
                 input_tokens = (
-                    result.trace.usage.input_tokens
-                    if result.trace.usage
-                    else None
+                    result.trace.usage.input_tokens if result.trace.usage else None
                 )
                 output_tokens = (
-                    result.trace.usage.output_tokens
-                    if result.trace.usage
-                    else None
+                    result.trace.usage.output_tokens if result.trace.usage else None
                 )
                 run_tokens.add_attempts(
-                    _result_path(
-                        run_root, query_id, profile, trial_index
-                    ).parent
+                    _result_path(run_root, query_id, profile, trial_index).parent
                     / "attempts",
                     profile,
                 )
@@ -1199,7 +1192,7 @@ def run_benchmark(
                 write_json(metadata_path, failed_metadata)
             raise
         finally:
-            if server_required:
+            if server_required and shared_runtime is None:
                 try:
                     stop_server(config, artifacts)
                 except RuntimeError as error:

@@ -37,7 +37,7 @@ on:
         type: choice
         options: [iteration, ci, smoke]
       parallel_cases:
-        description: Maximum concurrent case runners (lower this for provider rate limits)
+        description: Maximum concurrent isolated cases within one job
         default: "2"
         type: choice
         options: ["1", "2", "5"]
@@ -120,7 +120,7 @@ jobs:
           retention-days: 7
 
   prepare:
-    name: Prepare or restore corpus and index once
+    name: Prepare once and run isolated cases
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -129,9 +129,6 @@ jobs:
       actions: read
     outputs:
       cases: ${{ steps.plan.outputs.cases }}
-      snapshot-key: ${{ steps.snapshot-key.outputs.key }}
-      snapshot-artifact: ${{ steps.snapshot-reference.outputs.name }}
-      snapshot-run-id: ${{ steps.snapshot-reference.outputs.run-id }}
     env: &benchmark-env
       NO_COLOR: "1"
       BROWSE_CANDIDATE_COMMIT: ${{ needs.package.outputs.commit }}
@@ -148,12 +145,10 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - &node
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
-      - &tools
-        name: Install pinned benchmark tools
+      - name: Install pinned benchmark tools
         run: |
           echo "OPENCODE_HOME=$RUNNER_TEMP/browse-comp-plus-opencode" >> "$GITHUB_ENV"
           python -m pip install --disable-pip-version-check uv==0.9.17
@@ -163,25 +158,21 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y zstd ripgrep
           fi
-      - &candidate-download
-        name: Download the candidate from this run
+      - name: Download the candidate from this run
         uses: actions/download-artifact@v8
         with:
           name: browse-comp-plus-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/candidate-package
-      - &candidate-install
-        name: Verify and install the exact candidate
+      - name: Verify and install the exact candidate
         run: |
           node benchmarks/shared/rust-package-cache.mjs verify \
             --directory "$RUNNER_TEMP/candidate-package" --commit "$BROWSE_CANDIDATE_COMMIT"
           npm install --global "$RUNNER_TEMP/candidate-package/candidate.tgz"
-      - &space
-        name: Reserve space for corpus, index, and compressed snapshot
+      - name: Reserve space for corpus, index, and compressed snapshot
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           python -c 'import shutil; free = shutil.disk_usage(".").free; print(f"Free disk: {free / 2**30:.1f} GiB"); assert free >= 50 * 2**30, "BrowseComp-Plus needs at least 50 GiB free disk"'
-      - &credentials
-        name: Configure isolated credentials and verify tools
+      - name: Configure isolated credentials and verify tools
         id: setup
         env:
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
@@ -189,7 +180,7 @@ jobs:
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci auth
           uv run --project benchmarks/browse-comp-plus --frozen zg-bench doctor
       - name: Verify configured model access before indexing
-        env: &model-env
+        env:
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci preflight
       - name: Compute exact preparation identity
@@ -221,19 +212,21 @@ jobs:
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
           --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
-      - name: Download only the small query source on an exact preparation match
+      - name: Download the shared runtime snapshot once
         if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'false'
         uses: actions/download-artifact@v8
         with:
-          name: browse-comp-plus-plan-${{ steps.prepared-artifact.outputs.run-id }}
+          name: ${{ steps.prepared-artifact.outputs.artifact-name }}
           run-id: ${{ steps.prepared-artifact.outputs.run-id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/browse-comp-plus-source-plan
-      - name: Verify the query source before making a fresh evaluation plan
+          path: ${{ runner.temp }}/browse-comp-plus-snapshot
+      - name: Restore the shared corpus and index once
         if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'false'
+        env:
+          SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
         run: >-
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_parallel restore-queries
-          --plan "$RUNNER_TEMP/browse-comp-plus-source-plan/plan.json"
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
+          --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
       - name: Restore pinned source snapshots on a cold preparation
         if: steps.prepared-artifact.outputs.found != 'true'
         id: source-cache
@@ -244,7 +237,7 @@ jobs:
             benchmarks/browse-comp-plus/artifacts/state/dataset.json
           key: browse-comp-plus-source-v1-${{ runner.os }}-${{ hashFiles('benchmarks/browse-comp-plus/benchmark.toml', 'benchmarks/browse-comp-plus/zg_bench/dataset.py', 'benchmarks/browse-comp-plus/uv.lock') }}
       - name: Validate a restored snapshot without rebuilding it
-        if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'true'
+        if: steps.prepared-artifact.outputs.found == 'true'
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot verify
       - name: Download and verify pinned source snapshots before indexing
         if: steps.prepared-artifact.outputs.found != 'true'
@@ -286,27 +279,13 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 7
-      - name: Share the preparation artifact reference with case jobs
-        id: snapshot-reference
-        env:
-          FOUND: ${{ steps.prepared-artifact.outputs.found }}
-          LEGACY: ${{ steps.prepared-artifact.outputs.legacy }}
-          SOURCE_RUN: ${{ steps.prepared-artifact.outputs.run-id }}
-          SOURCE_NAME: ${{ steps.prepared-artifact.outputs.artifact-name }}
-          SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
-        run: |
-          if [[ "$FOUND" == true && "$LEGACY" == false ]]; then
-            printf 'run-id=%s\nname=%s\n' "$SOURCE_RUN" "$SOURCE_NAME" >> "$GITHUB_OUTPUT"
-          else
-            printf 'run-id=%s\nname=browse-comp-plus-prepared-%s-%s-%s\n' "$GITHUB_RUN_ID" "$RUNNER_OS" "$RUNNER_ARCH" "$SNAPSHOT_KEY" >> "$GITHUB_OUTPUT"
-          fi
       - name: Plan the suite and balanced A/B orders once
         id: plan
         env:
           BENCH_SUITE: ${{ inputs.suite }}
         run: |
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_parallel plan \
-            --suite "$BENCH_SUITE" --output "$RUNNER_TEMP/browse-comp-plus-plan" >> "$GITHUB_OUTPUT"
+            --suite "$BENCH_SUITE" --execution shared_job --output "$RUNNER_TEMP/browse-comp-plus-plan" >> "$GITHUB_OUTPUT"
           cp "$RUNNER_TEMP/candidate-package/manifest.json" "$RUNNER_TEMP/browse-comp-plus-plan/candidate-manifest.json"
       - name: Publish the small evaluation plan and query set
         uses: actions/upload-artifact@v7
@@ -316,6 +295,57 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 7
+      - name: Find earlier case bundles in this workflow run
+        if: github.run_attempt > 1
+        id: previous-evidence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const prefix = `browse-comp-plus-case-bundle-${context.runId}-`;
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: context.runId, per_page: 100,
+            });
+            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+            core.setOutput('found', artifacts.some(artifact => {
+              const suffix = artifact.name.slice(prefix.length);
+              return !artifact.expired && artifact.name.startsWith(prefix)
+                && /^[1-9][0-9]*$/.test(suffix) && Number(suffix) < attempt;
+            }) ? 'true' : 'false');
+      - name: Download earlier case bundles for trial-level resume
+        if: steps.previous-evidence.outputs.found == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: browse-comp-plus-case-bundle-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/browse-comp-plus-previous
+      - name: Run isolated cases with one shared index and daemon
+        id: run
+        env:
+          OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
+          BENCH_PARALLEL_CASES: ${{ inputs.parallel_cases }}
+        run: >-
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_shared run
+          --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json"
+          --parallel-cases "$BENCH_PARALLEL_CASES"
+          --previous-evidence "$RUNNER_TEMP/browse-comp-plus-previous"
+          --evidence "$RUNNER_TEMP/browse-comp-plus-case-evidence"
+          --reports "$RUNNER_TEMP/browse-comp-plus-case-reports"
+          --candidate-manifest "$RUNNER_TEMP/candidate-package/manifest.json"
+      - name: Upload independently sealed case evidence
+        if: ${{ always() && steps.run.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browse-comp-plus-case-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browse-comp-plus-case-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Upload small independent case reports
+        if: ${{ always() && steps.run.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browse-comp-plus-task-report-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browse-comp-plus-case-reports/
+          if-no-files-found: warn
+          retention-days: 90
       - name: Export preparation diagnostics on failure
         id: diagnostics
         if: ${{ (failure() || cancelled()) && steps.setup.outcome == 'success' }}
@@ -333,142 +363,17 @@ jobs:
           name: browse-comp-plus-preparation-error-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/preparation-diagnostics/
           retention-days: 7
-      - &cleanup
-        name: Remove temporary authentication
+      - name: Remove temporary authentication
         if: always()
         run: |
           if [[ -n "${OPENCODE_HOME:-}" ]]; then
             rm -rf -- "$OPENCODE_HOME"
           fi
 
-  case:
-    name: Pair + judge / ${{ matrix.case }}
-    needs: [package, prepare]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.parallel_cases) }}
-      matrix:
-        case: ${{ fromJSON(needs.prepare.outputs.cases) }}
-    env:
-      NO_COLOR: "1"
-      BROWSE_CANDIDATE_COMMIT: ${{ needs.package.outputs.commit }}
-      BROWSE_HARNESS_COMMIT: ${{ github.workflow_sha }}
-      BROWSE_COMP_MODEL_BASE_URL: ${{ vars.BROWSE_COMP_MODEL_BASE_URL || vars.SWE_QA_MODEL_BASE_URL }}
-      BROWSE_CASE: ${{ matrix.case }}
-    steps:
-      - *authorize
-      - *checkout
-      - *python
-      - *node
-      - *tools
-      - *candidate-download
-      - *candidate-install
-      - *space
-      - *credentials
-      - name: Download the shared prepared snapshot
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ needs.prepare.outputs.snapshot-artifact }}
-          run-id: ${{ needs.prepare.outputs.snapshot-run-id }}
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/browse-comp-plus-snapshot
-      - &plan-download
-        name: Download the immutable suite plan
-        uses: actions/download-artifact@v8
-        with:
-          name: browse-comp-plus-plan-${{ github.run_id }}
-          path: ${{ runner.temp }}/browse-comp-plus-plan
-      - name: Restore prepared files without rebuilding the index
-        id: restore
-        env:
-          SNAPSHOT_KEY: ${{ needs.prepare.outputs.snapshot-key }}
-        run: >-
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
-          --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
-      - name: Find earlier evidence for this case in the same workflow run
-        if: github.run_attempt > 1
-        id: previous-evidence
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const prefix = `browse-comp-plus-case-${process.env.BROWSE_CASE}-${context.runId}-`;
-            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
-            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
-              ...context.repo, run_id: context.runId, per_page: 100,
-            });
-            const prior = artifacts.filter(artifact => {
-              if (artifact.expired || !artifact.name.startsWith(prefix)) return false;
-              const suffix = artifact.name.slice(prefix.length);
-              return /^[1-9][0-9]*$/.test(suffix) && Number(suffix) < attempt;
-            });
-            core.setOutput('found', prior.length > 0 ? 'true' : 'false');
-      - name: Download earlier case evidence to reuse completed trials
-        if: steps.previous-evidence.outputs.found == 'true'
-        uses: actions/download-artifact@v8
-        with:
-          pattern: browse-comp-plus-case-${{ matrix.case }}-${{ github.run_id }}-*
-          path: ${{ runner.temp }}/browse-comp-plus-previous
-      - name: Run this case's paired trials in the planned order
-        id: run
-        env:
-          OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
-        run: >-
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_parallel run
-          --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json" --case "$BROWSE_CASE"
-          --previous-evidence "$RUNNER_TEMP/browse-comp-plus-previous"
-      - name: Judge completed pairs
-        if: ${{ !cancelled() && steps.run.outcome != 'skipped' && steps.restore.outcome == 'success' }}
-        env: *model-env
-        run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench evaluate
-      - name: Summarize trial retries
-        if: ${{ always() && steps.setup.outcome == 'success' }}
-        run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_reports retries
-      - name: Stage reports and reject credential leakage
-        id: evidence
-        if: ${{ always() && steps.setup.outcome == 'success' }}
-        env: *scan-env
-        run: |
-          plan_args=()
-          if [[ -f "$RUNNER_TEMP/browse-comp-plus-plan/plan.json" ]]; then
-            plan_args+=(--plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json")
-          fi
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci export \
-            --output "$RUNNER_TEMP/browse-comp-plus-evidence" \
-            --candidate-manifest "$RUNNER_TEMP/candidate-package/manifest.json" \
-            "${plan_args[@]}"
-      - name: Upload independent case evidence
-        if: ${{ always() && steps.evidence.outcome == 'success' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: browse-comp-plus-case-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/browse-comp-plus-evidence/
-          if-no-files-found: error
-          retention-days: 30
-      - name: Stage the small case report
-        id: report
-        if: ${{ always() && steps.evidence.outcome == 'success' }}
-        run: >-
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_reports compact
-          --evidence "$RUNNER_TEMP/browse-comp-plus-evidence" --output "$RUNNER_TEMP/browse-comp-plus-report"
-      - name: Upload independent case report
-        if: ${{ always() && steps.report.outcome == 'success' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: browse-comp-plus-task-report-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/browse-comp-plus-report/
-          if-no-files-found: error
-          retention-days: 90
-      - *cleanup
-
   aggregate:
     name: Aggregate raw trials without more model calls
-    needs: [package, prepare, case]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.case.result != 'skipped' }}
+    needs: [package, prepare]
+    if: ${{ always() && needs.prepare.outputs.cases != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -483,7 +388,11 @@ jobs:
           echo "OPENCODE_HOME=$RUNNER_TEMP/browse-comp-plus-opencode" >> "$GITHUB_ENV"
           python -m pip install --disable-pip-version-check uv==0.9.17
           uv sync --project benchmarks/browse-comp-plus --frozen
-      - *plan-download
+      - name: Download the immutable suite plan
+        uses: actions/download-artifact@v8
+        with:
+          name: browse-comp-plus-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/browse-comp-plus-plan
       - name: Download case evidence including earlier successful attempts
         uses: actions/download-artifact@v8
         with:

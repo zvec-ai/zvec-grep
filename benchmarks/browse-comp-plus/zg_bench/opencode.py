@@ -16,7 +16,7 @@ from .artifacts import atomic_write_text, write_json
 from .config import BenchmarkConfig
 from .corpus import workspace_root
 from .models import AttemptResult, Profile, TraceSummary
-from .process import resolve_executable
+from .process import resolve_executable, run_command
 from .profiles import ensure_server, opencode_environment, server_environment
 from .trace import parse_trace
 
@@ -363,6 +363,7 @@ def run_attempt(
     profiles_root: Path,
     opencode_bin: str = "opencode",
     idle_timeout_seconds: int | None = None,
+    shared_runtime: bool = False,
 ) -> AttemptResult:
     opencode = resolve_executable(opencode_bin)
     if opencode is None:
@@ -372,7 +373,16 @@ def run_attempt(
         raise RuntimeError("run-local OpenCode profiles are missing")
     environment = {}
     if profile == "zvec-grep":
-        ensure_server(config, artifacts)
+        if shared_runtime:
+            check = run_command(
+                ["zg", "--server", "status", "--check-ready"],
+                env=server_environment(config, artifacts),
+                timeout=30,
+            )
+            if not check.ok:
+                raise RuntimeError("shared zvec-grep server is unavailable")
+        else:
+            ensure_server(config, artifacts)
         index_dir = workspace_root(artifacts, "zvec-grep") / ".zvec-grep"
         if not index_dir.is_dir():
             raise RuntimeError("zvec-grep index is missing; run 'zg-bench prepare'")

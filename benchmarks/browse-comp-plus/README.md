@@ -248,7 +248,7 @@ run on pushes, PRs, comments, or a schedule.
 3. Choose `iteration` (default: 2 fixed cases / 4 agent runs / 4 judgements),
    `ci` (5 cases / 10 agent runs), or `smoke`
    (1 case, 1 paired trial / 2 agent runs, plus the usage audit). Set
-   `parallel_cases` to 1, 2 (default), or 5 to fit provider rate limits.
+   `parallel_cases` to 1, 2 (default), or 5 for concurrent isolated case processes within one job.
 
 Run the branch version without merging:
 
@@ -283,12 +283,18 @@ account `auth.json` is used. [OpenCode configuration](https://opencode.ai/docs/c
 references the key through an environment variable. Temporary homes and profiles
 are excluded from caches and evidence artifacts.
 
-**Execution time:** preparation runs once, then cases run on independent runners.
-Each case runs baseline and zvec-grep sequentially on the same runner in the
-suite-wide randomized A/B order planned once. Judges run alongside the other
-cases, and the final report recomputes metrics from raw results without more
-model calls. This changes the cross-case scheduling from the local serial run;
-the original metadata for every case is retained under `shards/`.
+**Execution time:** one job prepares or restores the corpus/index, starts and warms
+one zg daemon, and runs isolated case processes with the requested concurrency.
+A matching runtime snapshot is downloaded and restored once; a cold preparation
+uses its newly built index directly. Each case has separate OpenCode/profile/judge
+homes, sessions, temporary directories, results, and evidence; the prepared corpus
+and index are shared. This is session/process isolation, not a security sandbox.
+Each case retains the planned sequential A/B order. One failed case does not cancel
+others. The parent stops the daemon only after every child exits.
+Each completed case stages independently checksum-sealed evidence immediately;
+the job uploads a bundle after execution or cancellation while the runner remains
+available. Aggregation verifies every case and does not call models again. Shared
+startup/warmup is counted once; case metadata remains under `shards/`.
 
 | Stage | Reuse / parallelism |
 | --- | --- |
@@ -296,9 +302,9 @@ the original metadata for every case is retained under `shards/`.
 | Source data | Cached immediately after download and verification, so a failed index build does not require downloading the corpus again. |
 | Query decoding | Read only questions, reference answers, and gold/evidence document IDs from Parquet; skip unused document bodies while preserving every query and scoring input. |
 | Corpus, index, and local model | The seven-day v3 runtime artifact contains one Markdown corpus copy (`workspaces/b`), its index, Potion models, decoded queries, and state manifests. Raw Parquet and the duplicate baseline corpus are excluded. Candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path must match. |
-| Preparation on an exact runtime-artifact match | Download only the earlier run's small query artifact, verify its candidate and query digest, and create a fresh evaluation plan. Each case validates the runtime snapshot and restores its independent baseline corpus with `copy2`, not hardlinks; nanosecond timestamps are preserved to avoid rebuilding the index. |
-| Case execution | Up to five independent runners; no shared daemon or mutable index. |
-| Partial rerun | “Re-run failed jobs” reuses completed trials and matching judgements within the same workflow run and plan, then runs only failed or missing work. Successful case artifacts remain available to aggregation. |
+| Preparation on an exact runtime-artifact match | Download, verify, and unpack the runtime snapshot once in the execution job. Restore the independent baseline corpus once with `copy2`, preserving nanosecond timestamps; generate a fresh immutable plan without rebuilding the index. |
+| Case execution | Up to five isolated case processes on one runner, using one prepared index and parent-owned daemon. No per-case snapshot download, unpack, or daemon warmup. |
+| Partial rerun | “Re-run failed jobs” reuses completed trials and matching judgements within the same workflow run and plan, then runs only failed or missing work. Earlier bundles retain each completed case; only failed/missing trials run again, and all attempts remain in aggregation. |
 
 **Cold-run cost:** all suites prepare all 100,195 documents. A new preparation
 identity without a compatible snapshot, or an expired artifact, requires a local
@@ -309,15 +315,17 @@ a 15.9 GiB compressed **full** preparation snapshot. The
 [runtime conversion](https://github.com/zvec-ai/zvec-grep/actions/runs/40501615950)
 reused that index: the runtime snapshot is 11.47 GiB, 27.68% smaller than
 the 15.86 GiB full archive. One-time conversion/preparation took 12m40s;
-end-to-end validation is still pending. Later exact v3 matches skip conversion.
-Preparation and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
+the earlier matrix two-case E2E passed on [8f8f7df8](https://github.com/zvec-ai/zvec-grep/actions/runs/40519967945). Shared-job E2E validation is pending. Later exact v3 matches skip conversion.
+The combined preparation/execution job allows six hours. As in SWE-QA Bench, concurrency is scoped to
 the run ID and attempt, so separately requested runs do not block or cancel
 one another. Each hosted runner frees SDK space and requires 50 GiB free.
 Runtime snapshots use artifact storage independently of the repository's 10 GB
 Actions cache limit; only source data and candidate packages use Actions cache.
-A run that finds a matching runtime artifact shares the original with its case
-jobs without uploading another copy. Allow for artifact transfer/storage and
-local baseline-copy time on each worker.
+A matching runtime artifact is downloaded once without uploading another copy.
+The five-case suite transfers 11.47 GiB instead of five copies (57.35 GiB);
+this 80% transfer reduction is not a measured 80% workflow speedup. Download,
+unpack, and baseline-copy costs still occur once per run; hosted runners do not
+persist the restored files across workflow runs.
 Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
 The small plan artifact is retained for seven days. Retry failed jobs while
@@ -325,8 +333,7 @@ the prepared artifact still exists; after expiry, start a new run. Legacy v2
 snapshots are accepted only through the exact legacy key computed from the frozen
 preparation source hashes at `42102cd9`, with the same candidate, data, index
 configuration, and workspace path. Preparation validates and converts a compatible
-full snapshot once into v3 without rebuilding the index; workers then share the
-runtime artifact. Unmatched legacy snapshots are not a fallback.
+full snapshot once into v3 without rebuilding the index; the execution job then reuses the runtime artifact. Unmatched legacy snapshots are not a fallback.
 
 The candidate is built in a separate job without model credentials. Only select
 trusted candidate code, which subsequently executes on the benchmark runners.

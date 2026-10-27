@@ -198,10 +198,14 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 所选 key 通过 `OPENAI_API_KEY` 提供给每个调用模型的步骤，无需 Codex 登录或账号 `auth.json`。
 [OpenCode 配置](https://opencode.ai/docs/config/)通过环境变量引用 key；临时 home 与 profile 不进入缓存或上传产物。
 
-**耗时优化：** 准备阶段只执行一次，随后各题在独立 runner 上并行。每题的 baseline 与
-zvec-grep 仍在同一 runner 内顺序执行；全套题目的随机 A/B 顺序统一生成。各题评审与其他题执行
-重叠，最终报告从原始结果重算指标，不重复调用模型。题目间调度与本地串行执行不同，
-各题原始元数据保留在 `shards/`。
+**耗时优化：** 准备、索引恢复和所有题目执行放在同一个 job。命中快照时只下载、校验、
+解压一次；冷启动直接使用本机刚构建的索引。主进程统一启动并预热一个 zg daemon，
+按 `parallel_cases` 并发执行题目子进程。各题独立使用 OpenCode/profile/judge home、
+会话、临时目录、结果和证据，共享已有语料及索引；这是会话与进程隔离，不是安全沙箱。
+同题 A/B 仍按计划顺序执行，一题失败不取消其他题。所有子进程退出后才关闭共享 daemon。
+每题结束后立即在本机保存独立校验封存的证据，执行结束或取消时在 runner 仍可用的情况下
+上传 bundle；失败重跑复用其中已完成的答案和匹配评审。最终汇总不额外调用模型，
+共享启动和预热耗时只计算一次，各题原始元数据保留在 `shards/`。
 
 | 阶段 | 复用或并行方式 |
 | --- | --- |
@@ -209,27 +213,28 @@ zvec-grep 仍在同一 runner 内顺序执行；全套题目的随机 A/B 顺序
 | 源数据 | 下载校验完成后立即缓存，索引构建失败后无需重新下载语料。 |
 | 题目解密 | 从 Parquet 仅读取问题、参考答案及 gold/evidence 文档 ID，跳过未使用的正文；保留全部题目与评分输入。 |
 | 语料、索引和本地模型 | 保留 7 天的 v3 runtime 快照仅包含一份 Markdown 语料（`workspaces/b`）、索引、Potion 模型、解密题目及状态清单，不传输原始 Parquet 和重复的 baseline 语料。候选版本、数据、embedding 配置、准备脚本、系统架构和目录必须一致。 |
-| runtime 产物完全匹配 | 准备阶段仅读取此前运行的小型题目产物，校验候选版本与题目摘要后生成新评测计划；各题校验 runtime 快照后通过 `copy2` 恢复独立的 baseline 语料，不使用硬链接，并保留纳秒时间戳以避免重建索引。 |
-| 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
-| 失败重跑 | “Re-run failed jobs” 在同一次 workflow 运行、同一计划内复用已完成 trial 及匹配的评审，只补失败或缺失项；成功题目的产物继续参与汇总。 |
+| runtime 产物完全匹配 | 执行 job 只下载、校验、解压一次 runtime 快照，通过 `copy2` 恢复一次独立的 baseline 语料，不使用硬链接，保留纳秒时间戳；生成新的固定评测计划，无需重建索引。 |
+| 题目执行 | 同一 runner 内最多 5 个独立题目子进程，共享已有索引和主进程管理的 daemon；无需逐题重复下载、解压或预热。 |
+| 失败重跑 | “Re-run failed jobs” 在同一次 workflow 运行、同一计划内复用已完成 trial 及匹配的评审，只补失败或缺失项；此前 bundle 中成功题目的证据继续参与汇总，并保留全部历史尝试。 |
 
 **冷启动成本：** 所有 suite 都准备完整的 100,195 篇语料。准备标识变化且无兼容快照，或产物过期后，
 需在本地构建 Potion 索引。[历史实测运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
 索引全部文档耗时 112 分 32 秒、无失败，压缩的**完整准备快照**为 15.9 GiB。
 [runtime 转换实测](https://github.com/zvec-ai/zvec-grep/actions/runs/40501615950)
 直接复用该索引：新快照为 11.47 GiB，相比旧包的 15.86 GiB 缩减 27.68%。
-一次性转换及准备共 12 分 40 秒；完整端到端验证仍待完成，后续精确命中 v3 时跳过转换。
-准备阶段和各题均限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
+一次性转换及准备共 12 分 40 秒；原 matrix 版本[两题 E2E 已通过](https://github.com/zvec-ai/zvec-grep/actions/runs/40519967945)，单 job 版本 E2E 验证待完成。后续精确命中 v3 时跳过转换。
+准备与执行合并后的 job 限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
 独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 50 GiB
 可用磁盘。runtime 快照使用 artifact，与仓库的 10 GB Actions cache 配额分开；仅源数据和
-候选包进入 Actions cache。命中 runtime 快照的运行直接将原产物交给各题，不重复上传。
-仍需计入 artifact 传输、存储及各 worker 本地复制 baseline 语料的耗时；
+候选包进入 Actions cache。命中 runtime 快照时只下载原产物一次，不重复上传。五题总下载量从五份 57.35 GiB
+降至一份 11.47 GiB；减少 80% 传输量不代表整体耗时减少 80%。每轮仍需一次下载、
+解压和 baseline 复制；普通托管 runner 不会跨 workflow 保留已恢复文件。
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
 小型计划 artifact 保留 7 天；失败 job 应在准备快照仍有效时重跑，过期后启动新运行。
 旧 v2 快照只通过 `42102cd9` 冻结的准备代码哈希计算精确 legacy key，并要求候选版本、数据、
 索引配置及目录一致。准备阶段校验兼容的完整快照后，一次转换为 v3，无需重建索引，
-随后各 worker 共享 runtime 产物；不匹配的旧快照不能作为回退。
+随后执行 job 复用 runtime 产物；不匹配的旧快照不能作为回退。
 
 候选程序在不含模型凭据的独立 job 中构建。请只选择可信候选代码，该程序随后会在评测
 runner 上执行。产物分别记录评测脚本与候选程序的 commit SHA。
