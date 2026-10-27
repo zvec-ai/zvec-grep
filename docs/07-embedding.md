@@ -22,6 +22,12 @@ ModelScope copy. A complete ModelScope snapshot is reused on later runs without
 retrying Hugging Face. ModelScope downloads use a separate `modelscope` cache
 subdirectory.
 
+Cached pinned artifacts are checked against their expected size and SHA-256
+before reuse, even when a completion marker matches their file metadata. Valid
+cached artifacts need no network access; corrupt artifacts are downloaded again.
+Verification reads the model files, so preparing a large cached model can take
+longer on slower storage.
+
 Remote models avoid local inference but send disclosed query or workspace
 content to the configured provider after authorization.
 
