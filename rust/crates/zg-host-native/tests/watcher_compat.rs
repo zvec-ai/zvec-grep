@@ -269,20 +269,24 @@ async fn wait_for_change(
     control: &TaskControl,
     expected: WorkspaceChange,
 ) -> TestResult {
+    let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let batch = session.next_changes(control).await?;
-            if batch
+            let matched = batch
                 .changes
                 .iter()
-                .any(|actual| covers_change(actual, &expected))
-            {
+                .any(|actual| covers_change(actual, &expected));
+            observed.extend(batch.changes);
+            if matched {
                 return Ok::<_, HostError>(());
             }
         }
     })
     .await
-    .map_err(|error| format!("waiting for {expected:?}: {error}"))??;
+    .map_err(|error| {
+        format!("waiting for {expected:?}: {error}; observed changes: {observed:?}")
+    })??;
     Ok(())
 }
 
@@ -367,25 +371,26 @@ async fn polling_ignores_excluded_symlink_loops_and_keeps_selected_aliases_live(
     // Registration and subsequent backend polls must both ignore the broken link.
     tokio::time::sleep(Duration::from_millis(100)).await;
     tokio::time::timeout(Duration::from_secs(2), session.flush()).await??;
-    wait_for_change_matching(&session, &control, |change| {
-        *change == WorkspaceChange::Rescan
-    })
-    .await?;
+    wait_for_change(&session, &control, WorkspaceChange::Rescan).await?;
 
     for (target, alias) in [
         (&directory_file, Path::new("linked/source.rs")),
         (&file_target, Path::new("linked.rs")),
     ] {
         fs::write(target, "changed target contents")?;
-        wait_for_change_matching(
+        wait_for_change(
             &session,
             &control,
-            |change| matches!(change, WorkspaceChange::Upsert(path) if path == alias),
+            WorkspaceChange::Upsert(alias.to_path_buf()),
         )
         .await?;
         fs::remove_file(target)?;
-        wait_for_change_matching(&session, &control, |change|
-            matches!(change, WorkspaceChange::Delete(path) | WorkspaceChange::DeletePrefix(path) if path == alias)).await?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Delete(alias.to_path_buf()),
+        )
+        .await?;
         fs::write(target, "recreated target")?;
         wait_for_change(
             &session,
@@ -406,10 +411,10 @@ async fn polling_ignores_excluded_symlink_loops_and_keeps_selected_aliases_live(
     .await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     fs::write(&retargeted_file, "changed after same-second retarget")?;
-    wait_for_change_matching(
+    wait_for_change(
         &session,
         &control,
-        |change| matches!(change, WorkspaceChange::Upsert(path) if path == Path::new("linked.rs")),
+        WorkspaceChange::Upsert("linked.rs".into()),
     )
     .await?;
     tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
@@ -553,7 +558,14 @@ fn covers_change(actual: &WorkspaceChange, expected: &WorkspaceChange) -> bool {
             (WorkspaceChange::Rescan, _) => true,
             (
                 WorkspaceChange::RescanDirectory(parent),
-                WorkspaceChange::Upsert(path) | WorkspaceChange::RescanDirectory(path),
+                WorkspaceChange::Upsert(path)
+                | WorkspaceChange::Delete(path)
+                | WorkspaceChange::RescanDirectory(path)
+                | WorkspaceChange::DeletePrefix(path),
+            ) => path.starts_with(parent),
+            (
+                WorkspaceChange::DeletePrefix(parent),
+                WorkspaceChange::Delete(path) | WorkspaceChange::DeletePrefix(path),
             ) => path.starts_with(parent),
             _ => false,
         }
