@@ -95,12 +95,15 @@ def fetch(
     queries_dir.mkdir(parents=True, exist_ok=True)
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
+    # GitHub exposes an unset optional secret as "". Passing that string to
+    # huggingface_hub produces an invalid "Bearer " header instead of anonymous access.
+    download_token = token.strip() or False if token is not None else None
     snapshot_download(
         repo_id=config.dataset.queries_repo,
         repo_type="dataset",
         revision=config.dataset.queries_revision,
         local_dir=queries_dir,
-        token=token,
+        token=download_token,
         allow_patterns=["*.parquet", "**/*.parquet", "README.md"],
     )
     snapshot_download(
@@ -108,7 +111,7 @@ def fetch(
         repo_type="dataset",
         revision=config.dataset.corpus_revision,
         local_dir=corpus_dir,
-        token=token,
+        token=download_token,
         allow_patterns=["*.parquet", "**/*.parquet", "README.md"],
     )
 
