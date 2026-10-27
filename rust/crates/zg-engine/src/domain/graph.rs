@@ -45,7 +45,15 @@ pub enum GraphEdgeKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EdgeProvenance {
+    /// The winning candidate was the only one whose declared arity matched.
+    ArityBound,
+    /// The winning candidate was the only exported one.
+    ExportBound,
     FileLocal,
+    /// A receiver-qualified call bound to a same-file declaration.
+    FileScoped,
+    /// A bare name bound through the file's resolved import scope.
+    ImportBound,
     ImportScoped,
     /// The target was selected by a unique qualified-name match.
     QualifiedNameMatch,
@@ -135,10 +143,13 @@ impl GraphEdgeKind {
 }
 
 impl EdgeProvenance {
-    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::ArityBound => "arity_bound",
+            Self::ExportBound => "export_bound",
             Self::FileLocal => "file_local",
+            Self::FileScoped => "file_scoped",
+            Self::ImportBound => "import_bound",
             Self::ImportScoped => "import_scoped",
             Self::QualifiedNameMatch => "qualified_name_match",
             Self::WorkspaceUnique => "workspace_unique",

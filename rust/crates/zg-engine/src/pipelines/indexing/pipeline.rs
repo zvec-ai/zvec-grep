@@ -1198,7 +1198,7 @@ fn append_contents(output: &mut String, contents: &[Content]) {
     }
 }
 
-fn bind_entities(
+pub(super) fn bind_entities(
     file_id: FileId,
     extracted: Vec<ExtractedEntity>,
 ) -> Result<Vec<Entity>, EngineError> {
