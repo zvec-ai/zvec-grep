@@ -580,7 +580,7 @@ fn schemas_reject_foreign_databases_and_other_owners_without_rewriting_identity(
 }
 
 #[test]
-fn schema_contains_only_edges_and_enforces_json_objects() {
+fn schema_keeps_edges_only_and_enforces_json_objects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     open(&path).close().expect("init");
@@ -593,6 +593,7 @@ fn schema_contains_only_edges_and_enforces_json_objects() {
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
+    // Names, ownership and paths stay canonical in zvec; the graph holds edges.
     assert_eq!(names, ["edges", "sqlite_sequence"]);
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, metadata) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', '[]')", []).is_err());
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, line) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', 0)", []).is_err());
