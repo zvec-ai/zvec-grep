@@ -249,6 +249,7 @@ jobs:
                       and record["target"]["name"] == "zg_engine" and record["profile"]["test"] and record.get("executable")]
           assert len(binaries) == 1, binaries
           subprocess.run([sys.executable, "scripts/validate-onnxruntime-models.py", "--test-binary", binaries[0],
+              "--cargo-messages", "target/ort-tests.json",
               "--target", os.environ["ORT_TARGET"], "--model-cache", os.environ["MODEL_CACHE"],
               "--output", "target/ort-model-validation"], check=True)
       - name: Retain catalog and throughput evidence

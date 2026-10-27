@@ -57,9 +57,9 @@ pub(super) fn initialize() -> Result<Environment, ModelError> {
 
 #[cfg(target_os = "windows")]
 fn preload_directml(path: &std::path::Path) -> Result<(), String> {
-    // An adjacent Cargo DLL otherwise precedes SetDllDirectory in Windows'
-    // search order. Use ORT's supported preloader to select the runtime's own
-    // DirectML, also when zg-engine is embedded without the CLI's native hook.
+    // Loading an absolute ORT path does not add its parent to dependent-DLL
+    // lookup. Select its own DirectML before Windows can resolve another copy
+    // beside the executable, also when zg-engine is embedded without the CLI.
     let resolved = if path.is_relative() {
         env::current_exe()
             .ok()

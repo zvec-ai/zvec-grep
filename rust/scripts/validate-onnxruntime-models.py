@@ -45,6 +45,14 @@ def validate(args):
     # runner launches the same binary directly to swap only the ORT runtime.
     library_path = "DYLD_FALLBACK_LIBRARY_PATH" if "apple" in args.target else "LD_LIBRARY_PATH"
     paths = [str(args.test_binary.parent), str(args.test_binary.parent.parent)]
+    if args.cargo_messages:
+        records = [json.loads(line) for line in args.cargo_messages.read_text().splitlines()]
+        for record in records:
+            if record.get("reason") == "build-script-executed":
+                for linked in record["linked_paths"]:
+                    kind, separator, path = linked.partition("=")
+                    if not separator or kind in ("native", "all"):
+                        paths.append(path if separator else linked)
     if environment.get(library_path):
         paths.append(environment[library_path])
     environment[library_path] = os.pathsep.join(paths)
@@ -107,6 +115,7 @@ def validate(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--test-binary", required=True, type=Path)
+    parser.add_argument("--cargo-messages", type=Path, help="Cargo JSON containing native dependency search paths")
     parser.add_argument("--target", required=True)
     parser.add_argument("--model-cache", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)

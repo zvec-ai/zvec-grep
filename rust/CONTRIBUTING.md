@@ -283,8 +283,9 @@ under the Cargo target directory (under the target triple for cross builds).
 preparation; that runtime must support API 21. Using ONNX WebGPU requires a
 runtime containing WebGPU through this override. Enabling the Vulkan build
 feature alone does not require one: GGUF Vulkan and ONNX CPU remain available.
-The Windows CLI searches the selected custom runtime's directory for dependent
-DLLs, and the engine preloads its sibling DirectML before ORT initialization.
+On Windows, the engine preloads the selected runtime's sibling DirectML before
+ORT initialization. ORT loads CUDA providers from its own runtime directory;
+host CUDA/cuDNN libraries must still be available on PATH.
 Default release runtimes preserve CPU, macOS CoreML, Windows DirectML and x64
 CUDA 12 choices;
 macOS model routing continues to select CPU.
