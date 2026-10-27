@@ -37,6 +37,7 @@ import type {
   SearchHit,
   SearchPlan,
   SearchPlanResult,
+  WorkspaceIndexStatus,
 } from "../types.js";
 import { CURRENT_INDEX_VERSION } from "../types.js";
 import { indexStatusNeedsRefresh } from "../index-status.js";
@@ -100,9 +101,15 @@ export async function createZvecGrep(
 export type WorkspaceReadSession = {
   readonly root: string;
   context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
+  status(): Promise<WorkspaceIndexStatus>;
   close(): Promise<void>;
 };
 
+/**
+ * Keep one workspace index open for repeated SDK reads. The caller must close
+ * the session before updating, rebuilding, disabling, or dropping the index.
+ * Writes to this workspace fail with a busy lock while the session is open.
+ */
 export function openWorkspaceReadSession(
   startRoot: string,
   embeddingModel?: EmbeddingModel,
@@ -114,35 +121,57 @@ export function openWorkspaceReadSession(
     throw workspaceIndexMissingError(start, "undecided");
   }
 
-  const { location, info } = nearest;
-  if (info.indexPolicy === "disabled") {
-    throw workspaceIndexDisabledError(location.root);
+  const { location } = nearest;
+  const lock = acquireHomeLock(location.home, "read", "read-session");
+  let workspaceIndex: WorkspaceIndex;
+  try {
+    const info = readWorkspaceManifest(location.home);
+    if (!info) {
+      throw workspaceIndexMissingError(location.root, "undecided");
+    }
+    if (info.indexPolicy === "disabled") {
+      throw workspaceIndexDisabledError(location.root);
+    }
+    if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location)) {
+      throw workspaceIndexMissingError(
+        location.root,
+        info.indexPolicy ?? "enabled",
+      );
+    }
+    workspaceIndex = new WorkspaceIndex(info, {
+      mode: "read",
+      embeddingModel,
+    });
+  } catch (error) {
+    lock.release();
+    throw error;
   }
-  if (!isWorkspaceIndexed(info) || !hasWorkspaceIndex(location)) {
-    throw workspaceIndexMissingError(
-      location.root,
-      info.indexPolicy ?? "enabled",
-    );
-  }
+  let closing = false;
+  let pending: Promise<void> = Promise.resolve();
 
-  const workspaceIndex = new WorkspaceIndex(info, {
-    mode: "read",
-    embeddingModel,
-  });
-  let closed = false;
+  function schedule<T>(task: () => Promise<T>): Promise<T> {
+    if (closing) {
+      return Promise.reject(
+        new EngineError("Workspace read session is already closed", {
+          code: "ZVEC_GREP.ENGINE.SERVICE.READ_SESSION_CLOSED",
+        }),
+      );
+    }
+    const result = pending.then(task);
+    pending = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   return {
     root: location.root,
-    async context(options) {
-      if (closed) {
-        throw new EngineError("Workspace read session is already closed", {
-          code: "ZVEC_GREP.ENGINE.SERVICE.READ_SESSION_CLOSED",
-        });
-      }
-      const timings = new TimingCollector();
-      const request = normalizeContextRequest(options);
-      const result = await timings.time("total", () =>
-        withHomeReadLock(location.home, "daemon.context", () =>
+    context(options) {
+      return schedule(async () => {
+        const timings = new TimingCollector();
+        const request = normalizeContextRequest(options);
+        const result = await timings.time("total", () =>
           contextFromOpenWorkspaceIndex({
             root: location.root,
             request,
@@ -150,16 +179,25 @@ export function openWorkspaceReadSession(
             options: { ...options, autoUpdate: false },
             timings,
           }),
-        ),
-      );
-      return withContextTimings(result, timings);
+        );
+        return withContextTimings(result, timings);
+      });
+    },
+    status() {
+      return schedule(() => workspaceIndex.status());
     },
     async close() {
-      if (closed) {
-        return;
+      if (!closing) {
+        closing = true;
+        pending = pending.then(() => {
+          try {
+            workspaceIndex.close();
+          } finally {
+            lock.release();
+          }
+        });
       }
-      workspaceIndex.close();
-      closed = true;
+      await pending;
     },
   };
 }

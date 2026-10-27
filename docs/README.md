@@ -24,6 +24,7 @@ and implementation details, see the [Rust README](../rust/README.md).
 | Choose between Auto, Server, and Direct execution | [Server and execution modes](./06-server.md) |
 | Choose and configure an Embedding model | [Embedding models](./07-embedding.md) |
 | See what is stable now and what comes next | [Roadmap](./08-roadmap.md) |
+| Run repeated searches from an embedded SDK client | [SDK read sessions](./09-sdk-read-sessions.md) |
 
 ## Recommended paths
 
