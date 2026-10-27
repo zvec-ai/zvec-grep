@@ -12,7 +12,8 @@ enabling controlled and reproducible retriever comparisons.
 
 The current harness runs paired evaluations with **OpenCode 1.18.4 and
 `custom-openai/qwen3.8-max`** on that corpus. Both execution and blind judging
-use this model.
+use this model. Retrieval uses the local **`local/potion-multilingual-128m`**
+embedding model; no remote embedding service or embedding API key is needed.
 
 It follows the original paper's core principles, with small differences in
 corpus processing and evaluation protocol to better reflect real-world use of a
@@ -32,8 +33,9 @@ and complete OpenCode trajectories.
 ## Published results (historical Codex protocol)
 
 The [published full report](./LATEST_REPORT.md) and figures below use Codex
-`0.147.0` with `gpt-5.6-sol`. **They are not OpenCode/Qwen results.** Changing the
-agent, model, and tool protocol means new runs must be treated as a separate
+`0.147.0` with `gpt-5.6-sol` and `qwen/qwen3.7-text-embedding` embeddings.
+**They are not results for the current OpenCode/Qwen/Potion configuration.**
+Changing the agent, embedding model, and tool protocol means new runs must be treated as a separate
 study, not as a direct regression against these figures.
 
 The sections below summarize that study: across 300 paired
@@ -110,8 +112,8 @@ variation.
 
 Use macOS or Linux with `uv`, Node.js, and `zg` installed. Install the pinned
 OpenCode CLI, then configure a model API key and the matching OpenAI-compatible
-base URL for your provider workspace. The model endpoint is separate from the
-embedding endpoint.
+base URL for your provider workspace. Potion embeddings run locally; the model
+files download on first use.
 
 ```sh
 cd benchmarks/browse-comp-plus
@@ -122,8 +124,6 @@ source .venv/bin/activate
 # Read credentials from your environment or secret manager.
 export OPENAI_API_KEY="$QWEN_API_KEY"
 export BROWSE_COMP_MODEL_BASE_URL='https://YOUR-WORKSPACE.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
-export ZVEC_GREP_API_KEY="$QWEN_EMBEDDING_API_KEY"
-export ZVEC_GREP_ENDPOINT="$QWEN_EMBEDDING_ENDPOINT"
 zg-bench doctor
 ```
 
@@ -220,24 +220,39 @@ is started manually by a repository maintainer or administrator. It does not
 run on pushes, PRs, comments, or a schedule.
 
 1. Configure the Actions settings below.
-2. Once the workflow is on the default branch, open **Actions → BrowseComp-Plus
-   → Run workflow**. Select a trusted workflow branch and set `candidate_ref`
-   to the trusted branch, tag, or commit to benchmark in this repository.
+2. To test the new workflow before merging it, dispatch the already registered
+   **ZG Bench** workflow from this branch; it routes to BrowseComp-Plus. After
+   BrowseComp-Plus is registered on the default branch, use **Actions →
+   BrowseComp-Plus → Run workflow** directly. Select a trusted workflow branch
+   and set `candidate_ref` to the trusted branch, tag, or commit to benchmark
+   in this repository.
 3. Choose `ci` (default: 5 cases, 15 paired trials / 30 agent runs) or `smoke`
    (1 case, 3 paired trials / 6 agent runs, plus the usage audit). Set
    `parallel_cases` to 1, 2, or 5 (default) to fit provider rate limits.
 
+Run the branch version without merging:
+
+```sh
+gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
+  --ref dev/browse-comp-plus-ci \
+  -f pr_number=298 -f benchmark=browse-comp-plus \
+  -f candidate_ref=main -f suite=ci -f parallel_cases=5
+```
+
+`pr_number` satisfies the existing entry point's required input; the
+BrowseComp-Plus route does not use it. This route retains the manual-trigger
+and maintainer/admin checks.
+
 | Actions setting | Purpose |
 | --- | --- |
 | Secret `QWEN_API_KEY` | API key authorized to invoke `qwen3.8-max`. The existing `GLM_API_KEY` secret is used as a fallback when `QWEN_API_KEY` is absent. |
-| Variable `BROWSE_COMP_MODEL_BASE_URL` | Model's OpenAI-compatible base URL, ending in `/compatible-mode/v1` for Bailian; falls back to `SWE_QA_MODEL_BASE_URL`. Required and separate from the embedding endpoint. |
-| Secret `QWEN_EMBEDDING_API_KEY` | Credentials for the configured Qwen embedding model. |
-| Variable `QWEN_EMBEDDING_ENDPOINT` | Embedding endpoint, as in the SWE-QA workflow. |
+| Variable `BROWSE_COMP_MODEL_BASE_URL` | Required model OpenAI-compatible base URL, ending in `/compatible-mode/v1` for Bailian; falls back to `SWE_QA_MODEL_BASE_URL`. |
 | Secret `HF_TOKEN` (optional) | Hugging Face download authentication. |
 
 The workflow pins OpenCode `1.18.4` and uses `custom-openai/qwen3.8-max` for
-both agent execution and judging, retaining the pinned dataset and three trials
-per case. A small model preflight checks access before indexing. The selected
+both agent execution and judging, with local `local/potion-multilingual-128m`
+embeddings, the pinned dataset, and three trials per case. A small model
+preflight checks access before indexing. The selected
 key is supplied as `OPENAI_API_KEY` to each model-calling step; no Codex login or
 account `auth.json` is used. [OpenCode configuration](https://opencode.ai/docs/config/)
 references the key through an environment variable. Temporary homes and profiles
@@ -253,26 +268,26 @@ the original metadata for every case is retained under `shards/`.
 | Stage | Reuse / parallelism |
 | --- | --- |
 | Rust package | Cached for the exact candidate commit. |
-| Corpus and index | A complete snapshot is reused only for the same candidate, dataset, embedding configuration/endpoint, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
+| Corpus, index, and local model | A complete snapshot includes the Potion model cache, so case workers do not download it again. It is reused only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
 | Partial rerun | “Re-run failed jobs” keeps successful case artifacts; aggregation accepts only the current plan and latest attempt for each case. |
 
-**Cold-run cost:** both suites prepare all 100,195 documents. The published
-index build took about 2.7 hours and produced a 7.9 GB index; a new candidate or
-evicted cache still requires that build. No end-to-end speedup has yet been
-measured on Actions. Preparation allows six hours, each case three hours. Runs
+**Cold-run cost:** both suites prepare all 100,195 documents. A new candidate or
+evicted cache requires a local Potion index build. Its cold-build time, index
+size, and end-to-end Actions speedup have not yet been measured. Preparation
+allows six hours, each case three hours. Runs
 are queued, and each hosted runner frees SDK space and requires 35 GiB free.
 The compressed snapshot preserves nanosecond timestamps to avoid reindexing,
 is cached best-effort, and is also uploaded for the case jobs (one-day
 retention). Allow for multi-GB artifact transfer/storage and repository cache
-quota. Even `smoke` incurs embedding, agent, and judge costs on a cold run.
+quota. Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
 The small plan artifact is retained for seven days. Retry failed jobs while
 the one-day prepared artifact still exists; after expiry, start a new run.
 
 The candidate is built in a separate job without model credentials. Only select
-trusted candidate code: that executable subsequently runs with the embedding
-credentials. The harness and candidate commit SHAs are recorded separately.
+trusted candidate code, which subsequently executes on the benchmark runners.
+The harness and candidate commit SHAs are recorded separately.
 
 Results appear in the Actions job summary and a 30-day evidence artifact,
 including JSON/Markdown/CSV reports, trajectories, judge results, preparation

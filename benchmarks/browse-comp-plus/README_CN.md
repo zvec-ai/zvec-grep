@@ -6,7 +6,7 @@
 
 [BrowseComp-Plus](https://github.com/texttron/BrowseComp-Plus) 用于评估深度研究 Agent：题目通常需要在多篇文档中定位并串联线索，才能得出答案。与实时网页搜索不同，它使用约 10 万篇经人工核验的固定语料，使不同检索器能够在可控、可复现的条件下进行比较。
 
-当前 harness 使用 **OpenCode 1.18.4 + `custom-openai/qwen3.8-max`** 在该语料库上进行配对评测，执行和盲测评审使用同一模型。
+当前 harness 使用 **OpenCode 1.18.4 + `custom-openai/qwen3.8-max`** 在该语料库上进行配对评测，执行和盲测评审使用同一模型。检索使用本地 **`local/potion-multilingual-128m`** embedding 模型，无需远端 embedding 服务或 API key。
 
 整体原则与原论文一致，但在语料处理和评测流程上略有调整，以更贴近用户实际使用通用 Agent 的场景。
 
@@ -19,7 +19,7 @@ Benchmark 记录回答质量、Token 用量、Agent 执行耗时、工具调用�
 
 ## 已发布结果（历史 Codex 协议）
 
-[已发布完整报告](./LATEST_REPORT.md)及下列数字来自 Codex `0.147.0` + `gpt-5.6-sol`，**并非 OpenCode/Qwen 的结果**。Agent、模型与工具协议已变化，新运行应作为独立研究，不能直接将这些数字作为回归基线。
+[已发布完整报告](./LATEST_REPORT.md)及下列数字来自 Codex `0.147.0` + `gpt-5.6-sol`，embedding 使用 `qwen/qwen3.7-text-embedding`，**并非当前 OpenCode/Qwen/Potion 配置的结果**。Agent、embedding 模型与工具协议已变化，新运行应作为独立研究，不能直接将这些数字作为回归基线。
 
 以下是历史 study 的摘要：在 300 组配对 trial 中，zvec-grep 在保持回答质量的同时，将平均 Input Token 减少 **37.56%**、工具调用次数减少 **43.52%**、Agent 执行时间减少 **38.58%**。
 
@@ -60,7 +60,7 @@ BrowseComp-Plus 数据集中也存在少量瑕疵，例如个别 query 的线索
 
 ## 前置条件
 
-宿主环境需要 macOS 或 Linux，并安装 `uv`、Node.js 和 `zg`。安装固定版本的 OpenCode，配置模型 API key 及其业务空间对应的 OpenAI 兼容 base URL；模型地址与 embedding 地址分别配置。
+宿主环境需要 macOS 或 Linux，并安装 `uv`、Node.js 和 `zg`。安装固定版本的 OpenCode，配置模型 API key 及其业务空间对应的 OpenAI 兼容 base URL。Potion embedding 在本地运行，首次使用时下载模型文件。
 
 ```sh
 cd benchmarks/browse-comp-plus
@@ -71,8 +71,6 @@ source .venv/bin/activate
 # 从环境变量或密钥管理器读取凭据。
 export OPENAI_API_KEY="$QWEN_API_KEY"
 export BROWSE_COMP_MODEL_BASE_URL='https://YOUR-WORKSPACE.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
-export ZVEC_GREP_API_KEY="$QWEN_EMBEDDING_API_KEY"
-export ZVEC_GREP_ENDPOINT="$QWEN_EMBEDDING_ENDPOINT"
 zg-bench doctor
 ```
 
@@ -158,21 +156,32 @@ zg-bench clean
 仅供仓库 maintain/admin 角色手动触发，不会随 push、PR、评论或定时任务运行。
 
 1. 配置下表中的 Actions 设置。
-2. workflow 合入默认分支后，打开 **Actions → BrowseComp-Plus → Run workflow**。
+2. 合并前可从当前分支手动触发已注册的 **ZG Bench**，由其路由到 BrowseComp-Plus。
+   BrowseComp-Plus 在默认分支注册后，可直接打开 **Actions → BrowseComp-Plus → Run workflow**。
    选择可信的 workflow 分支，将 `candidate_ref` 设为本仓库待评测的可信分支、tag 或 commit。
 3. 选择 `ci`（默认：5 题、15 次配对试验，共 30 次 Agent 运行）或 `smoke`
    （1 题、3 次配对试验，共 6 次 Agent 运行，另含工具使用审计）。
    `parallel_cases` 可选 1、2、5（默认），按服务端限流调整。
 
+无需合并即可运行分支版本：
+
+```sh
+gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
+  --ref dev/browse-comp-plus-ci \
+  -f pr_number=298 -f benchmark=browse-comp-plus \
+  -f candidate_ref=main -f suite=ci -f parallel_cases=5
+```
+
+`pr_number` 仅用于兼容既有入口的必填参数，BrowseComp-Plus 路由不使用它。
+该路由保留手动触发与 maintain/admin 权限检查。
+
 | Actions 设置 | 用途 |
 | --- | --- |
 | Secret `QWEN_API_KEY` | 可调用 `qwen3.8-max` 的 API key；未配置时沿用已有 `GLM_API_KEY` secret。 |
-| Variable `BROWSE_COMP_MODEL_BASE_URL` | 模型的 OpenAI 兼容 base URL，百炼地址以 `/compatible-mode/v1` 结尾；未配置时使用 `SWE_QA_MODEL_BASE_URL`。必填，与 embedding endpoint 分开配置。 |
-| Secret `QWEN_EMBEDDING_API_KEY` | 所配置 Qwen embedding 模型的凭据。 |
-| Variable `QWEN_EMBEDDING_ENDPOINT` | Embedding endpoint，与 SWE-QA workflow 使用相同配置。 |
+| Variable `BROWSE_COMP_MODEL_BASE_URL` | 必填，模型的 OpenAI 兼容 base URL，百炼地址以 `/compatible-mode/v1` 结尾；未配置时使用 `SWE_QA_MODEL_BASE_URL`。 |
 | Secret `HF_TOKEN`（可选） | Hugging Face 下载认证。 |
 
-工作流固定 OpenCode `1.18.4`，执行与评审均使用 `custom-openai/qwen3.8-max`，保留锁定数据集及每题 3 次试验。建索引前通过一次小型模型调用检查访问权限。
+工作流固定 OpenCode `1.18.4`，执行与评审均使用 `custom-openai/qwen3.8-max`，embedding 使用本地 `local/potion-multilingual-128m`，保留锁定数据集及每题 3 次试验。建索引前通过一次小型模型调用检查访问权限。
 所选 key 通过 `OPENAI_API_KEY` 提供给每个调用模型的步骤，无需 Codex 登录或账号 `auth.json`。
 [OpenCode 配置](https://opencode.ai/docs/config/)通过环境变量引用 key；临时 home 与 profile 不进入缓存或上传产物。
 
@@ -184,21 +193,21 @@ zg-bench clean
 | 阶段 | 复用或并行方式 |
 | --- | --- |
 | Rust 包 | 按候选 commit 精确缓存。 |
-| 语料和索引 | 仅在候选版本、数据、embedding 配置及 endpoint、准备脚本、系统架构和目录一致时复用完整快照，不回退复用其他候选版本的索引。 |
+| 语料、索引和本地模型 | 完整快照包含 Potion 模型缓存，避免各题 worker 重复下载。仅在候选版本、数据、embedding 配置、准备脚本、系统架构和目录一致时复用，不回退复用其他候选版本的索引。 |
 | 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
 | 失败重跑 | “Re-run failed jobs” 保留成功题目的产物，汇总仅接受当前计划下各题最新 attempt。 |
 
-**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。已发布报告中的索引构建耗时约
-2.7 小时、索引约 7.9 GB；新候选版本或缓存被淘汰后仍需重建，尚未测得 Actions 端到端提速。
+**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。新候选版本或缓存被淘汰后需在本地
+构建 Potion 索引；尚未实测其冷构建耗时、索引大小或 Actions 端到端提速。
 准备阶段限时 6 小时，各题限时 3 小时；不同 workflow 排队运行。runner 会释放 SDK 空间，
 并检查至少 35 GiB 可用磁盘。压缩快照保留纳秒时间戳以避免误触发重建，尽力写入缓存，
 同时作为有效期 1 天的 artifact 供各题下载。需计入数 GB 的传输/存储与仓库缓存配额；
-冷启动的 `smoke` 同样产生 embedding、Agent 和评审费用。
+Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
 小型计划 artifact 保留 7 天；失败 job 应在准备快照的 1 天有效期内重跑，过期后启动新运行。
 
-候选程序在不含模型凭据的独立 job 中构建。请只选择可信候选代码，因为该程序随后会使用
-embedding 凭据运行。产物分别记录评测脚本与候选程序的 commit SHA。
+候选程序在不含模型凭据的独立 job 中构建。请只选择可信候选代码，该程序随后会在评测
+runner 上执行。产物分别记录评测脚本与候选程序的 commit SHA。
 
 结果展示在 Actions job summary，并保存为保留 30 天的 artifact，包含 JSON/Markdown/CSV
 报告、运行轨迹、评审结果、准备阶段日志和候选包 manifest。部分试验失败时仍评审并导出

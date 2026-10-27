@@ -9,10 +9,10 @@ corpus_split = "train"
 expected_corpus_documents = 100195
 
 [zvec_grep]
-embedding = "qwen/qwen3.7-text-embedding"
-embedding_concurrency = 60
+embedding = "local/potion-multilingual-128m"
+embedding_concurrency = 4
 max_filesize = "64M"
-device = "auto"
+device = "cpu"
 mcp_tool_timeout_seconds = 600
 server_port = 7999
 

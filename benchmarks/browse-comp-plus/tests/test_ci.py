@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,8 +48,6 @@ class CIIntegrationTests(unittest.TestCase):
 
     def configure(self):
         os.environ.update(
-            ZVEC_GREP_API_KEY="embedding-secret",
-            ZVEC_GREP_ENDPOINT="https://example.test",
             OPENAI_API_KEY="model-api-secret",
             BROWSE_COMP_MODEL_BASE_URL="https://model.example.test/v1",
         )
@@ -75,8 +74,6 @@ class CIIntegrationTests(unittest.TestCase):
         for name in (
             "OPENAI_API_KEY",
             "BROWSE_COMP_MODEL_BASE_URL",
-            "ZVEC_GREP_API_KEY",
-            "ZVEC_GREP_ENDPOINT",
         ):
             with (
                 self.subTest(name=name),
@@ -84,6 +81,29 @@ class CIIntegrationTests(unittest.TestCase):
                 patch("zg_bench.ci.subprocess.run") as run,
             ):
                 with self.assertRaises(ValueError):
+                    configure_auth(self.home)
+                run.assert_not_called()
+
+    def test_remote_embedding_still_requires_its_own_credentials(self):
+        config = load_config()
+        remote = replace(
+            config,
+            zvec_grep=replace(
+                config.zvec_grep, embedding="qwen/qwen3.7-text-embedding"
+            ),
+        )
+        self.configure()
+        for values, error in (
+            ({}, "QWEN_EMBEDDING_API_KEY"),
+            ({"ZVEC_GREP_API_KEY": "embedding-secret"}, "QWEN_EMBEDDING_ENDPOINT"),
+        ):
+            with (
+                self.subTest(values=values),
+                patch.dict(os.environ, values),
+                patch("zg_bench.ci.load_config", return_value=remote),
+                patch("zg_bench.ci.subprocess.run") as run,
+            ):
+                with self.assertRaisesRegex(ValueError, error):
                     configure_auth(self.home)
                 run.assert_not_called()
 

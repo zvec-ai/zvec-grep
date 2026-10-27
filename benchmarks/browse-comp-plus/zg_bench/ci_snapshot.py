@@ -22,9 +22,11 @@ STATE_FILES = {"dataset.json", "corpus.json", "corpus-manifest.jsonl", "index.js
 def cache_key(candidate: str, endpoint: str, artifacts: Path) -> str:
     config = load_config()
     identity = {
-        "schema": 1,
+        "schema": 2,
         "candidate": candidate,
-        "endpoint": endpoint,
+        "endpoint": None
+        if config.zvec_grep.embedding.startswith("local/")
+        else endpoint,
         "root": str(artifacts.resolve()),
         "dataset": asdict(config.dataset),
         "index": asdict(config.zvec_grep),
@@ -36,6 +38,7 @@ def cache_key(candidate: str, endpoint: str, artifacts: Path) -> str:
                 "zg_bench/dataset.py",
                 "zg_bench/corpus.py",
                 "zg_bench/index.py",
+                "zg_bench/profiles.py",
                 "zg_bench/artifacts.py",
                 "zg_bench/config.py",
                 "zg_bench/process.py",
@@ -44,7 +47,7 @@ def cache_key(candidate: str, endpoint: str, artifacts: Path) -> str:
         },
     }
     return (
-        "browse-comp-prepared-v1-"
+        "browse-comp-prepared-v2-"
         + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     )
 
@@ -52,7 +55,7 @@ def cache_key(candidate: str, endpoint: str, artifacts: Path) -> str:
 def _allowed(path: PurePosixPath) -> bool:
     if path.is_absolute() or ".." in path.parts or not path.parts:
         return False
-    return path.parts[0] in {"source", "workspaces"} or (
+    return path.parts[0] in {"source", "workspaces", "models"} or (
         len(path.parts) == 2 and path.parts[0] == "state" and path.name in STATE_FILES
     )
 
@@ -68,6 +71,8 @@ def write_tar(artifacts: Path, destination, key: str, secrets: set[bytes]) -> No
         info.size = len(metadata)
         archive.addfile(info, io.BytesIO(metadata))
         roots = [artifacts / "source", artifacts / "workspaces"]
+        if load_config().zvec_grep.embedding.startswith("local/"):
+            roots.append(artifacts / "models")
         roots.extend(artifacts / "state" / name for name in sorted(STATE_FILES))
         for root in roots:
             if not root.exists():
@@ -128,7 +133,10 @@ def read_tar(artifacts: Path, source, key: str) -> None:
             # tarfile's normal extraction converts PAX timestamps to float, losing ns.
             nanoseconds = int(Decimal(member.pax_headers["mtime"]) * 10**9)
             os.utime(target, ns=(nanoseconds, nanoseconds))
-    if not all(f"state/{name}" in seen for name in STATE_FILES):
+    if not all(f"state/{name}" in seen for name in STATE_FILES) or (
+        load_config().zvec_grep.embedding.startswith("local/")
+        and not any(name.startswith("models/") for name in seen)
+    ):
         raise ValueError("prepared snapshot is incomplete")
 
 
@@ -163,7 +171,7 @@ def main() -> int:
             "key="
             + cache_key(
                 os.environ["BROWSE_CANDIDATE_COMMIT"],
-                os.environ["ZVEC_GREP_ENDPOINT"],
+                os.environ.get("ZVEC_GREP_ENDPOINT", ""),
                 DEFAULT_ARTIFACTS_DIR,
             )
         )

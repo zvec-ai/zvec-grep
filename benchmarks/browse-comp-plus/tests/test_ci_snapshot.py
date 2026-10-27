@@ -45,6 +45,7 @@ class PreparedSnapshotTests(unittest.TestCase):
         self.write("workspaces/a/document.md", b"corpus text\n")
         self.write("workspaces/b/document.md", b"corpus text\n")
         self.write("workspaces/b/.zvec-grep/index.bin", bytes(range(256)))
+        self.write("models/potion/model.safetensors", b"local model weights")
         for name in STATE_FILES:
             self.write(f"state/{name}", b"{}\n")
 
@@ -72,6 +73,7 @@ class PreparedSnapshotTests(unittest.TestCase):
                         (f"state/{name}", b"{}", tarfile.REGTYPE)
                         for name in STATE_FILES
                     ),
+                    ("models/potion/model.safetensors", b"weights", tarfile.REGTYPE),
                     *entries,
                 ]
             for name, data, kind in entries:
@@ -143,6 +145,7 @@ class PreparedSnapshotTests(unittest.TestCase):
         for name in ("dataset.json", "index.json"):
             self.write(f"state/{name}", b"{}")
         self.write("workspaces/b/.zvec-grep/index.bin", b"index")
+        self.write("models/potion/model.safetensors", b"local model weights")
         self.assertIsNotNone(prepared_corpus(config, self.artifacts))
         buffer = self.pack()
         shutil.rmtree(self.artifacts)
@@ -216,6 +219,7 @@ class PreparedSnapshotTests(unittest.TestCase):
             "source/queries.jsonl",
             "workspaces/b/.zvec-grep/index.bin",
             "state/index.json",
+            "models/potion/model.safetensors",
         ):
             with self.subTest(relative=relative):
                 self.fixture()
@@ -237,7 +241,9 @@ class PreparedSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symlinks"):
             self.pack()
 
-    def test_cache_identity_changes_with_candidate_endpoint_or_restore_root(self):
+    def test_local_cache_identity_changes_with_candidate_or_root_not_remote_endpoint(
+        self,
+    ):
         initial = cache_key("candidate-a", "https://embedding-a.test", self.artifacts)
         self.assertEqual(
             initial,
@@ -245,13 +251,54 @@ class PreparedSnapshotTests(unittest.TestCase):
         )
         for candidate, endpoint, artifacts in (
             ("candidate-b", "https://embedding-a.test", self.artifacts),
-            ("candidate-a", "https://embedding-b.test", self.artifacts),
             ("candidate-a", "https://embedding-a.test", self.root / "other-artifacts"),
         ):
             with self.subTest(
                 candidate=candidate, endpoint=endpoint, artifacts=artifacts
             ):
                 self.assertNotEqual(initial, cache_key(candidate, endpoint, artifacts))
+        self.assertEqual(initial, cache_key("candidate-a", "", self.artifacts))
+        self.assertEqual(
+            initial,
+            cache_key("candidate-a", "https://embedding-b.test", self.artifacts),
+        )
+
+    def test_remote_cache_identity_changes_with_endpoint_and_embedding(self):
+        config = load_config()
+        local_key = cache_key("candidate-a", "", self.artifacts)
+        remote = replace(
+            config,
+            zvec_grep=replace(
+                config.zvec_grep, embedding="qwen/qwen3.7-text-embedding"
+            ),
+        )
+        with patch("zg_bench.ci_snapshot.load_config", return_value=remote):
+            remote_key = cache_key(
+                "candidate-a", "https://embedding-a.test", self.artifacts
+            )
+            self.assertNotEqual(local_key, remote_key)
+            self.assertNotEqual(
+                remote_key,
+                cache_key("candidate-a", "https://embedding-b.test", self.artifacts),
+            )
+
+    def test_local_snapshot_requires_model_weights(self):
+        self.fixture()
+        shutil.rmtree(self.artifacts / "models")
+        with self.assertRaisesRegex(ValueError, "input is missing"):
+            self.pack()
+        buffer = self.archive()
+        with tarfile.open(fileobj=buffer, mode="r:") as archive:
+            entries = [
+                (member.name, archive.extractfile(member).read(), member.type)
+                for member in archive
+                if member.name.startswith("state/")
+            ]
+        shutil.rmtree(self.artifacts)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            read_tar(
+                self.artifacts, self.archive(entries, include_state=False), self.key
+            )
 
     def test_verify_accepts_only_complete_snapshots_without_download_or_rebuild(self):
         checks = (

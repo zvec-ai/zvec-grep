@@ -2,6 +2,24 @@ name: BrowseComp-Plus
 run-name: BrowseComp-Plus / ${{ inputs.candidate_ref }} / ${{ inputs.suite }}
 
 on:
+  workflow_call:
+    inputs:
+      candidate_ref:
+        required: true
+        type: string
+      suite:
+        default: ci
+        type: string
+      parallel_cases:
+        default: "5"
+        type: string
+    secrets:
+      QWEN_API_KEY:
+        required: false
+      GLM_API_KEY:
+        required: false
+      HF_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       candidate_ref:
@@ -17,9 +35,9 @@ on:
         options: [ci, smoke]
       parallel_cases:
         description: Maximum concurrent case runners (lower this for provider rate limits)
-        default: '5'
+        default: "5"
         type: choice
-        options: ['1', '2', '5']
+        options: ["1", "2", "5"]
 
 permissions: {}
 
@@ -65,10 +83,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
       - name: Install locked benchmark environment
         run: |
           python -m pip install --disable-pip-version-check uv==0.9.17
@@ -106,7 +124,7 @@ jobs:
       cases: ${{ steps.plan.outputs.cases }}
       snapshot-key: ${{ steps.snapshot-key.outputs.key }}
     env: &benchmark-env
-      NO_COLOR: '1'
+      NO_COLOR: "1"
       BROWSE_CANDIDATE_COMMIT: ${{ needs.package.outputs.commit }}
       BROWSE_HARNESS_COMMIT: ${{ github.workflow_sha }}
       BROWSE_COMP_MODEL_BASE_URL: ${{ vars.BROWSE_COMP_MODEL_BASE_URL || vars.SWE_QA_MODEL_BASE_URL }}
@@ -120,11 +138,11 @@ jobs:
       - &python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - &node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
       - &tools
         name: Install pinned benchmark tools
         run: |
@@ -158,8 +176,6 @@ jobs:
         id: setup
         env:
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
-          ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
-          ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci auth
           uv run --project benchmarks/browse-comp-plus --frozen zg-bench doctor
@@ -169,8 +185,6 @@ jobs:
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci preflight
       - name: Compute exact preparation identity
         id: snapshot-key
-        env:
-          ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot key >> "$GITHUB_OUTPUT"
       - name: Restore the complete prepared snapshot
         id: prepared-cache
@@ -202,8 +216,6 @@ jobs:
         id: prepare
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
-          ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench prepare --yes
       - name: Save verified source snapshots
         if: steps.prepared-cache.outputs.cache-hit != 'true' && steps.source-cache.outputs.cache-hit != 'true'
@@ -218,7 +230,6 @@ jobs:
         env:
           SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
-          ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot pack
@@ -259,7 +270,6 @@ jobs:
         if: ${{ failure() && steps.setup.outcome == 'success' }}
         env: &scan-env
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
-          ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci export
@@ -293,7 +303,7 @@ jobs:
       matrix:
         case: ${{ fromJSON(needs.prepare.outputs.cases) }}
     env:
-      NO_COLOR: '1'
+      NO_COLOR: "1"
       BROWSE_CANDIDATE_COMMIT: ${{ needs.package.outputs.commit }}
       BROWSE_HARNESS_COMMIT: ${{ github.workflow_sha }}
       BROWSE_COMP_MODEL_BASE_URL: ${{ vars.BROWSE_COMP_MODEL_BASE_URL || vars.SWE_QA_MODEL_BASE_URL }}
@@ -330,8 +340,6 @@ jobs:
         id: run
         env:
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
-          ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
-          ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_parallel run
           --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json" --case "$BROWSE_CASE"

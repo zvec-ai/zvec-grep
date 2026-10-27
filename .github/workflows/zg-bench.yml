@@ -1,11 +1,16 @@
 name: ZG Bench
-run-name: "ZG Bench · PR #${{ github.event.issue.number || inputs.pr_number }}"
+run-name: "ZG Bench · PR #${{ github.event.issue.number || inputs.pr_number }}${{ inputs.benchmark == 'browse-comp-plus' && format(' · BrowseComp-Plus / {0} / {1}', inputs.candidate_ref, inputs.suite) || '' }}"
 
 on:
   issue_comment:
     types: [created]
   workflow_dispatch:
     inputs:
+      benchmark:
+        description: Benchmark to run manually
+        default: retrieval
+        type: choice
+        options: [retrieval, browse-comp-plus]
       pr_number:
         description: Open PR number in this repository
         required: true
@@ -14,13 +19,41 @@ on:
         description: Also run e2e (disabled by default)
         default: false
         type: boolean
+      candidate_ref:
+        description: BrowseComp-Plus trusted Rust candidate branch, tag, or commit
+        default: main
+        type: string
+      suite:
+        description: BrowseComp-Plus paired suite
+        default: ci
+        type: choice
+        options: [ci, smoke]
+      parallel_cases:
+        description: BrowseComp-Plus maximum concurrent cases
+        default: "5"
+        type: choice
+        options: ["1", "2", "5"]
 
 permissions: {}
 
 jobs:
+  browse-comp-plus:
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark == 'browse-comp-plus'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/browse-comp-plus.yml
+    with:
+      candidate_ref: ${{ inputs.candidate_ref }}
+      suite: ${{ inputs.suite }}
+      parallel_cases: ${{ inputs.parallel_cases }}
+    secrets:
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   request:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.benchmark != 'browse-comp-plus') ||
       (github.event.issue.pull_request &&
        github.event.comment.user.type != 'Bot' &&
        contains(github.event.comment.body, '@zg-bench'))

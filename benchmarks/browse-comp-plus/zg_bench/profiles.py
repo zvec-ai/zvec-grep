@@ -28,6 +28,7 @@ def server_environment(config: BenchmarkConfig, artifacts: Path) -> dict[str, st
     environment.update(
         {
             "ZVEC_GREP_HOME": str((artifacts / "runtime" / "zvec-home").resolve()),
+            "ZVEC_GREP_MODEL_CACHE": str((artifacts / "models").resolve()),
             "ZVEC_GREP_SERVER_URL": server_url(config),
         }
     )

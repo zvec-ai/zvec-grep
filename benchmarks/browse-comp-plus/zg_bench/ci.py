@@ -19,10 +19,12 @@ SECRET_ENV = ("OPENAI_API_KEY", "ZVEC_GREP_API_KEY", "HF_TOKEN")
 
 
 def configure_auth(home: Path) -> None:
-    if not os.environ.get("ZVEC_GREP_API_KEY"):
-        raise ValueError("QWEN_EMBEDDING_API_KEY Actions secret is required")
-    if not os.environ.get("ZVEC_GREP_ENDPOINT"):
-        raise ValueError("QWEN_EMBEDDING_ENDPOINT Actions variable is required")
+    config = load_config()
+    if not config.zvec_grep.embedding.startswith("local/"):
+        if not os.environ.get("ZVEC_GREP_API_KEY"):
+            raise ValueError("QWEN_EMBEDDING_API_KEY Actions secret is required")
+        if not os.environ.get("ZVEC_GREP_ENDPOINT"):
+            raise ValueError("QWEN_EMBEDDING_ENDPOINT Actions variable is required")
     if not os.environ.get("OPENAI_API_KEY", "").strip():
         raise ValueError("QWEN_API_KEY (or GLM_API_KEY) Actions secret is required")
     if not os.environ.get("BROWSE_COMP_MODEL_BASE_URL", "").strip():
@@ -46,7 +48,7 @@ def configure_auth(home: Path) -> None:
             )
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     home.chmod(0o700)
-    prepare_judge_home(load_config(), DEFAULT_ARTIFACTS_DIR, home)
+    prepare_judge_home(config, DEFAULT_ARTIFACTS_DIR, home)
 
 
 def verify_model() -> None:
