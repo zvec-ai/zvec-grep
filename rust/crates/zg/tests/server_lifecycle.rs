@@ -5,6 +5,8 @@ mod workspaces;
 
 #[path = "server_lifecycle/positional_queries.rs"]
 mod positional_queries;
+#[path = "server_lifecycle/protocol_upgrade.rs"]
+mod protocol_upgrade;
 
 use std::{
     error::Error,

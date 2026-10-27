@@ -30,6 +30,7 @@ const STARTUP_FILE: &str = "startup.lock";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
+const DAEMON_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +46,8 @@ struct DaemonInstanceRecord {
     ready: bool,
     #[serde(default = "legacy_full_toolset")]
     mcp_toolset: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daemon_protocol_version: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -75,7 +78,11 @@ impl StartupLock {
         let daemon_dir = daemon_dir(home);
         create_private_dir(&daemon_dir)?;
         let path = daemon_dir.join(STARTUP_FILE);
-        let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+        // A competing bootstrap may be draining a legacy daemon before spawning.
+        let deadline = tokio::time::Instant::now()
+            + crate::default_stop_timeout()
+            + SIGNAL_GRACE * 2
+            + START_TIMEOUT;
         loop {
             let record = StartupRecord {
                 pid: std::process::id(),
@@ -184,6 +191,7 @@ impl InstanceLock {
             listen: config.listen.to_string(),
             ready: false,
             mcp_toolset: config.mcp_toolset.unwrap_or_default().to_string(),
+            daemon_protocol_version: Some(DAEMON_PROTOCOL_VERSION),
         };
         // Register before publishing so a contender in this process never
         // sees our record without its token; dropping the guard on failure
@@ -316,6 +324,7 @@ fn retryable_replace_error(error: &std::io::Error) -> bool {
 }
 
 /// Starts the configured daemon process or returns the existing ready process.
+/// A legacy daemon without a protocol version is stopped before replacement.
 ///
 /// # Errors
 ///
@@ -324,14 +333,17 @@ pub async fn start_server(
     executable: &Path,
     config: &ServerConfig,
 ) -> Result<DaemonStatus, DaemonError> {
-    if let Some(current) = existing_server(config).await? {
-        return Ok(current);
+    match existing_server(config).await {
+        Ok(Some(current)) => return Ok(current),
+        Ok(None) | Err(DaemonError::LegacyDaemon { .. }) => {}
+        Err(error) => return Err(error),
     }
 
     // The status check above is intentionally only a fast path. This
     // cross-process claim closes the check/spawn race for concurrent stdio
     // bootstrap processes. The winner alone may spawn; waiters re-check state
-    // after the claim is released and reuse the ready daemon.
+    // after the claim is released and reuse the ready daemon. Legacy shutdown
+    // also runs under this claim so only its winner may replace the old process.
     let startup = StartupLock::acquire(&config.home).await?;
     let result = start_server_with_lock(executable, config).await;
     let release = startup.release().await;
@@ -363,11 +375,22 @@ async fn start_server_with_lock(
     executable: &Path,
     config: &ServerConfig,
 ) -> Result<DaemonStatus, DaemonError> {
+    let token = crate::resolve_token(config.token_file.as_deref())?;
+    if let Some(record) = read_running_instance(&config.home).await?
+        && record.daemon_protocol_version.is_none()
+    {
+        stop_recorded_server(
+            &config.home,
+            &record,
+            crate::default_stop_timeout(),
+            token.as_deref(),
+        )
+        .await?;
+    }
     if let Some(current) = existing_server(config).await? {
         return Ok(current);
     }
 
-    crate::resolve_token(config.token_file.as_deref())?;
     assert_address_available(&config.listen).await?;
     let daemon_dir = daemon_dir(&config.home);
     create_private_dir(&daemon_dir)?;
@@ -423,37 +446,46 @@ pub async fn stop_server_with_token(
         remove_record_if_same(home, &record).await?;
         return Ok(DaemonStatus::default());
     }
+    stop_recorded_server(home, &record, timeout, token.as_deref()).await
+}
+
+async fn stop_recorded_server(
+    home: &Path,
+    record: &DaemonInstanceRecord,
+    timeout: Duration,
+    token: Option<&str>,
+) -> Result<DaemonStatus, DaemonError> {
     if record.pid == std::process::id() {
         return Err(DaemonError::RefuseCurrentProcess);
     }
 
-    let address = record_address(&record, home)?;
-    let accepted = http_request(
-        &address,
-        "POST",
-        "/control/shutdown",
-        HTTP_TIMEOUT,
-        token.as_deref(),
-    )
-    .await
-    .is_ok_and(|status| status == 202);
+    assert_same_instance(home, record, false).await?;
+    let address = record_address(record, home)?;
+    let accepted =
+        match http_request(&address, "POST", "/control/shutdown", HTTP_TIMEOUT, token).await {
+            Ok(202) => true,
+            // An HTTP rejection, including failed authentication, must not be
+            // bypassed by falling back to process signals.
+            Ok(status) => return Err(DaemonError::ShutdownRejected { status }),
+            Err(_) => false,
+        };
     if accepted && wait_for_exit(record.pid, timeout).await {
-        remove_record_if_same(home, &record).await?;
+        remove_record_if_same(home, record).await?;
         return Ok(DaemonStatus::default());
     }
 
-    assert_same_instance(home, &record, accepted).await?;
+    assert_same_instance(home, record, accepted).await?;
     signal_process(record.pid, Signal::Term);
     if wait_for_exit(record.pid, SIGNAL_GRACE.min(timeout)).await {
-        remove_record_if_same(home, &record).await?;
+        remove_record_if_same(home, record).await?;
         return Ok(DaemonStatus::default());
     }
-    assert_same_instance(home, &record, true).await?;
+    assert_same_instance(home, record, true).await?;
     force_kill_process(record.pid);
     if !wait_for_exit(record.pid, SIGNAL_GRACE).await {
         return Err(DaemonError::Timeout { action: "stop" });
     }
-    remove_record_if_same(home, &record).await?;
+    remove_record_if_same(home, record).await?;
     Ok(DaemonStatus::default())
 }
 
@@ -462,13 +494,21 @@ pub async fn stop_server_with_token(
 /// # Errors
 ///
 /// Returns an I/O error when the instance record or health endpoint cannot be
-/// inspected safely.
+/// inspected safely, or when a running daemon uses an incompatible protocol.
 pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
-    let Some(record) = read_instance_record(home).await? else {
+    let Some(record) = read_running_instance(home).await? else {
         return Ok(DaemonStatus::default());
     };
-    if record.hostname != hostname() || !process_is_alive(record.pid) {
-        return Ok(DaemonStatus::default());
+    match record.daemon_protocol_version {
+        Some(DAEMON_PROTOCOL_VERSION) => {}
+        Some(actual) => {
+            return Err(DaemonError::ProtocolMismatch {
+                pid: record.pid,
+                actual,
+                expected: DAEMON_PROTOCOL_VERSION,
+            });
+        }
+        None => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
     }
     let address = record_address(&record, home)?;
     let healthy = http_request(&address, "GET", "/healthz", Duration::from_secs(1), None)
@@ -481,6 +521,12 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
         server_url: Some(record.server_url),
         mcp_toolset: Some(record.mcp_toolset),
     })
+}
+
+async fn read_running_instance(home: &Path) -> Result<Option<DaemonInstanceRecord>, DaemonError> {
+    Ok(read_instance_record(home)
+        .await?
+        .filter(|record| record.hostname == hostname() && process_is_alive(record.pid)))
 }
 
 async fn read_instance_record(home: &Path) -> Result<Option<DaemonInstanceRecord>, DaemonError> {
@@ -818,6 +864,10 @@ mod tests {
             .expect("starting record")
             .expect("starting record exists");
         assert!(!starting.ready);
+        assert_eq!(
+            starting.daemon_protocol_version,
+            Some(super::DAEMON_PROTOCOL_VERSION)
+        );
 
         lock.mark_ready().await.expect("ready record");
         let ready = read_instance_record(home.path())
@@ -825,6 +875,10 @@ mod tests {
             .expect("ready record")
             .expect("ready record exists");
         assert!(ready.ready);
+        assert_eq!(
+            ready.daemon_protocol_version,
+            starting.daemon_protocol_version
+        );
         assert_eq!(ready.instance_token, starting.instance_token);
         assert!(
             std::fs::read_dir(path.parent().expect("daemon directory"))
@@ -867,6 +921,7 @@ mod tests {
             listen: "127.0.0.1:7999".to_owned(),
             ready: true,
             mcp_toolset: "full".to_owned(),
+            daemon_protocol_version: None,
         };
         std::fs::write(&path, serde_json::to_vec(&stale).expect("stale record"))
             .expect("write stale record");
