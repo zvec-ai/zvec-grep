@@ -85,8 +85,33 @@ fn packaged_executable_uses_sibling_lib_directory() {
     let lib = root.path().join("lib");
     std::fs::create_dir_all(&bin).expect("bin directory");
     std::fs::create_dir_all(&lib).expect("lib directory");
+    let expected = runtime_path(None, Some(lib.clone()), None).expect("library filename");
+    std::fs::write(&expected, b"runtime").expect("packaged library");
     let runtime = runtime_path(None, None, Some(bin.join("zg"))).expect("packaged runtime");
-    assert_eq!(runtime.parent(), Some(lib.as_path()));
+    assert_eq!(runtime, expected);
+}
+
+#[test]
+fn unrelated_sibling_directory_does_not_hide_the_adjacent_runtime() {
+    let root = tempfile::tempdir().expect("temporary Cargo profile");
+    let deps = root.path().join("deps");
+    let lib = root.path().join("lib");
+    std::fs::create_dir_all(&deps).expect("deps directory");
+    std::fs::create_dir_all(&lib).expect("unrelated lib directory");
+    let expected = runtime_path(None, Some(deps.clone()), None).expect("library filename");
+    std::fs::write(&expected, b"runtime").expect("adjacent library");
+    let executable = deps.join("model_test");
+    assert_eq!(
+        runtime_path(None, None, Some(executable.clone())).expect("adjacent runtime"),
+        expected
+    );
+    // A same-named directory is not a loadable library either.
+    std::fs::create_dir(lib.join(expected.file_name().expect("filename")))
+        .expect("unrelated directory");
+    assert_eq!(
+        runtime_path(None, None, Some(executable)).expect("runtime"),
+        expected
+    );
 }
 
 #[test]

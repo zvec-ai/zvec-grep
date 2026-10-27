@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <delayimp.h>
+#include <shlwapi.h>
 #include <wchar.h>
 
 static INIT_ONCE runtime_once = INIT_ONCE_STATIC_INIT;
@@ -42,11 +43,55 @@ static BOOL CALLBACK configure_runtime(PINIT_ONCE once, PVOID parameter, PVOID *
     return TRUE;
 }
 
+static void configure_custom_ort_directory(void) {
+    wchar_t library[32768];
+    DWORD length = GetEnvironmentVariableW(L"ORT_DYLIB_PATH", library, 32768);
+    if (length == 0) {
+        length = GetEnvironmentVariableW(L"ZVEC_GREP_NATIVE_LIB_DIR", library, 32768);
+        if (length == 0 || length >= 32768 ||
+            wcscat_s(library, 32768, L"\\onnxruntime.dll") != 0) {
+            return;
+        }
+    } else if (length >= 32768) {
+        return;
+    }
+
+    // Match ort's relative-path lookup: executable-relative when that file
+    // exists, otherwise relative to the process's working directory.
+    if (PathIsRelativeW(library)) {
+        wchar_t adjacent[32768];
+        length = GetModuleFileNameW(NULL, adjacent, 32768);
+        if (length > 0 && length < 32768) {
+            wchar_t *separator = wcsrchr(adjacent, L'\\');
+            if (separator != NULL) {
+                separator[1] = L'\0';
+                if (wcscat_s(adjacent, 32768, library) == 0 &&
+                    GetFileAttributesW(adjacent) != INVALID_FILE_ATTRIBUTES) {
+                    wcscpy_s(library, 32768, adjacent);
+                }
+            }
+        }
+    }
+    wchar_t absolute[32768];
+    wchar_t *filename = NULL;
+    length = GetFullPathNameW(library, 32768, absolute, &filename);
+    if (length == 0 || length >= 32768 || filename == NULL) {
+        return;
+    }
+    *filename = L'\0';
+    // Loading an absolute ORT path does not add its parent to dependent-DLL
+    // lookup. Prefer its own siblings (e.g. DirectML.dll), retaining system/PATH
+    // lookup for NVIDIA runtime libraries. Packaged zvec/llama imports continue
+    // using the explicit runtime_directory path in the delay-load hook below.
+    SetDllDirectoryW(absolute);
+}
+
 // ORT now loads dynamically on every target. Configure sibling dependencies
 // (notably DirectML.dll) before Rust can load ORT, even if no delayed zvec import
 // has run yet. Cargo tests keep DLLs next to their own executable as before.
 static void __cdecl initialize_runtime_directory(void) {
     InitOnceExecuteOnce(&runtime_once, configure_runtime, NULL, NULL);
+    configure_custom_ort_directory();
 }
 #pragma section(".CRT$XCU", read)
 __declspec(allocate(".CRT$XCU")) void (__cdecl *zg_runtime_initializer)(void) = initialize_runtime_directory;

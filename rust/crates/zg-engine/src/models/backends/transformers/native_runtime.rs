@@ -29,6 +29,8 @@ pub(super) fn initialize() -> Result<Environment, ModelError> {
             env::var_os("ZVEC_GREP_NATIVE_LIB_DIR").map(PathBuf::from),
             env::current_exe().ok(),
         )?;
+        #[cfg(target_os = "windows")]
+        preload_directml(&path)?;
         let environment = ort::init_from(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?
             .build()
@@ -53,6 +55,28 @@ pub(super) fn initialize() -> Result<Environment, ModelError> {
         .ok_or_else(|| ModelError::internal("ONNX Runtime has shut down"))
 }
 
+#[cfg(target_os = "windows")]
+fn preload_directml(path: &std::path::Path) -> Result<(), String> {
+    // An adjacent Cargo DLL otherwise precedes SetDllDirectory in Windows'
+    // search order. Use ORT's supported preloader to select the runtime's own
+    // DirectML, also when zg-engine is embedded without the CLI's native hook.
+    let resolved = if path.is_relative() {
+        env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|parent| parent.join(path)))
+            .filter(|candidate| candidate.exists())
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let directml = resolved.with_file_name("DirectML.dll");
+    if directml.is_file() {
+        ort::util::preload_dylib(&directml)
+            .map_err(|error| format!("{}: {error}", directml.display()))?;
+    }
+    Ok(())
+}
+
 fn runtime_path(
     explicit: Option<PathBuf>,
     directory: Option<PathBuf>,
@@ -61,20 +85,6 @@ fn runtime_path(
     if let Some(path) = explicit {
         return Ok(path);
     }
-    let directory = if let Some(directory) = directory {
-        directory
-    } else {
-        let executable =
-            executable.ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?;
-        let adjacent = executable
-            .parent()
-            .ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?;
-        adjacent
-            .parent()
-            .map(|root| root.join("lib"))
-            .filter(|packaged| packaged.is_dir())
-            .unwrap_or_else(|| adjacent.to_path_buf())
-    };
     let filename = if cfg!(target_os = "windows") {
         "onnxruntime.dll"
     } else if cfg!(target_os = "macos") {
@@ -82,7 +92,19 @@ fn runtime_path(
     } else {
         "libonnxruntime.so.1"
     };
-    Ok(directory.join(filename))
+    if let Some(directory) = directory {
+        return Ok(directory.join(filename));
+    }
+    let executable =
+        executable.ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?;
+    let adjacent = executable
+        .parent()
+        .ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?;
+    Ok(adjacent
+        .parent()
+        .map(|root| root.join("lib").join(filename))
+        .filter(|packaged| packaged.is_file())
+        .unwrap_or_else(|| adjacent.join(filename)))
 }
 
 #[cfg(test)]

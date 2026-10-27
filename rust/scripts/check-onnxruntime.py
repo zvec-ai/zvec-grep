@@ -2,13 +2,13 @@
 """Load a deployed native ORT core and verify its version and C API."""
 
 from contextlib import ExitStack
+import argparse
 import ctypes
 import os
 from pathlib import Path
-import sys
 
 
-def check(path):
+def check(path, expected="1.21.0"):
     with ExitStack() as stack:
         if os.name == "nt":
             stack.enter_context(os.add_dll_directory(str(path.parent.resolve())))
@@ -21,10 +21,14 @@ def check(path):
         library.OrtGetApiBase.restype = ctypes.POINTER(ApiBase)
         base = library.OrtGetApiBase().contents
         version = base.get_version().decode()
-        if version != "1.21.0" or not base.get_api(21):
-            raise RuntimeError(f"Expected ORT 1.21.0 with API 21; loaded {version}")
+        if version != expected or not base.get_api(21):
+            raise RuntimeError(f"Expected ORT {expected} with API 21; loaded {version}")
         print(f"Loaded ORT {version}, API 21: {path}")
 
 
 if __name__ == "__main__":
-    check(Path(sys.argv[1]))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", type=Path)
+    parser.add_argument("--expected", default="1.21.0")
+    args = parser.parse_args()
+    check(args.path, args.expected)

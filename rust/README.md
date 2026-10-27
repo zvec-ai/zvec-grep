@@ -540,7 +540,8 @@ CPU builds select CPU/CoreML/DirectML runtimes; x64 CUDA builds select matching
 CUDA 12 core/providers. Both `--device cpu` and `--device cuda` locate packaged
 ORT without loader environment overrides. CUDA execution still requires the
 host NVIDIA driver, CUDA 12 libraries and cuDNN 9. An explicit `ORT_DYLIB_PATH`
-skips automatic preparation and supplies a custom runtime, required for WebGPU.
+skips automatic preparation and supplies a custom runtime when using ONNX WebGPU.
+Enabling GGUF Vulkan alone does not require a custom ORT library.
 
 ```sh
 npm run build

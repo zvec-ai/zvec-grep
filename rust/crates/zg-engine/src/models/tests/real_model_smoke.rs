@@ -12,10 +12,15 @@ use crate::{
     },
 };
 
-const CI_MODELS: [&str; 3] = [
+const CI_MODELS: [&str; 8] = [
     "local/potion-code-16m-v2",
     "local/all-minilm-l6-v2",
     "local/embeddinggemma-300m",
+    "local/bge-small-en-v1.5",
+    "local/multilingual-e5-small",
+    "local/jina-embeddings-v2-base-code",
+    "local/gte-modernbert-base",
+    "local/nomic-embed-text-v1.5",
 ];
 
 #[tokio::test]
@@ -32,6 +37,7 @@ async fn selected_local_model_downloads_loads_and_embeds() {
         .expect("ZVEC_GREP_MODEL_CACHE must isolate downloaded smoke artifacts");
 
     let devices = match env::var("ZVEC_GREP_SMOKE_DEVICE") {
+        Ok(device) if device == "cpu" => vec![Device::Cpu],
         Ok(device) if device == "cuda" && !cfg!(feature = "cuda") => {
             panic!("CUDA smoke requires --features cuda");
         }
@@ -61,7 +67,7 @@ async fn selected_local_model_downloads_loads_and_embeds() {
             }
             devices
         }
-        device => panic!("ZVEC_GREP_SMOKE_DEVICE must be unset or cuda, got {device:?}"),
+        device => panic!("ZVEC_GREP_SMOKE_DEVICE must be unset, cpu or cuda, got {device:?}"),
     };
 
     for device in devices {
@@ -111,4 +117,8 @@ async fn download_load_and_embed(reference: &str, cache_dir: PathBuf, device: De
             .sqrt();
         assert!(norm > 0.0 && norm.is_finite());
     }
+    println!(
+        "MODEL_SMOKE_OK model={reference} dimension={}",
+        model.info().dimension()
+    );
 }

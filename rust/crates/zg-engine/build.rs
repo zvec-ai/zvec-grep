@@ -19,10 +19,6 @@ fn main() {
     if std::env::var_os("ORT_DYLIB_PATH").is_some() {
         return;
     }
-    assert!(
-        std::env::var_os("CARGO_FEATURE_VULKAN").is_none(),
-        "WebGPU requires a custom ORT runtime; set ORT_DYLIB_PATH to that library"
-    );
     let python = std::env::var_os("PYTHON")
         .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
     let mut command = std::process::Command::new(python);

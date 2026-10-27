@@ -42,6 +42,7 @@ fn main() {
             .compile("zg_windows_runtime");
         println!("cargo:rerun-if-changed=windows_runtime.c");
         println!("cargo:rustc-link-lib=delayimp");
+        println!("cargo:rustc-link-lib=shlwapi");
         println!("cargo:rustc-link-arg=/INCLUDE:__pfnDliNotifyHook2");
         println!("cargo:rustc-link-arg=/INCLUDE:zg_runtime_initializer");
         println!("cargo:rustc-link-arg=/DELAYLOAD:zvec_c_api.dll");

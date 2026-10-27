@@ -15,15 +15,22 @@ SPEC.loader.exec_module(glibc)
 
 
 class GlibcTests(unittest.TestCase):
-    def test_only_strong_undefined_glibc_symbols_establish_the_floor(self):
+    def test_weak_symbols_can_have_mandatory_version_requirements(self):
         symbols = """
   1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memcpy@GLIBC_2.14 (2)
   2: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_create@GLIBC_2.31 (3)
   3: 0000000000000000     0 FUNC    WEAK   DEFAULT  UND pidfd_spawnp@GLIBC_2.39 (4)
   4: 0000000000001234     8 FUNC    GLOBAL DEFAULT   12 exported@@GLIBC_2.40
   5: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND std_function@GLIBCXX_3.4.22 (5)
+  6: 0000000000000000     0 FUNC    WEAK   DEFAULT  UND optional@GLIBC_2.41 (6)
+Version definition section '.gnu.version_d' contains 1 entry:
+  0x0010: Rev: 1 Flags: none Index: 2 Cnt: 1 Name: GLIBC_2.40
+Version needs section '.gnu.version_r' contains 1 entry:
+  0x0000: Version: 1 File: libc.so.6 Cnt: 2
+  0x0010: Name: GLIBC_2.39 Flags: none Version: 4
+  0x0020: Name: GLIBC_2.41 Flags: WEAK Version: 6
 """
-        self.assertEqual(glibc.required_versions(symbols), {(2, 14), (2, 31)})
+        self.assertEqual(glibc.required_versions(symbols), {(2, 14), (2, 31), (2, 39)})
 
     def test_recursively_checks_elf_payloads_and_rejects_newer_imports(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -35,11 +42,23 @@ class GlibcTests(unittest.TestCase):
             with patch.object(glibc.subprocess, "check_output") as readelf, redirect_stdout(io.StringIO()):
                 readelf.return_value = "1: 0 0 FUNC GLOBAL DEFAULT UND memcpy@GLIBC_2.27 (2)"
                 glibc.audit(root, (2, 31), "custom-readelf")
-                readelf.assert_called_once_with(
-                    ["custom-readelf", "--dyn-syms", "--wide", str(library)], text=True)
-                readelf.return_value = "1: 0 0 FUNC GLOBAL DEFAULT UND __isoc23_strtol@GLIBC_2.38 (2)"
+                self.assertEqual(readelf.call_args.args[0],
+                    ["custom-readelf", "--dyn-syms", "--version-info", "--wide", str(library)])
+                self.assertEqual(readelf.call_args.kwargs["env"]["LC_ALL"], "C")
+                readelf.return_value = """
+1: 0 0 FUNC WEAK DEFAULT UND pidfd_spawnp@GLIBC_2.39 (2)
+Version needs section '.gnu.version_r' contains 1 entry:
+  0x0010: Name: GLIBC_2.39 Flags: none Version: 2
+"""
                 with self.assertRaisesRegex(RuntimeError, "baseline exceeded"):
-                    glibc.audit(root, (2, 31))
+                    glibc.audit(root, (2, 38))
+
+    def test_unknown_mandatory_glibc_abi_cannot_silently_pass(self):
+        with self.assertRaisesRegex(RuntimeError, "GLIBC_ABI_DT_RELR"):
+            glibc.required_versions("""
+Version needs section '.gnu.version_r' contains 1 entry:
+  0x0010: Name: GLIBC_ABI_DT_RELR Flags: none Version: 2
+""")
 
     def test_missing_payload_cannot_silently_pass(self):
         with tempfile.TemporaryDirectory() as temporary:

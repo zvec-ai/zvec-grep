@@ -34,6 +34,10 @@ on:
         description: Optional reviewed source ref; empty uses the commit selected for this run
         type: string
         default: ""
+      ort_validation:
+        description: Validate all ONNX catalog models and compare 1.21/1.28 CPU throughput on Linux x64/ARM64
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -179,11 +183,84 @@ jobs:
             test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
             python3 scripts/check-onnxruntime.py target/ort-cpu/libonnxruntime.so.1
           '
+      - name: Verify Vulkan does not require a custom ORT at build time
+        run: |
+          CARGO_MANIFEST_DIR="$PWD/crates/zg-engine" rustc --edition=2024 crates/zg-engine/build.rs -o target/ort-build-script
+          env -u ORT_DYLIB_PATH CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true \
+            TARGET=${{ matrix.target }} OUT_DIR="$PWD/target/ort-vulkan/debug/build/zg-engine/out" \
+            ZG_ORT_CACHE_DIR="$PWD/target/ort-prebuilt" target/ort-build-script
       - name: Audit the CUDA 12 provider without requiring a GPU
         if: matrix.cuda
         run: |
           python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cuda --cache-dir target/ort-prebuilt --destination target/ort-cuda
           python3 scripts/check-glibc.py target/ort-cuda --max 2.31
+
+  ort-models:
+    name: ONNX catalog and CPU runtime comparison (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs.ort_validation
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    env:
+      LLAMA_CPP_BUILD_MODE: prebuilt
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - name: Install build dependencies and the pinned toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          prefix-key: rust-ort-models-v1-${{ matrix.target }}
+          workspaces: rust -> target
+      - name: Cache the pinned catalog graphs
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/ort-catalog-models
+          key: ort-catalog-v1-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**') }}
+      - name: Build one release test binary for both runtimes
+        run: |
+          mkdir -p target
+          cargo test --release --locked -p zg-engine --lib --no-run --message-format=json > target/ort-tests.json
+      - name: Validate all ONNX models and compare q4 CPU throughput
+        shell: python
+        env:
+          MODEL_CACHE: ${{ runner.temp }}/ort-catalog-models
+          ORT_TARGET: ${{ matrix.target }}
+        run: |
+          import json, os, pathlib, subprocess, sys
+          records = [json.loads(line) for line in pathlib.Path("target/ort-tests.json").read_text().splitlines()]
+          binaries = [record["executable"] for record in records if record.get("reason") == "compiler-artifact"
+                      and record["target"]["name"] == "zg_engine" and record["profile"]["test"] and record.get("executable")]
+          assert len(binaries) == 1, binaries
+          subprocess.run([sys.executable, "scripts/validate-onnxruntime-models.py", "--test-binary", binaries[0],
+              "--target", os.environ["ORT_TARGET"], "--model-cache", os.environ["MODEL_CACHE"],
+              "--output", "target/ort-model-validation"], check=True)
+      - name: Retain catalog and throughput evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ort-model-validation-${{ matrix.target }}
+          path: |
+            rust/target/ort-model-validation/*.log
+            rust/target/ort-model-validation/results.json
+          if-no-files-found: warn
+          retention-days: 14
 
   test:
     name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
@@ -509,6 +586,14 @@ jobs:
           subprocess.run([sys.executable, "scripts/cuda/e2e.py", "--bundle", "target/ort-package-smoke",
                           "--backend", "onnx", "--explicit-cpu", "--model-cache", os.environ["ZVEC_GREP_MODEL_CACHE"],
                           "--logs", "model-logs/ort-package"], env=environment, check=True)
+      - name: Verify Windows custom ORT sibling DLL lookup
+        if: ${{ !matrix.cuda && runner.os == 'Windows' }}
+        shell: python
+        run: |
+          import os, subprocess, sys
+          subprocess.run([sys.executable, "scripts/check-windows-ort-override.py",
+              "--bundle", "target/ort-package-smoke", "--model-cache", os.environ["ZVEC_GREP_MODEL_CACHE"],
+              "--logs", "model-logs/ort-override"], check=True)
       - name: Verify Linux CPU models without rebuilding or GPU libraries
         if: matrix.cuda && runner.os == 'Linux'
         shell: bash

@@ -280,9 +280,13 @@ Python 3 and curl are required (override Python with `PYTHON`).
 under the Cargo target directory (under the target triple for cross builds).
 `CARGO_NET_OFFLINE=true` requires valid cached archives and never downloads.
 `ORT_DYLIB_PATH` explicitly supplies an external runtime and skips automatic
-preparation; that runtime must support API 21. Custom WebGPU/Vulkan builds must
-provide a runtime containing WebGPU through this override. Default release
-runtimes preserve CPU, macOS CoreML, Windows DirectML and x64 CUDA 12 choices;
+preparation; that runtime must support API 21. Using ONNX WebGPU requires a
+runtime containing WebGPU through this override. Enabling the Vulkan build
+feature alone does not require one: GGUF Vulkan and ONNX CPU remain available.
+The Windows CLI searches the selected custom runtime's directory for dependent
+DLLs, and the engine preloads its sibling DirectML before ORT initialization.
+Default release runtimes preserve CPU, macOS CoreML, Windows DirectML and x64
+CUDA 12 choices;
 macOS model routing continues to select CPU.
 
 Run `python3 scripts/test-prepare-onnxruntime.py` for offline deployment checks
@@ -292,3 +296,10 @@ ELF imports, including the x64 CUDA provider. `scripts/check-glibc.py <payload>`
 can audit a complete ELF package too. Full CLI glibc 2.31 certification still
 requires compatible builds of the executable and every other native dependency;
 the ORT-only gate does not certify those separately maintained SDKs.
+
+Dispatch Rust CI with `ort_validation=true` to validate all six catalog ONNX
+graphs on Linux x64/ARM64 and compare official ORT 1.21/1.28 q4 CPU throughput.
+The comparison uses one release binary, fixed CPU/batch/concurrency settings,
+warmup and alternating runtime order. It measures the native runtime change;
+it is not a comparison of different Rust bindings or the former Pyke static
+build. Raw rounds and machine details are retained in the job artifacts.
