@@ -45,6 +45,14 @@ def run(run_id=100, **updates):
     }
 
 
+def plan_artifact(run_id=100, **updates):
+    return artifact(run_id, name=f"browse-comp-plus-plan-{run_id}", **updates)
+
+
+def prepared_artifacts(run_id=100):
+    return {"artifacts": [artifact(run_id), plan_artifact(run_id)]}
+
+
 class PreparedArtifactTests(unittest.TestCase):
     def discover(self, api, **updates):
         return discover(
@@ -59,17 +67,23 @@ class PreparedArtifactTests(unittest.TestCase):
         )
 
     def test_exact_artifact_uses_filtered_list_and_one_run_lookup(self):
-        api = Mock(side_effect=[{"artifacts": [artifact()]}, run()])
+        api = Mock(
+            side_effect=[{"artifacts": [artifact()]}, run(), prepared_artifacts()]
+        )
         result = self.discover(api)
         self.assertEqual(result.run_id, 100)
         self.assertEqual(result.artifact_name, NAME)
         self.assertFalse(result.legacy)
-        self.assertEqual(api.call_count, 2)
+        self.assertEqual(api.call_count, 3)
         self.assertEqual(
             api.call_args_list[0].args[0],
             f"{ENDPOINT}/artifacts?per_page=100&page=1&name={NAME}",
         )
         self.assertEqual(api.call_args_list[1].args[0], f"{ENDPOINT}/runs/100")
+        self.assertEqual(
+            api.call_args_list[2].args[0],
+            f"{ENDPOINT}/runs/100/artifacts?per_page=100&page=1",
+        )
 
     def test_empty_list_is_a_miss(self):
         api = Mock(return_value={"artifacts": []})
@@ -89,10 +103,11 @@ class PreparedArtifactTests(unittest.TestCase):
                     ]
                 },
                 run(),
+                prepared_artifacts(),
             ]
         )
         self.assertEqual(self.discover(api).run_id, 100)
-        self.assertEqual(api.call_count, 2)
+        self.assertEqual(api.call_count, 3)
 
     def test_rejects_untrusted_run_repository_branch_event_and_workflow(self):
         variants = (
@@ -115,6 +130,7 @@ class PreparedArtifactTests(unittest.TestCase):
                     side_effect=[
                         {"artifacts": [artifact()]},
                         run(path=f".github/workflows/{workflow}"),
+                        prepared_artifacts(),
                     ]
                 )
                 self.assertEqual(self.discover(api).run_id, 100)
@@ -125,10 +141,11 @@ class PreparedArtifactTests(unittest.TestCase):
                 {"artifacts": [artifact(), artifact(), artifact(101)]},
                 run(event="push"),
                 run(101),
+                prepared_artifacts(101),
             ]
         )
         self.assertEqual(self.discover(api).run_id, 101)
-        self.assertEqual(api.call_count, 3)
+        self.assertEqual(api.call_count, 4)
 
     def test_pagination_finds_a_later_matching_artifact(self):
         api = Mock(
@@ -136,6 +153,9 @@ class PreparedArtifactTests(unittest.TestCase):
                 {"artifacts": [artifact(expired=True)]},
                 {"artifacts": [artifact()]},
                 run(),
+                {"artifacts": [artifact()]},
+                {"artifacts": [plan_artifact()]},
+                {"artifacts": []},
             ]
         )
         with patch("zg_bench.ci_prepared_artifact.PAGE_SIZE", 1):
@@ -166,12 +186,85 @@ class PreparedArtifactTests(unittest.TestCase):
         api = Mock(
             side_effect=[
                 run(),
-                {"artifacts": [artifact(name=ARTIFACT_PREFIX + "100"), artifact()]},
+                {
+                    "artifacts": [
+                        artifact(name=ARTIFACT_PREFIX + "100"),
+                        artifact(),
+                        plan_artifact(),
+                    ]
+                },
             ]
         )
         result = self.discover(api, source_run_id="100")
         self.assertEqual(result.artifact_name, NAME)
         self.assertFalse(result.legacy)
+        self.assertEqual(api.call_count, 2)
+
+    def test_automatic_skips_missing_expired_or_wrong_run_plan_and_finds_next(self):
+        for invalid_plans in (
+            [],
+            [plan_artifact(expired=True)],
+            [artifact(999, name="browse-comp-plus-plan-100")],
+            [artifact(name="browse-comp-plus-plan-100-other")],
+        ):
+            with self.subTest(plans=invalid_plans):
+                api = Mock(
+                    side_effect=[
+                        {"artifacts": [artifact(), artifact(101)]},
+                        run(),
+                        {"artifacts": [artifact(), *invalid_plans]},
+                        run(101),
+                        prepared_artifacts(101),
+                    ]
+                )
+                self.assertEqual(self.discover(api).run_id, 101)
+
+    def test_automatic_missing_plan_is_a_miss_and_run_list_is_not_repeated(self):
+        api = Mock(
+            side_effect=[
+                {"artifacts": [artifact(), artifact()]},
+                run(),
+                {"artifacts": [artifact()]},
+            ]
+        )
+        self.assertIsNone(self.discover(api).run_id)
+        self.assertEqual(api.call_count, 3)
+
+    def test_explicit_keyed_snapshot_without_valid_plan_fails_even_with_legacy(self):
+        for invalid_plans in (
+            [],
+            [plan_artifact(expired=True)],
+            [artifact(999, name="browse-comp-plus-plan-100")],
+        ):
+            with self.subTest(plans=invalid_plans):
+                api = Mock(
+                    side_effect=[
+                        run(),
+                        {
+                            "artifacts": [
+                                artifact(),
+                                artifact(name=ARTIFACT_PREFIX + "100"),
+                                *invalid_plans,
+                            ]
+                        },
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    ArtifactDiscoveryError, "no unexpired plan"
+                ):
+                    self.discover(api, source_run_id="100")
+
+    def test_run_artifact_api_error_fails_instead_of_treating_plan_as_missing(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                responses = [run(), ArtifactDiscoveryError("GitHub API failure")]
+                if not explicit:
+                    responses.insert(0, {"artifacts": [artifact()]})
+                with self.assertRaises(ArtifactDiscoveryError):
+                    self.discover(
+                        Mock(side_effect=responses),
+                        source_run_id="100" if explicit else "",
+                    )
 
     def test_explicit_missing_expired_or_wrong_run_artifacts_fail(self):
         for records in (
@@ -281,7 +374,9 @@ class ArtifactCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "outputs"
             output.write_text("existing=value\n", encoding="utf-8")
-            api = Mock(side_effect=[{"artifacts": [artifact()]}, run()])
+            api = Mock(
+                side_effect=[{"artifacts": [artifact()]}, run(), prepared_artifacts()]
+            )
             with (
                 patch.dict(
                     "os.environ",

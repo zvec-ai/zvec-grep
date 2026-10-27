@@ -25,7 +25,7 @@ from .artifacts import (
 )
 from .config import BENCHMARK_ROOT, PROMPT_PATH, SUITES_DIR, BenchmarkConfig
 from .console import Console
-from .corpus import prepared_corpus, validate_workspace
+from .corpus import prepared_corpus, validate_workspace, workspace_root
 from .dataset import load_queries, prepared_dataset
 from .index import prepared_index
 from .models import PROFILES, AttemptResult, Profile
@@ -92,9 +92,12 @@ def _cpu_model() -> str:
                 lines = []
             for line in lines:
                 key, separator, value = line.partition(":")
-                if separator and key.strip() in {"model name", "Hardware"}:
-                    if value.strip():
-                        return value.strip()
+                if (
+                    separator
+                    and key.strip() in {"model name", "Hardware"}
+                    and value.strip()
+                ):
+                    return value.strip()
     if platform.system() == "Darwin":
         result = run_command(
             ["sysctl", "-n", "machdep.cpu.brand_string"], timeout=5
@@ -355,8 +358,9 @@ def _randomized_profile_orders(
     return output
 
 
-def _prompt(query: str) -> str:
+def _prompt(query: str, workspace: Path) -> str:
     template = PROMPT_PATH.read_text(encoding="utf-8")
+    template = template.replace("{workspace_root}", str(workspace.resolve()))
     return template.replace("{query}", query).rstrip() + "\n"
 
 
@@ -483,7 +487,9 @@ def _run_profile(
                 artifacts,
                 query_id=query_id,
                 trial_index=trial_index,
-                prompt=_prompt(str(query["query"])),
+                prompt=_prompt(
+                    str(query["query"]), workspace_root(artifacts, profile)
+                ),
                 profile=profile,
                 model=model,
                 reasoning_effort=reasoning_effort,

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from .artifacts import read_json, sha256_file, utc_now, write_json
@@ -22,6 +24,65 @@ from .runner import (
     run_benchmark,
     select_case,
 )
+
+
+def restore_queries(artifacts: Path, plan_path: Path) -> Path:
+    """Restore only validated query bytes; create_plan generates this run's plan."""
+    source = plan_path.parent / "source" / "browsecomp_plus_decrypted.jsonl"
+    if (
+        plan_path.parent.is_symlink()
+        or plan_path.is_symlink()
+        or not plan_path.is_file()
+        or source.parent.is_symlink()
+        or source.is_symlink()
+        or not source.is_file()
+    ):
+        raise ValueError("reuse plan and query set must be regular files")
+    try:
+        plan = read_json(plan_path)
+        payload = source.read_bytes()
+    except (OSError, ValueError):
+        raise ValueError("reuse plan or query set could not be read") from None
+    candidate = os.environ.get("BROWSE_CANDIDATE_COMMIT")
+    if (
+        not candidate
+        or not isinstance(plan, dict)
+        or plan.get("candidate_commit") != candidate
+    ):
+        raise ValueError("reuse plan candidate identity does not match")
+    if hashlib.sha256(payload).hexdigest() != plan.get("query_set_sha256"):
+        raise ValueError("reuse plan query set checksum does not match")
+
+    destination = artifacts / "source" / source.name
+    if (
+        artifacts.is_symlink()
+        or destination.parent.is_symlink()
+        or destination.is_symlink()
+        or destination.exists()
+    ):
+        raise ValueError("query restore requires an unused regular destination")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent, prefix=".restore-queries-", delete=False
+        ) as staging:
+            temporary = Path(staging.name)
+            staging.write(payload)
+        # Validate the same bytes that were hashed and will be published, even if
+        # the downloaded source changes after it was read. load_queries rejects
+        # malformed JSON rows, unsafe IDs, and duplicate IDs.
+        try:
+            queries = load_queries(temporary)
+        except (OSError, ValueError, TypeError):
+            raise ValueError("reuse plan query set is invalid") from None
+        if len(queries) != load_config().dataset.expected_queries:
+            raise ValueError("reuse plan query set has the wrong query count")
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return destination
 
 
 def create_plan(artifacts: Path, suite: str, output: Path) -> Path:
@@ -279,6 +340,8 @@ def main() -> int:
     plan = sub.add_parser("plan")
     plan.add_argument("--suite", choices=("ci", "smoke"), required=True)
     plan.add_argument("--output", type=Path, required=True)
+    restore = sub.add_parser("restore-queries")
+    restore.add_argument("--plan", type=Path, required=True)
     run = sub.add_parser("run")
     run.add_argument("--plan", type=Path, required=True)
     run.add_argument("--case", required=True)
@@ -288,6 +351,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "plan":
         create_plan(DEFAULT_ARTIFACTS_DIR, args.suite, args.output)
+        return 0
+    if args.command == "restore-queries":
+        restore_queries(DEFAULT_ARTIFACTS_DIR, args.plan)
         return 0
     if args.command == "run":
         return run_case(DEFAULT_ARTIFACTS_DIR, args.plan, args.case)

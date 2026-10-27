@@ -16,6 +16,8 @@ from zg_bench.artifacts import read_json, sha256_file, write_json
 from zg_bench.ci_parallel import (
     aggregate,
     create_plan,
+    main,
+    restore_queries,
     select_shards,
     validate_plan,
 )
@@ -507,6 +509,210 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                 "evaluated_trials"
             ],
             2,
+        )
+
+
+class RestoreQueriesTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.artifacts = self.root / "prepared"
+        self.plan_path = self.root / "old-plan/plan.json"
+        self.source = self.plan_path.parent / "source/browsecomp_plus_decrypted.jsonl"
+        self.source.parent.mkdir(parents=True)
+        self.rows = [
+            {
+                "query_id": case,
+                "query": f"Fixture question {case}: 测试",
+                "answer": "reference",
+                "evidence_docs": [{"docid": "evidence-id"}],
+                "gold_docs": [{"docid": "gold-id"}],
+            }
+            for case in [
+                "628",
+                "700",
+                "966",
+                "827",
+                "241",
+                "770",
+                *(str(number) for number in range(10000, 10824)),
+            ]
+        ]
+        self.assertEqual(len(self.rows), load_config().dataset.expected_queries)
+        self.plan = {
+            "candidate_commit": "candidate-sha",
+            "harness_commit": "old-harness",
+            "configuration_sha256": "old-configuration",
+            "suite": "old-suite",
+            "profile_orders": {"old-orders": "must not be reused"},
+        }
+        self.write_source()
+        environment = patch.dict(
+            os.environ,
+            BROWSE_CANDIDATE_COMMIT="candidate-sha",
+            BROWSE_HARNESS_COMMIT="current-harness",
+            BROWSE_COMP_MODEL_BASE_URL="https://qwen.example.test/v1",
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("subprocess.Popen", "urllib.request.urlopen"):
+            no_external_calls = patch(
+                name, side_effect=AssertionError("unexpected external call")
+            )
+            no_external_calls.start()
+            self.addCleanup(no_external_calls.stop)
+
+    def write_source(self, payload=None):
+        if payload is None:
+            payload = "".join(
+                json.dumps(row, ensure_ascii=False) + "\n" for row in self.rows
+            ).encode("utf-8")
+        self.source.write_bytes(payload)
+        self.plan["query_set_sha256"] = sha256_file(self.source)
+        write_json(self.plan_path, self.plan)
+
+    def assert_no_query_published(self):
+        source = self.artifacts / "source"
+        self.assertEqual(list(source.iterdir()) if source.exists() else [], [])
+
+    def test_all_queries_are_copied_byte_for_byte_without_old_plan_metadata(self):
+        restored = restore_queries(self.artifacts, self.plan_path)
+        self.assertEqual(restored.read_bytes(), self.source.read_bytes())
+        self.assertEqual(len(load_queries(restored)), 830)
+        self.assertEqual(load_queries(restored), load_queries(self.source))
+        self.assertFalse((self.artifacts / "plan.json").exists())
+        self.assertFalse((self.artifacts / "workspaces").exists())
+
+    def test_new_plan_uses_current_harness_configuration_suite_and_fresh_orders(self):
+        restore_queries(self.artifacts, self.plan_path)
+        fresh_orders = {"770": {"1": ["baseline", "zvec-grep"]}}
+        with (
+            patch(
+                "zg_bench.ci_parallel._randomized_profile_orders",
+                return_value=fresh_orders,
+            ) as orders,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            plan_path = create_plan(self.artifacts, "smoke", self.root / "new-plan")
+        plan = read_json(plan_path)
+        orders.assert_called_once_with(["770"], load_config().run.trials_per_case)
+        self.assertEqual(plan["profile_orders"], fresh_orders)
+        self.assertEqual(plan["harness_commit"], "current-harness")
+        self.assertEqual(plan["configuration_sha256"], sha256_file(load_config().path))
+        self.assertEqual(plan["suite"], "smoke")
+        self.assertEqual(plan["candidate_commit"], "candidate-sha")
+        self.assertEqual(plan["query_set_sha256"], self.plan["query_set_sha256"])
+
+    def test_candidate_mismatch_fails_without_publishing(self):
+        self.plan["candidate_commit"] = "different-candidate"
+        write_json(self.plan_path, self.plan)
+        with self.assertRaisesRegex(ValueError, "candidate identity"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assert_no_query_published()
+
+    def test_checksum_mismatch_fails_without_publishing(self):
+        self.source.write_bytes(self.source.read_bytes() + b"\n")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assert_no_query_published()
+
+    def test_missing_plan_and_query_files_fail(self):
+        for path in (self.plan_path, self.source):
+            with self.subTest(path=path.name):
+                contents = path.read_bytes()
+                path.unlink()
+                with self.assertRaisesRegex(ValueError, "regular files"):
+                    restore_queries(self.artifacts, self.plan_path)
+                self.assert_no_query_published()
+                path.write_bytes(contents)
+
+    def test_symlinked_plan_query_or_source_directory_fails(self):
+        for path in (
+            self.plan_path,
+            self.source,
+            self.source.parent,
+            self.plan_path.parent,
+        ):
+            with self.subTest(path=path.name):
+                original = path.with_name(path.name + "-original")
+                path.rename(original)
+                path.symlink_to(original, target_is_directory=original.is_dir())
+                with self.assertRaisesRegex(ValueError, "regular files"):
+                    restore_queries(self.artifacts, self.plan_path)
+                self.assert_no_query_published()
+                path.unlink()
+                original.rename(path)
+
+    def test_malformed_plan_json_or_object_fails(self):
+        for payload in ("not JSON", "[]"):
+            with self.subTest(payload=payload):
+                self.plan_path.write_text(payload, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    restore_queries(self.artifacts, self.plan_path)
+                self.assert_no_query_published()
+
+    def test_valid_checksum_does_not_accept_invalid_query_json_or_rows(self):
+        for payload in (
+            b"not JSON\n",
+            b'"not a row"\n',
+            b'{"query_id":"x"}\n',
+            b"\xff\n",
+        ):
+            with self.subTest(payload=payload):
+                self.write_source(payload)
+                with self.assertRaisesRegex(ValueError, "query set is invalid"):
+                    restore_queries(self.artifacts, self.plan_path)
+                self.assert_no_query_published()
+
+    def test_wrong_count_fails_without_publishing_or_partial_files(self):
+        self.rows.pop()
+        self.write_source()
+        with self.assertRaisesRegex(ValueError, "wrong query count"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assert_no_query_published()
+
+    def test_duplicate_ids_in_full_query_set_fail(self):
+        self.rows[-1] = self.rows[0]
+        self.write_source()
+        with self.assertRaisesRegex(ValueError, "query set is invalid"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assert_no_query_published()
+
+    def test_unsafe_query_ids_fail(self):
+        self.rows[-1]["query_id"] = "../escape"
+        self.write_source()
+        with self.assertRaisesRegex(ValueError, "query set is invalid"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assert_no_query_published()
+
+    def test_existing_or_symlinked_destination_is_preserved(self):
+        destination = self.artifacts / "source" / self.source.name
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"existing")
+        with self.assertRaisesRegex(ValueError, "unused regular destination"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assertEqual(destination.read_bytes(), b"existing")
+        destination.unlink()
+        destination.symlink_to(self.source)
+        before = self.source.read_bytes()
+        with self.assertRaisesRegex(ValueError, "unused regular destination"):
+            restore_queries(self.artifacts, self.plan_path)
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertTrue(destination.is_symlink())
+
+    def test_cli_uses_default_artifacts_and_only_restores_queries(self):
+        with (
+            patch(
+                "sys.argv",
+                ["ci_parallel", "restore-queries", "--plan", str(self.plan_path)],
+            ),
+            patch("zg_bench.ci_parallel.DEFAULT_ARTIFACTS_DIR", self.artifacts),
+        ):
+            self.assertEqual(main(), 0)
+        self.assertEqual(
+            (self.artifacts / "source" / self.source.name).read_bytes(),
+            self.source.read_bytes(),
         )
 
 

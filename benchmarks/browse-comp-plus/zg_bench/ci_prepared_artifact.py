@@ -131,6 +131,23 @@ def _matching_run(
     )
 
 
+def _run_artifact_names(
+    api: Callable[[str], dict[str, Any]], endpoint: str, run_id: int
+) -> set[str]:
+    names = set()
+    for artifact in _artifacts(api, f"{endpoint}/runs/{run_id}/artifacts"):
+        workflow_run = artifact.get("workflow_run")
+        name = artifact.get("name")
+        if (
+            artifact.get("expired") is False
+            and isinstance(workflow_run, dict)
+            and _positive_id(workflow_run.get("id")) == run_id
+            and isinstance(name, str)
+        ):
+            names.add(name)
+    return names
+
+
 def discover(
     api: Callable[[str], dict[str, Any]],
     *,
@@ -165,23 +182,16 @@ def discover(
             raise ArtifactDiscoveryError(
                 "requested source run is not a trusted workflow dispatch on this branch"
             )
+        names = _run_artifact_names(api, endpoint, requested_id)
+        if expected_name in names:
+            if f"browse-comp-plus-plan-{requested_id}" not in names:
+                raise ArtifactDiscoveryError(
+                    "requested keyed snapshot has no unexpired plan artifact from the same run"
+                )
+            return Discovery(requested_id, expected_name)
         legacy_name = ARTIFACT_PREFIX + str(requested_id)
-        legacy = None
-        for artifact in _artifacts(api, f"{endpoint}/runs/{requested_id}/artifacts"):
-            if artifact.get("expired") is not False:
-                continue
-            workflow_run = artifact.get("workflow_run")
-            if (
-                not isinstance(workflow_run, dict)
-                or _positive_id(workflow_run.get("id")) != requested_id
-            ):
-                continue
-            if artifact.get("name") == expected_name:
-                return Discovery(requested_id, expected_name)
-            if artifact.get("name") == legacy_name:
-                legacy = Discovery(requested_id, legacy_name, legacy=True)
-        if legacy is not None:
-            return legacy
+        if legacy_name in names:
+            return Discovery(requested_id, legacy_name, legacy=True)
         raise ArtifactDiscoveryError(
             "requested source run has no unexpired matching prepared snapshot artifact"
         )
@@ -202,11 +212,15 @@ def discover(
         if workflow_run.get("head_branch") != branch:
             continue
         if run_id not in checked_runs:
-            checked_runs[run_id] = _matching_run(
+            trusted = _matching_run(
                 api(f"{endpoint}/runs/{run_id}"),
                 run_id=run_id,
                 repository=repository,
                 branch=branch,
+            )
+            names = _run_artifact_names(api, endpoint, run_id) if trusted else set()
+            checked_runs[run_id] = (
+                expected_name in names and f"browse-comp-plus-plan-{run_id}" in names
             )
         if checked_runs[run_id]:
             return Discovery(run_id, expected_name)

@@ -204,8 +204,8 @@ jobs:
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_prepared_artifact discover
           --key "$RUNNER_OS-$RUNNER_ARCH-$SNAPSHOT_KEY" --source-run-id "$PREPARED_RUN_ID"
-      - name: Download the existing preparation
-        if: steps.prepared-artifact.outputs.found == 'true'
+      - name: Download a legacy preparation for verification and republication
+        if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'true'
         uses: actions/download-artifact@v8
         with:
           name: ${{ steps.prepared-artifact.outputs.artifact-name }}
@@ -213,12 +213,25 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/browse-comp-plus-snapshot
       - name: Restore prepared files with exact timestamps
-        if: steps.prepared-artifact.outputs.found == 'true'
+        if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'true'
         env:
           SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
           --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
+      - name: Download only the small query source on an exact preparation match
+        if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'false'
+        uses: actions/download-artifact@v8
+        with:
+          name: browse-comp-plus-plan-${{ steps.prepared-artifact.outputs.run-id }}
+          run-id: ${{ steps.prepared-artifact.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/browse-comp-plus-source-plan
+      - name: Verify the query source before making a fresh evaluation plan
+        if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'false'
+        run: >-
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_parallel restore-queries
+          --plan "$RUNNER_TEMP/browse-comp-plus-source-plan/plan.json"
       - name: Restore pinned source snapshots on a cold preparation
         if: steps.prepared-artifact.outputs.found != 'true'
         id: source-cache
@@ -229,7 +242,7 @@ jobs:
             benchmarks/browse-comp-plus/artifacts/state/dataset.json
           key: browse-comp-plus-source-v1-${{ runner.os }}-${{ hashFiles('benchmarks/browse-comp-plus/benchmark.toml', 'benchmarks/browse-comp-plus/zg_bench/dataset.py', 'benchmarks/browse-comp-plus/uv.lock') }}
       - name: Validate a restored snapshot without rebuilding it
-        if: steps.prepared-artifact.outputs.found == 'true'
+        if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'true'
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot verify
       - name: Download and verify pinned source snapshots before indexing
         if: steps.prepared-artifact.outputs.found != 'true'

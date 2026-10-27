@@ -276,6 +276,7 @@ the original metadata for every case is retained under `shards/`.
 | Source data | Cached immediately after download and verification, so a failed index build does not require downloading the corpus again. |
 | Query decoding | Read only questions, reference answers, and gold/evidence document IDs from Parquet; skip unused document bodies while preserving every query and scoring input. |
 | Corpus, index, and local model | A seven-day artifact includes the Potion model cache. Earlier runs and case workers reuse it only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
+| Preparation on an exact artifact match | Download only the earlier run's small query artifact, verify its candidate and query digest, and create a fresh evaluation plan. Each case downloads and validates the complete snapshot; preparation avoids a redundant multi-GB transfer and extraction. |
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
 | Partial rerun | “Re-run failed jobs” keeps successful case artifacts; aggregation accepts only the current plan and latest attempt for each case. |
 
@@ -290,7 +291,7 @@ one another. Each hosted runner frees SDK space and requires 50 GiB free.
 The compressed snapshot preserves nanosecond timestamps to avoid reindexing.
 It uses artifact storage because it exceeds the repository's 10 GB Actions
 cache limit; only source data and candidate packages use Actions cache. A run
-that restores a matching artifact shares the original with its case jobs
+that finds a matching artifact shares the original with its case jobs
 without uploading another copy. Allow for multi-GB artifact transfer/storage.
 Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
@@ -309,8 +310,11 @@ and provider errors marked retryable. Exhausted quota is terminal. Successful
 trials and low scores are not retried. The job summary separates successful
 trials, eligible paired trials, extra retries, failed attempts, final failures,
 and unfinished trials. Paired metrics use the final completed attempts only;
-failed-attempt overhead remains available in raw evidence. The pinned samples
-and paired evaluation protocol are unchanged.
+failed-attempt overhead remains available in raw evidence. The pinned samples,
+model settings, and paired scoring are unchanged. Both profiles receive their exact
+absolute working directory in the same task template, with instructions to copy
+path arguments verbatim; this reduces directory-name typos that obscure tool
+behavior. Tool failures remain visible in the report and raw evidence.
 
 Results appear in the Actions job summary. Retention follows SWE-QA Bench:
 
