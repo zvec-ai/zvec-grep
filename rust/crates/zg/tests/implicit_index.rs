@@ -348,6 +348,8 @@ fn closed_stdout_preserves_success_and_readiness_errors() {
         for args in [
             vec!["--status", "--mode", mode, "--check-ready"],
             vec!["--fts", "needle", "--mode", mode, "--refresh", "off"],
+            vec!["--callers", "foo", "--mode", mode],
+            vec!["--callees", "foo", "--mode", mode],
         ] {
             let output = with_closed_stdout(fixture.command(&args));
             assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");

@@ -504,7 +504,7 @@ async fn execute_relationships(
         engine.close();
         result?
     };
-    println!("{}", serde_json::to_string(&result)?);
+    writeln!(zg_cli::stdout(), "{}", serde_json::to_string(&result)?)?;
     Ok(())
 }
 
