@@ -3,7 +3,8 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 1;
+// v2 admits `declares` edges produced by the walk-time collector.
+pub(crate) const VERSION: i64 = 2;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -51,7 +52,7 @@ CREATE TABLE edges (
     file_id INTEGER NOT NULL CHECK (file_id BETWEEN 0 AND 4294967295),
     source TEXT NOT NULL,
     target TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('contains', 'calls', 'imports', 'extends', 'implements')),
+    kind TEXT NOT NULL CHECK (kind IN ('contains', 'calls', 'imports', 'extends', 'implements', 'declares')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved', 'failed')),
     reference_name TEXT,
     receiver_name TEXT,

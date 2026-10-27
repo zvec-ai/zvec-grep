@@ -52,7 +52,9 @@ use crate::{
     utils::{collapse_whitespace, decode_index_text, sha256_hex},
 };
 
-use super::{input_budget::index_chunk_options, model_progress, storage::IndexStorage};
+use super::{
+    graph_assembly, input_budget::index_chunk_options, model_progress, storage::IndexStorage,
+};
 
 const MAX_SKIPPED_FILE_SAMPLES: usize = 20;
 // All default file-size limits are at least this large.
@@ -1019,12 +1021,45 @@ async fn prepare_candidate(
     for fragment in &mut fragments {
         fragment.model = owners[&fragment.entity_id].clone();
     }
+    let graph = extracted
+        .graph
+        .as_ref()
+        .map(|graph| {
+            graph_assembly::assemble_file_graph(
+                &file.id().get().to_string(),
+                graph_language(formats),
+                graph,
+                &entities,
+            )
+        })
+        .unwrap_or_default();
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
         entities,
         fragments,
-        graph: extracted.graph.unwrap_or_default(),
+        graph,
     })))
+}
+
+/// Picks the language that owns walk-time graph collection for a source path.
+fn graph_language(formats: &[FileFormat]) -> FileFormat {
+    formats
+        .iter()
+        .copied()
+        .find(|format| {
+            matches!(
+                format,
+                FileFormat::Rust
+                    | FileFormat::TypeScript
+                    | FileFormat::JavaScript
+                    | FileFormat::Python
+                    | FileFormat::Go
+                    | FileFormat::Java
+                    | FileFormat::C
+                    | FileFormat::Cpp
+            )
+        })
+        .unwrap_or(FileFormat::Unknown)
 }
 
 fn model_for_content<'a>(
