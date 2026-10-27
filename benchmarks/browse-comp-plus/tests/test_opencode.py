@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -262,7 +263,10 @@ class OpenCodeTraceTests(unittest.TestCase):
 )
 class OpenCodeBinaryContractTests(unittest.TestCase):
     def test_real_binary_matches_request_trace_and_no_tool_judge_contract(self):
-        binary = Path(os.environ["OPENCODE_BENCHMARK_TEST_BINARY"]).resolve()
+        configured_binary = os.environ["OPENCODE_BENCHMARK_TEST_BINARY"]
+        resolved_binary = shutil.which(configured_binary)
+        self.assertIsNotNone(resolved_binary, f"OpenCode not found: {configured_binary}")
+        binary = Path(resolved_binary).resolve()
         self.assertEqual(
             subprocess.check_output(
                 [binary, "--version"], text=True, timeout=10
