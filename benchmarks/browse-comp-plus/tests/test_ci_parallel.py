@@ -386,6 +386,16 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 100)
         self.assertEqual(evaluation["zvec_grep_usage"]["expected_trials"], 0)
 
+    def test_single_flat_artifact_aggregates_complete_smoke_without_model_calls(self):
+        self.plan("smoke")
+        evidence, _ = self.shard("770")
+        report = aggregate(self.output, self.plan_path, evidence)
+        self.assertTrue(read_json(report / "ci-completeness.json")["complete"])
+        evaluation = read_json(report.parent / "evaluation/summary.json")
+        self.assertEqual(evaluation["expected_answers"], 2)
+        self.assertEqual(evaluation["evaluated_answers"], 2)
+        self.assertEqual(evaluation["zvec_grep_usage"]["evaluated_trials"], 1)
+
     def test_smoke_keeps_single_trial_audit_and_original_result_hash(self):
         self.plan("smoke")
         _, worker = self.shard("770")

@@ -183,6 +183,31 @@ class RawCaseResumeTests(unittest.TestCase):
             0,
         )
 
+    def test_single_artifact_extracted_directly_into_download_root_is_reused(self):
+        run_id = restore_case(
+            self.artifacts, self.evidence, self.plan_path, self.plan, "827", self.config
+        )
+        self.assertEqual(run_id, self.run.name)
+        restored = self.artifacts / "runs" / run_id
+        selected = self.trial(restored, "baseline") / "result.json"
+        self.assertFalse(_needs_run(self.config, selected))
+        self.assertEqual(
+            selected.read_bytes(),
+            (self.trial(self.run, "baseline") / "result.json").read_bytes(),
+        )
+
+    def test_flat_artifact_without_integrity_manifest_still_fails_closed(self):
+        (self.evidence / "evidence-manifest.json").unlink()
+        with self.assertRaisesRegex(ValueError, "checksum manifest"):
+            restore_case(
+                self.artifacts,
+                self.evidence,
+                self.plan_path,
+                self.plan,
+                "827",
+                self.config,
+            )
+
     def test_zero_automatic_retries_allows_one_new_attempt_only(self):
         restored = self.restore()
         selected = self.trial(restored, "zvec-grep") / "result.json"

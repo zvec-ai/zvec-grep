@@ -182,16 +182,16 @@ def run_case(
 
 def select_shards(shards: Path, plan_path: Path, plan: dict) -> list[Path]:
     """Reuse earlier successful jobs on re-runs, without mixing evaluation plans."""
+    from .ci_resume import evidence_roots, verify_evidence
+
     selected = {}
-    for evidence in sorted(shards.iterdir()) if shards.is_dir() else []:
+    for evidence in evidence_roots(shards):
         identity = read_json(evidence / "ci.json")
         if any(
             identity.get(key) != plan[key]
             for key in ("candidate_commit", "harness_commit")
         ) or identity.get("plan_sha256") != sha256_file(plan_path):
             continue
-        from .ci_resume import verify_evidence
-
         verify_evidence(evidence)
         case = identity.get("case_id")
         if case not in plan["query_ids"]:

@@ -20,6 +20,17 @@ from .models import PROFILES
 MANIFEST = "evidence-manifest.json"
 
 
+def evidence_roots(directory: Path) -> list[Path]:
+    """Handle both single-artifact flat and multiple-artifact named layouts."""
+    if not directory.exists():
+        return []
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("raw evidence must be a regular directory")
+    if (directory / "ci.json").exists() or (directory / MANIFEST).exists():
+        return [directory]
+    return sorted(directory.iterdir())
+
+
 def evidence_files(root: Path) -> dict[str, str]:
     if root.is_symlink() or not root.is_dir():
         raise ValueError("raw evidence must be a regular directory")
@@ -130,7 +141,7 @@ def restore_case(
         raise ValueError("previous evidence must be a regular directory")
     sources = []
     attempts = set()
-    for evidence in sorted(previous.iterdir()):
+    for evidence in evidence_roots(previous):
         verify_evidence(evidence)
         identity = read_json(evidence / "ci.json")
         attempt = int(identity.get("workflow_run_attempt", "0"))
