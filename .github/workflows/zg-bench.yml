@@ -33,6 +33,9 @@ on:
         default: "5"
         type: choice
         options: ["1", "2", "5"]
+      prepared_run_id:
+        description: BrowseComp-Plus optional prior run with the exact same preparation
+        type: string
 
 permissions: {}
 
@@ -41,11 +44,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.benchmark == 'browse-comp-plus'
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/browse-comp-plus.yml
     with:
       candidate_ref: ${{ inputs.candidate_ref }}
       suite: ${{ inputs.suite }}
       parallel_cases: ${{ inputs.parallel_cases }}
+      prepared_run_id: ${{ inputs.prepared_run_id }}
     secrets:
       QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
       GLM_API_KEY: ${{ secrets.GLM_API_KEY }}

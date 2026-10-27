@@ -13,6 +13,9 @@ on:
       parallel_cases:
         default: "5"
         type: string
+      prepared_run_id:
+        default: ""
+        type: string
     secrets:
       QWEN_API_KEY:
         required: false
@@ -38,6 +41,9 @@ on:
         default: "5"
         type: choice
         options: ["1", "2", "5"]
+      prepared_run_id:
+        description: Optional prior run with the exact same preparation; invalid snapshots fail without rebuilding
+        type: string
 
 permissions: {}
 
@@ -120,9 +126,12 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read
+      actions: read
     outputs:
       cases: ${{ steps.plan.outputs.cases }}
       snapshot-key: ${{ steps.snapshot-key.outputs.key }}
+      snapshot-artifact: ${{ steps.snapshot-reference.outputs.name }}
+      snapshot-run-id: ${{ steps.snapshot-reference.outputs.run-id }}
     env: &benchmark-env
       NO_COLOR: "1"
       BROWSE_CANDIDATE_COMMIT: ${{ needs.package.outputs.commit }}
@@ -170,7 +179,7 @@ jobs:
         name: Reserve space for corpus, index, and compressed snapshot
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          python -c 'import shutil; free = shutil.disk_usage(".").free; print(f"Free disk: {free / 2**30:.1f} GiB"); assert free >= 35 * 2**30, "BrowseComp-Plus needs at least 35 GiB free disk"'
+          python -c 'import shutil; free = shutil.disk_usage(".").free; print(f"Free disk: {free / 2**30:.1f} GiB"); assert free >= 50 * 2**30, "BrowseComp-Plus needs at least 50 GiB free disk"'
       - &credentials
         name: Configure isolated credentials and verify tools
         id: setup
@@ -186,21 +195,32 @@ jobs:
       - name: Compute exact preparation identity
         id: snapshot-key
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot key >> "$GITHUB_OUTPUT"
-      - name: Restore the complete prepared snapshot
-        id: prepared-cache
-        uses: actions/cache/restore@v5
+      - name: Find a verified preparation from an earlier manual run
+        id: prepared-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
+          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
+        run: >-
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_prepared_artifact discover
+          --key "$RUNNER_OS-$RUNNER_ARCH-$SNAPSHOT_KEY" --source-run-id "$PREPARED_RUN_ID"
+      - name: Download the existing preparation
+        if: steps.prepared-artifact.outputs.found == 'true'
+        uses: actions/download-artifact@v8
         with:
+          name: ${{ steps.prepared-artifact.outputs.artifact-name }}
+          run-id: ${{ steps.prepared-artifact.outputs.run-id }}
+          github-token: ${{ github.token }}
           path: ${{ runner.temp }}/browse-comp-plus-snapshot
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.snapshot-key.outputs.key }}
       - name: Restore prepared files with exact timestamps
-        if: steps.prepared-cache.outputs.cache-hit == 'true'
+        if: steps.prepared-artifact.outputs.found == 'true'
         env:
           SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
           --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
       - name: Restore pinned source snapshots on a cold preparation
-        if: steps.prepared-cache.outputs.cache-hit != 'true'
+        if: steps.prepared-artifact.outputs.found != 'true'
         id: source-cache
         uses: actions/cache/restore@v5
         with:
@@ -209,15 +229,15 @@ jobs:
             benchmarks/browse-comp-plus/artifacts/state/dataset.json
           key: browse-comp-plus-source-v1-${{ runner.os }}-${{ hashFiles('benchmarks/browse-comp-plus/benchmark.toml', 'benchmarks/browse-comp-plus/zg_bench/dataset.py', 'benchmarks/browse-comp-plus/uv.lock') }}
       - name: Validate a restored snapshot without rebuilding it
-        if: steps.prepared-cache.outputs.cache-hit == 'true'
+        if: steps.prepared-artifact.outputs.found == 'true'
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot verify
       - name: Download and verify pinned source snapshots before indexing
-        if: steps.prepared-cache.outputs.cache-hit != 'true'
+        if: steps.prepared-artifact.outputs.found != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci fetch
       - name: Save verified source snapshots
-        if: steps.prepared-cache.outputs.cache-hit != 'true' && steps.source-cache.outputs.cache-hit != 'true'
+        if: steps.prepared-artifact.outputs.found != 'true' && steps.source-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: |
@@ -225,11 +245,11 @@ jobs:
             benchmarks/browse-comp-plus/artifacts/state/dataset.json
           key: ${{ steps.source-cache.outputs.cache-primary-key }}
       - name: Build the corpus and index once on a miss
-        if: steps.prepared-cache.outputs.cache-hit != 'true'
+        if: steps.prepared-artifact.outputs.found != 'true'
         id: prepare
         run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench prepare --yes
       - name: Pack a credential-scanned snapshot with fast parallel compression
-        if: steps.prepared-cache.outputs.cache-hit != 'true'
+        if: steps.prepared-artifact.outputs.found != 'true'
         env:
           SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
@@ -237,21 +257,32 @@ jobs:
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot pack
           --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
-      - name: Save the complete preparation for repeat runs
-        if: steps.prepared-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: ${{ runner.temp }}/browse-comp-plus-snapshot
-          key: ${{ steps.prepared-cache.outputs.cache-primary-key }}
-      - name: Publish this run's prepared snapshot for all case jobs
+      # A complete snapshot exceeds the repository's 10 GB Actions cache quota.
+      # Keep it as an artifact and reuse it directly across runs and case jobs.
+      - name: Publish a reusable preparation artifact
+        if: steps.prepared-artifact.outputs.found != 'true' || steps.prepared-artifact.outputs.legacy == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: browse-comp-plus-prepared-${{ github.run_id }}
+          name: browse-comp-plus-prepared-${{ runner.os }}-${{ runner.arch }}-${{ steps.snapshot-key.outputs.key }}
           path: ${{ runner.temp }}/browse-comp-plus-snapshot/
           compression-level: 0
           overwrite: true
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+      - name: Share the preparation artifact reference with case jobs
+        id: snapshot-reference
+        env:
+          FOUND: ${{ steps.prepared-artifact.outputs.found }}
+          LEGACY: ${{ steps.prepared-artifact.outputs.legacy }}
+          SOURCE_RUN: ${{ steps.prepared-artifact.outputs.run-id }}
+          SOURCE_NAME: ${{ steps.prepared-artifact.outputs.artifact-name }}
+          SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
+        run: |
+          if [[ "$FOUND" == true && "$LEGACY" == false ]]; then
+            printf 'run-id=%s\nname=%s\n' "$SOURCE_RUN" "$SOURCE_NAME" >> "$GITHUB_OUTPUT"
+          else
+            printf 'run-id=%s\nname=browse-comp-plus-prepared-%s-%s-%s\n' "$GITHUB_RUN_ID" "$RUNNER_OS" "$RUNNER_ARCH" "$SNAPSHOT_KEY" >> "$GITHUB_OUTPUT"
+          fi
       - name: Plan the suite and balanced A/B orders once
         id: plan
         env:
@@ -300,6 +331,7 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read
+      actions: read
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.parallel_cases) }}
@@ -324,7 +356,9 @@ jobs:
       - name: Download the shared prepared snapshot
         uses: actions/download-artifact@v8
         with:
-          name: browse-comp-plus-prepared-${{ github.run_id }}
+          name: ${{ needs.prepare.outputs.snapshot-artifact }}
+          run-id: ${{ needs.prepare.outputs.snapshot-run-id }}
+          github-token: ${{ github.token }}
           path: ${{ runner.temp }}/browse-comp-plus-snapshot
       - &plan-download
         name: Download the immutable suite plan

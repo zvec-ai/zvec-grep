@@ -243,6 +243,11 @@ The BrowseComp-Plus route does not require `pr_number`; the existing retrieval
 route still validates it. Both routes retain the manual-trigger and
 maintainer/admin checks.
 
+Leave `prepared_run_id` empty to find an exact matching preparation artifact
+from an earlier manual run on the same branch. To recover a specific preparation,
+set it to that run's numeric ID and use the same candidate commit. A missing,
+expired, or incompatible explicitly requested snapshot fails without rebuilding.
+
 | Actions setting | Purpose |
 | --- | --- |
 | Secret `QWEN_API_KEY` | API key authorized to invoke `qwen3.8-max`. The existing `GLM_API_KEY` secret is used as a fallback when `QWEN_API_KEY` is absent. |
@@ -270,23 +275,29 @@ the original metadata for every case is retained under `shards/`.
 | Rust package | Cached for the exact candidate commit. |
 | Source data | Cached immediately after download and verification, so a failed index build does not require downloading the corpus again. |
 | Query decoding | Read only questions, reference answers, and gold/evidence document IDs from Parquet; skip unused document bodies while preserving every query and scoring input. |
-| Corpus, index, and local model | A complete snapshot includes the Potion model cache, so case workers do not download it again. It is reused only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
+| Corpus, index, and local model | A seven-day artifact includes the Potion model cache. Earlier runs and case workers reuse it only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
 | Partial rerun | “Re-run failed jobs” keeps successful case artifacts; aggregation accepts only the current plan and latest attempt for each case. |
 
-**Cold-run cost:** both suites prepare all 100,195 documents. A new candidate or
-evicted cache requires a local Potion index build. Its cold-build time, index
-size, and end-to-end Actions speedup have not yet been measured. Preparation
-and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
+**Cold-run cost:** both suites prepare all 100,195 documents. A new preparation
+identity or an expired artifact requires a local Potion index build. The first
+[measured run](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
+indexed all documents with no failures in 112 minutes 32 seconds and produced
+a 15.9 GiB compressed preparation snapshot. End-to-end speedup has not yet been
+measured. Preparation and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
 the run ID and attempt, so separately requested runs do not block or cancel
-one another. Each hosted runner frees SDK space and requires 35 GiB free.
-The compressed snapshot preserves nanosecond timestamps to avoid reindexing,
-is cached best-effort, and is also uploaded for the case jobs (one-day
-retention). Allow for multi-GB artifact transfer/storage and repository cache
-quota. Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
+one another. Each hosted runner frees SDK space and requires 50 GiB free.
+The compressed snapshot preserves nanosecond timestamps to avoid reindexing.
+It uses artifact storage because it exceeds the repository's 10 GB Actions
+cache limit; only source data and candidate packages use Actions cache. A run
+that restores a matching artifact shares the original with its case jobs
+without uploading another copy. Allow for multi-GB artifact transfer/storage.
+Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
 The small plan artifact is retained for seven days. Retry failed jobs while
-the one-day prepared artifact still exists; after expiry, start a new run.
+the prepared artifact still exists; after expiry, start a new run. Explicitly
+restoring an older run-ID-named snapshot republishes it under its exact
+preparation identity without rebuilding or recompressing the index.
 
 The candidate is built in a separate job without model credentials. Only select
 trusted candidate code, which subsequently executes on the benchmark runners.
