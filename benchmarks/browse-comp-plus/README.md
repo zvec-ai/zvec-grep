@@ -315,7 +315,7 @@ a 15.9 GiB compressed **full** preparation snapshot. The
 [runtime conversion](https://github.com/zvec-ai/zvec-grep/actions/runs/40501615950)
 reused that index: the runtime snapshot is 11.47 GiB, 27.68% smaller than
 the 15.86 GiB full archive. One-time conversion/preparation took 12m40s;
-the earlier matrix two-case E2E passed on [8f8f7df8](https://github.com/zvec-ai/zvec-grep/actions/runs/40519967945). Shared-job E2E validation is pending. Later exact v3 matches skip conversion.
+the earlier matrix two-case E2E passed on [8f8f7df8](https://github.com/zvec-ai/zvec-grep/actions/runs/40519967945). Later exact v3 matches skip conversion.
 The combined preparation/execution job allows six hours. As in SWE-QA Bench, concurrency is scoped to
 the run ID and attempt, so separately requested runs do not block or cancel
 one another. Each hosted runner frees SDK space and requires 50 GiB free.
@@ -327,6 +327,37 @@ this 80% transfer reduction is not a measured 80% workflow speedup. Download,
 unpack, and baseline-copy costs still occur once per run; hosted runners do not
 persist the restored files across workflow runs.
 Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
+
+**Measured shared-job CI (2026-10-27):** the [two-case iteration](https://github.com/zvec-ai/zvec-grep/actions/runs/40539457579)
+passed before the [existing five-case CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366),
+both on harness `0bb4e773` and candidate `4e557cd9`. The five-case run completed
+10 answers and 10 judgements. Downloaded case and aggregate checksum manifests,
+selected/attempt result bytes, judge input hashes, and completeness checks passed;
+all trials used only `attempt-001`, with no failed/incomplete agent attempts or
+unknown agent/judge usage. The full 100,195-document index was reused.
+
+| Five-case result, one trial per case | Baseline | zvec-grep |
+| --- | ---: | ---: |
+| Score | 5/5 (100%) | 5/5 (100%) |
+| Mean total agent tokens, including cached input | 1,323,608 | 1,266,916 |
+| Mean agent wall time, excluding preparation and judging | 733.62 s | 495.54 s |
+
+Workflow elapsed time was **49m25s**: candidate validation/build 49s, one snapshot
+download 3m11s, one restore 2m51s, restored-index validation 13s, isolated execution
+including judging 39m15s, and aggregation 16s. Shared daemon startup/warmup took
+4.77s within execution and was counted once. Ten judge calls used 29,761 total
+tokens and 91.16s summed wall time, separate from agent metrics; preflight and
+runner setup are also outside the agent averages. Download time varied from
+24m56s in the two-case run to 3m11s here, so these runs do not isolate a workflow
+speedup caused by sharing.
+
+This is CI validation on five cases, not an overall performance estimate or a
+comparison with the historical Codex study above. Mean agent tokens were 4.28%
+lower and mean time 32.45% lower, driven by case 700; the other four cases took
+longer with zvec-grep. Only three treatment trials invoked zg: one call succeeded,
+while two calls failed because the model misspelled the supplied workspace path
+as `browsecomp-plus` instead of `browse-comp-plus`. Those completed answers and
+tool errors remain in the evidence; no cases were rerun to improve results.
 
 The small plan artifact is retained for seven days. Retry failed jobs while
 the prepared artifact still exists; after expiry, start a new run. Legacy v2

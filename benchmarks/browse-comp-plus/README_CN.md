@@ -222,7 +222,7 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 索引全部文档耗时 112 分 32 秒、无失败，压缩的**完整准备快照**为 15.9 GiB。
 [runtime 转换实测](https://github.com/zvec-ai/zvec-grep/actions/runs/40501615950)
 直接复用该索引：新快照为 11.47 GiB，相比旧包的 15.86 GiB 缩减 27.68%。
-一次性转换及准备共 12 分 40 秒；原 matrix 版本[两题 E2E 已通过](https://github.com/zvec-ai/zvec-grep/actions/runs/40519967945)，单 job 版本 E2E 验证待完成。后续精确命中 v3 时跳过转换。
+一次性转换及准备共 12 分 40 秒；原 matrix 版本[两题 E2E 已通过](https://github.com/zvec-ai/zvec-grep/actions/runs/40519967945)。后续精确命中 v3 时跳过转换。
 准备与执行合并后的 job 限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
 独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 50 GiB
 可用磁盘。runtime 快照使用 artifact，与仓库的 10 GB Actions cache 配额分开；仅源数据和
@@ -230,6 +230,31 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 降至一份 11.47 GiB；减少 80% 传输量不代表整体耗时减少 80%。每轮仍需一次下载、
 解压和 baseline 复制；普通托管 runner 不会跨 workflow 保留已恢复文件。
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
+
+**单 job CI 实测（2026-10-27）：** 先完成[两题 iteration](https://github.com/zvec-ai/zvec-grep/actions/runs/40539457579)，
+再通过[现有五题 CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366)，
+两轮均使用 harness `0bb4e773`、candidate `4e557cd9`。五题共完成 10 份答案和 10 份评审；
+下载后的每题与汇总 checksum、selected/attempt 结果字节、评审输入哈希和完整性检查均通过。
+每个 trial 仅有 `attempt-001`，无失败或未完成的 Agent 尝试，无未知 Agent/评审用量，
+直接复用完整的 100,195 篇索引。
+
+| 五题结果，每题一次 | Baseline | zvec-grep |
+| --- | ---: | ---: |
+| Score | 5/5（100%） | 5/5（100%） |
+| 平均 Agent 总 tokens，含缓存输入 | 1,323,608 | 1,266,916 |
+| 平均 Agent 耗时，不含准备与评审 | 733.62 秒 | 495.54 秒 |
+
+Workflow 总耗时 **49 分 25 秒**：候选校验与构建 49 秒，快照下载一次 3 分 11 秒，
+恢复一次 2 分 51 秒，恢复后索引校验 13 秒，题目执行及评审 39 分 15 秒，汇总 16 秒。
+共享 daemon 启动与预热共 4.77 秒，包含在执行阶段且仅计算一次。10 次评审共用
+29,761 total tokens、累计 91.16 秒，与 Agent 指标分开；预检和 runner 准备也不计入
+Agent 均值。两题运行下载耗时 24 分 56 秒，本轮为 3 分 11 秒，传输波动明显，
+不能把两轮总耗时差直接归因于共享索引。
+
+这五题用于验证 CI，不代表整体性能，也不与上文历史 Codex 研究直接比较。平均 Agent
+tokens 减少 4.28%、耗时减少 32.45%，主要由 case 700 拉动，其余四题 zg 耗时均增加。
+只有三题实际调用 zg：一次成功，两次因模型把已提供的目录 `browse-comp-plus`
+误写为 `browsecomp-plus` 而失败。这些完成答案与工具错误均保留在证据中，未为改善结果重跑。
 
 小型计划 artifact 保留 7 天；失败 job 应在准备快照仍有效时重跑，过期后启动新运行。
 旧 v2 快照只通过 `42102cd9` 冻结的准备代码哈希计算精确 legacy key，并要求候选版本、数据、
