@@ -18,6 +18,16 @@ from .profiles import opencode_environment, prepare_judge_home
 SECRET_ENV = ("OPENAI_API_KEY", "ZVEC_GREP_API_KEY", "HF_TOKEN")
 
 
+def prepare_sources() -> None:
+    """Persist validated public data before starting the expensive index build."""
+    from .dataset import fetch, prepared_dataset
+
+    config = load_config()
+    if prepared_dataset(config, DEFAULT_ARTIFACTS_DIR) is None:
+        fetch(config, DEFAULT_ARTIFACTS_DIR, token=os.environ.get("HF_TOKEN"))
+    print("Pinned source snapshots are ready for caching.")
+
+
 def configure_auth(home: Path) -> None:
     config = load_config()
     if not config.zvec_grep.embedding.startswith("local/"):
@@ -190,6 +200,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("auth")
     commands.add_parser("preflight")
+    commands.add_parser("fetch")
     export = commands.add_parser("export")
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--candidate-manifest", type=Path, required=True)
@@ -201,6 +212,8 @@ def main() -> int:
             configure_auth(home)
         elif args.command == "preflight":
             verify_model()
+        elif args.command == "fetch":
+            prepare_sources()
         else:
             export_evidence(
                 DEFAULT_ARTIFACTS_DIR,

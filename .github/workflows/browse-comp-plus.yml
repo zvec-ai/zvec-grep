@@ -41,9 +41,9 @@ on:
 
 permissions: {}
 
-# Serialize costly preparation across workflow runs, including re-runs.
+# Keep separately requested runs and re-runs independent, as in SWE-QA Bench.
 concurrency:
-  group: browse-comp-plus
+  group: browse-comp-plus-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 
 jobs:
@@ -211,12 +211,11 @@ jobs:
       - name: Validate a restored snapshot without rebuilding it
         if: steps.prepared-cache.outputs.cache-hit == 'true'
         run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot verify
-      - name: Build the corpus and index once on a miss
+      - name: Download and verify pinned source snapshots before indexing
         if: steps.prepared-cache.outputs.cache-hit != 'true'
-        id: prepare
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench prepare --yes
+        run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci fetch
       - name: Save verified source snapshots
         if: steps.prepared-cache.outputs.cache-hit != 'true' && steps.source-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
@@ -225,6 +224,10 @@ jobs:
             benchmarks/browse-comp-plus/artifacts/source
             benchmarks/browse-comp-plus/artifacts/state/dataset.json
           key: ${{ steps.source-cache.outputs.cache-primary-key }}
+      - name: Build the corpus and index once on a miss
+        if: steps.prepared-cache.outputs.cache-hit != 'true'
+        id: prepare
+        run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench prepare --yes
       - name: Pack a credential-scanned snapshot with fast parallel compression
         if: steps.prepared-cache.outputs.cache-hit != 'true'
         env:
@@ -267,7 +270,7 @@ jobs:
           retention-days: 7
       - name: Export preparation diagnostics on failure
         id: diagnostics
-        if: ${{ failure() && steps.setup.outcome == 'success' }}
+        if: ${{ (failure() || cancelled()) && steps.setup.outcome == 'success' }}
         env: &scan-env
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -276,7 +279,7 @@ jobs:
           --output "$RUNNER_TEMP/preparation-diagnostics"
           --candidate-manifest "$RUNNER_TEMP/candidate-package/manifest.json"
       - name: Upload preparation diagnostics
-        if: ${{ failure() && steps.diagnostics.outcome == 'success' }}
+        if: ${{ always() && steps.diagnostics.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: browse-comp-plus-preparation-error-${{ github.run_id }}-${{ github.run_attempt }}
@@ -291,10 +294,10 @@ jobs:
           fi
 
   case:
-    name: Case ${{ matrix.case }} / three paired trials and judge
+    name: Pair + judge / ${{ matrix.case }} / three trials
     needs: [package, prepare]
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     strategy:
@@ -347,29 +350,50 @@ jobs:
         if: ${{ !cancelled() && steps.run.outcome != 'skipped' && steps.restore.outcome == 'success' }}
         env: *model-env
         run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench evaluate
+      - name: Summarize trial retries
+        if: ${{ always() && steps.setup.outcome == 'success' }}
+        run: uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_reports retries
       - name: Stage reports and reject credential leakage
         id: evidence
-        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
+        if: ${{ always() && steps.setup.outcome == 'success' }}
         env: *scan-env
-        run: >-
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci export
-          --output "$RUNNER_TEMP/browse-comp-plus-evidence"
-          --candidate-manifest "$RUNNER_TEMP/candidate-package/manifest.json"
-          --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json"
+        run: |
+          plan_args=()
+          if [[ -f "$RUNNER_TEMP/browse-comp-plus-plan/plan.json" ]]; then
+            plan_args+=(--plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json")
+          fi
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci export \
+            --output "$RUNNER_TEMP/browse-comp-plus-evidence" \
+            --candidate-manifest "$RUNNER_TEMP/candidate-package/manifest.json" \
+            "${plan_args[@]}"
       - name: Upload independent case evidence
-        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: browse-comp-plus-case-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/browse-comp-plus-evidence/
           if-no-files-found: error
           retention-days: 30
+      - name: Stage the small case report
+        id: report
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        run: >-
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_reports compact
+          --evidence "$RUNNER_TEMP/browse-comp-plus-evidence" --output "$RUNNER_TEMP/browse-comp-plus-report"
+      - name: Upload independent case report
+        if: ${{ always() && steps.report.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browse-comp-plus-task-report-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browse-comp-plus-report/
+          if-no-files-found: error
+          retention-days: 90
       - *cleanup
 
   aggregate:
     name: Aggregate raw trials without more model calls
     needs: [package, prepare, case]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.case.result != 'skipped' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -397,7 +421,7 @@ jobs:
           --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json" --shards "$RUNNER_TEMP/browse-comp-plus-shards"
       - name: Stage the aggregate report
         id: evidence
-        if: ${{ !cancelled() && steps.aggregate.outcome != 'skipped' }}
+        if: ${{ always() && steps.aggregate.outcome != 'skipped' && steps.authorize.outcome == 'success' }}
         env: *scan-env
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci export
@@ -405,10 +429,24 @@ jobs:
           --candidate-manifest "$RUNNER_TEMP/browse-comp-plus-plan/candidate-manifest.json"
           --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json"
       - name: Upload the aggregate report
-        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: browse-comp-plus-aggregate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/browse-comp-plus-aggregate/
           if-no-files-found: error
           retention-days: 30
+      - name: Stage the small aggregate report
+        id: report
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        run: >-
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_reports compact
+          --evidence "$RUNNER_TEMP/browse-comp-plus-aggregate" --output "$RUNNER_TEMP/browse-comp-plus-report"
+      - name: Upload the small aggregate report
+        if: ${{ always() && steps.report.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browse-comp-plus-aggregate-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browse-comp-plus-report/
+          if-no-files-found: error
+          retention-days: 90

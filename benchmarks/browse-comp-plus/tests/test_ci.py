@@ -13,6 +13,7 @@ from zg_bench.ci import (
     _contains_secret,
     configure_auth,
     export_evidence,
+    prepare_sources,
     secret_values,
     verify_model,
 )
@@ -51,6 +52,19 @@ class CIIntegrationTests(unittest.TestCase):
             OPENAI_API_KEY="model-api-secret",
             BROWSE_COMP_MODEL_BASE_URL="https://model.example.test/v1",
         )
+
+    def test_source_preparation_can_be_cached_before_any_index_build(self):
+        for ready in (None, self.artifacts / "state/dataset.json"):
+            with (
+                self.subTest(ready=ready),
+                patch("zg_bench.dataset.prepared_dataset", return_value=ready),
+                patch("zg_bench.dataset.fetch") as fetch,
+                patch("zg_bench.index.build_index") as build,
+                patch("zg_bench.ci.DEFAULT_ARTIFACTS_DIR", self.artifacts),
+            ):
+                prepare_sources()
+            self.assertEqual(fetch.call_count, int(ready is None))
+            build.assert_not_called()
 
     @patch("zg_bench.ci.prepare_judge_home")
     @patch("zg_bench.ci.subprocess.run")

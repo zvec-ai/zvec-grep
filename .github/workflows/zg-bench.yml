@@ -1,5 +1,5 @@
 name: ZG Bench
-run-name: "ZG Bench · PR #${{ github.event.issue.number || inputs.pr_number }}${{ inputs.benchmark == 'browse-comp-plus' && format(' · BrowseComp-Plus / {0} / {1}', inputs.candidate_ref, inputs.suite) || '' }}"
+run-name: "${{ inputs.benchmark == 'browse-comp-plus' && format('BrowseComp-Plus / Rust {0} / OpenCode + Qwen3.8 Max / local Potion / {1}', inputs.candidate_ref, inputs.suite) || format('ZG Bench · PR #{0}', github.event.issue.number || inputs.pr_number) }}"
 
 on:
   issue_comment:
@@ -12,8 +12,8 @@ on:
         type: choice
         options: [retrieval, browse-comp-plus]
       pr_number:
-        description: Open PR number in this repository
-        required: true
+        description: Open PR number (required for retrieval; unused by BrowseComp-Plus)
+        required: false
         type: string
       run_e2e:
         description: Also run e2e (disabled by default)

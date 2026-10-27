@@ -235,13 +235,13 @@ Run the branch version without merging:
 ```sh
 gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
   --ref dev/browse-comp-plus-ci \
-  -f pr_number=298 -f benchmark=browse-comp-plus \
+  -f benchmark=browse-comp-plus \
   -f candidate_ref=main -f suite=ci -f parallel_cases=5
 ```
 
-`pr_number` satisfies the existing entry point's required input; the
-BrowseComp-Plus route does not use it. This route retains the manual-trigger
-and maintainer/admin checks.
+The BrowseComp-Plus route does not require `pr_number`; the existing retrieval
+route still validates it. Both routes retain the manual-trigger and
+maintainer/admin checks.
 
 | Actions setting | Purpose |
 | --- | --- |
@@ -268,6 +268,7 @@ the original metadata for every case is retained under `shards/`.
 | Stage | Reuse / parallelism |
 | --- | --- |
 | Rust package | Cached for the exact candidate commit. |
+| Source data | Cached immediately after download and verification, so a failed index build does not require downloading the corpus again. |
 | Corpus, index, and local model | A complete snapshot includes the Potion model cache, so case workers do not download it again. It is reused only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
 | Partial rerun | “Re-run failed jobs” keeps successful case artifacts; aggregation accepts only the current plan and latest attempt for each case. |
@@ -275,8 +276,9 @@ the original metadata for every case is retained under `shards/`.
 **Cold-run cost:** both suites prepare all 100,195 documents. A new candidate or
 evicted cache requires a local Potion index build. Its cold-build time, index
 size, and end-to-end Actions speedup have not yet been measured. Preparation
-allows six hours, each case three hours. Runs
-are queued, and each hosted runner frees SDK space and requires 35 GiB free.
+and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
+the run ID and attempt, so separately requested runs do not block or cancel
+one another. Each hosted runner frees SDK space and requires 35 GiB free.
 The compressed snapshot preserves nanosecond timestamps to avoid reindexing,
 is cached best-effort, and is also uploaded for the case jobs (one-day
 retention). Allow for multi-GB artifact transfer/storage and repository cache
@@ -289,10 +291,26 @@ The candidate is built in a separate job without model credentials. Only select
 trusted candidate code, which subsequently executes on the benchmark runners.
 The harness and candidate commit SHAs are recorded separately.
 
-Results appear in the Actions job summary and a 30-day evidence artifact,
-including JSON/Markdown/CSV reports, trajectories, judge results, preparation
-logs, and the candidate manifest. Partial runs remain failed but completed
-pairs are still judged and exported. Cancellation stops further judging.
+Each profile retains three trials per case, with at most two additional
+attempts for infrastructure failures, including transient HTTP 429/5xx errors
+and provider errors marked retryable. Exhausted quota is terminal. Successful
+trials and low scores are not retried. The job summary separates successful
+trials, eligible paired trials, extra retries, failed attempts, final failures,
+and unfinished trials. Paired metrics use the final completed attempts only;
+failed-attempt overhead remains available in raw evidence. The pinned samples
+and paired evaluation protocol are unchanged.
+
+Results appear in the Actions job summary. Retention follows SWE-QA Bench:
+
+| Artifact | Contents | Retention |
+| --- | --- | --- |
+| Case / aggregate evidence | JSON/Markdown/CSV reports, trajectories, judge results, and candidate metadata | 30 days |
+| `task-report` / `aggregate-report` | Compact reports and metadata extracted from secret-scanned evidence | 90 days |
+| Preparation diagnostics | Preparation logs and candidate metadata | 7 days |
+
+Evidence export and upload are attempted even after failure, cancellation, or
+timeout, while the runner remains available. Partial runs remain failed but
+completed pairs are still judged; cancellation stops further judging.
 Missing credentials, runtime failures, incomplete trials, or incomplete judging
 fail the workflow; accuracy and efficiency are reported without a regression
 threshold. Evidence excludes profiles, runtime credentials, and corpus files;

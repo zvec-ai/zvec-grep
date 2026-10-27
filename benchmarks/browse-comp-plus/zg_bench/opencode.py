@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -27,6 +29,14 @@ INFRASTRUCTURE_PATTERN = (
     "timeout",
     "rate limit",
     "service unavailable",
+)
+HTTP_RETRY_PATTERN = re.compile(
+    r"\b(?:http(?:/\d(?:\.\d)?)?|status(?:[ _-]?code)?)\s*"
+    r"(?:[=:]\s*|error\s+)?(?:429|5\d{2})\b"
+    r"|\b429\s+too many requests\b"
+    r"|\b5\d{2}\s+(?:internal server error|bad gateway|service unavailable|"
+    r"gateway timeout|server error|overloaded)\b",
+    re.IGNORECASE,
 )
 
 HEARTBEAT_SECONDS = 30
@@ -107,6 +117,58 @@ def _corpus_access_denied(trace: TraceSummary, stderr: str) -> bool:
     return denial and inaccessible
 
 
+def _usage_limit_exhausted(errors: str) -> bool:
+    # Providers may report an exhausted account balance as a retryable HTTP 429.
+    # Such failures require account action, unlike temporary request throttling.
+    compact = re.sub(r"[^a-z0-9]", "", errors.lower())
+    return any(
+        marker in compact
+        for marker in (
+            "apiusagelimiterror",
+            "insufficientquota",
+            "quotaexhausted",
+            "quotaexceeded",
+            "exceededyourcurrentquota",
+            "insufficientbalance",
+            "billinghardlimit",
+            "usagelimitreached",
+            "usagelimitexceeded",
+            "freeallocatedquotaexceeded",
+        )
+    )
+
+
+def _retryable_error(error: str) -> bool:
+    # TraceSummary preserves OpenCode's error object as JSON, including the
+    # provider's APIError.data.isRetryable/statusCode and nested causes.
+    try:
+        pending = [json.loads(error)]
+    except ValueError:
+        pending = []
+    retry_flags: list[bool] = []
+    statuses: list[int] = []
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if type(value.get("isRetryable")) is bool:
+                retry_flags.append(value["isRetryable"])
+            for key in ("statusCode", "status_code", "status"):
+                status = value.get(key)
+                if type(status) is int:
+                    statuses.append(status)
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    if retry_flags:
+        return all(retry_flags)
+    if any(status == 429 or 500 <= status <= 599 for status in statuses):
+        return True
+    lowered = error.lower()
+    return bool(HTTP_RETRY_PATTERN.search(error)) or any(
+        marker in lowered for marker in INFRASTRUCTURE_PATTERN
+    )
+
+
 def _classify_attempt(
     *,
     exit_code: int,
@@ -122,17 +184,19 @@ def _classify_attempt(
         and bool(trace.final_response.strip())
     )
     corpus_access_denied = _corpus_access_denied(trace, stderr)
-    combined_errors = "\n".join((*trace.errors, stderr)).lower()
+    if completed and not corpus_access_denied:
+        return "completed", False
+    errors = (*trace.errors, stderr)
+    if _usage_limit_exhausted("\n".join(errors)):
+        return "failed", False
     infrastructure_failure = corpus_access_denied or (
         not completed
         and (
             idle_killed
             or exit_code < 0
-            or any(marker in combined_errors for marker in INFRASTRUCTURE_PATTERN)
+            or any(_retryable_error(error) for error in errors)
         )
     )
-    if completed and not corpus_access_denied:
-        return "completed", False
     if infrastructure_failure:
         return "infrastructure_failed", True
     return "failed", False

@@ -168,12 +168,12 @@ zg-bench clean
 ```sh
 gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
   --ref dev/browse-comp-plus-ci \
-  -f pr_number=298 -f benchmark=browse-comp-plus \
+  -f benchmark=browse-comp-plus \
   -f candidate_ref=main -f suite=ci -f parallel_cases=5
 ```
 
-`pr_number` 仅用于兼容既有入口的必填参数，BrowseComp-Plus 路由不使用它。
-该路由保留手动触发与 maintain/admin 权限检查。
+BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该参数。
+两个路由均保留手动触发与 maintain/admin 权限检查。
 
 | Actions 设置 | 用途 |
 | --- | --- |
@@ -193,14 +193,16 @@ gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
 | 阶段 | 复用或并行方式 |
 | --- | --- |
 | Rust 包 | 按候选 commit 精确缓存。 |
+| 源数据 | 下载校验完成后立即缓存，索引构建失败后无需重新下载语料。 |
 | 语料、索引和本地模型 | 完整快照包含 Potion 模型缓存，避免各题 worker 重复下载。仅在候选版本、数据、embedding 配置、准备脚本、系统架构和目录一致时复用，不回退复用其他候选版本的索引。 |
 | 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
 | 失败重跑 | “Re-run failed jobs” 保留成功题目的产物，汇总仅接受当前计划下各题最新 attempt。 |
 
 **冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。新候选版本或缓存被淘汰后需在本地
 构建 Potion 索引；尚未实测其冷构建耗时、索引大小或 Actions 端到端提速。
-准备阶段限时 6 小时，各题限时 3 小时；不同 workflow 排队运行。runner 会释放 SDK 空间，
-并检查至少 35 GiB 可用磁盘。压缩快照保留纳秒时间戳以避免误触发重建，尽力写入缓存，
+准备阶段和各题均限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
+独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 35 GiB
+可用磁盘。压缩快照保留纳秒时间戳以避免误触发重建，尽力写入缓存，
 同时作为有效期 1 天的 artifact 供各题下载。需计入数 GB 的传输/存储与仓库缓存配额；
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
@@ -209,9 +211,21 @@ Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 候选程序在不含模型凭据的独立 job 中构建。请只选择可信候选代码，该程序随后会在评测
 runner 上执行。产物分别记录评测脚本与候选程序的 commit SHA。
 
-结果展示在 Actions job summary，并保存为保留 30 天的 artifact，包含 JSON/Markdown/CSV
-报告、运行轨迹、评审结果、准备阶段日志和候选包 manifest。部分试验失败时仍评审并导出
-已完成的配对，原失败状态保留；取消运行后不再启动评审。缺少凭据、运行失败、试验或评审
+每个 profile 保持每题 3 次试验；基础设施失败最多额外重试 2 次，包括临时 HTTP 429/5xx
+及服务端标记可重试的错误，额度耗尽不重试。成功试验和低分不重试。job summary 分别列出
+成功试验、有效配对试验、额外重试、失败 attempt、最终失败和未完成试验。配对指标仅使用
+最终完成的 attempt；失败 attempt 的开销保留在原始证据中。锁定样本与配对评测协议不变。
+
+结果展示在 Actions job summary，产物保留策略与 SWE-QA Bench 对齐：
+
+| 产物 | 内容 | 保留时间 |
+| --- | --- | --- |
+| 各题 / 汇总证据 | JSON/Markdown/CSV 报告、运行轨迹、评审结果及候选元数据 | 30 天 |
+| `task-report` / `aggregate-report` | 从通过 secret 扫描的证据中提取的精简报告和元数据 | 90 天 |
+| 准备阶段诊断 | 准备日志及候选元数据 | 7 天 |
+
+失败、取消或超时后，只要 runner 仍可执行，就会尝试导出并上传证据。部分试验失败时仍
+评审已完成的配对，原失败状态保留；取消运行后不再启动评审。缺少凭据、运行失败、试验或评审
 不完整都会使 workflow 失败；准确率与效率仅报告，不设置回归阈值。导出排除 profile、运行时
 凭据与语料文件，检测到配置的 secret 值时阻止上传。
 
