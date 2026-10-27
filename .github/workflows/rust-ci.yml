@@ -131,7 +131,7 @@ jobs:
       - name: Check packages independently
         shell: bash
         run: |
-          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg; do
+          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
             cargo check --locked --package "${package}" --all-targets
           done
       - name: Run Clippy

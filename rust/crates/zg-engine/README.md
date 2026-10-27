@@ -64,6 +64,10 @@ An index is created on the first indexing run and updated as files are added, ch
 
 Indexed search combines full-text and vector retrieval to return relevant source snippets, refreshing the index as needed by default. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads source files without requiring an index.
 
+### Vector storage
+
+Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` remains 2. Existing FP32 indexes require an explicit rebuild with `zg --index --rebuild` before use.
+
 ### Embedding models
 
 Each workspace uses an embedding model for semantic search. Local models run on your machine and may need an initial download; remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
