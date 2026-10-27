@@ -322,8 +322,9 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
     markdown = report / "summary.md"
     status = "COMPLETE" if not errors else "INCOMPLETE"
     notes = (
-        f"**CI result: {status}.** Cases ran on separate runners; each case kept "
-        "three sequential paired trials. Runtime preparation totals sum worker "
+        f"**CI result: {status}.** Cases ran on separate runners; paired trials "
+        f"per case: {config.run.trials_per_case}, executed in the planned A/B order. "
+        "Runtime preparation totals sum worker "
         "time, not elapsed workflow time. Index build time describes the original "
         "snapshot build. The environment table is one worker's environment; "
         "all worker metadata is in `shards/`.\n\n"

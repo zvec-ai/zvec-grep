@@ -153,10 +153,18 @@ zg-bench run --suite smoke
 ```
 
 Model and request settings are configured in `benchmark.toml`: thinking enabled,
-`high` reasoning effort, requested temperature `0`, seed `42`, a 32,000-token
-output limit, and a 1,000,000-token context limit. Provider-side interpretation
-of those settings is model-specific. Automatic compaction and delegated
+`high` reasoning effort, requested temperature `0`, seed `42`, a 20,000-token
+output limit, and a 1,000,000-token context limit. `max_output_tokens` is sent as
+`max_tokens` for each model response; on Qwen it limits answer output, not the
+total reasoning or token budget of a multi-turn trial. Provider-side interpretation
+of these settings is model-specific. Automatic compaction and delegated
 subagents are disabled so all trial usage belongs to the recorded session.
+
+The current configuration uses `trials_per_case = 1` and
+`infrastructure_retries = 0`: one baseline/zvec-grep pair per query, with no
+automatic infrastructure-failure retries by the harness. Thus `smoke` runs one
+pair / two agent runs and `ci` runs five pairs / ten agent runs. These iteration
+settings differ from the historical three-trial study above.
 
 Run the fixed random 5-query CI subset:
 
@@ -226,8 +234,8 @@ run on pushes, PRs, comments, or a schedule.
    BrowseComp-Plus → Run workflow** directly. Select a trusted workflow branch
    and set `candidate_ref` to the trusted branch, tag, or commit to benchmark
    in this repository.
-3. Choose `ci` (default: 5 cases, 15 paired trials / 30 agent runs) or `smoke`
-   (1 case, 3 paired trials / 6 agent runs, plus the usage audit). Set
+3. Choose `ci` (default: 5 cases, 5 paired trials / 10 agent runs) or `smoke`
+   (1 case, 1 paired trial / 2 agent runs, plus the usage audit). Set
    `parallel_cases` to 1, 2, or 5 (default) to fit provider rate limits.
 
 Run the branch version without merging:
@@ -256,7 +264,7 @@ expired, or incompatible explicitly requested snapshot fails without rebuilding.
 
 The workflow pins OpenCode `1.18.4` and uses `custom-openai/qwen3.8-max` for
 both agent execution and judging, with local `local/potion-multilingual-128m`
-embeddings, the pinned dataset, and three trials per case. A small model
+embeddings, the pinned dataset, and one paired trial per case. A small model
 preflight checks access before indexing. The selected
 key is supplied as `OPENAI_API_KEY` to each model-calling step; no Codex login or
 account `auth.json` is used. [OpenCode configuration](https://opencode.ai/docs/config/)
@@ -264,8 +272,8 @@ references the key through an environment variable. Temporary homes and profiles
 are excluded from caches and evidence artifacts.
 
 **Execution time:** preparation runs once, then cases run on independent runners.
-Each case keeps its three sequential paired trials on the same runner; the
-suite-wide randomized A/B order is planned once. Judges run alongside the other
+Each case runs baseline and zvec-grep sequentially on the same runner in the
+suite-wide randomized A/B order planned once. Judges run alongside the other
 cases, and the final report recomputes metrics from raw results without more
 model calls. This changes the cross-case scheduling from the local serial run;
 the original metadata for every case is retained under `shards/`.
@@ -304,14 +312,15 @@ The candidate is built in a separate job without model credentials. Only select
 trusted candidate code, which subsequently executes on the benchmark runners.
 The harness and candidate commit SHAs are recorded separately.
 
-Each profile retains three trials per case, with at most two additional
-attempts for infrastructure failures, including transient HTTP 429/5xx errors
-and provider errors marked retryable. Exhausted quota is terminal. Successful
-trials and low scores are not retried. The job summary separates successful
+Each profile runs once per case. The harness does not automatically retry
+infrastructure failures (`infrastructure_retries = 0`), including transient
+HTTP 429/5xx errors and provider errors marked retryable. A manual failed-job
+rerun repeats that case's pair; it does not resume individual successful trials.
+Successful trials and low scores do not trigger retries. The job summary separates successful
 trials, eligible paired trials, extra retries, failed attempts, final failures,
 and unfinished trials. Paired metrics use the final completed attempts only;
-failed-attempt overhead remains available in raw evidence. The pinned samples,
-model settings, and paired scoring are unchanged. Both profiles receive their exact
+failed-attempt overhead remains available in raw evidence. Both profiles use
+the same model settings, pinned samples, and paired scoring. Both receive their exact
 absolute working directory in the same task template, with instructions to copy
 path arguments verbatim; this reduces directory-name typos that obscure tool
 behavior. Tool failures remain visible in the report and raw evidence.

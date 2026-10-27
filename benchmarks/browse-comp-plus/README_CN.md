@@ -96,7 +96,9 @@ zg-bench prepare
 zg-bench run --suite smoke
 ```
 
-模型与请求参数在 `benchmark.toml` 中配置：开启思考，reasoning effort 为 `high`，请求温度 `0`、seed `42`，输出上限 32,000 Token，上下文上限 1,000,000 Token。服务端对参数的实际处理依模型而定。关闭自动压缩与子代理委派，确保 trial 用量属于所记录的会话。
+模型与请求参数在 `benchmark.toml` 中配置：开启思考，reasoning effort 为 `high`，请求温度 `0`、seed `42`，输出上限 20,000 Token，上下文上限 1,000,000 Token。`max_output_tokens` 作为每次模型响应的 `max_tokens` 发送；在 Qwen 上限制答案输出，不是整个多轮 trial 的思考或累计 Token 预算。服务端对参数的实际处理依模型而定。关闭自动压缩与子代理委派，确保 trial 用量属于所记录的会话。
+
+当前配置为 `trials_per_case = 1`、`infrastructure_retries = 0`：每题一组 baseline/zvec-grep 配对，harness 不自动重试基础设施失败。因此 `smoke` 共 1 组配对、2 次 Agent 运行，`ci` 共 5 组配对、10 次 Agent 运行。这组迭代参数与上文历史 study 的每题 3 次试验不同。
 
 运行固定随机选取的 5 个问题组成的 CI 子集：
 
@@ -159,8 +161,8 @@ zg-bench clean
 2. 合并前可从当前分支手动触发已注册的 **ZG Bench**，由其路由到 BrowseComp-Plus。
    BrowseComp-Plus 在默认分支注册后，可直接打开 **Actions → BrowseComp-Plus → Run workflow**。
    选择可信的 workflow 分支，将 `candidate_ref` 设为本仓库待评测的可信分支、tag 或 commit。
-3. 选择 `ci`（默认：5 题、15 次配对试验，共 30 次 Agent 运行）或 `smoke`
-   （1 题、3 次配对试验，共 6 次 Agent 运行，另含工具使用审计）。
+3. 选择 `ci`（默认：5 题、5 次配对试验，共 10 次 Agent 运行）或 `smoke`
+   （1 题、1 次配对试验，共 2 次 Agent 运行，另含工具使用审计）。
    `parallel_cases` 可选 1、2、5（默认），按服务端限流调整。
 
 无需合并即可运行分支版本：
@@ -175,18 +177,21 @@ gh workflow run zg-bench.yml --repo zvec-ai/zvec-grep \
 BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该参数。
 两个路由均保留手动触发与 maintain/admin 权限检查。
 
+`prepared_run_id` 留空时，自动查找同分支此前手动运行中完全匹配的准备产物。
+也可填入指定运行的数字 ID，并使用相同候选 commit；显式指定的快照缺失、过期或不兼容时直接失败，不重新构建。
+
 | Actions 设置 | 用途 |
 | --- | --- |
 | Secret `QWEN_API_KEY` | 可调用 `qwen3.8-max` 的 API key；未配置时沿用已有 `GLM_API_KEY` secret。 |
 | Variable `BROWSE_COMP_MODEL_BASE_URL` | 必填，模型的 OpenAI 兼容 base URL，百炼地址以 `/compatible-mode/v1` 结尾；未配置时使用 `SWE_QA_MODEL_BASE_URL`。 |
 | Secret `HF_TOKEN`（可选） | Hugging Face 下载认证。 |
 
-工作流固定 OpenCode `1.18.4`，执行与评审均使用 `custom-openai/qwen3.8-max`，embedding 使用本地 `local/potion-multilingual-128m`，保留锁定数据集及每题 3 次试验。建索引前通过一次小型模型调用检查访问权限。
+工作流固定 OpenCode `1.18.4`，执行与评审均使用 `custom-openai/qwen3.8-max`，embedding 使用本地 `local/potion-multilingual-128m`，保留锁定数据集，每题执行 1 次配对试验。建索引前通过一次小型模型调用检查访问权限。
 所选 key 通过 `OPENAI_API_KEY` 提供给每个调用模型的步骤，无需 Codex 登录或账号 `auth.json`。
 [OpenCode 配置](https://opencode.ai/docs/config/)通过环境变量引用 key；临时 home 与 profile 不进入缓存或上传产物。
 
-**耗时优化：** 准备阶段只执行一次，随后各题在独立 runner 上并行。每题仍在同一 runner
-内顺序执行 3 次 A/B 配对试验；全套题目的随机 A/B 顺序统一生成。各题评审与其他题执行
+**耗时优化：** 准备阶段只执行一次，随后各题在独立 runner 上并行。每题的 baseline 与
+zvec-grep 仍在同一 runner 内顺序执行；全套题目的随机 A/B 顺序统一生成。各题评审与其他题执行
 重叠，最终报告从原始结果重算指标，不重复调用模型。题目间调度与本地串行执行不同，
 各题原始元数据保留在 `shards/`。
 
@@ -195,27 +200,34 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 | Rust 包 | 按候选 commit 精确缓存。 |
 | 源数据 | 下载校验完成后立即缓存，索引构建失败后无需重新下载语料。 |
 | 题目解密 | 从 Parquet 仅读取问题、参考答案及 gold/evidence 文档 ID，跳过未使用的正文；保留全部题目与评分输入。 |
-| 语料、索引和本地模型 | 完整快照包含 Potion 模型缓存，避免各题 worker 重复下载。仅在候选版本、数据、embedding 配置、准备脚本、系统架构和目录一致时复用，不回退复用其他候选版本的索引。 |
+| 语料、索引和本地模型 | 保留 7 天的完整快照包含 Potion 模型缓存。仅在候选版本、数据、embedding 配置、准备脚本、系统架构和目录一致时复用，不回退复用其他候选版本的索引。 |
+| 准备产物完全匹配 | 准备阶段仅读取此前运行的小型题目产物，校验候选版本与题目摘要后生成新评测计划；各题下载并校验完整快照，避免准备阶段重复传输、解包数 GB 数据。 |
 | 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
 | 失败重跑 | “Re-run failed jobs” 保留成功题目的产物，汇总仅接受当前计划下各题最新 attempt。 |
 
-**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。新候选版本或缓存被淘汰后需在本地
-构建 Potion 索引；尚未实测其冷构建耗时、索引大小或 Actions 端到端提速。
+**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。准备标识变化或产物过期后需在本地
+构建 Potion 索引。[首次实测运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
+索引全部文档耗时 112 分 32 秒、无失败，压缩准备快照为 15.9 GiB；尚未测得端到端提速。
 准备阶段和各题均限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
-独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 35 GiB
-可用磁盘。压缩快照保留纳秒时间戳以避免误触发重建，尽力写入缓存，
-同时作为有效期 1 天的 artifact 供各题下载。需计入数 GB 的传输/存储与仓库缓存配额；
+独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 50 GiB
+可用磁盘。压缩快照保留纳秒时间戳以避免误触发重建。快照超过仓库 10 GB Actions cache
+配额，因此使用 artifact；仅源数据和候选包进入 Actions cache。命中快照的运行直接将原产物
+交给各题，不重复上传。需计入数 GB 的 artifact 传输与存储；
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
-小型计划 artifact 保留 7 天；失败 job 应在准备快照的 1 天有效期内重跑，过期后启动新运行。
+小型计划 artifact 保留 7 天；失败 job 应在准备快照仍有效时重跑，过期后启动新运行。
+显式恢复旧版以 run ID 命名的快照时，会以精确准备标识重新发布，无需重新建索引或压缩。
 
 候选程序在不含模型凭据的独立 job 中构建。请只选择可信候选代码，该程序随后会在评测
 runner 上执行。产物分别记录评测脚本与候选程序的 commit SHA。
 
-每个 profile 保持每题 3 次试验；基础设施失败最多额外重试 2 次，包括临时 HTTP 429/5xx
-及服务端标记可重试的错误，额度耗尽不重试。成功试验和低分不重试。job summary 分别列出
+每个 profile 每题运行 1 次。harness 不自动重试基础设施失败（`infrastructure_retries = 0`），
+包括临时 HTTP 429/5xx 及服务端标记可重试的错误。手动重跑失败 job 会重新执行该题的整组
+配对，并不续跑单个 trial；成功试验和低分不会触发重试。job summary 分别列出
 成功试验、有效配对试验、额外重试、失败 attempt、最终失败和未完成试验。配对指标仅使用
-最终完成的 attempt；失败 attempt 的开销保留在原始证据中。锁定样本与配对评测协议不变。
+最终完成的 attempt；失败 attempt 的开销保留在原始证据中。两个 profile 使用相同的模型参数、
+锁定样本及配对评分方式。相同任务模板提供各自的完整绝对工作路径，要求原样复制路径参数，
+以减少目录拼写错误；工具失败仍保留在报告与原始证据中。
 
 结果展示在 Actions job summary，产物保留策略与 SWE-QA Bench 对齐：
 

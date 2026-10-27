@@ -19,10 +19,10 @@ server_port = 7999
 [run]
 model = "custom-openai/qwen3.8-max"
 reasoning_effort = "high"
-trials_per_case = 3
-infrastructure_retries = 2
+trials_per_case = 1
+infrastructure_retries = 0
 idle_timeout_seconds = 1800
 temperature = 0.0
 seed = 42
-max_output_tokens = 32000
+max_output_tokens = 20000
 context_limit = 1000000

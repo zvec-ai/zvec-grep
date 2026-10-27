@@ -260,9 +260,12 @@ class CIIntegrationTests(unittest.TestCase):
         self.assertIn("No paired report", summary.read_text())
         self.assertTrue((self.output / "logs/index.stderr.log").is_file())
 
-    def test_ci_and_smoke_preserve_the_existing_protocol(self):
+    def test_ci_and_smoke_use_single_trials_without_changing_case_selection(self):
         config = load_config()
-        self.assertEqual(config.run.trials_per_case, 3)
+        self.assertEqual(config.run.trials_per_case, 1)
+        self.assertEqual(config.run.infrastructure_retries, 0)
+        self.assertEqual(config.run.max_output_tokens, 20000)
+        self.assertEqual(config.run.reasoning_effort, "high")
         queries = [
             {"query_id": value} for value in ("628", "700", "966", "827", "241", "770")
         ]

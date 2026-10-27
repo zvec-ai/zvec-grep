@@ -31,7 +31,7 @@ on:
         default: main
         type: string
       suite:
-        description: Paired suite (both use the complete corpus and three trials per case)
+        description: Paired suite (complete corpus; repetitions configured in benchmark.toml)
         required: true
         default: ci
         type: choice
@@ -338,7 +338,7 @@ jobs:
           fi
 
   case:
-    name: Pair + judge / ${{ matrix.case }} / three trials
+    name: Pair + judge / ${{ matrix.case }}
     needs: [package, prepare]
     runs-on: ubuntu-24.04
     timeout-minutes: 360

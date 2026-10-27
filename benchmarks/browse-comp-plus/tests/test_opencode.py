@@ -446,7 +446,7 @@ class OpenCodeBinaryContractTests(unittest.TestCase):
                             self.assertEqual(request.get("seed"), 42)
                             self.assertTrue(request.get("enable_thinking"))
                             self.assertEqual(request.get("reasoning_effort"), "high")
-                            self.assertEqual(request.get("max_tokens"), 32000)
+                            self.assertEqual(request.get("max_tokens"), 20000)
                             names = {
                                 item["function"]["name"]
                                 for item in request.get("tools", [])

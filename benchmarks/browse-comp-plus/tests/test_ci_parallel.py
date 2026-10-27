@@ -269,8 +269,8 @@ class ParallelCIIntegrationTests(unittest.TestCase):
             self.assertEqual(selected.definition_sha256, selection.definition_sha256)
             self.assertEqual(selected.target_count, selection.target_count)
             self.assertEqual(selected.to_dict()["case_filter"], case)
-            self.assertEqual(set(plan["profile_orders"][case]), {"1", "2", "3"})
-        for trial in ("1", "2", "3"):
+            self.assertEqual(set(plan["profile_orders"][case]), {"1"})
+        for trial in ("1",):
             baseline_first = sum(
                 plan["profile_orders"][case][trial][0] == "baseline"
                 for case in plan["query_ids"]
@@ -290,7 +290,7 @@ class ParallelCIIntegrationTests(unittest.TestCase):
             {"query_ids": ["628"]},
             {
                 "profile_orders": {
-                    case: {"1": ["baseline", "zvec-grep"]}
+                    case: {"2": ["baseline", "zvec-grep"]}
                     for case in original["query_ids"]
                 }
             },
@@ -317,41 +317,41 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["profile_orders"], plan["profile_orders"])
         self.assertEqual(
             summary["trials"],
-            {"per_case": 3, "planned": 15, "persisted": 15, "completed": 15},
+            {"per_case": 1, "planned": 5, "persisted": 5, "completed": 5},
         )
         self.assertEqual(summary["cases"]["completed"], 5)
         self.assertEqual(
-            summary["profiles"]["baseline"]["tokens"]["input"]["total"], 3000
+            summary["profiles"]["baseline"]["tokens"]["input"]["total"], 500
         )
         self.assertEqual(
-            summary["profiles"]["baseline"]["tokens"]["input"]["mean"], 200
+            summary["profiles"]["baseline"]["tokens"]["input"]["mean"], 100
         )
         self.assertEqual(
-            summary["tool_interaction_batches"]["baseline"]["batches"]["total"], 15
+            summary["tool_interaction_batches"]["baseline"]["batches"]["total"], 5
         )
         self.assertEqual(summary["runtime_preparation"]["sessions"], 5)
-        self.assertEqual(evaluation["expected_answers"], 30)
-        self.assertEqual(evaluation["evaluated_answers"], 30)
-        self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 300)
+        self.assertEqual(evaluation["expected_answers"], 10)
+        self.assertEqual(evaluation["evaluated_answers"], 10)
+        self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 100)
         self.assertEqual(evaluation["zvec_grep_usage"]["expected_trials"], 0)
 
-    def test_smoke_keeps_all_three_audits_and_original_result_hashes(self):
+    def test_smoke_keeps_single_trial_audit_and_original_result_hash(self):
         self.plan("smoke")
         _, worker = self.shard("770")
         original_hashes = {
             trial: sha256_file(
                 worker / "cases/770/zvec-grep/trials" / f"trial-{trial:03d}/result.json"
             )
-            for trial in (1, 2, 3)
+            for trial in (1,)
         }
         report = self.aggregate()
         self.assertTrue(read_json(report / "ci-completeness.json")["complete"])
         evaluation = read_json(report.parent / "evaluation/summary.json")
         self.assertEqual(
             evaluation["zvec_grep_usage"],
-            {"expected_trials": 3, "evaluated_trials": 3, "correct_trials": 3},
+            {"expected_trials": 1, "evaluated_trials": 1, "correct_trials": 1},
         )
-        self.assertEqual(evaluation["cost"]["total"]["completed_calls"], 9)
+        self.assertEqual(evaluation["cost"]["total"]["completed_calls"], 3)
         self.assertEqual(
             read_json(report / "summary.json")["zvec_grep_usage_audit"]["status"],
             "scored",
@@ -477,10 +477,10 @@ class ParallelCIIntegrationTests(unittest.TestCase):
     def test_missing_raw_trial_is_not_hidden_by_completed_worker_status(self):
         self.plan("smoke")
         _, run = self.shard("770")
-        (run / "cases/770/baseline/trials/trial-002/result.json").unlink()
+        (run / "cases/770/baseline/trials/trial-001/result.json").unlink()
         report = self.aggregate()
         self.assertFalse(read_json(report / "ci-completeness.json")["complete"])
-        self.assertEqual(read_json(report / "summary.json")["trials"]["completed"], 2)
+        self.assertEqual(read_json(report / "summary.json")["trials"]["completed"], 0)
 
     def test_stale_judgement_is_not_counted(self):
         self.plan("smoke")
@@ -492,14 +492,14 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         report = self.aggregate()
         self.assertFalse(read_json(report / "ci-completeness.json")["complete"])
         self.assertEqual(
-            read_json(report.parent / "evaluation/summary.json")["evaluated_answers"], 5
+            read_json(report.parent / "evaluation/summary.json")["evaluated_answers"], 1
         )
 
     def test_stale_smoke_usage_audit_is_not_counted(self):
         self.plan("smoke")
         _, run = self.shard("770")
         self.change(
-            run / "evaluation/usage-audit/results/770/trial-002.json",
+            run / "evaluation/usage-audit/results/770/trial-001.json",
             case_result_sha256="stale",
         )
         report = self.aggregate()
@@ -508,7 +508,7 @@ class ParallelCIIntegrationTests(unittest.TestCase):
             read_json(report.parent / "evaluation/summary.json")["zvec_grep_usage"][
                 "evaluated_trials"
             ],
-            2,
+            0,
         )
 
 
