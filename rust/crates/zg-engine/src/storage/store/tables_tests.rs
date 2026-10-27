@@ -707,8 +707,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     metadata_store(temporary.path())
         .close()
         .expect("create tables");
-    let directory_table =
-        Directories::open(&temporary.path().join("storage"), false).expect("directory table");
+    let directory_table = Directories::open(temporary.path(), false).expect("directory table");
     let mut doc = Doc::new().expect("directory doc");
     doc.set_pk(&format!("d{}", u32::MAX));
     doc.add_u32("directory_id", u32::MAX).expect("directory ID");

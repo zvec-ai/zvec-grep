@@ -386,7 +386,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
                 path: "/workspace/.zvec-grep".into(),
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(
             render(&ready(), ColorMode::Never),
             format!(
-                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/storage\n  Version     2\n  Nested Git  included\n"
+                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/index\n  Version     2\n  Nested Git  included\n"
             )
         );
     }

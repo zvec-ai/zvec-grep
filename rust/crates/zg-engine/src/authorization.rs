@@ -6,11 +6,15 @@
 
 use crate::{
     EngineError,
+    domain::{Workspace, WorkspaceLayout},
     models::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
-    utils::{atomic_write, sync_directory},
+    utils::{atomic_write, ensure_directory, reject_symlink, resolve_directory, sync_directory},
     workspace::{
-        layout::{find_nearest_workspace, workspace_index_location},
-        manifest::{WorkspaceManifest, inspect_workspace_manifest, read_workspace_manifest},
+        find_nearest_workspace,
+        manifest::{
+            inspect_workspace_manifest, inspect_workspace_manifest_with_ignore_files,
+            read_workspace_manifest,
+        },
     },
 };
 use serde::{Deserialize, Serialize};
@@ -63,16 +67,22 @@ pub fn index_authorization(
 pub fn index_authorizations(
     options: &crate::api::index::IndexOptions,
 ) -> Result<Vec<IndexAuthorization>, EngineError> {
-    let requested_root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
-    let location = workspace_index_location(&requested_root)?;
-    let existing = inspect_workspace_manifest(&location.home)?.into_manifest(options.rebuild)?;
-    authorizations_for_manifest(options, &location.root, existing.as_ref())
+    let requested_root = resolve_directory(options.root.as_deref())?;
+    let layout = WorkspaceLayout::new(requested_root)?;
+    let ignore_files = options
+        .scan
+        .ignore_files
+        .as_deref()
+        .or_else(|| options.reset_paths.then_some([].as_slice()));
+    let existing = inspect_workspace_manifest_with_ignore_files(&layout, ignore_files)?
+        .into_workspace(options.rebuild)?;
+    authorizations_for_manifest(options, layout.source_root(), existing.as_ref())
 }
 
 fn authorizations_for_manifest(
     options: &crate::api::index::IndexOptions,
     root: &Path,
-    existing: Option<&WorkspaceManifest>,
+    existing: Option<&Workspace>,
 ) -> Result<Vec<IndexAuthorization>, EngineError> {
     Ok(authorization_for_manifest(options, root, existing)?
         .into_iter()
@@ -82,7 +92,7 @@ fn authorizations_for_manifest(
 fn authorization_for_manifest(
     options: &crate::api::index::IndexOptions,
     workspace_root: &Path,
-    existing: Option<&WorkspaceManifest>,
+    existing: Option<&Workspace>,
 ) -> Result<Option<IndexAuthorization>, EngineError> {
     let model = crate::pipelines::indexing::service::embedding_reference(
         existing,
@@ -104,7 +114,8 @@ fn authorization_for_manifest(
             })
             .or_else(|| {
                 existing
-                    .and_then(|m| m.embedding_runtimes.get(&model))
+                    .and_then(|m| m.index().descriptor())
+                    .and_then(|index| index.embedding_configs().get(&model))
                     .and_then(|runtime| runtime.endpoint.as_deref())
             }),
     )?;
@@ -171,37 +182,51 @@ pub fn query_authorizations(
     let workspace_content = options
         .refresh
         .map_or(options.auto_update, |refresh| refresh != RefreshPolicy::Off);
-    let root = crate::workspace::layout::resolve_workspace_root(options.root.as_deref())?;
-    let Some(location) = find_nearest_workspace(&root)? else {
+    let root = resolve_directory(options.root.as_deref())?;
+    let Some(layout) = find_nearest_workspace(&root)? else {
         return Ok(Vec::new());
     };
-    let Some(manifest) = read_workspace_manifest(&location.home)? else {
+    let Some(manifest) = read_workspace_manifest(&layout)? else {
         return Ok(Vec::new());
     };
-    if manifest.workspace.index.descriptor().is_none() {
+    if manifest.index().descriptor().is_none() {
         return Ok(Vec::new());
     }
     if options.allow_remote || (!query_text && !workspace_content) {
         return Ok(Vec::new());
     }
-    let targets = authorizations_for_manifest(
-        &crate::api::index::IndexOptions {
-            root: Some(location.root.clone()),
-            endpoint: options.endpoint.clone(),
-            authorized_remote: options.authorized_remote.clone(),
-            ..crate::api::index::IndexOptions::default()
-        },
-        &location.root,
-        Some(&manifest),
-    )?;
-    Ok(targets
-        .into_iter()
-        .map(|target| QueryAuthorization {
-            target,
-            query_text,
-            workspace_content,
-        })
-        .collect())
+    let mut authorizations: Vec<QueryAuthorization> = Vec::new();
+    for (enabled, endpoint, sends_query) in [
+        (query_text, options.endpoint.clone(), true),
+        (workspace_content, None, false),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let targets = authorizations_for_manifest(
+            &crate::api::index::IndexOptions {
+                root: Some(layout.source_root().to_path_buf()),
+                endpoint,
+                authorized_remote: options.authorized_remote.clone(),
+                ..crate::api::index::IndexOptions::default()
+            },
+            layout.source_root(),
+            Some(&manifest),
+        )?;
+        for target in targets {
+            if let Some(previous) = authorizations.iter_mut().find(|item| item.target == target) {
+                previous.query_text |= sends_query;
+                previous.workspace_content |= !sends_query;
+            } else {
+                authorizations.push(QueryAuthorization {
+                    target,
+                    query_text: sends_query,
+                    workspace_content: !sends_query,
+                });
+            }
+        }
+    }
+    Ok(authorizations)
 }
 
 /// Persists a destination explicitly approved by the terminal user.
@@ -234,6 +259,8 @@ struct Grant {
 #[derive(Serialize, Deserialize)]
 struct SignedGrant {
     grant: Grant,
+    #[serde(default)]
+    key_id: String,
     signature: Vec<u8>,
 }
 
@@ -261,13 +288,8 @@ fn json(error: serde_json::Error) -> EngineError {
 }
 
 fn root_path(root: &Path) -> Result<PathBuf, EngineError> {
-    let root = fs::canonicalize(root).map_err(io)?;
-    if !root.is_dir() {
-        return Err(EngineError::invalid_argument(
-            "Workspace root must be a directory",
-        ));
-    }
-    Ok(find_nearest_workspace(&root)?.map_or(root, |location| location.root))
+    let root = resolve_directory(Some(root))?;
+    Ok(find_nearest_workspace(&root)?.map_or(root, |layout| layout.source_root().to_path_buf()))
 }
 
 fn key_path() -> Result<PathBuf, EngineError> {
@@ -397,15 +419,16 @@ pub fn grant(
     endpoint: Option<&str>,
 ) -> Result<String, EngineError> {
     let root = root_path(root)?;
-    let location = workspace_index_location(&root)?;
-    let manifest = inspect_workspace_manifest(&location.home)?.into_manifest(true)?;
+    let layout = WorkspaceLayout::new(root.clone())?;
+    let manifest = inspect_workspace_manifest(&layout)?.into_workspace(true)?;
     let config = crate::config::read()?;
     let model = model
         .map(str::to_owned)
         .or_else(|| {
             manifest
                 .as_ref()
-                .and_then(|m| m.embedding())
+                .and_then(|m| m.index().descriptor())
+                .map(crate::domain::IndexDescriptor::default_embedding_model)
                 .map(|e| e.model().reference())
         })
         .or_else(|| {
@@ -424,7 +447,8 @@ pub fn grant(
         endpoint.or_else(|| {
             manifest
                 .as_ref()
-                .and_then(|m| m.embedding_runtimes.get(&model))
+                .and_then(|m| m.index().descriptor())
+                .and_then(|index| index.embedding_configs().get(&model))
                 .and_then(|runtime| runtime.endpoint.as_deref())
         }),
     )?;
@@ -441,27 +465,10 @@ pub fn grant(
 }
 
 fn persist_grant(grant: Grant) -> Result<(), EngineError> {
-    let location = workspace_index_location(&grant.root)?;
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    if let Err(error) = builder.create(&location.home)
-        && !(error.kind() == std::io::ErrorKind::AlreadyExists && location.home.is_dir())
-    {
-        return Err(EngineError::from_io(
-            format!(
-                "create workspace authorization directory '{}'",
-                location.home.display()
-            ),
-            &error,
-        ));
-    }
+    let layout = WorkspaceLayout::new(grant.root.clone())?;
+    ensure_directory(layout.storage_dir())?;
     let _lock = crate::workspace::lock::acquire_read_write_lock(
-        &location.home.join("authorization.lock"),
+        layout.authorization_lock_path(),
         crate::workspace::lock::LockMode::Write,
         "authorization.grant",
     )?;
@@ -474,7 +481,11 @@ fn persist_grant(grant: Grant) -> Result<(), EngineError> {
         .map(|grant| {
             let signature =
                 hmac_sha256::HMAC::mac(serde_json::to_vec(&grant).map_err(json)?, &key).to_vec();
-            Ok(SignedGrant { grant, signature })
+            Ok(SignedGrant {
+                grant,
+                key_id: crate::utils::sha256_hex(&key),
+                signature,
+            })
         })
         .collect::<Result<Vec<_>, EngineError>>()?;
     let bytes = if signed.len() == 1 {
@@ -483,12 +494,14 @@ fn persist_grant(grant: Grant) -> Result<(), EngineError> {
         serde_json::to_vec_pretty(&signed)
     }
     .map_err(json)?;
-    atomic_write(&location.home.join("authorization.json"), &bytes)?;
-    sync_directory(&location.root)
+    atomic_write(layout.authorization_path(), &bytes)?;
+    sync_directory(layout.storage_dir())
 }
 
 fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
-    let path = root.join(".zvec-grep/authorization.json");
+    let layout = WorkspaceLayout::new(root.to_path_buf())?;
+    let path = layout.authorization_path();
+    reject_symlink(path)?;
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -504,12 +517,27 @@ fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
         SignedGrants::One(record) => vec![record],
         SignedGrants::Many(records) => records,
     };
+    let Ok(path) = key_path() else {
+        return Ok(Vec::new());
+    };
+    let key = match fs::read(path) {
+        Ok(key) => key,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io(error)),
+    };
+    if key.len() < 32 {
+        return Err(EngineError::invalid_argument(
+            "Authorization signing key must contain at least 32 bytes",
+        ));
+    }
+    let key_id = crate::utils::sha256_hex(&key);
     records
         .into_iter()
+        .filter(|signed| signed.key_id == key_id && signed.grant.root == root)
         .map(|signed| {
             let expected = hmac_sha256::HMAC::mac(
                 serde_json::to_vec(&signed.grant).map_err(json)?,
-                signing_key(false)?,
+                &key,
             );
             let valid = signed.signature.len() == expected.len()
                 && signed
@@ -553,7 +581,9 @@ pub fn status_snapshot(root: &Path) -> Result<AuthorizationStatus, EngineError> 
         })
         .collect();
     Ok(AuthorizationStatus {
-        path: root.join(".zvec-grep/authorization.json"),
+        path: WorkspaceLayout::new(root.clone())?
+            .authorization_path()
+            .to_path_buf(),
         root,
         grants,
     })
@@ -604,9 +634,10 @@ pub fn revoke(root: &Path) -> Result<String, EngineError> {
 /// Returns an error when authorization state cannot be removed or synced.
 pub fn revoke_all(root: &Path) -> Result<Option<usize>, EngineError> {
     let root = root_path(root)?;
-    let home = root.join(".zvec-grep");
-    let path = home.join("authorization.json");
-    let count = match fs::read(&path) {
+    let layout = WorkspaceLayout::new(root)?;
+    let path = layout.authorization_path();
+    reject_symlink(path)?;
+    let count = match fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<SignedGrants>(&bytes) {
             Ok(SignedGrants::Many(records)) => Some(records.len()),
             Ok(SignedGrants::One(_)) => Some(1),
@@ -618,7 +649,7 @@ pub fn revoke_all(root: &Path) -> Result<Option<usize>, EngineError> {
         Err(_) => None,
     };
     match fs::remove_file(path) {
-        Ok(()) => sync_directory(&home)?,
+        Ok(()) => sync_directory(layout.storage_dir())?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(0)),
         Err(e) => return Err(io(e)),
     }
@@ -681,6 +712,95 @@ mod tests {
         api::index::{IndexOptions, options::EmbeddingModelSpec},
         domain::model::Device,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_storage_symlinks_do_not_block_authorization() {
+        use std::os::unix::fs::symlink;
+
+        for name in ["index", "temp/new"] {
+            let directory = tempfile::tempdir().expect("workspace");
+            let root = directory.path().join("source");
+            let home = root.join(".zvec-grep");
+            fs::create_dir_all(home.join("temp")).expect("workspace home");
+            let external = directory.path().join("external");
+            fs::create_dir(&external).expect("external directory");
+            symlink(&external, home.join(name)).expect("storage alias");
+
+            assert!(read_grants(&root).expect("read missing grants").is_empty());
+            let path = home.join("authorization.json");
+            fs::write(&path, b"invalid consent").expect("malformed consent");
+            assert_eq!(revoke_all(&root).expect("revoke malformed consent"), None);
+            assert!(!path.exists());
+            assert!(
+                fs::symlink_metadata(home.join(name))
+                    .expect("storage alias remains")
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorization_rejects_symlinked_home_and_grants() {
+        use std::os::unix::fs::symlink;
+
+        for home_alias in [true, false] {
+            let directory = tempfile::tempdir().expect("workspace");
+            let root = directory.path().join("source");
+            fs::create_dir(&root).expect("source directory");
+            let home = root.join(".zvec-grep");
+            let external = directory.path().join("external");
+            fs::create_dir(&external).expect("external directory");
+            let external_grants = external.join("authorization.json");
+            fs::write(&external_grants, b"external consent").expect("external grants");
+            let alias = if home_alias {
+                symlink(&external, &home).expect("home alias");
+                home.clone()
+            } else {
+                fs::create_dir(&home).expect("workspace home");
+                let path = home.join("authorization.json");
+                symlink(&external_grants, &path).expect("grants alias");
+                path
+            };
+
+            assert!(
+                read_grants(&root)
+                    .err()
+                    .expect("reject reading alias")
+                    .message()
+                    .contains("symbolic link")
+            );
+            assert!(
+                revoke_all(&root)
+                    .expect_err("reject revoking alias")
+                    .message()
+                    .contains("symbolic link")
+            );
+            assert!(
+                persist_grant(Grant {
+                    version: 1,
+                    root,
+                    capability: "embedding".into(),
+                    scope: "workspace".into(),
+                    model: "qwen/text-embedding-v4".into(),
+                    endpoint: "https://example.test/embeddings".into(),
+                })
+                .expect_err("reject writing alias")
+                .message()
+                .contains("symbolic link")
+            );
+            assert_eq!(
+                fs::read(&external_grants).expect("external grants"),
+                b"external consent"
+            );
+            assert!(
+                fs::symlink_metadata(alias)
+                    .expect("alias remains")
+                    .is_symlink()
+            );
+        }
+    }
 
     fn isolated_authorization_root(test_name: &str) -> Option<PathBuf> {
         const FIXTURE_ENV: &str = "ZG_AUTHORIZATION_RECOVERY_TEST_ROOT";
@@ -873,7 +993,10 @@ mod tests {
             return;
         };
         let root = fs::canonicalize(root).expect("canonical root");
-        let path = root.join(".zvec-grep/authorization.json");
+        let path = WorkspaceLayout::new(root.clone())
+            .expect("layout")
+            .authorization_path()
+            .to_path_buf();
         for invalid_scope in [false, true] {
             grant(
                 &root,
@@ -1044,6 +1167,19 @@ mod tests {
                 .expect("consent")
                 .workspace_content
         );
+        request.endpoint = Some("https://temporary.test/embeddings".into());
+        let plans = query_authorizations(&request).expect("separate query and refresh consent");
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].target.endpoint_host, "temporary.test");
+        assert!(plans[0].query_text && !plans[0].workspace_content);
+        assert_eq!(plans[1].target.endpoint_host, "query.test");
+        assert!(!plans[1].query_text && plans[1].workspace_content);
+        request.authorized_remote = vec![plans[0].target.clone()];
+        assert_eq!(
+            query_authorizations(&request).expect("query-only consent"),
+            vec![plans[1].clone()]
+        );
+        request.authorized_remote.clear();
         request.query = None;
         request.routes = vec![ContextRoute {
             mode: ContextRouteMode::Fts,
@@ -1056,6 +1192,11 @@ mod tests {
             .expect("wait")
             .expect("refresh consent");
         assert!(!plan.query_text && plan.workspace_content);
+        assert_eq!(plan.target.endpoint_host, "query.test");
+        assert_eq!(
+            fs::read(&manifest).expect("manifest unchanged by preflight"),
+            before
+        );
         request.allow_remote = true;
         assert!(
             query_authorization(&request)
@@ -1064,71 +1205,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn index_preflight_allows_replacing_unavailable_ignore_dependencies() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let root = directory.path().join("source");
+        fs::create_dir(&root).expect("source");
+        let ignored = directory.path().join("external.ignore");
+        fs::write(&ignored, "*.log\n").expect("external ignore");
+        let engine = crate::ZvecGrep::new();
+        engine
+            .index(IndexOptions {
+                root: Some(root.clone()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "qwen/text-embedding-v4".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Auto,
+                }),
+                api_key: Some("test-key".into()),
+                endpoint: Some("https://provider.test/embeddings".into()),
+                allow_remote: true,
+                scan: crate::api::index::options::ScanRulesUpdate {
+                    ignore_files: Some(vec![ignored.clone()]),
+                    ..Default::default()
+                },
+                ..IndexOptions::default()
+            })
+            .await
+            .expect("empty index");
+        engine.close();
+        let manifest = root.join(".zvec-grep/manifest.json");
+        let before = fs::read(&manifest).expect("manifest");
+        fs::remove_file(&ignored).expect("remove external dependency");
+        let mut request = IndexOptions {
+            root: Some(root.clone()),
+            ..IndexOptions::default()
+        };
+        assert!(
+            index_authorizations(&request)
+                .expect_err("missing ignore dependency")
+                .message()
+                .contains("--ignore-file")
+        );
+        request.reset_paths = true;
+        let plans = index_authorizations(&request).expect("reset can reach authorization");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].endpoint_host, "provider.test");
+        request.reset_paths = false;
+        let replacement = root.join("new.ignore");
+        fs::write(&replacement, "*.tmp\n").expect("replacement");
+        request.scan.ignore_files = Some(vec![replacement]);
+        assert_eq!(
+            index_authorizations(&request).expect("replacement can reach authorization"),
+            plans
+        );
+        assert_eq!(fs::read(&manifest).expect("unmodified manifest"), before);
+    }
+
+    fn remote_workspace(layout: WorkspaceLayout, endpoint: &str) -> Workspace {
+        use crate::domain::{
+            IndexDescriptor, IndexState,
+            model::{EmbeddingMetric, EmbeddingModelInfo},
+        };
+        Workspace::new(
+            layout,
+            crate::domain::ScanRules::default(),
+            Some(crate::workspace::CURRENT_INDEX_VERSION),
+            None,
+            1,
+            1,
+            IndexState::Enabled(Box::new(
+                IndexDescriptor::new(
+                    EmbeddingModelInfo::new(
+                        crate::domain::model::ModelInfo::new(
+                            "qwen",
+                            "text-embedding-v4",
+                            [
+                                crate::domain::ContentKind::Text,
+                                crate::domain::ContentKind::Code,
+                                crate::domain::ContentKind::Image,
+                            ],
+                            32,
+                        )
+                        .expect("valid model metadata"),
+                        1024,
+                        EmbeddingMetric::Cosine,
+                        None,
+                        None,
+                    )
+                    .expect("valid embedding metadata"),
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::from([(
+                        "qwen/text-embedding-v4".into(),
+                        crate::domain::model::ModelConfig {
+                            endpoint: Some(endpoint.into()),
+                            ..Default::default()
+                        },
+                    )]),
+                    crate::domain::FTS_CONFIG,
+                )
+                .expect("index descriptor"),
+            )),
+        )
+        .expect("manifest")
+    }
+
     #[test]
     fn abandoned_build_does_not_override_active_authorization() {
         use crate::{
             api::context::{ContextOptions, options::RefreshPolicy},
-            domain::{
-                IndexDescriptor, IndexState, Workspace,
-                model::{EmbeddingMetric, EmbeddingModelInfo, ModelConfig},
-            },
-            workspace::{build::prepare_build, manifest::write_workspace_manifest},
+            workspace::{index::prepare_build, manifest::write_workspace_manifest},
         };
         let directory = tempfile::tempdir().expect("workspace");
-        let home = directory.path().join(".zvec-grep");
-        let mut active = WorkspaceManifest::new(
-            Workspace {
-                root: directory.path().to_path_buf(),
-                scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(Box::new(
-                    IndexDescriptor::new(
-                        EmbeddingModelInfo::new(
-                            crate::domain::model::ModelInfo::new(
-                                "qwen",
-                                "text-embedding-v4",
-                                [
-                                    crate::domain::ContentKind::Text,
-                                    crate::domain::ContentKind::Code,
-                                    crate::domain::ContentKind::Image,
-                                ],
-                                32,
-                            )
-                            .expect("valid model metadata"),
-                            1024,
-                            EmbeddingMetric::Cosine,
-                            None,
-                            None,
-                        )
-                        .expect("valid embedding metadata"),
-                        std::collections::BTreeMap::new(),
-                        crate::domain::FTS_CONFIG,
-                    )
-                    .expect("index descriptor"),
-                )),
-                created_epoch_ms: 1,
-                updated_epoch_ms: 1,
-            },
-            home.clone(),
-            Some(crate::workspace::CURRENT_INDEX_VERSION),
-            std::collections::BTreeMap::from([(
-                "qwen/text-embedding-v4".into(),
-                ModelConfig {
-                    endpoint: Some("https://active.test/embeddings".into()),
-                    ..ModelConfig::default()
-                },
-            )]),
-        )
-        .expect("manifest");
-        active.storage_generation = Some(uuid::Uuid::new_v4().to_string());
-        fs::create_dir_all(active.storage_home()).expect("active generation");
-        write_workspace_manifest(&home, &active).expect("write active");
-        let mut target = active.clone();
-        target
-            .embedding_runtimes
-            .values_mut()
-            .next()
-            .expect("runtime")
-            .endpoint = Some("https://staging.test/embeddings".into());
+        let layout = WorkspaceLayout::new(directory.path().to_path_buf()).expect("layout");
+        let mut active = remote_workspace(layout.clone(), "https://active.test/embeddings");
+        active
+            .set_storage_generation(uuid::Uuid::new_v4().to_string())
+            .expect("generation");
+        fs::create_dir_all(active.layout().index_dir()).expect("active generation");
+        write_workspace_manifest(active.layout().manifest_path(), &active).expect("write active");
+        let target = remote_workspace(layout, "https://staging.test/embeddings");
         prepare_build(target).expect("staged build");
         let index = index_authorization(&IndexOptions {
             root: Some(directory.path().into()),
@@ -1150,7 +1347,7 @@ mod tests {
         assert!(query.workspace_content);
 
         // An abandoned initial build must not silently select its remote model.
-        fs::remove_file(home.join("manifest.json")).expect("unpublished workspace");
+        fs::remove_file(active.layout().manifest_path()).expect("unpublished workspace");
         let child = directory.path().join("src/nested");
         fs::create_dir_all(&child).expect("nested source directory");
         assert!(

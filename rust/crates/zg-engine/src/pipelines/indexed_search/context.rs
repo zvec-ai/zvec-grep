@@ -132,7 +132,6 @@ pub(crate) fn normalize_context_request(
 pub(crate) async fn context_from_index(
     root: &Path,
     workspace: &Workspace,
-    workspace_home: &Path,
     storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
@@ -161,7 +160,7 @@ pub(crate) async fn context_from_index(
     for group in &groups {
         searches.push(
             search_workspace_index(
-                &workspace.root,
+                workspace.layout().source_root(),
                 SearchPlan {
                     routes: group.routes.clone(),
                     limit: Some(limit),
@@ -176,13 +175,12 @@ pub(crate) async fn context_from_index(
         );
     }
 
-    build_context_result(root, workspace, workspace_home, request, &groups, searches)
+    build_context_result(root, workspace, request, &groups, searches)
 }
 
 fn build_context_result(
     root: &Path,
     workspace: &Workspace,
-    workspace_home: &Path,
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
     searches: Vec<SearchPlanResult>,
@@ -190,7 +188,9 @@ fn build_context_result(
     let group_items = searches
         .iter()
         .zip(groups)
-        .map(|(search, group)| search_plan_to_context_items(search, &workspace.root, group))
+        .map(|(search, group)| {
+            search_plan_to_context_items(search, workspace.layout().source_root(), group)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let coverage_groups = groups
         .iter()
@@ -216,8 +216,8 @@ fn build_context_result(
         source: ContextSource::Index,
         coverage: ContextCoverage::RankedSample,
         workspace_index: Some(ContextWorkspaceIndex {
-            root: workspace.root.clone(),
-            path: workspace_home.to_path_buf(),
+            root: workspace.layout().source_root().to_path_buf(),
+            path: workspace.layout().storage_dir().to_path_buf(),
         }),
         items,
         group_results: groups
@@ -799,6 +799,7 @@ mod tests {
             domain::{
                 Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus, FileRecord,
                 FileSnapshot, FragmentId, IndexDescriptor, IndexState, Range, TextRange, Workspace,
+                WorkspaceLayout,
                 model::{EmbeddingMetric, EmbeddingModelInfo},
             },
             pipelines::indexed_search::pipeline::{SearchHit, SearchPlanResult},
@@ -856,56 +857,61 @@ mod tests {
             ..ContextOptions::default()
         })
         .expect("request");
-        let mut workspace = Workspace {
-            root: original_root.clone(),
-            scan: crate::domain::ScanRules::default(),
-            index: IndexState::Enabled(Box::new(
-                IndexDescriptor::new(
-                    EmbeddingModelInfo::new(
-                        crate::domain::model::ModelInfo::new(
-                            "local".to_owned(),
-                            "fixture".to_owned(),
-                            [
-                                crate::domain::ContentKind::Text,
-                                crate::domain::ContentKind::Code,
-                                crate::domain::ContentKind::Image,
-                            ],
-                            32,
-                        )
-                        .expect("valid model metadata"),
-                        2,
-                        EmbeddingMetric::Cosine,
-                        None,
-                        None,
+        let index = IndexState::Enabled(Box::new(
+            IndexDescriptor::new(
+                EmbeddingModelInfo::new(
+                    crate::domain::model::ModelInfo::new(
+                        "local".to_owned(),
+                        "fixture".to_owned(),
+                        [
+                            crate::domain::ContentKind::Text,
+                            crate::domain::ContentKind::Code,
+                            crate::domain::ContentKind::Image,
+                        ],
+                        32,
                     )
-                    .expect("valid embedding metadata"),
-                    std::collections::BTreeMap::new(),
-                    crate::domain::FTS_CONFIG,
+                    .expect("valid model metadata"),
+                    2,
+                    EmbeddingMetric::Cosine,
+                    None,
+                    None,
                 )
-                .expect("index descriptor"),
-            )),
-            created_epoch_ms: 0,
-            updated_epoch_ms: 0,
-        };
-        let workspace_home = directory.path().join("index");
+                .expect("valid embedding metadata"),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+                crate::domain::FTS_CONFIG,
+            )
+            .expect("index descriptor"),
+        ));
 
         for root in [&original_root, &moved_root] {
             if root == &moved_root {
                 std::fs::rename(&original_root, &moved_root).expect("move workspace");
-                workspace.root = moved_root.clone();
             }
+            let workspace = Workspace::new(
+                WorkspaceLayout::new(root.clone()).expect("layout"),
+                crate::domain::ScanRules::default(),
+                Some(crate::workspace::CURRENT_INDEX_VERSION),
+                None,
+                0,
+                0,
+                index.clone(),
+            )
+            .expect("workspace");
             // The request may start in a subdirectory; source paths retain the workspace base.
             let requested_root = root.join("src");
             let result = super::build_context_result(
                 &requested_root,
                 &workspace,
-                &workspace_home,
                 &request,
                 &request.groups,
                 vec![search.clone()],
             )
             .expect("context result");
             assert_eq!(result.root, requested_root);
+            let workspace_index = result.workspace_index.as_ref().expect("workspace index");
+            assert_eq!(workspace_index.root, *root);
+            assert_eq!(workspace_index.path, root.join(".zvec-grep"));
             assert_eq!(result.items[0].absolute_path, root.join("src/file.txt"));
             assert_eq!(result.items[0].relative_path, PathBuf::from("src/file.txt"));
             assert_eq!(result.items[0].status, ContextItemStatus::Fresh);

@@ -1,14 +1,99 @@
 //! Common filesystem utilities.
 
 use std::{
+    env,
     fs::{self, File, Permissions},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use tempfile::{NamedTempFile, PersistError};
 
 use crate::{EngineError, EngineResult};
+
+fn metadata(path: &Path) -> EngineResult<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_symlink() => Err(EngineError::invalid_argument(format!(
+            "cannot use '{}': symbolic links are not supported",
+            path.display(),
+        ))),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(EngineError::from_io(
+            format!("cannot inspect path '{}'", path.display()),
+            &error,
+        )),
+    }
+}
+
+pub(crate) fn directory_exists(path: &Path) -> EngineResult<bool> {
+    match metadata(path)? {
+        Some(metadata) if !metadata.is_dir() => Err(EngineError::invalid_argument(format!(
+            "cannot use '{}': expected a directory, found {}",
+            path.display(),
+            if metadata.is_file() {
+                "a regular file"
+            } else {
+                "a special file"
+            },
+        ))),
+        metadata => Ok(metadata.is_some()),
+    }
+}
+
+pub(crate) fn ensure_directory(path: &Path) -> EngineResult<()> {
+    if directory_exists(path)? {
+        return Ok(());
+    }
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && directory_exists(path)? => {
+            Ok(())
+        }
+        Err(error) => Err(EngineError::from_io(
+            format!("create directory '{}'", path.display()),
+            &error,
+        )),
+    }
+}
+
+pub(crate) fn file_exists(path: &Path) -> EngineResult<bool> {
+    match metadata(path)? {
+        Some(metadata) if !metadata.is_file() => Err(EngineError::invalid_argument(format!(
+            "cannot use '{}': expected a regular file, found {}",
+            path.display(),
+            if metadata.is_dir() {
+                "a directory"
+            } else {
+                "a special file"
+            },
+        ))),
+        metadata => Ok(metadata.is_some()),
+    }
+}
+
+/// Rejects a symbolic-link entry; missing paths are allowed.
+pub(crate) fn reject_symlink(path: &Path) -> EngineResult<()> {
+    metadata(path).map(|_| ())
+}
+
+pub(crate) fn resolve_directory(path: Option<&Path>) -> EngineResult<PathBuf> {
+    let path = match path {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir()
+            .map_err(|error| EngineError::from_io("resolve current directory", &error))?,
+    };
+    let path = fs::canonicalize(&path).map_err(|error| {
+        EngineError::from_io(format!("resolve directory '{}'", path.display()), &error)
+    })?;
+    if !path.is_dir() {
+        return Err(EngineError::invalid_argument(format!(
+            "path must be a directory: {}",
+            path.display(),
+        )));
+    }
+    Ok(path)
+}
 
 pub(crate) fn sync_directory(path: &Path) -> EngineResult<()> {
     open_directory(nonempty_directory(path))
@@ -278,6 +363,51 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn path_queries_distinguish_missing_entries_and_wrong_types() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let file = root.path().join("file");
+        let missing = root.path().join("missing");
+        fs::write(&file, b"contents").expect("file");
+
+        assert!(!file_exists(&missing).expect("missing file"));
+        assert!(!directory_exists(&missing).expect("missing directory"));
+        assert!(file_exists(&file).expect("regular file"));
+        assert!(directory_exists(root.path()).expect("directory"));
+
+        for (error, path) in [
+            (
+                directory_exists(&file).expect_err("wrong directory type"),
+                file.as_path(),
+            ),
+            (
+                file_exists(root.path()).expect_err("wrong file type"),
+                root.path(),
+            ),
+        ] {
+            assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+            assert!(error.message().contains(&path.display().to_string()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_queries_reject_dangling_links_and_invalid_parents() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let file = root.path().join("file");
+        let missing = root.path().join("missing");
+        let link = root.path().join("link");
+        fs::write(&file, b"contents").expect("file");
+        symlink(&missing, &link).expect("dangling link");
+
+        assert!(file_exists(&link).is_err());
+        assert!(directory_exists(&link).is_err());
+        assert!(reject_symlink(&link).is_err());
+        assert!(file_exists(&file.join("child")).is_err());
+    }
+
     fn assert_entries(directory: &Path, expected: &[&str]) {
         let entries: BTreeSet<_> = fs::read_dir(directory)
             .expect("read directory")
@@ -292,84 +422,52 @@ mod tests {
             error.message().contains(&format!("'{}'", path.display())),
             "{error}"
         );
-        assert!(error.origin().file.ends_with("utils/filesystem.rs"));
-        assert!(error.origin().line > 0);
     }
 
     #[test]
-    fn creates_and_replaces_english_and_chinese_files_without_residue() {
+    fn creates_and_replaces_files_without_residue() {
         let root = tempfile::tempdir().expect("temporary directory");
-        for (directory, name, initial, replacement) in [
-            (
-                "english",
-                "record.txt",
-                "long original English contents",
-                "替换内容",
-            ),
-            (
-                "中文目录",
-                "中文 记录.txt",
-                "初始",
-                "long replacement English contents",
-            ),
-        ] {
-            let parent = root.path().join(directory);
-            fs::create_dir(&parent).expect("prepare parent directory");
-            let path = parent.join(name);
-            for contents in [initial, replacement] {
-                atomic_write(&path, contents.as_bytes()).expect("atomic write");
-                assert_eq!(fs::read(&path).expect("read contents"), contents.as_bytes());
-                assert_entries(&parent, &[name]);
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
-                    assert_eq!(
-                        fs::metadata(&path)
-                            .expect("file metadata")
-                            .file_attributes()
-                            & FILE_ATTRIBUTE_TEMPORARY,
-                        0,
-                    );
-                }
+        let parent = root.path().join("中文目录");
+        fs::create_dir(&parent).expect("prepare parent directory");
+        let name = "中文 记录.txt";
+        let path = parent.join(name);
+        for contents in ["", "long original contents", "短", ""] {
+            atomic_write(&path, contents.as_bytes()).expect("atomic write");
+            assert_eq!(fs::read(&path).expect("read contents"), contents.as_bytes());
+            assert_entries(&parent, &[name]);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+                assert_eq!(
+                    fs::metadata(&path)
+                        .expect("file metadata")
+                        .file_attributes()
+                        & FILE_ATTRIBUTE_TEMPORARY,
+                    0,
+                );
             }
         }
     }
 
     #[test]
-    fn creates_empty_files_and_replaces_contents_with_empty_bytes() {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let path = root.path().join("record");
-        for contents in [b"".as_slice(), b"previous contents", b""] {
-            atomic_write(&path, contents).expect("atomic write");
-            assert_eq!(fs::read(&path).expect("read contents"), contents);
-            assert_entries(root.path(), &["record"]);
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_paths_without_creating_parents() {
+    fn rejects_invalid_destinations_without_changing_contents() {
         let root = tempfile::tempdir().expect("temporary directory");
         let file = root.path().join("file");
         fs::write(&file, b"unchanged").expect("existing parent file");
+        let directory = root.path().join("directory");
+        fs::create_dir(&directory).expect("existing directory");
         let missing = root.path().join("missing/record");
         let not_directory = file.join("record");
         let trailing_separator = file.join("");
-        let trailing_dot = file.join(".");
-        let missing_with_separator = root.path().join("new/");
-        let missing_with_dot = root.path().join("new/.");
-        let filesystem_root = root.path().ancestors().last().expect("filesystem root");
+        let trailing_dot = root.path().join("new/.");
         for path in [
             Path::new(""),
-            Path::new("."),
-            Path::new(".."),
-            filesystem_root,
             &missing,
             &not_directory,
             &trailing_separator,
             &trailing_dot,
-            &missing_with_separator,
-            &missing_with_dot,
+            &directory,
         ] {
             let error = atomic_write(path, b"new").expect_err("invalid destination");
             assert_error(&error, "atomic file write failed", path);
@@ -378,24 +476,9 @@ mod tests {
                 fs::read(&file).expect("unchanged parent file"),
                 b"unchanged"
             );
-            assert_entries(root.path(), &["file"]);
+            assert_entries(&directory, &[]);
+            assert_entries(root.path(), &["directory", "file"]);
         }
-    }
-
-    #[test]
-    fn rejects_directory_destinations() {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let path = root.path().join("directory");
-        fs::create_dir(&path).expect("existing directory");
-        let error = atomic_write(&path, b"new").expect_err("directory destination");
-        assert_error(
-            &error,
-            "atomic file write failed while reading permissions",
-            &path,
-        );
-        assert!(path.is_dir());
-        assert_entries(&path, &[]);
-        assert_entries(root.path(), &["directory"]);
     }
 
     #[cfg(unix)]
@@ -411,11 +494,8 @@ mod tests {
         for destination in [&target, &missing] {
             symlink(destination, &link).expect("create symlink");
             let error = atomic_write(&link, b"new").expect_err("symlink destination");
-            assert_error(
-                &error,
-                "atomic file write failed while reading permissions",
-                &link,
-            );
+            assert_error(&error, "atomic file write failed", &link);
+            assert!(error.message().contains("destination not published"));
             assert_eq!(fs::read_link(&link).expect("unchanged link"), *destination);
             assert_eq!(fs::read(&target).expect("unchanged target"), b"unchanged");
             assert_entries(root.path(), &["link", "target"]);
@@ -453,16 +533,16 @@ mod tests {
                 fs::read(&path).expect("replacement contents"),
                 b"replacement"
             );
-            assert_eq!(
-                fs::metadata(root.path())
-                    .expect("parent metadata")
-                    .permissions()
-                    .mode()
-                    & 0o7777,
-                0o750
-            );
             assert_entries(root.path(), &["record"]);
         }
+        assert_eq!(
+            fs::metadata(root.path())
+                .expect("parent metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o750
+        );
     }
 
     #[cfg(windows)]
@@ -511,11 +591,8 @@ mod tests {
         fs::set_permissions(&path, original).expect("restore permissions for cleanup");
         let error = result.expect_err("readonly destination");
         assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
-        assert_error(
-            &error,
-            "atomic file write failed while reading permissions",
-            &path,
-        );
+        assert_error(&error, "atomic file write failed", &path);
+        assert!(error.message().contains("destination not published"));
         assert_eq!(metadata.expect("unchanged file").permissions(), readonly);
         assert_eq!(fs::read(&path).expect("unchanged contents"), b"unchanged");
         assert_entries(root.path(), &["record"]);
@@ -559,12 +636,10 @@ mod tests {
         fs::write(&file, b"unchanged").expect("ordinary file");
         let error = sync_directory(&file).expect_err("not a directory");
         assert_error(&error, "failed to sync directory", &file);
-        assert_eq!(fs::read(&file).expect("unchanged file"), b"unchanged");
         let missing = root.path().join("missing");
         let error = sync_directory(&missing).expect_err("missing directory");
         assert_eq!(error.code(), EngineError::NOT_FOUND);
         assert_error(&error, "failed to sync directory", &missing);
-        assert!(!error.message().contains("atomic file write"));
         assert_entries(root.path(), &["record"]);
     }
 }

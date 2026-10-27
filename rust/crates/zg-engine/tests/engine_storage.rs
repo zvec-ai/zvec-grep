@@ -756,9 +756,9 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
             .expect("original workspace")
             .root,
     );
-    assert_ne!(after_rebuild.index_path, before_rebuild.index_path);
+    assert_eq!(after_rebuild.index_path, before_rebuild.index_path);
+    assert_eq!(after_rebuild.index_path, root.join(".zvec-grep/index"));
     assert!(after_rebuild.index_path.is_dir());
-    assert!(!before_rebuild.index_path.exists());
     let rebuilt_query = engine
         .context(ContextOptions {
             root: Some(root.to_path_buf()),
@@ -820,8 +820,10 @@ async fn initial_build_publishes_successes_and_incrementally_retries_failed_file
     let status = info.status.expect("published status");
     assert_eq!((status.files_failed, status.files_indexed), (1, 1));
     assert_eq!(status.failed_files[0].path, Path::new("broken.txt"));
-    assert!(!home.join("build.json").exists());
-    assert_eq!(fs::read_dir(home.join("generations"))?.count(), 1);
+    assert!(!home.join("temp/build.json").exists());
+    assert!(home.join("index").is_dir());
+    assert!(!home.join("temp/new").exists());
+    assert!(!home.join("temp/old").exists());
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
         [PathBuf::from("stable.txt")]
@@ -891,13 +893,15 @@ async fn rebuild_publishes_successful_files_and_records_failures_for_incremental
     assert_eq!(rebuilt.failed_files[0].path, Path::new("note.txt"));
     assert_eq!(server.inputs.load(Ordering::Acquire), original_inputs + 1);
     let published = engine.info(info_options(root)).await?;
-    assert_ne!(published.index_path, original_path);
-    assert!(!original_path.exists());
+    assert_eq!(published.index_path, original_path);
+    assert!(original_path.is_dir());
     let status = published.status.expect("published status");
     assert_eq!((status.files_indexed, status.files_failed), (1, 1));
     assert_eq!(status.failed_files[0].path, Path::new("note.txt"));
-    assert!(!home.join("build.json").exists());
-    assert_eq!(fs::read_dir(home.join("generations"))?.count(), 1);
+    assert!(!home.join("temp/build.json").exists());
+    assert!(home.join("index").is_dir());
+    assert!(!home.join("temp/new").exists());
+    assert!(!home.join("temp/old").exists());
     assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
     assert_eq!(
         fts_paths(&engine, root, "baseline").await?,
@@ -1143,6 +1147,14 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     assert_eq!(before.items.len(), 1);
     let entity_id = before.items[0].entity_id.clone();
     assert!(entity_id.is_some());
+    let manifest_bytes = fs::read(original_root.join(".zvec-grep/manifest.json"))?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    assert_eq!(manifest["sourceRoot"], "..");
+    for field in ["root", "path", "name"] {
+        assert!(manifest.get(field).is_none());
+    }
+    assert!(manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["apiKey"].is_object());
+    assert!(!String::from_utf8_lossy(&manifest_bytes).contains("local-test-key"));
     engine.close();
     drop(engine);
 
@@ -1161,6 +1173,11 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
         relocated_root.join("src/note.txt")
     );
     assert_eq!(after.items[0].status, ContextItemStatus::Fresh);
+    assert_eq!(
+        fs::read(relocated_root.join(".zvec-grep/manifest.json"))?,
+        manifest_bytes,
+        "opening a relocated workspace must not rewrite its manifest"
+    );
 
     let calls = server.requests.load(Ordering::Acquire);
     let unchanged = engine.index(index_options(&relocated_root)).await?;
@@ -1191,6 +1208,107 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     );
     engine.drop_index(info_options(&relocated_root)).await?;
     engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn copied_workspaces_keep_credentials_and_update_independently() -> TestResult {
+    let temporary = tempdir()?;
+    let original = temporary.path().join("original");
+    let copied = temporary.path().join("copy");
+    fs::create_dir_all(original.join("src"))?;
+    fs::write(
+        original.join("src/note.txt"),
+        "Orchard original documentation.",
+    )?;
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(&original, server.address)?;
+    let engine = ZvecGrep::new();
+    engine.index(index_options(&original)).await?;
+    let original_records = native_file_records(&original.join(".zvec-grep/index"))?;
+    engine.close();
+    drop(engine);
+    copy_workspace(&original, &copied)?;
+
+    let engine = ZvecGrep::new();
+    let query = engine
+        .context(ContextOptions {
+            root: Some(copied.join("src")),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Vector,
+                query: "orchard".into(),
+            }],
+            auto_update: false,
+            allow_remote: true,
+            ..ContextOptions::default()
+        })
+        .await?;
+    assert_eq!(query.items.len(), 1);
+    assert_eq!(
+        query.items[0].absolute_path,
+        fs::canonicalize(copied.join("src/note.txt"))?
+    );
+    assert_eq!(
+        native_file_records(&copied.join(".zvec-grep/index"))?,
+        original_records
+    );
+
+    fs::write(
+        copied.join("src/note.txt"),
+        "Vineyard copied documentation.",
+    )?;
+    let updated = engine
+        .index(IndexOptions {
+            api_key: None,
+            ..index_options(&copied)
+        })
+        .await?;
+    assert_eq!(updated.files_modified, 1);
+    assert_eq!(
+        fts_paths(&engine, &copied, "vineyard").await?,
+        [PathBuf::from("src/note.txt")]
+    );
+    assert!(fts_paths(&engine, &original, "vineyard").await?.is_empty());
+    assert_eq!(
+        fts_paths(&engine, &original, "orchard").await?,
+        [PathBuf::from("src/note.txt")]
+    );
+    assert_eq!(
+        native_file_records(&original.join(".zvec-grep/index"))?,
+        original_records
+    );
+
+    fs::write(
+        original.join("src/note.txt"),
+        "Meadow independently updated original.",
+    )?;
+    assert_eq!(
+        engine.index(index_options(&original)).await?.files_modified,
+        1
+    );
+    assert!(fts_paths(&engine, &copied, "meadow").await?.is_empty());
+    assert!(engine.drop_index(info_options(&copied)).await?);
+    assert!(engine.info(info_options(&original)).await?.indexed);
+    assert_eq!(
+        fts_paths(&engine, &original, "meadow").await?,
+        [PathBuf::from("src/note.txt")]
+    );
+    engine.drop_index(info_options(&original)).await?;
+    engine.close();
+    Ok(())
+}
+
+fn copy_workspace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_workspace(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
     Ok(())
 }
 

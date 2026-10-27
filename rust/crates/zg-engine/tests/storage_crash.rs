@@ -136,10 +136,13 @@ async fn scoped_indexing_finishes_interrupted_updates_and_deletions_after_termin
     assert_eq!(files.len(), 2);
     for file in &files {
         assert_eq!(file["index_status"]["kind"], "indexed");
-        let name = file["relative_path"]["value"]
-            .as_str()
+        let name = file["relative_path"]["components"]
+            .as_array()
             .expect("path")
-            .replace(std::path::MAIN_SEPARATOR, "/");
+            .iter()
+            .map(|value| value.as_str().expect("Unicode component"))
+            .collect::<Vec<_>>()
+            .join("/");
         assert_eq!(file["id"].as_u64(), Some(u64::from(identities[&name])));
     }
     for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
@@ -157,11 +160,13 @@ fn file_identities(path: &Path) -> TestResult<BTreeMap<String, u32>> {
     native_file_records(path)?
         .into_iter()
         .map(|file| {
-            // Stored relative_path uses native separators; callers key by forward slash.
-            let name = file["relative_path"]["value"]
-                .as_str()
+            let name = file["relative_path"]["components"]
+                .as_array()
                 .expect("path")
-                .replace(std::path::MAIN_SEPARATOR, "/");
+                .iter()
+                .map(|value| value.as_str().expect("Unicode component"))
+                .collect::<Vec<_>>()
+                .join("/");
             let id = u32::try_from(file["id"].as_u64().expect("file ID"))?;
             Ok((name, id))
         })

@@ -108,7 +108,11 @@ fn grants_are_signed_scoped_and_revocable_without_remote_requests() {
         &original,
     )
     .expect("authorization test fixture operation");
-    assert!(!other.run(&["--auth", "status"]).status.success());
+    assert!(
+        other
+            .success(&["--auth", "status"])
+            .contains("not authorized")
+    );
     let mut value: serde_json::Value =
         serde_json::from_slice(&original).expect("authorization test fixture operation");
     value["grant"]["endpoint"] = "https://example.test/embeddings".into();
@@ -297,7 +301,7 @@ fn resident_server_observes_grant_and_revoke_without_restart() {
     // An empty workspace initializes the remote runtime without sending content.
     fixture.success(&args);
     let search = ["--mode", "server", "--vector", "needle", "--refresh", "off"];
-    assert!(String::from_utf8_lossy(&fixture.run(&search).stderr).contains("requires an API key"));
+    fixture.success(&["--index", "--mode", "server"]);
     fixture.success(&["--auth", "revoke"]);
     assert!(
         String::from_utf8_lossy(&fixture.run(&search).stderr).contains("authorization required")
@@ -376,4 +380,39 @@ fn api_base_url_grants_match_resolved_index_endpoints() {
             assert_eq!(manifest["embeddingRuntimes"][model]["endpoint"], endpoint);
         }
     }
+}
+
+#[test]
+fn grants_from_another_machine_require_consent_without_blocking_reauthorization() {
+    let fixture = Fixture::new();
+    fixture.grant();
+    let grant_path = fixture.root.path().join(".zvec-grep/authorization.json");
+    let original = fs::read(&grant_path).expect("original grant");
+    let key_path = fixture.state.path().join("key");
+    fs::write(&key_path, [0x5a; 32]).expect("another machine key");
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("not authorized")
+    );
+    assert_eq!(fs::read(&grant_path).expect("unchanged grant"), original);
+    fixture.grant();
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("is authorized")
+    );
+    fs::remove_file(&key_path).expect("machine with no signing key");
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("not authorized")
+    );
+    assert!(!key_path.exists());
+    fixture.grant();
+    assert!(
+        fixture
+            .success(&["--auth", "status"])
+            .contains("is authorized")
+    );
 }

@@ -11,4 +11,5 @@ mod store;
 pub(crate) mod types;
 mod zvec;
 
+pub(crate) use path::PathRecord;
 pub(crate) use store::IndexStore;

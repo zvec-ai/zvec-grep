@@ -906,7 +906,7 @@ async fn explicit_empty_false_and_null_updates_persist_and_survive_rebuild() -> 
         .await?;
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (3, 0));
     let rebuilt_info = engine.info(info_options(root)).await?;
-    assert_ne!(rebuilt_info.index_path, info.index_path);
+    assert_eq!(rebuilt_info.index_path, info.index_path);
     assert_eq!(
         rebuilt_info
             .workspace_index

@@ -142,8 +142,8 @@ mod tests {
         );
         let root = home.join("repo");
         assert_eq!(
-            storage_path(&root.join(".zvec-grep/storage"), &root),
-            Path::new(".zvec-grep/storage").display().to_string()
+            storage_path(&root.join(".zvec-grep/index"), &root),
+            Path::new(".zvec-grep/index").display().to_string()
         );
         assert_eq!(
             storage_path(Path::new("/elsewhere/storage"), &root),

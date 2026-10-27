@@ -120,7 +120,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
                 path: "/workspace/.zvec-grep".into(),

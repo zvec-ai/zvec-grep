@@ -370,16 +370,15 @@ pub(crate) fn runtime_device(
     config: &Value,
     reference: &str,
     explicit: Option<Device>,
-    workspace: Option<Device>,
 ) -> Result<Option<Device>, EngineError> {
-    if let Some(device) = explicit.or(workspace).or_else(|| device(config, reference)) {
+    if let Some(device) = explicit {
         return Ok(Some(device));
     }
     let Some(value) = std::env::var("ZVEC_GREP_DEVICE")
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
-        return Ok(default_runtime_device());
+        return Ok(device(config, reference).or_else(default_runtime_device));
     };
     serde_json::from_value(json!(value.trim().to_lowercase()))
         .map(Some)
@@ -398,13 +397,8 @@ pub(crate) const fn default_runtime_device() -> Option<Device> {
     }
 }
 
-pub(crate) fn model_cache(
-    config: &Value,
-    explicit: Option<PathBuf>,
-    workspace: Option<PathBuf>,
-) -> Option<PathBuf> {
+pub(crate) fn model_cache(config: &Value, explicit: Option<PathBuf>) -> Option<PathBuf> {
     explicit
-        .or(workspace)
         .or_else(|| std::env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
         .or_else(|| string(config, &["defaults", "modelCacheDir"]).map(PathBuf::from))
 }

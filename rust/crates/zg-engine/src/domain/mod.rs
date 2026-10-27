@@ -74,3 +74,4 @@ pub(crate) use source::TextRange;
 // Workspaces.
 pub use workspace::ScanRules;
 pub(crate) use workspace::Workspace;
+pub(crate) use workspace::WorkspaceLayout;

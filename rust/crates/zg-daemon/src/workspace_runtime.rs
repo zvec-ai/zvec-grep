@@ -992,8 +992,6 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             signal: request.signal.clone(),
             allow_remote: request.allow_remote,
             authorized_remote: request.authorized_remote.clone(),
-            api_key: request.api_key.clone(),
-            endpoint: request.endpoint.clone(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             runtime_device: request.device,
@@ -1340,7 +1338,22 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
-    template.runtime_device = None;
+    template.runtime_device = options.runtime_device.or(options.device).or_else(|| {
+        options
+            .embedding
+            .as_ref()
+            .map(|model| model.device)
+            .filter(|device| *device != zg_engine::api::index::options::Device::Auto)
+    });
+    template.model_cache = options.model_cache.clone().or_else(|| {
+        options
+            .embedding
+            .as_ref()
+            .and_then(|model| model.cache_dir.clone())
+    });
+    template.api_key = None;
+    template.endpoint = None;
+    template.device = None;
     template.embedding_concurrency = None;
     template.rebuild = false;
     template.reset_paths = false;
@@ -1439,6 +1452,30 @@ mod tests {
     use crate::job_scheduler::{IndexExecutor, SchedulerConfig};
 
     use super::WorkspaceRuntimeManager;
+
+    #[test]
+    fn watch_template_keeps_machine_options_without_replaying_saved_configuration() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        let template = super::index_template(&IndexOptions {
+            api_key: Some("one-operation-key".into()),
+            endpoint: Some("https://example.test/embeddings".into()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "local/potion-code-16m-v2".into(),
+                revision: None,
+                cache_dir: Some("local-model-cache".into()),
+                endpoint: None,
+                device: Device::Cpu,
+            }),
+            ..IndexOptions::default()
+        });
+        assert_eq!(template.runtime_device, Some(Device::Cpu));
+        assert_eq!(template.model_cache, Some("local-model-cache".into()));
+        assert!(template.api_key.is_none());
+        assert!(template.endpoint.is_none());
+        assert!(template.embedding.is_none());
+        assert!(template.device.is_none());
+    }
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -1579,7 +1616,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: None,
             status: Some(IndexStats::default()),

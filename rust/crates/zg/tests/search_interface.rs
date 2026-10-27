@@ -155,13 +155,11 @@ fn explicit_routes_continue_to_indexed_search() {
     std::fs::write(root.path().join("auth.ts"), "export const auth = true;").expect("source");
     let home = root.path().join(".zvec-grep");
     std::fs::create_dir(&home).expect("workspace home");
-    let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
     std::fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&serde_json::json!({
-            "name": "path-fallback",
-            "root": canonical_root,
-            "path": home,
+            "format": "zg-workspace",
+            "sourceRoot": "..",
             "indexPolicy": "disabled",
             "createdTime": 0,
             "updatedTime": 0,

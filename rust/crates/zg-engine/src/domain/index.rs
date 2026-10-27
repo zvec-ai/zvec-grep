@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{EngineError, EngineResult};
 
-use super::{ContentKind, model::EmbeddingModelInfo};
+use super::{
+    ContentKind,
+    model::{EmbeddingModelInfo, EncryptedApiKey, ModelConfig},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum IndexState {
@@ -26,6 +29,7 @@ impl IndexState {
 pub(crate) struct IndexDescriptor {
     default_embedding_model: EmbeddingModelInfo,
     embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
+    embedding_configs: BTreeMap<String, ModelConfig<EncryptedApiKey>>,
     fts: FtsConfig,
 }
 
@@ -40,6 +44,7 @@ impl IndexDescriptor {
     pub(crate) fn new(
         default_embedding_model: EmbeddingModelInfo,
         embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
+        embedding_configs: BTreeMap<String, ModelConfig<EncryptedApiKey>>,
         fts: FtsConfig,
     ) -> EngineResult<Self> {
         for (kind, embedding) in &embedding_routes {
@@ -61,9 +66,25 @@ impl IndexDescriptor {
                 }
             }
         }
+        for (reference, config) in &embedding_configs {
+            if !std::iter::once(&default_embedding_model)
+                .chain(embedding_routes.values())
+                .any(|model| model.model().reference() == *reference)
+            {
+                return Err(EngineError::invalid_argument(format!(
+                    "embedding configuration refers to model {reference}, which is not used by the index"
+                )));
+            }
+            if config.device.is_some() || config.cache_dir.is_some() {
+                return Err(EngineError::invalid_argument(format!(
+                    "saved configuration for {reference} must not contain a device or model cache directory"
+                )));
+            }
+        }
         Ok(Self {
             default_embedding_model,
             embedding_routes,
+            embedding_configs,
             fts,
         })
     }
@@ -74,6 +95,10 @@ impl IndexDescriptor {
 
     pub(crate) fn embedding_routes(&self) -> &BTreeMap<ContentKind, EmbeddingModelInfo> {
         &self.embedding_routes
+    }
+
+    pub(crate) fn embedding_configs(&self) -> &BTreeMap<String, ModelConfig<EncryptedApiKey>> {
+        &self.embedding_configs
     }
 
     pub(crate) fn fts(&self) -> FtsConfig {

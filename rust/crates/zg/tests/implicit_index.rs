@@ -124,7 +124,7 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
         plain.starts_with("? Workspace index is not configured\n  ~\n"),
         "{plain}"
     );
-    let storage = std::path::Path::new(".zvec-grep").join("storage");
+    let storage = std::path::Path::new(".zvec-grep").join("index");
     assert!(
         plain.contains(&format!("\n\n  Storage     {}", storage.display())),
         "{plain}"
@@ -726,9 +726,8 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
     fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&json!({
-            "name": "disabled-workspace",
-            "path": home,
-            "root": root,
+            "format": "zg-workspace",
+            "sourceRoot": "..",
             "indexPolicy": "disabled",
             "indexVersion": null,
             "createdTime": 0,
@@ -826,7 +825,7 @@ fn existing_local_and_remote_indexes_are_reused_from_nested_directories() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn implicit_build_preserves_local_overrides_without_persisting_remote_credentials() {
+fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
     for mode in ["direct", "server"] {
         let mut fixture = Fixture::new();
         fixture.success(&[
@@ -867,10 +866,9 @@ fn implicit_build_preserves_local_overrides_without_persisting_remote_credential
             &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
         )
         .expect("manifest JSON");
-        // These persisted runtime settings are shared with the Node client.
         let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
-        assert_eq!(runtime["device"], "cpu");
-        assert_eq!(runtime["cacheDir"], json!(cache));
+        assert!(runtime.get("device").is_none());
+        assert!(runtime.get("cacheDir").is_none());
         assert!(runtime.get("apiKey").is_none());
         assert!(runtime.get("endpoint").is_none());
         assert!(!manifest.to_string().contains("implicit-query-secret"));
@@ -956,9 +954,10 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
         &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
     )
     .expect("manifest JSON");
-    assert_eq!(
-        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
-        "cpu"
+    assert!(
+        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]
+            .get("device")
+            .is_none()
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");

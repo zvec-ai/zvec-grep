@@ -14,9 +14,7 @@ use crate::{
     pipelines::{indexed_search::service::context, indexing::service::WorkspaceIndexService},
     storage::types::IndexedFragment,
     workspace::{
-        CURRENT_INDEX_VERSION,
-        lock::acquire_home_lock,
-        manifest::{WorkspaceManifest, write_workspace_manifest},
+        CURRENT_INDEX_VERSION, lock::acquire_workspace_lock, manifest::write_workspace_manifest,
     },
 };
 
@@ -24,7 +22,7 @@ use super::*;
 
 struct Fixture {
     _directory: tempfile::TempDir,
-    home: PathBuf,
+    layout: WorkspaceLayout,
     storage_home: PathBuf,
 }
 
@@ -32,59 +30,51 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("workspace");
         let root = directory.path().canonicalize().expect("canonical root");
-        let home = root.join(".zvec-grep");
-        let storage_home = home
-            .join("generations")
-            .join(uuid::Uuid::new_v4().to_string());
+        let layout = WorkspaceLayout::new(root).expect("layout");
+        let storage_home = layout.index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("generation");
         let fixture = Self {
             _directory: directory,
-            home,
+            layout,
             storage_home,
         };
-        write_text(&fixture.home, &fixture.storage_home, "orchard");
+        write_text(&fixture.layout, &fixture.storage_home, "orchard");
         fixture
     }
 
     fn read(&self, cache: &ReadSessionCache) -> (FileLock, ReadSessionLease) {
         let home_lock =
-            acquire_home_lock(&self.home, LockMode::Read, "test.query").expect("read lock");
+            acquire_workspace_lock(&self.layout, LockMode::Read, "test.query").expect("read lock");
         let lease = cache
-            .acquire(&self.home, &self.storage_home)
+            .acquire(&self.layout, &self.storage_home, "initial")
             .expect("read session");
         (home_lock, lease)
     }
 
-    fn publish(&self) -> (WorkspaceManifest, ContextOptions) {
-        let root = self.home.parent().expect("workspace root");
-        let mut manifest = WorkspaceManifest::new(
-            Workspace {
-                root: root.to_path_buf(),
-                scan: crate::domain::ScanRules::default(),
-                index: IndexState::Enabled(Box::new(
-                    IndexDescriptor::new(
-                        schema(),
-                        std::collections::BTreeMap::new(),
-                        crate::domain::FTS_CONFIG,
-                    )
-                    .expect("index descriptor"),
-                )),
-                created_epoch_ms: 1,
-                updated_epoch_ms: 1,
-            },
-            self.home.clone(),
+    fn publish(&self) -> (Workspace, ContextOptions) {
+        let root = self.layout.source_root();
+        let mut manifest = Workspace::new(
+            self.layout.clone(),
+            crate::domain::ScanRules::default(),
             Some(CURRENT_INDEX_VERSION),
-            std::collections::BTreeMap::new(),
+            None,
+            1,
+            1,
+            IndexState::Enabled(Box::new(
+                IndexDescriptor::new(
+                    schema(),
+                    std::collections::BTreeMap::new(),
+                    std::collections::BTreeMap::new(),
+                    crate::domain::FTS_CONFIG,
+                )
+                .expect("index descriptor"),
+            )),
         )
         .expect("manifest");
-        manifest.storage_generation = Some(
-            self.storage_home
-                .file_name()
-                .expect("generation")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        write_workspace_manifest(&self.home, &manifest).expect("publish manifest");
+        manifest
+            .set_storage_generation(uuid::Uuid::new_v4().to_string())
+            .expect("generation");
+        write_workspace_manifest(self.layout.manifest_path(), &manifest).expect("publish manifest");
         let options = ContextOptions {
             root: Some(root.to_path_buf()),
             auto_update: false,
@@ -119,9 +109,9 @@ fn schema() -> EmbeddingModelInfo {
     .expect("valid embedding metadata")
 }
 
-fn write_text(home: &Path, storage_home: &Path, text: &str) {
+fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
     let _lock =
-        acquire_home_lock(home, LockMode::Write, "test.write").expect("writer drains cache");
+        acquire_workspace_lock(layout, LockMode::Write, "test.write").expect("writer drains cache");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: storage_home.to_path_buf(),
         embeddings: vec![schema()],
@@ -131,7 +121,7 @@ fn write_text(home: &Path, storage_home: &Path, text: &str) {
     let id = storage
         .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("file ID")[0];
-    fs::write(home.parent().expect("root").join("source.txt"), text).expect("source file");
+    fs::write(layout.source_root().join("source.txt"), text).expect("source file");
     let file = FileRecord::new(
         id,
         relative_path,
@@ -259,7 +249,7 @@ fn dropping_a_clone_preserves_the_cache_until_the_last_owner() {
     drop(lease);
     drop(cache);
     let lease = remaining
-        .acquire(&fixture.home, &fixture.storage_home)
+        .acquire(&fixture.layout, &fixture.storage_home, "initial")
         .expect("remaining cache owner");
     assert!(Weak::ptr_eq(&session, &Arc::downgrade(&lease.session)));
     drop(lease);
@@ -383,8 +373,8 @@ fn maintenance_does_not_recreate_removed_lock_files() {
     let session = Arc::downgrade(&lease.session);
     drop(lease);
     drop(home_lock);
-    let lock_file = fixture.home.join("locks/home");
-    fs::remove_file(&lock_file).expect("remove workspace lock");
+    let lock_file = fixture.layout.workspace_lock_path();
+    fs::remove_file(lock_file).expect("remove workspace lock");
     cache.owner.inner.reap(Instant::now());
     assert!(
         !lock_file.exists(),
@@ -396,17 +386,14 @@ fn maintenance_does_not_recreate_removed_lock_files() {
 #[test]
 fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     let fixture = Fixture::new();
-    let replacement = fixture
-        .home
-        .join("generations")
-        .join(uuid::Uuid::new_v4().to_string());
+    let replacement = fixture.layout.staged_index_dir().to_path_buf();
     fs::create_dir_all(&replacement).expect("replacement generation");
-    write_text(&fixture.home, &replacement, "vineyard");
+    write_text(&fixture.layout, &replacement, "vineyard");
     let cache = cache();
     let (home_lock, first) = fixture.read(&cache);
     let previous = Arc::downgrade(&first.session);
     let second = cache
-        .acquire(&fixture.home, &replacement)
+        .acquire(&fixture.layout, &replacement, "replacement")
         .expect("new generation");
     assert!(!Weak::ptr_eq(&previous, &Arc::downgrade(&second.session)));
     assert_eq!(
@@ -426,15 +413,19 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
         1
     );
     cache.close();
-    assert!(cache.acquire(&fixture.home, &replacement).is_err());
+    assert!(
+        cache
+            .acquire(&fixture.layout, &replacement, "replacement")
+            .is_err()
+    );
     assert!(second.storage().list_files().is_ok());
-    assert!(acquire_home_lock(&fixture.home, LockMode::Write, "test.write").is_err());
+    assert!(acquire_workspace_lock(&fixture.layout, LockMode::Write, "test.write").is_err());
     drop(first);
     drop(second);
     drop(home_lock);
     assert_eq!(previous.strong_count(), 0);
-    let _writer =
-        acquire_home_lock(&fixture.home, LockMode::Write, "test.write").expect("readers drained");
+    let _writer = acquire_workspace_lock(&fixture.layout, LockMode::Write, "test.write")
+        .expect("readers drained");
     IndexStore::delete(&fixture.storage_home).expect("drop old storage");
     IndexStore::delete(&replacement).expect("drop new storage");
 }
@@ -449,7 +440,7 @@ fn writes_invalidate_every_local_cache_and_next_query_sees_changes() {
         drop(lease);
         drop(home_lock);
     }
-    write_text(&fixture.home, &fixture.storage_home, "vineyard");
+    write_text(&fixture.layout, &fixture.storage_home, "vineyard");
     for cache in [&first, &second] {
         let (_home_lock, lease) = fixture.read(cache);
         assert!(
@@ -474,18 +465,17 @@ fn writes_invalidate_every_local_cache_and_next_query_sees_changes() {
 fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
     let fixture = Fixture::new();
     let cache = cache();
-    let missing = fixture
-        .home
-        .join("generations")
-        .join(uuid::Uuid::new_v4().to_string());
-    let reader = acquire_home_lock(&fixture.home, LockMode::Read, "test.query").expect("reader");
-    assert!(cache.acquire(&fixture.home, &missing).is_err());
+    let missing = fixture.layout.staged_index_dir().to_path_buf();
+    let reader =
+        acquire_workspace_lock(&fixture.layout, LockMode::Read, "test.query").expect("reader");
+    assert!(cache.acquire(&fixture.layout, &missing, "missing").is_err());
     drop(reader);
     fs::create_dir_all(&missing).expect("new generation");
-    write_text(&fixture.home, &missing, "vineyard");
-    let _reader = acquire_home_lock(&fixture.home, LockMode::Read, "test.query").expect("reader");
+    write_text(&fixture.layout, &missing, "vineyard");
+    let _reader =
+        acquire_workspace_lock(&fixture.layout, LockMode::Read, "test.query").expect("reader");
     let lease = cache
-        .acquire(&fixture.home, &missing)
+        .acquire(&fixture.layout, &missing, "missing")
         .expect("retry opens published storage");
     assert_eq!(
         lease
@@ -509,7 +499,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
         .expect("first query");
     assert_eq!(first.items.len(), 1);
     let session = Arc::downgrade(
-        &lock(&lock(&cache.owner.inner.state).entries[&fixture.home].entry)
+        &lock(&lock(&cache.owner.inner.state).entries[fixture.layout.storage_dir()].entry)
             .as_ref()
             .expect("session")
             .session,
@@ -521,7 +511,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     assert!(Weak::ptr_eq(
         &session,
         &Arc::downgrade(
-            &lock(&lock(&cache.owner.inner.state).entries[&fixture.home].entry)
+            &lock(&lock(&cache.owner.inner.state).entries[fixture.layout.storage_dir()].entry)
                 .as_ref()
                 .expect("session")
                 .session
@@ -532,13 +522,44 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
         0,
         "FTS does not acquire a model"
     );
-    manifest.workspace.index = IndexState::Disabled;
-    manifest.index_version = None;
-    manifest.storage_generation = None;
+    manifest = {
+        let index = IndexState::Disabled;
+        crate::domain::Workspace::new(
+            manifest.layout().clone(),
+            manifest.scan().clone(),
+            if matches!(index, crate::domain::IndexState::Enabled(_)) {
+                manifest
+                    .index_version()
+                    .or(Some(crate::workspace::CURRENT_INDEX_VERSION))
+            } else {
+                None
+            },
+            if matches!(index, crate::domain::IndexState::Enabled(_)) {
+                manifest.storage_generation().map(str::to_owned)
+            } else {
+                None
+            },
+            manifest.created_epoch_ms(),
+            manifest.updated_epoch_ms(),
+            index,
+        )
+        .expect("workspace")
+    };
+
+    manifest = crate::domain::Workspace::new(
+        manifest.layout().clone(),
+        manifest.scan().clone(),
+        manifest.index_version(),
+        None,
+        manifest.created_epoch_ms(),
+        manifest.updated_epoch_ms(),
+        manifest.index().clone(),
+    )
+    .expect("workspace");
     {
-        let _writer =
-            acquire_home_lock(&fixture.home, LockMode::Write, "test.disable").expect("writer");
-        write_workspace_manifest(&fixture.home, &manifest).expect("disable index");
+        let _writer = acquire_workspace_lock(&fixture.layout, LockMode::Write, "test.disable")
+            .expect("writer");
+        write_workspace_manifest(fixture.layout.manifest_path(), &manifest).expect("disable index");
     }
     assert!(
         context(&indexing, &models, &options, Some(&cache), false)
@@ -592,9 +613,10 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
     std::thread::scope(|scope| {
         let cache = &cache;
         scope.spawn(move || {
-            let _home = acquire_home_lock(&cold.home, LockMode::Read, "cold").expect("reader");
+            let _home =
+                acquire_workspace_lock(&cold.layout, LockMode::Read, "cold").expect("reader");
             cache
-                .acquire_with(&cold.home, &cold.storage_home, || {
+                .acquire_with(&cold.layout, &cold.storage_home, "initial", || {
                     started.send(()).expect("opening");
                     released.recv().expect("allow native open");
                     IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
@@ -624,4 +646,21 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
             1
         );
     });
+}
+
+#[test]
+fn changing_generation_retires_a_session_even_at_the_same_index_path() {
+    let fixture = Fixture::new();
+    let cache = cache();
+    let (home_lock, first) = fixture.read(&cache);
+    let original = Arc::downgrade(&first.session);
+    drop(first);
+    let replacement = cache
+        .acquire(&fixture.layout, &fixture.storage_home, "replacement")
+        .expect("new generation");
+    assert_eq!(original.strong_count(), 0);
+    assert_ne!(replacement.session.generation, "initial");
+    drop(replacement);
+    drop(home_lock);
+    cache.close();
 }

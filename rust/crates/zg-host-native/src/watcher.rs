@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
@@ -139,14 +140,14 @@ impl WorkspaceWatcherFactoryPort for NativeWatcherFactory {
                 poll_interval,
             )
         });
-        let watcher = tokio::select! {
+        let (watcher, registration_error) = tokio::select! {
             () = control.cancellation.cancelled() => return Err(HostError::cancelled("watcher initialization was cancelled")),
             () = deadline_wait(control.deadline) => return Err(HostError::deadline_exceeded("watcher initialization exceeded its deadline")),
             result = initialization => match result.map_err(watcher_error)? {
-                Ok(watcher) => Some(watcher),
+                Ok(watcher) => (Some(watcher), None),
                 Err(error) => {
                     warn!(%error, "native watcher initialization failed; retrying in background");
-                    None
+                    (None, Some(error.to_string()))
                 }
             },
         };
@@ -159,6 +160,7 @@ impl WorkspaceWatcherFactoryPort for NativeWatcherFactory {
             root_is_file: metadata.is_file(),
             config,
             watcher,
+            registration_error,
             raw_sender,
             raw_receiver,
             overflowed,
@@ -186,7 +188,7 @@ struct NativeWatchSession {
 #[derive(Debug)]
 struct FlushRequest {
     reconcile: bool,
-    acknowledge: oneshot::Sender<()>,
+    acknowledge: oneshot::Sender<Result<(), HostError>>,
 }
 
 impl Drop for NativeWatchSession {
@@ -212,7 +214,7 @@ impl NativeWatchSession {
             .map_err(|_| HostError::resource_closed("workspace watcher has stopped"))?;
         receiver
             .await
-            .map_err(|_| HostError::resource_closed("workspace watcher flush was interrupted"))
+            .map_err(|_| HostError::resource_closed("workspace watcher flush was interrupted"))?
     }
 }
 
@@ -268,6 +270,7 @@ struct WatchLoop {
     root_is_file: bool,
     config: NativeWatcherConfig,
     watcher: Option<NativeWatcher>,
+    registration_error: Option<String>,
     raw_sender: mpsc::Sender<notify::Result<Event>>,
     raw_receiver: mpsc::Receiver<notify::Result<Event>>,
     overflowed: Arc<AtomicBool>,
@@ -296,7 +299,7 @@ async fn watch_loop(mut state: WatchLoop) {
         (!initialization_failed).then(|| Instant::now() + Duration::from_secs(1));
     let mut consecutive_errors = u32::from(initialization_failed);
     let mut recovery_reconcile_pending = initialization_failed;
-    let mut pending_flush: Option<oneshot::Sender<()>> = None;
+    let mut pending_flush: Option<oneshot::Sender<Result<(), HostError>>> = None;
     if initialization_failed {
         changes.require_full_rescan();
         schedule_flush(
@@ -323,6 +326,7 @@ async fn watch_loop(mut state: WatchLoop) {
                     Ok(()) => {}
                     Err(error) => {
                         warn!(%error, "could not refresh watcher registrations at reader barrier");
+                        state.registration_error = Some(error.to_string());
                         consecutive_errors = consecutive_errors.saturating_add(1);
                         stable_deadline = None;
                         retry_deadline = Some(Instant::now() + retry_delay(consecutive_errors));
@@ -336,26 +340,24 @@ async fn watch_loop(mut state: WatchLoop) {
             debounce_deadline = None;
             max_wait_deadline = None;
             if let Some(acknowledge) = pending_flush.take() {
-                let _ = acknowledge.send(());
+                let result = state
+                    .registration_error
+                    .as_ref()
+                    .map_or(Ok(()), |error| Err(watcher_error(error)));
+                let _ = acknowledge.send(result);
             }
         }
         let mut refresh_registration = false;
         tokio::select! {
             () = state.close.cancelled() => break,
             Some(request) = state.flush_receiver.recv(), if pending_flush.is_none() => {
+                pending_flush = Some(request.acknowledge);
                 if !request.reconcile {
-                    pending_flush = Some(request.acknowledge);
                     continue;
                 }
                 // Reconciliation covers native events still pending delivery or normalization.
                 refresh_registration = true;
                 changes.require_full_rescan();
-                if !flush_changes(&mut changes, &state.batch_sender, &state.close).await {
-                    break;
-                }
-                debounce_deadline = None;
-                max_wait_deadline = None;
-                let _ = request.acknowledge.send(());
             }
             () = sleep_until_option(debounce_deadline) => {
                 if !flush_changes(&mut changes, &state.batch_sender, &state.close).await {
@@ -405,6 +407,7 @@ async fn watch_loop(mut state: WatchLoop) {
                 match recovered {
                     Ok(watcher) => {
                         state.watcher = Some(watcher);
+                        state.registration_error = None;
                         retry_deadline = None;
                         stable_deadline = Some(Instant::now() + Duration::from_secs(1));
                         // Reconcile changes missed between backend failure and recovery.
@@ -413,6 +416,7 @@ async fn watch_loop(mut state: WatchLoop) {
                     }
                     Err(error) => {
                         warn!(%error, "failed to recover native watcher");
+                        state.registration_error = Some(error.to_string());
                         consecutive_errors = consecutive_errors.saturating_add(1);
                         retry_deadline = Some(Instant::now() + retry_delay(consecutive_errors));
                     }
@@ -460,6 +464,7 @@ async fn watch_loop(mut state: WatchLoop) {
                             }
                             Ok((watcher, Err(error))) => {
                                 warn!(%error, "native watcher event policy failed");
+                                state.registration_error = Some(error.to_string());
                                 state.watcher = watcher;
                                 consecutive_errors = consecutive_errors.saturating_add(1);
                                 stable_deadline = None;
@@ -471,6 +476,8 @@ async fn watch_loop(mut state: WatchLoop) {
                             }
                             Err(error) => {
                                 warn!(%error, "native watcher event worker failed");
+                                state.registration_error = Some(error.to_string());
+                                state.watcher.take();
                                 consecutive_errors = consecutive_errors.saturating_add(1);
                                 stable_deadline = None;
                                 retry_deadline = Some(Instant::now() + retry_delay(consecutive_errors));
@@ -486,6 +493,7 @@ async fn watch_loop(mut state: WatchLoop) {
                     }
                     Err(error) => {
                         warn!(%error, "native watcher backend failed");
+                        state.registration_error = Some(error.to_string());
                         state.watcher.take();
                         consecutive_errors = consecutive_errors.saturating_add(1);
                         stable_deadline = None;
@@ -508,6 +516,7 @@ async fn watch_loop(mut state: WatchLoop) {
                 Ok(()) => {}
                 Err(error) => {
                     warn!(%error, "could not reconcile watcher registrations");
+                    state.registration_error = Some(error.to_string());
                     consecutive_errors = consecutive_errors.saturating_add(1);
                     stable_deadline = None;
                     retry_deadline = Some(Instant::now() + retry_delay(consecutive_errors));
@@ -543,6 +552,9 @@ async fn refresh_watcher(state: &mut WatchLoop) -> Result<(), HostError> {
     .await
     .map_err(watcher_error)?;
     state.watcher = Some(watcher);
+    if result.is_ok() {
+        state.registration_error = None;
+    }
     result
 }
 
@@ -750,11 +762,11 @@ impl NativeWatcher {
     }
 
     fn register(&mut self, path: &Path) -> Result<(), HostError> {
-        let identity = match fs::metadata(path) {
-            Ok(metadata) => DirectoryIdentity::from_metadata(&metadata),
-            Err(_) if !path.exists() => return Ok(()),
-            Err(error) => return Err(watcher_error(error)),
+        let Some(metadata) = watch_path_result(path, "inspect directory", fs::metadata(path))?
+        else {
+            return Ok(());
         };
+        let identity = DirectoryIdentity::from_metadata(&metadata);
         if self.registrations.get(path) == Some(&identity) {
             return Ok(());
         }
@@ -770,7 +782,11 @@ impl NativeWatcher {
                 self.registrations.insert(path.to_path_buf(), identity);
                 Ok(())
             }
-            Err(_) if !path.exists() => Ok(()),
+            Err(_)
+                if fs::metadata(path).is_err_and(|error| error.kind() == ErrorKind::NotFound) =>
+            {
+                Ok(())
+            }
             Err(error) => Err(watcher_error(format!(
                 "could not watch {}: {error}",
                 path.display()
@@ -787,17 +803,17 @@ fn watch_directories(
 ) -> Result<WatchPlan, HostError> {
     let mut plan = WatchPlan::default();
     // Watching the parent preserves root replacement and recreation detection.
-    plan.directories
-        .extend(existing_parent(&root.path).map(Path::to_path_buf));
+    add_existing_parent(&root.path, &mut plan.directories)?;
     for control_path in root.policy.control_paths() {
-        plan.directories
-            .extend(existing_parent(&control_path).map(Path::to_path_buf));
+        add_existing_parent(&control_path, &mut plan.directories)?;
     }
     for path in &plan.directories {
         register(path)?;
     }
     if root_is_file {
-        if fs::symlink_metadata(&root.path).is_ok_and(|metadata| metadata.is_symlink()) {
+        if watch_path_result(&root.path, "inspect root", fs::symlink_metadata(&root.path))?
+            .is_some_and(|metadata| metadata.is_symlink())
+        {
             add_file_link(root, &root.path, &mut plan, register)?;
         }
     } else {
@@ -806,17 +822,29 @@ fn watch_directories(
     }
     // Traversal may discover additional rule files (including symlink targets).
     for control in root.policy.control_paths() {
-        if let Some(parent) = existing_parent(&control)
-            && plan.directories.insert(parent.to_path_buf())
-        {
-            register(parent)?;
+        let mut parents = BTreeSet::new();
+        add_existing_parent(&control, &mut parents)?;
+        for parent in parents {
+            if plan.directories.insert(parent.clone()) {
+                register(&parent)?;
+            }
         }
     }
     Ok(plan)
 }
 
-fn existing_parent(path: &Path) -> Option<&Path> {
-    path.ancestors().skip(1).find(|parent| parent.is_dir())
+fn add_existing_parent(path: &Path, directories: &mut BTreeSet<PathBuf>) -> Result<(), HostError> {
+    let mut parent = path.parent();
+    while let Some(path) = parent {
+        if watch_path_result(path, "inspect parent directory", fs::metadata(path))?
+            .is_some_and(|metadata| metadata.is_dir())
+        {
+            directories.insert(path.to_path_buf());
+            break;
+        }
+        parent = path.parent();
+    }
+    Ok(())
 }
 
 fn collect_watch_directories(
@@ -827,10 +855,16 @@ fn collect_watch_directories(
     plan: &mut WatchPlan,
     register: &mut impl FnMut(&Path) -> Result<(), HostError>,
 ) -> Result<(), HostError> {
-    if !path.is_dir() || !root.policy.can_descend(path)? {
+    if !root.policy.can_descend(path)? {
         return Ok(());
     }
-    let Ok(canonical) = fs::canonicalize(path) else {
+    if !watch_path_result(path, "inspect directory", fs::metadata(path))?
+        .is_some_and(|metadata| metadata.is_dir())
+    {
+        return Ok(());
+    }
+    let Some(canonical) = watch_path_result(path, "resolve directory", fs::canonicalize(path))?
+    else {
         return Ok(());
     };
     if !visited.insert(canonical.clone()) {
@@ -849,19 +883,32 @@ fn collect_watch_directories(
         return Ok(());
     }
     let descend = root.recursive && root.max_depth.is_none_or(|maximum| depth + 1 < maximum);
-    let Ok(entries) = fs::read_dir(path) else {
+    let Some(entries) = watch_path_result(path, "read directory", fs::read_dir(path))? else {
         return Ok(());
     };
-    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|error| {
+        watcher_error(format!(
+            "could not read directory entry {}: {error}",
+            path.display()
+        ))
+    })?;
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
-        let Ok(file_type) = entry.file_type() else {
+        let Some(file_type) =
+            watch_path_result(&entry.path(), "inspect directory entry", entry.file_type())?
+        else {
             continue;
         };
         if file_type.is_dir() && descend {
             collect_watch_directories(root, &entry.path(), depth + 1, visited, plan, register)?;
         } else if root.follow && file_type.is_symlink() {
-            if entry.path().is_dir() {
+            if watch_path_result(
+                &entry.path(),
+                "inspect link target",
+                fs::metadata(entry.path()),
+            )?
+            .is_some_and(|metadata| metadata.is_dir())
+            {
                 if descend {
                     collect_watch_directories(
                         root,
@@ -889,12 +936,12 @@ fn add_file_link(
     if !root.policy.includes_file(alias)? && !root.policy.can_descend(alias)? {
         return Ok(());
     }
-    let Ok(link) = fs::read_link(alias) else {
+    let Some(link) = watch_path_result(alias, "read link", fs::read_link(alias))? else {
         return Ok(());
     };
     let target = alias.parent().unwrap_or(&root.path).join(link);
     // Resolve as much as exists, preserving missing target components for recreation.
-    let Some(target) = resolve_missing_path(&target) else {
+    let Some(target) = resolve_missing_path(&target)? else {
         return Ok(());
     };
     plan.aliases
@@ -902,21 +949,42 @@ fn add_file_link(
         .entry(target.clone())
         .or_default()
         .insert(alias.to_path_buf());
-    if let Some(parent) = existing_parent(&target)
-        && plan.directories.insert(parent.to_path_buf())
-    {
-        register(parent)?;
+    let mut parents = BTreeSet::new();
+    add_existing_parent(&target, &mut parents)?;
+    for parent in parents {
+        if plan.directories.insert(parent.clone()) {
+            register(&parent)?;
+        }
     }
     Ok(())
 }
 
-fn resolve_missing_path(path: &Path) -> Option<PathBuf> {
+fn resolve_missing_path(path: &Path) -> Result<Option<PathBuf>, HostError> {
     for ancestor in path.ancestors() {
-        if let Ok(canonical) = fs::canonicalize(ancestor) {
-            return Some(canonical.join(path.strip_prefix(ancestor).ok()?));
+        if let Some(canonical) =
+            watch_path_result(ancestor, "resolve link target", fs::canonicalize(ancestor))?
+        {
+            return Ok(Some(
+                canonical.join(path.strip_prefix(ancestor).expect("path ancestor")),
+            ));
         }
     }
-    None
+    Ok(None)
+}
+
+fn watch_path_result<T>(
+    path: &Path,
+    action: &str,
+    result: std::io::Result<T>,
+) -> Result<Option<T>, HostError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(watcher_error(format!(
+            "could not {action} {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn is_topology_event(kind: EventKind) -> bool {
@@ -975,7 +1043,7 @@ fn normalize_event(
             );
             continue;
         }
-        let metadata = fs::symlink_metadata(path).ok();
+        let metadata = watch_path_result(path, "inspect changed path", fs::symlink_metadata(path))?;
         let Some(metadata) = metadata else {
             normalized
                 .changes
@@ -987,7 +1055,9 @@ fn normalize_event(
             if !root.follow {
                 continue;
             }
-            let Ok(metadata) = fs::metadata(path) else {
+            let Some(metadata) =
+                watch_path_result(path, "inspect changed link target", fs::metadata(path))?
+            else {
                 normalized
                     .changes
                     .push(WorkspaceChange::DeletePrefix(relative));
@@ -1027,7 +1097,10 @@ fn normalize_policy_change(
     topology_event: bool,
     control_paths: &[PathBuf],
 ) -> Result<Option<WorkspaceChange>, HostError> {
-    if topology_event && path.is_dir() {
+    if topology_event
+        && watch_path_result(path, "inspect policy path", fs::metadata(path))?
+            .is_some_and(|metadata| metadata.is_dir())
+    {
         // A replacement directory must not inherit its predecessor's cached rules.
         root.policy.invalidate()?;
     }
@@ -1232,6 +1305,33 @@ mod tests {
             .position(|path| path == &root.join("selected/deeper"))
             .expect("child watch");
         assert!(parent < child, "register before visiting children");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_registration_rejects_unreadable_subdirectories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("fixture");
+        let child = temporary.path().join("restricted");
+        fs::create_dir(&child).expect("restricted directory");
+        let permissions = fs::metadata(&child).expect("metadata").permissions();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o000)).expect("restrict access");
+        if fs::read_dir(&child).is_ok() {
+            fs::set_permissions(&child, permissions).expect("restore permissions");
+            eprintln!(
+                "Skipping permission failure injection: this user can read chmod 000 directories."
+            );
+            return;
+        }
+        let spec = test_root(temporary.path(), temporary.path().join(".rules"));
+        let result = watch_directories(&spec, false, &mut |_| Ok(()));
+        fs::set_permissions(&child, permissions).expect("restore permissions");
+        let error = result
+            .err()
+            .expect("unreadable directories must fail watch registration");
+        assert!(error.to_string().contains("read directory"));
+        assert!(error.to_string().contains("restricted"));
     }
 
     #[test]

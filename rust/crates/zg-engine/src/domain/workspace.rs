@@ -1,38 +1,282 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EngineError, EngineResult};
+use crate::{
+    EngineError, EngineResult,
+    utils::{directory_exists, file_exists},
+};
 
 use super::{FileFormat, GlobRule, IndexState, SourcePath};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Workspace {
-    pub root: PathBuf,
-    pub scan: ScanRules,
-    pub index: IndexState,
-    pub created_epoch_ms: u64,
-    pub updated_epoch_ms: u64,
+    layout: WorkspaceLayout,
+    scan: ScanRules,
+    /// Storage format version used by the index.
+    index_version: Option<u32>,
+    /// Identifies an index build for publication, recovery, and caching.
+    storage_generation: Option<String>,
+    created_epoch_ms: u64,
+    updated_epoch_ms: u64,
+    index: IndexState,
 }
 
 impl Workspace {
-    #[allow(clippy::unnecessary_debug_formatting)] // Keep control characters in paths escaped.
-    pub(crate) fn validate(&self) -> EngineResult<()> {
-        if !self.root.is_absolute() {
-            return Err(EngineError::invalid_argument(format!(
-                "workspace root {:?} must be an absolute path",
-                self.root,
-            )));
+    pub(crate) fn new(
+        layout: WorkspaceLayout,
+        scan: ScanRules,
+        index_version: Option<u32>,
+        storage_generation: Option<String>,
+        created_epoch_ms: u64,
+        updated_epoch_ms: u64,
+        index: IndexState,
+    ) -> EngineResult<Self> {
+        let workspace = Self {
+            layout,
+            scan,
+            index_version,
+            storage_generation,
+            created_epoch_ms,
+            updated_epoch_ms,
+            index,
+        };
+        if workspace.index_enabled() {
+            if workspace.index_version.is_none() {
+                return Err(EngineError::invalid_argument(
+                    "enabled workspace requires an index version",
+                ));
+            }
+        } else if workspace.index_version.is_some() || workspace.storage_generation.is_some() {
+            return Err(EngineError::invalid_argument(
+                "an unbuilt workspace cannot select an index version or storage generation",
+            ));
+        }
+        if let Some(generation) = &workspace.storage_generation {
+            validate_generation(generation)?;
+        }
+        Ok(workspace)
+    }
+
+    pub(crate) fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    pub(crate) fn scan(&self) -> &ScanRules {
+        &self.scan
+    }
+
+    pub(crate) fn index_version(&self) -> Option<u32> {
+        self.index_version
+    }
+
+    pub(crate) fn storage_generation(&self) -> Option<&str> {
+        self.storage_generation.as_deref()
+    }
+
+    pub(crate) fn created_epoch_ms(&self) -> u64 {
+        self.created_epoch_ms
+    }
+
+    pub(crate) fn updated_epoch_ms(&self) -> u64 {
+        self.updated_epoch_ms
+    }
+
+    pub(crate) fn index(&self) -> &IndexState {
+        &self.index
+    }
+
+    pub(crate) fn set_storage_generation(&mut self, generation: String) -> EngineResult<()> {
+        if !self.index_enabled() {
+            return Err(EngineError::invalid_argument(
+                "an unbuilt workspace cannot select a storage generation",
+            ));
+        }
+        validate_generation(&generation)?;
+        self.storage_generation = Some(generation);
+        Ok(())
+    }
+
+    pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
+        self.updated_epoch_ms = updated_epoch_ms;
+    }
+
+    pub(crate) fn validate_published(&self) -> EngineResult<()> {
+        if self.index_enabled() && self.storage_generation.is_none() {
+            return Err(EngineError::invalid_argument(
+                "enabled workspace requires storageGeneration",
+            ));
         }
         Ok(())
     }
 
     pub(crate) fn source_path(&self, relative: &SourcePath) -> PathBuf {
-        self.root.join(relative)
+        self.layout.source_root().join(relative)
     }
 
     pub(crate) fn index_enabled(&self) -> bool {
         matches!(self.index, IndexState::Enabled(_))
+    }
+}
+
+fn validate_generation(generation: &str) -> EngineResult<()> {
+    uuid::Uuid::parse_str(generation)
+        .map(|_| ())
+        .map_err(|_| EngineError::invalid_argument("storageGeneration must be a UUID"))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceLayout {
+    /// Source tree root for scanning and relative file paths.
+    source_root: PathBuf,
+    /// Directory containing workspace data.
+    storage_dir: PathBuf,
+    /// Saved workspace settings and index metadata.
+    manifest_path: PathBuf,
+    /// Currently published index.
+    index_dir: PathBuf,
+    /// Staging and recovery data for index builds.
+    temp_dir: PathBuf,
+    /// Build state used to recover interrupted publication.
+    build_record_path: PathBuf,
+    /// Manifest prepared for the new index.
+    staged_manifest_path: PathBuf,
+    /// Index being built before publication.
+    staged_index_dir: PathBuf,
+    /// Previous index kept for rollback.
+    backup_index_dir: PathBuf,
+    /// Lock files coordinating index access.
+    locks_dir: PathBuf,
+    /// Coordinates shared reads and exclusive writes.
+    workspace_lock_path: PathBuf,
+    /// Blocks new readers while writers are waiting or active.
+    write_intent_lock_path: PathBuf,
+    /// Ensures cached index handles are closed before writes.
+    read_cache_lock_path: PathBuf,
+    /// Encryption key for saved model API keys.
+    credentials_key_path: PathBuf,
+    /// Saved remote embedding authorization grants.
+    authorization_path: PathBuf,
+    /// Serializes updates to authorization grants.
+    authorization_lock_path: PathBuf,
+}
+
+impl WorkspaceLayout {
+    #[allow(clippy::unnecessary_debug_formatting)] // Keep control characters in paths escaped.
+    pub(crate) fn new(source_root: PathBuf) -> EngineResult<Self> {
+        if !source_root.is_absolute() {
+            return Err(EngineError::invalid_argument(format!(
+                "workspace source root {source_root:?} must be an absolute path",
+            )));
+        }
+        let storage_dir = source_root.join(".zvec-grep");
+        directory_exists(&storage_dir)?;
+        let temp_dir = storage_dir.join("temp");
+        let locks_dir = storage_dir.join("locks");
+        Ok(Self {
+            source_root,
+            manifest_path: storage_dir.join("manifest.json"),
+            index_dir: storage_dir.join("index"),
+            build_record_path: temp_dir.join("build.json"),
+            staged_manifest_path: temp_dir.join("manifest.json"),
+            staged_index_dir: temp_dir.join("new"),
+            backup_index_dir: temp_dir.join("old"),
+            workspace_lock_path: locks_dir.join("home"),
+            write_intent_lock_path: locks_dir.join("write-intent"),
+            read_cache_lock_path: locks_dir.join("read-cache"),
+            credentials_key_path: storage_dir.join("credentials.key"),
+            authorization_path: storage_dir.join("authorization.json"),
+            authorization_lock_path: storage_dir.join("authorization.lock"),
+            storage_dir,
+            temp_dir,
+            locks_dir,
+        })
+    }
+
+    pub(crate) fn source_root(&self) -> &Path {
+        &self.source_root
+    }
+
+    pub(crate) fn storage_dir(&self) -> &Path {
+        &self.storage_dir
+    }
+
+    pub(crate) fn manifest_path(&self) -> &Path {
+        &self.manifest_path
+    }
+
+    pub(crate) fn index_dir(&self) -> &Path {
+        &self.index_dir
+    }
+
+    pub(crate) fn temp_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+
+    pub(crate) fn build_record_path(&self) -> &Path {
+        &self.build_record_path
+    }
+
+    pub(crate) fn staged_manifest_path(&self) -> &Path {
+        &self.staged_manifest_path
+    }
+
+    pub(crate) fn staged_index_dir(&self) -> &Path {
+        &self.staged_index_dir
+    }
+
+    pub(crate) fn backup_index_dir(&self) -> &Path {
+        &self.backup_index_dir
+    }
+
+    pub(crate) fn locks_dir(&self) -> &Path {
+        &self.locks_dir
+    }
+
+    pub(crate) fn workspace_lock_path(&self) -> &Path {
+        &self.workspace_lock_path
+    }
+
+    pub(crate) fn write_intent_lock_path(&self) -> &Path {
+        &self.write_intent_lock_path
+    }
+
+    pub(crate) fn read_cache_lock_path(&self) -> &Path {
+        &self.read_cache_lock_path
+    }
+
+    pub(crate) fn credentials_key_path(&self) -> &Path {
+        &self.credentials_key_path
+    }
+
+    pub(crate) fn authorization_path(&self) -> &Path {
+        &self.authorization_path
+    }
+
+    pub(crate) fn authorization_lock_path(&self) -> &Path {
+        &self.authorization_lock_path
+    }
+
+    pub(crate) fn has_manifest(&self) -> EngineResult<bool> {
+        file_exists(self.manifest_path())
+    }
+
+    pub(crate) fn has_build_record(&self) -> EngineResult<bool> {
+        Ok(directory_exists(self.temp_dir())? && file_exists(self.build_record_path())?)
+    }
+
+    pub(crate) fn has_index_data(&self) -> EngineResult<bool> {
+        let mut found = file_exists(self.manifest_path())?;
+        found |= directory_exists(self.index_dir())?;
+        if directory_exists(self.temp_dir())? {
+            for path in [self.build_record_path(), self.staged_manifest_path()] {
+                found |= file_exists(path)?;
+            }
+            for path in [self.staged_index_dir(), self.backup_index_dir()] {
+                found |= directory_exists(path)?;
+            }
+        }
+        Ok(found)
     }
 }
 

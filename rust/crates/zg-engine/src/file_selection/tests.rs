@@ -609,3 +609,37 @@ fn nested_ignore_symlinks_are_controls_without_following_source_symlinks() {
             .expect("included")
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixed_index_and_its_symlink_aliases_are_never_source_files() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    write(root, "source.txt", "source");
+    write(root, ".zvec-grep/index/stored.txt", "index data");
+    write(root, ".zvec-grep/temp/new/staged.txt", "staged data");
+    std::os::unix::fs::symlink(root.join(".zvec-grep"), root.join("data-alias"))
+        .expect("index alias");
+    std::os::unix::fs::symlink(
+        root.join(".zvec-grep/index/stored.txt"),
+        root.join("file-alias.txt"),
+    )
+    .expect("index file alias");
+    let rules = ScanRulesUpdate {
+        include_hidden: Some(true),
+        follow_symlinks: Some(true),
+        use_default_ignores: Some(false),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    assert_eq!(
+        scan(root, &[], &rules, vec![]).await,
+        [PathBuf::from("source.txt")]
+    );
+    assert!(
+        scan(root, &[], &rules, vec![root.join("data-alias")])
+            .await
+            .is_empty()
+    );
+}

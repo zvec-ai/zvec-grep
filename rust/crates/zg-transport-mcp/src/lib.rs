@@ -2517,7 +2517,7 @@ mod tests {
             let root = test_root();
             let reply = super::InfoResult {
                 home: root.join(".zvec-grep"),
-                index_path: root.join(".zvec-grep/storage"),
+                index_path: root.join(".zvec-grep/index"),
                 root,
                 indexed: false,
                 compatibility: super::IndexCompatibility::RebuildRequired {
@@ -2560,7 +2560,7 @@ mod tests {
         let root = test_root();
         let reply = super::InfoResult {
             home: root.join(".zvec-grep"),
-            index_path: root.join(".zvec-grep/storage"),
+            index_path: root.join(".zvec-grep/index"),
             root: root.clone(),
             indexed: true,
             compatibility: super::IndexCompatibility::Compatible { version: 2 },

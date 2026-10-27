@@ -29,6 +29,7 @@ const IGNORE_NAMES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
 #[derive(Debug)]
 pub(crate) struct ScanPolicy {
     root: PathBuf,
+    index_path: PathBuf,
     options: ScanRules,
     ignore_files: Vec<PathBuf>,
     matcher: GlobMatcher,
@@ -81,6 +82,8 @@ impl ScanPolicy {
         let control_paths = control_paths(root, options.use_default_ignores(), &ignore_files);
         let policy = Self {
             root: root.to_path_buf(),
+            index_path: std::fs::canonicalize(root.join(".zvec-grep"))
+                .unwrap_or_else(|_| root.join(".zvec-grep")),
             options: options.clone(),
             ignore_files,
             matcher,
@@ -105,6 +108,12 @@ impl ScanPolicy {
     }
 
     fn selected(&self, path: &Path, directory: bool) -> Result<bool, HostError> {
+        if path.starts_with(&self.index_path)
+            || (self.options.follow_symlinks()
+                && std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(&self.index_path)))
+        {
+            return Ok(false);
+        }
         let Ok(relative) = path.strip_prefix(&self.root) else {
             return Ok(false);
         };
