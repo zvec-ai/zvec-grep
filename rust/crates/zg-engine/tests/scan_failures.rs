@@ -175,3 +175,80 @@ async fn inaccessible_sources_allow_stored_queries_and_exclusion_updates()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn excluded_symlink_loops_allow_indexing_status_and_refresh()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    fs::write(root.join("visible.txt"), "Orchard apples in the garden.")?;
+    std::os::unix::fs::symlink("private", root.join("private"))?;
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    let engine = ZvecGrep::new();
+    let indexed = engine
+        .index(IndexOptions {
+            scan: ScanRulesUpdate {
+                globs: Some(vec!["!private".into()]),
+                follow_symlinks: Some(true),
+                ..ScanRulesUpdate::default()
+            },
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+    assert!(engine.info(info_options(root)).await?.status.is_some());
+
+    fs::write(
+        root.join("visible.txt"),
+        "Orchard pears in the updated garden.",
+    )?;
+    let updated = engine.index(index_options(root)).await?;
+    assert_eq!((updated.files_modified, updated.files_failed), (1, 0));
+    let result = engine
+        .context(ContextOptions {
+            root: Some(root.to_path_buf()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "pears".into(),
+            }],
+            auto_update: true,
+            allow_remote: true,
+            ..ContextOptions::default()
+        })
+        .await?;
+    assert_eq!(
+        result
+            .items
+            .into_iter()
+            .map(|item| item.relative_path)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([PathBuf::from("visible.txt")])
+    );
+
+    let error = engine
+        .index(IndexOptions {
+            scan: ScanRulesUpdate {
+                globs: Some(Vec::new()),
+                ..ScanRulesUpdate::default()
+            },
+            ..index_options(root)
+        })
+        .await
+        .expect_err("selected symlink loops must still fail the scan");
+    assert!(error.to_string().contains("inspect link target"), "{error}");
+    assert!(error.to_string().contains("private"), "{error}");
+    let info = engine.info(info_options(root)).await?;
+    assert_eq!(
+        info.workspace_index.expect("workspace").scan.globs(),
+        &["!private".into()]
+    );
+    engine.close();
+    let records = native_file_records(&info.index_path)?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["relative_path"]["components"],
+        serde_json::json!(["visible.txt"])
+    );
+    Ok(())
+}

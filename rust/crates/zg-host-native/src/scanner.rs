@@ -392,6 +392,11 @@ fn walk(
             if !root.follow {
                 continue;
             }
+            if !root.policy.includes_file(&absolute_path)?
+                && !root.policy.can_descend(&absolute_path)?
+            {
+                continue;
+            }
             match fs::metadata(&absolute_path) {
                 Ok(metadata) => (metadata.is_dir(), metadata.is_file()),
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,

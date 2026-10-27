@@ -259,6 +259,66 @@ async fn scanner_reports_unreadable_subdirectories_instead_of_a_partial_snapshot
 
 #[cfg(unix)]
 #[tokio::test]
+async fn scanner_skips_excluded_link_targets_but_reports_selected_targets() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let link = root.join("private");
+    fs::write(root.join("source.rs"), "fn source() {}")?;
+    std::os::unix::fs::symlink("private", &link)?;
+    let policy = Arc::new(TestPolicy {
+        blocked_directory: link.clone(),
+        excluded_file: link,
+        inspected_files: Mutex::new(Vec::new()),
+    });
+    let scanner = NativeScanner::default();
+    let mut excluded = RootSpec::new(root.to_path_buf(), policy);
+    excluded.follow = true;
+    let snapshot = discover(&scanner, excluded).await?;
+    let expected = BTreeSet::from([PathBuf::from("source.rs")]);
+    assert_eq!(relative_paths(&snapshot.files), expected);
+
+    let mut selected = root_spec(root);
+    selected.follow = true;
+    let error = discover(&scanner, selected)
+        .await
+        .expect_err("selected self-referential links must fail discovery");
+    assert!(error.to_string().contains("inspect link target"));
+    assert!(error.to_string().contains("private"));
+
+    let snapshot = discover(&scanner, root_spec(root)).await?;
+    assert_eq!(relative_paths(&snapshot.files), expected);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scanner_resolves_links_selected_by_either_file_or_directory_policy() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let link = root.join("private");
+    std::os::unix::fs::symlink("private", &link)?;
+    for (excluded_file, blocked_directory) in [
+        (link.clone(), root.join("other")),
+        (root.join("other"), link),
+    ] {
+        let policy = Arc::new(TestPolicy {
+            blocked_directory,
+            excluded_file,
+            inspected_files: Mutex::new(Vec::new()),
+        });
+        let mut selected = RootSpec::new(root.to_path_buf(), policy);
+        selected.follow = true;
+        let error = discover(&NativeScanner::default(), selected)
+            .await
+            .expect_err("a link selected by either policy must still be inspected");
+        assert!(error.to_string().contains("inspect link target"));
+        assert!(error.to_string().contains("private"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn scanner_follows_links_without_visiting_the_same_directory_twice() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();

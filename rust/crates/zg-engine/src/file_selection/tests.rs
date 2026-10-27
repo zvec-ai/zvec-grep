@@ -498,6 +498,22 @@ fn explicit_ignore_files_are_required_even_without_files_or_with_whitelist_globs
 }
 
 #[test]
+fn explicit_ignore_files_below_regular_files_are_rejected() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    write(root, "source.rs", "source");
+    let rules = ScanRulesUpdate {
+        ignore_files: Some(vec![root.join("source.rs/required.ignore")]),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    let error = make_policy(root, &[], &rules)
+        .expect_err("an explicit ignore file must not be treated as absent directory rules");
+    assert!(error.message().contains("required.ignore"));
+}
+
+#[test]
 fn external_ignore_aliases_match_canonical_change_events() {
     let temporary = tempfile::tempdir().expect("fixture");
     let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
@@ -607,6 +623,35 @@ fn nested_ignore_symlinks_are_controls_without_following_source_symlinks() {
         policy
             .can_descend(&root.join("src/blocked"))
             .expect("included")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn format_filtered_file_symlinks_do_not_fail_directory_policy_checks() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path().join("workspace");
+    let linked = temporary.path().join("linked");
+    write(&root, "source.rs", "source");
+    write(&linked, "child.rs", "linked source");
+    write(&linked, "ignored.rs", "ignored source");
+    write(&linked, ".gitignore", "ignored.rs\n");
+    write(&linked, "nested/.git/config", "nested repository");
+    write(&linked, "nested/hidden.rs", "nested source");
+    std::os::unix::fs::symlink("source.rs", root.join("alias.txt")).expect("excluded file alias");
+    std::os::unix::fs::symlink("source.rs", root.join("included.rs")).expect("included file alias");
+    std::os::unix::fs::symlink(&linked, root.join("linked.txt")).expect("directory alias");
+    let rules = ScanRulesUpdate {
+        included_formats: Some(vec![FileFormat::Rust]),
+        follow_symlinks: Some(true),
+        nested_git: Some(false),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    assert_eq!(
+        scan(&root, &[], &rules, vec![]).await,
+        ["included.rs", "linked.txt/child.rs", "source.rs"].map(PathBuf::from)
     );
 }
 

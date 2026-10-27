@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::Read,
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -219,7 +219,12 @@ impl ScanPolicy {
         let marker = directory.join(".git");
         let nested = match std::fs::symlink_metadata(&marker) {
             Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            // Link selection may test the directory policy before knowing the target type.
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                false
+            }
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",
@@ -314,7 +319,9 @@ impl ScanPolicy {
                         })?;
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => {}
+            Err(error)
+                if !explicit
+                    && matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {}
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",

@@ -293,6 +293,10 @@ async fn watch_loop(mut state: WatchLoop) {
         .resume_check_interval
         .map(|interval| Instant::now() + interval);
     let mut last_resume_check = Instant::now();
+    let mut alias_deadline = state
+        .config
+        .poll_interval
+        .map(|interval| Instant::now() + interval);
     let initialization_failed = state.watcher.is_none();
     let mut retry_deadline = initialization_failed.then(|| Instant::now() + retry_delay(1));
     let mut stable_deadline =
@@ -350,6 +354,28 @@ async fn watch_loop(mut state: WatchLoop) {
         let mut refresh_registration = false;
         tokio::select! {
             () = state.close.cancelled() => break,
+            () = sleep_until_option(alias_deadline) => {
+                alias_deadline = state.config.poll_interval.map(|interval| Instant::now() + interval);
+                if retry_deadline.is_none()
+                    && let Some(watcher) = &state.watcher {
+                    let aliases = watcher.aliases.clone();
+                    let paths = tokio::task::spawn_blocking(move || aliases.changed_paths()).await;
+                    if let Ok(paths) = paths
+                        && !paths.is_empty() {
+                        // notify polls symlink mtimes at second precision. Resolve admitted
+                        // aliases explicitly so retargeting cannot leave their old watches live.
+                        // Route changes through normal policy/control-file handling.
+                        let mut event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)));
+                        event.paths = paths;
+                        if state.raw_sender.try_send(Ok(event)).is_err() {
+                            state.overflowed.store(true, Ordering::Release);
+                            state.overflow_notify.notify_one();
+                        }
+                        changes.require_full_rescan();
+                        schedule_flush(&state.config, &mut debounce_deadline, &mut max_wait_deadline);
+                    }
+                }
+            }
             Some(request) = state.flush_receiver.recv(), if pending_flush.is_none() => {
                 pending_flush = Some(request.acknowledge);
                 if !request.reconcile {
@@ -583,17 +609,16 @@ fn create_watcher(
                 NotifyConfig::default()
                     .with_poll_interval(interval)
                     .with_compare_contents(true)
-                    .with_follow_symlinks(root.follow),
+                    // Selection and alias traversal belong to our watch plan. The
+                    // polling backend otherwise follows even excluded child links.
+                    .with_follow_symlinks(false),
             )
             .map_err(watcher_error)?,
         )
     } else {
         WatchBackend::Recommended(
-            RecommendedWatcher::new(
-                handler,
-                NotifyConfig::default().with_follow_symlinks(root.follow),
-            )
-            .map_err(watcher_error)?,
+            RecommendedWatcher::new(handler, NotifyConfig::default().with_follow_symlinks(false))
+                .map_err(watcher_error)?,
         )
     };
     let mut watcher = NativeWatcher {
@@ -615,13 +640,30 @@ struct NativeWatcher {
     aliases: WatchAliases,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct WatchAliases {
     directories: BTreeMap<PathBuf, PathBuf>,
     files: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
 impl WatchAliases {
+    fn changed_paths(&self) -> Vec<PathBuf> {
+        self.directories
+            .iter()
+            .chain(
+                self.files
+                    .iter()
+                    .flat_map(|(target, aliases)| aliases.iter().map(move |alias| (target, alias))),
+            )
+            .filter(|(target, alias)| {
+                resolve_watch_alias(alias).ok().flatten().as_ref() != Some(*target)
+            })
+            .map(|(_, alias)| alias.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     fn translated_events(&self, event: &Event) -> Vec<Event> {
         if event.paths.is_empty() {
             return vec![event.clone()];
@@ -805,7 +847,8 @@ fn watch_directories(
     // Watching the parent preserves root replacement and recreation detection.
     add_existing_parent(&root.path, &mut plan.directories)?;
     for control_path in root.policy.control_paths() {
-        add_existing_parent(&control_path, &mut plan.directories)?;
+        plan.directories
+            .extend(control_watch_directories(&control_path, &mut plan.aliases)?);
     }
     for path in &plan.directories {
         register(path)?;
@@ -822,15 +865,34 @@ fn watch_directories(
     }
     // Traversal may discover additional rule files (including symlink targets).
     for control in root.policy.control_paths() {
-        let mut parents = BTreeSet::new();
-        add_existing_parent(&control, &mut parents)?;
-        for parent in parents {
+        for parent in control_watch_directories(&control, &mut plan.aliases)? {
             if plan.directories.insert(parent.clone()) {
                 register(&parent)?;
             }
         }
     }
     Ok(plan)
+}
+
+fn control_watch_directories(
+    control: &Path,
+    aliases: &mut WatchAliases,
+) -> Result<BTreeSet<PathBuf>, HostError> {
+    let mut directories = BTreeSet::new();
+    add_existing_parent(control, &mut directories)?;
+    // Some controls (such as .git markers) only require observing the link's
+    // existence. Their policy decides whether an unreadable target is an error.
+    if let Some(target) = resolve_watch_alias(control).ok().flatten()
+        && target != control
+    {
+        add_existing_parent(&target, &mut directories)?;
+        aliases
+            .files
+            .entry(target)
+            .or_default()
+            .insert(control.to_path_buf());
+    }
+    Ok(directories)
 }
 
 fn add_existing_parent(path: &Path, directories: &mut BTreeSet<PathBuf>) -> Result<(), HostError> {
@@ -902,6 +964,11 @@ fn collect_watch_directories(
         if file_type.is_dir() && descend {
             collect_watch_directories(root, &entry.path(), depth + 1, visited, plan, register)?;
         } else if root.follow && file_type.is_symlink() {
+            if !root.policy.includes_file(&entry.path())?
+                && !root.policy.can_descend(&entry.path())?
+            {
+                continue;
+            }
             if watch_path_result(
                 &entry.path(),
                 "inspect link target",
@@ -936,12 +1003,8 @@ fn add_file_link(
     if !root.policy.includes_file(alias)? && !root.policy.can_descend(alias)? {
         return Ok(());
     }
-    let Some(link) = watch_path_result(alias, "read link", fs::read_link(alias))? else {
-        return Ok(());
-    };
-    let target = alias.parent().unwrap_or(&root.path).join(link);
     // Resolve as much as exists, preserving missing target components for recreation.
-    let Some(target) = resolve_missing_path(&target)? else {
+    let Some(target) = resolve_watch_alias(alias)? else {
         return Ok(());
     };
     plan.aliases
@@ -957,6 +1020,18 @@ fn add_file_link(
         }
     }
     Ok(())
+}
+
+fn resolve_watch_alias(alias: &Path) -> Result<Option<PathBuf>, HostError> {
+    if watch_path_result(alias, "inspect alias", fs::symlink_metadata(alias))?
+        .is_some_and(|metadata| metadata.is_symlink())
+    {
+        let Some(link) = watch_path_result(alias, "read link", fs::read_link(alias))? else {
+            return Ok(None);
+        };
+        return resolve_missing_path(&alias.parent().unwrap_or(Path::new("")).join(link));
+    }
+    resolve_missing_path(alias)
 }
 
 fn resolve_missing_path(path: &Path) -> Result<Option<PathBuf>, HostError> {
@@ -1055,6 +1130,10 @@ fn normalize_event(
             if !root.follow {
                 continue;
             }
+            if !root.policy.includes_file(path)? && !root.policy.can_descend(path)? {
+                continue;
+            }
+            normalized.refresh_registration = true;
             let Some(metadata) =
                 watch_path_result(path, "inspect changed link target", fs::metadata(path))?
             else {
@@ -1098,10 +1177,11 @@ fn normalize_policy_change(
     control_paths: &[PathBuf],
 ) -> Result<Option<WorkspaceChange>, HostError> {
     if topology_event
-        && watch_path_result(path, "inspect policy path", fs::metadata(path))?
-            .is_some_and(|metadata| metadata.is_dir())
+        && watch_path_result(path, "inspect policy path", fs::symlink_metadata(path))?
+            .is_some_and(|metadata| metadata.is_dir() || metadata.is_symlink())
     {
-        // A replacement directory must not inherit its predecessor's cached rules.
+        // Replaced directories and links must not inherit cached rules. Inspect
+        // the entry itself so excluded or unfollowed links need no target access.
         root.policy.invalidate()?;
     }
     if topology_event
@@ -1305,6 +1385,129 @@ mod tests {
             .position(|path| path == &root.join("selected/deeper"))
             .expect("child watch");
         assert!(parent < child, "register before visiting children");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excluded_symlink_loops_do_not_block_registration_or_event_normalization() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let root = temporary.path().canonicalize().expect("root");
+        let excluded = root.join("blocked");
+        std::os::unix::fs::symlink("blocked", &excluded).expect("excluded loop");
+        let mut spec = test_root(&root, root.join(".rules"));
+        spec.follow = true;
+        let plan = watch_directories(&spec, false, &mut |_| Ok(())).expect("watch plan");
+        assert!(plan.directories.contains(&root));
+        assert!(!plan.directories.contains(&excluded));
+        for kind in [
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+        ] {
+            let event = Event::new(kind).add_path(excluded.clone());
+            assert!(
+                normalize_event(&spec, false, &event)
+                    .expect("excluded link event")
+                    .changes
+                    .is_empty()
+            );
+        }
+        let removed = Event::new(EventKind::Remove(RemoveKind::File)).add_path(excluded);
+        assert_eq!(
+            normalize_event(&spec, false, &removed)
+                .expect("removal still clears previously indexed entries")
+                .changes,
+            vec![WorkspaceChange::Delete("blocked".into())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_symlink_loops_fail_only_when_following_is_enabled() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let root = temporary.path().canonicalize().expect("root");
+        let link = root.join("selected");
+        std::os::unix::fs::symlink("selected", &link).expect("selected loop");
+        let mut spec = test_root(&root, root.join(".rules"));
+        let event = Event::new(EventKind::Create(CreateKind::Any)).add_path(link);
+        watch_directories(&spec, false, &mut |_| Ok(())).expect("unfollowed loop");
+        assert!(
+            normalize_event(&spec, false, &event)
+                .expect("unfollowed topology event")
+                .changes
+                .is_empty()
+        );
+        spec.follow = true;
+        let error = watch_directories(&spec, false, &mut |_| Ok(()))
+            .err()
+            .expect("selected loop");
+        assert!(error.to_string().contains("inspect link target"));
+        let error = normalize_event(&spec, false, &event)
+            .err()
+            .expect("selected link event");
+        assert!(error.to_string().contains("inspect changed link target"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_control_events_precede_ordinary_exclusion_rules() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let root = temporary.path().canonicalize().expect("root");
+        let control = root.join("blocked");
+        std::os::unix::fs::symlink("blocked", &control).expect("control loop");
+        let mut spec = test_root(&root, control.clone());
+        spec.follow = true;
+        let event = Event::new(EventKind::Create(CreateKind::Any)).add_path(control);
+        let normalized = normalize_event(&spec, false, &event).expect("control event");
+        assert!(normalized.refresh_registration);
+        assert_eq!(
+            normalized.changes,
+            vec![WorkspaceChange::RescanDirectory(PathBuf::new())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_snapshots_detect_intermediate_retargets_without_timestamp_changes() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let parent = temporary.path().canonicalize().expect("parent");
+        let root = parent.join("workspace");
+        fs::create_dir(&root).expect("workspace");
+        let first = parent.join("first.rs");
+        let second = parent.join("second.rs");
+        fs::write(&first, "first").expect("first target");
+        fs::write(&second, "second").expect("second target");
+        let intermediate = parent.join("intermediate");
+        let alias = root.join("alias.rs");
+        std::os::unix::fs::symlink(&first, &intermediate).expect("intermediate link");
+        std::os::unix::fs::symlink(&intermediate, &alias).expect("source alias");
+        let mut spec = test_root(&root, root.join(".rules"));
+        spec.follow = true;
+        let plan = watch_directories(&spec, false, &mut |_| Ok(())).expect("watch plan");
+        assert!(plan.aliases.changed_paths().is_empty());
+        let alias_modified = fs::symlink_metadata(&alias)
+            .expect("alias metadata")
+            .modified()
+            .expect("alias time");
+        fs::remove_file(&intermediate).expect("remove old link");
+        std::os::unix::fs::symlink(&second, &intermediate).expect("retarget link");
+        assert_eq!(
+            fs::symlink_metadata(&alias)
+                .expect("alias metadata")
+                .modified()
+                .expect("alias time"),
+            alias_modified
+        );
+        assert_eq!(plan.aliases.changed_paths(), vec![alias.clone()]);
+        let event = Event::new(EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::WriteTime,
+        )))
+        .add_path(alias);
+        assert!(
+            normalize_event(&spec, false, &event)
+                .expect("retarget event")
+                .refresh_registration
+        );
     }
 
     #[cfg(unix)]
