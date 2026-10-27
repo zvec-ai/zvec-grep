@@ -135,15 +135,6 @@ impl WorkspaceIndexService {
                     error.with_help("Rebuild the index with `zg --index --rebuild`.")
                 })?;
         }
-        let generation = if rebuilding {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            existing
-                .as_ref()
-                .and_then(Workspace::storage_generation)
-                .expect("existing index generation")
-                .to_owned()
-        };
         let mut workspace = index_workspace_state(
             &layout,
             existing.as_ref(),
@@ -151,7 +142,7 @@ impl WorkspaceIndexService {
             &acquired,
             &descriptor,
             scan,
-            generation,
+            rebuilding,
         )?;
         if rebuilding {
             options.changes.clear();
@@ -398,8 +389,16 @@ fn index_workspace_state(
     models: &[ModelRuntimeLease],
     descriptor: &IndexDescriptor,
     scan: crate::domain::ScanRules,
-    generation: String,
+    rebuilding: bool,
 ) -> Result<Workspace, EngineError> {
+    let generation = if rebuilding {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        active
+            .and_then(Workspace::storage_generation)
+            .expect("existing index generation")
+            .to_owned()
+    };
     let now = epoch_millis();
     let configs = models
         .iter()
@@ -822,7 +821,7 @@ mod tests {
             &acquired.runtimes,
             &acquired.descriptor,
             crate::domain::ScanRules::default(),
-            uuid::Uuid::new_v4().to_string(),
+            true,
         )
         .expect("workspace");
         super::write_workspace_manifest(layout.manifest_path(), &workspace).expect("save");

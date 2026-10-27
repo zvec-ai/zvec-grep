@@ -44,16 +44,19 @@ fn paths(names: &[&str]) -> BTreeSet<PathBuf> {
     names.iter().map(PathBuf::from).collect()
 }
 
+fn stored_file_path(file: &Value) -> PathBuf {
+    file["relative_path"]["components"]
+        .as_array()
+        .expect("stored path components")
+        .iter()
+        .map(|component| component.as_str().expect("UTF-8 fixture path component"))
+        .collect()
+}
+
 fn stored_paths(index_path: &Path) -> TestResult<BTreeSet<PathBuf>> {
     Ok(native_file_records(index_path)?
         .iter()
-        .map(|file| {
-            PathBuf::from(
-                file["relative_path"]["value"]
-                    .as_str()
-                    .expect("UTF-8 fixture path"),
-            )
-        })
+        .map(stored_file_path)
         .collect())
 }
 
@@ -597,7 +600,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     let files = native_file_records(&info.index_path)?;
     let script = files
         .iter()
-        .find(|file| file["relative_path"]["value"] == "script")
+        .find(|file| stored_file_path(file) == Path::new("script"))
         .expect("stored script");
     assert!(script.get("formats").is_none());
 
@@ -618,7 +621,7 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
     assert!(
         files
             .iter()
-            .all(|file| file["relative_path"]["value"] != "script")
+            .all(|file| stored_file_path(file) != Path::new("script"))
     );
     assert_index_and_queries(
         &engine,

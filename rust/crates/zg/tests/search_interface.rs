@@ -183,7 +183,14 @@ fn explicit_routes_continue_to_indexed_search() {
         assert!(!output.status.success(), "{args:?}: {stdout}");
         assert!(!stdout.contains("auth.ts"), "{stdout}");
         assert!(!stderr.contains("No index found"), "{stderr}");
-        assert!(stderr.contains("ZG.ENGINE.NOT_FOUND"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("ZG.ENGINE.UNSUPPORTED"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("workspace indexing is disabled"),
+            "{args:?}: {stderr}"
+        );
         assert!(
             !stderr.contains("automatically performing path lookup"),
             "{stderr}"

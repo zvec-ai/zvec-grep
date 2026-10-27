@@ -1408,6 +1408,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         "directories".to_owned(),
         "files".to_owned(),
         "entities".to_owned(),
+        "graph".to_owned(),
     ];
     expected.extend(
         multi_model_schema()
@@ -1417,7 +1418,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     expected.sort();
     assert_eq!(
         collections, expected,
-        "three canonical collections plus one per model"
+        "three canonical collections, one per model, and the graph directory"
     );
 
     let reader = open(home.path(), true);
