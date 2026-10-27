@@ -200,11 +200,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
+          LEGACY_SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.legacy_key }}
           PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_prepared_artifact discover
           --key "$RUNNER_OS-$RUNNER_ARCH-$SNAPSHOT_KEY" --source-run-id "$PREPARED_RUN_ID"
-      - name: Download a legacy preparation for verification and republication
+          --legacy-key "$RUNNER_OS-$RUNNER_ARCH-$LEGACY_SNAPSHOT_KEY"
+      - name: Download a compatible full preparation for one-time conversion
         if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'true'
         uses: actions/download-artifact@v8
         with:
@@ -215,7 +217,7 @@ jobs:
       - name: Restore prepared files with exact timestamps
         if: steps.prepared-artifact.outputs.found == 'true' && steps.prepared-artifact.outputs.legacy == 'true'
         env:
-          SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
+          SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.legacy_key }}
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
           --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
@@ -261,17 +263,19 @@ jobs:
         if: steps.prepared-artifact.outputs.found != 'true'
         id: prepare
         run: uv run --project benchmarks/browse-comp-plus --frozen zg-bench prepare --yes
-      - name: Pack a credential-scanned snapshot with fast parallel compression
-        if: steps.prepared-artifact.outputs.found != 'true'
+      - name: Pack a credential-scanned runtime snapshot with one corpus copy
+        if: steps.prepared-artifact.outputs.found != 'true' || steps.prepared-artifact.outputs.legacy == 'true'
         env:
           SNAPSHOT_KEY: ${{ steps.snapshot-key.outputs.key }}
           OPENAI_API_KEY: ${{ secrets.QWEN_API_KEY || secrets.GLM_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: >-
-          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot pack
-          --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
-      # A complete snapshot exceeds the repository's 10 GB Actions cache quota.
-      # Keep it as an artifact and reuse it directly across runs and case jobs.
+        run: |
+          # A verified full archive is no longer needed; reclaim disk before conversion.
+          rm -f -- "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst"
+          uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot pack \
+            --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
+      # Runtime artifacts omit Parquet and the duplicate baseline corpus.
+      # Keep preparation snapshots separate from the source/candidate cache quota.
       - name: Publish a reusable preparation artifact
         if: steps.prepared-artifact.outputs.found != 'true' || steps.prepared-artifact.outputs.legacy == 'true'
         uses: actions/upload-artifact@v7
@@ -386,6 +390,29 @@ jobs:
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_snapshot unpack
           --archive "$RUNNER_TEMP/browse-comp-plus-snapshot/prepared.tar.zst" --key "$SNAPSHOT_KEY"
+      - name: Find earlier evidence for this case in the same workflow run
+        if: github.run_attempt > 1
+        id: previous-evidence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const prefix = `browse-comp-plus-case-${process.env.BROWSE_CASE}-${context.runId}-`;
+            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: context.runId, per_page: 100,
+            });
+            const prior = artifacts.filter(artifact => {
+              if (artifact.expired || !artifact.name.startsWith(prefix)) return false;
+              const suffix = artifact.name.slice(prefix.length);
+              return /^[1-9][0-9]*$/.test(suffix) && Number(suffix) < attempt;
+            });
+            core.setOutput('found', prior.length > 0 ? 'true' : 'false');
+      - name: Download earlier case evidence to reuse completed trials
+        if: steps.previous-evidence.outputs.found == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: browse-comp-plus-case-${{ matrix.case }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/browse-comp-plus-previous
       - name: Run this case's paired trials in the planned order
         id: run
         env:
@@ -393,6 +420,7 @@ jobs:
         run: >-
           uv run --project benchmarks/browse-comp-plus --frozen python -m zg_bench.ci_parallel run
           --plan "$RUNNER_TEMP/browse-comp-plus-plan/plan.json" --case "$BROWSE_CASE"
+          --previous-evidence "$RUNNER_TEMP/browse-comp-plus-previous"
       - name: Judge completed pairs
         if: ${{ !cancelled() && steps.run.outcome != 'skipped' && steps.restore.outcome == 'success' }}
         env: *model-env

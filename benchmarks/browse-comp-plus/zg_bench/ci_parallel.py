@@ -138,7 +138,9 @@ def validate_plan(path: Path, artifacts: Path) -> dict:
     return plan
 
 
-def run_case(artifacts: Path, plan_path: Path, case: str) -> int:
+def run_case(
+    artifacts: Path, plan_path: Path, case: str, previous_evidence: Path | None = None
+) -> int:
     plan = validate_plan(plan_path, artifacts)
     if case not in plan["query_ids"]:
         raise ValueError("case is not part of the CI plan")
@@ -159,8 +161,21 @@ def run_case(artifacts: Path, plan_path: Path, case: str) -> int:
         query_id: {int(i): tuple(order) for i, order in trials.items()}
         for query_id, trials in plan["profile_orders"].items()
     }
+    run_id = None
+    if previous_evidence is not None:
+        from .ci_resume import restore_case
+
+        run_id = restore_case(
+            artifacts, previous_evidence, plan_path, plan, case, config
+        )
     root = run_benchmark(
-        config, artifacts, suite=plan["suite"], case_id=case, planned_orders=orders
+        config,
+        artifacts,
+        suite=plan["suite"],
+        case_id=case,
+        planned_orders=orders,
+        run_id=run_id,
+        fresh_profiles=run_id is not None,
     )
     return 0 if read_json(root / "run.json")["status"] == "completed" else 1
 
@@ -175,6 +190,9 @@ def select_shards(shards: Path, plan_path: Path, plan: dict) -> list[Path]:
             for key in ("candidate_commit", "harness_commit")
         ) or identity.get("plan_sha256") != sha256_file(plan_path):
             continue
+        from .ci_resume import verify_evidence
+
+        verify_evidence(evidence)
         case = identity.get("case_id")
         if case not in plan["query_ids"]:
             raise ValueError("unexpected CI case")
@@ -317,7 +335,13 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
         "planned_cases": plan["query_ids"],
     }
     write_json(report / "ci-completeness.json", completeness)
-    summary["ci"] = {"execution": "parallel_cases", **completeness}
+    from .ci_resume import execution_costs
+
+    summary["ci"] = {
+        "execution": "parallel_cases",
+        **completeness,
+        "agent_attempt_costs": execution_costs(root),
+    }
     write_json(report / "summary.json", summary)
     markdown = report / "summary.md"
     status = "COMPLETE" if not errors else "INCOMPLETE"
@@ -327,7 +351,9 @@ def aggregate(artifacts: Path, plan_path: Path, shards: Path) -> Path:
         "Runtime preparation totals sum worker "
         "time, not elapsed workflow time. Index build time describes the original "
         "snapshot build. The environment table is one worker's environment; "
-        "all worker metadata is in `shards/`.\n\n"
+        "all worker metadata is in `shards/`. Agent metrics use selected completed "
+        "pairs; `ci.agent_attempt_costs` also includes failed and earlier manual "
+        "attempts, with missing usage/time explicitly marked.\n\n"
     )
     if errors:
         notes += "\n".join(f"- {error}" for error in errors) + "\n\n"
@@ -346,6 +372,7 @@ def main() -> int:
     run = sub.add_parser("run")
     run.add_argument("--plan", type=Path, required=True)
     run.add_argument("--case", required=True)
+    run.add_argument("--previous-evidence", type=Path)
     collect = sub.add_parser("aggregate")
     collect.add_argument("--plan", type=Path, required=True)
     collect.add_argument("--shards", type=Path, required=True)
@@ -357,7 +384,9 @@ def main() -> int:
         restore_queries(DEFAULT_ARTIFACTS_DIR, args.plan)
         return 0
     if args.command == "run":
-        return run_case(DEFAULT_ARTIFACTS_DIR, args.plan, args.case)
+        return run_case(
+            DEFAULT_ARTIFACTS_DIR, args.plan, args.case, args.previous_evidence
+        )
     report = aggregate(DEFAULT_ARTIFACTS_DIR, args.plan, args.shards)
     return 0 if read_json(report / "ci-completeness.json")["complete"] else 1
 

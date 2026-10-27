@@ -388,9 +388,18 @@ def _attempt_results(selected_path: Path) -> list[dict[str, Any]]:
 
 
 def _remaining_attempts(config: BenchmarkConfig, selected_path: Path) -> int:
-    failures = sum(
+    from .ci_resume import retry_start
+
+    first_attempt = retry_start(selected_path)
+    interrupted = sum(
+        not (attempt / "result.json").is_file()
+        for attempt in (selected_path.parent / "attempts").glob("attempt-*")
+        if attempt.is_dir() and int(attempt.name.removeprefix("attempt-")) >= first_attempt
+    )
+    failures = interrupted + sum(
         result.get("infrastructure_failure") is True
         for result in _attempt_results(selected_path)
+        if int(result["attempt"]) >= first_attempt
     )
     return max(0, config.run.infrastructure_retries + 1 - failures)
 
@@ -419,7 +428,13 @@ def _needs_run(config: BenchmarkConfig, path: Path) -> bool:
     if not path.is_file():
         return True
     result = read_json(path)
-    if result["status"] in {"completed", "failed"}:
+    if result["status"] == "completed":
+        return False
+    from .ci_resume import retry_start
+
+    if int(result["attempt"]) < retry_start(path):
+        return True
+    if result["status"] == "failed":
         return False
     if result["status"] != "infrastructure_failed":
         raise RuntimeError(f"unknown trial status in {path}: {result['status']}")
@@ -467,9 +482,14 @@ def _run_profile(
             trial_index=trial_index,
             path=latest_path,
         )
-        if (
-            latest["status"] in {"completed", "failed"}
-            or _remaining_attempts(config, selected_path) == 0
+        from .ci_resume import retry_start
+
+        if latest["status"] == "completed" or (
+            int(latest["attempt"]) >= retry_start(selected_path)
+            and (
+                latest["status"] == "failed"
+                or _remaining_attempts(config, selected_path) == 0
+            )
         ):
             write_json(selected_path, latest)
             return _result_from_dict(latest)
@@ -481,6 +501,16 @@ def _run_profile(
     for offset in range(_remaining_attempts(config, selected_path)):
         number = first_attempt + offset
         output = attempts_root / f"attempt-{number:03d}"
+        if os.environ.get("GITHUB_RUN_ID"):
+            write_json(
+                output / "origin.json",
+                {
+                    "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+                    "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                    "attempt": number,
+                    "started_at": utc_now(),
+                },
+            )
         try:
             final = run_attempt(
                 config,
@@ -503,12 +533,10 @@ def _run_profile(
             # Validate corpus metadata and remove all non-whitelisted files,
             # including residue left by failed or interrupted attempts.
             validate_workspace(artifacts, profile)
-        if (
-            final.status == "completed"
-            or not final.infrastructure_failure
-        ):
+        if final.status == "completed" or not final.infrastructure_failure:
             break
-    assert final is not None
+    if final is None:
+        raise RuntimeError("trial retry budget exhausted by an interrupted attempt; rerun the CI job explicitly")
     write_json(selected_path, final.to_dict())
     return final
 
@@ -527,6 +555,8 @@ def _execution_source_fingerprint() -> str:
             "process.py",
             "profiles.py",
             "runner.py",
+            "ci_resume.py",
+            "runtime_snapshot.py",
             "trace.py",
         )
     ]
@@ -798,6 +828,7 @@ def run_benchmark(
     opencode_bin: str = "opencode",
     case_id: str | None = None,
     planned_orders: dict[str, dict[int, tuple[Profile, Profile]]] | None = None,
+    fresh_profiles: bool = False,
 ) -> Path:
     model = config.run.model
     reasoning_effort = config.run.reasoning_effort
@@ -884,6 +915,15 @@ def run_benchmark(
         recorded_manifest = Path(metadata["profiles_manifest"])
         if recorded_manifest.resolve() != profiles_manifest_path.resolve():
             raise RuntimeError("run profile manifest path does not match its run")
+        if fresh_profiles:
+            # Raw artifacts deliberately exclude all homes and credentials.
+            prepare_profiles(
+                config,
+                artifacts,
+                opencode_bin=str(opencode),
+                profiles_root=profiles_root,
+                manifest_path=profiles_manifest_path,
+            )
         profile_manifest = validate_profiles(recorded_manifest)
         if metadata["profiles_fingerprint"] != profile_manifest["fingerprint"]:
             raise RuntimeError("run profile fingerprint does not match its manifest")
@@ -1046,9 +1086,7 @@ def run_benchmark(
                     artifacts,
                     restart_server=False,
                 )
-                total_preparation_wall_seconds = (
-                    time.monotonic() - preparation_started
-                )
+                total_preparation_wall_seconds = time.monotonic() - preparation_started
                 runtime_setup.update(
                     {
                         "started_at": preparation_started_at,
@@ -1126,6 +1164,9 @@ def run_benchmark(
                     flush=True,
                 )
 
+            from .ci_resume import execution_costs
+
+            metadata["agent_attempt_costs"] = execution_costs(run_root)
             metadata["finished_at"] = utc_now()
             metadata["completed_cases"] = completed_cases(run_root, query_ids)
             metadata.pop("error", None)

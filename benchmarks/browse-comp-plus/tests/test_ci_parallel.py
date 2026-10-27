@@ -21,6 +21,7 @@ from zg_bench.ci_parallel import (
     select_shards,
     validate_plan,
 )
+from zg_bench.ci_resume import seal_evidence
 from zg_bench.config import load_config
 from zg_bench.dataset import load_queries
 from zg_bench.models import PROFILES
@@ -211,6 +212,7 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                         "status": "completed",
                         "correct": True,
                         "candidate_sha256": hashlib.sha256(b"reference").hexdigest(),
+                        "case_result_sha256": sha256_file(trial_root / "result.json"),
                         "judge_prompt_sha256": evaluate.JUDGE_PROMPT_SHA256,
                         "judge_schema_sha256": evaluate.JUDGE_SCHEMA_SHA256,
                         "evaluation_source_sha256": evaluate.EVALUATION_SOURCE_SHA256,
@@ -247,9 +249,13 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                     },
                 )
         self.assertTrue(_write_pair(run, case, self.config.run.trials_per_case))
+        seal_evidence(evidence)
         return evidence, run
 
     def aggregate(self):
+        # Mutated fixtures represent newly published raw evidence.
+        for evidence in self.shards.iterdir():
+            seal_evidence(evidence)
         return aggregate(self.output, self.plan_path, self.shards)
 
     @staticmethod
@@ -257,6 +263,10 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         contents = read_json(path)
         contents.update(values)
         write_json(path, contents)
+        for parent in path.parents:
+            if (parent / "evidence-manifest.json").is_file():
+                seal_evidence(parent)
+                break
 
     def test_ci_plan_preserves_global_balancing_and_case_selection(self):
         plan = self.plan()
@@ -397,6 +407,13 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         selected = select_shards(self.shards, self.plan_path, plan)
         self.assertCountEqual(selected, [new, other])
         self.assertNotIn(old, selected)
+
+    def test_raw_integrity_is_verified_before_aggregation(self):
+        plan = self.plan()
+        _, run = self.shard("628")
+        (run / "run.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            select_shards(self.shards, self.plan_path, plan)
 
     def test_duplicate_case_attempt_is_rejected(self):
         plan = self.plan()

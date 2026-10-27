@@ -208,6 +208,20 @@ def _candidate_sha256(
     return hashlib.sha256(candidate.encode()).hexdigest()
 
 
+def _case_result_sha256(
+    run_root: Path, profile: str, query_id: str, trial_index: int
+) -> str:
+    return sha256_file(
+        run_root
+        / "cases"
+        / query_id
+        / profile
+        / "trials"
+        / f"trial-{trial_index:03d}"
+        / "result.json"
+    )
+
+
 def _completed_judgement(
     path: Path,
     *,
@@ -229,6 +243,8 @@ def _completed_judgement(
         and result.get("evaluation_source_sha256") == EVALUATION_SOURCE_SHA256
         and result.get("candidate_sha256")
         == _candidate_sha256(run_root, profile, query_id, trial_index)
+        and result.get("case_result_sha256")
+        == _case_result_sha256(run_root, profile, query_id, trial_index)
     )
 
 
@@ -559,6 +575,9 @@ def _run_judge(
         "reasoning": judgement.get("reasoning"),
         "confidence": judgement.get("confidence"),
         "candidate_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
+        "case_result_sha256": _case_result_sha256(
+            run_root, profile, query_id, trial_index
+        ),
         "judge_prompt_sha256": JUDGE_PROMPT_SHA256,
         "judge_schema_sha256": JUDGE_SCHEMA_SHA256,
         "evaluation_source_sha256": EVALUATION_SOURCE_SHA256,

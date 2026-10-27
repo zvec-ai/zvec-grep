@@ -156,9 +156,15 @@ def discover(
     branch: str,
     current_run_id: str,
     source_run_id: str = "",
+    legacy_key: str = "",
 ) -> Discovery:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", key):
         raise ArtifactDiscoveryError("invalid preparation artifact key")
+    if legacy_key and (
+        legacy_key == key
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", legacy_key)
+    ):
+        raise ArtifactDiscoveryError("invalid legacy preparation artifact key")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ArtifactDiscoveryError("GITHUB_REPOSITORY is required and must be valid")
     if not branch or any(character in branch for character in "\r\n\0"):
@@ -174,6 +180,9 @@ def discover(
 
     endpoint = f"/repos/{repository}/actions"
     expected_name = ARTIFACT_PREFIX + key
+    compatible_names = [(expected_name, False)]
+    if legacy_key:
+        compatible_names.append((ARTIFACT_PREFIX + legacy_key, True))
     if requested_id is not None:
         run = api(f"{endpoint}/runs/{requested_id}")
         if not _matching_run(
@@ -183,12 +192,13 @@ def discover(
                 "requested source run is not a trusted workflow dispatch on this branch"
             )
         names = _run_artifact_names(api, endpoint, requested_id)
-        if expected_name in names:
-            if f"browse-comp-plus-plan-{requested_id}" not in names:
-                raise ArtifactDiscoveryError(
-                    "requested keyed snapshot has no unexpired plan artifact from the same run"
-                )
-            return Discovery(requested_id, expected_name)
+        for name, legacy in compatible_names:
+            if name in names:
+                if f"browse-comp-plus-plan-{requested_id}" not in names:
+                    raise ArtifactDiscoveryError(
+                        "requested keyed snapshot has no unexpired plan artifact from the same run"
+                    )
+                return Discovery(requested_id, name, legacy=legacy)
         legacy_name = ARTIFACT_PREFIX + str(requested_id)
         if legacy_name in names:
             return Discovery(requested_id, legacy_name, legacy=True)
@@ -196,34 +206,36 @@ def discover(
             "requested source run has no unexpired matching prepared snapshot artifact"
         )
 
-    checked_runs: dict[int, bool] = {}
-    for artifact in _artifacts(api, f"{endpoint}/artifacts", name=expected_name):
-        if (
-            artifact.get("name") != expected_name
-            or artifact.get("expired") is not False
-        ):
-            continue
-        workflow_run = artifact.get("workflow_run")
-        if not isinstance(workflow_run, dict):
-            continue
-        run_id = _positive_id(workflow_run.get("id"))
-        if run_id is None or run_id == current_id:
-            continue
-        if workflow_run.get("head_branch") != branch:
-            continue
-        if run_id not in checked_runs:
-            trusted = _matching_run(
-                api(f"{endpoint}/runs/{run_id}"),
-                run_id=run_id,
-                repository=repository,
-                branch=branch,
-            )
-            names = _run_artifact_names(api, endpoint, run_id) if trusted else set()
-            checked_runs[run_id] = (
-                expected_name in names and f"browse-comp-plus-plan-{run_id}" in names
-            )
-        if checked_runs[run_id]:
-            return Discovery(run_id, expected_name)
+    for expected_name, legacy in compatible_names:
+        checked_runs: dict[int, bool] = {}
+        for artifact in _artifacts(api, f"{endpoint}/artifacts", name=expected_name):
+            if (
+                artifact.get("name") != expected_name
+                or artifact.get("expired") is not False
+            ):
+                continue
+            workflow_run = artifact.get("workflow_run")
+            if not isinstance(workflow_run, dict):
+                continue
+            run_id = _positive_id(workflow_run.get("id"))
+            if run_id is None or run_id == current_id:
+                continue
+            if workflow_run.get("head_branch") != branch:
+                continue
+            if run_id not in checked_runs:
+                trusted = _matching_run(
+                    api(f"{endpoint}/runs/{run_id}"),
+                    run_id=run_id,
+                    repository=repository,
+                    branch=branch,
+                )
+                names = _run_artifact_names(api, endpoint, run_id) if trusted else set()
+                checked_runs[run_id] = (
+                    expected_name in names
+                    and f"browse-comp-plus-plan-{run_id}" in names
+                )
+            if checked_runs[run_id]:
+                return Discovery(run_id, expected_name, legacy=legacy)
     return Discovery()
 
 
@@ -232,6 +244,7 @@ def main() -> int:
     parser.add_argument("command", choices=("discover",))
     parser.add_argument("--key", required=True)
     parser.add_argument("--source-run-id", default="")
+    parser.add_argument("--legacy-key", default="")
     args = parser.parse_args()
     try:
         result = discover(
@@ -241,6 +254,7 @@ def main() -> int:
             branch=os.environ.get("GITHUB_REF_NAME", ""),
             current_run_id=os.environ.get("GITHUB_RUN_ID", ""),
             source_run_id=args.source_run_id,
+            legacy_key=args.legacy_key,
         )
         output = os.environ.get("GITHUB_OUTPUT")
         if output:

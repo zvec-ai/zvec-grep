@@ -200,30 +200,36 @@ zvec-grep 仍在同一 runner 内顺序执行；全套题目的随机 A/B 顺序
 | Rust 包 | 按候选 commit 精确缓存。 |
 | 源数据 | 下载校验完成后立即缓存，索引构建失败后无需重新下载语料。 |
 | 题目解密 | 从 Parquet 仅读取问题、参考答案及 gold/evidence 文档 ID，跳过未使用的正文；保留全部题目与评分输入。 |
-| 语料、索引和本地模型 | 保留 7 天的完整快照包含 Potion 模型缓存。仅在候选版本、数据、embedding 配置、准备脚本、系统架构和目录一致时复用，不回退复用其他候选版本的索引。 |
-| 准备产物完全匹配 | 准备阶段仅读取此前运行的小型题目产物，校验候选版本与题目摘要后生成新评测计划；各题下载并校验完整快照，避免准备阶段重复传输、解包数 GB 数据。 |
+| 语料、索引和本地模型 | 保留 7 天的 v3 runtime 快照仅包含一份 Markdown 语料（`workspaces/b`）、索引、Potion 模型、解密题目及状态清单，不传输原始 Parquet 和重复的 baseline 语料。候选版本、数据、embedding 配置、准备脚本、系统架构和目录必须一致。 |
+| runtime 产物完全匹配 | 准备阶段仅读取此前运行的小型题目产物，校验候选版本与题目摘要后生成新评测计划；各题校验 runtime 快照后通过 `copy2` 恢复独立的 baseline 语料，不使用硬链接，并保留纳秒时间戳以避免重建索引。 |
 | 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
-| 失败重跑 | “Re-run failed jobs” 保留成功题目的产物，汇总仅接受当前计划下各题最新 attempt。 |
+| 失败重跑 | “Re-run failed jobs” 在同一次 workflow 运行、同一计划内复用已完成 trial 及匹配的评审，只补失败或缺失项；成功题目的产物继续参与汇总。 |
 
-**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。准备标识变化或产物过期后需在本地
-构建 Potion 索引。[首次实测运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
-索引全部文档耗时 112 分 32 秒、无失败，压缩准备快照为 15.9 GiB；尚未测得端到端提速。
+**冷启动成本：** 两个 suite 都准备完整的 100,195 篇语料。准备标识变化且无兼容快照，或产物过期后，
+需在本地构建 Potion 索引。[历史实测运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
+索引全部文档耗时 112 分 32 秒、无失败，压缩的**完整准备快照**为 15.9 GiB。
+这不是 v3 runtime 快照的实测值；其大小与端到端提速尚未测得。
 准备阶段和各题均限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
 独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 50 GiB
-可用磁盘。压缩快照保留纳秒时间戳以避免误触发重建。快照超过仓库 10 GB Actions cache
-配额，因此使用 artifact；仅源数据和候选包进入 Actions cache。命中快照的运行直接将原产物
-交给各题，不重复上传。需计入数 GB 的 artifact 传输与存储；
+可用磁盘。runtime 快照使用 artifact，与仓库的 10 GB Actions cache 配额分开；仅源数据和
+候选包进入 Actions cache。命中 runtime 快照的运行直接将原产物交给各题，不重复上传。
+仍需计入 artifact 传输、存储及各 worker 本地复制 baseline 语料的耗时；
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
 小型计划 artifact 保留 7 天；失败 job 应在准备快照仍有效时重跑，过期后启动新运行。
-显式恢复旧版以 run ID 命名的快照时，会以精确准备标识重新发布，无需重新建索引或压缩。
+旧 v2 快照只通过 `42102cd9` 冻结的准备代码哈希计算精确 legacy key，并要求候选版本、数据、
+索引配置及目录一致。准备阶段校验兼容的完整快照后，一次转换为 v3，无需重建索引，
+随后各 worker 共享 runtime 产物；不匹配的旧快照不能作为回退。
 
 候选程序在不含模型凭据的独立 job 中构建。请只选择可信候选代码，该程序随后会在评测
 runner 上执行。产物分别记录评测脚本与候选程序的 commit SHA。
 
 每个 profile 每题运行 1 次。harness 不自动重试基础设施失败（`infrastructure_retries = 0`），
-包括临时 HTTP 429/5xx 及服务端标记可重试的错误。手动重跑失败 job 会重新执行该题的整组
-配对，并不续跑单个 trial；成功试验和低分不会触发重试。job summary 分别列出
+包括临时 HTTP 429/5xx 及服务端标记可重试的错误。手动重跑失败 job 时，只有 workflow run ID、
+候选 commit、harness commit、配置及计划完全一致，才恢复原始证据。已完成的答案即使答错也复用，
+已有评审仅在输入哈希匹配时复用，只执行失败或缺失的 trial 和评审，不新增自动重试、不混用不同计划。
+证据必须包含 `evidence-manifest.json`；缺少该完整性清单的旧产物不能续跑。
+历史失败 attempt、成本及来源仍保留在原始证据中。job summary 分别列出
 成功试验、有效配对试验、额外重试、失败 attempt、最终失败和未完成试验。配对指标仅使用
 最终完成的 attempt；失败 attempt 的开销保留在原始证据中。两个 profile 使用相同的模型参数、
 锁定样本及配对评分方式。相同任务模板提供各自的完整绝对工作路径，要求原样复制路径参数，
@@ -233,7 +239,7 @@ runner 上执行。产物分别记录评测脚本与候选程序的 commit SHA�
 
 | 产物 | 内容 | 保留时间 |
 | --- | --- | --- |
-| 各题 / 汇总证据 | JSON/Markdown/CSV 报告、运行轨迹、评审结果及候选元数据 | 30 天 |
+| 各题 / 汇总证据 | JSON/Markdown/CSV 报告、运行轨迹、评审结果、候选元数据及 `evidence-manifest.json` | 30 天 |
 | `task-report` / `aggregate-report` | 从通过 secret 扫描的证据中提取的精简报告和元数据 | 90 天 |
 | 准备阶段诊断 | 准备日志及候选元数据 | 7 天 |
 

@@ -160,7 +160,14 @@ def export_evidence(
             if not run.is_dir():
                 continue
             # Never traverse profile homes, runtime, or the corpus.
-            for name in ("run.json", "report", "cases", "evaluation", "shards"):
+            for name in (
+                "run.json",
+                "report",
+                "cases",
+                "evaluation",
+                "shards",
+                "resume",
+            ):
                 _copy_evidence(run / name, output / "runs" / run.name / name, secrets)
         identity = {
             "candidate_commit": os.environ.get("BROWSE_CANDIDATE_COMMIT", ""),
@@ -177,6 +184,9 @@ def export_evidence(
         (output / "ci.json").write_text(
             json.dumps(identity, indent=2) + "\n", encoding="utf-8"
         )
+        from .ci_resume import seal_evidence
+
+        seal_evidence(output)
     except BaseException:
         shutil.rmtree(output)
         raise

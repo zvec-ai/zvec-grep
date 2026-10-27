@@ -19,8 +19,10 @@ from zg_bench.ci_prepared_artifact import (
 
 REPOSITORY = "zvec-ai/zvec-grep"
 BRANCH = "dev/browse-comp-plus-ci"
-KEY = "Linux-X64-browse-comp-prepared-v2-" + "a" * 64
+KEY = "Linux-X64-browse-comp-runtime-v3-" + "a" * 64
 NAME = ARTIFACT_PREFIX + KEY
+LEGACY_KEY = "Linux-X64-browse-comp-prepared-v2-" + "b" * 64
+LEGACY_NAME = ARTIFACT_PREFIX + LEGACY_KEY
 ENDPOINT = f"/repos/{REPOSITORY}/actions"
 
 
@@ -89,6 +91,54 @@ class PreparedArtifactTests(unittest.TestCase):
         api = Mock(return_value={"artifacts": []})
         self.assertIsNone(self.discover(api).run_id)
         api.assert_called_once()
+
+    def test_runtime_miss_converts_only_the_exact_compatible_full_snapshot(self):
+        api = Mock(
+            side_effect=[
+                {"artifacts": []},
+                {"artifacts": [artifact(name=LEGACY_NAME)]},
+                run(),
+                {"artifacts": [artifact(name=LEGACY_NAME), plan_artifact()]},
+            ]
+        )
+        result = self.discover(api, legacy_key=LEGACY_KEY)
+        self.assertEqual(result.run_id, 100)
+        self.assertEqual(result.artifact_name, LEGACY_NAME)
+        self.assertTrue(result.legacy)
+        self.assertEqual(api.call_count, 4)
+        self.assertIn(f"name={NAME}", api.call_args_list[0].args[0])
+        self.assertIn(f"name={LEGACY_NAME}", api.call_args_list[1].args[0])
+
+    def test_exact_runtime_match_does_not_download_or_look_up_full_snapshots(self):
+        api = Mock(
+            side_effect=[{"artifacts": [artifact()]}, run(), prepared_artifacts()]
+        )
+        result = self.discover(api, legacy_key=LEGACY_KEY)
+        self.assertFalse(result.legacy)
+        self.assertEqual(api.call_count, 3)
+
+    def test_explicit_compatible_full_snapshot_still_requires_same_run_plan(self):
+        for with_plan in (False, True):
+            with self.subTest(with_plan=with_plan):
+                records = [artifact(name=LEGACY_NAME)]
+                if with_plan:
+                    records.append(plan_artifact())
+                api = Mock(side_effect=[run(), {"artifacts": records}])
+                if with_plan:
+                    result = self.discover(api, legacy_key=LEGACY_KEY, source_run_id="100")
+                    self.assertTrue(result.legacy)
+                    self.assertEqual(result.artifact_name, LEGACY_NAME)
+                else:
+                    with self.assertRaisesRegex(ArtifactDiscoveryError, "no unexpired plan"):
+                        self.discover(api, legacy_key=LEGACY_KEY, source_run_id="100")
+
+    def test_invalid_compatible_key_fails_before_api_calls(self):
+        for legacy_key in (KEY, "../snapshot", "key\n"):
+            with self.subTest(legacy_key=legacy_key):
+                api = Mock()
+                with self.assertRaisesRegex(ArtifactDiscoveryError, "invalid legacy"):
+                    self.discover(api, legacy_key=legacy_key)
+                api.assert_not_called()
 
     def test_filters_expired_wrong_name_current_run_and_branch_before_lookup(self):
         api = Mock(

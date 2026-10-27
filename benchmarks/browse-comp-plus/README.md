@@ -283,30 +283,35 @@ the original metadata for every case is retained under `shards/`.
 | Rust package | Cached for the exact candidate commit. |
 | Source data | Cached immediately after download and verification, so a failed index build does not require downloading the corpus again. |
 | Query decoding | Read only questions, reference answers, and gold/evidence document IDs from Parquet; skip unused document bodies while preserving every query and scoring input. |
-| Corpus, index, and local model | A seven-day artifact includes the Potion model cache. Earlier runs and case workers reuse it only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
-| Preparation on an exact artifact match | Download only the earlier run's small query artifact, verify its candidate and query digest, and create a fresh evaluation plan. Each case downloads and validates the complete snapshot; preparation avoids a redundant multi-GB transfer and extraction. |
+| Corpus, index, and local model | The seven-day v3 runtime artifact contains one Markdown corpus copy (`workspaces/b`), its index, Potion models, decoded queries, and state manifests. Raw Parquet and the duplicate baseline corpus are excluded. Candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path must match. |
+| Preparation on an exact runtime-artifact match | Download only the earlier run's small query artifact, verify its candidate and query digest, and create a fresh evaluation plan. Each case validates the runtime snapshot and restores its independent baseline corpus with `copy2`, not hardlinks; nanosecond timestamps are preserved to avoid rebuilding the index. |
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
-| Partial rerun | “Re-run failed jobs” keeps successful case artifacts; aggregation accepts only the current plan and latest attempt for each case. |
+| Partial rerun | “Re-run failed jobs” reuses completed trials and matching judgements within the same workflow run and plan, then runs only failed or missing work. Successful case artifacts remain available to aggregation. |
 
 **Cold-run cost:** both suites prepare all 100,195 documents. A new preparation
-identity or an expired artifact requires a local Potion index build. The first
+identity without a compatible snapshot, or an expired artifact, requires a local
+Potion index build. The historical
 [measured run](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)
 indexed all documents with no failures in 112 minutes 32 seconds and produced
-a 15.9 GiB compressed preparation snapshot. End-to-end speedup has not yet been
-measured. Preparation and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
+a 15.9 GiB compressed **full** preparation snapshot. These are not v3 runtime
+snapshot measurements; its size and end-to-end speedup have not yet been measured.
+Preparation and each case allow six hours. As in SWE-QA Bench, concurrency is scoped to
 the run ID and attempt, so separately requested runs do not block or cancel
 one another. Each hosted runner frees SDK space and requires 50 GiB free.
-The compressed snapshot preserves nanosecond timestamps to avoid reindexing.
-It uses artifact storage because it exceeds the repository's 10 GB Actions
-cache limit; only source data and candidate packages use Actions cache. A run
-that finds a matching artifact shares the original with its case jobs
-without uploading another copy. Allow for multi-GB artifact transfer/storage.
+Runtime snapshots use artifact storage independently of the repository's 10 GB
+Actions cache limit; only source data and candidate packages use Actions cache.
+A run that finds a matching runtime artifact shares the original with its case
+jobs without uploading another copy. Allow for artifact transfer/storage and
+local baseline-copy time on each worker.
 Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
 The small plan artifact is retained for seven days. Retry failed jobs while
-the prepared artifact still exists; after expiry, start a new run. Explicitly
-restoring an older run-ID-named snapshot republishes it under its exact
-preparation identity without rebuilding or recompressing the index.
+the prepared artifact still exists; after expiry, start a new run. Legacy v2
+snapshots are accepted only through the exact legacy key computed from the frozen
+preparation source hashes at `42102cd9`, with the same candidate, data, index
+configuration, and workspace path. Preparation validates and converts a compatible
+full snapshot once into v3 without rebuilding the index; workers then share the
+runtime artifact. Unmatched legacy snapshots are not a fallback.
 
 The candidate is built in a separate job without model credentials. Only select
 trusted candidate code, which subsequently executes on the benchmark runners.
@@ -315,8 +320,14 @@ The harness and candidate commit SHAs are recorded separately.
 Each profile runs once per case. The harness does not automatically retry
 infrastructure failures (`infrastructure_retries = 0`), including transient
 HTTP 429/5xx errors and provider errors marked retryable. A manual failed-job
-rerun repeats that case's pair; it does not resume individual successful trials.
-Successful trials and low scores do not trigger retries. The job summary separates successful
+rerun restores raw evidence only when the workflow run ID, candidate commit,
+harness commit, configuration, and plan match exactly. Completed answers are
+reused even when judged incorrect; existing judgements are reused only when their
+input hashes match. Only failed or missing trials and judgements execute again.
+This adds no automatic retries and never mixes plans. Evidence must include
+`evidence-manifest.json`; older artifacts without that integrity manifest cannot
+be resumed. Prior failed attempts, their costs, and their origins remain in the
+raw evidence. The job summary separates successful
 trials, eligible paired trials, extra retries, failed attempts, final failures,
 and unfinished trials. Paired metrics use the final completed attempts only;
 failed-attempt overhead remains available in raw evidence. Both profiles use
@@ -329,7 +340,7 @@ Results appear in the Actions job summary. Retention follows SWE-QA Bench:
 
 | Artifact | Contents | Retention |
 | --- | --- | --- |
-| Case / aggregate evidence | JSON/Markdown/CSV reports, trajectories, judge results, and candidate metadata | 30 days |
+| Case / aggregate evidence | JSON/Markdown/CSV reports, trajectories, judge results, candidate metadata, and `evidence-manifest.json` | 30 days |
 | `task-report` / `aggregate-report` | Compact reports and metadata extracted from secret-scanned evidence | 90 days |
 | Preparation diagnostics | Preparation logs and candidate metadata | 7 days |
 

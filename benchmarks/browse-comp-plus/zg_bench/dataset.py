@@ -21,6 +21,10 @@ CANARY = (
 
 
 def prepared_dataset(config: BenchmarkConfig, artifacts: Path) -> Path | None:
+    from .runtime_snapshot import MANIFEST_PATH, prepared_runtime_dataset
+
+    if (artifacts / MANIFEST_PATH).exists():
+        return prepared_runtime_dataset(config, artifacts)
     state_path = artifacts / "state" / "dataset.json"
     if not state_path.is_file():
         return None
