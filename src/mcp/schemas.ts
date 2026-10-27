@@ -464,7 +464,13 @@ export const zvecGrepIndexOutputSchema = z.object({
         z.object({
           absolutePath: z.string(),
           relativePath: z.string(),
-          reason: z.enum(["empty", "too_large", "unsupported", "binary"]),
+          reason: z.enum([
+            "empty",
+            "too_large",
+            "unsupported",
+            "binary",
+            "escapes_workspace",
+          ]),
           sizeBytes: z.number().int().nonnegative().optional(),
           limitBytes: z.number().int().positive().optional(),
         }),
@@ -517,6 +523,7 @@ export const zvecGrepIndexStatusOutputSchema = z.object({
   persistent: z.object({
     home: z.string(),
     index_path: z.string(),
+    unverified: z.boolean().optional(),
     workspace_index: z
       .object({
         id: z.string(),

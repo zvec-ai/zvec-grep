@@ -97,6 +97,7 @@ type ServerIndexInfo = {
   persistent: {
     home: string;
     index_path: string;
+    unverified?: boolean;
     workspace_index?: {
       root_paths: ServerRootPath[];
       embedding?: {
@@ -535,6 +536,7 @@ function serverIndexState(info: ServerIndexInfo): WorkspaceIndexState {
     return "stale";
   }
   if ((info.persistent.files?.failed ?? 0) > 0) return "failed";
+  if (info.persistent.unverified === true) return "stale";
   if (
     (info.persistent.files?.pending ?? 0) > 0 ||
     serverChangedTotal(info.persistent.files) > 0

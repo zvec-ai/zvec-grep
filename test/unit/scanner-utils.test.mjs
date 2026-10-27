@@ -3,6 +3,7 @@ import {
   link,
   mkdir,
   readFile,
+  rm,
   stat,
   symlink,
   writeFile,
@@ -456,7 +457,7 @@ test("JSON helpers provide fallbacks, atomic replacement, modes, and parse failu
   assert.throws(() => readJsonFileSync(asyncPath, null), SyntaxError);
 });
 
-test("read/write locks allow readers, reject conflicts, release, and recover stale owners", async (t) => {
+test("read/write locks allow readers, reject conflicts, release, and require operator recovery for dead write owners", async (t) => {
   const root = await createTemporaryDirectory(t, "zvec-lock-");
   const lockPath = join(root, "index.lock");
   const readOne = acquireReadWriteLock(lockPath, "read", {
@@ -485,6 +486,8 @@ test("read/write locks allow readers, reject conflicts, release, and recover sta
   write.release();
   assert.doesNotThrow(() => assertNoWriteLock(lockPath, "status"));
 
+  // Intentional behavior change: a write lock left by a dead owner is never
+  // reclaimed automatically. Recovery is the documented operator action.
   const stalePath = `${lockPath}.write`;
   await mkdir(stalePath, { recursive: true });
   await writeFile(
@@ -497,9 +500,17 @@ test("read/write locks allow readers, reject conflicts, release, and recover sta
       operation: "stale",
     }),
   );
+  assert.throws(
+    () =>
+      acquireReadWriteLock(lockPath, "write", {
+        operation: "recovered",
+        staleMs: 1,
+      }),
+    /Index unavailable/,
+  );
+  await rm(stalePath, { recursive: true, force: true });
   const recovered = acquireReadWriteLock(lockPath, "write", {
     operation: "recovered",
-    staleMs: 1,
   });
   assert.equal(recovered.info.operation, "recovered");
   recovered.release();

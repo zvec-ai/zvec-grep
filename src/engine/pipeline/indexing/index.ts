@@ -37,12 +37,22 @@ import {
   scanFilePath,
   scanRootPaths,
 } from "./scanner/index.js";
+import { createCanonicalPathResolver } from "../../utils/canonical-path.js";
+import { resolveWorkspaceFilePath } from "./root-paths.js";
 import { indexChunkOptions } from "./input-budget.js";
 
 export type IndexContext = {
   workspaceIndex: WorkspaceIndexInfo;
   storage: WorkspaceIndexStorage;
   embeddingModel: EmbeddingModel;
+  /** Current workspace root; the identity reference point for scanned files. */
+  workspaceRoot: string;
+  /**
+   * When true, the index is being reconciled after a binding change: matched
+   * files are content-hashed even when size and mtime agree, and unchanged
+   * records have their stored metadata refreshed.
+   */
+  reconcile?: boolean;
   embeddingConcurrency?: number;
   onProgress?: (progress: IndexProgress) => void;
   signal?: AbortSignal;
@@ -54,6 +64,8 @@ type DiffResult = {
   pending: FileInfo[];
   deleted: FileInfo[];
   unchanged: FileInfo[];
+  /** Unchanged after content verification; stored metadata needs refresh. */
+  refreshed: FileInfo[];
 };
 
 type PreparedFragment = {
@@ -177,12 +189,14 @@ export async function indexWorkspacePaths(
 export async function getWorkspaceIndexStatus(
   workspaceIndex: WorkspaceIndexInfo,
   storedFiles: readonly FileInfo[],
+  workspaceRoot: string,
+  options: { unverified?: boolean } = {},
 ): Promise<WorkspaceIndexStatus> {
   try {
     const scan = await scanRootPaths(
       workspaceIndex.id,
       workspaceIndex.rootPaths,
-      { knownFiles: storedFiles },
+      { knownFiles: storedFiles, workspaceRoot },
     );
     const diff = await computeDiffFromFiles(scan.files, storedFiles);
     const pendingFiles = storedFiles.filter(
@@ -217,6 +231,7 @@ export async function getWorkspaceIndexStatus(
       filesModified: diff.modified.length,
       filesDeleted: diff.deleted.length,
       filesUnchanged: diff.unchanged.length,
+      ...(options.unverified ? { unverified: true } : {}),
       pendingFiles,
       failedFiles,
       addedFiles: diff.added,
@@ -290,7 +305,24 @@ async function indexWorkspacePathsUnchecked(
   const start = Date.now();
   const report = ctx.onProgress ?? (() => undefined);
   const timings = new TimingCollector();
-  const normalizedPaths = [...new Set(changedPaths.map(normalizePath))];
+  // Changed paths may address the workspace through an equivalent
+  // spelling (macOS /var, Windows short names); remap them to the
+  // resolver's spelling so scan roots, stored paths and canonical
+  // identities all agree. Paths genuinely outside stay as given.
+  const pathResolver =
+    ctx.workspaceRoot === undefined
+      ? undefined
+      : createCanonicalPathResolver(ctx.workspaceRoot);
+  const normalizedPaths = [
+    ...new Set(
+      changedPaths.map((path) => {
+        const normalized = normalizePath(path);
+        return pathResolver === undefined
+          ? normalized
+          : resolveWorkspaceFilePath(normalized, pathResolver);
+      }),
+    ),
+  ];
   throwIfIndexCancelled(ctx);
   const firstPass = await runPathIndexPass(
     ctx,
@@ -376,7 +408,7 @@ async function runPathIndexPass(
             ctx.workspaceIndex.id,
             ctx.workspaceIndex.rootPaths,
             path,
-            { signal: ctx.signal },
+            { signal: ctx.signal, workspaceRoot: ctx.workspaceRoot },
           )
         : await scanFilePath(
             ctx.workspaceIndex.id,
@@ -384,6 +416,7 @@ async function runPathIndexPass(
             path,
             {
               signal: ctx.signal,
+              workspaceRoot: ctx.workspaceRoot,
             },
           );
       files.push(...scan.files);
@@ -437,6 +470,7 @@ async function runIndexPass(
     scanRootPaths(ctx.workspaceIndex.id, ctx.workspaceIndex.rootPaths, {
       signal: ctx.signal,
       knownFiles: existing,
+      workspaceRoot: ctx.workspaceRoot,
     }),
   );
   throwIfIndexCancelled(ctx);
@@ -461,10 +495,19 @@ async function runDiffPass(
   scanDiagnostics: FileScanDiagnostics = emptyScanDiagnostics(),
 ): Promise<IndexPassResult> {
   const diff = await timings.time("index_diff", () =>
-    computeDiffFromFiles(scannedFiles, existingFiles),
+    computeDiffFromFiles(scannedFiles, existingFiles, {
+      reconcile: ctx.reconcile,
+    }),
   );
   throwIfIndexCancelled(ctx);
   const pending = [...diff.added, ...diff.modified, ...diff.pending];
+
+  timings.timeSync("index_refresh_metadata", () => {
+    for (const file of diff.refreshed) {
+      ctx.storage.refreshFileMetadata(file);
+    }
+  });
+  diff.unchanged.push(...diff.refreshed);
 
   report({
     phase: "scanning",
@@ -625,6 +668,7 @@ function emptyScanDiagnostics(): FileScanDiagnostics {
       too_large: 0,
       unsupported: 0,
       binary: 0,
+      escapes_workspace: 0,
     },
     skippedSamples: [],
   };
@@ -640,6 +684,7 @@ function mergeScanDiagnostics(
     "too_large",
     "unsupported",
     "binary",
+    "escapes_workspace",
   ] as const) {
     target.skippedByReason[reason] += source.skippedByReason[reason];
   }
@@ -663,13 +708,16 @@ async function optimizeStorage(ctx: IndexContext): Promise<void> {
 async function computeDiffFromFiles(
   scannedFiles: readonly FileInfo[],
   existingFiles: readonly FileInfo[],
+  options: { reconcile?: boolean } = {},
 ): Promise<DiffResult> {
   const existingById = new Map(existingFiles.map((file) => [file.id, file]));
   const seen = new Set<string>();
   const added: FileInfo[] = [];
   const modified: FileInfo[] = [];
   const pending: FileInfo[] = [];
+  const deleted: FileInfo[] = [];
   const unchanged: FileInfo[] = [];
+  const refreshed: FileInfo[] = [];
 
   for (const file of scannedFiles) {
     seen.add(file.id);
@@ -685,7 +733,10 @@ async function computeDiffFromFiles(
       continue;
     }
 
+    // Reconciliation never trusts size/mtime agreement: content is hashed
+    // before the stored record is believed.
     if (
+      !options.reconcile &&
       existing.sizeBytes === file.sizeBytes &&
       existing.lastModifiedTime === file.lastModifiedTime &&
       existing.contentHash
@@ -699,18 +750,29 @@ async function computeDiffFromFiles(
       existing.sizeBytes === hashed.sizeBytes &&
       existing.contentHash === hashed.contentHash
     ) {
-      unchanged.push(existing);
+      if (options.reconcile) {
+        // Identical content keeps its vectors; stored metadata is refreshed
+        // so later scans can trust the fast path again.
+        refreshed.push({
+          ...existing,
+          sizeBytes: hashed.sizeBytes,
+          lastModifiedTime: hashed.lastModifiedTime,
+          contentHash: hashed.contentHash ?? existing.contentHash,
+        });
+      } else {
+        unchanged.push(existing);
+      }
       continue;
     }
 
     modified.push(hashed);
   }
 
-  const deleted = [...existingById.values()].filter(
-    (file) => !seen.has(file.id),
+  deleted.push(
+    ...[...existingById.values()].filter((file) => !seen.has(file.id)),
   );
 
-  return { added, modified, pending, deleted, unchanged };
+  return { added, modified, pending, deleted, unchanged, refreshed };
 }
 
 async function indexFiles(

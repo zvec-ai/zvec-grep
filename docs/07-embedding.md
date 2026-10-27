@@ -169,6 +169,12 @@ If an endpoint returns an empty or non-JSON HTTP error response, the error
 reports the HTTP status. For HTTP 404, check the endpoint and whether the model
 is available at that service.
 
+Credentials are resolved per session from explicit options, the environment,
+or the global provider configuration; they are never written into the
+workspace manifest. A copied or moved workspace index therefore contains no
+credential material, and remote providers need a credential in each session
+that uses them.
+
 Credentials configure access to a provider; they do not authorize data
 transfer. `--allow-remote` authorizes Remote Embedding only for the current
 command. To create a signed Workspace grant shared by the CLI and MCP server:

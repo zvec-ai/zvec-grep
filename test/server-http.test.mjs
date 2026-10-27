@@ -221,6 +221,9 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
     "zvec_grep_index",
     "zvec_grep_index_drop",
+    "zvec_grep_index_export",
+    "zvec_grep_index_import",
+    "zvec_grep_index_migrate",
     "zvec_grep_index_status",
     "zvec_grep_rg",
     "zvec_grep_search",
@@ -477,6 +480,9 @@ test("full MCP toolset restores all tools on the public endpoint", async (t) => 
   assert.deepEqual(listed.tools.map((tool) => tool.name).toSorted(), [
     "zvec_grep_index",
     "zvec_grep_index_drop",
+    "zvec_grep_index_export",
+    "zvec_grep_index_import",
+    "zvec_grep_index_migrate",
     "zvec_grep_index_status",
     "zvec_grep_rg",
     "zvec_grep_search",

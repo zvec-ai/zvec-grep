@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -235,11 +235,13 @@ test("does not trust a completion marker after a same-size file mutation", async
   const first = await resolveModelArtifacts(resolveOptions);
   assert.equal(fetchCalls, 1);
 
-  await new Promise((resolve) => setTimeout(resolve, 2));
-  await writeFile(
-    first.paths[artifact.path],
-    Buffer.alloc(bytes.byteLength, 120),
-  );
+  // The completion marker is trusted only while size, mtime and ctime all
+  // match. A sleep cannot guarantee an mtime change (timestamp granularity
+  // and ms truncation), so set the mutation's mtime explicitly.
+  const mutated = first.paths[artifact.path];
+  await writeFile(mutated, Buffer.alloc(bytes.byteLength, 120));
+  const distinct = new Date(Date.now() + 60_000);
+  await utimes(mutated, distinct, distinct);
   await resolveModelArtifacts(resolveOptions);
 
   assert.equal(fetchCalls, 2);
