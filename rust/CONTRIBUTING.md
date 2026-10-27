@@ -263,8 +263,15 @@ validation.
 
 ### ONNX Runtime distributions
 
-`zg-engine` uses `ort` rc.13 with API 21 and dynamic loading. Its build script
-runs `scripts/prepare-onnxruntime.py`, whose target/variant selection, archive
+`zg-engine` pins the upstream `ort` revision `02b13133` with API 21 and dynamic
+loading. This includes the manual-environment fix from
+[ort#610](https://github.com/pykeio/ort/pull/610): the published rc.13 can crash
+after successful inference with ORT 1.21. The engine keeps one environment across
+model reloads and registers its cleanup after library initialization so it runs
+before ORT's C++ destructors. A subprocess regression test verifies failed model
+loads, successful inference, reload and the final process exit status.
+
+The build script runs `scripts/prepare-onnxruntime.py`, whose target/variant selection, archive
 SHA-256 pins and exact payload paths live in `scripts/onnxruntime-distributions.json`.
 This also prepares independent engine tests; building the CLI first is unnecessary.
 Python 3 and curl are required (override Python with `PYTHON`).

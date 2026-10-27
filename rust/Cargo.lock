@@ -1972,8 +1972,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "ort"
 version = "2.0.0-rc.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
+source = "git+https://github.com/pykeio/ort?rev=02b13133f0c9d17d06ab0046ac20e5b36e56c37a#02b13133f0c9d17d06ab0046ac20e5b36e56c37a"
 dependencies = [
  "libloading 0.9.0",
  "ndarray",
@@ -1985,8 +1984,7 @@ dependencies = [
 [[package]]
 name = "ort-sys"
 version = "2.0.0-rc.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
+source = "git+https://github.com/pykeio/ort?rev=02b13133f0c9d17d06ab0046ac20e5b36e56c37a#02b13133f0c9d17d06ab0046ac20e5b36e56c37a"
 dependencies = [
  "glob",
 ]
@@ -2759,6 +2757,12 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "shutdown_hooks"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6057adedbec913419c92996f395ba69931acbd50b7d56955394cd3f7bedbfa45"
 
 [[package]]
 name = "signal-hook"
@@ -4273,6 +4277,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shutdown_hooks",
  "sysinfo",
  "tempfile",
  "thiserror",

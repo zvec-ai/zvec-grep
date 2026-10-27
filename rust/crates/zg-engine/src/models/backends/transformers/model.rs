@@ -671,7 +671,7 @@ fn load_session(
     provider: TransformersExecutionProvider,
     prepacked_weights: &PrepackedWeights,
 ) -> Result<Session, ModelError> {
-    let builder = Session::builder()
+    let builder = Session::builder(&super::native_runtime::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
         })?

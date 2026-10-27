@@ -34,13 +34,14 @@ httpdate = "1.0.3"
 llama-cpp-2.workspace = true
 # Use the same pinned official runtime in Cargo tests and every native package.
 # API selection does not select the download version; build.rs owns that pin.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-21", "load-dynamic", "std"] }
+ort.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+shutdown_hooks = "0.1.0"
 sysinfo.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -67,11 +68,11 @@ zvec-rust.workspace = true
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
+ort = { workspace = true, features = ["coreml"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 dunce = "1.0.5"
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
+ort = { workspace = true, features = ["directml"] }
 
 [dev-dependencies]
 # Count SQLite VM instructions in graph query performance regression tests.

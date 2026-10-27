@@ -30,6 +30,9 @@ hyper = { version = "1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 ignore = "0.4.33"
 notify = "8.2.0"
+# rc.13's exit hook crashes with ORT <1.23. Pin the upstream manual-environment
+# fix: https://github.com/pykeio/ort/pull/610. Runtime archives stay at 1.21.0.
+ort = { git = "https://github.com/pykeio/ort", rev = "02b13133f0c9d17d06ab0046ac20e5b36e56c37a", default-features = false, features = ["api-21", "load-dynamic", "std"] }
 rmcp = { version = "3.1.4", features = ["macros", "schemars", "server", "transport-streamable-http-server"] }
 same-file = "1.0.6"
 schemars = "1"
