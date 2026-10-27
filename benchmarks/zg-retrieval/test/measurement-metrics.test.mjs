@@ -22,6 +22,8 @@ test("measurements use all successful calls for latency and only the quality cal
       latency_ms_mean: 40,
       latency_ms_p50: 25,
       latency_sample_count: 4,
+      latency_ms_p95: 100,
+      latency_ms_p99: 100,
       output_bytes_mean: 3072,
       output_sample_count: 2,
     },
@@ -40,6 +42,8 @@ test("failures and invalid calls cannot improve measurements; missing values are
     latency_ms_mean: null,
     latency_ms_p50: null,
     latency_sample_count: 0,
+    latency_ms_p95: null,
+    latency_ms_p99: null,
     output_bytes_mean: null,
     output_sample_count: 0,
   });
@@ -47,6 +51,8 @@ test("failures and invalid calls cannot improve measurements; missing values are
     latency_ms_mean: 0,
     latency_ms_p50: 0,
     latency_sample_count: 1,
+    latency_ms_p95: 0,
+    latency_ms_p99: 0,
     output_bytes_mean: 0,
     output_sample_count: 1,
   });

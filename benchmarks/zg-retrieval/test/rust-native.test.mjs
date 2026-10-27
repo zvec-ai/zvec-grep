@@ -7,6 +7,8 @@ import {
   findSchemaVariant,
   isProductPreparationFailure,
   nativeCandidate,
+  productCandidate,
+  candidateCommand,
   schemaAllowsType,
 } from "../engines/zg/run.mjs";
 import {
@@ -62,6 +64,65 @@ test("the packed Rust npm metadata resolves to a native zg binary", () => {
     () => nativeCandidate(root, "/tmp/candidate", { bin: { zg: "../zg" } }),
     /escapes/,
   );
+});
+
+test("Node 0.2.2 uses its unchanged public verbs and the release's V8 flag", () => {
+  const root = "/tmp/candidate/node_modules/@zvec/zvec-grep";
+  const candidate = productCandidate(root, "/tmp/candidate", {
+    name: "@zvec/zvec-grep",
+    version: "0.2.2",
+    bin: { zg: "dist/cli/index.js" },
+  });
+  assert.equal(candidate.runtime, "node-0.2.2");
+  assert.deepEqual(
+    candidateCommand(candidate, [
+      "--index",
+      "/tmp/corpus",
+      "--embedding-concurrency",
+      "4",
+    ]),
+    {
+      command: process.execPath,
+      args: [
+        "--liftoff-only",
+        join(root, "dist/cli/index.js"),
+        "index",
+        "/tmp/corpus",
+        "--embedding-concurrency",
+        "4",
+      ],
+    },
+  );
+  assert.equal(
+    candidateCommand(candidate, ["--help", "index"]).args.at(-2),
+    "help",
+  );
+  assert.throws(
+    () =>
+      productCandidate(root, "/tmp/candidate", {
+        name: "@zvec/zvec-grep",
+        version: "0.2.3",
+        bin: "cli.mjs",
+      }),
+    /unchanged 0.2.2/,
+  );
+  assert.throws(
+    () =>
+      productCandidate(root, "/tmp/candidate", {
+        name: "@zvec/zvec-grep",
+        version: "0.2.2",
+        bin: "../cli.mjs",
+      }),
+    /escapes/,
+  );
+});
+
+test("Node status explicitly omits source-size telemetry without weakening Rust validation", () => {
+  const nodeStatus = groupedReadyStatus.replace(/^ {2}Source size .+\n/m, "");
+  const status = parseNativeStatus(nodeStatus, { runtime: "node-0.2.2" });
+  assert.equal(status.files_indexed, 381);
+  assert.equal(status.indexed_source_bytes, null);
+  assert.throws(() => parseNativeStatus(nodeStatus), /source size/);
 });
 
 test("public Rust status output supplies a stable ready-index audit", () => {

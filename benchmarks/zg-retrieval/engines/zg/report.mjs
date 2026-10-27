@@ -28,6 +28,7 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import { summarizePerformance } from "../../reports/performance.mjs";
 
 async function findRuns(directory) {
   const runs = [];
@@ -112,7 +113,12 @@ export async function aggregate(directory, { expectedTasks } = {}) {
             2,
             "unsupported native snapshot",
           );
-          assert.equal(snapshot.kind, "rust-public-status");
+          assert.equal(
+            snapshot.kind,
+            manifest.package?.runtime === "node-0.2.2"
+              ? "node-public-status"
+              : "rust-public-status",
+          );
           assert.equal(
             snapshot.logical_content_sha256,
             manifest.index_content_sha256,
@@ -511,6 +517,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   );
   const report = {
     schema_version: 7,
+    runtime: manifests[0]?.package?.runtime ?? "rust-native",
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
     preview: suite.protocol.preview,
     quality_repetition: suite.protocol.quality_repetition,
@@ -530,6 +537,9 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       "each query/mode averages all five repetition scores; file Hit@1/5/10 and MRR@10 weight original questions equally; nDCG@10 weights repositories equally after averaging questions within each repository; all five metrics use frozen accepted-file targets and native ranks",
     modes: modeReports,
     repositories: manifests,
+    performance: summarizePerformance(
+      manifests.map((manifest) => manifest.performance ?? {}),
+    ),
     tasks: quality,
   };
   await writeFile(

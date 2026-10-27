@@ -24,6 +24,8 @@ export async function loadSuite({
   assert.equal(protocol.quality_repetition, 5);
   assert.equal(protocol.limit, 10);
   assert.equal(protocol.call_order, "mode-task-repetition");
+  assert.equal(protocol.index_embedding_concurrency, 4);
+  assert.equal(protocol.query_concurrency, 4);
   protocol.model = embeddingModel(protocol.model, embedding);
   assert.equal(
     lock.tasks.length,

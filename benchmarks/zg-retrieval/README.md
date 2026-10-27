@@ -10,6 +10,8 @@ PR creation, reopening and new commits automatically compare the frozen PR base 
 
 For a manual paired comparison without a PR comment, select **Retrieval-only PR → Run workflow** and supply full `baseline_sha` / `candidate_sha` commit identities and their `baseline_repository` / `candidate_repository` (`owner/name`). This uses the same local-only comparison and does not run e2e. Manual runs require maintain/admin access.
 
+To compare the unchanged official **Node.js 0.2.2** release with Rust, select the PR branch as the workflow ref, set `baseline_sha` to `npm:@zvec/zvec-grep@0.2.2` and `baseline_repository` to `zvec-ai/zvec-grep`, then set `candidate_sha` to the full latest upstream `main` SHA and `candidate_repository` to `zvec-ai/zvec-grep`. Both sides use that same PR harness across all four suites. The Node package is downloaded from the official npm registry and checked against pinned SHA-256 and registry SHA-512 hashes before installation and in each suite; it is never rebuilt. Rust builds from the frozen commit. Reports identify Node by its npm release rather than inventing a source commit.
+
 The workflow freezes the selected harness ref to a full commit, checks out the candidate separately, resolves it to another full commit SHA, and builds `candidate/rust/`. The packed native package cache is keyed by operating system, architecture and that exact candidate commit. A hit skips Rust compilation and packaging. On a miss, a second Cargo cache can reuse registry data and `rust/target` objects before `npm run pack:local` creates the candidate tarball. Node.js version is not part of candidate selection, package-cache identity or report identity.
 
 Manual and comment runs require the original actor and current re-run actor to have the repository **maintain or admin** role; execution jobs check both, including partial re-runs. Automatic PR runs instead require the supported PR event and local embedding, with read-only permissions and no model secrets. These in-workflow checks apply to the checked-in workflow. Contributors who can modify the workflow or its local authorization action on another branch can bypass that check; a permission boundary against those contributors requires repository- or organization-level Actions execution policies.
@@ -35,9 +37,24 @@ Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` 
 | Mean output (KiB) | Mean public MCP text UTF-8 bytes / 1024, using successful fifth calls only; not model tokens |
 | Avg RT / P50 RT (ms) | Mean and median of all successful MCP search calls, including five repetitions; excludes indexing |
 
-Each repository uses one fresh index and one MCP session. Modes run in the fixed order **hybrid → fts → vector**; each original question is called five consecutive times within each mode. All five calls supply quality and stability observations; only the fifth supplies output size. A complete run contains **300 calls and 60 question/mode quality summaries**, with **20 questions, 20 output samples and 100 latency samples per mode** when all calls succeed. Repetitions are not independent questions.
+Each repository uses one fresh index and one MCP session. Modes run in the fixed order **hybrid → fts → vector**; requests are dispatched in question/repetition order with up to four calls in flight per mode. Completion order can differ; evidence is saved in the original plan order. All five calls supply quality and stability observations; only the fifth supplies output size. A complete run contains **300 calls and 60 question/mode quality summaries**, with **20 questions, 20 output samples and 100 latency samples per mode** when all calls succeed. Repetitions are not independent questions.
 
-Isolated public-response format failures still fail CI, but the overview displays diagnostic scores from validated questions with explicit question/repository coverage and a failed-task table. Invalid evidence is excluded, never counted as a miss or a zero. Protocol, identity, missing-call and other integrity errors still withhold all aggregates. Product failures with valid evidence retain zero quality credit and fail operational integrity; failed calls are excluded from output and latency measurements. Quality scores have no arbitrary pass threshold. Fixed mode order and shared runtime/model caches mean latency is an observation under this protocol, not a controlled comparison of cold-start or mode execution speed.
+Isolated public-response format failures still fail CI, but the overview displays diagnostic scores from validated questions with explicit question/repository coverage and a failed-task table. Invalid evidence is excluded, never counted as a miss or a zero. Protocol, identity, missing-call and other integrity errors still withhold all aggregates. Product failures with valid evidence retain zero quality credit and fail operational integrity; failed calls are excluded from output and latency measurements. Quality scores have no arbitrary pass threshold. Fixed mode order, concurrent requests and shared runtime/model caches mean latency is an observation under this protocol, not a controlled comparison of cold-start or mode execution speed.
+
+## Index & Query performance
+
+All four suites and base/head comparisons include an **Index & Query performance** section. Index embedding and public query concurrency are fixed at a limit of **4 per suite process**; independent suite jobs can run simultaneously. The product retains its native batch size, commit scheduling and throttling behavior. The query plan and saved evidence order remain deterministic; completion order can differ. This concurrency policy changes the protocol identity to v8, so use a matching harness for comparisons.
+
+| Measurement | Scope |
+| --- | --- |
+| Query RT | One public MCP tool call, measured before parsing, scoring and saving its response |
+| Phase total | Full index command, including startup/model loading/final optimization; or all queries and response capture for one corpus/mode |
+| Memory | Sum of product process-tree RSS, including the detached daemon and excluding the benchmark driver, sampled at a target interval of 100 ms |
+| Index size | Sum of regular-file bytes under `.zvec-grep` immediately after building; model cache and symlinks are excluded |
+
+Reports show mean, p95 and p99 for query RT, RSS and corpus-phase totals, plus sampled peak RSS, summed phase durations and generated index sizes. Percentiles use nearest rank over pooled raw samples, never averages of per-index percentiles. Phase totals are summed across corpora and do not represent total parallel workflow duration. Sample counts, missing coverage and failures are explicit. Performance RT includes failed query attempts; the existing quality-table latency fields continue to describe successful valid calls. Fixed-order concurrent requests share cache/model state, so these observations do not isolate cold starts.
+
+All performance measurements are collected externally without modifying the tested product. Per-file write RT is excluded because the unchanged Node.js 0.2.2 package does not expose individual write samples; neither runtime receives dedicated product instrumentation for this benchmark. Raw memory/query samples are retained in `run.json` for SWE-QA and `evidence/*/performance.json` plus `performance_groups` for pilots; the final reports contain recomputed aggregates. Missing `ps` support produces unavailable memory, not zero. RSS can double-count shared pages and sampling can miss brief peaks.
 
 ## Dataset and scoring
 
@@ -63,7 +80,7 @@ Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, D
 
 SWE-QA20 ZG reports use **schema 7**, with `preview: "mcp-default"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
 
-The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v7`. The comparator accepts schema 7 reports with matching protocol and frozen inputs, Rust MCP default presentation and all three modes. Reports from other protocol versions require their matching scorer checkout. Replaying saved evidence is not a new retrieval run.
+The protocol ID is `sweqa20-zg-node022-rust-three-modes-mcp-default-v8`. The comparator accepts schema 7 reports with matching protocol and frozen inputs, Rust MCP default presentation and all three modes. Reports from other protocol versions require their matching scorer checkout. Replaying saved evidence is not a new retrieval run.
 
 ## Code structure
 
@@ -79,6 +96,8 @@ zg-retrieval/
   gold/              Frozen relevance labels and annotation provenance
   test/              Contract tests and pinned scoring reference
 ```
+
+The runner accepts native Rust packages and the unchanged Node.js 0.2.2 release. The benchmark adapter translates only the public CLI action syntax (`index` versus `--index`) and preserves each installer-generated MCP command. Node 0.2.2 does not expose indexed source bytes in public status; this field is recorded as unavailable, without inventing a value or relaxing Rust status validation.
 
 The runner captures public evidence; the aggregator reparses and audits it; metric functions score normalized results; report validators recompute quality and measurements before comparison or CI rendering. Metrics do not depend on engine implementations. Response presentation behavior remains covered by the product's MCP contract tests, rather than duplicate retrieval benchmark arms.
 
@@ -112,6 +131,39 @@ and report commands.
 
 Add `--repository reflex-dev/reflex` or `--tasks reflex:6` for an explicitly labeled subset smoke run; all three modes still execute. Standalone `report.mjs` requires all 20 questions, and CI rejects subset reports. Modes and MCP presentation are fixed by the protocol, without selection flags.
 
+## Compare unchanged Node 0.2.2 with pinned Rust
+
+CI candidate refs still compile Rust. For a local cross-runtime comparison, supply the official Node 0.2.2 npm tarball and a native Rust package built from a recorded full commit. Both use the same frozen questions, code-selection arguments, model/device and four-request limit; each builds independent indexes. The adapter changes benchmark invocation syntax only and never patches either product.
+
+Keep the corpus directories outside any existing indexed workspace: Node 0.2.2 discovers ancestor indexes. Use an already-populated shared model-download cache so a download in the first arm does not bias indexing time. Preserve both consumer lockfiles and package hashes. Public status records Node's missing indexed-source-byte field as `null`; generated index disk size is measured independently for both runtimes.
+
+```sh
+mkdir -p "$retrieval_work/node-package"
+npm pack @zvec/zvec-grep@0.2.2 --pack-destination "$retrieval_work/node-package"
+node benchmarks/zg-retrieval/run.mjs \
+  --package "$retrieval_work/node-package" \
+  --output "$retrieval_work/node-results" \
+  --corpus "$retrieval_work/node-corpus" \
+  --model-cache "$retrieval_work/model-cache" \
+  --candidate-commit 'npm:@zvec/zvec-grep@0.2.2'
+
+# Run the same command with the pinned native package and fresh Rust output/corpus.
+node benchmarks/zg-retrieval/compare.mjs \
+  "$retrieval_work/node-results/report.json" \
+  "$retrieval_work/rust-results/report.json" \
+  "$retrieval_work/comparison"
+```
+
+An explicit live integration test verifies both real products on identical isolated 80-file corpora, with 20 synthetic queries, three modes and five repetitions per mode. It checks successful captures, measured RSS/index bytes and an observed maximum of four in-flight requests. Its results are integration evidence, not full-suite quality/performance conclusions:
+
+```sh
+node benchmarks/zg-retrieval/test/live-performance.mjs \
+  --node-package /absolute/path/to/zvec-zvec-grep-0.2.2.tgz \
+  --rust-package /absolute/path/to/native-candidate.tgz \
+  --rust-commit FULL_PINNED_COMMIT \
+  --output NEW_INTEGRATION_DIRECTORY
+```
+
 ## Offline replay and comparisons
 
 Download `retrieval-zg-evidence` into one directory, then recompute:
@@ -139,7 +191,7 @@ Query counts are small, but every run builds fresh corpus indexes before searchi
 
 ArguAna needs a separate leave-one-out index for each of its three selected queries, so BEIR processes 92,473 document files across its six indexes. Source files can yield multiple embedding entities. Model downloads and compiled packages may be cached; corpus indexes and their document embeddings are not reused between runs or versions. Each of the 70 queries is also searched in three modes with five calls per mode.
 
-Manual remote runs start the four suite jobs independently. The Qwen text backend's default indexing policy starts at eight concurrent batches and can grow to twelve; Qwen3.7 text embedding accepts up to twenty inputs per batch. Separate runs for different candidates can overlap, with no account-wide token budget in this workflow. Large fresh indexes and overlapping batches can therefore exhaust a shared remote token rate limit even when there are few test queries. PR and comment version comparisons deliberately use local embedding.
+Manual remote runs start the four suite jobs independently. The harness explicitly caps index embedding concurrency at four batches (the product may reduce concurrency after throttling); Qwen3.7 text embedding accepts up to twenty inputs per batch. Separate runs for different candidates can overlap, with no account-wide token budget in this workflow. Large fresh indexes and overlapping batches can therefore exhaust a shared remote token rate limit even when there are few test queries. PR and comment version comparisons deliberately use local embedding.
 
 For Model Studio, `Allocated quota exceeded` indicates a token rate limit; [the provider documents TPM/TPS limits and account-wide aggregation](https://www.alibabacloud.com/help/en/model-studio/rate-limit). Remote capacity planning needs token-aware pacing across suite jobs and runs, in addition to limiting per-process concurrency. Reducing test query counts alone does not remove the indexing load.
 

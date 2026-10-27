@@ -41,7 +41,7 @@ export function inside(root, path) {
 export function run(
   command,
   args,
-  { cwd, env = process.env, timeout = 600_000, log } = {},
+  { cwd, env = process.env, timeout = 600_000, log, onSpawn } = {},
 ) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
@@ -49,6 +49,7 @@ export function run(
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    onSpawn?.(child);
     let stdout = "",
       stderr = "",
       timedOut = false;

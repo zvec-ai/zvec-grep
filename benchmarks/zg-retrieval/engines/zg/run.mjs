@@ -28,6 +28,15 @@ import {
   inside,
 } from "../../core/lib.mjs";
 import { embeddingRuntime } from "../../core/embedding.mjs";
+import {
+  BENCHMARK_CONCURRENCY,
+  ResourceMonitor,
+  daemonPid,
+  indexConcurrencyArguments,
+  mapConcurrent,
+  measureIndex,
+} from "../../core/performance.mjs";
+import { statistics } from "../../metrics/statistics.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
 
@@ -139,6 +148,37 @@ export function nativeCandidate(packageRoot, consumer, metadata) {
   return { consumer, packageRoot, cli, runtime: "rust-native" };
 }
 
+export function productCandidate(packageRoot, consumer, metadata) {
+  const bin =
+    typeof metadata.bin === "string" ? metadata.bin : metadata.bin?.zg;
+  if (typeof bin === "string" && /\.[cm]?js$/i.test(bin)) {
+    assert.equal(metadata.name, "@zvec/zvec-grep");
+    assert.equal(
+      metadata.version,
+      "0.2.2",
+      "Node comparison requires the unchanged 0.2.2 release",
+    );
+    const cli = resolve(packageRoot, bin);
+    assert.ok(
+      inside(packageRoot, cli),
+      "candidate binary escapes the installed package",
+    );
+    return { consumer, packageRoot, cli, runtime: "node-0.2.2" };
+  }
+  return nativeCandidate(packageRoot, consumer, metadata);
+}
+
+export function candidateCommand(candidate, args) {
+  if (candidate.runtime !== "node-0.2.2")
+    return { command: candidate.cli, args };
+  const [first, ...rest] = args;
+  const verb = first?.startsWith("--") ? first.slice(2) : first;
+  return {
+    command: process.execPath,
+    args: ["--liftoff-only", candidate.cli, verb, ...rest],
+  };
+}
+
 export async function packageCandidate(packagePath, output) {
   let tarball = resolve(packagePath);
   if ((await lstat(tarball)).isDirectory()) {
@@ -171,13 +211,12 @@ export async function packageCandidate(packagePath, output) {
     join(output, "consumer-lock.json"),
     await readFile(join(consumer, "package-lock.json")),
   );
-  const candidate = nativeCandidate(packageRoot, consumer, metadata);
-  assert.ok(
-    (await lstat(candidate.cli)).isFile(),
-    "installed Rust CLI is missing",
-  );
+  const candidate = productCandidate(packageRoot, consumer, metadata);
+  assert.ok((await lstat(candidate.cli)).isFile(), "installed CLI is missing");
+  const help = await runCandidate(candidate, ["--help", "index"]);
   return {
     ...candidate,
+    indexConcurrencyArguments: indexConcurrencyArguments(help.stdout),
     identity: {
       name: metadata.name,
       version: metadata.version,
@@ -188,8 +227,9 @@ export async function packageCandidate(packagePath, output) {
   };
 }
 
-function runCandidate(candidate, args, options) {
-  return run(candidate.cli, args, options);
+export function runCandidate(candidate, args, options) {
+  const invocation = candidateCommand(candidate, args);
+  return run(invocation.command, invocation.args, options);
 }
 
 function referencedSchema(root, reference) {
@@ -262,6 +302,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     invalid_reasons: [],
     preparation_status: "pending",
     stage_availability: "pending",
+    performance: { index: null, query: {} },
   };
   await writeJson(join(output, "run.json"), manifest);
   let root, env, client, transport, corpusBefore, modelBefore, before;
@@ -352,30 +393,35 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     console.log(`${repo.repository}: building a fresh index`);
     const started = performance.now();
     try {
-      const indexed = await runCandidate(
-        candidate,
-        [
-          "--index",
-          root,
-          "--mode",
-          "direct",
-          "--embedding",
-          protocol.model,
-          "--model-cache",
-          options.modelCache,
-          ...(!embedding.remote ? ["--device", protocol.device] : []),
-          ...embedding.indexArguments,
-          ...indexSelectionArguments(protocol),
-          "--debug",
-        ],
-        { env, cwd: root, timeout: 2_400_000 },
-      );
-      manifest.index_seconds = (performance.now() - started) / 1000;
+      const invocation = candidateCommand(candidate, [
+        "--index",
+        root,
+        "--mode",
+        "direct",
+        "--embedding",
+        protocol.model,
+        "--model-cache",
+        options.modelCache,
+        ...(!embedding.remote ? ["--device", protocol.device] : []),
+        ...embedding.indexArguments,
+        ...candidate.indexConcurrencyArguments,
+        ...indexSelectionArguments(protocol),
+        "--debug",
+      ]);
+      const indexed = await measureIndex(invocation.command, invocation.args, {
+        env,
+        cwd: root,
+        timeout: 2_400_000,
+      });
+      manifest.index_seconds = indexed.measurements.total_ms / 1000;
+      manifest.performance.index = indexed.measurements;
       manifest.index_timing_scope =
         "CLI process startup, model load/download if needed, complete index build";
       await writeJson(join(output, "index.json"), indexed);
     } catch (error) {
-      manifest.index_seconds = (performance.now() - started) / 1000;
+      manifest.performance.index = error.measurements ?? null;
+      manifest.index_seconds =
+        (error.measurements?.total_ms ?? performance.now() - started) / 1000;
       await writeJson(
         join(output, "index.json"),
         error.result ?? { error: error.message },
@@ -390,6 +436,9 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "snapshot";
     await snapshotIndex({
       cli: candidate.cli,
+      runtime: candidate.runtime,
+      runStatus: (_cli, args, options) =>
+        runCandidate(candidate, args, options),
       root,
       output: join(output, "stages/before"),
       env,
@@ -513,39 +562,70 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     );
     await writeJson(join(output, "installation/tools.json"), tools);
     phase = "replay";
-    for (const [index, call] of planned.entries()) {
-      const args = requestArguments(call.task, root, call.mode, protocol);
-      const start = performance.now();
-      let response, error;
+    for (const mode of modes) {
+      const monitor = new ResourceMonitor(async () => [
+        transport.pid,
+        await daemonPid(env.ZVEC_GREP_HOME),
+      ]).start();
+      const calls = planned
+        .map((call, index) => ({ call, index }))
+        .filter(({ call }) => call.mode === mode);
+      let records;
       try {
-        response = await client.callTool(
-          { name: "zvec_grep_search", arguments: args },
-          undefined,
-          { timeout: 120_000 },
-        );
-      } catch (failure) {
-        error = failure.message;
-        response = { isError: true, content: [{ type: "text", text: error }] };
+        records = await mapConcurrent(calls, async ({ call, index }) => {
+          const args = requestArguments(call.task, root, call.mode, protocol);
+          const start = performance.now();
+          let response, error;
+          try {
+            response = await client.callTool(
+              { name: "zvec_grep_search", arguments: args },
+              undefined,
+              { timeout: 120_000 },
+            );
+          } catch (failure) {
+            error = failure.message;
+            response = {
+              isError: true,
+              content: [{ type: "text", text: error }],
+            };
+          }
+          const record = {
+            task_id: call.task.task_id,
+            mode: call.mode,
+            preview: call.preview,
+            repetition: call.repetition,
+            quality_observation: call.quality_observation,
+            session_first_query: index === 0,
+            latency_ms: performance.now() - start,
+            request: { name: "zvec_grep_search", arguments: args },
+            transport_error: error ?? null,
+            product_error: response.isError === true,
+            raw_path: `raw/${call.task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
+          };
+          await writeJson(join(output, record.raw_path), response);
+          record.raw_sha256 = await fileHash(join(output, record.raw_path));
+          return record;
+        });
+      } finally {
+        manifest.performance.query[mode] = await monitor.stop();
+        manifest.performance.query[mode].concurrency = BENCHMARK_CONCURRENCY;
+        manifest.performance.query[mode].status = "failed";
       }
-      const record = {
-        task_id: call.task.task_id,
-        mode: call.mode,
-        preview: call.preview,
-        repetition: call.repetition,
-        quality_observation: call.quality_observation,
-        session_first_query: index === 0,
-        latency_ms: performance.now() - start,
-        request: { name: "zvec_grep_search", arguments: args },
-        transport_error: error ?? null,
-        raw_path: `raw/${call.task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
-      };
-      await writeJson(join(output, record.raw_path), response);
-      record.raw_sha256 = await fileHash(join(output, record.raw_path));
+      manifest.performance.query[mode].latency_ms = statistics(
+        records.map((record) => record.latency_ms),
+      );
+      manifest.performance.query[mode].status = "success";
+      manifest.performance.query[mode].failed_calls = records.filter(
+        (record) => record.transport_error || record.product_error,
+      ).length;
+      manifest.performance.query[mode].samples_ms = records.map(
+        (record) => record.latency_ms,
+      );
       await appendFile(
         join(output, "requests.jsonl"),
-        `${JSON.stringify(record)}\n`,
+        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
       );
-      responses.push(record);
+      responses.push(...records);
     }
     await writeFile(join(output, "mcp-stderr.log"), mcpStderr);
   } catch (error) {
@@ -571,6 +651,9 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       try {
         await snapshotIndex({
           cli: candidate.cli,
+          runtime: candidate.runtime,
+          runStatus: (_cli, args, options) =>
+            runCandidate(candidate, args, options),
           root,
           output: join(output, "stages/after"),
           env,

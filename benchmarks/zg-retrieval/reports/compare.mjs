@@ -9,6 +9,7 @@ import {
   summarizeFileRetrieval,
 } from "../metrics/files.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
+import { markdownPerformance, summarizePerformance } from "./performance.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
 
@@ -87,6 +88,7 @@ function reportIdentity(report) {
     ].sort();
   return {
     generated_at: report.generated_at ?? null,
+    runtime: report.runtime ?? "rust-native",
     integrity_passed: report.integrity_passed,
     product_error_calls: report.product_error_calls,
     candidate_commits: unique((repo) => repo.candidate_commit),
@@ -231,6 +233,17 @@ function compareValidatedReports(baseline, candidate, before, after) {
       }),
     ),
     tasks: pairs,
+    performance: Object.fromEntries(
+      [
+        ["baseline", baseline],
+        ["candidate", candidate],
+      ].map(([side, report]) => [
+        side,
+        summarizePerformance(
+          report.repositories.map((repo) => repo.performance ?? {}),
+        ),
+      ]),
+    ),
   };
 }
 
@@ -257,6 +270,8 @@ export function markdownComparison(result) {
   const lines = [
     "# zg Retrieval-only version comparison",
     "",
+    `Baseline: **${cell(result.baseline.runtime)}** (\`${cell(result.baseline.candidate_commits.join(", "))}\`). Candidate: **${cell(result.candidate.runtime)}** (\`${cell(result.candidate.candidate_commits.join(", "))}\`).`,
+    "",
     `Scope: **${result.scope} / ${result.expected_task_ids.length} original questions**. All modes use the Rust public MCP default presentation. Quality averages five calls per query/mode. Delta is candidate minus baseline.`,
     "",
     "Source, Gold, frozen accepted-file targets and protocol identities match; task/mode coverage and scoring eligibility are validated. All five metrics are recomputed from saved public result items. This is a report-only comparison with no quality threshold or causal attribution.",
@@ -274,6 +289,14 @@ export function markdownComparison(result) {
     "File Hit@1/5/10 and MRR@10 weight original questions equally. nDCG@10 first averages questions within each repository, then weights repositories equally. Native ranks are preserved without deduplication. These SWE-QA accepted-file projection scores measure file localization, not sufficient answer evidence; five repetitions are not independent questions.",
   ];
   const warnings = [...new Set(result.warnings)];
+  for (const side of ["baseline", "candidate"])
+    if (result.performance?.[side])
+      lines.push(
+        "",
+        `## ${side} performance`,
+        "",
+        markdownPerformance(result.performance[side]),
+      );
   if (warnings.length)
     lines.push(
       "",
@@ -306,7 +329,14 @@ export function markdownComparison(result) {
     "",
     "Product-error zeros remain in the denominator. Invalid experiments are rejected; unreviewed Gold is N/A. JSON retains input identities, target ranks and per-question status transitions.",
   );
-  return lines.join("\n") + "\n";
+  return (lines.join("\n") + "\n").replaceAll(
+    "the Rust public MCP default presentation",
+    result.baseline.runtime === result.candidate.runtime
+      ? result.baseline.runtime === "node-0.2.2"
+        ? "the Node.js 0.2.2 public MCP default presentation"
+        : "the Rust public MCP default presentation"
+      : "each runtime’s public MCP default presentation",
+  );
 }
 
 export async function writeComparison(baselinePath, candidatePath, outputPath) {

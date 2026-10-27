@@ -7,13 +7,20 @@ import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
+import { NODE_RELEASE } from "../../shared/retrieval-package.mjs";
+import {
+  markdownPerformance,
+  summarizePerformance,
+} from "../reports/performance.mjs";
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
 
 function checkIdentity(value) {
   assert.match(value.repository ?? "", /^[\w.-]+\/[\w.-]+$/);
-  assert.match(value.commit ?? "", /^[a-f0-9]{40}$/);
+  if (value.commit === NODE_RELEASE.identity)
+    assert.equal(value.repository, "zvec-ai/zvec-grep");
+  else assert.match(value.commit ?? "", /^[a-f0-9]{40}$/);
 }
 
 // Inputs to this function have already been rebuilt from validated suite rows.
@@ -75,6 +82,24 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     ...metadata,
     harness_commit: baseline.harness_commit,
     rows,
+    performance: Object.fromEntries(
+      ["sweqa", ...PILOT_NAMES].map((name) => [
+        name,
+        Object.fromEntries(
+          [
+            ["baseline", baseline],
+            ["candidate", candidate],
+          ].map(([side, report]) => [
+            side,
+            name === "sweqa"
+              ? report.sweqa.performance
+              : summarizePerformance(
+                  report.pilots[name].report?.performance_groups ?? [],
+                ),
+          ]),
+        ),
+      ]),
+    ),
     errors: [],
   };
 }
@@ -117,10 +142,12 @@ export function markdownVersionComparison(result) {
   const server = result.server_url ?? "https://github.com";
   const version = (side) => {
     const value = result[side];
+    if (value.commit === NODE_RELEASE.identity)
+      return `[Node.js @zvec/zvec-grep@0.2.2](https://www.npmjs.com/package/@zvec/zvec-grep/v/0.2.2)`;
     return `[${value.repository}@${value.commit}](${server}/${value.repository}/commit/${value.commit})`;
   };
   const lines = [
-    "## Retrieval-only · PR base vs head",
+    "## Retrieval-only · version comparison",
     "",
     `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}**`,
     "",
@@ -156,6 +183,18 @@ export function markdownVersionComparison(result) {
             .replace(/[\r\n]+/g, " ")}`,
       ),
     );
+  if (result.performance) {
+    lines.push(
+      "",
+      "<details>",
+      "<summary>Index & Query performance by suite and version</summary>",
+      "",
+    );
+    for (const [suite, versions] of Object.entries(result.performance))
+      for (const [side, measured] of Object.entries(versions))
+        lines.push(`## ${suite} / ${side}`, "", markdownPerformance(measured));
+    lines.push("", "</details>");
+  }
   lines.push(
     "",
     "SWE-QA nDCG uses repository macro averaging; the other suites use query means. Suites are reported separately. Full base/head reports and per-call evidence are available in the run artifacts.",
