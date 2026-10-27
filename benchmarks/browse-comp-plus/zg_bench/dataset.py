@@ -4,15 +4,15 @@ import base64
 import hashlib
 import json
 import os
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
-import pyarrow.parquet as parquet
 from huggingface_hub import snapshot_download
+from pyarrow import parquet
 
 from .artifacts import read_json, sha256_file, utc_now, write_json
 from .config import BenchmarkConfig
-
 
 CANARY = (
     "BENCHMARK DATA SHOULD NEVER APPEAR AS PLAIN TEXT ONLINE. "
@@ -55,10 +55,7 @@ def prepared_dataset(config: BenchmarkConfig, artifacts: Path) -> Path | None:
         )
     source = (artifacts / "source").resolve()
     decrypted = source / "browsecomp_plus_decrypted.jsonl"
-    if (
-        not decrypted.is_file()
-        or sha256_file(decrypted) != queries.get("sha256")
-    ):
+    if not decrypted.is_file() or sha256_file(decrypted) != queries.get("sha256"):
         return None
     try:
         entries = [*queries["parquet_files"], *corpus["parquet_files"]]
@@ -226,9 +223,20 @@ def _decrypt(value: Any, *, key: str | None = None) -> Any:
 
 
 def _parquet_rows(files: list[Path]) -> Iterator[dict[str, Any]]:
+    # Execution and judging need the question/reference answer; retrieval metrics
+    # need only gold/evidence IDs. Full documents come from the separate corpus.
+    # Project nested IDs before decoding: unused document bodies dominate this
+    # dataset and would otherwise be decrypted, written, and parsed repeatedly.
+    columns = [
+        "query_id",
+        "query",
+        "answer",
+        "gold_docs.list.element.docid",
+        "evidence_docs.list.element.docid",
+    ]
     for path in files:
         source = parquet.ParquetFile(path)
-        for batch in source.iter_batches(batch_size=8):
+        for batch in source.iter_batches(batch_size=8, columns=columns):
             yield from batch.to_pylist()
 
 
@@ -247,9 +255,9 @@ def decrypt_queries(
         progress(0, expected)
     with temporary.open("wb") as destination:
         for row in _parquet_rows(files):
-            encoded = (
-                json.dumps(_decrypt(row), ensure_ascii=False) + "\n"
-            ).encode("utf-8")
+            encoded = (json.dumps(_decrypt(row), ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            )
             destination.write(encoded)
             digest.update(encoded)
             count += 1

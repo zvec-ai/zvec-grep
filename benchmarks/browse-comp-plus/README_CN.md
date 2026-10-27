@@ -194,6 +194,7 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 | --- | --- |
 | Rust 包 | 按候选 commit 精确缓存。 |
 | 源数据 | 下载校验完成后立即缓存，索引构建失败后无需重新下载语料。 |
+| 题目解密 | 从 Parquet 仅读取问题、参考答案及 gold/evidence 文档 ID，跳过未使用的正文；保留全部题目与评分输入。 |
 | 语料、索引和本地模型 | 完整快照包含 Potion 模型缓存，避免各题 worker 重复下载。仅在候选版本、数据、embedding 配置、准备脚本、系统架构和目录一致时复用，不回退复用其他候选版本的索引。 |
 | 题目执行 | 最多 5 个独立 runner，不共享 daemon 或可写索引。 |
 | 失败重跑 | “Re-run failed jobs” 保留成功题目的产物，汇总仅接受当前计划下各题最新 attempt。 |

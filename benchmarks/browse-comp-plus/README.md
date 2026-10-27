@@ -269,6 +269,7 @@ the original metadata for every case is retained under `shards/`.
 | --- | --- |
 | Rust package | Cached for the exact candidate commit. |
 | Source data | Cached immediately after download and verification, so a failed index build does not require downloading the corpus again. |
+| Query decoding | Read only questions, reference answers, and gold/evidence document IDs from Parquet; skip unused document bodies while preserving every query and scoring input. |
 | Corpus, index, and local model | A complete snapshot includes the Potion model cache, so case workers do not download it again. It is reused only for the same candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path. No fallback to another candidate's index. |
 | Case execution | Up to five independent runners; no shared daemon or mutable index. |
 | Partial rerun | “Re-run failed jobs” keeps successful case artifacts; aggregation accepts only the current plan and latest attempt for each case. |
