@@ -22,9 +22,9 @@ The key hashes persisted storage/workspace production code, the explicit Rust in
 
 1. Package the frozen base/head sources and compute storage keys.
 2. Deduplicate identical keys: compatible base/head share **one** sealed index.
-3. Find `browsecomp-doc-index-<key>` across this independent workflow's runs. Verify producer provenance, archive/member hashes, full public coverage and exact model/corpus identities.
+3. Find `browsecomp-doc-index-<key>` across this independent workflow's runs and verify producer provenance. Ordinary hits only record its reference, avoiding a duplicate multi-gigabyte download before Query.
 4. For a previously unseen storage identity, build one full index, retain original time/RSS/size evidence and seal it with model bytes.
-5. Restore a pristine copy for base Query, stop the product and remove it, then restore a pristine copy for head Query on the same host. Disable automatic updates and verify status before/after.
+5. Query downloads each selected Artifact once and verifies archive/member hashes, full public coverage and exact model/corpus identities before use. Restore a pristine copy for base, stop the product and remove it, then restore a pristine copy for head on the same host. Disable automatic updates and verify status before/after.
 
 API/download errors, corruption and a registered index that expired or disappeared **fail explicitly**, without silently reindexing. Bot result comments retain full receipts so a deleted Artifact is not mistaken for a new key. Preserve these comments and producer workflow runs.
 

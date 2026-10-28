@@ -116,10 +116,11 @@ export async function plan({ directory, request, core }) {
   return matrix;
 }
 
-export async function receipt({ directory, key, artifactId, runId, output }) {
-  const manifest = await readJson(join(directory, "manifest.json"));
-  assert.equal(manifest.key, key);
-  assert.equal(manifest.build.status, "success");
+// This is a reference to a sealed producer, not a content-validation result.
+// Query verifies every archive/member hash before loading the index. Keeping
+// ordinary cache hits metadata-only avoids downloading a large index twice.
+export async function receipt({ key, artifactId, runId, output }) {
+  assert.match(key, keyPattern);
   const value = {
     schema_version: 1,
     key,

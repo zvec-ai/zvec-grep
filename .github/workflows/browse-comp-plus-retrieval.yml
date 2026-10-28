@@ -213,14 +213,14 @@ jobs:
             const { lookup } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.github/scripts/browsecomp-index-store.mjs`));
             await lookup({ github, context, core, key: process.env.STORAGE_KEY });
       - uses: actions/download-artifact@v8
-        if: steps.lookup.outputs.hit == 'true'
+        if: steps.lookup.outputs.renew == 'true'
         with:
           name: ${{ matrix.artifact_name }}
           run-id: ${{ steps.lookup.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/browsecomp-index
-      - name: Verify an existing compatible Artifact; corruption never triggers rebuilding
-        if: steps.lookup.outputs.hit == 'true'
+      - name: Verify unchanged archive bytes before renewing an existing Artifact
+        if: steps.lookup.outputs.renew == 'true'
         env:
           STORAGE_KEY: ${{ matrix.key }}
         run: python benchmarks/browse-comp-plus-retrieval/index_artifact.py verify --directory "$RUNNER_TEMP/browsecomp-index" --key "$STORAGE_KEY"
@@ -279,7 +279,7 @@ jobs:
           script: |
             const { pathToFileURL } = require('node:url');
             const { receipt } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.github/scripts/browsecomp-index-store.mjs`));
-            await receipt({ directory: `${process.env.RUNNER_TEMP}/browsecomp-index`, key: process.env.STORAGE_KEY, artifactId: process.env.ARTIFACT_ID, runId: process.env.PRODUCER_RUN, output: `${process.env.RUNNER_TEMP}/browsecomp-index-ref` });
+            await receipt({ key: process.env.STORAGE_KEY, artifactId: process.env.ARTIFACT_ID, runId: process.env.PRODUCER_RUN, output: `${process.env.RUNNER_TEMP}/browsecomp-index-ref` });
       - uses: actions/upload-artifact@v7
         with:
           name: browsecomp-doc-index-ref-${{ matrix.key }}

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   findIndex,
   readIndexReceipts,
+  receipt,
   select,
 } from "./browsecomp-index-store.mjs";
 
@@ -175,4 +176,24 @@ test("ambiguous or misnamed receipt layouts fail closed", async (t) => {
   await assert.rejects(readIndexReceipts(directory));
   await writeFile(join(directory, "receipt.json"), JSON.stringify(value));
   await assert.rejects(readIndexReceipts(directory), /ambiguous/);
+});
+
+test("a catalog hit records the exact producer without downloading index bytes", async (t) => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "browsecomp-catalog-receipt-"),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const found = await findIndex(fixture([cached()]));
+  const options = {
+    key: found.key,
+    artifactId: found.artifact_id,
+    runId: found.run_id,
+    output: directory,
+  };
+  await receipt(options);
+  const result = (await readIndexReceipts(directory)).get(key);
+  assert.equal(result.artifact_id, 12);
+  assert.equal(result.run_id, 123);
+  for (const change of [{ key: "invalid" }, { artifactId: 0 }, { runId: -1 }])
+    await assert.rejects(receipt({ ...options, ...change }));
 });
