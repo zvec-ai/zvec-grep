@@ -365,62 +365,11 @@ export function markdownPrComparison(result) {
   const lines = [
     `**✅ Complete** · Base ${version("baseline")} → Head ${version("candidate")} · [Run & artifacts](${result.run_url})`,
     "",
-    "Cells show **base → head (Δ%)**. Δ% = (head − base) / base × 100, using unrounded values. — = unavailable or zero baseline. Concurrency: **≤4**.",
+    "Performance cells show **base → head (Δ%)**. Δ% = (head − base) / base × 100, using unrounded values. — = unavailable or zero baseline. Concurrency: **≤4**.",
     "",
-    "### 1 · Index",
+    "### 1 · Retrieval quality",
     "",
-    "| Suite | Total time (s) | Peak RSS (MiB) | Index size (MiB) |",
-    "| --- | ---: | ---: | ---: |",
-    ...suites.map(
-      (suite) =>
-        `| ${label(suite)} | ${pair(suite, (p) => p.index.total_ms.total, 1000)} | ${pair(suite, (p) => p.index.memory_rss_bytes.max, mib)} | ${pair(suite, (p) => p.index.index_bytes.total, mib)} |`,
-    ),
-    "",
-    "### 2 · Query",
-    "",
-    "| Suite / mode | Mean RT (ms) | p95 RT (ms) | Peak RSS (MiB) |",
-    "| --- | ---: | ---: | ---: |",
-    ...suites.flatMap((suite) =>
-      modes.map(
-        (mode) =>
-          `| ${label(suite)} / ${mode} | ${pair(suite, (p) => p.query[mode].latency_ms.mean)} | ${pair(suite, (p) => p.query[mode].latency_ms.p95)} | ${pair(suite, (p) => p.query[mode].memory_rss_bytes.max, mib)} |`,
-      ),
-    ),
-    "",
-    "<details>",
-    "<summary>Full performance · sample counts, all percentiles & group totals</summary>",
-    "",
-    "Σ = sum; μ = mean. p50 uses the median; p95/p99 use nearest rank. Peak RSS is the sampled maximum. Each row below is one version.",
-    "",
-    "**Index**",
-    "",
-    "| Suite / version | Phases measured/planned; failed | Time n; Σ / μ / p95 / p99 (s) | RSS n; μ / p95 / p99 / peak (MiB) | Index n; Σ / μ / p95 / p99 (MiB) |",
-    "| --- | --- | --- | --- | --- |",
-    ...suites.flatMap((suite) =>
-      sides.map((side) => {
-        const stage = result.performance[suite][side].index;
-        return `| ${label(suite)} / ${side === "baseline" ? "base" : "head"} | ${stage.measured}/${stage.planned}; ${stage.failed} | ${stage.total_ms.count}; ${stats(stage.total_ms, ["total", "mean", "p95", "p99"], 1000)} | ${stage.memory_rss_bytes.count} (${stage.memory_measured}/${stage.planned} complete phases); ${stats(stage.memory_rss_bytes, ["mean", "p95", "p99", "max"], mib)} | ${stage.index_bytes.count}/${stage.planned}; ${stats(stage.index_bytes, ["total", "mean", "p95", "p99"], mib)} |`;
-      }),
-    ),
-    "",
-    "**Query**",
-    "",
-    "| Suite / mode / version | RT n; mean / p50 / p95 / p99 (ms) | Group phases measured/planned; failed; time n; Σ / μ / p95 / p99 (s) | RSS n; μ / p95 / p99 / peak (MiB) |",
-    "| --- | --- | --- | --- |",
-    ...suites.flatMap((suite) =>
-      modes.flatMap((mode) =>
-        sides.map((side) => {
-          const stage = result.performance[suite][side].query[mode];
-          return `| ${label(suite)} / ${mode} / ${side === "baseline" ? "base" : "head"} | ${stage.latency_ms.count}; ${stats(stage.latency_ms, ["mean", "p50", "p95", "p99"])} | ${stage.measured}/${stage.planned}; ${stage.failed}; ${stage.total_ms.count}; ${stats(stage.total_ms, ["total", "mean", "p95", "p99"], 1000)} | ${stage.memory_rss_bytes.count} (${stage.memory_measured}/${stage.planned} complete phases); ${stats(stage.memory_rss_bytes, ["mean", "p95", "p99", "max"], mib)} |`;
-        }),
-      ),
-    ),
-    "",
-    "</details>",
-    "",
-    "### 3 · Retrieval quality",
-    "",
-    "<details>",
+    "<details open>",
     "<summary>Quality scores · 4 suites × 3 modes</summary>",
     "",
     "Each cell is base / head / Δ. Δ = head − base; higher is better. Quality is report-only.",
@@ -438,6 +387,70 @@ export function markdownPrComparison(result) {
     ),
     "",
     "Same frozen queries, gold labels, local models and harness; fresh indexes and five calls per query/mode. SWE-QA nDCG uses repository macro averaging; other suites use query means.",
+    "",
+    "</details>",
+    "",
+    "### 2 · Index",
+    "",
+    "<details>",
+    "<summary>Index performance · 4 suites</summary>",
+    "",
+    "| Suite | Total time (s) | Peak RSS (MiB) | Index size (MiB) |",
+    "| --- | ---: | ---: | ---: |",
+    ...suites.map(
+      (suite) =>
+        `| ${label(suite)} | ${pair(suite, (p) => p.index.total_ms.total, 1000)} | ${pair(suite, (p) => p.index.memory_rss_bytes.max, mib)} | ${pair(suite, (p) => p.index.index_bytes.total, mib)} |`,
+    ),
+    "",
+    "<details>",
+    "<summary>Full Index metrics · counts, percentiles & totals</summary>",
+    "",
+    "Σ = sum; μ = mean. p50 uses the median; p95/p99 use nearest rank. Peak RSS is the sampled maximum. Each row below is one version.",
+    "",
+    "| Suite / version | Phases measured/planned; failed | Time n; Σ / μ / p95 / p99 (s) | RSS n; μ / p95 / p99 / peak (MiB) | Index n; Σ / μ / p95 / p99 (MiB) |",
+    "| --- | --- | --- | --- | --- |",
+    ...suites.flatMap((suite) =>
+      sides.map((side) => {
+        const stage = result.performance[suite][side].index;
+        return `| ${label(suite)} / ${side === "baseline" ? "base" : "head"} | ${stage.measured}/${stage.planned}; ${stage.failed} | ${stage.total_ms.count}; ${stats(stage.total_ms, ["total", "mean", "p95", "p99"], 1000)} | ${stage.memory_rss_bytes.count} (${stage.memory_measured}/${stage.planned} complete phases); ${stats(stage.memory_rss_bytes, ["mean", "p95", "p99", "max"], mib)} | ${stage.index_bytes.count}/${stage.planned}; ${stats(stage.index_bytes, ["total", "mean", "p95", "p99"], mib)} |`;
+      }),
+    ),
+    "",
+    "</details>",
+    "",
+    "</details>",
+    "",
+    "### 3 · Query",
+    "",
+    "<details>",
+    "<summary>Query performance · 4 suites × 3 modes</summary>",
+    "",
+    "| Suite / mode | Mean RT (ms) | p95 RT (ms) | Peak RSS (MiB) |",
+    "| --- | ---: | ---: | ---: |",
+    ...suites.flatMap((suite) =>
+      modes.map(
+        (mode) =>
+          `| ${label(suite)} / ${mode} | ${pair(suite, (p) => p.query[mode].latency_ms.mean)} | ${pair(suite, (p) => p.query[mode].latency_ms.p95)} | ${pair(suite, (p) => p.query[mode].memory_rss_bytes.max, mib)} |`,
+      ),
+    ),
+    "",
+    "<details>",
+    "<summary>Full Query metrics · counts, percentiles & group totals</summary>",
+    "",
+    "Σ = sum; μ = mean. p50 uses the median; p95/p99 use nearest rank. Peak RSS is the sampled maximum. Each row below is one version.",
+    "",
+    "| Suite / mode / version | RT n; mean / p50 / p95 / p99 (ms) | Group phases measured/planned; failed; time n; Σ / μ / p95 / p99 (s) | RSS n; μ / p95 / p99 / peak (MiB) |",
+    "| --- | --- | --- | --- |",
+    ...suites.flatMap((suite) =>
+      modes.flatMap((mode) =>
+        sides.map((side) => {
+          const stage = result.performance[suite][side].query[mode];
+          return `| ${label(suite)} / ${mode} / ${side === "baseline" ? "base" : "head"} | ${stage.latency_ms.count}; ${stats(stage.latency_ms, ["mean", "p50", "p95", "p99"])} | ${stage.measured}/${stage.planned}; ${stage.failed}; ${stage.total_ms.count}; ${stats(stage.total_ms, ["total", "mean", "p95", "p99"], 1000)} | ${stage.memory_rss_bytes.count} (${stage.memory_measured}/${stage.planned} complete phases); ${stats(stage.memory_rss_bytes, ["mean", "p95", "p99", "max"], mib)} |`;
+        }),
+      ),
+    ),
+    "",
+    "</details>",
     "",
     "</details>",
     "",
