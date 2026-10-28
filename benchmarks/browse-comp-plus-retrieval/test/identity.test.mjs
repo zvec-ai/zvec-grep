@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -140,4 +140,48 @@ test("inline tests do not hide production storage items that follow them", async
   );
   await commit();
   assert.notEqual((await indexIdentity(source, lock)).key, first.key);
+});
+
+test("optional FP16 codec changes invalidate storage while legacy FP32 keys stay unchanged", async (t) => {
+  const { source, commit, lock } = await fixture(t);
+  const base = await indexIdentity(source, lock);
+  const cargoPath = join(source, "rust/Cargo.lock");
+  const cargo = await readFile(cargoPath, "utf8");
+  const half = (version) =>
+    `\n[[package]]\nname = "half"\nversion = "${version}"\n`;
+  await writeFile(cargoPath, cargo + half("1"));
+  await commit();
+  assert.equal((await indexIdentity(source, lock)).key, base.key);
+  const codec = join(source, "rust/crates/zg-zvec-fp16");
+  await mkdir(join(codec, "src"), { recursive: true });
+  const manifest = '[package]\nname = "zg-zvec-fp16"\n';
+  await writeFile(join(codec, "Cargo.toml"), manifest);
+  const production = "fn encode_fp16() {}\n";
+  const tests = (value) =>
+    `\n#[cfg(test)]\nmod tests {\n    const TEST: u32 = ${value};\n}\n`;
+  await writeFile(join(codec, "src/lib.rs"), production + tests(1));
+  await commit();
+  const fp16 = await indexIdentity(source, lock);
+  assert.equal(fp16.storage.index_version, 2);
+  assert.notEqual(fp16.key, base.key);
+  await writeFile(join(codec, "src/lib.rs"), production + tests(2));
+  await commit();
+  assert.equal((await indexIdentity(source, lock)).key, fp16.key);
+  await writeFile(
+    join(codec, "src/lib.rs"),
+    "fn encode_fp16_differently() {}\n",
+  );
+  await commit();
+  const changed = await indexIdentity(source, lock);
+  assert.notEqual(changed.key, fp16.key);
+  await writeFile(cargoPath, cargo + half("2"));
+  await commit();
+  const dependency = await indexIdentity(source, lock);
+  assert.notEqual(dependency.key, changed.key);
+  await writeFile(
+    join(codec, "Cargo.toml"),
+    manifest + "[features]\ncodec = []\n",
+  );
+  await commit();
+  assert.notEqual((await indexIdentity(source, lock)).key, dependency.key);
 });

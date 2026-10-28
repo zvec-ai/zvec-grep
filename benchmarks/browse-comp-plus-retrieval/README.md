@@ -18,6 +18,8 @@ Quoted/fenced commands, bot comments, extra arguments and ordinary issues are ig
 
 ## Reusable Index Artifacts
 
+When present, the FP16 codec crate's production sources, manifest and `half` dependency also participate. FP32 keys without this optional crate remain unchanged, even though both formats use index version 2.
+
 The key hashes persisted storage/workspace production code, the explicit Rust index version and storage-backend dependency identities, together with pinned corpus/model inputs and Linux x64 settings. PR SHA, query code, benchmark harness and storage tests do not invalidate it. Production storage changes conservatively invalidate it, including nonfunctional edits.
 
 1. Package the frozen base/head sources and compute storage keys.

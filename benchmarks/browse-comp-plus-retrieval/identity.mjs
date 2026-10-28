@@ -13,6 +13,7 @@ import {
 } from "../zg-retrieval/core/io.mjs";
 
 const SHA = /^[a-f0-9]{40}$/;
+const FP16_CODEC = "rust/crates/zg-zvec-fp16/";
 export const INDEX_PREFIX = "browsecomp-doc-index-";
 
 // Rustfmt keeps the test module's closing brace at column zero. Preserve all
@@ -58,6 +59,7 @@ export async function indexIdentity(source, lock) {
       "-z",
       "rust/crates/zg-engine/src/storage",
       "rust/crates/zg-engine/src/workspace",
+      FP16_CODEC,
     ])
   ).stdout
     .split("\0")
@@ -65,21 +67,25 @@ export async function indexIdentity(source, lock) {
   const files = [];
   for (const path of tracked.sort()) {
     if (
-      !path.endsWith(".rs") ||
+      (!path.endsWith(".rs") && path !== `${FP16_CODEC}Cargo.toml`) ||
       /(?:\/tests\/|\/tests\.rs$|_tests\.rs$)/.test(path)
     )
       continue;
-    const text = productionSource(await readFile(join(source, path), "utf8"));
+    const raw = await readFile(join(source, path), "utf8");
+    const text = path.endsWith(".rs") ? productionSource(raw) : raw;
     files.push({ path, sha256: sha256(text) });
   }
   assert.ok(files.length > 0);
   const cargo = await readFile(join(source, "rust/Cargo.lock"), "utf8");
+  const fp16 = files.some(({ path }) => path.startsWith(FP16_CODEC));
   const dependencies = cargo
     .split("[[package]]")
-    .filter((block) =>
-      /^\s*name = "(?:zvec-rust(?:-sys|-build)?|rusqlite|libsqlite3-sys)"/m.test(
-        block,
-      ),
+    .filter(
+      (block) =>
+        /^\s*name = "(?:zvec-rust(?:-sys|-build)?|rusqlite|libsqlite3-sys)"/m.test(
+          block,
+        ) ||
+        (fp16 && /^\s*name = "(?:zg-zvec-fp16|half)"/m.test(block)),
     )
     .map((block) => block.trim())
     .sort();
