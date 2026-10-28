@@ -70,6 +70,31 @@ Matching local concurrency configurations share runtime admission. Different
 configurations use separate cached native resources; active leases keep their
 models alive, while unused variants are released when switching configurations.
 
+`zg --install --upgrade-installed` migrates existing user-level MCP launchers
+from 0.2.x without selecting agents or installing new integrations. It changes
+`zg server --stdio` to `zg --server --stdio` and replaces recognized Node/JS
+entrypoints with the running native executable. Known config-directory overrides
+are respected; project files are not searched. HTTP connections, toolsets,
+timeouts, environment variables, disabled state, permissions and guidance remain
+unchanged. JSONC and TOML comments are preserved. Only existing entries are
+changed, including when related clients use separate config files.
+
+Use `zg --install --upgrade-installed --dry-run` to preview. Each changed file
+gets a unique adjacent `.zg-upgrade-*.bak` backup before atomic replacement.
+Repeated runs make no additional changes. Invalid files and unsupported launchers
+are reported while other independent files are processed; any unresolved entry
+produces a nonzero exit status. Migration does not start a daemon or load models.
+Reconnect agents afterwards. HTTP users can run `zg --server on` to replace an
+old daemon using the existing protocol-upgrade path.
+
+Published npm packages attempt this migration after a successful global
+installation or rebuild for the current user. Local dependencies, temporary
+execution, CI, elevated Unix installs and ambiguous user homes are skipped.
+Set `ZG_INSTALL_SKIP_AGENT_UPGRADE=1` to opt out. Automatic migration has a
+10-second timeout; failure preserves package installation and writes details to
+`agent-upgrade.log` in the installed package. The manual command remains available
+for skipped or failed migrations. Packaging and release verification opt out.
+
 `zg --install --target opencode` respects a nonempty `OPENCODE_CONFIG` override.
 Otherwise it selects an existing `opencode.jsonc` before `opencode.json` under
 `${XDG_CONFIG_HOME:-~/.config}/opencode`, creating `opencode.json` when neither
@@ -707,7 +732,8 @@ the original libraries or silently includes them in a CPU package.
 The registry distribution is prepared as one meta package plus exact-version
 native optional dependencies declared in `npm/platforms.json`. The meta package
 uses Node only during `postinstall` to verify and materialize the native
-executable; running `zg` enters that executable directly. Published installs
+executable and conditionally migrate existing agent configurations; running `zg`
+enters that executable directly. Published installs
 support Node.js 14.14 and newer.
 
 Validate the release manifest and build the current platform dry-run packages:

@@ -61,8 +61,8 @@ pub use authorization::{
 };
 
 pub use install::{
-    InstallError, InstallOutcome, execute_install, execute_uninstall, resolve_server_listen,
-    resolve_server_url,
+    InstallError, InstallOutcome, execute_install, execute_uninstall, execute_upgrade_installed,
+    resolve_server_listen, resolve_server_url,
 };
 pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
 pub use path_lookup::write_path_lookup_result;
@@ -184,7 +184,12 @@ pub enum McpInstallTransport {
 }
 
 #[derive(Clone, Debug, Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI switches are constrained by clap conflicts and dependencies.
 pub struct InstallArgs {
+    #[arg(long, conflicts_with_all = ["targets", "positional_targets", "yes", "force", "transport", "mcp_toolset", "mcp_tool_timeout_seconds", "mcp_token_env"])]
+    pub upgrade_installed: bool,
+    #[arg(long, requires = "upgrade_installed")]
+    pub dry_run: bool,
     #[arg(long = "target", value_name = "AGENT", action = clap::ArgAction::Append)]
     pub targets: Vec<String>,
     #[arg(long = "mcp-transport", value_enum)]

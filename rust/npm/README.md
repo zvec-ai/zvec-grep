@@ -8,6 +8,13 @@ names and npm `os`, `cpu`, and `libc` selectors.
 The current published targets are macOS ARM64/x64, Linux x64/ARM64 with glibc,
 and Windows x64/ARM64.
 
+After native installation succeeds, eligible per-user global installs run
+`zg --install --upgrade-installed` using the installed binary's absolute path.
+This migrates existing 0.2.x agent launchers without adding integrations or
+starting a daemon. See the [package README](meta/README.md) for skip conditions,
+`ZG_INSTALL_SKIP_AGENT_UPGRADE`, backups and manual recovery. Release verification
+sets the skip flag so temporary npm prefixes never change user configuration.
+
 After installation, the meta package retains the existing runtime paths. CUDA
 files are present only after successful plugin installation:
 

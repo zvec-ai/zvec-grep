@@ -689,6 +689,7 @@ See zg --help environment for daemon startup scope.";
 
 const INSTALL_HELP: &str = r"Usage:
   zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|pi|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install --upgrade-installed [--dry-run]
 
 Options:
   --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, grok, pi, auto, or all; repeatable
@@ -698,6 +699,15 @@ Options:
   --mcp-token-env <name>            HTTP mode Bearer token environment variable
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
+  --upgrade-installed              Migrate existing integrations without installing new ones
+  --dry-run                        Preview migration without writing files
+
+Upgrade scans existing entries in known user configuration files.
+It preserves transport, custom settings, permissions, guidance and comments;
+HTTP entries are unchanged. Unsupported launchers require manual migration.
+Changed files receive a unique .zg-upgrade-*.bak backup beside the original.
+No daemon is started. Reconnect agents afterwards; HTTP users run zg --server on.
+Upgrade options cannot be combined with target or installation settings.
 
 The qoder target configures Qoder CLI and Qoder IDE together.
 The copilot target configures GitHub Copilot CLI and Agent Host. The vscode

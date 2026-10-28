@@ -20,7 +20,7 @@ const test = require("node:test");
 const { spawn, spawnSync } = require("node:child_process");
 const { createServer } = require("node:http");
 
-const { materialize, selectPlatform, verifyPayload, verifyInstallation } = require("./install.cjs");
+const { installPackage, upgradeInstalledAgents, materialize, selectPlatform, verifyPayload, verifyInstallation } = require("./install.cjs");
 const { coreIdentity, packageFilename, componentArchive, settings } = require("./plugins.cjs");
 
 const entry = {
@@ -681,4 +681,114 @@ test("real npm install/rebuild supports CPU bootstrap, offline plugins and pinne
   assert.equal(verifyInstallation({ ...options, metaRoot: installedMeta.replace(prefix, onlinePrefix),
     platformRoot: installedBase.replace(prefix, onlinePrefix), requireCuda: true }).components.length,
   fixture.plugins.components.length);
+});
+
+function upgradeOptions(home, overrides = {}) {
+  return {
+    environment: { npm_config_global: "true", npm_command: "install", HOME: home, USERPROFILE: home },
+    identity: () => ({ uid: 1000, euid: 1000, homedir: home }),
+    log: () => {},
+    ...overrides,
+  };
+}
+
+test("postinstall upgrades existing integrations using the verified absolute executable", () => {
+  const paths = fixture();
+  try {
+    let calls = 0;
+    const agentUpgrade = upgradeOptions(paths.root, {
+      run(binary, args, options) {
+        calls++;
+        assert.equal(binary, join(paths.metaRoot, "bin", "zg.exe"));
+        assert.match(readFileSync(binary, "utf8"), /0\.0\.1/);
+        assert.deepEqual(args, ["--install", "--upgrade-installed"]);
+        assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
+        assert.equal(options.timeout, 10000);
+        assert.equal(options.killSignal, "SIGKILL");
+        assert.equal(options.shell, undefined);
+        assert.equal(options.env.HOME, paths.root);
+        return { status: 0, stdout: "Upgraded: 1, compatible: 0, manual: 0, failed: 0\n", stderr: "" };
+      },
+      warn: assert.fail,
+    });
+    installPackage({ ...paths, entry, expectedVersion: "0.0.1", agentUpgrade });
+    assert.equal(calls, 1);
+    assert.match(readFileSync(join(paths.metaRoot, "agent-upgrade.log"), "utf8"), /Upgraded: 1/);
+    installPackage({ ...paths, entry, expectedVersion: "0.0.1", agentUpgrade });
+    assert.equal(calls, 2);
+  } finally { rmSync(paths.root, { recursive: true, force: true }); }
+});
+
+test("postinstall never attempts migration before a successful native installation", () => {
+  const paths = fixture();
+  try {
+    const agentUpgrade = upgradeOptions(paths.root, { run: () => assert.fail("must not run") });
+    assert.throws(() => installPackage({ ...paths, entry, expectedVersion: "wrong", agentUpgrade }), /mismatch/);
+    assert.equal(existsSync(join(paths.metaRoot, "agent-upgrade.log")), false);
+  } finally { rmSync(paths.root, { recursive: true, force: true }); }
+});
+
+test("postinstall skips local, temporary, CI, opted out and ambiguous user installations", () => {
+  const paths = fixture();
+  try {
+    const base = upgradeOptions(paths.root, { run: () => assert.fail("must not run"), warn: assert.fail });
+    for (const patch of [
+      { npm_config_global: undefined }, { npm_config_global: "false" },
+      { npm_command: "exec" }, { npm_command: "ci" }, { CI: "true" },
+      { CONTINUOUS_INTEGRATION: "1" }, { GITHUB_ACTIONS: "true" }, { TF_BUILD: "True" },
+      { BUILD_NUMBER: "12" }, { JENKINS_URL: "https://ci.example" },
+      { ZG_INSTALL_SKIP_AGENT_UPGRADE: "1" }, { SUDO_UID: "1000" }, { SUDO_USER: "user" },
+      { HOME: "", USERPROFILE: "" }, { HOME: "relative", USERPROFILE: "relative" },
+      { HOME: join(paths.root, "other"), USERPROFILE: join(paths.root, "other") },
+    ]) {
+      upgradeInstalledAgents(paths.metaRoot, { ...base, environment: { ...base.environment, ...patch } });
+    }
+    for (const identity of [
+      { uid: 0, euid: 0, homedir: paths.root },
+      { uid: 1000, euid: 1001, homedir: paths.root },
+      { uid: 1000, euid: 1000, homedir: join(paths.root, "other") },
+    ]) {
+      upgradeInstalledAgents(paths.metaRoot, { ...base, identity: () => identity });
+    }
+    assert.equal(existsSync(join(paths.metaRoot, "agent-upgrade.log")), false);
+  } finally { rmSync(paths.root, { recursive: true, force: true }); }
+});
+
+test("migration errors, process failures and timeouts leave native installation usable", () => {
+  const paths = fixture();
+  try {
+    for (const result of [
+      { status: 1, stdout: "manual: user-config [zvec_grep]\n", stderr: "Needs attention\n" },
+      { status: null, signal: "SIGKILL", error: Object.assign(new Error("spawn timed out"), { code: "ETIMEDOUT" }) },
+      { status: null, error: new Error("cannot load native runtime") },
+    ]) {
+      const warnings = [];
+      installPackage({ ...paths, entry, expectedVersion: "0.0.1", agentUpgrade: upgradeOptions(paths.root, {
+        run: () => result, warn: (message) => warnings.push(message),
+      }) });
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /zg --install --upgrade-installed/);
+      assert.match(readFileSync(join(paths.metaRoot, "bin/zg.exe"), "utf8"), /0\.0\.1/);
+      const report = readFileSync(join(paths.metaRoot, "agent-upgrade.log"), "utf8");
+      assert.ok(report.includes(result.error ? result.error.message : "Needs attention"));
+    }
+    const warnings = [];
+    upgradeInstalledAgents(paths.metaRoot, upgradeOptions(paths.root, {
+      run: () => { throw new Error("spawn failed"); }, warn: (message) => warnings.push(message),
+    }));
+    assert.match(warnings[0], /spawn failed/);
+  } finally { rmSync(paths.root, { recursive: true, force: true }); }
+});
+
+test("an explicitly false CI flag permits normal global rebuild migration", () => {
+  const paths = fixture();
+  try {
+    let calls = 0;
+    const options = upgradeOptions(paths.root, {
+      run: () => { calls++; return { status: 0, stdout: "No existing integrations found.\n" }; }, warn: assert.fail,
+    });
+    Object.assign(options.environment, { CI: "false", npm_command: "rebuild" });
+    upgradeInstalledAgents(paths.metaRoot, options);
+    assert.equal(calls, 1);
+  } finally { rmSync(paths.root, { recursive: true, force: true }); }
 });

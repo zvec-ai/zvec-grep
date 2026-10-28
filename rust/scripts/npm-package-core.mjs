@@ -259,6 +259,8 @@ export function npmEnvironment(cacheDir) {
     ...process.env,
     npm_config_cache: cacheDir,
     npm_config_update_notifier: "false",
+    // Packaging and release verification must not edit the developer's integrations.
+    ZG_INSTALL_SKIP_AGENT_UPGRADE: "1",
   };
 }
 

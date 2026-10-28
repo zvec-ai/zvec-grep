@@ -72,6 +72,10 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             writeln!(zg_cli::stdout(), "{}", env!("CARGO_PKG_VERSION"))?;
             return Ok(ExitCode::SUCCESS);
         }
+        CliPlan::Install(args) if args.upgrade_installed => {
+            zg_cli::execute_upgrade_installed(args)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         _ => {}
     }
     let lexical_only = matches!(&plan, CliPlan::Files { .. })
