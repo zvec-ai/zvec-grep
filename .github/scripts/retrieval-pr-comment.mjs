@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { markdownVersionComparison } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { PILOT_SUITES } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
 
@@ -296,7 +295,7 @@ export function commentBody({ run, request, report, serverUrl, repository }) {
   const body = [marker, versionMarker(run), "## ZG Retrieval Benchmark", ""];
   if (result) {
     body.push(
-      markdownVersionComparison({
+      markdownPrComparison({
         ...result,
         server_url: serverUrl,
         run_url: runUrl,
@@ -326,6 +325,124 @@ export function commentBody({ run, request, report, serverUrl, repository }) {
     "Embedding: local. e2e: skipped. This comment is updated by automatic PR Retrieval runs.",
   );
   return body.join("\n");
+}
+
+export function markdownPrComparison(result) {
+  const suites = ["sweqa", "beir", "duretrieval", "quarry"];
+  const modes = ["hybrid", "fts", "vector"];
+  const sides = ["baseline", "candidate"];
+  const label = (suite) =>
+    ({
+      sweqa: "SWE-QA20",
+      beir: "BEIR",
+      duretrieval: "DuRetrieval",
+      quarry: "Quarry",
+    })[suite];
+  const number = (value, unit = 1) =>
+    Number.isFinite(value) ? (value / unit).toFixed(2) : "—";
+  const stats = (value, fields, unit = 1) =>
+    fields.map((field) => number(value[field], unit)).join(" / ");
+  const pair = (suite, select) =>
+    sides.map((side) => select(result.performance[suite][side])).join(" → ");
+  const version = (side) => {
+    const { repository, commit } = result[side];
+    return `[\`${commit.slice(0, 7)}\`](${result.server_url}/${repository}/commit/${commit})`;
+  };
+  const mib = 1024 ** 2;
+  const lines = [
+    `**✅ Complete** · Base ${version("baseline")} → Head ${version("candidate")} · [Run & artifacts](${result.run_url})`,
+    "",
+    "Cells show **base → head**. — = unavailable. Concurrency: **≤4**.",
+    "",
+    "### 1 · Index",
+    "",
+    "| Suite | Total time (s) | Peak RSS (MiB) | Index size (MiB) |",
+    "| --- | ---: | ---: | ---: |",
+    ...suites.map(
+      (suite) =>
+        `| ${label(suite)} | ${pair(suite, (p) => number(p.index.total_ms.total, 1000))} | ${pair(suite, (p) => number(p.index.memory_rss_bytes.max, mib))} | ${pair(suite, (p) => number(p.index.index_bytes.total, mib))} |`,
+    ),
+    "",
+    "### 2 · Query",
+    "",
+    "| Suite / mode | Mean RT (ms) | p95 RT (ms) | Peak RSS (MiB) |",
+    "| --- | ---: | ---: | ---: |",
+    ...suites.flatMap((suite) =>
+      modes.map(
+        (mode) =>
+          `| ${label(suite)} / ${mode} | ${pair(suite, (p) => number(p.query[mode].latency_ms.mean))} | ${pair(suite, (p) => number(p.query[mode].latency_ms.p95))} | ${pair(suite, (p) => number(p.query[mode].memory_rss_bytes.max, mib))} |`,
+      ),
+    ),
+    "",
+    "<details>",
+    "<summary>Full performance · sample counts, all percentiles & group totals</summary>",
+    "",
+    "Σ = sum; μ = mean. p50 uses the median; p95/p99 use nearest rank. Peak RSS is the sampled maximum. Each row below is one version.",
+    "",
+    "**Index**",
+    "",
+    "| Suite / version | Phases measured/planned; failed | Time n; Σ / μ / p95 / p99 (s) | RSS n; μ / p95 / p99 / peak (MiB) | Index n; Σ / μ / p95 / p99 (MiB) |",
+    "| --- | --- | --- | --- | --- |",
+    ...suites.flatMap((suite) =>
+      sides.map((side) => {
+        const stage = result.performance[suite][side].index;
+        return `| ${label(suite)} / ${side === "baseline" ? "base" : "head"} | ${stage.measured}/${stage.planned}; ${stage.failed} | ${stage.total_ms.count}; ${stats(stage.total_ms, ["total", "mean", "p95", "p99"], 1000)} | ${stage.memory_rss_bytes.count} (${stage.memory_measured}/${stage.planned} complete phases); ${stats(stage.memory_rss_bytes, ["mean", "p95", "p99", "max"], mib)} | ${stage.index_bytes.count}/${stage.planned}; ${stats(stage.index_bytes, ["total", "mean", "p95", "p99"], mib)} |`;
+      }),
+    ),
+    "",
+    "**Query**",
+    "",
+    "| Suite / mode / version | RT n; mean / p50 / p95 / p99 (ms) | Group phases measured/planned; failed; time n; Σ / μ / p95 / p99 (s) | RSS n; μ / p95 / p99 / peak (MiB) |",
+    "| --- | --- | --- | --- |",
+    ...suites.flatMap((suite) =>
+      modes.flatMap((mode) =>
+        sides.map((side) => {
+          const stage = result.performance[suite][side].query[mode];
+          return `| ${label(suite)} / ${mode} / ${side === "baseline" ? "base" : "head"} | ${stage.latency_ms.count}; ${stats(stage.latency_ms, ["mean", "p50", "p95", "p99"])} | ${stage.measured}/${stage.planned}; ${stage.failed}; ${stage.total_ms.count}; ${stats(stage.total_ms, ["total", "mean", "p95", "p99"], 1000)} | ${stage.memory_rss_bytes.count} (${stage.memory_measured}/${stage.planned} complete phases); ${stats(stage.memory_rss_bytes, ["mean", "p95", "p99", "max"], mib)} |`;
+        }),
+      ),
+    ),
+    "",
+    "</details>",
+    "",
+    "### 3 · Retrieval quality",
+    "",
+    "<details>",
+    "<summary>Quality scores · 4 suites × 3 modes</summary>",
+    "",
+    "Each cell is base / head / Δ. Δ = head − base; higher is better. Quality is report-only.",
+    "",
+    "| Suite | Mode | File Hit@1 | File Hit@5 | File Hit@10 | MRR@10 | nDCG@10 |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ...result.rows.map(
+      (row) =>
+        `| ${label(row.suite)} | ${row.mode} | ${QUALITY_METRICS.map(
+          (metric) => {
+            const cell = row.metrics[metric];
+            return `${cell.baseline.toFixed(4)} / ${cell.candidate.toFixed(4)} / ${cell.delta > 0 ? "+" : ""}${cell.delta.toFixed(4)}`;
+          },
+        ).join(" | ")} |`,
+    ),
+    "",
+    "Same frozen queries, gold labels, local models and harness; fresh indexes and five calls per query/mode. SWE-QA nDCG uses repository macro averaging; other suites use query means.",
+    "",
+    "</details>",
+    "",
+    "<details>",
+    "<summary>Build identities & measurement notes</summary>",
+    "",
+    `Harness: \`${result.harness_commit}\``,
+    "",
+    ...sides.map(
+      (side) =>
+        `${side === "baseline" ? "Base" : "Head"}: \`${result[side].commit}\` · package SHA-256: \`${result.package_sha256[side]}\``,
+    ),
+    "",
+    "Index totals include startup, model loading/download and optimization. Query RT includes attempted public calls; group time includes response capture. Phase sums are not parallel workflow wall time. Fixed mode order and first-call/cache effects apply. RSS samples product process trees and resident daemons every 100 ms, excludes the driver, may double-count shared pages and miss short peaks. Index size sums regular files under .zvec-grep; model caches and symlinks are excluded. Missing values and coverage are explicit; raw samples remain in the run artifacts.",
+    "",
+    "</details>",
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
 async function readJson(path) {

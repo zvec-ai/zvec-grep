@@ -198,8 +198,11 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.equal(
     input.body
       .split("\n")
-      .filter((line) => /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/.test(line))
-      .length,
+      .filter((line) =>
+        /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry) \| (hybrid|fts|vector) \|/.test(
+          line,
+        ),
+      ).length,
     12,
   );
   assert.ok(input.body.includes(`/commit/${base}`));
@@ -209,11 +212,11 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.ok(input.body.includes(request.harness_commit));
   assert.ok(input.body.includes(report.package_sha256.candidate));
   assert.equal(
-    (input.body.match(/RT mean \/ p50 \/ p95 \/ p99/g) ?? []).length,
-    8,
+    (input.body.match(/RT n; mean \/ p50 \/ p95 \/ p99/g) ?? []).length,
+    1,
   );
   assert.match(input.body, /2\.50 \/ 2\.50 \/ 4\.00 \/ 4\.00/);
-  assert.match(input.body, /Index \| 1\/2/);
+  assert.match(input.body, /SWE-QA20 \/ head \| 1\/2; 0/);
   assert.ok(input.body.length < 65536, "Fits GitHub's comment limit");
 });
 
@@ -457,7 +460,7 @@ test("missing RSS remains unavailable and artifact performance text is never ren
   await publish(x);
   const body = x.messages()[0][1].body;
   assert.match(body, /✅ Complete/);
-  assert.match(body, /Index \| 0\/1 \| 0 \| — \| 0 \| —/);
+  assert.match(body, /SWE-QA20 \/ base \| 0\/1; 0 \| 0; —/);
   assert.doesNotMatch(body, /everyone|forged/);
 });
 
@@ -501,6 +504,25 @@ test("invalid performance, package and harness identities cannot become a comple
     change(input);
     assert.throws(() => validateComparison(input, request));
   }
+});
+
+test("the compact comment exposes three parts and keeps complete statistics in disclosures", async (t) => {
+  const x = await fixture(t);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
+  for (const part of ["1 · Index", "2 · Query", "3 · Retrieval quality"])
+    assert.ok(visible.includes(part));
+  assert.equal((body.match(/<details>/g) ?? []).length, 3);
+  assert.equal(
+    (visible.match(/^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/gm) ?? []).length,
+    16,
+  );
+  assert.ok(visible.length < 4000);
+  assert.match(body, /Σ \/ μ \/ p95 \/ p99/);
+  assert.match(body, /mean \/ p50 \/ p95 \/ p99/);
+  assert.match(body, /complete phases/);
+  assert.match(body, /Peak RSS/);
 });
 
 test("publisher checks out trusted code and only reads artifacts from the triggering run", async () => {
