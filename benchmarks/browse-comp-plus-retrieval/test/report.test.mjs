@@ -188,7 +188,9 @@ test("BrowseComp workflow uses one runner, fresh indexes, fixed local embedding 
     "utf8",
   );
   assert.match(workflow, /RETRIEVAL_EMBEDDING: local/);
-  assert.match(workflow, /Fresh indexes and paired retrieval on one runner/);
+  for (const phase of ["node-index", "node-query", "rust-index", "rust-query"])
+    assert.ok(workflow.includes(`--phase ${phase}`));
+  assert.match(workflow, /--phase finish/);
   assert.match(workflow, /--rust-commit/);
   assert.match(workflow, /--harness-commit/);
   assert.match(workflow, /contents: read/);

@@ -139,6 +139,15 @@ export function markdownReport(report) {
     "",
     `${report.dataset?.tasks.length ?? 0} fixed original queries · ${report.dataset?.corpus.count ?? 0} complete corpus documents · hybrid / fts / vector · five calls per query/mode · concurrency limit 4. No answering agent, query rewriting or judge participates.`,
     "",
+    `Current phase: **${report.phase ?? "unavailable"}**. Evidence is saved after each completed call and phase; an incomplete report is never a passing comparison.`,
+    "",
+    "| Runtime | Index status | Query status | Observed file progress | Index elapsed (min) |",
+    "| --- | --- | --- | ---: | ---: |",
+    ...Object.entries(report.arms).map(([name, arm]) => {
+      const p = arm.index_progress;
+      return `| ${name} | ${arm.index_status ?? "unavailable"} | ${arm.query_status ?? "unavailable"} | ${Number.isInteger(p?.completed_files) ? `${p.completed_files}/${p.total_files}` : "—"} | ${number(p?.elapsed_ms, 60_000)} |`;
+    }),
+    "",
     "## Document retrieval quality",
     "",
     "Each cell is Node / Rust (relative change). Gold annotations map to one Markdown file per document. Native result ranks, including repeated document chunks, are preserved. These pilot metrics are not official BrowseComp answer accuracy or multi-hop evidence sufficiency.",
@@ -227,9 +236,9 @@ export function markdownReport(report) {
     "",
     "Each runtime builds one fresh complete corpus index, so Index and per-mode phase-time mean/p95/p99 each describe one observation. They do not estimate run-to-run variation. RT has 50 calls per mode. p50 is the median; p95/p99 use nearest rank over pooled raw samples.",
     "",
-    "Model downloads are warmed separately before measurement. Index includes CLI startup, model loading and optimization. Query RT includes first-call/session/cache effects; group totals include capture. Both products run sequentially on the same host, with fixed hybrid → fts → vector order and a shared pinned model cache. This is one observed paired run, without a controlled causal speed claim.",
+    "Model downloads are warmed separately before measurement. Index includes CLI startup, model loading and optimization. Query RT includes first-call/session/cache effects; group totals include capture. Both products run sequentially on the same dedicated host (identity checked between stages), with fixed hybrid → fts → vector order and a shared pinned model cache. Different hardware, previous CI runs and diagnostic subsets are not directly comparable. This is one observed paired run, without a controlled causal speed claim.",
     "",
-    "RSS samples sum product process trees and resident daemons, excluding the driver; shared pages may be double-counted and 100 ms target sampling can miss spikes. Index bytes include regular .zvec-grep files after building, excluding model cache and symlinks. Index embedding batches and public queries have a limit of four; storage commits retain native scheduling. Per-file write RT is excluded.",
+    "RSS samples sum product process trees and resident daemons, excluding the driver; shared pages may be double-counted and the 1000 ms target sampling can miss spikes. Linux sampling reads /proc without spawning ps. Raw samples are appended as collected. Index bytes include regular .zvec-grep files after building, excluding model cache and symlinks. Index embedding batches and public queries have a limit of four; storage commits retain native scheduling. Per-file write RT is excluded.",
   );
   if (report.errors.length)
     lines.push(
@@ -242,5 +251,15 @@ export function markdownReport(report) {
     );
   if (report.run_url)
     lines.push("", `[CI run and raw artifacts](${report.run_url})`);
+  if (Number.isSafeInteger(report.pr_number) && report.pr_number > 0)
+    lines.push(
+      "",
+      `[Associated PR #${report.pr_number}](https://github.com/zvec-ai/zvec-grep/pull/${report.pr_number})`,
+    );
+  if (report.environment)
+    lines.push(
+      "",
+      `Host: ${report.environment.platform}/${report.environment.arch}; ${report.environment.cpus} CPUs (${report.environment.cpu_model ?? "model unavailable"}); ${number(report.environment.total_memory_bytes, 1024 ** 3)} GiB RAM; identity \`${report.environment.host_identity_sha256 ?? "unavailable"}\`.`,
+    );
   return `${lines.join("\n")}\n`;
 }

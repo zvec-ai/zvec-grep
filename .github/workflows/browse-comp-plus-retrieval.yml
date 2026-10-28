@@ -4,6 +4,9 @@ run-name: BrowseComp-Plus Retrieval-only / Node 0.2.2 vs Rust ${{ inputs.candida
 on:
   workflow_call:
     inputs:
+      pr_number:
+        default: "308"
+        type: string
       baseline_ref:
         default: npm:@zvec/zvec-grep@0.2.2
         type: string
@@ -18,6 +21,10 @@ on:
         type: string
   workflow_dispatch:
     inputs:
+      pr_number:
+        description: PR associated with this independent full-corpus run
+        default: "308"
+        type: string
       candidate_ref:
         description: Rust source ref in zvec-ai/zvec-grep (resolved to an immutable SHA)
         default: main
@@ -31,7 +38,7 @@ env:
   RETRIEVAL_EMBEDDING: local
 
 concurrency:
-  group: browsecomp-plus-retrieval-${{ github.run_id }}
+  group: browsecomp-plus-retrieval-dedicated
   cancel-in-progress: false
 
 jobs:
@@ -48,6 +55,19 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - name: Require an explicit manual full-corpus run
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          echo '::error::Full BrowseComp retrieval requires workflow_dispatch; ordinary PR updates run only offline contracts and standard retrieval.'
+          exit 1
+      - name: Require the dedicated long-running host to be provisioned
+        env:
+          RUNNER_READY: ${{ vars.BROWSECOMP_RUNNER_READY }}
+        run: |
+          if [ "$RUNNER_READY" != 'true' ]; then
+            echo '::error::Provision ONE Linux x64 self-hosted runner labelled browsecomp-plus, then set BROWSECOMP_RUNNER_READY=true. The full corpus cannot fit the hosted 6-hour job budget. No full run has started.'
+            exit 1
+          fi
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -93,11 +113,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  retrieve:
-    name: Fresh indexes and paired retrieval on one runner
+  node:
+    name: Node fresh full Index and 150 Query calls on dedicated host
     needs: package
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    runs-on:
+      [
+        self-hosted,
+        linux,
+        x64,
+        "${{ vars.BROWSECOMP_RUNNER_LABEL || 'browsecomp-plus' }}",
+      ]
+    timeout-minutes: 840
+    outputs:
+      prepared: ${{ steps.prepare.outcome }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -105,79 +133,201 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - name: Locate the same-host run directory (never a reusable index cache)
+        run: |
+          echo "BCP_ROOT=$RUNNER_TOOL_CACHE/browsecomp-plus/runs/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "BCP_MODEL_CACHE=$RUNNER_TOOL_CACHE/browsecomp-plus/model-cache" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v6
         with:
           node-version: 24
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Free runner disk for the full corpus and fresh indexes
+      - name: Require a new run directory and enough dedicated disk
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          python -c 'import shutil; free = shutil.disk_usage(".").free; print(f"Free disk: {free / 2**30:.1f} GiB"); assert free >= 50 * 2**30, "BrowseComp+ needs 50 GiB free disk"'
+          test ! -e "$BCP_ROOT"
+          mkdir -p "$BCP_ROOT"
+          python -c 'import os, shutil; free = shutil.disk_usage(os.environ["BCP_ROOT"]).free; print(f"Free disk: {free / 2**30:.1f} GiB"); assert free >= 50 * 2**30, "BrowseComp+ needs 50 GiB free disk"'
       - uses: actions/download-artifact@v8
         with:
           name: browsecomp-plus-retrieval-packages
-          path: ${{ runner.temp }}/packages
-      - name: Verify both downloaded package identities
-        env:
-          RUST_COMMIT: ${{ needs.package.outputs.rust }}
-        run: |
-          node benchmarks/shared/retrieval-package.mjs verify \
-            --directory "$RUNNER_TEMP/packages/node" --commit 'npm:@zvec/zvec-grep@0.2.2'
-          node benchmarks/shared/retrieval-package.mjs verify \
-            --directory "$RUNNER_TEMP/packages/rust" --commit "$RUST_COMMIT"
-      - name: Install the pinned dataset reader
+          path: ${{ env.BCP_ROOT }}/packages
+      - name: Install the pinned dataset reader (pip download cache is reusable)
         run: python -m pip install --requirement benchmarks/browse-comp-plus-retrieval/requirements.txt
-      - name: Prepare ten original queries and the complete pinned corpus once
+      - name: Prepare complete corpus from checksum-verified read-only source cache
         run: |
           python benchmarks/browse-comp-plus-retrieval/prepare.py \
-            --source "$RUNNER_TEMP/browsecomp-source" \
-            --output "$RUNNER_TEMP/browsecomp-prepared"
-          rm -rf "$RUNNER_TEMP/browsecomp-source"
-      - name: Measure Node.js and Rust with separate fresh indexes
+            --source "${{ runner.tool_cache }}/browsecomp-plus/source" \
+            --output "$BCP_ROOT/prepared"
+      - name: Verify packages, freeze inputs, install once and warm both models
+        id: prepare
         env:
           RUST_COMMIT: ${{ needs.package.outputs.rust }}
           HARNESS_COMMIT: ${{ needs.package.outputs.harness }}
+          PR_NUMBER: ${{ inputs.pr_number || '308' }}
         run: |
-          node benchmarks/browse-comp-plus-retrieval/run.mjs \
-            --dataset "$RUNNER_TEMP/browsecomp-prepared" \
-            --node-package "$RUNNER_TEMP/packages/node/candidate.tgz" \
-            --rust-package "$RUNNER_TEMP/packages/rust/candidate.tgz" \
+          node benchmarks/browse-comp-plus-retrieval/run.mjs --phase prepare \
+            --dataset "$BCP_ROOT/prepared" --output "$BCP_ROOT/results" \
+            --node-package "$BCP_ROOT/packages/node/candidate.tgz" \
+            --rust-package "$BCP_ROOT/packages/rust/candidate.tgz" \
             --rust-commit "$RUST_COMMIT" --harness-commit "$HARNESS_COMMIT" \
-            --model-cache "$RUNNER_TEMP/browsecomp-model-cache" \
-            --output "$RUNNER_TEMP/browsecomp-results"
-      - name: Publish retrieval quality and all performance metrics
+            --pr-number "$PR_NUMBER" --model-cache "$BCP_MODEL_CACHE"
+      - name: Node Index (100,195 fresh documents; 12-hour internal budget)
+        id: index
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase node-index
+      - name: Publish the latest Node Index stage report even after failure
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
-          if [ -f "$RUNNER_TEMP/browsecomp-results/summary.md" ]; then
-            cat "$RUNNER_TEMP/browsecomp-results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$BCP_ROOT/results/summary.md" ]; then
+            cat "$BCP_ROOT/results/summary.md" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo '# BrowseComp-Plus Retrieval-only: failed before producing a report' >> "$GITHUB_STEP_SUMMARY"
-            echo 'Missing measurements are unavailable, never zero.' >> "$GITHUB_STEP_SUMMARY"
+            echo '# BrowseComp-Plus: incomplete before measurements (never a passing comparison)' >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Preserve the compact comparison report
+      - name: Save node index checkpoint before continuing
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-node-index
+          path: |
+            ${{ env.BCP_ROOT }}/results/
+            ${{ env.BCP_ROOT }}/prepared/dataset.json
+            ${{ env.BCP_ROOT }}/prepared/corpus-manifest.jsonl
+            !${{ env.BCP_ROOT }}/results/**/consumer/**
+            !${{ env.BCP_ROOT }}/results/**/runtime-home/**
+            !${{ env.BCP_ROOT }}/results/warmup/**
+            !${{ env.BCP_ROOT }}/results/warmup-home/**
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Node Query (hybrid, fts, vector; 50 calls each)
+        id: query
+        if: ${{ !cancelled() && steps.index.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase node-query
+      - name: Stop node and release only this run's generated index
+        if: ${{ always() && steps.access.outcome == 'success' && steps.prepare.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase release-node
+      - name: Publish the latest Node Query stage report even after failure
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$BCP_ROOT/results/summary.md" ]; then
+            cat "$BCP_ROOT/results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '# BrowseComp-Plus: incomplete before measurements (never a passing comparison)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save node query checkpoint before continuing
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-node-query
+          path: |
+            ${{ env.BCP_ROOT }}/results/
+            ${{ env.BCP_ROOT }}/prepared/dataset.json
+            ${{ env.BCP_ROOT }}/prepared/corpus-manifest.jsonl
+            !${{ env.BCP_ROOT }}/results/**/consumer/**
+            !${{ env.BCP_ROOT }}/results/**/runtime-home/**
+            !${{ env.BCP_ROOT }}/results/warmup/**
+            !${{ env.BCP_ROOT }}/results/warmup-home/**
+          if-no-files-found: warn
+          retention-days: 30
+
+  rust:
+    name: Rust fresh full Index and 150 Query calls on dedicated host
+    needs: [package, node]
+    if: ${{ always() && !cancelled() && needs.package.result == 'success' && needs.node.outputs.prepared == 'success' }}
+    runs-on:
+      [
+        self-hosted,
+        linux,
+        x64,
+        "${{ vars.BROWSECOMP_RUNNER_LABEL || 'browsecomp-plus' }}",
+      ]
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.package.outputs.harness }}
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - name: Locate the same-host run directory (never a reusable index cache)
+        run: |
+          echo "BCP_ROOT=$RUNNER_TOOL_CACHE/browsecomp-plus/runs/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "BCP_MODEL_CACHE=$RUNNER_TOOL_CACHE/browsecomp-plus/model-cache" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Require the same host and this run's durable completed preparation
+        id: resume
+        run: |
+          test -f "$BCP_ROOT/results/state.json" || { echo '::error::Missing same-host state. The browsecomp-plus label must select ONE dedicated host.'; exit 1; }
+          test -f "$BCP_ROOT/results/summary.json"
+      - name: Rust Index (100,195 fresh documents; 3-hour internal budget)
+        id: index
+        if: ${{ !cancelled() && steps.resume.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase rust-index
+      - name: Publish the latest Rust Index stage report even after failure
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$BCP_ROOT/results/summary.md" ]; then
+            cat "$BCP_ROOT/results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '# BrowseComp-Plus: incomplete before measurements (never a passing comparison)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save rust index checkpoint before continuing
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-rust-index
+          path: |
+            ${{ env.BCP_ROOT }}/results/
+            ${{ env.BCP_ROOT }}/prepared/dataset.json
+            ${{ env.BCP_ROOT }}/prepared/corpus-manifest.jsonl
+            !${{ env.BCP_ROOT }}/results/**/consumer/**
+            !${{ env.BCP_ROOT }}/results/**/runtime-home/**
+            !${{ env.BCP_ROOT }}/results/warmup/**
+            !${{ env.BCP_ROOT }}/results/warmup-home/**
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Rust Query (hybrid, fts, vector; 50 calls each)
+        id: query
+        if: ${{ !cancelled() && steps.index.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase rust-query
+      - name: Stop rust and release only this run's generated index
+        if: ${{ always() && steps.access.outcome == 'success' && steps.resume.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase release-rust
+      - name: Audit all 300 calls and accept only both complete fresh indexes
+        if: ${{ always() && steps.access.outcome == 'success' && steps.resume.outcome == 'success' }}
+        run: node benchmarks/browse-comp-plus-retrieval/run.mjs --output "$BCP_ROOT/results" --phase finish
+      - name: Publish the latest complete comparison stage report even after failure
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$BCP_ROOT/results/summary.md" ]; then
+            cat "$BCP_ROOT/results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '# BrowseComp-Plus: incomplete before measurements (never a passing comparison)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save rust query checkpoint before continuing
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-rust-query
+          path: |
+            ${{ env.BCP_ROOT }}/results/
+            ${{ env.BCP_ROOT }}/prepared/dataset.json
+            ${{ env.BCP_ROOT }}/prepared/corpus-manifest.jsonl
+            !${{ env.BCP_ROOT }}/results/**/consumer/**
+            !${{ env.BCP_ROOT }}/results/**/runtime-home/**
+            !${{ env.BCP_ROOT }}/results/warmup/**
+            !${{ env.BCP_ROOT }}/results/warmup-home/**
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve the final compact comparison
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: browsecomp-plus-retrieval-report
           path: |
-            ${{ runner.temp }}/browsecomp-results/summary.json
-            ${{ runner.temp }}/browsecomp-results/summary.md
+            ${{ env.BCP_ROOT }}/results/summary.json
+            ${{ env.BCP_ROOT }}/results/summary.md
           if-no-files-found: warn
           retention-days: 90
-      - name: Preserve raw requests, responses and resource samples
-        if: ${{ always() && steps.access.outcome == 'success' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: browsecomp-plus-retrieval-evidence
-          path: |
-            ${{ runner.temp }}/browsecomp-results/
-            ${{ runner.temp }}/browsecomp-prepared/dataset.json
-            ${{ runner.temp }}/browsecomp-prepared/corpus-manifest.jsonl
-            !${{ runner.temp }}/browsecomp-results/**/consumer/**
-            !${{ runner.temp }}/browsecomp-results/**/runtime-home/**
-            !${{ runner.temp }}/browsecomp-results/warmup/**
-            !${{ runner.temp }}/browsecomp-results/warmup-home/**
-          if-no-files-found: warn
-          retention-days: 30
