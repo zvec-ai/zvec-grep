@@ -168,6 +168,28 @@ jobs:
           node benchmarks/shared/rust-package-cache.mjs verify \
             --directory "$RUNNER_TEMP/candidate-package" --commit "$BROWSE_CANDIDATE_COMMIT"
           npm install --global "$RUNNER_TEMP/candidate-package/candidate.tgz"
+      - name: Find the original immutable plan on a job rerun
+        if: github.run_attempt > 1
+        id: original-plan
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: context.runId, per_page: 100,
+            });
+            const name = `browse-comp-plus-plan-${context.runId}`;
+            const plan = artifacts.find(artifact => artifact.name === name && !artifact.expired);
+            const prefix = `browse-comp-plus-case-bundle-${context.runId}-`;
+            if (!plan && artifacts.some(artifact => artifact.name.startsWith(prefix))) {
+              throw new Error('Original CI plan is missing; refusing to replace a plan with existing case evidence.');
+            }
+            core.setOutput('found', plan ? 'true' : 'false');
+      - name: Restore the original plan and A/B orders without regenerating them
+        if: steps.original-plan.outputs.found == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: browse-comp-plus-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/browse-comp-plus-plan
       - name: Reserve space for corpus, index, and compressed snapshot
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
@@ -288,11 +310,12 @@ jobs:
             --suite "$BENCH_SUITE" --execution shared_job --output "$RUNNER_TEMP/browse-comp-plus-plan" >> "$GITHUB_OUTPUT"
           cp "$RUNNER_TEMP/candidate-package/manifest.json" "$RUNNER_TEMP/browse-comp-plus-plan/candidate-manifest.json"
       - name: Publish the small evaluation plan and query set
+        if: steps.original-plan.outputs.found != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: browse-comp-plus-plan-${{ github.run_id }}
           path: ${{ runner.temp }}/browse-comp-plus-plan/
-          overwrite: true
+          overwrite: false
           if-no-files-found: error
           retention-days: 7
       - name: Find earlier case bundles in this workflow run

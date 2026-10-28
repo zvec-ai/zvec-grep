@@ -118,7 +118,11 @@ zg-bench run --suite ci
 每题 2–7 份，包含跨作品人员关系、跨年代核对、同名消歧、论文引用对齐及跨领域实体检索。
 文档数量不等于最低必读文件数或推理跳数。这是跨文档、跨主题检索，不是代码库跨模块导航。
 GitHub Actions 日常回归选择 `suite=ci`、`parallel_cases=5`；10 题共用一份准备和索引。
-下文已完成实测仍是此前五题集合，尚无十题真实 E2E 结果。
+下文完整成功实测仍是此前五题集合，十题 E2E 尚未完成。
+[十题首次运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40628819654/attempts/1)
+保留了 18 份完成答案和 16 份评审，另两次模型步骤触发现有的 30 分钟无进程输出保护。
+失败已报告 9,064,127 tokens、累计 6,647.34 秒，未结束步骤的额外用量未知。
+随后恢复尝试因重新生成 A/B 顺序改变计划哈希，被严格证据校验拒绝，未新增答题或评审调用。
 
 运行固定的 Study 子集：
 
@@ -223,7 +227,7 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 | 语料、索引和本地模型 | 保留 7 天的 v3 runtime 快照仅包含一份 Markdown 语料（`workspaces/b`）、索引、Potion 模型、解密题目及状态清单，不传输原始 Parquet 和重复的 baseline 语料。候选版本、数据、embedding 配置、准备脚本、系统架构和目录必须一致。 |
 | runtime 产物完全匹配 | 执行 job 只下载、校验、解压一次 runtime 快照，通过 `copy2` 恢复一次独立的 baseline 语料，不使用硬链接，保留纳秒时间戳；生成新的固定评测计划，无需重建索引。 |
 | 题目执行 | 同一 runner 内最多 5 个独立题目子进程，共享已有索引和主进程管理的 daemon；无需逐题重复下载、解压或预热。 |
-| 失败重跑 | “Re-run failed jobs” 在同一次 workflow 运行、同一计划内复用已完成 trial 及匹配的评审，只补失败或缺失项；此前 bundle 中成功题目的证据继续参与汇总，并保留全部历史尝试。 |
+| 失败重跑 | “Re-run failed jobs” 先恢复并校验原始计划与题目字节，不重新随机化 A/B 顺序，不覆盖计划 artifact；在同一次 workflow、同一计划内复用已完成 trial 及匹配评审，只补失败或缺失项。此前 bundle 的证据继续参与汇总，并保留全部历史尝试。 |
 
 **冷启动成本：** 所有 suite 都准备完整的 100,195 篇语料。准备标识变化且无兼容快照，或产物过期后，
 需在本地构建 Potion 索引。[历史实测运行](https://github.com/zvec-ai/zvec-grep/actions/runs/40438698350)

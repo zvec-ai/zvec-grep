@@ -190,7 +190,13 @@ original five cases to the first ten under the same ranking, without selecting
 by score, zg adoption, tokens, or runtime. These tasks cover cross-document and
 cross-subject retrieval, not code-module navigation. For GitHub Actions daily
 regression runs, choose `suite=ci` and `parallel_cases=5`; all ten cases share one
-preparation and index. Ten-case real E2E results have not yet been collected.
+preparation and index. Ten-case E2E validation is not yet complete: the
+[first attempt](https://github.com/zvec-ai/zvec-grep/actions/runs/40628819654/attempts/1)
+preserved 18 completed answers and 16 judgements, but two unfinished model steps
+hit the existing 30-minute process-output idle guard. Their recorded cost was
+9,064,127 tokens / 6,647.34 agent seconds, plus unknown usage for the unfinished
+steps. The recovery attempt made no new answer/judge calls: regenerated A/B
+orders changed the plan hash, so strict evidence reuse correctly rejected it.
 
 Run the fixed study subset:
 
@@ -313,7 +319,7 @@ startup/warmup is counted once; case metadata remains under `shards/`.
 | Corpus, index, and local model | The seven-day v3 runtime artifact contains one Markdown corpus copy (`workspaces/b`), its index, Potion models, decoded queries, and state manifests. Raw Parquet and the duplicate baseline corpus are excluded. Candidate, dataset, embedding configuration, preparation code, OS/architecture, and workspace path must match. |
 | Preparation on an exact runtime-artifact match | Download, verify, and unpack the runtime snapshot once in the execution job. Restore the independent baseline corpus once with `copy2`, preserving nanosecond timestamps; generate a fresh immutable plan without rebuilding the index. |
 | Case execution | Up to five isolated case processes on one runner, using one prepared index and parent-owned daemon. No per-case snapshot download, unpack, or daemon warmup. |
-| Partial rerun | “Re-run failed jobs” reuses completed trials and matching judgements within the same workflow run and plan, then runs only failed or missing work. Earlier bundles retain each completed case; only failed/missing trials run again, and all attempts remain in aggregation. |
+| Partial rerun | “Re-run failed jobs” restores and validates the original plan and query bytes without drawing new A/B orders or overwriting the plan artifact. It reuses completed trials and matching judgements within the same workflow run and plan, then runs only failed or missing work. Earlier bundles retain each completed case, and all attempts remain in aggregation. |
 
 **Cold-run cost:** all suites prepare all 100,195 documents. A new preparation
 identity without a compatible snapshot, or an expired artifact, requires a local

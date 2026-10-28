@@ -325,6 +325,45 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_plan(self.plan_path, self.artifacts)
 
+    def test_rerun_keeps_downloaded_plan_and_queries_without_randomizing_again(self):
+        self.plan()
+        before = self.plan_path.read_bytes()
+        queries = (self.plan_path.parent / "source" / self.queries.name).read_bytes()
+        with patch(
+            "zg_bench.ci_parallel._randomized_profile_orders",
+            side_effect=AssertionError("rerun must not draw new A/B orders"),
+        ):
+            self.plan()
+        self.assertEqual(self.plan_path.read_bytes(), before)
+        self.assertEqual(
+            (self.plan_path.parent / "source" / self.queries.name).read_bytes(), queries
+        )
+
+    def test_rerun_rejects_changed_plan_identity_suite_and_execution(self):
+        self.plan()
+        before = self.plan_path.read_bytes()
+        with (
+            patch.dict(os.environ, BROWSE_CANDIDATE_COMMIT="other"),
+            self.assertRaisesRegex(ValueError, "identity"),
+        ):
+            self.plan()
+        with self.assertRaisesRegex(ValueError, "suite or execution"):
+            self.plan("iteration")
+        with self.assertRaisesRegex(ValueError, "suite or execution"):
+            create_plan(
+                self.artifacts, "ci", self.plan_path.parent, execution="shared_job"
+            )
+        self.assertEqual(self.plan_path.read_bytes(), before)
+
+    def test_rerun_rejects_corrupt_downloaded_query_bytes_without_replacing_plan(self):
+        self.plan()
+        before = self.plan_path.read_bytes()
+        restored = self.plan_path.parent / "source" / self.queries.name
+        restored.write_bytes(restored.read_bytes() + b"\n")
+        with self.assertRaisesRegex(ValueError, "query checksum"):
+            self.plan()
+        self.assertEqual(self.plan_path.read_bytes(), before)
+
     def test_iteration_requires_both_fixed_pairs_and_all_four_judgements(self):
         output = self.root / "plan"
         with (

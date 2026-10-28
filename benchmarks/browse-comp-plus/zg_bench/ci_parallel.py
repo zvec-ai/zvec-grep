@@ -90,6 +90,25 @@ def create_plan(
 ) -> Path:
     config = load_config()
     query_path = artifacts / "source" / "browsecomp_plus_decrypted.jsonl"
+    existing = output / "plan.json"
+    if existing.exists() or existing.is_symlink():
+        restored_queries = output / "source" / query_path.name
+        if (
+            existing.is_symlink()
+            or not existing.is_file()
+            or restored_queries.is_symlink()
+            or not restored_queries.is_file()
+        ):
+            raise ValueError("restored CI plan and queries must be regular files")
+        plan = validate_plan(existing, artifacts)
+        if plan["suite"] != suite or plan.get("execution") != execution:
+            raise ValueError("restored CI plan suite or execution changed")
+        if sha256_file(restored_queries) != plan["query_set_sha256"]:
+            raise ValueError("restored CI plan query checksum changed")
+        # A/B orders use SystemRandom on the first attempt. A retry must retain
+        # the exact published bytes, not generate another balanced permutation.
+        print("cases=" + json.dumps(plan["query_ids"]))
+        return existing
     selection = load_suite(suite, load_queries(query_path))
     plan = {
         "suite": suite,
