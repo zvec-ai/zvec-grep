@@ -28,5 +28,5 @@ jobs:
       - run: python -m pip install --requirement benchmarks/browse-comp-plus-retrieval/requirements.txt
       - name: Verify protocol, metrics, process cleanup and partial evidence
         run: |
-          node --test benchmarks/zg-retrieval/test/*.test.mjs benchmarks/browse-comp-plus-retrieval/test/*.test.mjs
+          node --test --test-concurrency=4 benchmarks/zg-retrieval/test/*.test.mjs benchmarks/browse-comp-plus-retrieval/test/*.test.mjs .github/scripts/retrieval-pr-comment.test.mjs
           python -m unittest discover -s benchmarks/browse-comp-plus-retrieval/test -p 'test_*.py' -v
