@@ -222,7 +222,7 @@ impl SourceRoot {
             )));
         }
         let resolved = crate::utils::resolve_directory(Some(
-            &self.relative.to_path(layout.storage_dir()),
+            &self.relative.to_logical_path(layout.storage_dir()),
         ))
         .map_err(|error| {
             EngineError::invalid_argument(format!(
@@ -706,27 +706,31 @@ mod tests {
     use super::ScanRules;
     use crate::api::index::options::ScanRulesUpdate;
 
-    #[cfg(unix)]
     #[test]
-    fn source_root_remains_relative_through_aliases_and_moves() {
-        use std::{fs, os::unix::fs::symlink};
+    fn source_root_remains_relative_after_move() {
+        use std::fs;
 
         use super::{SourceRoot, WorkspaceLayout};
 
         let directory = tempfile::tempdir().expect("directory");
         let original = directory.path().join("original");
-        let alias = directory.path().join("alias");
         fs::create_dir(&original).expect("source directory");
-        symlink(&original, &alias).expect("source alias");
-        let layout = WorkspaceLayout::new(alias.join(".zvec-grep")).expect("layout");
-        let source = SourceRoot::new(&alias, &layout).expect("source root");
+        let source_path = fs::canonicalize(&original).expect("source path");
+        #[cfg(unix)]
+        let source_path = {
+            let alias = directory.path().join("alias");
+            std::os::unix::fs::symlink(&source_path, &alias).expect("source alias");
+            alias
+        };
+        let layout = WorkspaceLayout::new(source_path.join(".zvec-grep")).expect("layout");
+        let source = SourceRoot::new(&source_path, &layout).expect("source root");
         fs::create_dir(layout.storage_dir()).expect("storage directory");
 
         let mut loaded: SourceRoot =
             serde_json::from_value(serde_json::to_value(source).expect("serialize"))
                 .expect("deserialize");
         loaded
-            .resolve(&layout, &alias)
+            .resolve(&layout, &source_path)
             .expect("resolve source root");
         let rebuilt = SourceRoot::new(&loaded.resolved, &layout).expect("rebuild source root");
         assert_eq!(rebuilt.relative.as_str(), "..");
@@ -735,16 +739,14 @@ mod tests {
 
         let moved = directory.path().join("moved");
         fs::rename(original, &moved).expect("move source and storage");
+        let moved = fs::canonicalize(moved).expect("moved source");
         let moved_layout = WorkspaceLayout::new(moved.join(".zvec-grep")).expect("moved layout");
         let mut reloaded: SourceRoot =
             serde_json::from_value(saved).expect("read moved source root");
         reloaded
             .resolve(&moved_layout, &moved)
             .expect("resolve moved source root");
-        assert_eq!(
-            reloaded.resolved,
-            fs::canonicalize(moved).expect("moved source")
-        );
+        assert_eq!(reloaded.resolved, moved);
     }
 
     #[test]
@@ -799,19 +801,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn internal_paths_preserve_native_names_and_file_aliases() {
-        use std::{
-            ffi::OsStr,
-            fs,
-            os::unix::{ffi::OsStrExt, fs::symlink},
-        };
+    fn internal_ignore_paths_preserve_file_aliases() {
+        use std::{fs, os::unix::fs::symlink};
         let directory = tempfile::tempdir().expect("source");
         let root = fs::canonicalize(directory.path()).expect("root");
         let first = root.join("first.ignore");
         let second = root.join("second.ignore");
         fs::write(&first, "first\n").expect("first rules");
         fs::write(&second, "second\n").expect("second rules");
-        let alias = root.join(OsStr::from_bytes(b"rules-\xff.ignore"));
+        let alias = root.join("rules.ignore");
         symlink(&first, &alias).expect("file alias");
         let mut scan = ScanRules::new(
             vec![],
@@ -827,8 +825,8 @@ mod tests {
         )
         .expect("scan rules");
         scan.normalize_ignore_paths(&root).expect("relative path");
-        let saved = serde_json::to_string(&scan).expect("save native path");
-        let restored: ScanRules = serde_json::from_str(&saved).expect("read native path");
+        let saved = serde_json::to_string(&scan).expect("save path");
+        let restored: ScanRules = serde_json::from_str(&saved).expect("read path");
         fs::remove_file(&alias).expect("remove alias");
         symlink(&second, &alias).expect("replace alias");
         let paths = restored
@@ -838,5 +836,26 @@ mod tests {
             fs::read_to_string(&paths[0]).expect("read selected alias"),
             "second\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn internal_ignore_paths_preserve_non_unicode_names() {
+        use std::{ffi::OsStr, fs, os::unix::ffi::OsStrExt};
+
+        let directory = tempfile::tempdir().expect("source");
+        let root = fs::canonicalize(directory.path()).expect("root");
+        let relative = Path::new("config").join(OsStr::from_bytes(b"rules-\xff.ignore"));
+        let mut scan = ScanRulesUpdate {
+            ignore_files: Some(vec![root.join(&relative)]),
+            ..Default::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        scan.normalize_ignore_paths(&root).expect("relative path");
+        assert_eq!(scan.ignore_files().next(), Some(relative.as_path()));
+        let saved = serde_json::to_string(&scan).expect("save native path");
+        let restored: ScanRules = serde_json::from_str(&saved).expect("read native path");
+        assert_eq!(restored, scan);
     }
 }

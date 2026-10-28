@@ -359,6 +359,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         let workspace = fixture_manifest(&layout);
+        fs::create_dir(layout.storage_dir()).expect("storage directory");
         let mut value = serde_json::to_value(&workspace).expect("manifest");
         value["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["endpoint"] =
             serde_json::json!("https://example.test/embeddings");
@@ -593,6 +594,7 @@ mod tests {
         let manifest = fixture_manifest(
             &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
         );
+        fs::create_dir(manifest.layout().storage_dir()).expect("storage directory");
         let value = serde_json::to_value(&manifest).expect("manifest");
         let mut routed = value.clone();
         let mut second = value["index"]["descriptor"]["defaultEmbeddingModel"].clone();
@@ -640,6 +642,7 @@ mod tests {
         let manifest = fixture_manifest(
             &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
         );
+        fs::create_dir(manifest.layout().storage_dir()).expect("storage directory");
         let mut json = serde_json::to_value(&manifest).expect("serialize");
         json["index"]["descriptor"]["defaultEmbeddingModel"] = serde_json::Value::Null;
         assert!(decode_manifest(json, manifest.layout()).is_err());
@@ -993,6 +996,7 @@ mod tests {
             manifest.index().clone(),
         )
         .expect("workspace");
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
         let mut original = serde_json::to_value(&manifest).expect("JSON");
         let key = crate::domain::model::EncryptedApiKey {
             nonce: vec![1; 24],
@@ -1072,6 +1076,7 @@ mod tests {
         let manifest = fixture_manifest(
             &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
         );
+        fs::create_dir(manifest.layout().storage_dir()).expect("storage directory");
         let mut json = serde_json::to_value(&manifest).expect("JSON");
         json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["device"] =
             serde_json::json!("cpu");

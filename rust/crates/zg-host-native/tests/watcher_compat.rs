@@ -562,8 +562,8 @@ fn covers_change(actual: &WorkspaceChange, expected: &WorkspaceChange) -> bool {
                 | WorkspaceChange::Delete(path)
                 | WorkspaceChange::RescanDirectory(path)
                 | WorkspaceChange::DeletePrefix(path),
-            ) => path.starts_with(parent),
-            (
+            )
+            | (
                 WorkspaceChange::DeletePrefix(parent),
                 WorkspaceChange::Delete(path) | WorkspaceChange::DeletePrefix(path),
             ) => path.starts_with(parent),
