@@ -506,19 +506,24 @@ test("invalid performance, package and harness identities cannot become a comple
   }
 });
 
-test("the compact comment exposes three parts and keeps complete statistics in disclosures", async (t) => {
+test("quality comes first and is the only disclosure expanded by default", async (t) => {
   const x = await fixture(t);
   await publish(x);
   const body = x.messages()[0][1].body;
-  const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
-  for (const part of ["1 · Index", "2 · Query", "3 · Retrieval quality"])
-    assert.ok(visible.includes(part));
-  assert.equal((body.match(/<details>/g) ?? []).length, 3);
-  assert.equal(
-    (visible.match(/^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/gm) ?? []).length,
-    16,
+  const parts = ["1 · Retrieval quality", "2 · Index", "3 · Query"].map(
+    (part) => body.indexOf(part),
   );
-  assert.ok(visible.length < 4000);
+  assert.ok(parts[0] >= 0 && parts[0] < parts[1] && parts[1] < parts[2]);
+  const disclosures = [
+    ...body.matchAll(/<details( open)?>\n<summary>([^<]+)<\/summary>/g),
+  ];
+  assert.equal(disclosures.length, 6);
+  assert.equal(disclosures[0][1], " open");
+  assert.equal(disclosures[0][2], "Quality scores · 4 suites × 3 modes");
+  assert.ok(disclosures.slice(1).every((match) => match[1] === undefined));
+  assert.equal((body.match(/<details open>/g) ?? []).length, 1);
+  assert.match(body, /### 2 · Index\n\n<details>\n<summary>Index performance/);
+  assert.match(body, /### 3 · Query\n\n<details>\n<summary>Query performance/);
   assert.match(body, /Σ \/ μ \/ p95 \/ p99/);
   assert.match(body, /mean \/ p50 \/ p95 \/ p99/);
   assert.match(body, /complete phases/);
