@@ -211,7 +211,6 @@ export async function buildCiSummary({
         errors.push(`${job}: ${jobResults[job]?.result ?? "missing job"}`);
   return {
     schema_version: 5,
-    runtime: zg?.runtime ?? "rust-native",
     status: errors.length ? "failed" : "success",
     model: suite.protocol.model,
     preview: "mcp-default",
@@ -336,19 +335,7 @@ export function markdownCiSummary(result) {
   );
   if (result.run_url)
     lines.push("", `[Open this run and its artifacts](${result.run_url})`);
-  const text = `${lines.join("\n")}\n`;
-  return result.runtime === "node-0.2.2"
-    ? text
-        .replaceAll(
-          "Rust MCP default presentation",
-          "Node.js 0.2.2 MCP default presentation",
-        )
-        .replaceAll(
-          "Rust public MCP default presentation",
-          "Node.js 0.2.2 public MCP default presentation",
-        )
-        .replace("Rust candidate:", "Node.js 0.2.2 candidate:")
-    : text;
+  return `${lines.join("\n")}\n`;
 }
 
 export async function main() {

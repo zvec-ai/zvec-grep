@@ -198,8 +198,11 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.equal(
     input.body
       .split("\n")
-      .filter((line) => /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/.test(line))
-      .length,
+      .filter((line) =>
+        /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry) \| (hybrid|fts|vector) \|/.test(
+          line,
+        ),
+      ).length,
     12,
   );
   assert.ok(input.body.includes(`/commit/${base}`));
@@ -209,11 +212,11 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.ok(input.body.includes(request.harness_commit));
   assert.ok(input.body.includes(report.package_sha256.candidate));
   assert.equal(
-    (input.body.match(/RT mean \/ p50 \/ p95 \/ p99/g) ?? []).length,
-    8,
+    (input.body.match(/RT n; mean \/ p50 \/ p95 \/ p99/g) ?? []).length,
+    1,
   );
   assert.match(input.body, /2\.50 \/ 2\.50 \/ 4\.00 \/ 4\.00/);
-  assert.match(input.body, /Index \| 1\/2/);
+  assert.match(input.body, /SWE-QA20 \/ head \| 1\/2; 0/);
   assert.ok(input.body.length < 65536, "Fits GitHub's comment limit");
 });
 
@@ -457,7 +460,7 @@ test("missing RSS remains unavailable and artifact performance text is never ren
   await publish(x);
   const body = x.messages()[0][1].body;
   assert.match(body, /✅ Complete/);
-  assert.match(body, /Index \| 0\/1 \| 0 \| — \| 0 \| —/);
+  assert.match(body, /SWE-QA20 \/ base \| 0\/1; 0 \| 0; —/);
   assert.doesNotMatch(body, /everyone|forged/);
 });
 
@@ -500,6 +503,74 @@ test("invalid performance, package and harness identities cannot become a comple
     const input = structuredClone(report);
     change(input);
     assert.throws(() => validateComparison(input, request));
+  }
+});
+
+test("the compact comment exposes three parts and keeps complete statistics in disclosures", async (t) => {
+  const x = await fixture(t);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
+  for (const part of ["1 · Index", "2 · Query", "3 · Retrieval quality"])
+    assert.ok(visible.includes(part));
+  assert.equal((body.match(/<details>/g) ?? []).length, 3);
+  assert.equal(
+    (visible.match(/^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/gm) ?? []).length,
+    16,
+  );
+  assert.ok(visible.length < 4000);
+  assert.match(body, /Σ \/ μ \/ p95 \/ p99/);
+  assert.match(body, /mean \/ p50 \/ p95 \/ p99/);
+  assert.match(body, /complete phases/);
+  assert.match(body, /Peak RSS/);
+});
+
+test("performance cells show signed relative changes for index, RT and RSS", async (t) => {
+  const x = await fixture(t);
+  const input = structuredClone(report);
+  const summarize = (measured) =>
+    summarizePerformance([
+      {
+        index: measured,
+        query: Object.fromEntries(
+          ["hybrid", "fts", "vector"].map((mode) => [mode, measured]),
+        ),
+      },
+    ]);
+  input.performance.sweqa = {
+    baseline: summarize(stage),
+    candidate: summarize({
+      ...stage,
+      total_ms: 750,
+      samples_ms: [2, 4, 6, 8],
+      memory: {
+        status: "available",
+        samples: [{ rss_bytes: 1.5 * 1024 ** 2 }],
+      },
+    }),
+  };
+  await x.write("comparison/summary.json", input);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.match(body, /1\.00 → 0\.75 \(-25\.00%\)/);
+  assert.match(body, /1\.00 → 1\.50 \(\+50\.00%\)/);
+  assert.match(body, /2\.50 → 5\.00 \(\+100\.00%\)/);
+  assert.match(body, /0\.00 → 0\.00 \(0\.00%\)/);
+});
+
+test("zero or missing baselines withhold percentages without Infinity or false zeros", async (t) => {
+  for (const index of [{ ...stage, total_ms: 0, index_bytes: 0 }, null]) {
+    const x = await fixture(t);
+    const input = structuredClone(report);
+    input.performance.sweqa = {
+      baseline: summarizePerformance([{ index }]),
+      candidate: performance,
+    };
+    await x.write("comparison/summary.json", input);
+    await publish(x);
+    const body = x.messages()[0][1].body;
+    assert.ok(body.includes(`${index ? "0.00" : "—"} → 1.00 (—)`));
+    assert.doesNotMatch(body, /Infinity|NaN|-0\.00%/);
   }
 });
 

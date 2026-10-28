@@ -10,9 +10,7 @@ PR creation, reopening and new commits automatically compare the frozen PR base 
 
 For a manual paired comparison without a PR comment, select **Retrieval-only PR → Run workflow** and supply full `baseline_sha` / `candidate_sha` commit identities and their `baseline_repository` / `candidate_repository` (`owner/name`). This uses the same local-only comparison and does not run e2e. Manual runs require maintain/admin access.
 
-To compare the unchanged official **Node.js 0.2.2** release with Rust, select the PR branch as the workflow ref, set `baseline_sha` to `npm:@zvec/zvec-grep@0.2.2` and `baseline_repository` to `zvec-ai/zvec-grep`, then set `candidate_sha` to the full latest upstream `main` SHA and `candidate_repository` to `zvec-ai/zvec-grep`. Both sides use that same PR harness across all four suites. The Node package is downloaded from the official npm registry and checked against pinned SHA-256 and registry SHA-512 hashes before installation and in each suite; it is never rebuilt. Rust builds from the frozen commit. Reports identify Node by its npm release rather than inventing a source commit.
-
-The workflow freezes the selected harness ref to a full commit, checks out the candidate separately, resolves it to another full commit SHA, and builds `candidate/rust/`. A full requested SHA must match the checkout exactly. The packed native package cache is keyed by operating system, architecture and that exact candidate commit. A hit skips Rust compilation and packaging; a miss runs `npm run pack:local`. There is no Cargo build cache. Comparison reports include the harness SHA and each version's package SHA-256, checked for consistency across all suites. Node.js version is not part of candidate selection, package-cache identity or report identity.
+The workflow freezes the selected harness ref to a full commit, checks out the candidate separately, resolves it to another full commit SHA, and builds `candidate/rust/`. A full requested SHA must match the checkout exactly. The packed native package cache is keyed by operating system, architecture and that exact candidate commit. A hit skips Rust compilation and packaging; a miss runs `npm run pack:local`. There is no Cargo build cache. Comparison reports include the harness SHA and each version's package SHA-256, checked for consistency across all suites.
 
 Manual and comment runs require the original actor and current re-run actor to have the repository **maintain or admin** role; execution jobs check both, including partial re-runs. Automatic PR runs instead require the supported PR event and local embedding, with read-only permissions and no model secrets. These in-workflow checks apply to the checked-in workflow. Contributors who can modify the workflow or its local authorization action on another branch can bypass that check; a permission boundary against those contributors requires repository- or organization-level Actions execution policies.
 
@@ -54,9 +52,9 @@ All four suites and base/head comparisons include an **Index & Query performance
 
 Reports show query RT mean/p50/p95/p99, RSS and corpus-phase time mean/p95/p99, sampled peak RSS, summed phase durations and index bytes (sum/mean/p95/p99). p50 uses the median; p95/p99 use nearest rank over pooled raw samples, never averages of per-index percentiles. Phase totals are summed across corpora and do not represent total parallel workflow duration. Time/RT/RSS sample counts, missing coverage and failures are explicit. Performance RT includes failed query attempts; the existing quality-table latency fields continue to describe successful valid calls. Fixed-order concurrent requests share cache/model state, so these observations do not isolate cold starts.
 
-The automatic PR comment includes these tables for both versions of all four suites. The trusted `workflow_run` publisher validates numeric statistics, coverage, concurrency and package/harness identities and renders its own Markdown; it never executes PR code or publishes artifact Markdown. **Publisher changes take effect after they reach `main`.** Before then, PR runs retain full performance in Actions summaries and JSON/raw artifacts, while the existing default-branch publisher still displays quality only.
+The automatic PR comment has three parts: Index, Query and retrieval quality. Its visible tables summarize duration, RT and sampled peak RSS; expandable sections retain all percentiles, group totals, sample counts, coverage, quality scores and build identities. The trusted `workflow_run` publisher validates numeric statistics, coverage, concurrency and package/harness identities and renders its own Markdown; it never executes PR code or publishes artifact Markdown. **Publisher changes take effect after they reach `main`.** Before then, PR runs retain full performance in Actions summaries and JSON/raw artifacts, while the existing default-branch publisher still displays quality only.
 
-All performance measurements are collected externally without modifying the tested product. Per-file write RT is excluded because the unchanged Node.js 0.2.2 package does not expose individual write samples; neither runtime receives dedicated product instrumentation for this benchmark. Raw memory/query samples are retained in `run.json` for SWE-QA and `evidence/*/performance.json` plus `performance_groups` for pilots; the final reports contain recomputed aggregates. Missing `ps` support produces unavailable memory, not zero. RSS can double-count shared pages and sampling can miss brief peaks.
+All performance measurements are collected externally without modifying the tested product. Per-file write RT is outside this benchmark's scope; the Rust product receives no dedicated instrumentation. Raw memory/query samples are retained in `run.json` for SWE-QA and `evidence/*/performance.json` plus `performance_groups` for pilots; the final reports contain recomputed aggregates. Missing `ps` support produces unavailable memory, not zero. RSS can double-count shared pages and sampling can miss brief peaks.
 
 ## Dataset and scoring
 
@@ -82,7 +80,7 @@ Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, D
 
 SWE-QA20 ZG reports use **schema 7**, with `preview: "mcp-default"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
 
-The protocol ID is `sweqa20-zg-node022-rust-three-modes-mcp-default-v8`. The comparator accepts schema 7 reports with matching protocol and frozen inputs, Rust MCP default presentation and all three modes. Reports from other protocol versions require their matching scorer checkout. Replaying saved evidence is not a new retrieval run.
+The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v8`. The comparator accepts schema 7 reports with matching protocol and frozen inputs, Rust MCP default presentation and all three modes. Reports from other protocol versions require their matching scorer checkout. Replaying saved evidence is not a new retrieval run.
 
 ## Code structure
 
@@ -98,8 +96,6 @@ zg-retrieval/
   gold/              Frozen relevance labels and annotation provenance
   test/              Contract tests and pinned scoring reference
 ```
-
-The runner accepts native Rust packages and the unchanged Node.js 0.2.2 release. The benchmark adapter translates only the public CLI action syntax (`index` versus `--index`) and preserves each installer-generated MCP command. Node 0.2.2 does not expose indexed source bytes in public status; this field is recorded as unavailable, without inventing a value or relaxing Rust status validation.
 
 The runner captures public evidence; the aggregator reparses and audits it; metric functions score normalized results; report validators recompute quality and measurements before comparison or CI rendering. Metrics do not depend on engine implementations. Response presentation behavior remains covered by the product's MCP contract tests, rather than duplicate retrieval benchmark arms.
 
@@ -132,39 +128,6 @@ and report commands.
 `--package` accepts a tarball or a directory containing exactly one `.tgz`. The runner installs it in an isolated consumer. Use a new `--output` directory and fresh corpus checkout: output is never overwritten and an existing index is rejected. An external model-download cache may be reused.
 
 Add `--repository reflex-dev/reflex` or `--tasks reflex:6` for an explicitly labeled subset smoke run; all three modes still execute. Standalone `report.mjs` requires all 20 questions, and CI rejects subset reports. Modes and MCP presentation are fixed by the protocol, without selection flags.
-
-## Compare unchanged Node 0.2.2 with pinned Rust
-
-CI candidate refs still compile Rust. For a local cross-runtime comparison, supply the official Node 0.2.2 npm tarball and a native Rust package built from a recorded full commit. Both use the same frozen questions, code-selection arguments, model/device and four-request limit; each builds independent indexes. The adapter changes benchmark invocation syntax only and never patches either product.
-
-Keep the corpus directories outside any existing indexed workspace: Node 0.2.2 discovers ancestor indexes. Use an already-populated shared model-download cache so a download in the first arm does not bias indexing time. Preserve both consumer lockfiles and package hashes. Public status records Node's missing indexed-source-byte field as `null`; generated index disk size is measured independently for both runtimes.
-
-```sh
-mkdir -p "$retrieval_work/node-package"
-npm pack @zvec/zvec-grep@0.2.2 --pack-destination "$retrieval_work/node-package"
-node benchmarks/zg-retrieval/run.mjs \
-  --package "$retrieval_work/node-package" \
-  --output "$retrieval_work/node-results" \
-  --corpus "$retrieval_work/node-corpus" \
-  --model-cache "$retrieval_work/model-cache" \
-  --candidate-commit 'npm:@zvec/zvec-grep@0.2.2'
-
-# Run the same command with the pinned native package and fresh Rust output/corpus.
-node benchmarks/zg-retrieval/compare.mjs \
-  "$retrieval_work/node-results/report.json" \
-  "$retrieval_work/rust-results/report.json" \
-  "$retrieval_work/comparison"
-```
-
-An explicit live integration test verifies both real products on identical isolated 80-file corpora, with 20 synthetic queries, three modes and five repetitions per mode. It checks successful captures, measured RSS/index bytes and an observed maximum of four in-flight requests. Its results are integration evidence, not full-suite quality/performance conclusions:
-
-```sh
-node benchmarks/zg-retrieval/test/live-performance.mjs \
-  --node-package /absolute/path/to/zvec-zvec-grep-0.2.2.tgz \
-  --rust-package /absolute/path/to/native-candidate.tgz \
-  --rust-commit FULL_PINNED_COMMIT \
-  --output NEW_INTEGRATION_DIRECTORY
-```
 
 ## Offline replay and comparisons
 

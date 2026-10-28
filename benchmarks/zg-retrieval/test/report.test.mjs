@@ -47,19 +47,6 @@ test("report has one three-arm table with Rust MCP output, fixed averages and pe
     integrity_errors: [],
   };
   const text = markdownReport(report);
-  const nodeText = markdownReport({
-    ...report,
-    runtime: "node-0.2.2",
-    integrity_errors: ["Rust error payload is preserved"],
-  });
-  assert.match(nodeText, /Node.js 0.2.2 MCP default presentation/);
-  assert.match(
-    nodeText,
-    /unchanged Node.js 0.2.2 package uses its own public MCP default/,
-  );
-  assert.match(nodeText, /Rust error payload is preserved/);
-  assert.doesNotMatch(nodeText, /Node.js 0.2.2 MCP schema does not expose/);
-
   for (const mode of ["hybrid", "fts", "vector"])
     assert.ok(
       text.includes(

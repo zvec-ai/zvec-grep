@@ -88,7 +88,6 @@ function reportIdentity(report) {
     ].sort();
   return {
     generated_at: report.generated_at ?? null,
-    runtime: report.runtime ?? "rust-native",
     integrity_passed: report.integrity_passed,
     product_error_calls: report.product_error_calls,
     candidate_commits: unique((repo) => repo.candidate_commit),
@@ -270,8 +269,6 @@ export function markdownComparison(result) {
   const lines = [
     "# zg Retrieval-only version comparison",
     "",
-    `Baseline: **${cell(result.baseline.runtime)}** (\`${cell(result.baseline.candidate_commits.join(", "))}\`). Candidate: **${cell(result.candidate.runtime)}** (\`${cell(result.candidate.candidate_commits.join(", "))}\`).`,
-    "",
     `Scope: **${result.scope} / ${result.expected_task_ids.length} original questions**. All modes use the Rust public MCP default presentation. Quality averages five calls per query/mode. Delta is candidate minus baseline.`,
     "",
     "Source, Gold, frozen accepted-file targets and protocol identities match; task/mode coverage and scoring eligibility are validated. All five metrics are recomputed from saved public result items. This is a report-only comparison with no quality threshold or causal attribution.",
@@ -329,14 +326,7 @@ export function markdownComparison(result) {
     "",
     "Product-error zeros remain in the denominator. Invalid experiments are rejected; unreviewed Gold is N/A. JSON retains input identities, target ranks and per-question status transitions.",
   );
-  return (lines.join("\n") + "\n").replaceAll(
-    "the Rust public MCP default presentation",
-    result.baseline.runtime === result.candidate.runtime
-      ? result.baseline.runtime === "node-0.2.2"
-        ? "the Node.js 0.2.2 public MCP default presentation"
-        : "the Rust public MCP default presentation"
-      : "each runtime’s public MCP default presentation",
-  );
+  return lines.join("\n") + "\n";
 }
 
 export async function writeComparison(baselinePath, candidatePath, outputPath) {

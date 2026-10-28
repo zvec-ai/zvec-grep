@@ -12,9 +12,7 @@ export const MEMORY_SAMPLE_INTERVAL_MS = 100;
 const execute = promisify(execFile);
 
 export function indexConcurrencyArguments(help) {
-  const flag = help.includes("--index-embedding-concurrency")
-    ? "--index-embedding-concurrency"
-    : "--embedding-concurrency";
+  const flag = "--index-embedding-concurrency";
   assert.ok(
     help.includes(flag),
     "candidate cannot fix index embedding concurrency",

@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_ref:
-        description: Rust ref (main uses upstream), or npm:@zvec/zvec-grep@0.2.2
+        description: Candidate ref (main resolves from zvec-ai/zvec-grep; other refs resolve from this fork)
         required: true
         default: main
         type: string
@@ -90,12 +90,12 @@ jobs:
         run: node --test benchmarks/zg-retrieval/test/*.test.mjs
 
   package-candidate:
-    name: Prepare retrieval candidate
+    name: build Rust retrieval candidate
     needs: [authorize, quality-contract]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
-      candidate-commit: ${{ steps.node-candidate.outputs.identity || steps.rust-candidate.outputs.commit }}
+      candidate-commit: ${{ steps.rust-candidate.outputs.commit }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -103,15 +103,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
-      - name: Download the unchanged official Node.js 0.2.2 package
-        if: inputs.candidate_ref == 'npm:@zvec/zvec-grep@0.2.2'
-        id: node-candidate
-        run: |
-          node benchmarks/shared/retrieval-package.mjs download-node \
-            --output "$RUNNER_TEMP/rust-package-cache"
-          echo 'identity=npm:@zvec/zvec-grep@0.2.2' >> "$GITHUB_OUTPUT"
       - name: Build and verify the selected Rust package
-        if: inputs.candidate_ref != 'npm:@zvec/zvec-grep@0.2.2'
         id: rust-candidate
         uses: ./.github/actions/rust-candidate-package
         with:
@@ -146,7 +138,7 @@ jobs:
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
-          node benchmarks/shared/retrieval-package.mjs verify \
+          node benchmarks/shared/rust-package-cache.mjs verify \
             --directory "$RUNNER_TEMP/package" \
             --commit "${{ needs.package-candidate.outputs.candidate-commit }}"
       - name: Cache the code model
@@ -155,7 +147,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/model-cache
           key: retrieval-sweqa-potion-code-16m-v2-v1-${{ runner.os }}-${{ runner.arch }}
-      - name: Run all SWE-QA20 repositories through the selected MCP server
+      - name: Run all SWE-QA20 repositories through the Rust MCP server
         env:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
@@ -225,7 +217,7 @@ jobs:
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
-          node benchmarks/shared/retrieval-package.mjs verify \
+          node benchmarks/shared/rust-package-cache.mjs verify \
             --directory "$RUNNER_TEMP/package" \
             --commit "${{ needs.package-candidate.outputs.candidate-commit }}"
       - uses: actions/setup-python@v6
@@ -301,7 +293,7 @@ jobs:
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
-          node benchmarks/shared/retrieval-package.mjs verify \
+          node benchmarks/shared/rust-package-cache.mjs verify \
             --directory "$RUNNER_TEMP/package" \
             --commit "${{ needs.package-candidate.outputs.candidate-commit }}"
       - uses: actions/setup-python@v6
@@ -377,7 +369,7 @@ jobs:
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
-          node benchmarks/shared/retrieval-package.mjs verify \
+          node benchmarks/shared/rust-package-cache.mjs verify \
             --directory "$RUNNER_TEMP/package" \
             --commit "${{ needs.package-candidate.outputs.candidate-commit }}"
       - name: Cache the code model

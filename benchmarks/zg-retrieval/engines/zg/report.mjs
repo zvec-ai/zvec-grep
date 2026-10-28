@@ -113,12 +113,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
             2,
             "unsupported native snapshot",
           );
-          assert.equal(
-            snapshot.kind,
-            manifest.package?.runtime === "node-0.2.2"
-              ? "node-public-status"
-              : "rust-public-status",
-          );
+          assert.equal(snapshot.kind, "rust-public-status");
           assert.equal(
             snapshot.logical_content_sha256,
             manifest.index_content_sha256,
@@ -517,7 +512,6 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   );
   const report = {
     schema_version: 7,
-    runtime: manifests[0]?.package?.runtime ?? "rust-native",
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
     preview: suite.protocol.preview,
     quality_repetition: suite.protocol.quality_repetition,
