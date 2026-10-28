@@ -161,7 +161,6 @@ export async function buildCombined({
     schema_version: 1,
     status: errors.length ? "failed" : "success",
     candidate: { ref: candidateRef, commit: candidateCommit },
-    runtime: zg?.runtime ?? "rust-native",
     harness_commit: harnessCommit,
     run_url: runUrl,
     sweqa,
@@ -177,7 +176,7 @@ export function markdownCombined(result) {
   const lines = [
     "# Retrieval-only results",
     "",
-    `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}** · ${result.runtime === "node-0.2.2" ? "Node.js 0.2.2" : "Rust"} candidate \`${result.candidate.ref ?? "?"}\` at \`${result.candidate.commit ?? "?"}\``,
+    `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}** · Rust candidate \`${result.candidate.ref ?? "?"}\` at \`${result.candidate.commit ?? "?"}\``,
     "",
     "| Suite | Status | Queries | Model |",
     "| --- | --- | ---: | --- |",

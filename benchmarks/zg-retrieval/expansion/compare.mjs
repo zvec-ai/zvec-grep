@@ -7,7 +7,6 @@ import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
-import { NODE_RELEASE } from "../../shared/retrieval-package.mjs";
 import {
   markdownPerformance,
   summarizePerformance,
@@ -29,9 +28,7 @@ export function comparisonPackageHash(reports) {
 
 function checkIdentity(value) {
   assert.match(value.repository ?? "", /^[\w.-]+\/[\w.-]+$/);
-  if (value.commit === NODE_RELEASE.identity)
-    assert.equal(value.repository, "zvec-ai/zvec-grep");
-  else assert.match(value.commit ?? "", /^[a-f0-9]{40}$/);
+  assert.match(value.commit ?? "", /^[a-f0-9]{40}$/);
 }
 
 // Inputs to this function have already been rebuilt from validated suite rows.
@@ -162,12 +159,10 @@ export function markdownVersionComparison(result) {
   const server = result.server_url ?? "https://github.com";
   const version = (side) => {
     const value = result[side];
-    if (value.commit === NODE_RELEASE.identity)
-      return `[Node.js @zvec/zvec-grep@0.2.2](https://www.npmjs.com/package/@zvec/zvec-grep/v/0.2.2)`;
     return `[${value.repository}@${value.commit}](${server}/${value.repository}/commit/${value.commit})`;
   };
   const lines = [
-    "## Retrieval-only · version comparison",
+    "## Retrieval-only · PR base vs head",
     "",
     `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}**`,
     "",

@@ -76,7 +76,7 @@ function expandHome(path, home) {
   return path;
 }
 
-function parseGroupedStatus(stdout, home, runtime) {
+function parseGroupedStatus(stdout, home) {
   const heading = required(
     /^(✓ Workspace index is ready|! Workspace index needs an update|✗ Workspace index failed|○ Workspace indexing is disabled|○ Workspace index is not created|\? Workspace index is not configured|\? Workspace index status is unknown|! Workspace index requires a rebuild)\n {2}(.+)$/m,
     stdout,
@@ -135,28 +135,22 @@ function parseGroupedStatus(stdout, home, runtime) {
       required(/^ {2}Entities +([\d,]+)$/m, stdout, "entity count")[1],
       "entity count",
     ),
-    indexed_source_bytes:
-      runtime === "node-0.2.2"
-        ? null
-        : groupedCount(
-            required(
-              /^ {2}Source size +([\d,]+) bytes$/m,
-              stdout,
-              "indexed source size",
-            )[1],
-            "indexed source size",
-          ),
+    indexed_source_bytes: groupedCount(
+      required(
+        /^ {2}Source size +([\d,]+) bytes$/m,
+        stdout,
+        "indexed source size",
+      )[1],
+      "indexed source size",
+    ),
   };
 }
 
-export function parseNativeStatus(
-  stdout,
-  { home = homedir(), runtime = "rust-native" } = {},
-) {
+export function parseNativeStatus(stdout, { home = homedir() } = {}) {
   const text = stripVTControlCharacters(stdout).replaceAll("\r\n", "\n");
   const status = /^Workspace index: /m.test(text)
     ? parseLegacyStatus(text)
-    : parseGroupedStatus(text, home, runtime);
+    : parseGroupedStatus(text, home);
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
@@ -185,7 +179,6 @@ export async function snapshotIndex({
   root,
   output,
   env,
-  runtime = "rust-native",
   runStatus = run,
 }) {
   await mkdir(output, { recursive: true });
@@ -201,7 +194,7 @@ export async function snapshotIndex({
     throw error;
   }
   await writeStatusEvidence(output, result);
-  const status = parseNativeStatus(result.stdout, { home: env?.HOME, runtime });
+  const status = parseNativeStatus(result.stdout, { home: env?.HOME });
   assert.equal(
     status.root,
     root,
@@ -219,9 +212,7 @@ export async function snapshotIndex({
   await writeJson(join(output, "status.json"), status);
   const summary = {
     schema_version: 2,
-    kind:
-      runtime === "node-0.2.2" ? "node-public-status" : "rust-public-status",
-    runtime,
+    kind: "rust-public-status",
     logical_content_sha256: objectHash(identity),
     files: status.files_indexed,
     fragments: status.entities_indexed,
@@ -234,7 +225,7 @@ export async function snapshotIndex({
     ],
     stages: {
       corpus_scan: "available_as_public_aggregate_counts",
-      persisted_chunks_and_vectors: "not_exposed_by_public_status_interface",
+      persisted_chunks_and_vectors: "not_exposed_by_public_rust_interface",
       actual_embedding_inputs: "not_available",
       preselection_candidates: "not_available",
       fusion_and_selection: "not_available",

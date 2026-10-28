@@ -44,15 +44,11 @@ test("percentiles use nearest rank and preserve empty/zero populations", () => {
   assert.equal(samples[0], 100);
 });
 
-test("both current and historical public index flags explicitly cap concurrency at four", () => {
+test("the Rust public index flag explicitly caps concurrency at four", () => {
   assert.deepEqual(
     indexConcurrencyArguments("--index-embedding-concurrency <n>"),
     ["--index-embedding-concurrency", "4"],
   );
-  assert.deepEqual(indexConcurrencyArguments("--embedding-concurrency <n>"), [
-    "--embedding-concurrency",
-    "4",
-  ]);
   assert.throws(() => indexConcurrencyArguments("unsupported"), /cannot fix/);
 });
 

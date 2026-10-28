@@ -128,35 +128,6 @@ test("incomplete, mixed-harness, wrong-commit and mixed-model results are reject
   }
 });
 
-test("the fixed Node.js 0.2.2 baseline uses its npm identity without inventing a source SHA", () => {
-  const commit = "npm:@zvec/zvec-grep@0.2.2";
-  const versions = {
-    baseline: { repository: "zvec-ai/zvec-grep", commit },
-    candidate: metadata.candidate,
-  };
-  const comparison = compareCombinedResults(
-    result(commit),
-    result(headSha),
-    versions,
-  );
-  const markdown = markdownVersionComparison(comparison);
-  assert.match(
-    markdown,
-    /www\.npmjs\.com\/package\/@zvec\/zvec-grep\/v\/0\.2\.2/,
-  );
-  assert.doesNotMatch(markdown, /\/commit\/npm:/);
-  for (const baseline of [
-    { repository: "other/zg", commit },
-    { repository: "zvec-ai/zvec-grep", commit: "npm:@zvec/zvec-grep@0.2.3" },
-  ])
-    assert.throws(() =>
-      compareCombinedResults(result(commit), result(headSha), {
-        ...versions,
-        baseline,
-      }),
-    );
-});
-
 test("raw-report comparison rejects missing evidence and substituted SWE-QA versions", async () => {
   const baseline = { summary: result(baseSha), reports: {} };
   await assert.rejects(

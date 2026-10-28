@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { arch, cpus, platform } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { fileHash, writeJson } from "../core/io.mjs";
+import { fileHash, run, writeJson } from "../core/io.mjs";
 import { embeddingRuntime } from "../core/embedding.mjs";
 import {
   BENCHMARK_CONCURRENCY,
@@ -27,12 +27,7 @@ import {
   parseVisibleResponse,
   validateSearchRoute,
 } from "../engines/zg/parse.mjs";
-import {
-  freePort,
-  packageCandidate,
-  candidateCommand,
-  runCandidate,
-} from "../engines/zg/run.mjs";
+import { freePort, packageCandidate } from "../engines/zg/run.mjs";
 import { snapshotIndex } from "../engines/zg/snapshot.mjs";
 import { PILOT_SUITES_BY_ID } from "./config.mjs";
 import {
@@ -263,12 +258,7 @@ export function markdownPilotReport(report) {
         `- \`${String(failure.task_id).replaceAll("`", "")}\`: ${String(failure.reason).replaceAll(/\r?\n/g, " ")}`,
       );
   }
-  return `${lines.join("\n")}\n`.replaceAll(
-    "Rust MCP default presentation",
-    report.runtime === "node-0.2.2"
-      ? "Node.js 0.2.2 MCP default presentation"
-      : "Rust MCP default presentation",
-  );
+  return `${lines.join("\n")}\n`;
 }
 
 async function writeReport(output, report, pilot) {
@@ -289,14 +279,14 @@ async function writeReport(output, report, pilot) {
   await writeFile(join(output, "report.md"), markdownPilotReport(report));
 }
 
-export async function runGroup(pilot, group, candidate, options, report, mcp) {
+async function runGroup(pilot, group, candidate, options, report, mcp) {
   const embedding = embeddingRuntime(pilot.model);
   const groupRows = [];
   const measured = { id: group.id, index: null, query: {} };
   report.performance_groups.push(measured);
   const evidence = join(options.output, "evidence", group.id);
   await mkdir(evidence, { recursive: true });
-  const root = await realpath(group.root);
+  const root = resolve(group.root);
   const indexTimeoutMs = pilot.config.indexTimeoutMinutes * 60_000;
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
@@ -324,8 +314,8 @@ export async function runGroup(pilot, group, candidate, options, report, mcp) {
   };
   let client;
   try {
-    const install = await runCandidate(
-      candidate,
+    const install = await run(
+      candidate.cli,
       [
         "--install",
         "--target",
@@ -345,10 +335,10 @@ export async function runGroup(pilot, group, candidate, options, report, mcp) {
         command.length >= 3 &&
         command.every((part) => typeof part === "string"),
     );
-    await runCandidate(candidate, ["--server", "off"], { cwd: root, env });
+    await run(candidate.cli, ["--server", "off"], { cwd: root, env });
     const indexStart = performance.now();
     try {
-      const invocation = candidateCommand(candidate, [
+      const args = [
         "--index",
         root,
         "--mode",
@@ -365,8 +355,8 @@ export async function runGroup(pilot, group, candidate, options, report, mcp) {
         "--iglob",
         group.indexGlob,
         "--debug",
-      ]);
-      const indexed = await measureIndex(invocation.command, invocation.args, {
+      ];
+      const indexed = await measureIndex(candidate.cli, args, {
         cwd: root,
         env,
         timeout: indexTimeoutMs,
@@ -385,15 +375,12 @@ export async function runGroup(pilot, group, candidate, options, report, mcp) {
         (measured.index?.total_ms ?? performance.now() - indexStart) / 1000;
     }
     if (embedding.remote)
-      await runCandidate(candidate, embedding.grantArguments(root), {
+      await run(candidate.cli, embedding.grantArguments(root), {
         cwd: root,
         env,
       });
     const before = await snapshotIndex({
       cli: candidate.cli,
-      runtime: candidate.runtime,
-      runStatus: (_cli, args, options) =>
-        runCandidate(candidate, args, options),
       root,
       output: join(evidence, "status-before"),
       env,
@@ -542,9 +529,6 @@ export async function runGroup(pilot, group, candidate, options, report, mcp) {
     }
     const after = await snapshotIndex({
       cli: candidate.cli,
-      runtime: candidate.runtime,
-      runStatus: (_cli, args, options) =>
-        runCandidate(candidate, args, options),
       root,
       output: join(evidence, "status-after"),
       env,
@@ -563,7 +547,7 @@ export async function runGroup(pilot, group, candidate, options, report, mcp) {
     throw error;
   } finally {
     if (client) await client.close().catch(() => undefined);
-    await runCandidate(candidate, ["--server", "off"], {
+    await run(candidate.cli, ["--server", "off"], {
       cwd: root,
       env,
     }).catch(() => undefined);
@@ -615,7 +599,6 @@ export async function main(args = process.argv.slice(2)) {
   try {
     const candidate = await packageCandidate(values.package, output);
     report.package = candidate.identity;
-    report.runtime = candidate.runtime;
     const require = createRequire(join(candidate.consumer, "package.json"));
     const mcp = {
       Client: (

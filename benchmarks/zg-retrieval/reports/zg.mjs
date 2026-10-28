@@ -77,20 +77,5 @@ export function markdownReport(report) {
         (reason) => `- ${reason.replaceAll("\n", " ")}`,
       ),
     );
-  const text = lines.join("\n") + "\n";
-  return report.runtime === "node-0.2.2"
-    ? text
-        .replaceAll(
-          "Rust MCP default presentation",
-          "Node.js 0.2.2 MCP default presentation",
-        )
-        .replaceAll(
-          "Rust public MCP default presentation",
-          "Node.js 0.2.2 public MCP default presentation",
-        )
-        .replace(
-          "The benchmark does not send a preview override because the current Rust MCP schema does not expose one.",
-          "The benchmark does not send a preview override; the unchanged Node.js 0.2.2 package uses its own public MCP default.",
-        )
-    : text;
+  return lines.join("\n") + "\n";
 }

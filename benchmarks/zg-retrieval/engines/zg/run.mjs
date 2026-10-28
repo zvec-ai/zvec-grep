@@ -148,37 +148,6 @@ export function nativeCandidate(packageRoot, consumer, metadata) {
   return { consumer, packageRoot, cli, runtime: "rust-native" };
 }
 
-export function productCandidate(packageRoot, consumer, metadata) {
-  const bin =
-    typeof metadata.bin === "string" ? metadata.bin : metadata.bin?.zg;
-  if (typeof bin === "string" && /\.[cm]?js$/i.test(bin)) {
-    assert.equal(metadata.name, "@zvec/zvec-grep");
-    assert.equal(
-      metadata.version,
-      "0.2.2",
-      "Node comparison requires the unchanged 0.2.2 release",
-    );
-    const cli = resolve(packageRoot, bin);
-    assert.ok(
-      inside(packageRoot, cli),
-      "candidate binary escapes the installed package",
-    );
-    return { consumer, packageRoot, cli, runtime: "node-0.2.2" };
-  }
-  return nativeCandidate(packageRoot, consumer, metadata);
-}
-
-export function candidateCommand(candidate, args) {
-  if (candidate.runtime !== "node-0.2.2")
-    return { command: candidate.cli, args };
-  const [first, ...rest] = args;
-  const verb = first?.startsWith("--") ? first.slice(2) : first;
-  return {
-    command: process.execPath,
-    args: ["--liftoff-only", candidate.cli, verb, ...rest],
-  };
-}
-
 export async function packageCandidate(packagePath, output) {
   let tarball = resolve(packagePath);
   if ((await lstat(tarball)).isDirectory()) {
@@ -211,8 +180,11 @@ export async function packageCandidate(packagePath, output) {
     join(output, "consumer-lock.json"),
     await readFile(join(consumer, "package-lock.json")),
   );
-  const candidate = productCandidate(packageRoot, consumer, metadata);
-  assert.ok((await lstat(candidate.cli)).isFile(), "installed CLI is missing");
+  const candidate = nativeCandidate(packageRoot, consumer, metadata);
+  assert.ok(
+    (await lstat(candidate.cli)).isFile(),
+    "installed Rust CLI is missing",
+  );
   const help = await runCandidate(candidate, ["--help", "index"]);
   return {
     ...candidate,
@@ -227,9 +199,8 @@ export async function packageCandidate(packagePath, output) {
   };
 }
 
-export function runCandidate(candidate, args, options) {
-  const invocation = candidateCommand(candidate, args);
-  return run(invocation.command, invocation.args, options);
+function runCandidate(candidate, args, options) {
+  return run(candidate.cli, args, options);
 }
 
 function referencedSchema(root, reference) {
@@ -393,7 +364,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     console.log(`${repo.repository}: building a fresh index`);
     const started = performance.now();
     try {
-      const invocation = candidateCommand(candidate, [
+      const args = [
         "--index",
         root,
         "--mode",
@@ -407,8 +378,8 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         ...candidate.indexConcurrencyArguments,
         ...indexSelectionArguments(protocol),
         "--debug",
-      ]);
-      const indexed = await measureIndex(invocation.command, invocation.args, {
+      ];
+      const indexed = await measureIndex(candidate.cli, args, {
         env,
         cwd: root,
         timeout: 2_400_000,
@@ -436,9 +407,6 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "snapshot";
     await snapshotIndex({
       cli: candidate.cli,
-      runtime: candidate.runtime,
-      runStatus: (_cli, args, options) =>
-        runCandidate(candidate, args, options),
       root,
       output: join(output, "stages/before"),
       env,
@@ -651,9 +619,6 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       try {
         await snapshotIndex({
           cli: candidate.cli,
-          runtime: candidate.runtime,
-          runStatus: (_cli, args, options) =>
-            runCandidate(candidate, args, options),
           root,
           output: join(output, "stages/after"),
           env,

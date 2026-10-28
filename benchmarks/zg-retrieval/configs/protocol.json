@@ -1,5 +1,5 @@
 {
-  "id": "sweqa20-zg-node022-rust-three-modes-mcp-default-v8",
+  "id": "sweqa20-zg-rust-three-modes-mcp-default-v8",
   "index_embedding_concurrency": 4,
   "query_concurrency": 4,
   "model": "local/potion-code-16m-v2",

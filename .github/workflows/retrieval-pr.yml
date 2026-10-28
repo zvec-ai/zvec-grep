@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       baseline_sha:
-        description: Full Rust baseline SHA, or npm:@zvec/zvec-grep@0.2.2
+        description: Full Rust baseline commit SHA
         required: true
         type: string
       baseline_repository:

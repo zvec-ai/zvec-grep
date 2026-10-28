@@ -282,7 +282,7 @@ test("the selected source is built from rust/ and exact-commit package caching b
   assert.match(job, /cache_namespace: retrieval-rust/);
   assert.match(
     job,
-    /candidate-commit: \$\{\{ steps\.node-candidate\.outputs\.identity \|\| steps\.rust-candidate\.outputs\.commit \}\}/,
+    /candidate-commit: \$\{\{ steps\.rust-candidate\.outputs\.commit \}\}/,
   );
   assert.match(
     rustAction,
@@ -315,24 +315,6 @@ test("the selected source is built from rust/ and exact-commit package caching b
       /--commit "\$\{\{ needs\.package-candidate\.outputs\.candidate-commit \}\}"/,
     );
   }
-});
-
-test("the official Node.js 0.2.2 selector bypasses Rust builds and all suites verify the package identity", () => {
-  const entries = steps(jobs["package-candidate"]);
-  assert.match(
-    entries.find((entry) => entry.includes("id: node-candidate")),
-    /if: inputs\.candidate_ref == 'npm:@zvec\/zvec-grep@0\.2\.2'/,
-  );
-  assert.match(
-    entries.find((entry) => entry.includes("id: node-candidate")),
-    /retrieval-package\.mjs download-node/,
-  );
-  assert.match(
-    entries.find((entry) => entry.includes("id: rust-candidate")),
-    /if: inputs\.candidate_ref != 'npm:@zvec\/zvec-grep@0\.2\.2'/,
-  );
-  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"])
-    assert.match(jobs[suite], /retrieval-package\.mjs verify/);
 });
 
 test("every independently rerunnable job checks benchmark access before doing work", () => {
