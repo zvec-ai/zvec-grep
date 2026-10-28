@@ -2,6 +2,7 @@
 
 mod chunking;
 mod code;
+mod graph;
 mod image;
 mod markdown;
 mod service;
@@ -16,6 +17,10 @@ pub(crate) use spi::ChunkOptions;
 
 // Indexing output.
 pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, ExtractionOutput};
+
+// Per-file graph support shared with the indexing pipeline.
+#[allow(unused_imports)]
+pub(crate) use graph::{FILE_SCOPE_INDEX, PartitionedGraph};
 
 use crate::{
     EngineError,

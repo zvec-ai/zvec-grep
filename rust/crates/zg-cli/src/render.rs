@@ -1321,6 +1321,9 @@ mod output_tests {
                 visibility: None,
                 language: None,
                 documentation: None,
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
             }));
             let mut buffer = Vec::new();
             write_item_preview(

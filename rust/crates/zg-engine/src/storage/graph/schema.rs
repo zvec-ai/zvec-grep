@@ -3,7 +3,12 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::{Error, Result};
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-pub(crate) const VERSION: i64 = 1;
+// v2 is the only shape this branch ships: the walk-time `declares` edges and the
+// cross-file resolver's data plane (ambiguity candidates, reference language and
+// name tail) share the `edges` table. Names, ownership and paths stay canonical
+// in zvec; the resolver reads them into a per-sweep snapshot instead of
+// duplicating them here.
+pub(crate) const VERSION: i64 = 2;
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
@@ -44,27 +49,32 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
-// `failed` is reserved for resolver integration; no API currently sets it.
+// `failed` terminates import references whose specifier addresses modules
+// outside the workspace; they carry no target, so invalidation cannot
+// resurrect them and only a rewrite of the owning file re-enqueues them.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id INTEGER NOT NULL CHECK (file_id BETWEEN 0 AND 4294967295),
     source TEXT NOT NULL,
     target TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('contains', 'calls', 'imports', 'extends', 'implements')),
+    kind TEXT NOT NULL CHECK (kind IN ('contains', 'calls', 'imports', 'extends', 'implements', 'declares')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved', 'failed')),
     reference_name TEXT,
     receiver_name TEXT,
     arity INTEGER CHECK (arity >= 0),
     line INTEGER CHECK (line >= 1),
     col INTEGER CHECK (col >= 0),
-    provenance TEXT CHECK (provenance IN ('file_local', 'import_scoped', 'qualified_name_match', 'workspace_unique')),
+    candidates TEXT CHECK (candidates IS NULL OR (json_valid(candidates) AND json_type(candidates) = 'array')),
+    language TEXT NOT NULL DEFAULT 'unknown',
+    name_tail TEXT NOT NULL DEFAULT '',
+    provenance TEXT CHECK (provenance IN ('arity_bound', 'export_bound', 'file_local', 'file_scoped', 'import_bound', 'import_scoped', 'preferred_file', 'qualified_name_match', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),
     CHECK (
         (reference_name IS NULL AND status = 'resolved' AND provenance = 'file_local'
-            AND receiver_name IS NULL AND arity IS NULL)
+            AND receiver_name IS NULL AND arity IS NULL AND candidates IS NULL)
         OR
         (reference_name IS NOT NULL AND length(trim(reference_name)) > 0
             AND line IS NOT NULL AND col IS NOT NULL

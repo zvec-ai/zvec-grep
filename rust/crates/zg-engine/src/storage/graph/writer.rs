@@ -8,20 +8,23 @@ use super::{Error, Result, SqliteGraphStorage, nonempty};
 const TARGET_ID_BATCH_SIZE: usize = 512;
 
 impl SqliteGraphStorage {
-    /// Atomically replaces one file's local graph and invalidates inbound edges.
+    /// Atomically replaces one file's local graph rows and invalidates inbound
+    /// edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
     /// an empty slice for a new file. Snapshot node IDs validate ownership.
     /// The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges are written by the resolver.
+    /// `language` labels pending references for the resolver's language gate.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
     ///
     /// # Errors
     /// Rejects invalid ownership, duplicate/empty IDs, non-local edges, invalid
     /// positions, read-only connections, and SQLite failures. Failures roll back.
-    pub(crate) fn write_file_graph(
+    pub(crate) fn write_file_graph_with_language(
         &mut self,
         file_id: u32,
+        language: &str,
         graph: &FileGraphResult,
         old_entity_ids: &[String],
     ) -> Result<()> {
@@ -37,10 +40,11 @@ impl SqliteGraphStorage {
         for chunk in targets.chunks(TARGET_ID_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             // Even unchanged target IDs require re-resolution. Preserve the row ID
-            // and reference evidence for the next resolution pass.
+            // and reference evidence for the next resolution pass, but discard
+            // candidates recorded against the previous snapshot.
             tx.execute(
                 &format!(
-                    "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+                    "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL, candidates = NULL
                   WHERE target IN ({placeholders}) AND file_id <> ? AND reference_name IS NOT NULL"
                 ),
                 params_from_iter(
@@ -73,8 +77,8 @@ impl SqliteGraphStorage {
                 ])?;
             }
             let mut insert = tx.prepare("INSERT INTO edges
-                (file_id, source, reference_name, receiver_name, kind, arity, line, col, status, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
+                (file_id, source, reference_name, receiver_name, kind, arity, line, col, language, name_tail, status, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
             for reference in &graph.pending_refs {
                 insert.execute(params![
                     file_id,
@@ -85,6 +89,8 @@ impl SqliteGraphStorage {
                     reference.arity,
                     reference.line,
                     reference.column,
+                    language,
+                    name_tail(&reference.ref_name),
                     serde_json::to_string(&reference.metadata)?
                 ])?;
             }
@@ -103,8 +109,33 @@ impl SqliteGraphStorage {
         file_id: u32,
         old_entity_ids: &[String],
     ) -> Result<()> {
-        self.write_file_graph(file_id, &FileGraphResult::default(), old_entity_ids)
+        self.write_file_graph_with_language(
+            file_id,
+            "unknown",
+            &FileGraphResult::default(),
+            old_entity_ids,
+        )
     }
+
+    /// Snapshot write without a persisted language. Tests that do not exercise
+    /// import resolution use this entry point.
+    #[cfg(test)]
+    pub(crate) fn write_file_graph(
+        &mut self,
+        file_id: u32,
+        graph: &FileGraphResult,
+        old_entity_ids: &[String],
+    ) -> Result<()> {
+        self.write_file_graph_with_language(file_id, "unknown", graph, old_entity_ids)
+    }
+}
+
+/// Last component of a referenced name, matching the name index's namespace:
+/// `a::b::c`, `a.b.c` and `a/b/c` all index as `c`.
+fn name_tail(name: &str) -> &str {
+    name.rsplit([':', '.', '/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name)
 }
 
 pub(super) fn validate(

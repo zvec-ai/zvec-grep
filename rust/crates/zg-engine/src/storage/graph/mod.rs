@@ -8,12 +8,12 @@
 //! `IndexStore` owns the writable connection and coordinates file replacement.
 
 mod pending;
-#[cfg(test)]
 mod reader;
 mod schema;
 mod types;
 mod writer;
 
+pub(crate) use reader::parse_file_endpoint;
 use rusqlite::{Connection, OpenFlags};
 use std::{path::Path, time::Duration};
 pub(crate) use types::*;

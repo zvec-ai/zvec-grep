@@ -113,6 +113,31 @@ impl Entities {
         Ok(owners)
     }
 
+    /// Every entity that carries code metadata, projected as `(entity_id,
+    /// file_id, metadata)` for the resolver's workspace snapshot. Canonical
+    /// bodies and fragments stay unread.
+    pub(super) fn list_symbol_projection(
+        &self,
+    ) -> EngineResult<Vec<(String, FileId, CodeMetadata)>> {
+        let iterator = native(
+            self.collection
+                .iter_with_options(Some(&["entity_id", "file_id", "metadata"]), false),
+            "iterate symbol metadata",
+        )?;
+        let mut projection = Vec::new();
+        for doc in iterator {
+            let doc = native(doc, "read symbol metadata")?;
+            let id = string_field(&doc, "entity_id")?;
+            if doc_key(&doc)? != id {
+                return Err(corrupt("entity identity differs from its index fields"));
+            }
+            if let Some(EntityMetadata::Code(metadata)) = decode_metadata(&doc)? {
+                projection.push((id, FileId::new(u32_field(&doc, "file_id")?), metadata));
+            }
+        }
+        Ok(projection)
+    }
+
     /// Read every canonical ID before replacing or deleting a file's entities.
     /// The caller must hold the store lock throughout this read and the update.
     /// Full query batches are split into disjoint indexed ranges so a retrieval

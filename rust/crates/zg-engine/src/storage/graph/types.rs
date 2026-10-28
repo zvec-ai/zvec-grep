@@ -19,13 +19,69 @@ pub(crate) enum Direction {
     Both,
 }
 
-/// A pending reference with its database identity.
+/// A pending reference with its database identity and resolution evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StoredPendingRef {
     pub id: i64,
     /// Matches zvec's `FileId`; the resolver retrieves file paths from zvec.
     pub file_id: u32,
     pub reference: PendingRef,
+    /// Ambiguity candidates recorded by the resolver; cleared on invalidation
+    /// because they describe the previous snapshot.
+    pub candidates: Option<Vec<String>>,
+    /// Language of the owning file (`rust`, `python`, ...), the resolver's
+    /// cross-language gate.
+    pub language: String,
+    /// Last component of the referenced name, the name-index key.
+    pub name_tail: String,
+}
+
+/// One workspace name-index hit for a symbol name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NameIndexEntry {
+    pub entity_id: String,
+    pub file_id: u32,
+    pub qualified_name: String,
+    pub is_exported: bool,
+    pub arity: Option<u32>,
+    /// Pure declaration without a body (C/C++ prototypes).
+    pub is_declaration: bool,
+}
+
+/// Name-index record for one entity. Entities without a symbol name are
+/// omitted; `name` shares the namespace with the pending-ref `name_tail`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EntityRecord {
+    pub entity_id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub is_exported: bool,
+    pub arity: Option<u32>,
+    pub is_declaration: bool,
+}
+
+/// One import statement of a file as the resolver sees it: the extracted
+/// module specifier plus the statement text, which carries the `as` alias
+/// bindings the specifier alone loses.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ImportReference {
+    /// Module specifier from extraction (`./left`, `declare`, `left::work`).
+    pub specifier: String,
+    /// Import statement text as written in the source.
+    pub raw_text: Option<String>,
+}
+
+/// A variable/parameter type binding declared by one entity
+/// (`var x = new X()` binds `x` to `X` inside its function).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeclaredBinding {
+    /// The bound name as the source spells it (the call's receiver).
+    pub name: String,
+    /// Declared receiver type (`X`).
+    pub bound_type: String,
+    /// One-based line of the declaring site; rebindings of the same name
+    /// shadow earlier ones at later lines.
+    pub line: u32,
 }
 
 /// Page over pending references. Restart pagination after file mutations.

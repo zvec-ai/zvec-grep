@@ -15,13 +15,46 @@ pub(crate) enum GraphEdgeKind {
     Imports,
     Extends,
     Implements,
+    Declares,
+}
+
+/// Kinds of buffered name references. Each pending ref is resolved into the
+/// [`GraphEdgeKind`] with the same name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GraphRefKind {
+    Calls,
+    Imports,
+    Extends,
+    Implements,
+    Declares,
+}
+
+impl From<GraphRefKind> for GraphEdgeKind {
+    fn from(kind: GraphRefKind) -> Self {
+        match kind {
+            GraphRefKind::Calls => Self::Calls,
+            GraphRefKind::Imports => Self::Imports,
+            GraphRefKind::Extends => Self::Extends,
+            GraphRefKind::Implements => Self::Implements,
+            GraphRefKind::Declares => Self::Declares,
+        }
+    }
 }
 
 /// Evidence provenance recorded on persisted edges.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EdgeProvenance {
+    /// The winning candidate was the only one whose declared arity matched.
+    ArityBound,
+    /// The winning candidate was the only exported one.
+    ExportBound,
     FileLocal,
+    /// A receiver-qualified call bound to a same-file declaration.
+    FileScoped,
+    /// A bare name bound through the file's resolved import scope.
+    ImportBound,
     ImportScoped,
     /// The target was selected by a unique qualified-name match.
     QualifiedNameMatch,
@@ -83,6 +116,9 @@ pub(crate) struct FileGraphNode {
     pub arity: Option<usize>,
     pub visibility: Option<String>,
     pub is_exported: bool,
+    /// Pure declaration without a body (C/C++ prototypes, in-class member
+    /// declarations); definitions shadow them in name-based binding.
+    pub is_declaration: bool,
 }
 
 /// Per-file graph extraction output, assembled after the walk and partition.
@@ -94,6 +130,7 @@ pub(crate) struct FileGraphResult {
 }
 
 impl GraphEdgeKind {
+    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
@@ -101,6 +138,7 @@ impl GraphEdgeKind {
             Self::Imports => "imports",
             Self::Extends => "extends",
             Self::Implements => "implements",
+            Self::Declares => "declares",
         }
     }
 }
@@ -108,7 +146,11 @@ impl GraphEdgeKind {
 impl EdgeProvenance {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::ArityBound => "arity_bound",
+            Self::ExportBound => "export_bound",
             Self::FileLocal => "file_local",
+            Self::FileScoped => "file_scoped",
+            Self::ImportBound => "import_bound",
             Self::ImportScoped => "import_scoped",
             Self::QualifiedNameMatch => "qualified_name_match",
             Self::WorkspaceUnique => "workspace_unique",

@@ -8,7 +8,7 @@ use rusqlite::{Row, TransactionBehavior, params, params_from_iter};
 /// Maximum references per page, excluding the one-row pagination lookahead.
 pub(super) const MAX_PENDING_PAGE_SIZE: usize = 1024;
 
-const SELECT_REF: &str = "SELECT id, file_id, source, reference_name, receiver_name, kind, arity, line, col, metadata FROM edges";
+const SELECT_REF: &str = "SELECT id, file_id, source, reference_name, receiver_name, kind, arity, line, col, metadata, candidates, language, name_tail FROM edges";
 
 impl SqliteGraphStorage {
     /// Fetch current pending rows for writeback validation, without scanning the queue.
@@ -99,6 +99,63 @@ impl SqliteGraphStorage {
         tx.commit()?;
         Ok(stats)
     }
+
+    /// Atomically records ambiguity candidates for still-pending refs. The
+    /// candidates are evidence for later sweeps: a name that stays ambiguous
+    /// keeps the rows that explain why, and invalidation clears them.
+    ///
+    /// # Errors
+    /// Rejects invalid proposals and SQLite failures; the entire batch rolls back.
+    pub(crate) fn record_candidates(&mut self, entries: &[(i64, Vec<String>)]) -> Result<usize> {
+        if entries.iter().any(|(ref_id, _)| *ref_id < 1) {
+            return Err(Error::InvalidInput(
+                "candidate records require a positive ref ID",
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut recorded = 0;
+        {
+            let mut update =
+                tx.prepare("UPDATE edges SET candidates = ? WHERE id = ? AND status = 'pending'")?;
+            for (ref_id, candidates) in entries {
+                let payload = serde_json::to_string(candidates)?;
+                recorded += update.execute(params![payload, ref_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(recorded)
+    }
+
+    /// Atomically terminates pending references whose specifier cannot
+    /// address any workspace module. Failed rows drop out of the queue until
+    /// the owning file is rewritten; they carry no target, so invalidation
+    /// never resurrects them. The same caller serialization as
+    /// `apply_resolutions` applies.
+    ///
+    /// # Errors
+    /// Rejects invalid proposals and SQLite failures; the entire batch rolls back.
+    pub(crate) fn apply_failures(&mut self, ref_ids: &[i64]) -> Result<usize> {
+        if ref_ids.iter().any(|ref_id| *ref_id < 1) {
+            return Err(Error::InvalidInput("failures require a positive ref ID"));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut failed = 0;
+        {
+            let mut update = tx.prepare(
+                "UPDATE edges SET status = 'failed', candidates = NULL
+                 WHERE id = ? AND status = 'pending'",
+            )?;
+            for ref_id in ref_ids {
+                failed += update.execute(params![ref_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(failed)
+    }
 }
 
 fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {
@@ -116,5 +173,19 @@ fn ref_from_row(row: &Row<'_>) -> rusqlite::Result<StoredPendingRef> {
             status: PendingRefStatus::Pending,
             metadata: decode_metadata(&row.get::<_, String>(9)?)?,
         },
+        candidates: row
+            .get::<_, Option<String>>(10)?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
+        language: row.get(11)?,
+        name_tail: row.get(12)?,
     })
 }

@@ -1,6 +1,21 @@
 use super::*;
 use crate::domain::{CodeMetadata, EntityMetadata, Language};
 
+fn target_metadata(index: usize) -> CodeMetadata {
+    CodeMetadata {
+        symbol_type: Some(SymbolType::Function),
+        symbol_name: Some("target'quoted".into()),
+        scope: Some(format!("scope{index}")),
+        signature: Some("fn target()".into()),
+        documentation: None,
+        visibility: None,
+        language: Some(Language::Rust),
+        arity: None,
+        is_exported: false,
+        is_declaration: false,
+    }
+}
+
 #[test]
 fn candidates_are_complete_and_distinct_without_loading_source_bodies() {
     let temporary = tempfile::tempdir().expect("workspace");
@@ -27,15 +42,7 @@ fn candidates_are_complete_and_distinct_without_loading_source_bodies() {
                 entity.file_id(),
                 entity.source_range(),
                 entity.content().clone(),
-                Some(EntityMetadata::Code(CodeMetadata {
-                    symbol_type: Some(SymbolType::Function),
-                    symbol_name: Some("target'quoted".into()),
-                    scope: Some(format!("scope{index}")),
-                    signature: Some("fn target()".into()),
-                    documentation: None,
-                    visibility: None,
-                    language: Some(Language::Rust),
-                })),
+                Some(EntityMetadata::Code(target_metadata(index))),
                 fragments,
             )
             .expect("named entity")

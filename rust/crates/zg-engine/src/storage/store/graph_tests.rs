@@ -126,6 +126,7 @@ fn node(id: &str) -> FileGraphNode {
         arity: None,
         visibility: None,
         is_exported: false,
+        is_declaration: false,
     }
 }
 
