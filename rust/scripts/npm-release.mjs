@@ -38,10 +38,7 @@ import {
   promoteRelease,
   publishRelease,
 } from "./npm-release-registry.mjs";
-import {
-  stageCompliance,
-  verifyPublicationInputs,
-} from "./npm-release-compliance.mjs";
+import { stageCompliance } from "./npm-release-compliance.mjs";
 import {
   rollbackVersion,
   installArtifactRelease,
@@ -174,6 +171,7 @@ async function checksumManifest(root, target) {
 }
 
 async function packDirectory(packageDirectory) {
+  await copyFile(join(workspaceDir, "..", "LICENSE"), join(packageDirectory, "LICENSE"));
   await mkdir(tarballRoot, { recursive: true });
   const stdout = run(
     "npm",
@@ -246,7 +244,7 @@ async function packPlatform(options) {
         await stageCompliance(join(workspaceDir, "npm", "compliance", entry.target,
           component.package.slice(entry.package.length + 1)), staged);
         // Preserve the upstream ORT notices in each redistributed provider or
-        // fragment, independently of the reviewed publication-only SBOM inputs.
+        // fragment, independently of optional supplemental license/SBOM inputs.
         const notices = join(temporary, "lib", "licenses");
         if (component.file.includes("onnxruntime") && (await stat(notices).catch((error) => {
           if (error.code === "ENOENT") return undefined;
@@ -261,7 +259,7 @@ async function packPlatform(options) {
           description: `Native runtime component for ${entry.package}; install @zvec/zvec-grep`,
           license: "Apache-2.0", repository: "https://github.com/zvec-ai/zvec-grep",
           os: [entry.os], cpu: [entry.cpu], ...(entry.libc ? { libc: [entry.libc] } : {}),
-          files: ["lib", "parts", "checksums.json", "README.md", "UPSTREAM_NOTICES", "LICENSES", "SBOM.spdx.json"],
+          files: ["lib", "parts", "checksums.json", "README.md", "LICENSE", "UPSTREAM_NOTICES", "LICENSES", "SBOM.spdx.json"],
           publishConfig: { access: "public", provenance: true },
         }, null, 2)}\n`);
         await writeFile(join(staged, "README.md"), `# ${component.package}\n\nExact-version runtime component. Install @zvec/zvec-grep to assemble and verify the complete runtime; do not load a data fragment directly.\n`);
@@ -305,7 +303,7 @@ async function packPlatform(options) {
       repository: "https://github.com/zvec-ai/zvec-grep",
       os: [entry.os],
       cpu: [entry.cpu],
-      files: ["bin", "lib", "checksums.json", "plugins.json", "README.md", "LICENSES", "SBOM.spdx.json"],
+      files: ["bin", "lib", "checksums.json", "plugins.json", "README.md", "LICENSE", "LICENSES", "SBOM.spdx.json"],
       publishConfig: { access: "public", provenance: true },
       zvecGrep: {
         // variant describes compiled capabilities, never installed plugins.
@@ -359,7 +357,7 @@ async function packMeta() {
       license: "Apache-2.0",
       repository: "https://github.com/zvec-ai/zvec-grep",
       bin: { zg: "bin/zg.exe" },
-      files: ["bin", "install.cjs", "plugins.cjs", "platforms.json", "README.md"],
+      files: ["bin", "install.cjs", "plugins.cjs", "platforms.json", "README.md", "LICENSE"],
       scripts: { postinstall: "node install.cjs" },
       engines: { node: manifest.nodeEngine },
       optionalDependencies,
@@ -442,13 +440,6 @@ async function main() {
     await verifyManifest();
     return;
   }
-  if (command === "verify-publication") {
-    await verifyPublicationInputs(
-      loadReleaseManifest(),
-      join(workspaceDir, "npm", "compliance"),
-    );
-    return;
-  }
   if (artifactCommands.includes(command)) {
     const install = command === "smoke-artifacts" ? smokeArtifactRelease :
       command === "rebuild-artifacts" ? rebuildArtifactRelease : installArtifactRelease;
@@ -509,7 +500,7 @@ async function main() {
     return;
   }
   throw new Error(
-    "usage: npm-release.mjs <build|verify|verify-publication|pack-platform|pack-meta|pack-current|install-artifacts|smoke-artifacts|rebuild-artifacts|collect|publish|promote|rollback-version|smoke-registry> [--target TARGET] [--targets TARGET,... (collect only)] [--binary PATH] [--lib-dir PATH] [--bundle-dir PATH] [--output-dir PATH] [--tarball-dir PATH] [--prefix-root PATH] [--accelerator cpu|auto|cuda (artifact installation/verification only)] [--expect-cpu (default auto must not request CUDA)] [--expect-cuda (CUDA installation required even in auto mode)] [--cpu-only] [--no-build]",
+    "usage: npm-release.mjs <build|verify|pack-platform|pack-meta|pack-current|install-artifacts|smoke-artifacts|rebuild-artifacts|collect|publish|promote|rollback-version|smoke-registry> [--target TARGET] [--targets TARGET,... (collect only)] [--binary PATH] [--lib-dir PATH] [--bundle-dir PATH] [--output-dir PATH] [--tarball-dir PATH] [--prefix-root PATH] [--accelerator cpu|auto|cuda (artifact installation/verification only)] [--expect-cpu (default auto must not request CUDA)] [--expect-cuda (CUDA installation required even in auto mode)] [--cpu-only] [--no-build]",
   );
 }
 

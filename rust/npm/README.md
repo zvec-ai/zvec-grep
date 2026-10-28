@@ -20,9 +20,9 @@ lib/*ggml-cuda*          # primary CUDA 13.1 GGUF plugin
 lib/cuda12/*ggml-cuda*    # CUDA 12.4 GGUF fallback plugin
 ```
 
-Source npm packages also carry `checksums.json` and, once reviewed inputs are
-available, `LICENSES/` and `SBOM.spdx.json`; these are package metadata rather
-than runtime files copied by the installer.
+Every release package carries the project's `LICENSE`. Native packages also
+carry `checksums.json` and any supplied `LICENSES/` or `SBOM.spdx.json`; these
+are package metadata rather than runtime files copied by the installer.
 
 The Linux x64 base package's `plugins.json` references `-ggml-cuda13`, `-ggml-cuda12`,
 `-ort-cuda-part1` and `-ort-cuda-part2` packages. Windows x64 references
@@ -72,8 +72,9 @@ publication path and 64-bit Node's string limit. `npm pack` succeeding alone is
 not publication validation. A component that outgrows the budget fails closed;
 it must be split further, not silently published as a reduced CPU package.
 
-`LICENSES/` and `SBOM.spdx.json` require reviewed per-target compliance inputs;
-validation candidates may omit them, but publication and promotion may not.
+Supplemental `LICENSES/` and `SBOM.spdx.json` inputs are optional for packaging,
+publication, and promotion. Existing upstream license and notice files remain
+bundled with their native libraries and redistributed ORT components.
 
 `bin/` contains only the native executable. All runtime libraries, providers,
 and plugins live under `lib/`. Unix binaries use a `../lib`
@@ -215,7 +216,8 @@ Release order:
 1. Build and package every native target; apply ad hoc signatures on macOS.
 2. Collect the exact-version meta/native/component candidates once. Verify
    payload closure and checksums, run CPU and requested GPU checks in parallel,
-   and require all publication gates including licenses and SBOMs to pass.
+   and require all publication gates to pass. Supplemental licenses and SBOMs
+   are optional.
 3. Publish runtime components before their base native packages to `rust-canary`, then publish the meta package
    to `rust-canary` last. Candidate publication never changes `latest`.
 4. On every platform's ordinary CPU runner, install the exact meta-package version from the
@@ -354,11 +356,11 @@ published first and the meta package last, always under `rust-canary`. Selecting
 `latest` requests the separate promotion job; any registry smoke failure leaves
 the existing default installation unchanged.
 
-Publication is currently blocked until reviewed license texts and SPDX SBOMs
-exist for every native target under [`compliance/`](compliance/README.md).
-Candidate artifacts can still be downloaded, but they are not publication-ready
-while these inputs are missing. Both the initial source check and the tarball
-preflight fail before publication when compliance inputs are incomplete.
+Publication and promotion do not require supplemental license collections or
+SPDX SBOMs under [`compliance/`](compliance/README.md). Packaging copies either
+input when supplied, without validating the SBOM schema. Every release package
+includes the project `LICENSE`, and bundled upstream notices are preserved.
+Removing this metadata gate does not change third-party redistribution terms.
 
 Publication and promotion explicitly install npm 11.21.0, which supports OIDC
 authentication for `npm dist-tag`. Configure trusted publishing for all 14

@@ -1,60 +1,39 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  stageCompliance,
-  verifyComplianceDirectory,
-  verifyPublicationInputs,
-} from "./npm-release-compliance.mjs";
+import { stageCompliance } from "./npm-release-compliance.mjs";
 
-test("candidates can omit compliance inputs, but publication cannot", async (t) => {
+test("packaging accepts a missing supplemental compliance directory", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "zg-compliance-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await stageCompliance(join(root, "missing"), join(root, "candidate"));
-  await assert.rejects(
-    verifyPublicationInputs({ platforms: [{ target: "missing" }] }, root),
-    /publication disabled/,
-  );
+  assert.deepEqual(await readdir(root), []);
 });
 
-test("packaging copies complete compliance inputs and rejects an empty license", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "zg-compliance-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const source = join(root, "source");
-  await mkdir(join(source, "LICENSES"), { recursive: true });
-  await writeFile(
-    join(source, "LICENSES", "project.txt"),
-    "Example license text",
-  );
-  await writeFile(
-    join(source, "SBOM.spdx.json"),
-    JSON.stringify({
-      spdxVersion: "SPDX-2.3",
-      dataLicense: "CC0-1.0",
-      SPDXID: "SPDXRef-DOCUMENT",
-      documentNamespace: "https://example.com/sbom/0.0.1",
-      creationInfo: {
-        creators: ["Organization: Example"],
-        created: "2026-10-13T00:00:00Z",
-      },
-      packages: [{ name: "example" }],
-    }),
-  );
-  const destination = join(root, "candidate");
-  await stageCompliance(source, destination);
-  await verifyComplianceDirectory(destination);
-  await assert.rejects(verifyPublicationInputs({ platforms: [{
-    target: "source", package: "@zvec/base", components: [{ package: "@zvec/base-cuda" }],
-  }] }, root), /incomplete compliance files.*source[\\/]cuda/);
-  assert.equal(
-    await readFile(join(destination, "LICENSES", "project.txt"), "utf8"),
-    "Example license text",
-  );
-  await writeFile(join(source, "LICENSES", "project.txt"), " ");
-  await assert.rejects(
-    stageCompliance(source, join(root, "incomplete")),
-    /publication disabled/,
-  );
-});
+for (const names of [[], ["LICENSES"], ["SBOM.spdx.json"], ["LICENSES", "SBOM.spdx.json"]]) {
+  test(`packaging preserves optional inputs: ${names.join(", ") || "none"}`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "zg-compliance-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const source = join(root, "source");
+    const destination = join(root, "candidate");
+    await mkdir(source);
+    await mkdir(destination);
+    const inputs = {
+      LICENSES: { path: join("LICENSES", "dependency", "LICENSE"), text: "Example license text\n" },
+      "SBOM.spdx.json": { path: "SBOM.spdx.json", text: '{"spdxVersion":"SPDX-2.3"}\n' },
+    };
+    for (const name of names) {
+      const input = inputs[name];
+      await mkdir(join(source, input.path, ".."), { recursive: true });
+      await writeFile(join(source, input.path), input.text);
+    }
+    await stageCompliance(source, destination);
+    assert.deepEqual((await readdir(destination)).sort(), [...names].sort());
+    for (const name of names) {
+      const input = inputs[name];
+      assert.equal(await readFile(join(destination, input.path), "utf8"), input.text);
+    }
+  });
+}

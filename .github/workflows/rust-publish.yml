@@ -122,7 +122,6 @@ jobs:
               echo "::error::rust-v$version must point to the commit being published"
               exit 1
             fi
-            node scripts/npm-release.mjs verify-publication
           fi
       - name: Test package selection and installation
         working-directory: rust
