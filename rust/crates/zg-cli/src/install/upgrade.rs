@@ -68,7 +68,7 @@ pub fn execute_upgrade_installed(args: &InstallArgs) -> Result<(), InstallError>
         let result = candidate.and_then(|file| {
             (|| {
                 let target = resolve_atomic_target(&file.path, &mut HashSet::new())?;
-                if !visited.insert(target.clone()) {
+                if !visited.insert((target.clone(), file.container)) {
                     return Ok(());
                 }
                 upgrade_file(&file, &target, args.dry_run, &mut report)

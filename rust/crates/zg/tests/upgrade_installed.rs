@@ -342,6 +342,73 @@ fn preserves_symlinks_file_permissions_and_backups_at_the_target() {
 }
 
 #[test]
+fn shared_configuration_file_migrates_each_container_once() {
+    let fixture = Fixture::new();
+    let server = json!({"command":"zg", "args":["server", "--stdio"]});
+    let mut expected = json!({
+        "mcpServers":{"zvec_grep":server},
+        "servers":{"zvec_grep":server}
+    });
+    let path = fixture.write("shared/mcp.json", &expected.to_string());
+    let mut command = fixture.command();
+    command
+        .args(["--install", "--upgrade-installed"])
+        .env("CURSOR_CONFIG_DIR", fixture.path("shared"))
+        .env("QODER_IDE_MCP_PATH", &path)
+        .env("VSCODE_USER_DIR", fixture.path("shared"));
+
+    assert!(success(&command.output().expect("upgrade")).contains("Upgraded: 2, compatible: 0"));
+    for container in ["mcpServers", "servers"] {
+        expected[container]["zvec_grep"]["args"][0] = json!("--server");
+    }
+    assert_eq!(read_json(&path), expected);
+    let updated = fs::read_to_string(&path).expect("updated");
+    let mut saved = backups(&path);
+    saved.sort();
+    assert!(success(&command.output().expect("repeat")).contains("Upgraded: 0, compatible: 2"));
+    assert_eq!(fs::read_to_string(&path).expect("unchanged"), updated);
+    let mut repeated_backups = backups(&path);
+    repeated_backups.sort();
+    assert_eq!(repeated_backups, saved);
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_configuration_symlinks_preview_and_migrate_all_containers() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let server = json!({"command":"zg", "args":["server", "--stdio"]});
+    let source = json!({
+        "mcpServers":{"zvec_grep":server},
+        "servers":{"zvec_grep":server}
+    })
+    .to_string();
+    let target = fixture.write("shared/mcp.json", &source);
+    let links = [
+        fixture.path(".cursor/mcp.json"),
+        fixture.path(".qoder/mcp.json"),
+        fixture.path("vscode/User/mcp.json"),
+    ];
+    for link in &links {
+        fs::create_dir_all(link.parent().expect("parent")).expect("directory");
+        symlink(&target, link).expect("symlink");
+    }
+
+    assert!(success(&fixture.run(true)).contains("Would upgrade: 2, compatible: 0"));
+    assert_eq!(fs::read_to_string(&target).expect("preview"), source);
+    assert!(backups(&target).is_empty());
+    assert!(success(&fixture.run(false)).contains("Upgraded: 2, compatible: 0"));
+    let expected = source.replace("\"server\"", "\"--server\"");
+    assert_eq!(fs::read_to_string(&target).expect("upgraded"), expected);
+    for link in &links {
+        assert!(fs::symlink_metadata(link).expect("link").is_symlink());
+        assert_eq!(fs::read_to_string(link).expect("linked content"), expected);
+    }
+    assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 2"));
+}
+
+#[test]
 fn migrates_windows_node_paths_and_keeps_argument_comments() {
     let fixture = Fixture::new();
     let source = r#"{
