@@ -1,4 +1,7 @@
 mod adapter;
+mod outline;
+
+pub(crate) use outline::code_outline;
 
 use tree_sitter::{Language, Node, Parser};
 

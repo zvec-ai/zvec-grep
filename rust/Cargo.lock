@@ -4204,6 +4204,7 @@ dependencies = [
  "crossterm",
  "dunce",
  "grep",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

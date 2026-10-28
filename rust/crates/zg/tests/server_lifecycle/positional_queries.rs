@@ -12,6 +12,10 @@ fn positional_queries_merge_and_warn_consistently_in_direct_and_server_modes()
         workspace.path().join("source.txt"),
         "connection pool timeout\nsocket timeout\n",
     )?;
+    std::fs::write(
+        workspace.path().join("probe.ts"),
+        "function outlineProbe() {\n  const value = first();\n  second(value);\n  return value;\n}\n",
+    )?;
     let configure = |command: &mut Command| {
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("ZVEC_GREP_") {
@@ -45,6 +49,14 @@ fn positional_queries_merge_and_warn_consistently_in_direct_and_server_modes()
         &format!("http://{}/embeddings", embedding.address),
     ])?);
     let (_guard, _) = start_server(&binary, &home, "agent", None, configure)?;
+    verify_positional_queries(&run, home.path())?;
+    verify_previews(&run, home.path())
+}
+
+fn verify_positional_queries(
+    run: &impl Fn(&[&str]) -> std::io::Result<Output>,
+    home: &Path,
+) -> Result<(), Box<dyn Error>> {
     let mut direct_stdout = None;
     for mode in ["direct", "server"] {
         let search = |words: &[&str]| -> Result<Output, Box<dyn Error>> {
@@ -52,11 +64,10 @@ fn positional_queries_merge_and_warn_consistently_in_direct_and_server_modes()
                 "--mode",
                 mode,
                 "--home",
-                path_text(home.path())?,
+                path_text(home)?,
                 "--allow-remote",
                 "--refresh",
                 "off",
-                "--compact",
                 "--no-color",
             ];
             args.extend(words);
@@ -99,7 +110,90 @@ fn positional_queries_merge_and_warn_consistently_in_direct_and_server_modes()
                     "{stderr}"
                 );
             }
-            assert_eq!(output.stdout, expected.stdout, "{mode}: {words:?}");
+            if words[0] == "--hybrid" {
+                let text = String::from_utf8(output.stdout)?;
+                assert!(text.contains("query groups (2):"), "{text}");
+                assert!(text.contains("[primary]: connection pool"), "{text}");
+                assert!(text.contains("[primary]: socket timeout"), "{text}");
+            } else {
+                let query = words
+                    .iter()
+                    .filter(|word| !word.starts_with("--"))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let expected_text = String::from_utf8_lossy(&expected.stdout).replacen(
+                    "Q1 [primary]: connection pool timeout",
+                    &format!("Q1 [primary]: {query}"),
+                    1,
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    expected_text,
+                    "{mode}: {words:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_previews(
+    run: &impl Fn(&[&str]) -> std::io::Result<Output>,
+    home: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut default_output = None;
+    for preview in [
+        None,
+        Some("none"),
+        Some("short"),
+        Some("full"),
+        Some("detail"),
+    ] {
+        let mut outputs = Vec::new();
+        for mode in ["direct", "server"] {
+            let mut args = vec![
+                "--mode",
+                mode,
+                "--home",
+                path_text(home)?,
+                "--fts",
+                "outlineProbe",
+                "--refresh",
+                "off",
+                "--no-color",
+            ];
+            if let Some(preview) = preview {
+                args.extend(["--preview", preview]);
+            }
+            let output = run(&args)?;
+            assert_command_success(&output);
+            let text = String::from_utf8(output.stdout)?;
+            assert!(text.contains("probe.ts"), "{text}");
+            if preview != Some("none") {
+                assert!(text.contains("calls: first, second"), "{text}");
+            }
+            if preview == Some("detail") {
+                for field in [
+                    "Range:",
+                    "Status: fresh",
+                    "Kind: code/function",
+                    "Symbol: outlineProbe",
+                    "Signature: function outlineProbe()",
+                    "Outline:",
+                    "Source:",
+                ] {
+                    assert!(text.contains(field), "missing {field}: {text}");
+                }
+            }
+            outputs.push(text);
+        }
+        assert_eq!(outputs[0], outputs[1], "preview={preview:?}");
+        if preview.is_none() {
+            default_output = Some(outputs[0].clone());
+        }
+        if preview == Some("short") {
+            assert_eq!(default_output.as_ref(), Some(&outputs[0]));
         }
     }
     Ok(())

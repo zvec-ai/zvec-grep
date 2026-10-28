@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { nodeResult } from "../fixtures/cli-presentation.mjs";
 import {
   modelDownloadFailureMessage,
   printError,
@@ -11,7 +13,7 @@ import {
   formatCliContextResult,
   printAgentContextResult,
   printCliContextResult,
-  printHumanContextResult,
+  printDetailContextResult,
 } from "../../dist/cli/format/context.js";
 import { printDebug } from "../../dist/cli/format/debug.js";
 import { createIndexProgressReporter } from "../../dist/cli/format/progress.js";
@@ -29,6 +31,57 @@ function progressBarGlyphs() {
     ? { filled: "█", empty: "░" }
     : { filled: "#", empty: "-" };
 }
+
+test("CLI preview modes match shared fixtures independently of stdout TTY", async () => {
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../rust/compat/cli-search-presentation.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  try {
+    for (const terminal of [false, true]) {
+      Object.defineProperty(process.stdout, "isTTY", {
+        value: terminal,
+        configurable: true,
+      });
+      for (const fixture of fixtures.cases) {
+        const result = nodeResult(fixture.result);
+        assert.equal(
+          formatCliContextResult(result, {
+            color: "never",
+            trace: fixture.trace === true,
+          }),
+          fixture.expected_short,
+        );
+        for (const preview of ["none", "short", "full", "detail"]) {
+          const options = {
+            preview,
+            color: "never",
+            trace: fixture.trace === true,
+          };
+          const expected = fixture[`expected_${preview}`];
+          assert.equal(
+            formatCliContextResult(result, options),
+            expected,
+            `${fixture.id}: ${preview}`,
+          );
+          const output = await captureConsole(() =>
+            printCliContextResult(result, options),
+          );
+          assert.equal(output.logs.join("\n"), expected);
+        }
+      }
+    }
+  } finally {
+    if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor);
+    else delete process.stdout.isTTY;
+  }
+});
 
 function progressBar(filled, empty = 0) {
   const glyphs = progressBarGlyphs();
@@ -408,9 +461,8 @@ test("context formatters render indexed, lexical, metadata, preview, trace, and 
       trace: true,
       color: "never",
     });
-    printHumanContextResult(result, {
-      human: true,
-      preview: "full",
+    printDetailContextResult(result, {
+      preview: "detail",
       trace: true,
       color: "always",
     });
@@ -447,7 +499,7 @@ test("context formatters render indexed, lexical, metadata, preview, trace, and 
     });
     const emptyOutput = await captureConsole(() => {
       printAgentContextResult(empty, { color: "never" });
-      printHumanContextResult(empty, { human: true, color: "never" });
+      printDetailContextResult(empty, { preview: "detail", color: "never" });
     });
     assert.ok(emptyOutput.logs.length > 0);
     assert.equal(
@@ -720,7 +772,7 @@ test("CLI indexed results are grouped by recall group without cross-group fill l
   assert.match(oneGroup, /^query groups \(1\):/);
 
   const output = await captureConsole(() =>
-    printCliContextResult(result, { human: true, color: "never" }),
+    printCliContextResult(result, { preview: "detail", color: "never" }),
   );
   assert.match(output.logs.join("\n"), /Group:\s+Q1 \[primary\]/);
   assert.match(output.logs.join("\n"), /Group:\s+Q2 \[primary\]/);

@@ -68,8 +68,7 @@ Result controls:
 | Option | Meaning |
 | --- | --- |
 | `--limit <n>` | Maximum returned items per group |
-| `--compact` | Force compact output intended for pipes |
-| `--preview none\|short\|full` | Indexed source preview size |
+| `--preview none\|short\|full\|detail` | Indexed output detail (default: `short`) |
 | `--refresh background\|wait\|off` | Index refresh policy |
 | `--mode direct\|server\|auto` | Execution transport |
 | `--debug` | Print diagnostics to stderr |
@@ -78,6 +77,22 @@ Result controls:
 | `--symbol-type <type>` | Restrict results to a symbol type |
 | `--modified-after <time>` | Search files modified after a time |
 | `--modified-before <time>` | Search files modified before a time |
+
+Terminal, redirected, and piped output use the same layout and default to
+`--preview short`. Terminal detection affects automatic color selection only.
+`--compact` and `--human` have been removed.
+
+| Preview | Behavior |
+| --- | --- |
+| `none` | Minimal layout with one source line; no expanded context or outline |
+| `short` | Concise layout with bounded source snippets and structural outlines (default) |
+| `full` | Concise layout with all returned source content and outlines |
+| `detail` | Detailed metadata and file/hit grouping, with the same content as `full` |
+
+`full` and `detail` display already-returned content; they do not retrieve an entire
+function or file. Preview selection does not change ranking or result limits.
+These options apply to indexed search. `--rg` still uses `-A/-B/-C` for context,
+and public MCP search continues to accept `short` and `full`.
 
 Indexed CLI results are separated by query group and preserve the rank assigned
 inside that group. The CLI does not apply the MCP response's cross-group

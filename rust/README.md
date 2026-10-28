@@ -193,10 +193,12 @@ Other protocol versions are rejected without replacement;
 use a compatible client or explicitly stop that daemon first. Index format
 compatibility remains separate and may require `zg --index --rebuild`.
 
-Terminal searches default to human-readable output with full source previews;
-piped output is compact. `--compact` forces compact output, and
-`--preview=full` explicitly requests full previews even in compact output.
-The former `--human` option is no longer accepted.
+Searches default to `--preview short` in terminals, pipes, and redirected files.
+Use `none` for a one-line source summary, `short` for bounded source and outline,
+`full` for all returned content, or `detail` for full previews with metadata and
+file/hit grouping. Full previews do not retrieve an entire function or file.
+Terminal detection affects automatic colors only. The former `--compact` and
+`--human` options are no longer accepted.
 
 When an interactive search finds no index, it asks you to choose an embedding
 model before building. The picker has **Local models** and **Remote models** tabs:

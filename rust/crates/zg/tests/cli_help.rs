@@ -24,7 +24,8 @@ fn main_help_aliases_have_one_stable_surface() {
     assert_eq!(main, stdout(&["--help"]));
     assert!(main.starts_with("zvec-grep 0.0.1\n\nUsage:\n  zg <query> [options]\n"));
     assert!(main.contains("Run zg --help environment for all variables"));
-    assert!(main.contains("--compact"));
+    assert!(!main.contains("--compact"));
+    assert!(main.contains("short"));
     assert!(!main.contains("--human"));
 }
 
@@ -74,13 +75,15 @@ fn integration_help_documents_pi_and_its_configuration_directory() {
 }
 
 #[test]
-fn search_help_describes_terminal_and_compact_defaults() {
+fn search_help_describes_preview_modes_and_stable_defaults() {
     let help = stdout(&["--help", "search"]);
     assert!(help.starts_with("Usage:\n  zg <query> [options]\n"));
-    assert!(help.contains("--compact"));
+    assert!(!help.contains("--compact"));
+    assert!(help.contains("none|short|full|detail"));
     assert!(help.contains("zg --rg --files [discovery-options] [path...]"));
     assert!(help.contains("-0/--null"));
-    assert!(help.contains("full on TTY, none in compact mode"));
+    assert!(help.contains("default: short"));
+    assert!(help.contains("TTY affects only color"));
     assert!(!help.contains("--human"));
     assert!(!help.contains("zg query"));
 }

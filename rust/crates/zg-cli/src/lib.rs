@@ -31,7 +31,6 @@ pub use terminal::{stderr_supports_ansi, stdout_supports_ansi};
 
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, IsTerminal},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -247,10 +246,11 @@ pub enum ColorMode {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum PreviewMode {
-    #[default]
     None,
+    #[default]
     Short,
     Full,
+    Detail,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -484,8 +484,6 @@ pub struct QueryArgs {
     pub debug: bool,
     #[arg(long)]
     pub trace: bool,
-    #[arg(long)]
-    pub compact: bool,
     #[arg(long, value_enum)]
     pub preview: Option<PreviewMode>,
     #[arg(long, value_enum)]
@@ -538,17 +536,11 @@ impl QueryArgs {
             .filter(|value| !value.is_empty())
     }
 
-    fn output_options(&self, terminal: bool) -> OutputOptions {
-        let human = terminal && !self.compact;
+    fn output_options(&self) -> OutputOptions {
         OutputOptions {
             debug: self.debug,
             trace: self.trace,
-            human,
-            preview: self.preview.unwrap_or(if human {
-                PreviewMode::Full
-            } else {
-                PreviewMode::None
-            }),
+            preview: self.preview.unwrap_or_default(),
             color: if self.no_color {
                 ColorMode::Never
             } else {
@@ -715,7 +707,6 @@ pub enum CliPlan {
 pub struct OutputOptions {
     pub debug: bool,
     pub trace: bool,
-    pub human: bool,
     pub preview: PreviewMode,
     pub color: ColorMode,
 }
@@ -761,10 +752,12 @@ pub enum CliError {
     InvalidFileCategory(String),
     #[error("--force-direct requires --mode direct")]
     ForceDirectMode,
-    #[error("--json is not supported; redirect output or use --compact for compact markdown")]
+    #[error("--json is not supported; use --preview none, short, full, or detail for text output")]
     RemovedJson,
-    #[error("--human has been removed; terminal output is human-readable by default")]
+    #[error("--human has been removed; use --preview detail for detailed output")]
     RemovedHuman,
+    #[error("--compact has been removed; use --preview none, short, or full")]
+    RemovedCompact,
     #[error("unknown option: {0}")]
     UnknownQueryOption(String),
     #[error("--modified-after must not be later than --modified-before")]
@@ -877,19 +870,11 @@ impl Cli {
     ///
     /// Returns [`CliError`] when options are incompatible.
     pub fn into_plan(self, current_dir: PathBuf) -> Result<CliPlan, CliError> {
-        self.into_plan_with_terminal(current_dir, io::stdout().is_terminal())
-    }
-
-    fn into_plan_with_terminal(
-        self,
-        current_dir: PathBuf,
-        terminal: bool,
-    ) -> Result<CliPlan, CliError> {
         let Some(command) = self.command else {
             return Ok(CliPlan::Help(None));
         };
         match command {
-            CommandLine::Query(args) => query_plan(args, current_dir, terminal),
+            CommandLine::Query(args) => query_plan(args, current_dir),
             CommandLine::Index(args) => index_plan(args, &current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
                 mode: resolve_client_mode(args.mode)?,
@@ -1168,7 +1153,6 @@ fn query_option_without_value(value: &str) -> bool {
             | "--rg"
             | "--debug"
             | "--trace"
-            | "--compact"
             | "--no-color"
             | "--fuse"
             | "--prefer-symbol"
@@ -1329,6 +1313,9 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
         if value == "--human" {
             return Err(CliError::RemovedHuman);
         }
+        if value == "--compact" {
+            return Err(CliError::RemovedCompact);
+        }
         index += if args.rg && managed_rg::takes_separate_value(value) {
             2
         } else {
@@ -1349,16 +1336,12 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
     Ok(())
 }
 
-fn query_plan(
-    mut args: QueryArgs,
-    current_dir: PathBuf,
-    terminal: bool,
-) -> Result<CliPlan, CliError> {
+fn query_plan(mut args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError> {
     let mode = resolve_query_mode(&args)?;
     validate_query(&args, mode)?;
     let path_lookup = uses_path_lookup(&args);
     let home = args.home.clone();
-    let output = args.output_options(terminal);
+    let output = args.output_options();
     let mut files = false;
     let mut null = false;
     let mut request = if args.rg {
@@ -1729,60 +1712,55 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    fn plan(arguments: &[&str], terminal: bool) -> CliPlan {
+    fn plan(arguments: &[&str]) -> CliPlan {
         Cli::try_parse_from(arguments.iter().copied())
             .expect("parse")
-            .into_plan_with_terminal(std::env::temp_dir(), terminal)
+            .into_plan(std::env::temp_dir())
             .expect("plan")
     }
 
     #[test]
     fn managed_files_plan_uses_all_positionals_as_inputs_and_preserves_filters() {
-        for terminal in [false, true] {
-            for arguments in [
-                vec!["zg", "--rg", "--files"],
-                vec!["zg", "--files", "--rg"],
-                vec!["zg", "--rg", "--files", "--null"],
-            ] {
-                let CliPlan::Files { request, null } = plan(&arguments, terminal) else {
-                    panic!("file discovery plan")
-                };
-                assert!(request.paths.is_empty());
-                assert_eq!(null, arguments.contains(&"--null"));
-            }
-            let CliPlan::Files { request, null } = plan(
-                &[
-                    "zg",
-                    "--iglob",
-                    "*.TS",
-                    "--rg",
-                    "--files",
-                    "src",
-                    "docs",
-                    "-g",
-                    "!*.test.ts",
-                    "-t",
-                    "ts",
-                    "--hidden",
-                    "-0",
-                    "--max-depth",
-                    "2",
-                ],
-                terminal,
-            ) else {
+        for arguments in [
+            vec!["zg", "--rg", "--files"],
+            vec!["zg", "--files", "--rg"],
+            vec!["zg", "--rg", "--files", "--null"],
+        ] {
+            let CliPlan::Files { request, null } = plan(&arguments) else {
                 panic!("file discovery plan")
             };
-            assert!(null);
-            assert_eq!(request.paths, [PathBuf::from("src"), PathBuf::from("docs")]);
-            assert_eq!(request.file_types, ["ts"]);
-            assert!(request.hidden);
-            assert_eq!(request.max_depth, Some(2));
-            assert_eq!(request.globs.len(), 2);
-            assert_eq!(request.globs[0].pattern, "*.TS");
-            assert!(request.globs[0].case_insensitive);
-            assert_eq!(request.globs[1].pattern, "!*.test.ts");
-            assert!(!request.globs[1].case_insensitive);
+            assert!(request.paths.is_empty());
+            assert_eq!(null, arguments.contains(&"--null"));
         }
+        let CliPlan::Files { request, null } = plan(&[
+            "zg",
+            "--iglob",
+            "*.TS",
+            "--rg",
+            "--files",
+            "src",
+            "docs",
+            "-g",
+            "!*.test.ts",
+            "-t",
+            "ts",
+            "--hidden",
+            "-0",
+            "--max-depth",
+            "2",
+        ]) else {
+            panic!("file discovery plan")
+        };
+        assert!(null);
+        assert_eq!(request.paths, [PathBuf::from("src"), PathBuf::from("docs")]);
+        assert_eq!(request.file_types, ["ts"]);
+        assert!(request.hidden);
+        assert_eq!(request.max_depth, Some(2));
+        assert_eq!(request.globs.len(), 2);
+        assert_eq!(request.globs[0].pattern, "*.TS");
+        assert!(request.globs[0].case_insensitive);
+        assert_eq!(request.globs[1].pattern, "!*.test.ts");
+        assert!(!request.globs[1].case_insensitive);
     }
 
     #[test]
@@ -1817,7 +1795,7 @@ mod tests {
             ".gitignore",
             "src/auth",
         ] {
-            let CliPlan::Query { path_lookup, .. } = plan(&["zg", query], false) else {
+            let CliPlan::Query { path_lookup, .. } = plan(&["zg", query]) else {
                 panic!("query plan");
             };
             assert!(path_lookup, "{query}");
@@ -1839,7 +1817,7 @@ mod tests {
             vec!["zg", "auth.ts", "--symbol-type", "function"],
             vec!["zg", "--rg", "auth.ts"],
         ] {
-            let CliPlan::Query { path_lookup, .. } = plan(&args, false) else {
+            let CliPlan::Query { path_lookup, .. } = plan(&args) else {
                 panic!("query plan");
             };
             assert!(!path_lookup, "{args:?}");
@@ -1862,8 +1840,7 @@ mod tests {
             "help",
             "version",
         ] {
-            let CliPlan::Query { request, .. } =
-                plan(&["zg", word, "second", "--limit", "3"], false)
+            let CliPlan::Query { request, .. } = plan(&["zg", word, "second", "--limit", "3"])
             else {
                 panic!("{word} must not run an action")
             };
@@ -1874,50 +1851,41 @@ mod tests {
 
     #[test]
     fn long_actions_are_exclusive_and_can_follow_options_or_roots() {
+        assert!(matches!(plan(&["zg", "--index"]), CliPlan::Index { .. }));
+        assert!(matches!(plan(&["zg", "--status"]), CliPlan::Status { .. }));
         assert!(matches!(
-            plan(&["zg", "--index"], false),
-            CliPlan::Index { .. }
-        ));
-        assert!(matches!(
-            plan(&["zg", "--status"], false),
-            CliPlan::Status { .. }
-        ));
-        assert!(matches!(
-            plan(&["zg", "--install", "--yes"], false),
+            plan(&["zg", "--install", "--yes"]),
             CliPlan::Install(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--uninstall", "--yes"], false),
+            plan(&["zg", "--uninstall", "--yes"]),
             CliPlan::Uninstall(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--auth", "status"], false),
+            plan(&["zg", "--auth", "status"]),
             CliPlan::Auth(_)
         ));
         assert!(matches!(
-            plan(
-                &[
-                    "zg",
-                    "--config",
-                    "model",
-                    "set",
-                    "local/potion-code-16m-v2",
-                    "--default"
-                ],
-                false
-            ),
+            plan(&[
+                "zg",
+                "--config",
+                "model",
+                "set",
+                "local/potion-code-16m-v2",
+                "--default"
+            ]),
             CliPlan::Config(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--server", "status"], false),
+            plan(&["zg", "--server", "status"]),
             CliPlan::Server(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--mode", "direct", "--index", "repo"], false),
+            plan(&["zg", "--mode", "direct", "--index", "repo"]),
             CliPlan::Index { .. }
         ));
         assert!(matches!(
-            plan(&["zg", "repo", "--status"], false),
+            plan(&["zg", "repo", "--status"]),
             CliPlan::Status { .. }
         ));
         for arguments in [["zg", "--index", "--status"], ["zg", "--index", "--index"]] {
@@ -1927,19 +1895,16 @@ mod tests {
 
     #[test]
     fn separator_preserves_literal_flags_and_command_words() {
-        let CliPlan::Query { request, .. } = plan(
-            &[
-                "zg", "--", "query", "--index", "--status", "--help", "--human", "--json", "-v",
-            ],
-            false,
-        ) else {
+        let CliPlan::Query { request, .. } = plan(&[
+            "zg", "--", "query", "--index", "--status", "--help", "--human", "--json", "-v",
+        ]) else {
             panic!("literal search")
         };
         assert_eq!(
             request.queries,
             ["query --index --status --help --human --json -v"]
         );
-        let CliPlan::Query { request, .. } = plan(&["zg", "--rg", "--", "--index"], false) else {
+        let CliPlan::Query { request, .. } = plan(&["zg", "--rg", "--", "--index"]) else {
             panic!("literal rg")
         };
         assert!(request.rg);
@@ -1971,12 +1936,12 @@ mod tests {
             ] {
                 let CliPlan::Query {
                     request, output, ..
-                } = plan(&["zg", "--rg", option, pattern], true)
+                } = plan(&["zg", "--rg", option, pattern])
                 else {
                     panic!("regexp values must remain search input")
                 };
                 assert_eq!(request.queries, [pattern]);
-                assert!(output.human);
+                assert_eq!(output.preview, super::PreviewMode::Short);
             }
         }
     }
@@ -1985,19 +1950,19 @@ mod tests {
     fn rg_separator_pattern_does_not_hide_following_options_or_literal_paths() {
         for option in ["-e", "-Fe", "--regexp"] {
             for literal_path in [false, true] {
-                let mut arguments = vec!["zg", "--rg", option, "--", "--limit", "3", "--compact"];
+                let mut arguments = vec!["zg", "--rg", option, "--", "--limit", "3"];
                 if literal_path {
                     arguments.extend(["--", "--human"]);
                 }
                 let CliPlan::Query {
                     request, output, ..
-                } = plan(&arguments, true)
+                } = plan(&arguments)
                 else {
                     panic!("separator pattern must remain search input")
                 };
                 assert_eq!(request.queries, ["--"]);
                 assert_eq!(request.limit, Some(3));
-                assert!(!output.human);
+                assert_eq!(output.preview, super::PreviewMode::Short);
                 assert_eq!(
                     request.rg_paths,
                     if literal_path {
@@ -2039,28 +2004,29 @@ mod tests {
     }
 
     #[test]
-    fn terminal_search_defaults_to_human_unless_compact_is_explicit() {
-        for (terminal, compact, human, preview) in [
-            (true, false, true, super::PreviewMode::Full),
-            (true, true, false, super::PreviewMode::None),
-            (false, false, false, super::PreviewMode::None),
-            (false, true, false, super::PreviewMode::None),
+    fn preview_defaults_to_short_and_accepts_all_modes() {
+        let CliPlan::Query { output, .. } = plan(&["zg", "needle"]) else {
+            panic!("query")
+        };
+        assert_eq!(output.preview, super::PreviewMode::Short);
+        for (name, preview) in [
+            ("none", super::PreviewMode::None),
+            ("short", super::PreviewMode::Short),
+            ("full", super::PreviewMode::Full),
+            ("detail", super::PreviewMode::Detail),
         ] {
-            let mut arguments = vec!["zg", "needle"];
-            if compact {
-                arguments.push("--compact");
-            }
-            let CliPlan::Query { output, .. } = plan(&arguments, terminal) else {
+            let CliPlan::Query { output, .. } = plan(&["zg", "needle", "--preview", name]) else {
                 panic!("query")
             };
-            assert_eq!(output.human, human);
             assert_eq!(output.preview, preview);
-            arguments.push("--preview=short");
-            let CliPlan::Query { output, .. } = plan(&arguments, terminal) else {
-                panic!("query")
-            };
-            assert_eq!(output.human, human);
-            assert_eq!(output.preview, super::PreviewMode::Short);
+        }
+        for arguments in [["zg", "needle", "--compact"], ["zg", "--rg", "--compact"]] {
+            assert!(matches!(
+                Cli::try_parse_from(arguments)
+                    .expect("parse")
+                    .into_plan(std::env::temp_dir()),
+                Err(super::CliError::RemovedCompact)
+            ));
         }
         for arguments in [
             vec!["zg", "needle", "--human"],
@@ -2077,25 +2043,20 @@ mod tests {
 
     #[test]
     fn help_and_version_require_flags_and_respect_separator() {
-        assert!(matches!(plan(&["zg"], false), CliPlan::Help(None)));
-        assert!(matches!(
-            plan(&["zg", "--help"], false),
-            CliPlan::Help(None)
-        ));
+        assert!(matches!(plan(&["zg"]), CliPlan::Help(None)));
+        assert!(matches!(plan(&["zg", "--help"]), CliPlan::Help(None)));
         for arguments in [
             vec!["zg", "--help", "search"],
             vec!["zg", "--help=search"],
             vec!["zg", "needle", "--help"],
         ] {
-            assert!(
-                matches!(plan(&arguments, false), CliPlan::Help(Some(topic)) if topic == "search")
-            );
+            assert!(matches!(plan(&arguments), CliPlan::Help(Some(topic)) if topic == "search"));
         }
         assert!(
-            matches!(plan(&["zg", "--index", "--help"], false), CliPlan::Help(Some(topic)) if topic == "index")
+            matches!(plan(&["zg", "--index", "--help"]), CliPlan::Help(Some(topic)) if topic == "index")
         );
         for flag in ["--version", "-v"] {
-            assert!(matches!(plan(&["zg", flag], false), CliPlan::Version));
+            assert!(matches!(plan(&["zg", flag]), CliPlan::Version));
             assert!(Cli::try_parse_from(["zg", flag, "extra"]).is_err());
         }
         for arguments in [
@@ -2814,7 +2775,6 @@ mod tests {
     fn parses_indexed_query_routes_and_filters() {
         let cli = Cli::try_parse_from([
             "zg",
-            "--compact",
             "--trace",
             "--limit",
             "7",
@@ -2840,7 +2800,7 @@ mod tests {
         assert_eq!(request.queries, ["query text", "zero"]);
         assert_eq!(request.routes.len(), 2);
         assert_eq!(request.limit, Some(7));
-        assert!(!output.human);
+        assert_eq!(output.preview, super::PreviewMode::Short);
         assert!(output.trace);
     }
 
@@ -2941,28 +2901,25 @@ mod tests {
 
     #[test]
     fn positional_merge_preserves_explicit_routes_options_and_literal_separator() {
-        let CliPlan::Query { request, .. } = plan(
-            &[
-                "zg",
-                "connection",
-                "--hybrid",
-                "first query",
-                "pool",
-                "--limit=3",
-                "--hybrid=second query",
-                "--fts",
-                "exact phrase",
-                "--fts=another phrase",
-                "--vector",
-                "semantic intent",
-                "--vector=another intent",
-                "--fuse",
-                "--",
-                "--timeout",
-                "literal words",
-            ],
-            false,
-        ) else {
+        let CliPlan::Query { request, .. } = plan(&[
+            "zg",
+            "connection",
+            "--hybrid",
+            "first query",
+            "pool",
+            "--limit=3",
+            "--hybrid=second query",
+            "--fts",
+            "exact phrase",
+            "--fts=another phrase",
+            "--vector",
+            "semantic intent",
+            "--vector=another intent",
+            "--fuse",
+            "--",
+            "--timeout",
+            "literal words",
+        ]) else {
             panic!("query")
         };
         assert_eq!(
@@ -3016,18 +2973,15 @@ mod tests {
             let cli = Cli::try_parse_from(arguments).expect("syntax");
             assert!(cli.positional_query_warning().is_none());
         }
-        let CliPlan::Query { request, .. } = plan(
-            &[
-                "zg",
-                "",
-                " ",
-                "--hybrid",
-                "connection pool",
-                "--hybrid",
-                "socket timeout",
-            ],
-            false,
-        ) else {
+        let CliPlan::Query { request, .. } = plan(&[
+            "zg",
+            "",
+            " ",
+            "--hybrid",
+            "connection pool",
+            "--hybrid",
+            "socket timeout",
+        ]) else {
             panic!("query")
         };
         assert_eq!(request.queries, ["connection pool", "socket timeout"]);

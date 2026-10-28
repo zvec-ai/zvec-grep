@@ -74,7 +74,7 @@ fn write_current_text(
         .items
         .chunk_by(|left, right| left.relative_path == right.relative_path)
         .collect();
-    if options.human {
+    if options.preview == crate::PreviewMode::Detail {
         field(
             writer,
             theme,
@@ -101,7 +101,7 @@ fn write_current_text(
             Some(EmptyReason::NoSearchableFiles) => "No searchable files",
             Some(EmptyReason::NoMatches) | None => "No matches",
         };
-        if options.human {
+        if options.preview == crate::PreviewMode::Detail {
             field(writer, theme, "Reason", reason)?;
         } else {
             writeln!(writer, "{reason}.")?;
@@ -109,7 +109,7 @@ fn write_current_text(
         return Ok(());
     }
     for group in groups {
-        if options.human {
+        if options.preview == crate::PreviewMode::Detail {
             writeln!(writer)?;
             field(
                 writer,
@@ -122,14 +122,16 @@ fn write_current_text(
             writeln!(writer, "{}", path_label(&group[0].relative_path))?;
         }
         for item in group {
-            if options.human {
-                write_human_item(writer, item, theme)?;
+            if options.preview == crate::PreviewMode::Detail {
+                write_detail_item(writer, item, theme)?;
                 writeln!(writer, "  {}:", theme.label("Source"))?;
             } else if let Some(label) = structural_label(item) {
                 let range = &item.container.as_ref().expect("structural container").range;
                 writeln!(writer, "  {} [{label}]", range_label(range))?;
             }
-            let indent = if options.human || structural_label(item).is_some() {
+            let indent = if options.preview == crate::PreviewMode::Detail
+                || structural_label(item).is_some()
+            {
                 "    "
             } else {
                 "  "
@@ -140,7 +142,7 @@ fn write_current_text(
     Ok(())
 }
 
-fn write_human_item(
+fn write_detail_item(
     writer: &mut impl Write,
     item: &ContextItem,
     theme: StatusTheme,
@@ -425,14 +427,18 @@ mod tests {
         }
     }
 
-    fn render(result: &PathLookupResult, human: bool) -> (String, String) {
+    fn render(result: &PathLookupResult, detail: bool) -> (String, String) {
         let (mut output, mut diagnostics) = (Vec::new(), Vec::new());
         write_path_lookup_result(
             &mut output,
             &mut diagnostics,
             result,
             OutputOptions {
-                human,
+                preview: if detail {
+                    crate::PreviewMode::Detail
+                } else {
+                    crate::PreviewMode::Short
+                },
                 color: ColorMode::Never,
                 ..OutputOptions::default()
             },
@@ -452,9 +458,9 @@ mod tests {
             paths: vec![Path::new("src").join("auth.ts")],
             truncated: true,
         });
-        for human in [false, true] {
+        for detail in [false, true] {
             assert_eq!(
-                render(&result, human),
+                render(&result, detail),
                 (
                     "#1 matchedBy=path src/auth.ts\n".into(),
                     "warning: more matching files exist; use --limit to show more\n".into(),
@@ -498,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn human_text_and_empty_results_report_coverage_files_and_match_metadata() {
+    fn detailed_text_and_empty_results_report_coverage_files_and_match_metadata() {
         let mut result = text_result();
         let (output, diagnostics) = render(&PathLookupResult::Text(Box::new(result.clone())), true);
         assert!(
