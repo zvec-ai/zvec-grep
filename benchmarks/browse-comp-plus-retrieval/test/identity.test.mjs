@@ -121,3 +121,23 @@ test("storage version, backend dependency and pinned index inputs cannot alias",
   await commit();
   assert.notEqual((await indexIdentity(source, lock)).key, version.key);
 });
+
+test("inline tests do not hide production storage items that follow them", async (t) => {
+  const { source, commit, lock } = await fixture(t);
+  const path = join(source, "rust/crates/zg-engine/src/storage/record.rs");
+  const production = "fn encode() {}\n";
+  const tests = (value) =>
+    `\n#[cfg(test)]\nmod tests {\n    const TEST: u32 = ${value};\n}\n`;
+  await writeFile(path, production + tests(1));
+  await commit();
+  const first = await indexIdentity(source, lock);
+  await writeFile(path, production + tests(2));
+  await commit();
+  assert.equal((await indexIdentity(source, lock)).key, first.key);
+  await writeFile(
+    path,
+    production + tests(2) + "\nfn new_storage_codec() {}\n",
+  );
+  await commit();
+  assert.notEqual((await indexIdentity(source, lock)).key, first.key);
+});

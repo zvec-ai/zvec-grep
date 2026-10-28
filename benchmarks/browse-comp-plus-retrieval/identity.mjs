@@ -15,6 +15,28 @@ import {
 const SHA = /^[a-f0-9]{40}$/;
 export const INDEX_PREFIX = "browsecomp-doc-index-";
 
+// Rustfmt keeps the test module's closing brace at column zero. Preserve all
+// following production items; splitting at cfg(test) would hide those changes.
+function productionSource(text) {
+  const start = /\n#\[cfg\(test\)\]\s*\nmod tests\b(?:[^\n]*\{|;)/.exec(text);
+  if (!start) return text;
+  const body = text.slice(start.index + start[0].length);
+  if (start[0].endsWith(";")) {
+    const tail = productionSource(body).replace(
+      /\n#\[cfg\(test\)\]\s*\nmod \w+;[ \t]*/g,
+      "\n",
+    );
+    return text.slice(0, start.index) + (tail.trim() ? tail : "");
+  }
+  const end = /^\}/m.exec(body);
+  if (!end) return text; // Unknown formatting is hashed conservatively.
+  const tail = productionSource(body.slice(end.index + 1)).replace(
+    /\n#\[cfg\(test\)\]\s*\nmod \w+;[ \t]*/g,
+    "\n",
+  );
+  return text.slice(0, start.index) + (tail.trim() ? tail : "");
+}
+
 /** Query code, PR SHA and harness SHA deliberately do not invalidate an index. */
 export async function indexIdentity(source, lock) {
   source = resolve(source);
@@ -47,9 +69,7 @@ export async function indexIdentity(source, lock) {
       /(?:\/tests\/|\/tests\.rs$|_tests\.rs$)/.test(path)
     )
       continue;
-    const text = (await readFile(join(source, path), "utf8")).split(
-      /\n#\[cfg\(test\)\]\s*\nmod tests\b/,
-    )[0];
+    const text = productionSource(await readFile(join(source, path), "utf8"));
     files.push({ path, sha256: sha256(text) });
   }
   assert.ok(files.length > 0);

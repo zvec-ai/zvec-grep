@@ -375,6 +375,7 @@ jobs:
             --dataset "$RUNNER_TEMP/browsecomp-prepared" --package "$RUNNER_TEMP/browsecomp-packages/browsecomp-doc-package-baseline/package" \
             --identity "$RUNNER_TEMP/browsecomp-packages/browsecomp-doc-package-baseline/identity.json" \
             --artifact "$RUNNER_TEMP/browsecomp-cache-base" --receipt "$RUNNER_TEMP/browsecomp-selected/baseline.json" \
+            --model-cache "$RUNNER_TEMP/browsecomp-model" \
             --harness-commit "$HARNESS_COMMIT" --output "$RUNNER_TEMP/browsecomp-query/baseline"
       - name: Release the base download before retrieving another storage format
         if: ${{ !cancelled() && steps.dataset.outcome == 'success' && steps.refs.outputs.baseline_artifact_id != steps.refs.outputs.candidate_artifact_id }}
@@ -396,6 +397,7 @@ jobs:
             --dataset "$RUNNER_TEMP/browsecomp-prepared" --package "$RUNNER_TEMP/browsecomp-packages/browsecomp-doc-package-candidate/package" \
             --identity "$RUNNER_TEMP/browsecomp-packages/browsecomp-doc-package-candidate/identity.json" \
             --artifact "$RUNNER_TEMP/$HEAD_CACHE" --receipt "$RUNNER_TEMP/browsecomp-selected/candidate.json" \
+            --model-cache "$RUNNER_TEMP/browsecomp-model" \
             --harness-commit "$HARNESS_COMMIT" --output "$RUNNER_TEMP/browsecomp-query/candidate"
       - name: Audit raw evidence and compare pinned PR base/head
         if: ${{ always() && steps.access.outcome == 'success' && steps.dataset.outcome == 'success' }}

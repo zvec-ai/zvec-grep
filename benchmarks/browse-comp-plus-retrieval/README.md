@@ -39,7 +39,7 @@ API/download errors, corruption and a registered index that expired or disappear
 | `browsecomp-doc-index-evidence-<key>` | Complete or partial fresh-build logs, progress, RSS and report | 30 days |
 | `browsecomp-doc-package-{baseline,candidate}` | Commit-bound Rust package and storage identity | 14 days |
 
-The read-only Parquet cache reduces download time. It never substitutes for an index Artifact. Each run recreates query workspaces and verifies corpus/model identities.
+The read-only Parquet cache reduces download time. It never substitutes for an index Artifact. Each run recreates query workspaces and verifies corpus/model identities. Model bytes are restored at the same absolute cache path recorded by the builder; a mismatch fails before Query rather than using a separate download.
 
 ## Budget and measurements
 

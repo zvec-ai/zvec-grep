@@ -32,7 +32,7 @@ import {
   markdownPerformance,
 } from "../zg-retrieval/reports/performance.mjs";
 import { runStage } from "./stages.mjs";
-import { runCandidate } from "./runtime.mjs";
+import { runCandidate, verifyModelCacheLocation } from "./runtime.mjs";
 import { auditArm, MODES } from "./report.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -185,6 +185,7 @@ export async function main(args = process.argv.slice(2)) {
     "identity",
     "output",
     "harness-commit",
+    "model-cache",
   ])
     assert.ok(values[key], `requires --${key}`);
   const output = resolve(values.output);
@@ -228,6 +229,7 @@ export async function main(args = process.argv.slice(2)) {
   process.once("SIGINT", interrupt);
   process.once("SIGTERM", interrupt);
   let root, candidate, modelCache;
+  let modelRestored = false;
   try {
     await checkpoint();
     assert.match(report.commit, /^[a-f0-9]{40}$/);
@@ -280,7 +282,12 @@ export async function main(args = process.argv.slice(2)) {
         { timeout: 1800000 },
       );
       await rename(join(restored, "index"), join(root, ".zvec-grep"));
-      modelCache = join(restored, "model");
+      modelCache = resolve(values["model-cache"]);
+      await requireAbsent(modelCache);
+      await mkdir(dirname(modelCache), { recursive: true });
+      await rename(join(restored, "model"), modelCache);
+      modelRestored = true;
+      await verifyModelCacheLocation(root, lock.model, modelCache);
       assert.equal(manifest.build.corpus_sha256, before.sha256);
       report.index_artifact = {
         ...(await readJson(values.receipt)),
@@ -305,6 +312,7 @@ export async function main(args = process.argv.slice(2)) {
       report.warmup = await warmModel(candidate, modelCache, output, lock);
     }
     report.model_artifacts = await modelArtifactManifest(modelCache);
+    report.model_cache = modelCache;
     assert.equal(
       report.model_artifacts.sha256,
       lock.model_artifacts_sha256,
@@ -390,6 +398,8 @@ export async function main(args = process.argv.slice(2)) {
         });
         await rm(join(root, ".zvec-grep"), { recursive: true, force: true });
         await rm(join(output, "restored"), { recursive: true, force: true });
+        if (modelRestored)
+          await rm(modelCache, { recursive: true, force: true });
       } catch (error) {
         report.status = "failed";
         report.errors.push(`shutdown/cleanup: ${error.message}`);
