@@ -97,7 +97,15 @@ fn unreachable_legacy_endpoint_does_not_force_termination() -> Result<(), Box<dy
         survived,
         "migration must not signal a process when shutdown is unreachable"
     );
-    assert_failure(&output, "daemon I/O failed");
+    assert!(!output.status.success(), "unexpected success: {output:?}");
+    // A closed loopback port can reach the HTTP deadline on Windows instead
+    // of immediately refusing the connection. Both are failed contact attempts.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("daemon I/O failed")
+            || stderr.contains("timed out waiting for zvec-grep server to contact"),
+        "expected a connection failure or contact timeout: {output:?}"
+    );
     assert_eq!(after, legacy);
     assert_command_success(&guard.stop()?);
     Ok(())
