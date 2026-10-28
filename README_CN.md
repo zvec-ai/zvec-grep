@@ -39,6 +39,9 @@
 本 README 和[使用文档](./docs/README.md)以 TypeScript / Node.js 实现为主。
 Rust 实现位于独立的 [`rust/`](./rust/README.md) 目录。
 
+**安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
+`brew install zvec-grep`
+
 <a id="tour"></a>
 
 ## 🎬 功能演示
