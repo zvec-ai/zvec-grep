@@ -23,6 +23,11 @@ function validateRequest(request, run, repository) {
     "Invalid source attempt",
   );
   assert.ok(positiveInteger(request.pr_number), "Invalid PR number");
+  assert.match(
+    request.harness_commit ?? "",
+    /^[a-f0-9]{40}$/,
+    "Invalid harness",
+  );
   for (const side of ["baseline", "candidate"]) {
     assert.match(
       request[side]?.commit ?? "",
@@ -81,6 +86,97 @@ function currentRequest(pr, request) {
   );
 }
 
+// Copy numeric aggregates only. Artifact text, raw samples and extra fields must
+// never enter the trusted Markdown renderer or become executable instructions.
+function performanceSummary(value) {
+  assert.equal(value?.schema_version, 1, "Unsupported performance schema");
+  const count = (number) => {
+    assert.ok(
+      Number.isSafeInteger(number) && number >= 0 && number <= 1e9,
+      "Invalid performance count",
+    );
+    return number;
+  };
+  const stats = (input) => {
+    const result = { count: count(input?.count) };
+    for (const field of ["mean", "p50", "p95", "p99", "max", "total"]) {
+      const number = input[field];
+      assert.ok(
+        result.count === 0
+          ? number === null
+          : Number.isFinite(number) && number >= 0,
+        "Invalid performance statistic",
+      );
+      result[field] = number;
+    }
+    if (result.count) {
+      assert.ok(
+        result.p50 <= result.p95 &&
+          result.p95 <= result.p99 &&
+          result.p99 <= result.max &&
+          result.mean <= result.max,
+        "Inconsistent performance percentiles",
+      );
+      assert.ok(
+        Math.abs(result.total / result.count - result.mean) <=
+          Math.max(1, result.mean) * 1e-9,
+        "Inconsistent performance total",
+      );
+    }
+    return result;
+  };
+  const stage = (input, kind) => {
+    const result = Object.fromEntries(
+      ["planned", "measured", "failed", "memory_measured"].map((key) => [
+        key,
+        count(input?.[key]),
+      ]),
+    );
+    assert.ok(
+      result.failed <= result.measured &&
+        result.measured <= result.planned &&
+        result.memory_measured <= result.measured,
+      "Invalid phase coverage",
+    );
+    assert.ok(
+      Array.isArray(input.concurrency) &&
+        input.concurrency.length <= 1 &&
+        input.concurrency.every((limit) => limit === 4),
+      "Invalid concurrency cap",
+    );
+    result.concurrency = [...input.concurrency];
+    result.total_ms = stats(input.total_ms);
+    result.memory_rss_bytes = stats(input.memory_rss_bytes);
+    assert.ok(
+      result.total_ms.count <= result.measured,
+      "Invalid time coverage",
+    );
+    assert.ok(
+      !result.memory_measured || result.memory_rss_bytes.count > 0,
+      "Missing RSS samples",
+    );
+    const field = kind === "index" ? "index_bytes" : "latency_ms";
+    result[field] = stats(input[field]);
+    if (kind === "index")
+      assert.ok(
+        result.index_bytes.count <= result.measured,
+        "Invalid index coverage",
+      );
+    return result;
+  };
+  return {
+    schema_version: 1,
+    percentile_method: "p50 median; p95/p99 nearest-rank",
+    index: stage(value.index, "index"),
+    query: Object.fromEntries(
+      ["hybrid", "fts", "vector"].map((mode) => [
+        mode,
+        stage(value.query?.[mode], "query"),
+      ]),
+    ),
+  };
+}
+
 export function validateComparison(report, request) {
   assert.equal(report.schema_version, 1, "Unsupported comparison schema");
   assert.equal(
@@ -93,6 +189,11 @@ export function validateComparison(report, request) {
     report.harness_commit ?? "",
     /^[a-f0-9]{40}$/,
     "Missing harness identity",
+  );
+  assert.equal(
+    report.harness_commit,
+    request.harness_commit,
+    "Wrong harness commit",
   );
   assert.deepEqual(report.errors, [], "Comparison contains errors");
   for (const side of ["baseline", "candidate"]) {
@@ -111,7 +212,14 @@ export function validateComparison(report, request) {
     "Incomplete suite/mode coverage",
   );
   const rows = [];
+  const performance = {};
   for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+    performance[suite] = Object.fromEntries(
+      ["baseline", "candidate"].map((side) => [
+        side,
+        performanceSummary(report.performance?.[suite]?.[side]),
+      ]),
+    );
     for (const mode of ["hybrid", "fts", "vector"]) {
       const matches = report.rows.filter(
         (row) => row?.suite === suite && row.mode === mode,
@@ -146,6 +254,13 @@ export function validateComparison(report, request) {
       rows.push({ suite, mode, model, metrics });
     }
   }
+  const package_sha256 = Object.fromEntries(
+    ["baseline", "candidate"].map((side) => {
+      const hash = report.package_sha256?.[side];
+      assert.match(hash ?? "", /^[a-f0-9]{64}$/, "Invalid package hash");
+      return [side, hash];
+    }),
+  );
   // Whitelist data passed to the trusted renderer; artifact Markdown and URLs
   // are never published, interpreted as code, or used to choose the target PR.
   return {
@@ -161,6 +276,8 @@ export function validateComparison(report, request) {
       commit: request.candidate.commit,
     },
     harness_commit: report.harness_commit,
+    package_sha256,
+    performance,
     rows,
     errors: [],
   };

@@ -51,6 +51,7 @@ jobs:
             run_id: Number(process.env.GITHUB_RUN_ID),
             run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
             pr_number: pr.number,
+            harness_commit: process.env.GITHUB_SHA,
             baseline: { repository: pr.base.repo.full_name, commit: pr.base.sha, ref: pr.base.ref },
             candidate: { repository: pr.head.repo.full_name, commit: pr.head.sha, ref: pr.head.ref },
           }));
