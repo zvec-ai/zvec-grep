@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "dataset_repo": "Tevatron/browsecomp-plus",
   "dataset_revision": "144cff8e35b5eaef7e526346aa60774a9deb941f",
   "corpus_revision": "b27b02bc3e45511b8b82a13e6f90ce761df726f6",
@@ -7,7 +7,7 @@
   "dataset_query_count": 830,
   "seed": "browsecomp-plus-ci-v1",
   "ranking": "ascending SHA256(UTF8(revision + NUL + seed + NUL + query_id))",
-  "selection_rule": "first 10 ranks, extending the existing first 5 without outcome-based exclusions",
+  "selection_rule": "first 5 ranks, restoring the original five-case daily suite without substitutions",
   "selection_inputs": [
     "pinned query IDs for ranking",
     "query wording and annotated document IDs for descriptive coverage review"
@@ -101,84 +101,7 @@
       "gold_document_count": 6,
       "evidence_document_count": 6,
       "coverage_tags": ["biography", "family-history", "letter-evidence"]
-    },
-    {
-      "query_id": "165",
-      "rank": 6,
-      "rank_sha256": "029f704dce92e5ac53f8a1d867c19cba96d206e9db34e1f1596e089119118604",
-      "gold_docids": ["24156", "50798", "6013", "69225"],
-      "evidence_docids": ["24156", "50798", "57785", "6013", "69225", "85689"],
-      "gold_document_count": 4,
-      "evidence_document_count": 6,
-      "coverage_tags": [
-        "crime-statistics",
-        "country-identification",
-        "film-director-links"
-      ]
-    },
-    {
-      "query_id": "1068",
-      "rank": 7,
-      "rank_sha256": "02b6f33ac35b5d79fdcbc4b23ed80e2ff1b5d0817c74cd80d848ec09567aa6e5",
-      "gold_docids": ["31626", "68646", "71223", "89423", "98815"],
-      "evidence_docids": ["31626", "68646", "71223", "89423", "98815"],
-      "gold_document_count": 5,
-      "evidence_document_count": 5,
-      "coverage_tags": [
-        "author-biography",
-        "geographic-identity",
-        "bibliography"
-      ]
-    },
-    {
-      "query_id": "244",
-      "rank": 8,
-      "rank_sha256": "02d79bfbd8867aa4e6113087deca3fffd7ed7e4cb7bee197de84307ab95b3edd",
-      "gold_docids": ["26119", "52127"],
-      "evidence_docids": ["26119", "52127"],
-      "gold_document_count": 2,
-      "evidence_document_count": 2,
-      "coverage_tags": [
-        "scientific-literature",
-        "citation-matching",
-        "document-structure"
-      ]
-    },
-    {
-      "query_id": "843",
-      "rank": 9,
-      "rank_sha256": "032f3076151ac2ed131bafdc07275832eaff73e1ad09a208ba928c70e42bf781",
-      "gold_docids": ["69717"],
-      "evidence_docids": [
-        "10944",
-        "26844",
-        "36522",
-        "37560",
-        "62997",
-        "69717",
-        "7253"
-      ],
-      "gold_document_count": 1,
-      "evidence_document_count": 7,
-      "coverage_tags": [
-        "academic-thesis",
-        "advisor-identity",
-        "game-dlc-credits"
-      ]
-    },
-    {
-      "query_id": "563",
-      "rank": 10,
-      "rank_sha256": "0360fe92dc04bb91e7c9848d940a44265e1575a1025ff01ad6070fccb91bca5f",
-      "gold_docids": ["43686", "59165", "96216"],
-      "evidence_docids": ["17023", "43686", "59165", "96216"],
-      "gold_document_count": 3,
-      "evidence_document_count": 4,
-      "coverage_tags": [
-        "education-career",
-        "company-acquisition",
-        "interview-clues"
-      ]
     }
-  ]
+  ],
+  "suite_size_decision": "User requested restoring the original five cases after the ten-case experiment was too slow; the original ranking and case identities are unchanged."
 }

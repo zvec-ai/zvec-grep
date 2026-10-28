@@ -1,15 +1,10 @@
-# Ten fixed cases from all 830 cases in the pinned dataset revision.
+# Five fixed cases from all 830 cases in the pinned dataset revision.
 # Revision: 144cff8e35b5eaef7e526346aa60774a9deb941f
 # Seed: browsecomp-plus-ci-v1
-# Rank: SHA256("<revision>\0<seed>\0<query_id>"); select the lowest 10 hashes.
-# Preserve the original first five; see CI_SELECTION.md and ci-selection.json.
+# Rank: SHA256("<revision>\0<seed>\0<query_id>"); select the lowest 5 hashes.
+# Restore the original five for daily iteration; see CI_SELECTION.md.
 628
 700
 966
 827
 241
-165
-1068
-244
-843
-563

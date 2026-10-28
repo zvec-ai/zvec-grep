@@ -285,7 +285,7 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         self.assertEqual(validate_plan(self.plan_path, self.artifacts), plan)
         self.assertEqual(
             plan["query_ids"],
-            ["628", "700", "966", "827", "241", "165", "1068", "244", "843", "563"],
+            ["628", "700", "966", "827", "241"],
         )
         selection = load_suite("ci", load_queries(self.queries))
         for case in plan["query_ids"]:
@@ -300,7 +300,7 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                 plan["profile_orders"][case][trial][0] == "baseline"
                 for case in plan["query_ids"]
             )
-            self.assertEqual(baseline_first, 5)
+            self.assertIn(baseline_first, (2, 3))
         with self.assertRaises(ValueError):
             select_case(selection, "770")
 
@@ -422,22 +422,22 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["profile_orders"], plan["profile_orders"])
         self.assertEqual(
             summary["trials"],
-            {"per_case": 1, "planned": 10, "persisted": 10, "completed": 10},
+            {"per_case": 1, "planned": 5, "persisted": 5, "completed": 5},
         )
-        self.assertEqual(summary["cases"]["completed"], 10)
+        self.assertEqual(summary["cases"]["completed"], 5)
         self.assertEqual(
-            summary["profiles"]["baseline"]["tokens"]["input"]["total"], 1000
+            summary["profiles"]["baseline"]["tokens"]["input"]["total"], 500
         )
         self.assertEqual(
             summary["profiles"]["baseline"]["tokens"]["input"]["mean"], 100
         )
         self.assertEqual(
-            summary["tool_interaction_batches"]["baseline"]["batches"]["total"], 10
+            summary["tool_interaction_batches"]["baseline"]["batches"]["total"], 5
         )
-        self.assertEqual(summary["runtime_preparation"]["sessions"], 10)
-        self.assertEqual(evaluation["expected_answers"], 20)
-        self.assertEqual(evaluation["evaluated_answers"], 20)
-        self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 200)
+        self.assertEqual(summary["runtime_preparation"]["sessions"], 5)
+        self.assertEqual(evaluation["expected_answers"], 10)
+        self.assertEqual(evaluation["evaluated_answers"], 10)
+        self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 100)
         self.assertEqual(evaluation["zvec_grep_usage"]["expected_trials"], 0)
 
     def test_single_flat_artifact_aggregates_complete_smoke_without_model_calls(self):

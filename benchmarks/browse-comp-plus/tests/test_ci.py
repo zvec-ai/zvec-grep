@@ -284,7 +284,7 @@ class CIIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(
             load_suite("ci", queries).query_ids,
-            ("628", "700", "966", "827", "241", "165", "1068", "244", "843", "563"),
+            ("628", "700", "966", "827", "241"),
         )
         self.assertEqual(load_suite("smoke", queries).query_ids, ("770",))
 
