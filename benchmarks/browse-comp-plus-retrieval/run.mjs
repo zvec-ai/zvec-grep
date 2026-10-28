@@ -316,8 +316,9 @@ export async function main(args = process.argv.slice(2)) {
     assert.equal(
       report.model_artifacts.sha256,
       lock.model_artifacts_sha256,
-      "model bytes differ from the frozen Linux scout",
+      "model bytes differ from the frozen fresh Rust cache",
     );
+    assert.deepEqual(report.model_artifacts.entries, lock.model_artifacts);
     report.arm.model_before_sha256 = report.model_artifacts.sha256;
     await checkpoint();
     const require = createRequire(join(candidate.consumer, "package.json"));

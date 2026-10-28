@@ -41,5 +41,19 @@
   "limit": 10,
   "index_max_filesize": 67108864,
   "concurrency": 4,
-  "model_artifacts_sha256": "217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771"
+  "model_artifacts_sha256": "1d2c04d6b5a9ef342e46e32745357f6c09a594f5b99554d8048db83820f0d123",
+  "model_artifacts": [
+    {
+      "path": "model2vec/minishlab--potion-multilingual-128M/73908c3438cf03b6a01bcb9611d62b23d0726f08/model.safetensors",
+      "sha256": "14b5eb39cb4ce5666da8ad1f3dc6be4346e9b2d601c073302fa0a31bf7943397"
+    },
+    {
+      "path": "model2vec/minishlab--potion-multilingual-128M/73908c3438cf03b6a01bcb9611d62b23d0726f08/tokenizer/tokenizer_config.json",
+      "sha256": "81336c4a13050c6487eee83879338202a16638fbf49b5b0231a9deee1231b0c1"
+    },
+    {
+      "path": "model2vec/minishlab--potion-multilingual-128M/73908c3438cf03b6a01bcb9611d62b23d0726f08/tokenizer/tokenizer.json",
+      "sha256": "19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1"
+    }
+  ]
 }

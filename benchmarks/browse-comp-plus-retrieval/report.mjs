@@ -14,6 +14,9 @@ import { summarizePilotRows } from "../zg-retrieval/expansion/run.mjs";
 import { summarizePerformance } from "../zg-retrieval/reports/performance.mjs";
 
 export const MODES = ["hybrid", "fts", "vector"];
+const sourceLock = await readJson(
+  new URL("./source.lock.json", import.meta.url),
+);
 
 /** Reparse saved public responses and recompute quality/performance aggregates. */
 export async function auditArm(arm, dataset, directory) {
@@ -152,10 +155,7 @@ export function validateComparison(report, request) {
     `https://github.com/${request.repository}/actions/runs/${request.run_id}`,
   );
   assert.equal(report.document_count, 100195);
-  assert.equal(
-    report.model_sha256,
-    "217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771",
-  );
+  assert.equal(report.model_sha256, sourceLock.model_artifacts_sha256);
   for (const name of ["baseline", "candidate"]) {
     const arm = report[name];
     assert.equal(arm.commit, request[`${name}_sha`]);

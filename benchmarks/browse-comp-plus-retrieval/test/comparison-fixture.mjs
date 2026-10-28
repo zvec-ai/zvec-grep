@@ -86,7 +86,7 @@ export function comparisonFixture() {
     harness_commit: requestFixture.harness_commit,
     document_count: 100195,
     model_sha256:
-      "217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771",
+      "1d2c04d6b5a9ef342e46e32745357f6c09a594f5b99554d8048db83820f0d123",
     repository_url: "https://github.com/owner/repo",
     run_url: "https://github.com/owner/repo/actions/runs/123",
     baseline: arm(requestFixture.baseline_sha, 2),

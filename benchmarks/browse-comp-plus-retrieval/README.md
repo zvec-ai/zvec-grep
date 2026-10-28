@@ -72,7 +72,7 @@ Inputs follow the [BrowseComp+ integration at `c1299bf2`](https://github.com/zve
 - CI IDs: **628, 700, 966, 827, 241, 165, 1068, 244, 843, 563**, selected with original seed `browsecomp-plus-ci-v1`; no outcome-based exclusions.
 - `source.lock.json` pins all 13 Parquet hashes and the decrypted query digest. `suites/ci-selection.json` retains original gold/evidence IDs. Plaintext questions remain outside the repository and indexed root.
 - Each `<docid>.md` contains exact source UTF-8 `text`, without title/URL injection. Size cap: 64 MiB. Public ready-status must cover every document.
-- Embedding: **`local/potion-multilingual-128m`, CPU**. Exact model content hash: `217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771`.
+- Embedding: **`local/potion-multilingual-128m`, CPU**. Fresh Rust model content hash: `1d2c04d6b5a9ef342e46e32745357f6c09a594f5b99554d8048db83820f0d123`; the lock lists all three files. Weights/tokenizer match the scout, while Rust generates its own minimal tokenizer config instead of inheriting Node's config from a shared cache.
 
 Quality averages five calls per question, then equally averages ten original questions. Preserve native top-ten chunk ranks without document deduplication. These scores measure document localization; repetitions are not additional independent questions. The full 830-question answer evaluation is outside this workflow.
 
