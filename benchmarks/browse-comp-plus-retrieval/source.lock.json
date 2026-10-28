@@ -40,5 +40,6 @@
   "repetitions": 5,
   "limit": 10,
   "index_max_filesize": 67108864,
-  "concurrency": 4
+  "concurrency": 4,
+  "model_artifacts_sha256": "217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771"
 }

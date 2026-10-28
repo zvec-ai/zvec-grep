@@ -21,14 +21,11 @@ import {
   parseVisibleResponse,
   validateSearchRoute,
 } from "../zg-retrieval/engines/zg/parse.mjs";
-import {
-  freePort,
-  candidateCommand,
-  runCandidate,
-} from "../zg-retrieval/engines/zg/run.mjs";
+import { freePort } from "../zg-retrieval/engines/zg/run.mjs";
 import { snapshotIndex } from "../zg-retrieval/engines/zg/snapshot.mjs";
 import { invalidateGroupRows } from "../zg-retrieval/expansion/run.mjs";
 import { DurableMonitor, measureIndex } from "./execution.mjs";
+import { candidateCommand, runCandidate } from "./runtime.mjs";
 const REPETITIONS = 5;
 function searchArguments(task, root, mode) {
   return {
@@ -58,16 +55,15 @@ export async function runStage(pilot, group, candidate, options, report, mcp) {
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
   await mkdir(home, { recursive: true });
-  if (options.phase === "index")
-    await writeJson(join(home, ".zvec-grep", "config.json"), {
-      version: 1,
-      server: { host: "127.0.0.1", port: await freePort() },
-      defaults: {
-        embedding: pilot.model,
-        modelCacheDir: options.modelCache,
-      },
-      models: embedding.remote ? {} : { [pilot.model]: { device: "cpu" } },
-    });
+  await writeJson(join(home, ".zvec-grep", "config.json"), {
+    version: 1,
+    server: { host: "127.0.0.1", port: await freePort() },
+    defaults: {
+      embedding: pilot.model,
+      modelCacheDir: options.modelCache,
+    },
+    models: embedding.remote ? {} : { [pilot.model]: { device: "cpu" } },
+  });
   const env = {
     ...process.env,
     HOME: home,
@@ -86,29 +82,29 @@ export async function runStage(pilot, group, candidate, options, report, mcp) {
   };
   options.signal?.addEventListener("abort", abort, { once: true });
   try {
+    const install = await runCandidate(
+      candidate,
+      [
+        "--install",
+        "--target",
+        "opencode",
+        "--yes",
+        "--mcp-transport",
+        "stdio",
+      ],
+      { cwd: root, env },
+    );
+    await writeJson(join(evidence, "install.json"), install);
+    const config = JSON.parse(await readFile(opencode, "utf8"));
+    assert.equal(config.mcp?.zvec_grep?.type, "local");
+    const command = config.mcp.zvec_grep.command;
+    assert.ok(
+      Array.isArray(command) &&
+        command.length >= 3 &&
+        command.every((part) => typeof part === "string"),
+    );
+    await runCandidate(candidate, ["--server", "off"], { cwd: root, env });
     if (options.phase === "index") {
-      const install = await runCandidate(
-        candidate,
-        [
-          "--install",
-          "--target",
-          "opencode",
-          "--yes",
-          "--mcp-transport",
-          "stdio",
-        ],
-        { cwd: root, env },
-      );
-      await writeJson(join(evidence, "install.json"), install);
-      const config = JSON.parse(await readFile(opencode, "utf8"));
-      assert.equal(config.mcp?.zvec_grep?.type, "local");
-      const command = config.mcp.zvec_grep.command;
-      assert.ok(
-        Array.isArray(command) &&
-          command.length >= 3 &&
-          command.every((part) => typeof part === "string"),
-      );
-      await runCandidate(candidate, ["--server", "off"], { cwd: root, env });
       const indexStart = performance.now();
       try {
         const invocation = candidateCommand(candidate, [
@@ -190,14 +186,21 @@ export async function runStage(pilot, group, candidate, options, report, mcp) {
     }
     assert.equal(
       report.index_status,
-      "success",
-      "Query requires this run's completed fresh index",
+      "restored",
+      "Query requires a verified index artifact",
     );
-    const before = JSON.parse(
-      await readFile(join(evidence, "status-before/summary.json"), "utf8"),
+    const before = await snapshotIndex({
+      cli: candidate.cli,
+      root,
+      output: join(evidence, "status-before"),
+      env,
+    });
+    assert.equal(before.files, group.expectedIndexedFiles);
+    assert.equal(
+      before.logical_content_sha256,
+      report.expected_index_status.logical_content_sha256,
+      "restored index differs from the sealed public status",
     );
-    const config = JSON.parse(await readFile(opencode, "utf8"));
-    const command = config.mcp.zvec_grep.command;
     const transport = new mcp.StdioClientTransport({
       command: command[0],
       args: command.slice(1),

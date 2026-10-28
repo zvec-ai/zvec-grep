@@ -1,98 +1,87 @@
-# BrowseComp-Plus Retrieval-only CI
+# BrowseComp+ Retrieval-only
 
-Compare the unchanged official **Node.js 0.2.2** npm release with a commit-pinned **Rust** build, using ten fixed original queries against the complete **100,195-document** corpus. Both products run sequentially on one dedicated Linux x64 host, with separate fresh indexes and a shared model download cache. Each mode executes five calls per query: **150 calls per runtime**, 300 per comparison.
+An independent comparison of **PR base Rust → PR head Rust**, following #303. Both versions query all **100,195 documents** using ten fixed original questions, three modes and five repetitions: **150 public MCP calls per version**. No answering agent or LLM judge runs.
 
-The workflow uses public MCP search in **hybrid → fts → vector** order. It does not run an answering agent or an LLM judge. Index embedding batches and public queries have a concurrency limit of **4**. Storage commits retain each product's own scheduling.
+## Trigger and isolation
 
-## Execution budget and runner
+After this workflow reaches the default branch, a maintainer/admin posts a standalone line on an open PR:
 
-A [same-host Linux scout](https://github.com/zvec-ai/zvec-grep/actions/runs/40687725826) measured complete fresh sample indexes, including final optimization:
-
-| Documents | Node 0.2.2 | Rust `3c2936aa599b…` |
-| ---: | ---: | ---: |
-| 256 | 51.785 s | 10.508 s |
-| 1024 | 201.951 s | 28.914 s |
-
-The byte-calibrated samples suggest about 0.8–1.1 h for Rust and 5.5–5.6 h for Node under a linear scaling assumption. This is **not full-corpus acceptance or a runtime guarantee**. The previous Node full build actually reached 56,981/100,195 files in 5 h before timeout; its slower large-index throughput suggests about 8.8 h before accounting for unfinished finalization. Historical runs and different machines are not controlled comparisons.
-
-[GitHub hosted jobs are limited to 6 h](https://docs.github.com/en/actions/reference/limits). The full comparison therefore uses one dedicated self-hosted Linux x64 runner: Node gets a **12 h internal Index limit / 14 h job**, Rust **3 h / 5 h**. Separate jobs keep artifact uploads within the 24 h token lifetime. Both jobs must find this run's durable state and the same hashed machine identity; changing machines fails instead of producing a misleading pair.
-
-Provision **one** runner with label `browsecomp-plus` (or repository variable `BROWSECOMP_RUNNER_LABEL`) and at least 50 GiB free disk, then set `BROWSECOMP_RUNNER_READY=true`. Until this is configured, the hosted preflight fails before scheduling the long run. This repository had no registered self-hosted runners when the scout ran; no full result is claimed. A runner intended for this comparison must be dedicated to the manual run.
-
-## Run and view results
-
-After merging, select **BrowseComp-Plus Retrieval-only → Run workflow** and provide the Rust `candidate_ref` (default `main`). The build job freezes it to a full commit SHA. The benchmark harness is frozen independently, and both npm packages are verified before installation.
-
-For testing a PR branch before this new workflow is registered on the default branch, use the existing **Retrieval-only PR** dispatch entry point:
-
-```sh
-gh workflow run retrieval-pr.yml --repo zvec-ai/zvec-grep \
-  --ref dev/browse-comp-plus-retrieval-ci \
-  -f suite=browsecomp-plus \
-  -f baseline_sha=npm:@zvec/zvec-grep@0.2.2 \
-  -f baseline_repository=zvec-ai/zvec-grep \
-  -f candidate_sha=FULL_UPSTREAM_MAIN_SHA \
-  -f candidate_repository=zvec-ai/zvec-grep
+```text
+@zg-retrieval-bench doc
 ```
 
-Ordinary PR events keep the existing four-suite Retrieval-only workflow. Changes to this harness also run the lightweight **BrowseComp-Plus retrieval contracts** workflow; those checks are not full-corpus measurements. The BrowseComp job runs only when explicitly selected by a manual caller; manual runs and partial re-runs require maintain/admin access. All jobs have read-only GitHub permissions. The public dataset and local model require no model API credentials.
+Quoted/fenced commands, bot comments, extra arguments and ordinary issues are ignored. Original and rerun actors both need maintain/admin access. The request freezes base/head repositories and full SHAs plus the trusted harness SHA. One bot comment moves from queued to a validated comparison or an incomplete result.
 
-Each completed Index/Query stage publishes its current report to Summary; the final Rust stage publishes the complete comparison to its **Summary**, including relative percentages `(Rust − Node) / Node × 100%`. A negative value means lower. A zero denominator or missing measurement is unavailable, never an invented zero.
+**BrowseComp-Plus Retrieval-only** owns separate package, index, query and reply jobs. It does not enter the standard Retrieval-only suite matrix. PR changes run lightweight contracts only. A manual diagnostic entry accepts `pr_number`; both entries compare Rust with Rust.
+
+**Comment events require this workflow on the default branch.** Posting the command before then cannot exercise the entry. See [GitHub event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#issue_comment).
+
+## Reusable Index Artifacts
+
+The key hashes persisted storage/workspace production code, the explicit Rust index version and storage-backend dependency identities, together with pinned corpus/model inputs and Linux x64 settings. PR SHA, query code, benchmark harness and storage tests do not invalidate it. Production storage changes conservatively invalidate it, including nonfunctional edits.
+
+1. Package the frozen base/head sources and compute storage keys.
+2. Deduplicate identical keys: compatible base/head share **one** sealed index.
+3. Find `browsecomp-doc-index-<key>` across this independent workflow's runs. Verify producer provenance, archive/member hashes, full public coverage and exact model/corpus identities.
+4. For a previously unseen storage identity, build one full index, retain original time/RSS/size evidence and seal it with model bytes.
+5. Restore a pristine copy for base Query, stop the product and remove it, then restore a pristine copy for head Query on the same host. Disable automatic updates and verify status before/after.
+
+API/download errors, corruption and a registered index that expired or disappeared **fail explicitly**, without silently reindexing. Bot result comments retain full receipts so a deleted Artifact is not mistaken for a new key. Preserve these comments and producer workflow runs.
+
+**Artifacts have a retention limit; they are not permanent NAS storage.** Index retention is 90 days. A requested run finding fewer than seven days remaining republishes the same verified archive bytes. It does not reindex. If no run renews it before expiry, restore externally archived bytes first. There is no scheduled keepalive or automatic deletion of older storage versions. See [GitHub Artifact retention](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts).
 
 | Artifact | Contents | Retention |
 | --- | --- | --- |
-| `browsecomp-plus-retrieval-report` | `summary.md` and `summary.json`; quality, performance, versions and coverage | 90 days |
-| `browsecomp-plus-retrieval-{node,rust}-{index,query}` | Raw public requests/responses and SHA-256 identities, per-call RT, RSS samples, index command/status evidence, corpus/model manifests and failures | 30 days |
-| `browsecomp-plus-retrieval-packages` | Original Node tarball and frozen Rust tarball, with verified identity manifests | 14 days |
+| `browsecomp-doc-index-<key>` | Full index, exact model bytes, file hashes, original Index report/evidence | 90 days; byte-copy renewal |
+| `browsecomp-doc-index-ref-<key>` | Selected Artifact/run IDs and storage key | 30 days |
+| `browsecomp-doc-comparison` | Validated `summary.json` and readable `summary.md` | 90 days |
+| `browsecomp-doc-query-evidence` | All 300 requests/responses, hashes, RT, RSS, status and reports | 30 days |
+| `browsecomp-doc-index-evidence-<key>` | Complete or partial fresh-build logs, progress, RSS and report | 30 days |
+| `browsecomp-doc-package-{baseline,candidate}` | Commit-bound Rust package and storage identity | 14 days |
 
-Missing source data, partial indexing, product failures, changed corpus/model identities, malformed responses, incomplete calls or unavailable RSS fail the measured run. Partial evidence is retained. Retrieval quality is report-only, without an arbitrary score threshold.
+The read-only Parquet cache reduces download time. It never substitutes for an index Artifact. Each run recreates query workspaces and verifies corpus/model identities.
 
-## Collected measurements
+## Budget and measurements
 
-| Stage | Measurement | Output |
-| --- | --- | --- |
-| Index | Complete build command time | Total, mean, p95, p99 |
-| Query | Individual public MCP RT | Mean, p50, p95, p99; 50 samples per mode/runtime |
-| Query | Complete corpus/mode phase time | Total, mean, p95, p99 |
-| Index / Query | Product process-tree and resident daemon RSS | Mean, p95, p99, sampled peak; raw samples and coverage |
-| Index | Generated `.zvec-grep` regular-file size | Exact bytes and MiB; total, mean, p95, p99 |
-| Index / Query | Concurrency policy | Embedding batch limit 4; query in-flight limit 4 |
+A [real Linux scout](https://github.com/zvec-ai/zvec-grep/actions/runs/40687725826) measured Rust fresh indexes at 10.508 s for 256 documents and 28.914 s for 1024 documents, including final optimization. These are not full-corpus acceptance or a runtime guarantee.
 
-There is **one full-corpus index and one phase per mode/runtime**. Phase-time and index-size mean/p95/p99 therefore each describe one observation; they do not estimate run-to-run variance. Query percentiles use raw per-call samples; RSS percentiles pool raw time samples. p50 is the median; p95/p99 use nearest rank.
+Each new key gets a separate hosted Ubuntu 24.04 job: **180 min internal Index timeout / 240 min job**. Both Query arms run sequentially on one hosted runner with a 120 min limit. Jobs reserve at least 50 GiB local disk. Archives use low compression and Artifact transport disables recompression. No self-hosted runner or model API credential is required.
 
-Models are downloaded/warmed separately before measurement. Index time includes CLI startup, model loading and final optimization. Query RT stops before parsing/scoring/capture; phase totals include capture. Fixed mode order and shared caches retain first-call/model/session effects. Sequential runs on one runner reduce host differences but do not establish a controlled causal speed comparison.
+Index stdout/stderr stream to disk. Observed file-count checkpoints occur every 30 s; Linux process-tree RSS targets 1000 ms. Timeout/cancellation kills the Index process group and retains partial evidence through always-run uploads. Forced runner loss cannot guarantee the last upload.
 
-RSS sampling targets 1000 ms, excludes the driver and may double-count shared pages or miss brief spikes. Model cache and symlinks are excluded from index size. Neither product is modified, and per-file write RT is excluded because Node 0.2.2 does not expose it. Indexes are never reused for measured builds; the first index is removed after the server stops and its measurements are saved, before the second build.
+| Stage | Measurements |
+| --- | --- |
+| Historical Index builder | Full build time and exact regular-file bytes: total/mean/p95/p99; RSS mean/p95/p99/sampled peak and coverage |
+| Current Query | Mean/p50/p95/p99 public MCP RT, 50 samples per mode/version; group total and RSS distribution |
+| Quality | Original gold-document Hit@1/5/10, MRR@10 and binary nDCG@10 |
 
-## Progress, retention and preparation
+**Cached Index timings are historical builder measurements**, with builder SHA, environment, Artifact and run provenance. Reuse creates neither a fresh observation nor a synthetic zero regression. Each full build provides one observation, so its percentiles do not estimate run-to-run variation.
 
-Node Index, Node Query, Rust Index and Rust Query are separate visible steps. Index logs stream directly to files with bounded in-memory tails; a 30 s heartbeat saves observed file counts, elapsed time and RSS coverage without rescanning the corpus. Linux RSS uses `/proc` and raw samples are appended as collected. Query responses and report checkpoints are saved per completed call; stage snapshots are uploaded before the next expensive phase.
+Query changes use `(head − base) / base × 100%`; missing values or zero denominators are unavailable. RT excludes parsing/scoring/capture; group totals include them. Both arms use identical model bytes and concurrency limit 4. Fixed hybrid → fts → vector order and sequential arms retain first-call/model/page-cache effects. RSS may double-count shared pages and miss short peaks.
 
-Read-only Parquet sources, model downloads and package-manager downloads may persist on the dedicated runner. Every Parquet checksum is checked again and model content is hashed before/after each arm. Each workflow attempt materializes a new full corpus and creates each product's index from an absent `.zvec-grep`; **indexes are never restored from a cache or a previous workflow**. Only the live index belonging to this attempt survives from its Index step to its Query step, then public daemon shutdown and index removal happen before the other arm.
+The final audit reparses saved public responses, checks hashes and exact requests, and recomputes scores/statistics. Full coverage, all 300 successful calls, unchanged corpus/model identities and available RSS are required. Quality has no arbitrary passing threshold. Missing/failed data cannot publish a green result.
 
-`run.mjs --phase prepare` installs both verified packages once and warms both models. Subsequent phases are `node-index`, `node-query`, `release-node`, `rust-index`, `rust-query`, `release-rust`, `finish`, each with the same `--output`. The original one-process invocation remains available by omitting `--phase`. Completed phases cannot be silently rerun in place. Host identity, source/corpus/model hashes, raw-response audits, full coverage and all 300 calls are required before `finish` can mark success.
+Package/index/query jobs have read-only GitHub permissions. Separate request/reply jobs execute the frozen harness with comment-write access. The reply validates typed JSON identities/numbers and renders its own Markdown.
 
-Timeout/cancellation terminates the Index process group, saves failed measurements and leaves completed evidence available to `always()` artifact steps. A forced runner loss cannot guarantee an upload of the current stage; earlier uploaded snapshots remain available, and the durable run directory retains files for recovery. Run directories live under `$RUNNER_TOOL_CACHE/browsecomp-plus/runs/<run>-<attempt>`; remove old directories only after confirming their artifacts. Source/model caches are separate from these run directories.
+## Frozen inputs
 
-## Frozen inputs and scoring
-
-Input selection and normalization come from the [BrowseComp+ integration at `c1299bf2`](https://github.com/zvec-ai/zvec-grep/tree/c1299bf23ef4d06b3640880a1f0beed8cca092f8/benchmarks/browse-comp-plus). This workflow is independent of that integration's agent execution/recovery pipeline.
+Inputs follow the [BrowseComp+ integration at `c1299bf2`](https://github.com/zvec-ai/zvec-grep/tree/c1299bf23ef4d06b3640880a1f0beed8cca092f8/benchmarks/browse-comp-plus).
 
 - Queries: `Tevatron/browsecomp-plus@144cff8e35b5eaef7e526346aa60774a9deb941f`, 830 original records.
 - Corpus: `Tevatron/browsecomp-plus-corpus@b27b02bc3e45511b8b82a13e6f90ce761df726f6`, 100,195 documents.
-- CI IDs: **628, 700, 966, 827, 241, 165, 1068, 244, 843, 563**; the original first ten SHA-256 ranks with seed `browsecomp-plus-ci-v1`. No outcome-based exclusions or replacements.
-- `source.lock.json` pins all 13 Parquet file hashes and the complete decrypted query digest; `suites/ci-selection.json` preserves the reference gold/evidence audit. Original questions are not rewritten or checked into this repository as plaintext.
-- Each document is exactly its UTF-8 source `text` in `<docid>.md`, with no injected title or URL header. The 64 MiB size policy matches the referenced integration, and complete public index counts are required.
-- Embedding: **`local/potion-multilingual-128m` on CPU**, with matching model artifact content hashes for both products.
+- CI IDs: **628, 700, 966, 827, 241, 165, 1068, 244, 843, 563**, selected with original seed `browsecomp-plus-ci-v1`; no outcome-based exclusions.
+- `source.lock.json` pins all 13 Parquet hashes and the decrypted query digest. `suites/ci-selection.json` retains original gold/evidence IDs. Plaintext questions remain outside the repository and indexed root.
+- Each `<docid>.md` contains exact source UTF-8 `text`, without title/URL injection. Size cap: 64 MiB. Public ready-status must cover every document.
+- Embedding: **`local/potion-multilingual-128m`, CPU**. Exact model content hash: `217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771`.
 
-The five quality metrics are document Hit@1/5/10, MRR@10 and binary nDCG@10 using original `gold_docs`, averaged over five calls then equally over the ten original queries. Native top-ten chunk ranks are preserved without document deduplication. These measure document localization, not official BrowseComp answer accuracy or multi-hop evidence sufficiency; repetitions are not additional independent questions. The full 830-question evaluation is not run.
+Quality averages five calls per question, then equally averages ten original questions. Preserve native top-ten chunk ranks without document deduplication. These scores measure document localization; repetitions are not additional independent questions. The full 830-question answer evaluation is outside this workflow.
 
-## Local verification
+## Local checks
 
 ```sh
-python -m pip install --requirement benchmarks/browse-comp-plus-retrieval/requirements.txt
+python -m pip install -r benchmarks/browse-comp-plus-retrieval/requirements.txt
 python -m unittest discover -s benchmarks/browse-comp-plus-retrieval/test -p 'test_*.py' -v
-node --test benchmarks/zg-retrieval/test/*.test.mjs benchmarks/browse-comp-plus-retrieval/test/*.test.mjs
+node --test benchmarks/zg-retrieval/test/*.test.mjs benchmarks/browse-comp-plus-retrieval/test/*.test.mjs .github/scripts/browsecomp-*.test.mjs .github/scripts/retrieval-pr-comment.test.mjs
 ```
 
-Preparation downloads and verifies the full corpus once. Questions, gold labels and evidence stay outside the indexed Markdown root. The retained comparison includes exact package, harness, source, corpus and model identities, and the report audit reparses saved public responses and recomputes scores and statistics.
+Archive tests use tiny synthetic files to exercise sealing/corruption/path safety, not benchmark measurements. Execution modes are `run.mjs --mode build` and `run.mjs --mode query`; the workflow supplies frozen identities and a verified Artifact receipt.

@@ -108,7 +108,7 @@ test("PR updates run Retrieval-only at the fork head SHA with local embedding an
   const job = block(prWorkflow, "retrieval", 2);
   assert.equal(
     [...block(prWorkflow, "jobs", 0).matchAll(/^ {2}([\w-]+):$/gm)].length,
-    3,
+    2,
   );
   assert.match(job, /uses: \.\/\.github\/workflows\/retrieval-comparison\.yml/);
   assert.equal(block(prWorkflow, "permissions", 4).trim(), "contents: read");

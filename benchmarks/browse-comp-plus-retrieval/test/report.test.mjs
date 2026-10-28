@@ -8,7 +8,6 @@ import { fileHash, writeJson } from "../../zg-retrieval/core/io.mjs";
 import { parseVisibleResponse } from "../../zg-retrieval/engines/zg/parse.mjs";
 import { statistics } from "../../zg-retrieval/metrics/statistics.mjs";
 import { summarizeRepeatedQuality } from "../../zg-retrieval/metrics/repetitions.mjs";
-import { summarizePerformance } from "../../zg-retrieval/reports/performance.mjs";
 
 async function fixture(t) {
   const directory = await mkdtemp(
@@ -155,31 +154,26 @@ test("replay rejects rewritten queries, altered scores, missing RSS and substitu
   }
 });
 
-test("percentage reports retain increases, zero values and unavailable denominators", () => {
+test("percentages retain zero and unavailable denominators", () => {
   assert.equal(relativeChange(100, 80), -20);
   assert.equal(relativeChange(100, 125), 25);
   assert.equal(relativeChange(100, 0), -100);
   assert.equal(relativeChange(0, 100), null);
-  const p = summarizePerformance([]);
-  const report = {
-    status: "failed",
-    rust_commit: "a".repeat(40),
-    harness_commit: "b".repeat(40),
-    dataset: { tasks: [], corpus: { count: 100195 } },
-    arms: { node: { performance: p }, rust: { performance: p } },
-    errors: ["incomplete"],
-  };
-  const text = markdownReport(report);
-  assert.match(text, /Failed \/ incomplete/);
-  assert.match(text, /request RT p50/);
-  assert.match(text, /sampled RSS p99/);
-  assert.match(text, /generated index total bytes/);
-  assert.match(text, /concurrency limit 4/);
-  assert.match(text, /one observation/);
-  assert.match(text, /incomplete/);
+  assert.doesNotMatch(markdownReport({ status: "failed" }), /✅/);
 });
 
-test("BrowseComp workflow uses one runner, fresh indexes, fixed local embedding and manual routing", async () => {
+test("restored indexes never become fresh Index observations", async (t) => {
+  const { directory, arm, dataset } = await fixture(t);
+  arm.performance_groups[0].index = null;
+  await assert.rejects(auditArm(arm, dataset, directory));
+  arm.index_artifact = { key: "c".repeat(64) };
+  const result = await auditArm(arm, dataset, directory);
+  assert.equal(result.performance.index.measured, 0);
+  assert.equal(result.performance.index.total_ms.total, null);
+  assert.equal(result.calls, 15);
+});
+
+test("BrowseComp has an independent exact-comment entry and no standard suite route", async () => {
   const workflow = await readFile(
     new URL(
       "../../../.github/workflows/browse-comp-plus-retrieval.yml",
@@ -187,24 +181,19 @@ test("BrowseComp workflow uses one runner, fresh indexes, fixed local embedding 
     ),
     "utf8",
   );
+  assert.match(workflow, /issue_comment:/);
+  assert.match(workflow, /@zg-retrieval-bench/);
   assert.match(workflow, /RETRIEVAL_EMBEDDING: local/);
-  for (const phase of ["node-index", "node-query", "rust-index", "rust-query"])
-    assert.ok(workflow.includes(`--phase ${phase}`));
-  assert.match(workflow, /--phase finish/);
-  assert.match(workflow, /--rust-commit/);
-  assert.match(workflow, /--harness-commit/);
-  assert.match(workflow, /contents: read/);
+  assert.match(workflow, /--mode build/);
+  assert.match(workflow, /--mode query/);
+  assert.match(workflow, /retention-days: 90/);
   assert.doesNotMatch(
     workflow,
-    /secrets:|secrets\.|opencode|judge|parallel_cases|actions\/cache/,
+    /self-hosted|secrets:|secrets\.|retrieval-comparison\.yml|zg-bench\.yml|node-package/,
   );
   const caller = await readFile(
     new URL("../../../.github/workflows/retrieval-pr.yml", import.meta.url),
     "utf8",
   );
-  assert.match(caller, /inputs\.suite != 'browsecomp-plus'/);
-  assert.match(
-    caller,
-    /github\.event_name == 'workflow_dispatch' && inputs\.suite == 'browsecomp-plus'/,
-  );
+  assert.doesNotMatch(caller, /browsecomp|browse-comp|inputs\.suite/);
 });

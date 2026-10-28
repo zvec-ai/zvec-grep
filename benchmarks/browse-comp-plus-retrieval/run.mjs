@@ -1,80 +1,41 @@
 import assert from "node:assert/strict";
 import {
   mkdir,
-  readFile,
   lstat,
   realpath,
   rm,
-  writeFile,
   rename,
+  writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { arch, cpus, platform, totalmem, hostname } from "node:os";
+import { arch, cpus, platform, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import {
-  verifyRetrievalPackage,
-  NODE_RELEASE,
-} from "../shared/retrieval-package.mjs";
+import { verifyPackageCache } from "../shared/rust-package-cache.mjs";
 import {
   corpusManifest,
   modelArtifactManifest,
 } from "../zg-retrieval/core/corpus.mjs";
+import { directoryBytes } from "../zg-retrieval/core/performance.mjs";
 import {
   fileHash,
-  objectHash,
   readJson,
   run,
   writeJson,
 } from "../zg-retrieval/core/io.mjs";
-import {
-  packageCandidate,
-  runCandidate,
-} from "../zg-retrieval/engines/zg/run.mjs";
-import { runStage } from "./stages.mjs";
+import { packageCandidate } from "../zg-retrieval/engines/zg/run.mjs";
 import { summarizePilotRows } from "../zg-retrieval/expansion/run.mjs";
-import { summarizePerformance } from "../zg-retrieval/reports/performance.mjs";
-import { auditArm, markdownReport, MODES } from "./report.mjs";
+import {
+  summarizePerformance,
+  markdownPerformance,
+} from "../zg-retrieval/reports/performance.mjs";
+import { runStage } from "./stages.mjs";
+import { runCandidate } from "./runtime.mjs";
+import { auditArm, MODES } from "./report.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-
-async function hostIdentity() {
-  const machine =
-    process.platform === "linux"
-      ? await readFile("/etc/machine-id", "utf8")
-      : hostname();
-  return objectHash({
-    machine,
-    hostname: hostname(),
-    platform: platform(),
-    arch: arch(),
-    cpu: cpus()[0]?.model,
-    memory: totalmem(),
-  });
-}
-
-async function verifyHarness(commit) {
-  assert.equal(
-    (
-      await run("git", ["-C", resolve(here, "../.."), "rev-parse", "HEAD"])
-    ).stdout.trim(),
-    commit,
-    "the running harness differs from the frozen commit",
-  );
-  await run("git", [
-    "-C",
-    resolve(here, "../.."),
-    "diff",
-    "--exit-code",
-    "HEAD",
-    "--",
-    "benchmarks/browse-comp-plus-retrieval",
-    "benchmarks/zg-retrieval",
-    "benchmarks/shared",
-  ]);
-}
 
 export async function loadDataset(directory) {
   const lock = await readJson(join(here, "source.lock.json"));
@@ -110,25 +71,68 @@ export async function loadDataset(directory) {
   return { lock, dataset };
 }
 
-async function ensureFresh(root) {
-  try {
-    await lstat(join(root, ".zvec-grep"));
-    assert.fail("measurement requires a fresh index, found .zvec-grep");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
+export function reportWriter(output, report) {
+  let pending = Promise.resolve();
+  return () => {
+    pending = pending.then(async () => {
+      const arm = report.arm;
+      arm.calls = arm.rows.reduce((sum, row) => sum + row.calls.length, 0);
+      arm.performance = summarizePerformance(arm.performance_groups);
+      arm.quality = summarizePilotRows(
+        arm.rows,
+        MODES,
+        report.dataset?.tasks.length ?? 10,
+      );
+      await writeJson(join(output, "report.pending.json"), report);
+      await rename(
+        join(output, "report.pending.json"),
+        join(output, "report.json"),
+      );
+      await writeFile(
+        join(output, "summary.md"),
+        [
+          `# BrowseComp+ ${report.mode}`,
+          "",
+          `State: **${report.status}**`,
+          "",
+          `Rust source: \`${report.commit}\`; harness: \`${report.harness_commit}\`.`,
+          "",
+          `Index: ${arm.index_status}; Query: ${arm.query_status}; calls: ${arm.calls}/150.`,
+          arm.index_progress
+            ? `Index progress: ${arm.index_progress.completed_files ?? "unknown"}/${arm.index_progress.total_files ?? 100195}; elapsed ${(arm.index_progress.elapsed_ms / 60000).toFixed(1)} min.`
+            : "",
+          report.mode === "query"
+            ? "Index measurements belong to the Artifact builder, not this Query run."
+            : "One complete Index is one observation.",
+          "",
+          markdownPerformance(arm.performance),
+          "",
+          ...report.errors,
+        ].join("\n"),
+      );
+    });
+    return pending;
+  };
 }
 
-async function warmModel(candidate, name, modelCache, output, lock) {
-  const root = join(output, "warmup", name);
-  await mkdir(root, { recursive: true });
+async function requireAbsent(path) {
+  await assert.rejects(
+    lstat(path),
+    { code: "ENOENT" },
+    "an existing index cannot be silently reused or overwritten",
+  );
+}
+
+async function warmModel(candidate, modelCache, output, lock) {
+  const root = join(output, "warmup");
+  await mkdir(root);
   await writeFile(
     join(root, "warmup.md"),
-    "BrowseComp retrieval model download warmup.\n",
+    "BrowseComp model download warmup.\n",
   );
   await run("git", ["init", "--quiet", root]);
-  const started = performance.now();
-  const result = await runCandidate(
+  const start = performance.now();
+  await runCandidate(
     candidate,
     [
       "--index",
@@ -147,249 +151,14 @@ async function warmModel(candidate, name, modelCache, output, lock) {
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        ZVEC_GREP_HOME: join(output, "warmup-home", name),
-      },
-      timeout: 900_000,
+      env: { ...process.env, ZVEC_GREP_HOME: join(output, "warmup-home") },
+      timeout: 900000,
     },
   );
-  const total_ms = performance.now() - started;
-  await writeJson(join(output, "warmup", `${name}.json`), {
-    total_ms,
-    ...result,
-  });
   return {
-    total_ms,
-    status: "success",
-    scope: "download/session warmup excluded from measured Index/Query",
+    total_ms: performance.now() - start,
+    scope: "download/session warmup excluded from Index/Query",
   };
-}
-
-async function atomicJson(path, value) {
-  const temporary = `${path}.pending`;
-  await writeJson(temporary, value);
-  await rename(temporary, path);
-}
-
-export function reportWriter(output, report, state) {
-  let pending = Promise.resolve();
-  return () => {
-    pending = pending.then(async () => {
-      for (const arm of Object.values(report.arms)) {
-        arm.calls = arm.rows.reduce((sum, row) => sum + row.calls.length, 0);
-        arm.performance = summarizePerformance(arm.performance_groups);
-        arm.quality = summarizePilotRows(
-          arm.rows,
-          MODES,
-          report.dataset?.tasks.length ?? 10,
-        );
-      }
-      await atomicJson(join(output, "state.json"), state);
-      await atomicJson(join(output, "summary.json"), report);
-      await writeFile(
-        join(output, "summary.md.pending"),
-        markdownReport(report),
-      );
-      await rename(
-        join(output, "summary.md.pending"),
-        join(output, "summary.md"),
-      );
-    });
-    return pending;
-  };
-}
-
-async function prepare(values, output, report, state, checkpoint) {
-  for (const key of [
-    "dataset",
-    "node-package",
-    "rust-package",
-    "rust-commit",
-    "harness-commit",
-  ])
-    assert.ok(values[key], `requires --${key}`);
-  for (const key of ["rust-commit", "harness-commit"])
-    assert.match(values[key], /^[a-f0-9]{40}$/);
-  await verifyHarness(values["harness-commit"]);
-  state.prepared = await realpath(resolve(values.dataset));
-  const { lock, dataset } = await loadDataset(state.prepared);
-  report.dataset = dataset;
-  report.source_lock = lock;
-  state.root = join(state.prepared, "corpus");
-  await ensureFresh(state.root);
-  const expected = await corpusManifest(state.root);
-  assert.equal(expected.entries.length, lock.corpus.count);
-  for (const entry of expected.entries) assert.equal(entry.kind, "file");
-  state.corpus_sha256 = report.corpus_sha256 = expected.sha256;
-  await writeJson(join(output, "corpus-manifest.json"), expected);
-  state.modelCache = resolve(
-    values["model-cache"] ?? join(output, "model-cache"),
-  );
-  await mkdir(state.modelCache, { recursive: true });
-  for (const [name, identity] of [
-    ["node", NODE_RELEASE.identity],
-    ["rust", report.rust_commit],
-  ]) {
-    const arm = (report.arms[name] = {
-      status: "pending",
-      index_status: "pending",
-      query_status: "pending",
-      corpus_root: state.root,
-      rows: [],
-      failures: [],
-      index_seconds: {},
-      performance_groups: [],
-    });
-    await checkpoint();
-    const path = resolve(values[`${name}-package`]);
-    const manifest = await verifyRetrievalPackage({
-      directory: dirname(path),
-      commit: identity,
-    });
-    assert.equal(await fileHash(path), manifest.tarball_sha256);
-    const directory = join(output, name);
-    await mkdir(directory);
-    const candidate = (state.candidates[name] = await packageCandidate(
-      path,
-      directory,
-    ));
-    assert.equal(
-      candidate.runtime,
-      name === "node" ? "node-0.2.2" : "rust-native",
-    );
-    arm.runtime = candidate.runtime;
-    arm.package = candidate.identity;
-    console.log(`Warming ${name} model outside measured Index/Query`);
-    report.model_download_warmups[name] = await warmModel(
-      candidate,
-      name,
-      state.modelCache,
-      output,
-      lock,
-    );
-    await checkpoint();
-  }
-  report.model_artifacts = await modelArtifactManifest(state.modelCache);
-  report.input_identity = objectHash({
-    source: lock,
-    dataset,
-    corpus: state.corpus_sha256,
-    model: report.model_artifacts.sha256,
-  });
-  state.prepared_ok = true;
-  await checkpoint();
-}
-
-async function stage(name, phase, output, report, state, checkpoint, signal) {
-  assert.ok(state.prepared_ok, "preparation did not finish");
-  const arm = report.arms[name];
-  const candidate = state.candidates[name];
-  const directory = join(output, name);
-  assert.equal(
-    arm[`${phase}_status`],
-    "pending",
-    "each stage is single-use; restart the workflow with a fresh output directory",
-  );
-  if (phase === "index") {
-    await ensureFresh(state.root);
-    assert.equal(
-      state.index_owner,
-      null,
-      "previous index has not been released",
-    );
-    arm.corpus_before_sha256 = (await corpusManifest(state.root)).sha256;
-    arm.model_before_sha256 = (
-      await modelArtifactManifest(state.modelCache)
-    ).sha256;
-    assert.equal(arm.corpus_before_sha256, state.corpus_sha256);
-    assert.equal(arm.model_before_sha256, report.model_artifacts.sha256);
-    state.index_owner = name;
-  } else {
-    assert.equal(state.index_owner, name);
-    assert.equal(arm.index_status, "success");
-  }
-  arm[`${phase}_status`] = "running";
-  report.phase = `${name}-${phase}`;
-  await checkpoint();
-  const require = createRequire(join(candidate.consumer, "package.json"));
-  const { Client } = await import(
-    pathToFileURL(require.resolve("@modelcontextprotocol/client")).href
-  );
-  const { StdioClientTransport } = await import(
-    pathToFileURL(require.resolve("@modelcontextprotocol/client/stdio")).href
-  );
-  try {
-    await runStage(
-      {
-        name: "browsecomp-plus",
-        model: report.source_lock.model,
-        modes: MODES,
-        config: { indexTimeoutMinutes: name === "node" ? 720 : 180 },
-      },
-      {
-        id: "full-corpus",
-        root: state.root,
-        tasks: report.dataset.tasks,
-        indexGlob: "*.md",
-        maxFileSize: report.source_lock.index_max_filesize,
-        expectedIndexedFiles: report.source_lock.corpus.count,
-      },
-      candidate,
-      {
-        output: directory,
-        modelCache: state.modelCache,
-        phase,
-        signal,
-        checkpoint,
-        onProgress: async (progress) => {
-          arm.index_progress = progress;
-          await checkpoint();
-        },
-      },
-      arm,
-      { Client, StdioClientTransport },
-    );
-    if (phase === "query") {
-      arm.corpus_after_sha256 = (await corpusManifest(state.root)).sha256;
-      arm.model_after_sha256 = (
-        await modelArtifactManifest(state.modelCache)
-      ).sha256;
-      assert.equal(arm.corpus_after_sha256, state.corpus_sha256);
-      assert.equal(arm.model_after_sha256, report.model_artifacts.sha256);
-      Object.assign(arm, await auditArm(arm, report.dataset, directory));
-      arm.status = "success";
-    }
-    arm[`${phase}_status`] = "success";
-  } catch (error) {
-    arm[`${phase}_status`] = signal.aborted ? "cancelled" : "failed";
-    arm.status = "failed";
-    arm.failures.push({ phase, reason: error.message });
-    throw error;
-  } finally {
-    await writeJson(join(directory, "report.json"), arm);
-    await checkpoint();
-  }
-}
-
-async function release(name, report, state, checkpoint) {
-  if (state.index_owner !== name) return;
-  const home = join(state.output, name, "evidence/full-corpus/runtime-home");
-  // Only remove the index after the public shutdown has completed successfully.
-  await runCandidate(state.candidates[name], ["--server", "off"], {
-    cwd: state.root,
-    env: {
-      ...process.env,
-      HOME: home,
-      USERPROFILE: home,
-      ZVEC_GREP_HOME: join(home, ".zvec-grep"),
-    },
-    timeout: 60_000,
-  });
-  await rm(join(state.root, ".zvec-grep"), { recursive: true, force: true });
-  state.index_owner = null;
-  report.arms[name].index_released = true;
-  await checkpoint();
 }
 
 export async function main(args = process.argv.slice(2)) {
@@ -397,161 +166,241 @@ export async function main(args = process.argv.slice(2)) {
     args,
     options: Object.fromEntries(
       [
+        "mode",
         "dataset",
-        "node-package",
-        "rust-package",
-        "rust-commit",
-        "harness-commit",
-        "model-cache",
+        "package",
+        "identity",
         "output",
-        "phase",
-        "pr-number",
+        "model-cache",
+        "artifact",
+        "receipt",
+        "harness-commit",
       ].map((key) => [key, { type: "string" }]),
     ),
   });
-  assert.ok(values.output, "requires --output");
-  const phase = values.phase ?? "all";
-  assert.ok(
-    [
-      "all",
-      "prepare",
-      "node-index",
-      "node-query",
-      "rust-index",
-      "rust-query",
-      "release-node",
-      "release-rust",
-      "finish",
-    ].includes(phase),
-  );
+  assert.ok(["build", "query"].includes(values.mode));
+  for (const key of [
+    "dataset",
+    "package",
+    "identity",
+    "output",
+    "harness-commit",
+  ])
+    assert.ok(values[key], `requires --${key}`);
   const output = resolve(values.output);
-  let report, state;
-  if (["all", "prepare"].includes(phase)) {
-    await mkdir(output, { recursive: false });
-    report = {
-      schema_version: 2,
-      protocol: "browsecomp-plus-ci10-public-mcp-v1",
-      status: "incomplete",
-      rust_commit: values["rust-commit"],
-      harness_commit: values["harness-commit"],
-      pr_number: values["pr-number"] ? Number(values["pr-number"]) : null,
-      run_url: process.env.GITHUB_RUN_ID
-        ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
-        : null,
-      environment: {
-        platform: platform(),
-        arch: arch(),
-        cpus: cpus().length,
-        cpu_model: cpus()[0]?.model,
-        total_memory_bytes: totalmem(),
-        node: process.version,
-        host_identity_sha256: await hostIdentity(),
-        runner_name: process.env.RUNNER_NAME ?? null,
-        runner_environment: process.env.RUNNER_ENVIRONMENT ?? "local",
-      },
-      started_at: new Date().toISOString(),
-      arms: {},
-      model_download_warmups: {},
-      errors: [],
-    };
-    state = {
-      output,
-      candidates: {},
-      index_owner: null,
-      prepared_ok: false,
-      input_harness: report.harness_commit,
-    };
-  } else {
-    report = await readJson(join(output, "summary.json"));
-    state = await readJson(join(output, "state.json"));
-    assert.equal(state.output, output);
-    assert.equal(state.input_harness, report.harness_commit);
-    assert.equal(
-      report.environment.host_identity_sha256,
-      await hostIdentity(),
-      "both arms must execute on the same dedicated host",
-    );
-  }
-  const checkpoint = reportWriter(output, report, state);
-  const controller = new AbortController();
-  const interrupt = () => controller.abort(new Error("workflow cancellation"));
+  await mkdir(dirname(output), { recursive: true });
+  await mkdir(output, { recursive: false });
+  const identity = await readJson(values.identity);
+  const report = {
+    schema_version: 1,
+    kind: `browsecomp-doc-${values.mode}`,
+    mode: values.mode,
+    status: "incomplete",
+    identity,
+    commit: identity.builder_commit,
+    harness_commit: values["harness-commit"],
+    started_at: new Date().toISOString(),
+    run_url: process.env.GITHUB_RUN_ID
+      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+      : null,
+    environment: {
+      platform: platform(),
+      arch: arch(),
+      cpus: cpus().length,
+      cpu_model: cpus()[0]?.model,
+      total_memory_bytes: totalmem(),
+      node: process.version,
+    },
+    arm: {
+      runtime: "rust-native",
+      index_status: "pending",
+      query_status: "pending",
+      rows: [],
+      failures: [],
+      index_seconds: {},
+      performance_groups: [],
+    },
+    errors: [],
+  };
+  const checkpoint = reportWriter(output, report);
+  const abort = new AbortController();
+  const interrupt = () => abort.abort(new Error("workflow cancellation"));
   process.once("SIGINT", interrupt);
   process.once("SIGTERM", interrupt);
-  let failed = false;
-  const perform = async (selected) => {
-    controller.signal.throwIfAborted();
-    if (selected !== "prepare") await verifyHarness(report.harness_commit);
-    report.phase = selected;
-    await checkpoint();
-    if (selected === "prepare")
-      return prepare(values, output, report, state, checkpoint);
-    if (selected.startsWith("release-"))
-      return release(selected.slice(8), report, state, checkpoint);
-    if (selected === "finish") {
-      assert.equal(
-        state.index_owner,
-        null,
-        "an index is still owned by an unfinished stage",
-      );
-      for (const name of ["node", "rust"]) {
-        const arm = report.arms[name];
-        assert.equal(arm?.status, "success", `${name} is incomplete`);
-        await auditArm(arm, report.dataset, join(output, name));
-      }
-      assert.equal(report.errors.length, 0);
-      report.status = "success";
-      report.finished_at = new Date().toISOString();
-      return;
-    }
-    const [name, kind] = selected.split("-");
-    return stage(
-      name,
-      kind,
-      output,
-      report,
-      state,
-      checkpoint,
-      controller.signal,
-    );
-  };
+  let root, candidate, modelCache;
   try {
     await checkpoint();
-    const phases =
-      phase === "all"
-        ? [
-            "prepare",
-            "node-index",
-            "node-query",
-            "release-node",
-            "rust-index",
-            "rust-query",
-            "release-rust",
-            "finish",
-          ]
-        : [phase];
-    for (const selected of phases) {
+    assert.match(report.commit, /^[a-f0-9]{40}$/);
+    assert.equal(
+      (
+        await run("git", ["-C", resolve(here, "../.."), "rev-parse", "HEAD"])
+      ).stdout.trim(),
+      report.harness_commit,
+    );
+    const { lock, dataset } = await loadDataset(
+      await realpath(resolve(values.dataset)),
+    );
+    report.dataset = dataset;
+    report.source_lock_sha256 = await fileHash(join(here, "source.lock.json"));
+    root = join(resolve(values.dataset), "corpus");
+    await requireAbsent(join(root, ".zvec-grep"));
+    const before = await corpusManifest(root);
+    assert.equal(before.entries.length, lock.corpus.count);
+    report.corpus_sha256 = before.sha256;
+    report.document_count = lock.corpus.count;
+    report.arm.corpus_root = root;
+    report.arm.corpus_before_sha256 = before.sha256;
+    await writeJson(join(output, "corpus-manifest.json"), before);
+    await verifyPackageCache({
+      directory: resolve(values.package),
+      commit: report.commit,
+    });
+    candidate = await packageCandidate(
+      join(resolve(values.package), "candidate.tgz"),
+      output,
+    );
+    report.package = report.arm.package = candidate.identity;
+    if (values.mode === "query") {
+      assert.ok(values.artifact && values.receipt);
+      const manifest = await readJson(join(values.artifact, "manifest.json"));
+      assert.equal(manifest.key, identity.key);
+      const restored = join(output, "restored");
+      await run(
+        "python",
+        [
+          join(here, "index_artifact.py"),
+          "extract",
+          "--directory",
+          resolve(values.artifact),
+          "--key",
+          identity.key,
+          "--output",
+          restored,
+        ],
+        { timeout: 1800000 },
+      );
+      await rename(join(restored, "index"), join(root, ".zvec-grep"));
+      modelCache = join(restored, "model");
+      assert.equal(manifest.build.corpus_sha256, before.sha256);
+      report.index_artifact = {
+        ...(await readJson(values.receipt)),
+        builder_commit: manifest.build.commit,
+        builder_harness_commit: manifest.build.harness_commit,
+        builder_run_url: manifest.build.run_url,
+        archive_sha256: manifest.archive_sha256,
+      };
+      report.historical_index = {
+        performance: summarizePerformance(
+          manifest.build.arm.performance_groups,
+        ),
+        environment: manifest.build.environment,
+      };
+      report.arm.index_artifact = report.index_artifact;
+      report.arm.expected_index_status = manifest.build.status_snapshot;
+      report.arm.index_status = "restored";
+    } else {
+      assert.ok(values["model-cache"]);
+      modelCache = resolve(values["model-cache"]);
+      await mkdir(modelCache, { recursive: true });
+      report.warmup = await warmModel(candidate, modelCache, output, lock);
+    }
+    report.model_artifacts = await modelArtifactManifest(modelCache);
+    assert.equal(
+      report.model_artifacts.sha256,
+      lock.model_artifacts_sha256,
+      "model bytes differ from the frozen Linux scout",
+    );
+    report.arm.model_before_sha256 = report.model_artifacts.sha256;
+    await checkpoint();
+    const require = createRequire(join(candidate.consumer, "package.json"));
+    const { Client } = await import(
+      pathToFileURL(require.resolve("@modelcontextprotocol/client")).href
+    );
+    const { StdioClientTransport } = await import(
+      pathToFileURL(require.resolve("@modelcontextprotocol/client/stdio")).href
+    );
+    await runStage(
+      {
+        name: "browsecomp-plus",
+        model: lock.model,
+        modes: MODES,
+        config: { indexTimeoutMinutes: 180 },
+      },
+      {
+        id: "full-corpus",
+        root,
+        tasks: dataset.tasks,
+        indexGlob: "*.md",
+        maxFileSize: lock.index_max_filesize,
+        expectedIndexedFiles: lock.corpus.count,
+      },
+      candidate,
+      {
+        output,
+        modelCache,
+        phase: values.mode === "build" ? "index" : "query",
+        signal: abort.signal,
+        checkpoint,
+        onProgress: async (progress) => {
+          report.arm.index_progress = progress;
+          await checkpoint();
+        },
+      },
+      report.arm,
+      { Client, StdioClientTransport },
+    );
+    report.arm.corpus_after_sha256 = (await corpusManifest(root)).sha256;
+    report.arm.model_after_sha256 = (
+      await modelArtifactManifest(modelCache)
+    ).sha256;
+    assert.equal(report.arm.corpus_after_sha256, before.sha256);
+    assert.equal(report.arm.model_after_sha256, report.model_artifacts.sha256);
+    if (values.mode === "query") {
+      Object.assign(report.arm, await auditArm(report.arm, dataset, output));
+      assert.equal(report.arm.calls, 150);
+    } else {
+      const stage = report.arm.performance_groups[0].index;
+      assert.equal(report.arm.index_status, "success");
+      assert.equal(stage.memory.status, "available");
+      stage.index_bytes = await directoryBytes(join(root, ".zvec-grep"));
+      assert.ok(stage.index_bytes > 0);
+      report.status_snapshot = await readJson(
+        join(output, "evidence/full-corpus/status-before/summary.json"),
+      );
+    }
+    report.status = "success";
+  } catch (error) {
+    report.status = abort.signal.aborted ? "cancelled" : "failed";
+    report.errors.push(error.message);
+    console.error(error.stack);
+    process.exitCode = 1;
+  } finally {
+    if (values.mode === "query" && root && candidate) {
+      const home = join(output, "evidence/full-corpus/runtime-home");
       try {
-        await perform(selected);
+        await runCandidate(candidate, ["--server", "off"], {
+          cwd: root,
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            ZVEC_GREP_HOME: join(home, ".zvec-grep"),
+          },
+          timeout: 60000,
+        });
+        await rm(join(root, ".zvec-grep"), { recursive: true, force: true });
+        await rm(join(output, "restored"), { recursive: true, force: true });
       } catch (error) {
-        failed = true;
-        report.status = controller.signal.aborted ? "cancelled" : "failed";
-        report.errors.push(`${selected}: ${error.message}`);
-        console.error(error.stack);
-        if (
-          controller.signal.aborted ||
-          selected === "prepare" ||
-          phase !== "all"
-        )
-          break;
+        report.status = "failed";
+        report.errors.push(`shutdown/cleanup: ${error.message}`);
+        process.exitCode = 1;
       }
     }
-  } finally {
+    report.finished_at = new Date().toISOString();
     await checkpoint();
     process.removeListener("SIGINT", interrupt);
     process.removeListener("SIGTERM", interrupt);
   }
-  if (failed || (phase === "finish" && report.status !== "success"))
-    process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)

@@ -351,7 +351,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         ...embedding.indexArguments,
         ...candidate.indexConcurrencyArguments,
         "--max-filesize",
-        String(group.maxFileSize ?? 1000000),
+        "1000000",
         "--iglob",
         group.indexGlob,
         "--debug",

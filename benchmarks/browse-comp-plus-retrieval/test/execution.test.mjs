@@ -162,15 +162,16 @@ test("concurrent checkpoints keep completed calls without declaring incomplete a
   const { cwd } = await fixture(t);
   const report = {
     status: "incomplete",
-    rust_commit: "a".repeat(40),
+    commit: "a".repeat(40),
+    mode: "query",
     harness_commit: "b".repeat(40),
     errors: [],
-    arms: { node: { rows: [], performance_groups: [] } },
+    arm: { rows: [], performance_groups: [] },
   };
-  const write = reportWriter(cwd, report, { prepared_ok: true });
+  const write = reportWriter(cwd, report);
   await Promise.all([write(), write(), write()]);
-  const saved = JSON.parse(await readFile(join(cwd, "summary.json")));
+  const saved = JSON.parse(await readFile(join(cwd, "report.json")));
   assert.equal(saved.status, "incomplete");
-  assert.equal(saved.arms.node.performance.index.total_ms.total, null);
+  assert.equal(saved.arm.performance.index.total_ms.total, null);
   assert.doesNotMatch(await readFile(join(cwd, "summary.md"), "utf8"), /✅/);
 });

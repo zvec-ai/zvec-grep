@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { readJson, fileHash } from "../zg-retrieval/core/io.mjs";
+import { join, resolve } from "node:path";
+import { writeFile, mkdir } from "node:fs/promises";
+import { parseArgs } from "node:util";
+import { pathToFileURL } from "node:url";
+import { readJson, fileHash, writeJson } from "../zg-retrieval/core/io.mjs";
 import {
   parseVisibleResponse,
   validateSearchRoute,
@@ -11,12 +14,6 @@ import { summarizePilotRows } from "../zg-retrieval/expansion/run.mjs";
 import { summarizePerformance } from "../zg-retrieval/reports/performance.mjs";
 
 export const MODES = ["hybrid", "fts", "vector"];
-
-export function relativeChange(node, rust) {
-  return Number.isFinite(node) && Number.isFinite(rust) && node !== 0
-    ? ((rust - node) / node) * 100
-    : null;
-}
 
 /** Reparse saved public responses and recompute quality/performance aggregates. */
 export async function auditArm(arm, dataset, directory) {
@@ -95,7 +92,9 @@ export async function auditArm(arm, dataset, directory) {
     assert.deepEqual(group.query[mode].latency_ms, statistics(expected));
     assert.equal(group.query[mode].failed_calls, 0);
   }
-  for (const stage of [group.index, ...Object.values(group.query)]) {
+  for (const stage of [group.index, ...Object.values(group.query)].filter(
+    Boolean,
+  )) {
     assert.equal(stage.status, "success");
     assert.equal(stage.concurrency, 4);
     assert.ok(Number.isFinite(stage.total_ms) && stage.total_ms > 0);
@@ -107,10 +106,17 @@ export async function auditArm(arm, dataset, directory) {
       statistics(stage.memory.samples.map((s) => s.rss_bytes)),
     );
   }
-  assert.ok(
-    Number.isSafeInteger(group.index.index_bytes) &&
-      group.index.index_bytes > 0,
-  );
+  if (group.index)
+    assert.ok(
+      Number.isSafeInteger(group.index.index_bytes) &&
+        group.index.index_bytes > 0,
+    );
+  else
+    assert.match(
+      arm.index_artifact?.key ?? "",
+      /^[a-f0-9]{64}$/,
+      "missing reusable index identity",
+    );
   return {
     calls: arm.rows.reduce((sum, row) => sum + row.calls.length, 0),
     quality: summarizePilotRows(arm.rows, MODES, dataset.tasks.length),
@@ -118,148 +124,300 @@ export async function auditArm(arm, dataset, directory) {
   };
 }
 
+export function relativeChange(base, head) {
+  return Number.isFinite(base) && Number.isFinite(head) && base !== 0
+    ? ((head - base) / base) * 100
+    : null;
+}
 const number = (value, divisor = 1) =>
   Number.isFinite(value) ? (value / divisor).toFixed(2) : "—";
-const percent = (a, b) => {
-  const change = relativeChange(a, b);
-  return change === null
-    ? "—"
-    : `${change >= 0 ? "+" : ""}${change.toFixed(1)}%`;
+const delta = (a, b) => {
+  const p = relativeChange(a, b);
+  return p === null ? "—" : `${p >= 0 ? "+" : ""}${p.toFixed(1)}%`;
 };
+const pair = (a, b, divisor = 1) =>
+  `${number(a, divisor)} → ${number(b, divisor)} (${delta(a, b)})`;
+
+/** Numeric-only projection shared by Summary and the privileged PR publisher. */
+export function validateComparison(report, request) {
+  assert.equal(report.schema_version, 1);
+  assert.equal(report.kind, "browsecomp-doc-comparison");
+  assert.equal(report.harness_commit, request.harness_commit);
+  assert.equal(
+    report.repository_url,
+    `https://github.com/${request.repository}`,
+  );
+  assert.equal(
+    report.run_url,
+    `https://github.com/${request.repository}/actions/runs/${request.run_id}`,
+  );
+  assert.equal(report.document_count, 100195);
+  assert.equal(
+    report.model_sha256,
+    "217e3074d135c2055eed9d3b3c43a3158a904460e4e6ca4b3d492a7ca4f93771",
+  );
+  for (const name of ["baseline", "candidate"]) {
+    const arm = report[name];
+    assert.equal(arm.commit, request[`${name}_sha`]);
+    assert.match(arm.commit, /^[a-f0-9]{40}$/);
+    assert.equal(arm.status, "success");
+    assert.equal(arm.calls, 150);
+    assert.match(arm.index_artifact.key, /^[a-f0-9]{64}$/);
+    assert.match(arm.index_artifact.builder_commit, /^[a-f0-9]{40}$/);
+    assert.ok(
+      Number.isSafeInteger(arm.index_artifact.artifact_id) &&
+        arm.index_artifact.artifact_id > 0,
+    );
+    assert.ok(
+      Number.isSafeInteger(arm.index_artifact.run_id) &&
+        arm.index_artifact.run_id > 0,
+    );
+    for (const mode of MODES) {
+      const stage = arm.performance.query[mode];
+      assert.equal(stage.latency_ms.count, 50);
+      assert.equal(stage.failed, 0);
+      assert.equal(stage.measured, 1);
+      assert.equal(stage.memory_measured, 1);
+      assert.deepEqual(stage.concurrency, [4]);
+      assert.ok(stage.memory_rss_bytes.count > 0);
+      for (const [stats, keys] of [
+        [stage.latency_ms, ["mean", "p50", "p95", "p99"]],
+        [stage.total_ms, ["total", "mean", "p95", "p99"]],
+        [stage.memory_rss_bytes, ["mean", "p95", "p99", "max"]],
+      ])
+        for (const key of keys)
+          assert.ok(Number.isFinite(stats[key]) && stats[key] >= 0);
+      const quality = arm.quality.find((row) => row.mode === mode);
+      assert.equal(quality.completed, 10);
+      for (const key of [
+        "file_hit_at_1",
+        "file_hit_at_5",
+        "file_hit_at_10",
+        "file_mrr_at_10",
+        "ndcg_at_10",
+      ]) {
+        const value = quality.metrics[key];
+        assert.ok(Number.isFinite(value) && value >= 0 && value <= 1);
+      }
+    }
+    const index = arm.historical_index.performance.index;
+    assert.equal(index.measured, 1);
+    assert.equal(index.failed, 0);
+    assert.equal(index.memory_measured, 1);
+    assert.deepEqual(index.concurrency, [4]);
+    for (const [stats, keys] of [
+      [index.total_ms, ["total", "mean", "p95", "p99"]],
+      [index.memory_rss_bytes, ["mean", "p95", "p99", "max", "count"]],
+      [index.index_bytes, ["total", "mean", "p95", "p99", "count"]],
+    ])
+      for (const key of keys)
+        assert.ok(Number.isFinite(stats[key]) && stats[key] > 0);
+    assert.ok(index.index_bytes.total > 0);
+  }
+  assert.equal(report.status, "success");
+  return report;
+}
 
 export function markdownReport(report) {
-  const node = report.arms.node,
-    rust = report.arms.rust;
+  const a = report.baseline,
+    b = report.candidate;
+  if (report.status !== "success" || !a || !b)
+    return "# BrowseComp+ Retrieval-only · failed / incomplete\n\nNo passing full-corpus comparison is available. Missing measurements are unavailable, never zero. See the run artifacts for partial evidence.\n";
+  const shared = a.index_artifact.key === b.index_artifact.key;
   const lines = [
-    "# BrowseComp-Plus Retrieval-only",
+    "# BrowseComp+ Retrieval-only",
     "",
-    `**${report.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}**`,
+    "**✅ Complete: PR base Rust → PR head Rust**",
     "",
-    `Node: official 0.2.2. Rust: \`${report.rust_commit}\`. Harness: \`${report.harness_commit}\`.`,
+    `Base: \`${a.commit}\`; head: \`${b.commit}\`; harness: \`${report.harness_commit}\`.`,
     "",
-    `${report.dataset?.tasks.length ?? 0} fixed original queries · ${report.dataset?.corpus.count ?? 0} complete corpus documents · hybrid / fts / vector · five calls per query/mode · concurrency limit 4. No answering agent, query rewriting or judge participates.`,
+    "100,195 documents · ten fixed original questions · hybrid / fts / vector · five calls per query/mode · 150 calls per version · CPU · concurrency limit 4.",
     "",
-    `Current phase: **${report.phase ?? "unavailable"}**. Evidence is saved after each completed call and phase; an incomplete report is never a passing comparison.`,
+    "## Index",
     "",
-    "| Runtime | Index status | Query status | Observed file progress | Index elapsed (min) |",
+    "Index data below are **historical Artifact-builder measurements**, not fresh Index timings from this Query run. Each index has one full-build observation; its mean/p95/p99 do not estimate run-to-run variation.",
+    "",
+    "| Version | Index Artifact | Builder SHA | Original build (s) | Index bytes |",
     "| --- | --- | --- | ---: | ---: |",
-    ...Object.entries(report.arms).map(([name, arm]) => {
-      const p = arm.index_progress;
-      return `| ${name} | ${arm.index_status ?? "unavailable"} | ${arm.query_status ?? "unavailable"} | ${Number.isInteger(p?.completed_files) ? `${p.completed_files}/${p.total_files}` : "—"} | ${number(p?.elapsed_ms, 60_000)} |`;
-    }),
+  ];
+  for (const [name, arm] of [
+    ["Base", a],
+    ["Head", b],
+  ]) {
+    const index = arm.historical_index.performance.index;
+    lines.push(
+      `| ${name} | [${arm.index_artifact.key.slice(0, 12)}](${report.repository_url}/actions/runs/${arm.index_artifact.run_id}/artifacts/${arm.index_artifact.artifact_id}) | \`${arm.index_artifact.builder_commit}\` | ${number(index.total_ms.total, 1000)} | ${number(index.index_bytes.total)} |`,
+    );
+  }
+  lines.push(
     "",
-    "## Document retrieval quality",
+    shared
+      ? "Both versions reuse the **same sealed full-corpus index**. Only a changed underlying storage identity requires a new index."
+      : "The underlying storage identities differ; each version uses its own compatible sealed full-corpus index.",
     "",
-    "Each cell is Node / Rust (relative change). Gold annotations map to one Markdown file per document. Native result ranks, including repeated document chunks, are preserved. These pilot metrics are not official BrowseComp answer accuracy or multi-hop evidence sufficiency.",
+    "<details><summary>Historical Index time, RSS, size and coverage</summary>",
+    "",
+    "| Metric | Base | Head |",
+    "| --- | ---: | ---: |",
+  );
+  for (const [label, field, keys, divisor] of [
+    ["Index time (s)", "total_ms", ["total", "mean", "p95", "p99"], 1000],
+    [
+      "Index RSS (MiB)",
+      "memory_rss_bytes",
+      ["mean", "p95", "p99", "max", "count"],
+      1024 ** 2,
+    ],
+    [
+      "Index size (MiB)",
+      "index_bytes",
+      ["total", "mean", "p95", "p99", "count"],
+      1024 ** 2,
+    ],
+  ])
+    for (const key of keys)
+      lines.push(
+        `| ${label} ${key} | ${number(a.historical_index.performance.index[field][key], key === "count" ? 1 : divisor)} | ${number(b.historical_index.performance.index[field][key], key === "count" ? 1 : divisor)} |`,
+      );
+  lines.push(
+    "",
+    "Builder hardware and all raw Index samples are retained with the Artifact. Builds from different machines or dates are not controlled speed comparisons.",
+    "",
+    "</details>",
+    "",
+    "## Query",
+    "",
+    "Cells are base → head (relative change). Δ = (head − base) / base × 100%; a zero denominator or missing value is —.",
+    "",
+    "| Mode | Mean RT (ms) | p95 RT (ms) | Group total (s) | Sampled peak RSS (MiB) |",
+    "| --- | ---: | ---: | ---: | ---: |",
+  );
+  for (const mode of MODES) {
+    const x = a.performance.query[mode],
+      y = b.performance.query[mode];
+    lines.push(
+      `| ${mode} | ${pair(x.latency_ms.mean, y.latency_ms.mean)} | ${pair(x.latency_ms.p95, y.latency_ms.p95)} | ${pair(x.total_ms.total, y.total_ms.total, 1000)} | ${pair(x.memory_rss_bytes.max, y.memory_rss_bytes.max, 1024 ** 2)} |`,
+    );
+  }
+  lines.push(
+    "",
+    "<details><summary>All Query percentiles, totals and sample coverage</summary>",
+    "",
+    "| Mode | Metric | Base → head (Δ) |",
+    "| --- | --- | ---: |",
+  );
+  for (const mode of MODES) {
+    const x = a.performance.query[mode],
+      y = b.performance.query[mode];
+    for (const [label, field, keys, divisor] of [
+      ["RT (ms)", "latency_ms", ["mean", "p50", "p95", "p99", "count"], 1],
+      ["Phase (s)", "total_ms", ["total", "mean", "p95", "p99", "count"], 1000],
+      [
+        "RSS (MiB)",
+        "memory_rss_bytes",
+        ["mean", "p95", "p99", "max", "count"],
+        1024 ** 2,
+      ],
+    ])
+      for (const key of keys)
+        lines.push(
+          `| ${mode} | ${label} ${key} | ${pair(x[field][key], y[field][key], key === "count" ? 1 : divisor)} |`,
+        );
+  }
+  lines.push(
+    "",
+    "</details>",
+    "",
+    "## Retrieval quality",
     "",
     "| Mode | Doc Hit@1 | Doc Hit@5 | Doc Hit@10 | MRR@10 | nDCG@10 |",
     "| --- | ---: | ---: | ---: | ---: | ---: |",
-  ];
-  const qualityNumber = (value) =>
-    Number.isFinite(value) ? value.toFixed(4) : "—";
-  const pair = (a, b) =>
-    `${qualityNumber(a)} / ${qualityNumber(b)} (${percent(a, b)})`;
+  );
   for (const mode of MODES) {
-    const a = node?.quality?.find((row) => row.mode === mode)?.metrics;
-    const b = rust?.quality?.find((row) => row.mode === mode)?.metrics;
+    const x = a.quality.find((row) => row.mode === mode).metrics,
+      y = b.quality.find((row) => row.mode === mode).metrics;
     lines.push(
-      `| ${mode} | ${["file_hit_at_1", "file_hit_at_5", "file_hit_at_10", "file_mrr_at_10", "ndcg_at_10"].map((key) => pair(a?.[key], b?.[key])).join(" | ")} |`,
+      `| ${mode} | ${["file_hit_at_1", "file_hit_at_5", "file_hit_at_10", "file_mrr_at_10", "ndcg_at_10"].map((key) => `${x[key].toFixed(4)} → ${y[key].toFixed(4)} (${delta(x[key], y[key])})`).join(" | ")} |`,
     );
   }
   lines.push(
     "",
-    "## Index & Query performance",
+    "Original gold/evidence and native chunk ranks are preserved. Scores measure document localization, not BrowseComp answer accuracy. Repeated calls are not independent questions.",
     "",
-    "Relative change = (Rust − Node) / Node × 100%. Negative means lower. Missing values and zero denominators are —.",
+    "Both Query versions execute sequentially on the same Linux host with identical model bytes. First-call/model/page-cache effects remain. RT excludes response parsing/capture; group totals include it. RSS sums product process trees and resident daemons at a 1000 ms target interval; shared pages may be counted twice and short peaks may be missed. No per-file write RT is invented.",
     "",
-    "| Stage | Metric | Unit | Node 0.2.2 | Rust | Relative change |",
-    "| --- | --- | --- | ---: | ---: | ---: |",
+    `[Run, Summary and raw evidence](${report.run_url})`,
   );
-  for (const mode of ["index", ...MODES]) {
-    const a =
-      mode === "index"
-        ? node?.performance?.index
-        : node?.performance?.query[mode];
-    const b =
-      mode === "index"
-        ? rust?.performance?.index
-        : rust?.performance?.query[mode];
-    const stage = mode === "index" ? "Index" : `Query ${mode}`;
-    const add = (metric, unit, left, right, divisor = 1) =>
-      lines.push(
-        `| ${stage} | ${metric} | ${unit} | ${number(left, divisor)} | ${number(right, divisor)} | ${percent(left, right)} |`,
-      );
-    for (const key of ["total", "mean", "p95", "p99"])
-      add(`phase time ${key}`, "s", a?.total_ms[key], b?.total_ms[key], 1000);
-    if (mode !== "index")
-      for (const key of ["mean", "p50", "p95", "p99"])
-        add(`request RT ${key}`, "ms", a?.latency_ms[key], b?.latency_ms[key]);
-    for (const key of ["mean", "p95", "p99", "max"])
-      add(
-        `sampled RSS ${key}`,
-        "MiB",
-        a?.memory_rss_bytes[key],
-        b?.memory_rss_bytes[key],
-        1024 ** 2,
-      );
-    if (mode === "index") {
-      add(
-        "generated index total bytes",
-        "bytes",
-        a?.index_bytes.total,
-        b?.index_bytes.total,
-      );
-      for (const key of ["total", "mean", "p95", "p99"])
-        add(
-          `generated index ${key}`,
-          "MiB",
-          a?.index_bytes[key],
-          b?.index_bytes[key],
-          1024 ** 2,
-        );
+  return lines.join("\n") + "\n";
+}
+
+export async function combine({ baseline, candidate, request, output }) {
+  const comparison = {
+    schema_version: 1,
+    kind: "browsecomp-doc-comparison",
+    status: "failed",
+    harness_commit: request.harness_commit,
+    document_count: 100195,
+    repository_url: `https://github.com/${request.repository}`,
+    run_url: `https://github.com/${request.repository}/actions/runs/${request.run_id}`,
+    errors: [],
+  };
+  try {
+    for (const [name, directory] of [
+      ["baseline", baseline],
+      ["candidate", candidate],
+    ]) {
+      const report = await readJson(join(directory, "report.json"));
+      assert.equal(report.status, "success");
+      assert.equal(report.commit, request[`${name}_sha`]);
+      assert.equal(report.harness_commit, request.harness_commit);
+      const audited = await auditArm(report.arm, report.dataset, directory);
+      assert.equal(audited.calls, 150);
+      assert.equal(report.document_count, 100195);
+      comparison[name] = {
+        commit: report.commit,
+        status: report.status,
+        package: report.package,
+        index_artifact: report.index_artifact,
+        historical_index: report.historical_index,
+        ...audited,
+      };
+      if (comparison.model_sha256)
+        assert.equal(comparison.model_sha256, report.model_artifacts.sha256);
+      comparison.model_sha256 = report.model_artifacts.sha256;
+      if (comparison.corpus_sha256)
+        assert.equal(comparison.corpus_sha256, report.corpus_sha256);
+      comparison.corpus_sha256 = report.corpus_sha256;
     }
+    comparison.status = "success";
+    validateComparison(comparison, request);
+  } catch (error) {
+    comparison.status = "failed";
+    comparison.errors.push(error.message);
+    process.exitCode = 1;
   }
-  lines.push(
-    "",
-    "## Coverage",
-    "",
-    "| Runtime | Calls | Index phases | Query phases per mode | RSS samples: index / hybrid / fts / vector |",
-    "| --- | ---: | ---: | ---: | --- |",
-  );
-  for (const [name, arm] of Object.entries(report.arms)) {
-    const p = arm.performance;
-    lines.push(
-      `| ${name} | ${arm.calls ?? 0}/150 | ${p?.index.measured ?? 0}/1 | ${MODES.map((m) => p?.query[m].measured ?? 0).join(" / ")} | ${[p?.index, ...MODES.map((m) => p?.query[m])].map((stage) => stage?.memory_rss_bytes.count ?? 0).join(" / ")} |`,
-    );
-  }
-  lines.push(
-    "",
-    "Each runtime builds one fresh complete corpus index, so Index and per-mode phase-time mean/p95/p99 each describe one observation. They do not estimate run-to-run variation. RT has 50 calls per mode. p50 is the median; p95/p99 use nearest rank over pooled raw samples.",
-    "",
-    "Model downloads are warmed separately before measurement. Index includes CLI startup, model loading and optimization. Query RT includes first-call/session/cache effects; group totals include capture. Both products run sequentially on the same dedicated host (identity checked between stages), with fixed hybrid → fts → vector order and a shared pinned model cache. Different hardware, previous CI runs and diagnostic subsets are not directly comparable. This is one observed paired run, without a controlled causal speed claim.",
-    "",
-    "RSS samples sum product process trees and resident daemons, excluding the driver; shared pages may be double-counted and the 1000 ms target sampling can miss spikes. Linux sampling reads /proc without spawning ps. Raw samples are appended as collected. Index bytes include regular .zvec-grep files after building, excluding model cache and symlinks. Index embedding batches and public queries have a limit of four; storage commits retain native scheduling. Per-file write RT is excluded.",
-  );
-  if (report.errors.length)
-    lines.push(
-      "",
-      "## Failures",
-      "",
-      ...report.errors.map(
-        (error) => `- ${String(error).replace(/[\r\n|]/g, " ")}`,
-      ),
-    );
-  if (report.run_url)
-    lines.push("", `[CI run and raw artifacts](${report.run_url})`);
-  if (Number.isSafeInteger(report.pr_number) && report.pr_number > 0)
-    lines.push(
-      "",
-      `[Associated PR #${report.pr_number}](https://github.com/zvec-ai/zvec-grep/pull/${report.pr_number})`,
-    );
-  if (report.environment)
-    lines.push(
-      "",
-      `Host: ${report.environment.platform}/${report.environment.arch}; ${report.environment.cpus} CPUs (${report.environment.cpu_model ?? "model unavailable"}); ${number(report.environment.total_memory_bytes, 1024 ** 3)} GiB RAM; identity \`${report.environment.host_identity_sha256 ?? "unavailable"}\`.`,
-    );
-  return `${lines.join("\n")}\n`;
+  await mkdir(output, { recursive: true });
+  await writeJson(join(output, "summary.json"), comparison);
+  await writeFile(join(output, "summary.md"), markdownReport(comparison));
+  return comparison;
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  const { values } = parseArgs({
+    options: Object.fromEntries(
+      ["baseline", "candidate", "request", "output"].map((key) => [
+        key,
+        { type: "string" },
+      ]),
+    ),
+  });
+  await combine({
+    baseline: resolve(values.baseline),
+    candidate: resolve(values.candidate),
+    request: await readJson(values.request),
+    output: resolve(values.output),
+  });
 }
