@@ -452,7 +452,18 @@ class RawCaseResumeTests(unittest.TestCase):
                 "evidence_docs": [],
                 "gold_docs": [],
             }
-            for case in ("628", "700", "966", "827", "241")
+            for case in (
+                "628",
+                "700",
+                "966",
+                "827",
+                "241",
+                "165",
+                "1068",
+                "244",
+                "843",
+                "563",
+            )
         ]
         query_path.write_text("".join(json.dumps(row) + "\n" for row in queries))
         metadata = read_json(restored / "run.json")

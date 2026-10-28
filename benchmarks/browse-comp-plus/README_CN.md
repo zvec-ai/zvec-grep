@@ -98,19 +98,27 @@ zg-bench run --suite smoke
 
 模型与请求参数在 `benchmark.toml` 中配置：开启思考，reasoning effort 为 `high`，请求温度 `0`、seed `42`，输出上限 20,000 Token，上下文上限 1,000,000 Token。`max_output_tokens` 作为每次模型响应的 `max_tokens` 发送；在 Qwen 上限制答案输出，不是整个多轮 trial 的思考或累计 Token 预算。服务端对参数的实际处理依模型而定。关闭自动压缩与子代理委派，确保 trial 用量属于所记录的会话。
 
-当前配置为 `trials_per_case = 1`、`infrastructure_retries = 0`：每题一组 baseline/zvec-grep 配对，harness 不自动重试基础设施失败。因此 `iteration` 共 2 组配对、4 次 Agent 运行，`smoke` 共 1 组配对、2 次 Agent 运行，`ci` 共 5 组配对、10 次 Agent 运行。这组迭代参数与上文历史 study 的每题 3 次试验不同。
+当前配置为 `trials_per_case = 1`、`infrastructure_retries = 0`：每题一组 baseline/zvec-grep 配对，harness 不自动重试基础设施失败。因此 `iteration` 共 2 组配对、4 次 Agent 运行，`smoke` 共 1 组配对、2 次 Agent 运行，`ci` 共 10 组配对、20 次 Agent 运行及 20 次判分。这组迭代参数与上文历史 study 的每题 3 次试验不同。
 
-先使用固定的 628、241 两题迭代 CI；两组配对、4 次判分与原始证据汇总完整成功后，再跑 5 题 CI 集合：
+修改基础设施时先使用固定的 628、241 两题；两组配对、4 次判分与原始证据汇总完整成功后，再使用日常 10 题 CI 集合：
 
 ```sh
 zg-bench run --suite iteration
 ```
 
-运行固定随机选取的 5 个问题组成的 CI 子集：
+运行固定 10 题的日常 CI 子集：
 
 ```sh
 zg-bench run --suite ci
 ```
+
+[选题依据](./suites/CI_SELECTION.md)与[审计元数据](./suites/ci-selection.json)记录了固定种子、
+排序哈希、逐题检索链和标注证据文件。沿用原排序的前 10 题，保留原有 5 题，
+不按得分、zg 使用率、tokens 或耗时换题。10 题共覆盖 56 份不同的标注证据文档，
+每题 2–7 份，包含跨作品人员关系、跨年代核对、同名消歧、论文引用对齐及跨领域实体检索。
+文档数量不等于最低必读文件数或推理跳数。这是跨文档、跨主题检索，不是代码库跨模块导航。
+GitHub Actions 日常回归选择 `suite=ci`、`parallel_cases=5`；10 题共用一份准备和索引。
+下文已完成实测仍是此前五题集合，尚无十题真实 E2E 结果。
 
 运行固定的 Study 子集：
 
@@ -169,7 +177,7 @@ zg-bench clean
    选择可信的 workflow 分支，将 `candidate_ref` 设为本仓库待评测的可信分支、tag 或 commit。
 3. 先选择默认的 `iteration`（固定 628、241 两题，共 4 次 Agent 答题、4 次判分）。
    两组配对、全部判分和原始证据汇总完整成功后，再使用较大的集合；小样本只验证 CI，不能代表整体质量。
-   另保留 `ci`（5 题、10 次 Agent 运行）和 `smoke`
+   另保留 `ci`（10 题、20 次 Agent 运行、20 次判分）和 `smoke`
    （1 题、1 次配对试验，共 2 次 Agent 运行，另含工具使用审计）。
    `parallel_cases` 可选 1、2（默认）、5，按服务端限流调整。
 
@@ -226,13 +234,13 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 准备与执行合并后的 job 限时 6 小时；与 SWE-QA Bench 一致，concurrency 按 run ID 和 attempt
 独立，不同手动运行不会互相阻塞或取消。runner 会释放 SDK 空间，并检查至少 50 GiB
 可用磁盘。runtime 快照使用 artifact，与仓库的 10 GB Actions cache 配额分开；仅源数据和
-候选包进入 Actions cache。命中 runtime 快照时只下载原产物一次，不重复上传。五题总下载量从五份 57.35 GiB
-降至一份 11.47 GiB；减少 80% 传输量不代表整体耗时减少 80%。每轮仍需一次下载、
+候选包进入 Actions cache。命中 runtime 快照时只下载原产物一次，不重复上传。十题总下载量从十份 114.70 GiB
+降至一份 11.47 GiB；减少 90% 传输量不代表整体耗时减少 90%。每轮仍需一次下载、
 解压和 baseline 复制；普通托管 runner 不会跨 workflow 保留已恢复文件。
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
 **单 job CI 实测（2026-10-27）：** 先完成[两题 iteration](https://github.com/zvec-ai/zvec-grep/actions/runs/40539457579)，
-再通过[现有五题 CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366)，
+再通过[当时的五题 CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366)，
 两轮均使用 harness `0bb4e773`、candidate `4e557cd9`。五题共完成 10 份答案和 10 份评审；
 下载后的每题与汇总 checksum、selected/attempt 结果字节、评审输入哈希和完整性检查均通过。
 每个 trial 仅有 `attempt-001`，无失败或未完成的 Agent 尝试，无未知 Agent/评审用量，

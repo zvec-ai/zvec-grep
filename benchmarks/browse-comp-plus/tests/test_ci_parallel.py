@@ -61,7 +61,19 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                     }
                 )
                 + "\n"
-                for case in ("628", "700", "966", "827", "241", "770")
+                for case in (
+                    "628",
+                    "700",
+                    "966",
+                    "827",
+                    "241",
+                    "165",
+                    "1068",
+                    "244",
+                    "843",
+                    "563",
+                    "770",
+                )
             )
         )
         # An aggregation must never start OpenCode or any other child process.
@@ -271,7 +283,10 @@ class ParallelCIIntegrationTests(unittest.TestCase):
     def test_ci_plan_preserves_global_balancing_and_case_selection(self):
         plan = self.plan()
         self.assertEqual(validate_plan(self.plan_path, self.artifacts), plan)
-        self.assertEqual(plan["query_ids"], ["628", "700", "966", "827", "241"])
+        self.assertEqual(
+            plan["query_ids"],
+            ["628", "700", "966", "827", "241", "165", "1068", "244", "843", "563"],
+        )
         selection = load_suite("ci", load_queries(self.queries))
         for case in plan["query_ids"]:
             selected = select_case(selection, case)
@@ -285,7 +300,7 @@ class ParallelCIIntegrationTests(unittest.TestCase):
                 plan["profile_orders"][case][trial][0] == "baseline"
                 for case in plan["query_ids"]
             )
-            self.assertIn(baseline_first, (2, 3))
+            self.assertEqual(baseline_first, 5)
         with self.assertRaises(ValueError):
             select_case(selection, "770")
 
@@ -368,22 +383,22 @@ class ParallelCIIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["profile_orders"], plan["profile_orders"])
         self.assertEqual(
             summary["trials"],
-            {"per_case": 1, "planned": 5, "persisted": 5, "completed": 5},
+            {"per_case": 1, "planned": 10, "persisted": 10, "completed": 10},
         )
-        self.assertEqual(summary["cases"]["completed"], 5)
+        self.assertEqual(summary["cases"]["completed"], 10)
         self.assertEqual(
-            summary["profiles"]["baseline"]["tokens"]["input"]["total"], 500
+            summary["profiles"]["baseline"]["tokens"]["input"]["total"], 1000
         )
         self.assertEqual(
             summary["profiles"]["baseline"]["tokens"]["input"]["mean"], 100
         )
         self.assertEqual(
-            summary["tool_interaction_batches"]["baseline"]["batches"]["total"], 5
+            summary["tool_interaction_batches"]["baseline"]["batches"]["total"], 10
         )
-        self.assertEqual(summary["runtime_preparation"]["sessions"], 5)
-        self.assertEqual(evaluation["expected_answers"], 10)
-        self.assertEqual(evaluation["evaluated_answers"], 10)
-        self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 100)
+        self.assertEqual(summary["runtime_preparation"]["sessions"], 10)
+        self.assertEqual(evaluation["expected_answers"], 20)
+        self.assertEqual(evaluation["evaluated_answers"], 20)
+        self.assertEqual(evaluation["cost"]["total"]["input_tokens"], 200)
         self.assertEqual(evaluation["zvec_grep_usage"]["expected_trials"], 0)
 
     def test_single_flat_artifact_aggregates_complete_smoke_without_model_calls(self):
@@ -603,8 +618,13 @@ class RestoreQueriesTests(unittest.TestCase):
                 "966",
                 "827",
                 "241",
+                "165",
+                "1068",
+                "244",
+                "843",
+                "563",
                 "770",
-                *(str(number) for number in range(10000, 10824)),
+                *(str(number) for number in range(10000, 10819)),
             ]
         ]
         self.assertEqual(len(self.rows), load_config().dataset.expected_queries)

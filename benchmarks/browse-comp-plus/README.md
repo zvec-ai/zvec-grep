@@ -164,7 +164,7 @@ The current configuration uses `trials_per_case = 1` and
 `infrastructure_retries = 0`: one baseline/zvec-grep pair per query, with no
 automatic infrastructure-failure retries by the harness. Thus `iteration` runs
 two pairs / four agent runs, `smoke` runs one pair / two agent runs, and `ci`
-runs five pairs / ten agent runs. These iteration
+runs ten pairs / twenty agent runs and twenty judgements. These iteration
 settings differ from the historical three-trial study above.
 
 Stabilize the workflow on the fixed `628` and `241` cases first:
@@ -177,11 +177,20 @@ This small set validates CI execution, not benchmark quality. Require both
 paired answers, all four judgements, and successful raw-evidence aggregation
 before moving to a larger suite.
 
-Run the fixed random 5-query CI subset:
+Run the fixed ten-query CI subset:
 
 ```sh
 zg-bench run --suite ci
 ```
+
+The [selection rationale](./suites/CI_SELECTION.md) and
+[audit metadata](./suites/ci-selection.json) document the fixed seed/ranking,
+per-case retrieval chains, and annotated evidence files. The suite extends the
+original five cases to the first ten under the same ranking, without selecting
+by score, zg adoption, tokens, or runtime. These tasks cover cross-document and
+cross-subject retrieval, not code-module navigation. For GitHub Actions daily
+regression runs, choose `suite=ci` and `parallel_cases=5`; all ten cases share one
+preparation and index. Ten-case real E2E results have not yet been collected.
 
 Run the fixed study subset:
 
@@ -246,7 +255,7 @@ run on pushes, PRs, comments, or a schedule.
    and set `candidate_ref` to the trusted branch, tag, or commit to benchmark
    in this repository.
 3. Choose `iteration` (default: 2 fixed cases / 4 agent runs / 4 judgements),
-   `ci` (5 cases / 10 agent runs), or `smoke`
+   `ci` (10 cases / 20 agent runs / 20 judgements), or `smoke`
    (1 case, 1 paired trial / 2 agent runs, plus the usage audit). Set
    `parallel_cases` to 1, 2 (default), or 5 for concurrent isolated case processes within one job.
 
@@ -322,14 +331,14 @@ one another. Each hosted runner frees SDK space and requires 50 GiB free.
 Runtime snapshots use artifact storage independently of the repository's 10 GB
 Actions cache limit; only source data and candidate packages use Actions cache.
 A matching runtime artifact is downloaded once without uploading another copy.
-The five-case suite transfers 11.47 GiB instead of five copies (57.35 GiB);
-this 80% transfer reduction is not a measured 80% workflow speedup. Download,
+The ten-case suite transfers 11.47 GiB instead of ten copies (114.70 GiB);
+this 90% transfer reduction is not a measured 90% workflow speedup. Download,
 unpack, and baseline-copy costs still occur once per run; hosted runners do not
 persist the restored files across workflow runs.
 Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
 **Measured shared-job CI (2026-10-27):** the [two-case iteration](https://github.com/zvec-ai/zvec-grep/actions/runs/40539457579)
-passed before the [existing five-case CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366),
+passed before the [then-five-case CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366),
 both on harness `0bb4e773` and candidate `4e557cd9`. The five-case run completed
 10 answers and 10 judgements. Downloaded case and aggregate checksum manifests,
 selected/attempt result bytes, judge input hashes, and completeness checks passed;
