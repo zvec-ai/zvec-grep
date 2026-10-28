@@ -1124,7 +1124,7 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
 }
 
 #[tokio::test]
-async fn unavailable_ignore_files_do_not_block_existing_index_queries() -> TestResult {
+async fn missing_ignore_files_are_skipped_and_restored_rules_apply() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path().join("source");
     fs::create_dir(&root)?;
@@ -1149,7 +1149,7 @@ async fn unavailable_ignore_files_do_not_block_existing_index_queries() -> TestR
         .await?;
     let manifest_path = root.join(".zvec-grep/manifest.json");
     let before = fs::read(&manifest_path)?;
-    fs::remove_file(ignored)?;
+    fs::remove_file(&ignored)?;
 
     assert!(
         engine
@@ -1172,12 +1172,18 @@ async fn unavailable_ignore_files_do_not_block_existing_index_queries() -> TestR
         })
         .await?;
     assert_eq!(results.items.len(), 1);
-    let error = engine
-        .index(index_options(&root))
-        .await
-        .expect_err("scanning requires its ignore file");
-    assert!(error.message().contains("ignore file"));
     assert_eq!(fs::read(&manifest_path)?, before);
+
+    let unchanged = engine.index(index_options(&root)).await?;
+    assert_eq!(unchanged.files_unchanged, 1);
+    let saved: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    let original: Value = serde_json::from_slice(&before)?;
+    assert_eq!(saved["scan"], original["scan"]);
+
+    fs::write(&ignored, "note.txt\n")?;
+    let restored = engine.index(index_options(&root)).await?;
+    assert_eq!(restored.files_deleted, 1);
+    assert!(fts_paths(&engine, &root, "orchard").await?.is_empty());
 
     engine
         .index(IndexOptions {
@@ -1188,6 +1194,10 @@ async fn unavailable_ignore_files_do_not_block_existing_index_queries() -> TestR
             ..index_options(&root)
         })
         .await?;
+    assert_eq!(
+        fts_paths(&engine, &root, "orchard").await?,
+        [PathBuf::from("note.txt")]
+    );
     engine.close();
     Ok(())
 }
