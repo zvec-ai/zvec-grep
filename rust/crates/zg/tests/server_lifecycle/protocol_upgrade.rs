@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "migration_safety.rs"]
+mod migration_safety;
+
 fn instance_record(home: &Path) -> Result<serde_json::Value, Box<dyn Error>> {
     Ok(serde_json::from_slice(&std::fs::read(
         home.join("daemon").join("instance.lock"),

@@ -179,8 +179,13 @@ live legacy daemons without this field, including Node.js daemons; `auto` mode
 does not silently fall back to direct execution. Run `zg --server on` with the
 same home and any required token file to stop the legacy daemon and start Rust.
 The stdio bootstrap performs the same replacement automatically. Concurrent
-starts serialize shutdown and startup, and an HTTP shutdown rejection preserves
-the old process. Other protocol versions are rejected without replacement;
+starts serialize shutdown and startup. Automatic migration only requests graceful
+shutdown: an unreachable endpoint, HTTP rejection, or exit timeout preserves the
+process instead of sending termination signals. OS process start times are checked
+against the instance record to reject reused PIDs. When changing listening addresses,
+the target is checked before stopping the old service. Legacy `localhost` endpoints
+are probed on both IPv4 and IPv6; ambiguous healthy endpoints block migration.
+Other protocol versions are rejected without replacement;
 use a compatible client or explicitly stop that daemon first. Index format
 compatibility remains separate and may require `zg --index --rebuild`.
 

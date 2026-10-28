@@ -142,6 +142,12 @@ pub enum DaemonError {
     RefuseCurrentProcess,
     #[error("zvec-grep server instance changed while stopping; refusing to signal PID {pid}")]
     InstanceChanged { pid: u32 },
+    #[error(
+        "cannot verify daemon process identity for PID {pid}: the OS start time does not match the instance record; refusing to stop the process"
+    )]
+    ProcessIdentityMismatch { pid: u32 },
+    #[error("cannot identify a unique healthy daemon at {address}; no shutdown request was sent")]
+    UnverifiedEndpoint { address: String },
     #[error("invalid daemon instance record at {0}")]
     InvalidRecord(PathBuf),
     #[error(

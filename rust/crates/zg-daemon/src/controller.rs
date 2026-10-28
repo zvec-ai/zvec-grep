@@ -32,6 +32,51 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
 const DAEMON_PROTOCOL_VERSION: u32 = 1;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StopMode {
+    Graceful,
+    Terminate,
+}
+
+struct DaemonProcess {
+    pid: u32,
+    started_at: u64,
+}
+
+impl DaemonProcess {
+    fn from_record(record: &DaemonInstanceRecord) -> Result<Option<Self>, DaemonError> {
+        let Some(started_at) = with_process(record.pid, sysinfo::Process::start_time) else {
+            return Ok(None);
+        };
+        // The record timestamps lock acquisition, after process creation. A
+        // newer OS start time proves PID reuse; zero means identity is unknown.
+        // Second-resolution times alone cannot prove ownership, so automatic
+        // migration never falls back to process signals, even after this check.
+        if started_at == 0 || started_at > record.started_at / 1_000 {
+            return Err(DaemonError::ProcessIdentityMismatch { pid: record.pid });
+        }
+        Ok(Some(Self {
+            pid: record.pid,
+            started_at,
+        }))
+    }
+
+    fn is_alive(&self) -> bool {
+        with_process(self.pid, sysinfo::Process::start_time) == Some(self.started_at)
+    }
+
+    fn signal(&self, signal: Signal) -> Result<(), DaemonError> {
+        with_process(self.pid, |process| {
+            if process.start_time() != self.started_at {
+                return Err(DaemonError::ProcessIdentityMismatch { pid: self.pid });
+            }
+            process.kill_with(signal).unwrap_or_else(|| process.kill());
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DaemonInstanceRecord {
@@ -379,11 +424,17 @@ async fn start_server_with_lock(
     if let Some(record) = read_running_instance(&config.home).await?
         && record.daemon_protocol_version.is_none()
     {
+        // A different target can be checked while the legacy service is still
+        // available. Its own listening address must be released before binding.
+        if record_address(&record, &config.home).await? != config.listen {
+            assert_address_available(&config.listen).await?;
+        }
         stop_recorded_server(
             &config.home,
             &record,
             crate::default_stop_timeout(),
             token.as_deref(),
+            StopMode::Graceful,
         )
         .await?;
     }
@@ -428,7 +479,8 @@ async fn start_server_with_lock(
 }
 
 /// Requests graceful shutdown using an explicitly selected token file and falls
-/// back to verified process termination.
+/// back to verified process termination. Automatic migration uses graceful
+/// shutdown only and never sends process signals.
 ///
 /// # Errors
 ///
@@ -446,7 +498,14 @@ pub async fn stop_server_with_token(
         remove_record_if_same(home, &record).await?;
         return Ok(DaemonStatus::default());
     }
-    stop_recorded_server(home, &record, timeout, token.as_deref()).await
+    stop_recorded_server(
+        home,
+        &record,
+        timeout,
+        token.as_deref(),
+        StopMode::Terminate,
+    )
+    .await
 }
 
 async fn stop_recorded_server(
@@ -454,35 +513,44 @@ async fn stop_recorded_server(
     record: &DaemonInstanceRecord,
     timeout: Duration,
     token: Option<&str>,
+    mode: StopMode,
 ) -> Result<DaemonStatus, DaemonError> {
     if record.pid == std::process::id() {
         return Err(DaemonError::RefuseCurrentProcess);
     }
+    let Some(process) = DaemonProcess::from_record(record)? else {
+        remove_record_if_same(home, record).await?;
+        return Ok(DaemonStatus::default());
+    };
 
     assert_same_instance(home, record, false).await?;
-    let address = record_address(record, home)?;
+    let address = record_address(record, home).await?;
     let accepted =
         match http_request(&address, "POST", "/control/shutdown", HTTP_TIMEOUT, token).await {
             Ok(202) => true,
             // An HTTP rejection, including failed authentication, must not be
             // bypassed by falling back to process signals.
             Ok(status) => return Err(DaemonError::ShutdownRejected { status }),
+            Err(error) if mode == StopMode::Graceful => return Err(error),
             Err(_) => false,
         };
-    if accepted && wait_for_exit(record.pid, timeout).await {
+    if accepted && wait_for_exit(&process, timeout).await {
         remove_record_if_same(home, record).await?;
         return Ok(DaemonStatus::default());
     }
+    if mode == StopMode::Graceful {
+        return Err(DaemonError::Timeout { action: "stop" });
+    }
 
     assert_same_instance(home, record, accepted).await?;
-    signal_process(record.pid, Signal::Term);
-    if wait_for_exit(record.pid, SIGNAL_GRACE.min(timeout)).await {
+    process.signal(Signal::Term)?;
+    if wait_for_exit(&process, SIGNAL_GRACE.min(timeout)).await {
         remove_record_if_same(home, record).await?;
         return Ok(DaemonStatus::default());
     }
     assert_same_instance(home, record, true).await?;
-    force_kill_process(record.pid);
-    if !wait_for_exit(record.pid, SIGNAL_GRACE).await {
+    process.signal(Signal::Kill)?;
+    if !wait_for_exit(&process, SIGNAL_GRACE).await {
         return Err(DaemonError::Timeout { action: "stop" });
     }
     remove_record_if_same(home, record).await?;
@@ -510,7 +578,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
         }
         None => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
     }
-    let address = record_address(&record, home)?;
+    let address = record_address(&record, home).await?;
     let healthy = http_request(&address, "GET", "/healthz", Duration::from_secs(1), None)
         .await
         .is_ok_and(|status| status == 200);
@@ -662,10 +730,10 @@ async fn http_request(
     .map_err(Into::into)
 }
 
-async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+async fn wait_for_exit(process: &DaemonProcess, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if !process_is_alive(pid) {
+        if !process.is_alive() {
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -723,16 +791,6 @@ fn record_owner_alive(host: &str, pid: u32, token: Uuid) -> bool {
     process_is_alive(pid)
 }
 
-fn signal_process(pid: u32, signal: Signal) {
-    let _ = with_process(pid, |process| {
-        process.kill_with(signal).unwrap_or_else(|| process.kill())
-    });
-}
-
-fn force_kill_process(pid: u32) {
-    let _ = with_process(pid, sysinfo::Process::kill);
-}
-
 async fn assert_same_instance(
     home: &Path,
     expected: &DaemonInstanceRecord,
@@ -765,7 +823,7 @@ fn same_instance(current: Option<&DaemonInstanceRecord>, expected: &DaemonInstan
     })
 }
 
-fn record_address(
+async fn record_address(
     record: &DaemonInstanceRecord,
     home: &Path,
 ) -> Result<ListenAddress, DaemonError> {
@@ -778,9 +836,34 @@ fn record_address(
     } else {
         &record.listen
     };
-    value
-        .parse()
-        .map_err(|_| DaemonError::InvalidRecord(instance_path(home)))
+    let address = value
+        .parse::<ListenAddress>()
+        .map_err(|_| DaemonError::InvalidRecord(instance_path(home)))?;
+    if !value
+        .split_once(':')
+        .is_some_and(|(host, _)| host.eq_ignore_ascii_case("localhost"))
+    {
+        return Ok(address);
+    }
+
+    // Node.js records the requested hostname, which may resolve to IPv6 even
+    // though Rust's listen configuration defaults localhost to IPv4. Probe both
+    // loopback families without credentials or side effects. Never send shutdown
+    // to an arbitrary first responder when both endpoints appear healthy.
+    let ipv6 = format!("[::1]:{}", address.socket_addr().port()).parse::<ListenAddress>()?;
+    let healthy = async |candidate: &ListenAddress| {
+        http_request(candidate, "GET", "/healthz", HTTP_TIMEOUT, None)
+            .await
+            .is_ok_and(|status| status == 200)
+    };
+    let (ipv4_healthy, ipv6_healthy) = tokio::join!(healthy(&address), healthy(&ipv6));
+    match (ipv4_healthy, ipv6_healthy) {
+        (true, false) => Ok(address),
+        (false, true) => Ok(ipv6),
+        _ => Err(DaemonError::UnverifiedEndpoint {
+            address: value.to_owned(),
+        }),
+    }
 }
 
 fn legacy_full_toolset() -> String {
