@@ -120,8 +120,8 @@ Published target/backend support is:
 | --- | --- | --- |
 | macOS ARM64 | CPU + Metal | CPU (CoreML deliberately not selected) |
 | macOS x64 (14+) | CPU + Metal where available | CPU (CoreML deliberately not selected) |
-| Linux x64 glibc (Ubuntu 24.04 baseline) | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
-| Linux ARM64 glibc | CPU | CPU |
+| Linux x64 glibc (Ubuntu 20.04 / glibc 2.31 baseline) | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
+| Linux ARM64 glibc (Ubuntu 20.04 / glibc 2.31 baseline) | CPU | CPU |
 | Windows x64 | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
 | Windows ARM64 | CPU | CPU + DirectML |
 
