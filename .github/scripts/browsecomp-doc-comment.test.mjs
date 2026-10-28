@@ -207,28 +207,36 @@ test("percentiles and identities are validated before rendering untrusted report
 });
 
 test("successful Index receipts survive a failed Query in the durable result comment", async (t) => {
-  const x = await fixture(t);
-  await prepareDoc(x);
-  x.env.BCP_REQUEST = JSON.stringify(x.outputs);
-  x.env.BCP_JOB_RESULTS = JSON.stringify({ query: { result: "failure" } });
-  const key = "d".repeat(64);
-  x.env.BCP_INDEX_PLAN = JSON.stringify({ include: [{ key }] });
-  x.env.BCP_INDEX_DIRECTORY = join(x.directory, "receipts");
-  const directory = join(
-    x.env.BCP_INDEX_DIRECTORY,
-    `browsecomp-doc-index-ref-${key}`,
-  );
-  await mkdir(directory, { recursive: true });
-  await writeFile(
-    join(directory, "receipt.json"),
-    JSON.stringify({
-      key,
-      name: `browsecomp-doc-index-${key}`,
-      artifact_id: 10,
-      run_id: 100,
-    }),
-  );
-  await finishDoc(x);
-  assert.match(x.comments[0].body, new RegExp(`doc-index:${key}:100:10`));
-  assert.doesNotMatch(x.comments[0].body, /✅/);
+  for (const flat of [true, false]) {
+    await t.test(
+      flat ? "v8 flattened single receipt" : "named receipt directory",
+      async (t) => {
+        const x = await fixture(t);
+        await prepareDoc(x);
+        x.env.BCP_REQUEST = JSON.stringify(x.outputs);
+        x.env.BCP_JOB_RESULTS = JSON.stringify({
+          query: { result: "failure" },
+        });
+        const key = "d".repeat(64);
+        x.env.BCP_INDEX_PLAN = JSON.stringify({ include: [{ key }] });
+        x.env.BCP_INDEX_DIRECTORY = join(x.directory, "receipts");
+        const directory = flat
+          ? x.env.BCP_INDEX_DIRECTORY
+          : join(x.env.BCP_INDEX_DIRECTORY, `browsecomp-doc-index-ref-${key}`);
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          join(directory, "receipt.json"),
+          JSON.stringify({
+            key,
+            name: `browsecomp-doc-index-${key}`,
+            artifact_id: 10,
+            run_id: 100,
+          }),
+        );
+        await finishDoc(x);
+        assert.match(x.comments[0].body, new RegExp(`doc-index:${key}:100:10`));
+        assert.doesNotMatch(x.comments[0].body, /✅/);
+      },
+    );
+  }
 });

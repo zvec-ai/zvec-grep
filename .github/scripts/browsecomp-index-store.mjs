@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   INDEX_PREFIX,
@@ -132,20 +132,48 @@ export async function receipt({ directory, key, artifactId, runId, output }) {
   return value;
 }
 
+// download-artifact v8 flattens a pattern matching only one Artifact, even
+// when merge-multiple is false. Multiple matches retain named directories.
+export async function readIndexReceipts(directory, { missingOk = false } = {}) {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(
+    (error) => {
+      if (missingOk && error.code === "ENOENT") return [];
+      throw error;
+    },
+  );
+  const flat = entries.some((entry) => entry.name === "receipt.json");
+  assert.ok(!flat || entries.length === 1, "ambiguous index receipt layout");
+  const receipts = new Map();
+  for (const entry of entries) {
+    assert.ok(flat ? entry.isFile() : entry.isDirectory());
+    const path = flat
+      ? join(directory, "receipt.json")
+      : join(directory, entry.name, "receipt.json");
+    const info = await lstat(path);
+    assert.ok(info.isFile() && info.size < 65536, "invalid index receipt file");
+    const value = await readJson(path);
+    assert.match(value.key, keyPattern);
+    assert.equal(value.name, `${INDEX_PREFIX}${value.key}`);
+    if (!flat)
+      assert.equal(entry.name, `browsecomp-doc-index-ref-${value.key}`);
+    for (const field of ["artifact_id", "run_id"])
+      assert.ok(Number.isSafeInteger(value[field]) && value[field] > 0);
+    assert.ok(!receipts.has(value.key), "duplicate index receipt");
+    receipts.set(value.key, value);
+  }
+  return receipts;
+}
+
 export async function select({ packages, receipts, output, core }) {
+  const available = await readIndexReceipts(receipts);
   await mkdir(output, { recursive: true });
   for (const arm of ["baseline", "candidate"]) {
     const identity = await readJson(
       join(packages, `browsecomp-doc-package-${arm}`, "identity.json"),
     );
     assert.match(identity.key, keyPattern);
-    const value = await readJson(
-      join(
-        receipts,
-        `browsecomp-doc-index-ref-${identity.key}`,
-        "receipt.json",
-      ),
-    );
+    const value = available.get(identity.key);
+    assert.ok(value, "missing receipt for the requested storage identity");
     assert.equal(value.key, identity.key);
     assert.equal(value.name, `${INDEX_PREFIX}${identity.key}`);
     positive(value.artifact_id);

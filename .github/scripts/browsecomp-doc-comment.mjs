@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { authorize } from "./bench-comment.mjs";
+import { readIndexReceipts } from "./browsecomp-index-store.mjs";
 import {
   markdownReport,
   validateComparison,
@@ -150,22 +151,11 @@ export async function finishDoc({ github, context, env }) {
     if (env.BCP_INDEX_DIRECTORY) {
       const plan = JSON.parse(env.BCP_INDEX_PLAN);
       const allowed = new Set(plan.include.map((row) => row.key));
-      const directories = await readdir(env.BCP_INDEX_DIRECTORY).catch(
-        (error) => {
-          if (error.code === "ENOENT") return [];
-          throw error;
-        },
-      );
-      for (const directory of directories) {
-        const path = join(env.BCP_INDEX_DIRECTORY, directory, "receipt.json");
-        assert.ok((await stat(path)).size < 65536);
-        const receipt = JSON.parse(await readFile(path, "utf8"));
-        assert.match(receipt.key, /^[a-f0-9]{64}$/);
+      const receipts = await readIndexReceipts(env.BCP_INDEX_DIRECTORY, {
+        missingOk: true,
+      });
+      for (const receipt of receipts.values()) {
         assert.ok(allowed.has(receipt.key));
-        assert.equal(receipt.name, `browsecomp-doc-index-${receipt.key}`);
-        assert.equal(directory, `browsecomp-doc-index-ref-${receipt.key}`);
-        for (const key of ["artifact_id", "run_id"])
-          assert.ok(Number.isSafeInteger(receipt[key]) && receipt[key] > 0);
         catalog.push(
           `<!-- zg-retrieval-bench:doc-index:${receipt.key}:${receipt.run_id}:${receipt.artifact_id} -->`,
         );

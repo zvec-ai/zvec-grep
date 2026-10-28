@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { findIndex } from "./browsecomp-index-store.mjs";
+import {
+  findIndex,
+  readIndexReceipts,
+  select,
+} from "./browsecomp-index-store.mjs";
 
 const key = "a".repeat(64),
   now = Date.parse("2026-10-28T00:00:00Z");
@@ -91,4 +98,81 @@ test("near-expiry Artifacts renew identical bytes; expiration or API failure nev
     throw new Error("API unavailable");
   };
   await assert.rejects(findIndex(x), /API unavailable/);
+});
+
+test("v8 flattened single receipts and nested multiple receipts select the exact requested Artifacts", async (t) => {
+  for (const shared of [true, false]) {
+    await t.test(
+      shared ? "single flattened Artifact" : "two named Artifacts",
+      async (t) => {
+        const directory = await mkdtemp(join(tmpdir(), "browsecomp-receipts-"));
+        t.after(() => rm(directory, { recursive: true, force: true }));
+        const packages = join(directory, "packages"),
+          receipts = join(directory, "receipts"),
+          output = join(directory, "selected");
+        const outputs = {};
+        for (const [index, arm] of ["baseline", "candidate"].entries()) {
+          const armKey = shared || index === 0 ? key : "b".repeat(64);
+          const pkg = join(packages, `browsecomp-doc-package-${arm}`);
+          await mkdir(pkg, { recursive: true });
+          await writeFile(
+            join(pkg, "identity.json"),
+            JSON.stringify({ key: armKey }),
+          );
+          if (shared && index === 1) continue;
+          const target = shared
+            ? receipts
+            : join(receipts, `browsecomp-doc-index-ref-${armKey}`);
+          await mkdir(target, { recursive: true });
+          await writeFile(
+            join(target, "receipt.json"),
+            JSON.stringify({
+              key: armKey,
+              name: `browsecomp-doc-index-${armKey}`,
+              artifact_id: 12 + index,
+              run_id: 123,
+            }),
+          );
+        }
+        await select({
+          packages,
+          receipts,
+          output,
+          core: { setOutput: (k, v) => (outputs[k] = v) },
+        });
+        assert.equal(outputs.baseline_artifact_id, "12");
+        assert.equal(outputs.candidate_artifact_id, shared ? "12" : "13");
+        assert.equal(
+          JSON.parse(await readFile(join(output, "candidate.json"), "utf8"))
+            .artifact_id,
+          shared ? 12 : 13,
+        );
+        await writeFile(
+          join(packages, "browsecomp-doc-package-candidate/identity.json"),
+          JSON.stringify({ key: "c".repeat(64) }),
+        );
+        await assert.rejects(
+          select({ packages, receipts, output, core: { setOutput() {} } }),
+          /missing receipt/,
+        );
+      },
+    );
+  }
+});
+
+test("ambiguous or misnamed receipt layouts fail closed", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "browsecomp-receipt-layout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const value = {
+    key,
+    name: `browsecomp-doc-index-${key}`,
+    artifact_id: 12,
+    run_id: 123,
+  };
+  const nested = join(directory, `browsecomp-doc-index-ref-${"b".repeat(64)}`);
+  await mkdir(nested);
+  await writeFile(join(nested, "receipt.json"), JSON.stringify(value));
+  await assert.rejects(readIndexReceipts(directory));
+  await writeFile(join(directory, "receipt.json"), JSON.stringify(value));
+  await assert.rejects(readIndexReceipts(directory), /ambiguous/);
 });
