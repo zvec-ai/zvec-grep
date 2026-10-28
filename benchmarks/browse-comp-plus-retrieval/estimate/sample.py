@@ -113,7 +113,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepared", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--counts", default="256,1024")
+    parser.add_argument("--counts", default="256,1024,4096")
     args = parser.parse_args()
     main(
         args.prepared.resolve(),

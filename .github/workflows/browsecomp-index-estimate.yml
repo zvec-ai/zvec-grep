@@ -1,5 +1,5 @@
 name: BrowseComp index time scout
-run-name: Index estimate / 256 + 1024 / Node 0.2.2 vs Rust main
+run-name: Index estimate / 256 + 1024 + 4096 / Node 0.2.2 vs Rust main
 
 on:
   push:
@@ -63,7 +63,7 @@ jobs:
         run: |
           python benchmarks/browse-comp-plus-retrieval/estimate/sample.py \
             --prepared "$RUNNER_TEMP/browsecomp-prepared" --output "$RUNNER_TEMP/browsecomp-samples"
-      - name: Complete four independent fresh indexes on this one Linux runner
+      - name: Complete six independent fresh indexes on this one Linux runner
         run: |
           node benchmarks/browse-comp-plus-retrieval/estimate/run.mjs \
             --samples "$RUNNER_TEMP/browsecomp-samples" \

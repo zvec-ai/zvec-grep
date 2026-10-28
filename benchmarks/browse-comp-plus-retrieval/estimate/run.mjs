@@ -104,7 +104,7 @@ const report = {
     indexed_documents: 56981,
     total_documents: 100195,
     timed_out: true,
-    linear_full_hours: 8.792125356,
+    linear_full_hours: (18000.418790177 * 100195) / (56981 * 3600),
     limitation:
       "unfinished index, no final optimization; late-scale behavior must constrain small-sample estimates",
   },
@@ -220,6 +220,7 @@ try {
   for (const [count, names] of [
     [256, ["node", "rust"]],
     [1024, ["rust", "node"]],
+    [4096, ["node", "rust"]],
   ]) {
     for (const name of names) {
       const candidate = candidates[name],

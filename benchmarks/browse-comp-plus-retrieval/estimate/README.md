@@ -1,6 +1,6 @@
 # BrowseComp index time scout
 
-This estimates full-corpus indexing time from completed 256/1024-document
+This estimates full-corpus indexing time from completed 256/1024/4096-document
 indexes. It does **not** satisfy the full-corpus release comparison.
 
 The dedicated workflow runs unchanged official Node 0.2.2 and the explicitly
