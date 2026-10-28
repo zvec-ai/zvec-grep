@@ -3,6 +3,8 @@ mod mcp_parity;
 #[path = "server_lifecycle/workspaces.rs"]
 mod workspaces;
 
+#[path = "server_lifecycle/outline_context.rs"]
+mod outline_context;
 #[path = "server_lifecycle/positional_queries.rs"]
 mod positional_queries;
 #[path = "server_lifecycle/protocol_upgrade.rs"]

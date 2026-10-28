@@ -7,7 +7,7 @@ use super::{
     grammar,
 };
 use crate::domain::{Content, EntityMetadata, FileFormat, Language, SymbolType};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 const MAX_CALLS: usize = 24;
 const MAX_MEMBERS: usize = 32;
@@ -38,23 +38,24 @@ pub(crate) fn code_outline(
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
     let mut parser = Parser::new();
-    parser.set_language(&grammar(format, jsx)?).ok()?;
-    let mut tree = parser.parse(source, None)?;
+    let mut tree = parse_source(&mut parser, source, format, jsx)?;
     let mut bytes = source.as_bytes();
     let wrapped_source;
-    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript)
-        && metadata.symbol_type == Some(SymbolType::Function)
-        && find_entity(
+    if matches!(
+        format,
+        FileFormat::Java | FileFormat::JavaScript | FileFormat::TypeScript
+    ) && metadata.symbol_type == Some(SymbolType::Function)
+        && !has_complete_entity(
             tree.root_node(),
             adapter,
             bytes,
             metadata.symbol_name.as_deref(),
         )
-        .is_none()
     {
-        // Stored methods lack their class body; restore that syntax before finding calls.
+        // Stored methods and constructors lack their class body; restore that
+        // syntax before finding calls, including calls in constructor arguments.
         wrapped_source = format!("class OutlineContainer {{\n{source}\n}}");
-        tree = parser.parse(&wrapped_source, None)?;
+        tree = parse_source(&mut parser, &wrapped_source, format, jsx)?;
         bytes = wrapped_source.as_bytes();
     }
     let root = tree.root_node();
@@ -87,6 +88,54 @@ pub(crate) fn code_outline(
         format!("{header}\n\n{}", details.join("\n"))
     };
     Some(clip(outline.trim(), MAX_OUTLINE_CHARS))
+}
+
+fn parse_source(parser: &mut Parser, source: &str, format: FileFormat, jsx: bool) -> Option<Tree> {
+    parser.set_language(&grammar(format, jsx)?).ok()?;
+    let tree = parser.parse(source, None)?;
+    if format == FileFormat::TypeScript && !jsx && tree.root_node().has_error() {
+        // Stored component snippets do not retain script lang="tsx". Recover
+        // that dialect only when it parses completely; valid TypeScript type
+        // assertions and generic arrows must keep their original interpretation.
+        parser.set_language(&grammar(format, true)?).ok()?;
+        if let Some(tsx_tree) = parser.parse(source, None)
+            && !tsx_tree.root_node().has_error()
+        {
+            return Some(tsx_tree);
+        }
+    }
+    Some(tree)
+}
+
+fn has_complete_entity(
+    root: Node<'_>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    name: Option<&str>,
+) -> bool {
+    let Some(mut entity) = find_entity(root, adapter, source, name) else {
+        return false;
+    };
+    while let Some(parent) = entity.parent().filter(|parent| {
+        matches!(
+            parent.kind(),
+            "export_statement"
+                | "ambient_declaration"
+                | "lexical_declaration"
+                | "variable_declaration"
+        )
+    }) {
+        entity = parent;
+    }
+    // A nested declaration with the same name does not establish the syntax of
+    // the stored outer entity. Only declaration wrappers and whitespace may lie
+    // outside it; method bodies must be reconstructed in their class context.
+    source[..entity.start_byte()]
+        .iter()
+        .all(u8::is_ascii_whitespace)
+        && source[entity.end_byte()..]
+            .iter()
+            .all(u8::is_ascii_whitespace)
 }
 
 fn outline_format(path: &Path, language: Option<Language>) -> Option<FileFormat> {
@@ -321,12 +370,150 @@ mod tests {
         }
     }
 
+    fn indexed_entity(
+        path: &str,
+        source: &str,
+        kind: SymbolType,
+        name: &str,
+    ) -> crate::extraction::ExtractedEntity {
+        crate::extraction::extract_for_indexing(
+            &crate::extraction::TextSource {
+                relative_path: crate::domain::SourcePath::new(path).expect("source path"),
+                formats: FileFormat::from_file_name(Path::new(path).file_name().expect("filename")),
+                text: source.into(),
+            },
+            crate::extraction::ChunkOptions::default(),
+        )
+        .expect("code extraction")
+        .fragments
+        .into_iter()
+        .find(|entity| {
+            matches!(&entity.metadata, Some(EntityMetadata::Code(code))
+                if code.symbol_type == Some(kind) && code.symbol_name.as_deref() == Some(name))
+        })
+        .expect("indexed entity")
+    }
+
+    #[test]
+    fn tsx_components_restore_calls_in_functions_and_methods() {
+        for path in ["component.vue", "component.svelte"] {
+            for declaration in [
+                "function render() { return <Widget title={formatTitle()}>{renderBody()}</Widget>; }",
+                "class View { render() { return <Widget title={formatTitle()}>{renderBody()}</Widget>; } }",
+            ] {
+                let source = format!("<script lang=\"tsx\">\n{declaration}\n</script>");
+                let mut entity = indexed_entity(path, &source, SymbolType::Function, "render");
+                for legacy in [false, true] {
+                    if legacy && let Some(EntityMetadata::Code(code)) = &mut entity.metadata {
+                        code.language = None;
+                    }
+                    let outline =
+                        code_outline(Path::new(path), &entity.content, entity.metadata.as_ref())
+                            .expect("component outline");
+                    assert!(
+                        outline.ends_with("calls: formatTitle, renderBody"),
+                        "{path}, legacy={legacy}: {outline}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typescript_components_preserve_non_jsx_syntax() {
+        for (declaration, expected) in [
+            (
+                "function render() { return <Widget>makeWidget(); }",
+                "calls: makeWidget",
+            ),
+            (
+                "const render = <T>(value: T) => convert(value);",
+                "calls: convert",
+            ),
+        ] {
+            let source = format!("<script lang=\"ts\">\n{declaration}\n</script>");
+            let entity = indexed_entity("component.vue", &source, SymbolType::Function, "render");
+            let outline = code_outline(
+                Path::new("component.vue"),
+                &entity.content,
+                entity.metadata.as_ref(),
+            )
+            .expect("TypeScript outline");
+            assert!(outline.ends_with(expected), "{outline}");
+        }
+    }
+
+    #[test]
+    fn java_constructor_declarations_are_not_calls() {
+        for (declaration, expected) in [
+            ("Builder() { init(); }", Some("calls: init")),
+            (
+                "Builder() { this(makeValue()); init(); }",
+                Some("calls: makeValue, init"),
+            ),
+            ("public Builder() { init(); }", Some("calls: init")),
+            ("Builder() {}", None),
+        ] {
+            let source = format!("class Builder {{ {declaration} }}");
+            let entity = indexed_entity("Builder.java", &source, SymbolType::Function, "Builder");
+            let outline = code_outline(
+                Path::new("Builder.java"),
+                &entity.content,
+                entity.metadata.as_ref(),
+            );
+            if let Some(expected) = expected {
+                assert!(
+                    outline
+                        .as_deref()
+                        .is_some_and(|outline| outline.ends_with(expected)),
+                    "{declaration}: {outline:?}"
+                );
+            } else {
+                assert!(outline.is_none(), "{declaration}: {outline:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_names_do_not_hide_method_context_or_real_calls() {
+        for path in ["store.js", "store.ts"] {
+            for (source, expected) in [
+                (
+                    "class Store { get(key) { function get() { nested(); } return load(key); } }",
+                    "calls: nested, load",
+                ),
+                (
+                    "class Store { get(key) { return get(key - 1); } }",
+                    "calls: get",
+                ),
+                (
+                    "function get(key) { function get() { nested(); } return load(key); }",
+                    "calls: nested, load",
+                ),
+            ] {
+                let entity = indexed_entity(path, source, SymbolType::Function, "get");
+                let outline =
+                    code_outline(Path::new(path), &entity.content, entity.metadata.as_ref())
+                        .expect("function outline");
+                assert!(outline.ends_with(expected), "{path}: {outline}");
+            }
+        }
+    }
+
     #[test]
     fn stored_method_signatures_are_not_reported_as_calls() {
         for (path, source) in [
             ("store.ts", "get(key: string) { return load(key); }"),
             ("store.js", "get(key) { return load(key); }"),
             ("Store.java", "String get(String key) { return load(key); }"),
+            (
+                "store.ts",
+                "export function get(key: string) { return load(key); }",
+            ),
+            (
+                "store.js",
+                "export async function get(key) { return load(key); }",
+            ),
         ] {
             let outline = code_outline(
                 Path::new(path),
