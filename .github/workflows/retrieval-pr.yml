@@ -6,6 +6,11 @@ on:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
+      suite:
+        description: Retrieval suite to compare
+        default: standard
+        type: choice
+        options: [standard, browsecomp-plus]
       baseline_sha:
         description: Full Rust baseline SHA, or npm:@zvec/zvec-grep@0.2.2
         required: true
@@ -64,6 +69,7 @@ jobs:
           retention-days: 14
 
   retrieval:
+    if: inputs.suite != 'browsecomp-plus'
     permissions:
       contents: read
     uses: ./.github/workflows/retrieval-comparison.yml
@@ -73,3 +79,14 @@ jobs:
       candidate_ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
       candidate_repository: ${{ inputs.candidate_repository || github.event.pull_request.head.repo.full_name }}
     # Model secrets are intentionally not forwarded to automatic PR runs.
+
+  browsecomp-plus:
+    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'browsecomp-plus'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/browse-comp-plus-retrieval.yml
+    with:
+      baseline_ref: ${{ inputs.baseline_sha }}
+      baseline_repository: ${{ inputs.baseline_repository }}
+      candidate_ref: ${{ inputs.candidate_sha }}
+      candidate_repository: ${{ inputs.candidate_repository }}

@@ -1,0 +1,183 @@
+name: BrowseComp-Plus Retrieval-only
+run-name: BrowseComp-Plus Retrieval-only / Node 0.2.2 vs Rust ${{ inputs.candidate_ref }}
+
+on:
+  workflow_call:
+    inputs:
+      baseline_ref:
+        default: npm:@zvec/zvec-grep@0.2.2
+        type: string
+      baseline_repository:
+        default: zvec-ai/zvec-grep
+        type: string
+      candidate_ref:
+        required: true
+        type: string
+      candidate_repository:
+        default: zvec-ai/zvec-grep
+        type: string
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Rust source ref in zvec-ai/zvec-grep (resolved to an immutable SHA)
+        default: main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RETRIEVAL_EMBEDDING: local
+
+concurrency:
+  group: browsecomp-plus-retrieval-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Validate harness and freeze both packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      harness: ${{ steps.identity.outputs.harness }}
+      rust: ${{ steps.rust.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Freeze identities and require the official Node.js baseline
+        id: identity
+        env:
+          BASELINE: ${{ inputs.baseline_ref || 'npm:@zvec/zvec-grep@0.2.2' }}
+          BASELINE_REPOSITORY: ${{ inputs.baseline_repository || 'zvec-ai/zvec-grep' }}
+        run: |
+          test "$BASELINE" = 'npm:@zvec/zvec-grep@0.2.2'
+          test "$BASELINE_REPOSITORY" = 'zvec-ai/zvec-grep'
+          echo "harness=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Install the pinned Parquet reader
+        run: python -m pip install --requirement benchmarks/browse-comp-plus-retrieval/requirements.txt
+      - name: Test retrieval contracts and frozen BrowseComp inputs
+        run: |
+          node --test benchmarks/zg-retrieval/test/*.test.mjs benchmarks/browse-comp-plus-retrieval/test/*.test.mjs
+          python -m unittest discover -s benchmarks/browse-comp-plus-retrieval/test -p 'test_*.py' -v
+      - name: Download and verify unchanged Node.js 0.2.2
+        run: |
+          node benchmarks/shared/retrieval-package.mjs download-node \
+            --output "$RUNNER_TEMP/packages/node"
+          node benchmarks/shared/retrieval-package.mjs verify \
+            --directory "$RUNNER_TEMP/packages/node" --commit 'npm:@zvec/zvec-grep@0.2.2'
+      - name: Build the frozen Rust candidate
+        id: rust
+        uses: ./.github/actions/rust-candidate-package
+        with:
+          candidate_repository: ${{ inputs.candidate_repository || 'zvec-ai/zvec-grep' }}
+          candidate_ref: ${{ inputs.candidate_ref }}
+          cache_namespace: browsecomp-retrieval-rust
+      - name: Stage the commit-verified Rust package
+        run: |
+          mkdir -p "$RUNNER_TEMP/packages/rust"
+          cp -a "$RUNNER_TEMP/rust-package-cache/." "$RUNNER_TEMP/packages/rust/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-packages
+          path: ${{ runner.temp }}/packages/
+          if-no-files-found: error
+          retention-days: 14
+
+  retrieve:
+    name: Fresh indexes and paired retrieval on one runner
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.package.outputs.harness }}
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Free runner disk for the full corpus and fresh indexes
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          python -c 'import shutil; free = shutil.disk_usage(".").free; print(f"Free disk: {free / 2**30:.1f} GiB"); assert free >= 50 * 2**30, "BrowseComp+ needs 50 GiB free disk"'
+      - uses: actions/download-artifact@v8
+        with:
+          name: browsecomp-plus-retrieval-packages
+          path: ${{ runner.temp }}/packages
+      - name: Verify both downloaded package identities
+        env:
+          RUST_COMMIT: ${{ needs.package.outputs.rust }}
+        run: |
+          node benchmarks/shared/retrieval-package.mjs verify \
+            --directory "$RUNNER_TEMP/packages/node" --commit 'npm:@zvec/zvec-grep@0.2.2'
+          node benchmarks/shared/retrieval-package.mjs verify \
+            --directory "$RUNNER_TEMP/packages/rust" --commit "$RUST_COMMIT"
+      - name: Install the pinned dataset reader
+        run: python -m pip install --requirement benchmarks/browse-comp-plus-retrieval/requirements.txt
+      - name: Prepare ten original queries and the complete pinned corpus once
+        run: |
+          python benchmarks/browse-comp-plus-retrieval/prepare.py \
+            --source "$RUNNER_TEMP/browsecomp-source" \
+            --output "$RUNNER_TEMP/browsecomp-prepared"
+          rm -rf "$RUNNER_TEMP/browsecomp-source"
+      - name: Measure Node.js and Rust with separate fresh indexes
+        env:
+          RUST_COMMIT: ${{ needs.package.outputs.rust }}
+          HARNESS_COMMIT: ${{ needs.package.outputs.harness }}
+        run: |
+          node benchmarks/browse-comp-plus-retrieval/run.mjs \
+            --dataset "$RUNNER_TEMP/browsecomp-prepared" \
+            --node-package "$RUNNER_TEMP/packages/node/candidate.tgz" \
+            --rust-package "$RUNNER_TEMP/packages/rust/candidate.tgz" \
+            --rust-commit "$RUST_COMMIT" --harness-commit "$HARNESS_COMMIT" \
+            --model-cache "$RUNNER_TEMP/browsecomp-model-cache" \
+            --output "$RUNNER_TEMP/browsecomp-results"
+      - name: Publish retrieval quality and all performance metrics
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$RUNNER_TEMP/browsecomp-results/summary.md" ]; then
+            cat "$RUNNER_TEMP/browsecomp-results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '# BrowseComp-Plus Retrieval-only: failed before producing a report' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Missing measurements are unavailable, never zero.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve the compact comparison report
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-report
+          path: |
+            ${{ runner.temp }}/browsecomp-results/summary.json
+            ${{ runner.temp }}/browsecomp-results/summary.md
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Preserve raw requests, responses and resource samples
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-plus-retrieval-evidence
+          path: |
+            ${{ runner.temp }}/browsecomp-results/
+            ${{ runner.temp }}/browsecomp-prepared/dataset.json
+            ${{ runner.temp }}/browsecomp-prepared/corpus-manifest.jsonl
+            !${{ runner.temp }}/browsecomp-results/**/consumer/**
+            !${{ runner.temp }}/browsecomp-results/**/runtime-home/**
+            !${{ runner.temp }}/browsecomp-results/warmup/**
+            !${{ runner.temp }}/browsecomp-results/warmup-home/**
+          if-no-files-found: warn
+          retention-days: 30
