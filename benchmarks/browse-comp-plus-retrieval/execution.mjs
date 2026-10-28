@@ -74,7 +74,7 @@ export class DurableMonitor extends ResourceMonitor {
 export function fileProgress(text) {
   const matches = [
     ...stripVTControlCharacters(text).matchAll(
-      /Indexing files:\s*([\d,]+)\s*\/\s*([\d,]+)/g,
+      /(?:Indexing files|Indexing|Index complete):\s*([\d,]+)\s*\/\s*([\d,]+)/g,
     ),
   ];
   const last = matches.at(-1);

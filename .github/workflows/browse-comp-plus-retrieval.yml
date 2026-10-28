@@ -9,7 +9,6 @@ on:
       pr_number:
         description: Open PR whose base/head Rust packages will be compared
         required: true
-        default: "308"
         type: string
   pull_request:
     paths:

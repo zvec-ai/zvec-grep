@@ -28,6 +28,22 @@ test("file counts come from product progress, not elapsed-time extrapolation", (
     total_files: 100195,
   });
   assert.equal(fileProgress("Preparing model"), null);
+  assert.deepEqual(
+    fileProgress("Indexing: 807/1024 files — indexed 83998.md"),
+    {
+      completed_files: 807,
+      total_files: 1024,
+    },
+  );
+  assert.deepEqual(
+    fileProgress(
+      "Indexing: 807/1024 files\nIndex complete: 1024/1024 files — indexing complete",
+    ),
+    {
+      completed_files: 1024,
+      total_files: 1024,
+    },
+  );
 });
 
 test("raw logs and progress exist while indexing; fast exits and bounded tails are retained", async (t) => {
@@ -37,7 +53,7 @@ test("raw logs and progress exist while indexing; fast exits and bounded tails a
     const fs = require('node:fs');
     fs.mkdirSync('.zvec-grep'); fs.writeFileSync('.zvec-grep/index', 'abc');
     process.stdout.write('x'.repeat(200000));
-    process.stderr.write('Indexing files: 4/100195\\n');
+    process.stderr.write('Indexing: 4/100195 files\\n');
     const timer=setInterval(()=>{if(fs.existsSync('progress-ack')) {clearInterval(timer);process.exit(0);}},20);
   `;
   const result = await measureIndex(process.execPath, ["-e", code], {
