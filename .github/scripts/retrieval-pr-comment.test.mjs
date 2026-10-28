@@ -525,6 +525,55 @@ test("the compact comment exposes three parts and keeps complete statistics in d
   assert.match(body, /Peak RSS/);
 });
 
+test("performance cells show signed relative changes for index, RT and RSS", async (t) => {
+  const x = await fixture(t);
+  const input = structuredClone(report);
+  const summarize = (measured) =>
+    summarizePerformance([
+      {
+        index: measured,
+        query: Object.fromEntries(
+          ["hybrid", "fts", "vector"].map((mode) => [mode, measured]),
+        ),
+      },
+    ]);
+  input.performance.sweqa = {
+    baseline: summarize(stage),
+    candidate: summarize({
+      ...stage,
+      total_ms: 750,
+      samples_ms: [2, 4, 6, 8],
+      memory: {
+        status: "available",
+        samples: [{ rss_bytes: 1.5 * 1024 ** 2 }],
+      },
+    }),
+  };
+  await x.write("comparison/summary.json", input);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.match(body, /1\.00 → 0\.75 \(-25\.00%\)/);
+  assert.match(body, /1\.00 → 1\.50 \(\+50\.00%\)/);
+  assert.match(body, /2\.50 → 5\.00 \(\+100\.00%\)/);
+  assert.match(body, /0\.00 → 0\.00 \(0\.00%\)/);
+});
+
+test("zero or missing baselines withhold percentages without Infinity or false zeros", async (t) => {
+  for (const index of [{ ...stage, total_ms: 0, index_bytes: 0 }, null]) {
+    const x = await fixture(t);
+    const input = structuredClone(report);
+    input.performance.sweqa = {
+      baseline: summarizePerformance([{ index }]),
+      candidate: performance,
+    };
+    await x.write("comparison/summary.json", input);
+    await publish(x);
+    const body = x.messages()[0][1].body;
+    assert.ok(body.includes(`${index ? "0.00" : "—"} → 1.00 (—)`));
+    assert.doesNotMatch(body, /Infinity|NaN|-0\.00%/);
+  }
+});
+
 test("publisher checks out trusted code and only reads artifacts from the triggering run", async () => {
   const workflow = await readFile(
     new URL("../workflows/retrieval-pr-comment.yml", import.meta.url),

@@ -342,8 +342,21 @@ export function markdownPrComparison(result) {
     Number.isFinite(value) ? (value / unit).toFixed(2) : "—";
   const stats = (value, fields, unit = 1) =>
     fields.map((field) => number(value[field], unit)).join(" / ");
-  const pair = (suite, select) =>
-    sides.map((side) => select(result.performance[suite][side])).join(" → ");
+  const pair = (suite, select, unit = 1) => {
+    const [before, after] = sides.map((side) =>
+      select(result.performance[suite][side]),
+    );
+    const change =
+      Number.isFinite(before) && Number.isFinite(after) && before > 0
+        ? ((after - before) / before) * 100
+        : null;
+    const rounded = Number.isFinite(change) ? Number(change.toFixed(2)) : null;
+    const percent =
+      rounded === null
+        ? "—"
+        : `${rounded > 0 ? "+" : ""}${rounded.toFixed(2)}%`;
+    return `${number(before, unit)} → ${number(after, unit)} (${percent})`;
+  };
   const version = (side) => {
     const { repository, commit } = result[side];
     return `[\`${commit.slice(0, 7)}\`](${result.server_url}/${repository}/commit/${commit})`;
@@ -352,7 +365,7 @@ export function markdownPrComparison(result) {
   const lines = [
     `**✅ Complete** · Base ${version("baseline")} → Head ${version("candidate")} · [Run & artifacts](${result.run_url})`,
     "",
-    "Cells show **base → head**. — = unavailable. Concurrency: **≤4**.",
+    "Cells show **base → head (Δ%)**. Δ% = (head − base) / base × 100, using unrounded values. — = unavailable or zero baseline. Concurrency: **≤4**.",
     "",
     "### 1 · Index",
     "",
@@ -360,7 +373,7 @@ export function markdownPrComparison(result) {
     "| --- | ---: | ---: | ---: |",
     ...suites.map(
       (suite) =>
-        `| ${label(suite)} | ${pair(suite, (p) => number(p.index.total_ms.total, 1000))} | ${pair(suite, (p) => number(p.index.memory_rss_bytes.max, mib))} | ${pair(suite, (p) => number(p.index.index_bytes.total, mib))} |`,
+        `| ${label(suite)} | ${pair(suite, (p) => p.index.total_ms.total, 1000)} | ${pair(suite, (p) => p.index.memory_rss_bytes.max, mib)} | ${pair(suite, (p) => p.index.index_bytes.total, mib)} |`,
     ),
     "",
     "### 2 · Query",
@@ -370,7 +383,7 @@ export function markdownPrComparison(result) {
     ...suites.flatMap((suite) =>
       modes.map(
         (mode) =>
-          `| ${label(suite)} / ${mode} | ${pair(suite, (p) => number(p.query[mode].latency_ms.mean))} | ${pair(suite, (p) => number(p.query[mode].latency_ms.p95))} | ${pair(suite, (p) => number(p.query[mode].memory_rss_bytes.max, mib))} |`,
+          `| ${label(suite)} / ${mode} | ${pair(suite, (p) => p.query[mode].latency_ms.mean)} | ${pair(suite, (p) => p.query[mode].latency_ms.p95)} | ${pair(suite, (p) => p.query[mode].memory_rss_bytes.max, mib)} |`,
       ),
     ),
     "",
