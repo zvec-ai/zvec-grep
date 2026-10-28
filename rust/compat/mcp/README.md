@@ -54,7 +54,10 @@ known oracle bug, whole-entity content, and both preview modes under
 context, long unbounded output, explicit head truncation, empty results, symbols,
 overlapping symbol matches, redundant declarations and multiple files. Regenerate
 with `node rust/scripts/capture-mcp-rg-presentation.mjs` after `npm run build`.
-`rg_format::tests::captured_node_rg_presentation` compares the text verbatim.
+`rg_format::tests::captured_rg_presentation_uses_plain_matches` compares source
+lines and context. Symbol cases intentionally omit the captured Node headers:
+Rust rg searches return plain matches without structural parsing. This difference
+is recorded under `managed-rg-plain-text` in `allowed-differences.toml`.
 
 The regular `cargo test --workspace --all-targets` entry point also runs:
 

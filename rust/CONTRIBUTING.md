@@ -155,6 +155,9 @@ package-level validation. It runs only through manual dispatch. Runs with both
 without allocating GPUs or publishing
 to npm. Compilation always stays on CPU runners, including when `cuda=true` or
 `publish=true`; Linux/Windows x64 still build the default CUDA-capable bundles.
+Linux x64 and ARM64 release builds use Ubuntu 20.04 containers on native runners
+and audit the executable and bundled libraries against glibc 2.31. The host
+runner's Ubuntu version does not set the release package's compatibility baseline.
 Set `cuda=true,publish=false` to add GPU validation without publishing.
 Separate GPU jobs download the exact native npm artifacts from the same run and
 invoke `.github/actions/cuda-cli-e2e`, without recompiling native code or repacking. Publication
@@ -180,12 +183,13 @@ behavior on the real CPU host. An isolated loopback registry serves only this
 run's CUDA archives: any CUDA metadata/tarball request (even a failed optional
 attempt), installed plugin or populated plugin cache fails CPU validation.
 `cpu-downloads.json` retains the request evidence; no public registry is used.
-They verify CLI and daemon IPC. Linux/Windows x64 then
+They verify CLI and daemon IPC. Linux x64 and ARM64 install and exercise the
+artifacts in plain Ubuntu 20.04 containers. Linux/Windows x64 then
 run `scripts/cuda/e2e.py --cpu-only` against the installed meta
 package. This checks both explicit `--device cpu` and default automatic CPU
-fallback for real GGUF/ONNX indexing and vector queries. Linux uses a plain
-Ubuntu 24.04 container; Windows excludes toolkit paths. Both require CUDA host
-libraries to be unavailable and retain `cpu-artifact-evidence-*` logs on failure.
+fallback for real GGUF/ONNX indexing and vector queries. Windows excludes toolkit
+paths. Both x64 model checks require CUDA host libraries to be unavailable and
+retain `cpu-artifact-evidence-*` logs on failure.
 CPU artifact validation runs even when `publish=false`; failure blocks npm
 publication, while the downloaded candidate remains available for diagnosis.
 
@@ -294,9 +298,9 @@ Run `python3 scripts/test-prepare-onnxruntime.py` for offline deployment checks
 and `python3 scripts/test-check-glibc.py` for the compatibility checker tests.
 The ORT CI gate loads Linux x64/ARM64 CPU cores on glibc 2.31 and audits their
 ELF imports, including the x64 CUDA provider. `scripts/check-glibc.py <payload>`
-can audit a complete ELF package too. Full CLI glibc 2.31 certification still
-requires compatible builds of the executable and every other native dependency;
-the ORT-only gate does not certify those separately maintained SDKs.
+can also audit a complete ELF package. The release workflow builds Linux x64/ARM64
+packages on Ubuntu 20.04, applies this audit to the executable and bundled native
+libraries, and verifies the installed artifacts on that baseline.
 
 Dispatch Rust CI with `ort_validation=true` to validate all six catalog ONNX
 graphs on Linux x64/ARM64 and compare official ORT 1.21/1.28 q4 CPU throughput.

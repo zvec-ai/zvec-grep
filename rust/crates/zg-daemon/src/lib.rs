@@ -115,6 +115,20 @@ pub enum DaemonError {
     #[error("zvec-grep server is already running with PID {pid}")]
     AlreadyRunning { pid: u32 },
     #[error(
+        "legacy zvec-grep daemon (PID {pid}) has no daemonProtocolVersion and cannot serve this client; run `zg --server on` with the same --home to replace it"
+    )]
+    LegacyDaemon { pid: u32 },
+    #[error(
+        "zvec-grep daemon (PID {pid}) uses daemonProtocolVersion {actual}, but this client requires {expected}; use a compatible client or explicitly stop the daemon before restarting"
+    )]
+    ProtocolMismatch {
+        pid: u32,
+        actual: u32,
+        expected: u32,
+    },
+    #[error("server shutdown request failed with HTTP {status}; daemon was not terminated")]
+    ShutdownRejected { status: u16 },
+    #[error(
         "zvec-grep server is already running with MCP toolset {active:?}; run `zg --server off` before changing toolsets"
     )]
     ToolsetMismatch { active: String },
@@ -128,6 +142,12 @@ pub enum DaemonError {
     RefuseCurrentProcess,
     #[error("zvec-grep server instance changed while stopping; refusing to signal PID {pid}")]
     InstanceChanged { pid: u32 },
+    #[error(
+        "cannot verify daemon process identity for PID {pid}: the OS start time does not match the instance record; refusing to stop the process"
+    )]
+    ProcessIdentityMismatch { pid: u32 },
+    #[error("cannot identify a unique healthy daemon at {address}; no shutdown request was sent")]
+    UnverifiedEndpoint { address: String },
     #[error("invalid daemon instance record at {0}")]
     InvalidRecord(PathBuf),
     #[error(

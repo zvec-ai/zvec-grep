@@ -3,6 +3,53 @@ use std::{error::Error, fs, process::Command};
 use tempfile::TempDir;
 
 #[test]
+fn managed_rg_skips_structure_for_text_output_in_all_modes() -> Result<(), Box<dyn Error>> {
+    let root = TempDir::new()?;
+    fs::write(root.path().join("notes.md"), "# Orchard\nneedle\n")?;
+    fs::write(
+        root.path().join("source.rs"),
+        "pub fn orchard() {\n    let fruit = \"needle\";\n}\n",
+    )?;
+
+    for mode in ["direct", "server"] {
+        for threads in ["0", "1", "2"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_zg"))
+                .current_dir(root.path())
+                .args([
+                    "--mode", mode, "--debug", "--rg", "-j", threads, "needle", ".",
+                ])
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{mode} -j{threads}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout)?,
+                "notes.md\n  2: needle\n\nsource.rs\n  2:     let fruit = \"needle\";\n"
+            );
+            let stderr = String::from_utf8(output.stderr)?;
+            let diagnostics = stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("Diagnostics: "))
+                .ok_or("missing search diagnostics")?;
+            let diagnostics: serde_json::Value = serde_json::from_str(diagnostics)?;
+            assert!(diagnostics["structure"].is_null(), "{diagnostics}");
+            assert!(
+                diagnostics["timings"]
+                    .as_array()
+                    .ok_or("missing timing array")?
+                    .iter()
+                    .all(|timing| timing["name"] != "structure_enrichment"),
+                "{diagnostics}"
+            );
+        }
+    }
+    assert!(!root.path().join(".zvec-grep").exists());
+    Ok(())
+}
+
+#[test]
 fn managed_rg_preserves_patterns_and_case_insensitive_globs() -> Result<(), Box<dyn Error>> {
     let root = TempDir::new()?;
     fs::write(root.path().join("sample.rs"), "needle\n needle \nother\n")?;

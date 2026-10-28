@@ -57,6 +57,12 @@ Search routes:
 | `--fuse` | Combine all groups into one ranked plan |
 | `--rg` | Run exhaustive managed ripgrep without an index |
 
+CLI `--rg`, API rg requests and MCP `zvec_grep_rg` return plain text matches
+without parsing code or Markdown structure. Search
+threads follow ripgrep's defaults: up to 12 available CPU threads, one for a
+single file, or the explicit `-j` value. Direct and Server modes use the same local
+grep path.
+
 Result controls:
 
 | Option | Meaning |

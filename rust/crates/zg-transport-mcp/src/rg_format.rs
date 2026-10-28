@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use zg_engine::api::context::{
     ContextResult,
-    result::{ContentRange, ContextCoverage, ContextItem, EmptyReason, EntityMetadata},
+    result::{ContextCoverage, ContextItem, EmptyReason},
 };
 
 pub(crate) fn format(reply: &ContextResult) -> String {
@@ -37,38 +37,7 @@ pub(crate) fn format(reply: &ContextResult) -> String {
                 .display()
                 .to_string(),
         );
-        let mut blocks: Vec<(Option<String>, Vec<&ContextItem>)> = Vec::new();
-        for item in file {
-            let label = symbol(item);
-            if let Some((_, group)) = blocks.iter_mut().find(|(existing, group)| {
-                label.is_some() && *existing == label && group[0].container == item.container
-            }) {
-                group.push(item);
-            } else {
-                blocks.push((label, vec![item]));
-            }
-        }
-        for (label, group) in blocks {
-            let item = group[0];
-            let entries = source(&group);
-            let redundant = group.len() == 1 && redundant_declaration(item, &entries);
-            if let Some(label) = label.filter(|_| !redundant) {
-                let range = &item.container.as_ref().expect("symbol container").range;
-                let header = format!("  {} [{label}]", super::range_label(range));
-                if entries.len() == 1 && group.len() == 1 {
-                    lines.push(format!("{header} {}", entries[0].2));
-                } else {
-                    lines.push(header);
-                    lines.extend(
-                        entries
-                            .into_iter()
-                            .map(|(_, _, text)| format!("    {text}")),
-                    );
-                }
-            } else {
-                lines.extend(entries.into_iter().map(|(_, _, text)| format!("  {text}")));
-            }
-        }
+        lines.extend(source(&file).into_iter().map(|text| format!("  {text}")));
     }
     if reply.coverage == ContextCoverage::RgTruncated {
         lines.push("\nMore matches were omitted by the explicit output bound. Remove or increase the trailing `head` bound to see them.".to_owned());
@@ -76,32 +45,7 @@ pub(crate) fn format(reply: &ContextResult) -> String {
     lines.join("\n")
 }
 
-fn symbol(item: &ContextItem) -> Option<String> {
-    let container = item.container.as_ref()?;
-    match container.metadata.as_ref().or(item.metadata.as_ref())? {
-        EntityMetadata::Code(code) => {
-            let name = code.symbol_name.as_ref()?;
-            let qualified = code
-                .scope
-                .as_ref()
-                .map_or_else(|| name.clone(), |scope| format!("{scope}.{name}"));
-            let kind = serde_json::to_value(code.symbol_type?).ok()?;
-            Some(format!("{} {qualified}", kind.as_str()?))
-        }
-        EntityMetadata::Markdown(markdown) => {
-            let heading = markdown.heading.as_ref()?;
-            Some(format!(
-                "heading {}",
-                markdown
-                    .scope
-                    .as_ref()
-                    .map_or_else(|| heading.clone(), |scope| format!("{scope} > {heading}"))
-            ))
-        }
-    }
-}
-
-fn source(items: &[&ContextItem]) -> Vec<(Option<usize>, bool, String)> {
+fn source(items: &[&ContextItem]) -> Vec<String> {
     let mut numbered: BTreeMap<usize, (bool, String)> = BTreeMap::new();
     let mut unnumbered = Vec::new();
     for item in items {
@@ -117,58 +61,117 @@ fn source(items: &[&ContextItem]) -> Vec<(Option<usize>, bool, String)> {
                     .and_modify(|(previous_hit, _)| *previous_hit |= hit)
                     .or_insert((hit, text.to_owned()));
             } else {
-                unnumbered.push((None, false, format!("\t{text}")));
+                unnumbered.push(format!("\t{text}"));
             }
         }
     }
     numbered
         .into_iter()
-        .map(|(line, (hit, text))| {
-            (
-                Some(line),
-                hit,
-                format!("{line}{}\t{text}", if hit { ':' } else { '-' }),
-            )
-        })
+        .map(|(line, (hit, text))| format!("{line}{}\t{text}", if hit { ':' } else { '-' }))
         .chain(unnumbered)
         .collect()
-}
-
-fn redundant_declaration(item: &ContextItem, entries: &[(Option<usize>, bool, String)]) -> bool {
-    let Some(container) = &item.container else {
-        return false;
-    };
-    let Some(EntityMetadata::Code(code)) = container.metadata.as_ref().or(item.metadata.as_ref())
-    else {
-        return false;
-    };
-    let Some(name) = &code.symbol_name else {
-        return false;
-    };
-    let hits: Vec<_> = entries.iter().filter(|(_, hit, _)| *hit).collect();
-    hits.len() == 1
-        && matches!(container.range, ContentRange::Text { .. })
-        && hits[0].0 == container.range.start_line()
-        && hits[0].2.contains(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn public_rg_tool_returns_plain_code_and_markdown_matches() {
+        use std::sync::Arc;
+
+        use rmcp::{ServiceExt, model::CallToolRequestParams};
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let directory = tempfile::tempdir().expect("source directory");
+            std::fs::write(directory.path().join("notes.md"), "# Orchard\nneedle\nafter\n")
+                .expect("Markdown source");
+            std::fs::write(
+                directory.path().join("source.rs"),
+                "pub fn orchard() {\n    let fruit = \"needle\";\n}\n",
+            )
+            .expect("code source");
+            let engine = Arc::new(zg_engine::ZvecGrep::new());
+            let server = crate::ZvecGrepMcpServer::build(
+                Arc::clone(&engine),
+                crate::McpToolset::Full,
+                None,
+            );
+            let (server_io, client_io) = tokio::io::duplex(4096);
+            let task = tokio::spawn(async move {
+                server.serve(server_io).await.expect("server").waiting().await
+            });
+            let client = ().serve(client_io).await.expect("client");
+            let mut request = CallToolRequestParams::new("zvec_grep_rg");
+            request.arguments = serde_json::json!({
+                "root": directory.path(),
+                "command": "rg -n -C 1 needle ."
+            })
+            .as_object()
+            .cloned();
+            let reply = client.call_tool(request).await.expect("rg tool result");
+            assert!(!reply.is_error.unwrap_or(false));
+            assert!(reply.structured_content.is_none());
+            assert_eq!(reply.content.len(), 1);
+            let rmcp::model::ContentBlock::Text(content) = &reply.content[0] else {
+                panic!("rg returns text")
+            };
+            assert_eq!(
+                content.text,
+                "notes.md\n  1-\t# Orchard\n  2:\tneedle\n  3-\tafter\nsource.rs\n  1-\tpub fn orchard() {\n  2:\t    let fruit = \"needle\";\n  3-\t}"
+            );
+            assert!(!directory.path().join(".zvec-grep").exists());
+            client.cancel().await.expect("close client");
+            task.await.expect("server task").expect("server stop");
+            engine.close();
+        })
+        .await
+        .expect("rg protocol test terminates");
+    }
+
     #[test]
-    fn captured_node_rg_presentation() {
+    fn presents_structured_matches_as_plain_source_lines() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../../compat/mcp/rg-presentation.json"))
+                .expect("fixtures");
+        let case = fixtures["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .find(|case| case["id"] == "symbol")
+            .expect("structured matches");
+        for markdown in [false, true] {
+            let mut value = case["result"].clone();
+            if markdown {
+                value["items"][0]["container"]["metadata"] = serde_json::json!({
+                    "kind": "markdown", "heading": "Orchard", "level": 1, "scope": null
+                });
+            }
+            let result: ContextResult = serde_json::from_value(value).expect("context");
+            assert_eq!(
+                format(&result),
+                "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter"
+            );
+        }
+    }
+
+    #[test]
+    fn captured_rg_presentation_uses_plain_matches() {
         let fixtures: serde_json::Value =
             serde_json::from_str(include_str!("../../../compat/mcp/rg-presentation.json"))
                 .expect("fixtures");
         for case in fixtures["cases"].as_array().expect("cases") {
             let result: ContextResult =
                 serde_json::from_value(case["result"].clone()).expect("context");
-            assert_eq!(
-                format(&result),
-                case["expected"].as_str().expect("expected"),
-                "{}",
-                case["id"]
-            );
+            // Plain rg results retain source coordinates without the Node symbol headers.
+            let expected = match case["id"].as_str() {
+                Some("symbol") => "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter",
+                Some("symbol-overlap") => {
+                    "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12:\tafter"
+                }
+                _ => case["expected"].as_str().expect("expected"),
+            };
+            assert_eq!(format(&result), expected, "{}", case["id"]);
         }
     }
 

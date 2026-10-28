@@ -52,8 +52,9 @@ def cached_archive(cache, artifact, offline):
     # Concurrent builds never share partial downloads or expose unverified bytes.
     with tempfile.TemporaryDirectory(dir=cache) as temporary:
         partial = Path(temporary) / "download"
+        # Ubuntu 20.04 ships curl 7.68, before --retry-all-errors was added.
         subprocess.run(["curl.exe" if os.name == "nt" else "curl", "-fL",
-                        "--retry", "3", "--retry-all-errors", "--connect-timeout", "20",
+                        "--retry", "3", "--retry-connrefused", "--connect-timeout", "20",
                         "--max-time", "600", "-o", str(partial), artifact["url"]], check=True)
         if digest(partial) != expected:
             raise RuntimeError(f"Downloaded ORT archive SHA-256 mismatch: {artifact['url']}")

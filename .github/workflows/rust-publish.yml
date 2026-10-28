@@ -276,27 +276,31 @@ jobs:
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
           key: cuda-cli-models-v1-${{ runner.os }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/scripts/cuda/e2e.py') }}
-      - name: Install and exercise the downloaded artifacts without Linux CUDA libraries
-        if: matrix.target == 'linux-x64-gnu'
+      - name: Install and exercise Linux artifacts on Ubuntu 20.04 without CUDA libraries
+        if: runner.os == 'Linux'
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
           node_root="$(node -p 'require("node:path").dirname(require("node:path").dirname(process.execPath))')"
           # Only Node and the downloaded artifacts are mounted; no CUDA image or GPU access.
-          docker run --rm --platform linux/amd64 \
+          docker run --rm --platform ${{ matrix.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
             --volume "${GITHUB_WORKSPACE}:/work" \
             --volume "${node_root}:/opt/node:ro" \
             --volume "${RUNNER_TEMP}/zvec-grep-model-cache:/model-cache" \
             --workdir /work/rust --env DEBIAN_FRONTEND=noninteractive \
+            --env RELEASE_TARGET=${{ matrix.target }} \
             --env PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            ubuntu:24.04 bash -euo pipefail -c '
+            ubuntu:20.04 bash -euo pipefail -c '
               apt-get update -qq
               apt-get install --yes --no-install-recommends python3 ca-certificates libstdc++6 >/dev/null
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
               npm run release:artifact-smoke -- --expect-cpu
-              python3 scripts/cuda/e2e.py --cpu-only \
-                --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep \
-                --model-cache /model-cache --logs /work/cpu-logs
+              if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
+                python3 scripts/cuda/e2e.py --cpu-only \
+                  --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep \
+                  --model-cache /model-cache --logs /work/cpu-logs
+              fi
             '
       - name: Install and exercise the downloaded artifacts without Windows CUDA libraries
         if: matrix.target == 'win32-x64-msvc'
@@ -311,14 +315,14 @@ jobs:
             --bundle dist/npm/release/artifact-smoke/prefix/node_modules/@zvec/zvec-grep `
             --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs ../cpu-logs
       - name: Restore Linux model cache and log ownership
-        if: ${{ always() && matrix.target == 'linux-x64-gnu' }}
+        if: ${{ always() && runner.os == 'Linux' }}
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
           sudo chown -R "$(id -u):$(id -g)" cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
       - name: Install and exercise the non-CUDA platform artifacts
-        if: ${{ !matrix.cuda_package }}
+        if: ${{ !matrix.cuda_package && runner.os != 'Linux' }}
         run: npm run release:artifact-smoke -- --expect-cpu
       - name: Retain CPU artifact execution evidence
         if: ${{ always() }}

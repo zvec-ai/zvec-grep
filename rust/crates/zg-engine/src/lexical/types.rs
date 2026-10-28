@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::TextRange;
+pub(crate) use super::matches::LexicalMatch;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct LexicalSearchRequest {
@@ -35,19 +35,6 @@ pub(crate) struct LexicalOptions {
     pub max_file_size_bytes: Option<u64>,
     pub modified_after_epoch_ms: Option<u64>,
     pub modified_before_epoch_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LexicalMatch {
-    pub rank: usize,
-    pub absolute_path: PathBuf,
-    pub relative_path: PathBuf,
-    pub range: TextRange,
-    pub excerpt_range: Option<TextRange>,
-    /// Source coordinates of the returned lines, which may extend beyond the match.
-    pub content_range: TextRange,
-    pub match_ranges: Vec<TextRange>,
-    pub content: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
