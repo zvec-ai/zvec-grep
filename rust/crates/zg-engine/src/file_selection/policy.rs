@@ -65,7 +65,7 @@ impl ScanPolicy {
             .resolve_ignore_files(root)?
             .iter()
             .map(|path| control_alias(path))
-            .collect();
+            .collect::<Vec<_>>();
         let mut defaults = GitignoreBuilder::new(root);
         if exclude_defaults {
             for name in DEFAULT_IGNORED_DIRECTORY_NAMES {

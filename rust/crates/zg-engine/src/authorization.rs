@@ -1346,8 +1346,13 @@ mod tests {
             IndexDescriptor, IndexState,
             model::{EmbeddingMetric, EmbeddingModelInfo},
         };
+        let source_root = layout
+            .storage_dir()
+            .parent()
+            .expect("source root")
+            .to_path_buf();
         Workspace::new(
-            layout.storage_dir().parent().expect("source root"),
+            &source_root,
             layout,
             crate::domain::ScanRules::default(),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
